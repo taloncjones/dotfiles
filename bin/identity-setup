@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# identity-setup - interactive one-time setup of the machine-local work
+# identity. Personal identity is tracked in the dotfiles repo; everything
+# employer-specific is machine-local and this wizard writes it:
+#
+#   ~/.gitconfig-work              work git identity + Git-work url routing
+#   ~/.ssh/id_ed25519_work.pub     work SSH key public half (pins Git-work)
+#   ~/.ssh/config_local            machine-local hosts (optional)
+#
+# Re-runnable: existing values are shown as defaults and kept on empty input.
+# Finishes by running identity-doctor.
+
+set -euo pipefail
+
+WORK_GITCONFIG="$HOME/.gitconfig-work"
+WORK_PUB="$HOME/.ssh/id_ed25519_work.pub"
+TEMPLATE_NOTE="seeded by link.sh from git/work/.gitconfig-work.tmpl"
+
+prompt() {
+  # prompt <question> <current-value> -> echoes the answer (empty keeps current)
+  local q="$1" cur="$2" ans
+  if [[ -n "$cur" ]]; then
+    read -r -p "$q [$cur]: " ans
+    printf '%s' "${ans:-$cur}"
+  else
+    read -r -p "$q: " ans
+    printf '%s' "$ans"
+  fi
+}
+
+echo "identity-setup: configure the machine-local WORK identity."
+echo "(Personal identity is dotfiles-tracked and needs no setup.)"
+echo
+
+read -r -p "Set up a work identity on this machine? [Y/n]: " yn
+if [[ "${yn:-Y}" =~ ^[Nn] ]]; then
+  echo "[INFO] Skipping work identity (personal-only machine)."
+  echo "[INFO] Commits under ~/Git/work will be refused until this is run."
+  exec identity-doctor
+fi
+
+# Seed the work gitconfig if link.sh has not run yet on this machine.
+# Resolve through symlinks (this script is linked into ~/bin) so the
+# template path lands in the real dotfiles checkout.
+if [[ ! -f "$WORK_GITCONFIG" || -L "$WORK_GITCONFIG" ]]; then
+  rm -f "$WORK_GITCONFIG"
+  script_path="${BASH_SOURCE[0]}"
+  while [[ -L "$script_path" ]]; do script_path="$(readlink "$script_path")"; done
+  dotfiledir="$(cd "$(dirname "$script_path")/.." && pwd)"
+  cp "$dotfiledir/git/work/.gitconfig-work.tmpl" "$WORK_GITCONFIG"
+  echo "[INFO] Seeded $WORK_GITCONFIG ($TEMPLATE_NOTE)"
+fi
+
+cur_name="$(git config --file "$WORK_GITCONFIG" user.name 2>/dev/null || true)"
+cur_email="$(git config --file "$WORK_GITCONFIG" user.email 2>/dev/null || true)"
+cur_key="$(git config --file "$WORK_GITCONFIG" user.signingkey 2>/dev/null || true)"
+
+name="$(prompt "Full name for work commits" "${cur_name:-$(git config --file "$HOME/.gitconfig-personal" user.name 2>/dev/null || true)}")"
+email="$(prompt "Work email" "$cur_email")"
+
+echo
+echo "Work SSH/signing key: create or import an SSH key in 1Password (a"
+echo "separate work vault is recommended), enable it for the SSH agent in"
+echo "~/.config/1Password/ssh/agent.toml, then paste its PUBLIC half here."
+echo "(Looks like: ssh-ed25519 AAAA... -- get it from the 1Password item.)"
+pubkey="$(prompt "Work public key" "$cur_key")"
+
+if [[ -z "$email" || -z "$pubkey" ]]; then
+  echo "[X] Work email and public key are both required. Nothing written."
+  exit 1
+fi
+if [[ "$pubkey" != ssh-* && "$pubkey" != ecdsa-* && "$pubkey" != sk-* ]]; then
+  echo "[X] That does not look like an OpenSSH public key (expected ssh-ed25519/ssh-rsa/ecdsa-*/sk-*). Nothing written."
+  exit 1
+fi
+
+git config --file "$WORK_GITCONFIG" user.name "$name"
+git config --file "$WORK_GITCONFIG" user.email "$email"
+git config --file "$WORK_GITCONFIG" user.signingkey "$pubkey"
+echo "[OK] Wrote work identity to $WORK_GITCONFIG"
+
+printf '%s\n' "$pubkey" > "$WORK_PUB"
+chmod 644 "$WORK_PUB"
+echo "[OK] Wrote $WORK_PUB (pins the work key on the Git-work ssh alias)"
+
+if [[ ! -f "$HOME/.ssh/config_local" ]]; then
+  cat > "$HOME/.ssh/config_local" <<'EOF'
+# Machine-local SSH hosts -- never tracked in dotfiles.
+# Work benches, lab gear, and anything employer-specific belongs here.
+# Enable ForwardAgent per-host here only where genuinely needed.
+EOF
+  chmod 600 "$HOME/.ssh/config_local"
+  echo "[OK] Created ~/.ssh/config_local (add employer hosts there)"
+fi
+
+echo
+echo "[INFO] Reminders:"
+echo "  - Enable the work key in ~/.config/1Password/ssh/agent.toml (vault/item)."
+echo "  - Add the work key to your work GitHub account (auth + signing)."
+echo "  - Work repos clone under ~/Git/work; remotes auto-route to Git-work."
+echo
+exec identity-doctor

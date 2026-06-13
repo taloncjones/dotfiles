@@ -1,0 +1,11 @@
+# Work GitHub routing. The key itself is machine-local: identity-setup
+# writes the work key's PUBLIC half to ~/.ssh/id_ed25519_work.pub (the
+# private half stays in the 1Password agent). IdentitiesOnly pins it so
+# only the work key is ever offered on this alias. Until that pubkey file
+# exists, Git-work connections fail loudly instead of silently using
+# whatever key the agent offers first.
+Host Git-work
+    HostName github.com
+    IdentityFile ~/.ssh/id_ed25519_work
+    IdentitiesOnly yes
+    User git

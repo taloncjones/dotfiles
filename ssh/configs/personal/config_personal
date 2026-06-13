@@ -1,0 +1,14 @@
+Host Git-Personal
+    HostName github.com
+    IdentityFile ~/.ssh/id_ed25519_personal
+    IdentitiesOnly yes
+    User git
+
+# Bare github.com connections are personal by definition: work repos are
+# rewritten to the Git-work alias by url.insteadOf in ~/.gitconfig-work.
+# Pinning here stops the 1Password agent from ever offering the work key
+# to a personal clone (key offer order no longer matters).
+Host github.com
+    IdentityFile ~/.ssh/id_ed25519_personal
+    IdentitiesOnly yes
+    User git

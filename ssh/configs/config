@@ -1,0 +1,18 @@
+##############################
+######## General ########
+##############################
+
+# Machine-local hosts (work benches, lab gear, one-offs) live in
+# ~/.ssh/config_local -- never tracked. identity-setup seeds it; ssh
+# ignores a missing Include, so it is safe to leave absent.
+Include ~/.ssh/config_local
+
+Include ~/.ssh/config_personal
+Include ~/.ssh/config_work
+
+# Defaults for everything else. Host blocks above win for their hosts
+# (ssh takes the first value it sees per option). All private keys live
+# in the 1Password agent -- nothing on disk. ForwardAgent is deliberately
+# NOT set globally; enable it per-host in config_local where needed.
+Host *
+    IdentityAgent "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"

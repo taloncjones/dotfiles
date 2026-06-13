@@ -1,0 +1,20 @@
+[user]
+    name = Talon Jones
+    email = taloncjones@gmail.com
+    signingkey = ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDReyk+NqobTAi8URLqW/16MCX4UbVuIVUBSj18NR3A+
+[github]
+    user = taloncjones
+[gpg]
+    format = ssh
+[gpg "ssh"]
+    program = "/Applications/1Password.app/Contents/MacOS/op-ssh-sign"
+[commit]
+    gpgsign = true
+# Route every github.com remote in ~/Git/personal through the Git-Personal
+# ssh alias automatically (pinned to the personal key in ~/.ssh/config),
+# so fresh clones never need a manual `git update-remote`. https URLs keep
+# anonymous fetch but push over ssh.
+[url "git@Git-Personal:"]
+    insteadOf = git@github.com:
+    insteadOf = ssh://git@github.com/
+    pushInsteadOf = https://github.com/

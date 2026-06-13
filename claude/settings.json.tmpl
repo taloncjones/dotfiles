@@ -1,0 +1,236 @@
+{
+  "env": {
+    "CLAUDE_CODE_DISABLE_TELEMETRY": "1",
+    "ECC_CONTEXT_MONITOR_COST_WARNINGS": "0"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "Bash(test -f:*)",
+      "Bash(mkdir:*)",
+      "Bash(git -C:*)",
+      "Bash(git log:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git branch:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git submodule:*)",
+      "Bash(git fetch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git worktree:*)",
+      "Bash(git rev-list:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git show:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git remote:*)",
+      "Bash(git describe:*)",
+      "Bash(git shortlog:*)",
+      "Bash(git blame:*)",
+      "Bash(git for-each-ref:*)",
+      "Bash(git symbolic-ref:*)",
+      "Bash(git name-rev:*)",
+      "Bash(git config:*)",
+      "Bash(git add:*)",
+      "Bash(gh api:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh repo:*)",
+      "Bash(gh run:*)",
+      "Bash(gh issue:*)",
+      "Bash(gh workflow:*)",
+      "Bash(gh search:*)",
+      "Bash(gh status:*)",
+      "Bash(jq:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker images:*)",
+      "Bash(docker logs:*)",
+      "Bash(kubectl get:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(cargo doc:*)",
+      "Bash(rustup show:*)",
+      "Bash(docker inspect:*)",
+      "Bash(docker-compose ps:*)",
+      "Bash(docker-compose config:*)",
+      "Bash(helm list:*)",
+      "Bash(helm status:*)",
+      "Bash(helm template:*)",
+      "Bash(which:*)",
+      "Bash(file:*)",
+      "Bash(stat:*)",
+      "Bash(diff:*)",
+      "Bash(realpath:*)",
+      "Bash(md5:*)",
+      "Bash(shasum:*)",
+      "Bash(hexdump:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(cut:*)",
+      "Bash(uv:*)",
+      "Bash(ruff:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(python3:*)",
+      "Bash(python -m pytest:*)",
+      "WebSearch",
+      "Read(~/.claude/**)",
+      "Read(~/.claude-work/**)",
+      "Skill(arch-review)",
+      "Skill(arewedone)",
+      "Skill(bugs)",
+      "Skill(checks)",
+      "Skill(commit)",
+      "Skill(dev-review)",
+      "Skill(doc)",
+      "Skill(done)",
+      "Skill(explain)",
+      "Skill(jira)",
+      "Skill(lint)",
+      "Skill(pr)",
+      "Skill(ready)",
+      "Skill(rebase)",
+      "Skill(refresh)",
+      "Skill(start)",
+      "Skill(status)",
+      "Skill(switch)",
+      "Skill(test)",
+      "Skill(worktree)",
+      "mcp__plugin_atlassian_atlassian__atlassianUserInfo",
+      "mcp__plugin_atlassian_atlassian__getAccessibleAtlassianResources",
+      "mcp__plugin_atlassian_atlassian__getJiraIssue",
+      "mcp__plugin_atlassian_atlassian__searchJiraIssuesUsingJql",
+      "mcp__plugin_atlassian_atlassian__getVisibleJiraProjects",
+      "mcp__plugin_atlassian_atlassian__getJiraIssueTypeMetaWithFields"
+    ],
+    "deny": [],
+    "ask": [
+      "Bash(rm:*)",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(git rebase:*)",
+      "mcp__plugin_atlassian_atlassian__createJiraIssue",
+      "mcp__plugin_atlassian_atlassian__getTransitionsForJiraIssue",
+      "mcp__plugin_atlassian_atlassian__transitionJiraIssue"
+    ],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/commit_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/no_ai_attribution_bash.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/block_secrets.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/protect_claude_md.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/emoji_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/no_ai_comments.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/format_files.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__plugin_atlassian",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/cache_jira_url.py"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/tiered_orchestrator.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/account_guard.py"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "node ~/.claude/statusline.js"
+  },
+  "enabledPlugins": {
+    "feature-dev@claude-code-plugins": true,
+    "python-development@claude-code-workflows": true,
+    "cicd-automation@claude-code-workflows": true,
+    "code-documentation@claude-code-workflows": true,
+    "code-refactoring@claude-code-workflows": true,
+    "atlassian@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "code-review@claude-plugins-official": true,
+    "ecc@ecc": true,
+    "superpowers@claude-plugins-official": true,
+    "telegram@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "security-guidance@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "ecc": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/affaan-m/ECC.git"
+      }
+    }
+  },
+  "mcpServers": {}
+}

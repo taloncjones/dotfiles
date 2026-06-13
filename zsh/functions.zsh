@@ -1,0 +1,791 @@
+#!/bin/zsh
+# functions.zsh - Shell functions for file operations, system tasks, and dotfile management
+#
+# General-purpose functions loaded by .zshrc. API-specific scripts live in scripts/.
+# Use `functionlist` to see all available functions with descriptions.
+
+# List all available functions from this file and scripts/
+function functionlist() {    # functionlist() will list all of the available functions. ex: $ functionlist
+    # grab all of the common funcs to both platforms
+    local list=$(grep 'function ' "$DOTFILEDIR/zsh/functions.zsh" | awk '{$1=$1};1' | highlight --syntax=bash)
+
+    local funcslist=()
+
+    # grab all of the platform agnostic funcs
+    for file in "$DOTFILEDIR/zsh/scripts/"*
+    do
+        if [[ -f $file ]]; then
+            funcslist+=$(grep 'function' "$file" | awk '{$1=$1};1' | highlight --syntax=bash)
+            funcslist+=$'\n'
+        fi
+    done
+
+    echo "$funcslist" | awk '{$1=$1};1'
+    echo "$list" | sort -u -d -s | tr -d '\\+'
+}
+
+# update the dotfiles completely
+function update() {    # update() will update the current dotfiles installation and dependencies. ex: $ update
+	# save the current directory
+	currentdir=$(pwd)
+
+	# navigate to dotfile install directory
+	dotfiles
+
+	# pull new version from origin
+	git pull
+
+    # update tldr definitions
+    tldr --update
+	
+	# execute the install script
+	# note: we manually specify bash here, since the install script is written in bash 
+	# and we're calling it from zsh. bad things happen if you use source instead
+	bash $DOTFILEDIR/install/install.sh
+
+	# return user to previous directory
+	cd $currentdir
+}
+
+# Extract a compressed archive without worrying about which tool to use
+function extract() { # extract() will unzip/unrar/untar any type of compressed file. ex $ extract file.tar.gz
+  if [ -f "$1" ]; then
+    case "$1" in
+      *.tar.bz2)   tar xjf "$1"    ;;
+      *.tar.gz)    tar xzf "$1"    ;;
+      *.bz2)       bunzip2 "$1"    ;;
+      *.rar)       unrar x "$1"    ;;
+      *.gz)        gunzip "$1"     ;;
+      *.tar)       tar xf "$1"     ;;
+      *.tbz2)      tar xjf "$1"    ;;
+      *.tgz)       tar xzf "$1"    ;;
+      *.zip)       unzip "$1"      ;;
+      *.Z)         uncompress "$1" ;;
+      *.7z)        7z x "$1"       ;;
+      *)           echo "'$1' cannot be extracted via extract()" ;;
+    esac
+  else
+    echo "'$1' is not a valid file"
+  fi
+}
+
+# Determine size of a file or total size of a directory
+function fs() {    # fs() will print a human readable size of given file or directory. ex: $ fs ~
+	if du -b /dev/null > /dev/null 2>&1; then
+		local arg=-sbh;
+	else
+		local arg=-sh;
+	fi
+	if [[ -n "$@" ]]; then
+		du $arg -- "$@";
+	else
+        if [[ $(uname) == "Darwin" ]]; then
+            du $arg .[^.]* ./*;
+        else
+            find . -type f | du -ah -d1
+        fi;
+	fi;
+}
+
+# Prints permissions of file
+function permissions() {    # permissions() will print human readable permissions for a given file or directory. ex: $ permissions ~
+	if [ -z "${1}" ]; then
+		echo "ERROR: No file or directory specified";
+		return 1;
+	fi;
+
+    if [[ $(uname) == "Darwin" ]]; then
+        stat -f "%Sp %OLp %N" "$1"
+    else
+        stat -c '%A %a %n' "$1"
+    fi;
+}
+
+
+# pretty print json
+function prettyjson() {    # prettyjson() will print human readable json that has been colorized. ex: $ prettyjson file.json
+	if [ -z "${1}" ]; then
+		echo "ERROR: No file specified";
+		return 1;
+	fi;
+
+  result=$(python3 -m json.tool "$1")
+  echo "$result" | highlight --syntax=json
+}
+
+# list all ssh endpoints from ssh configs
+function sshlist() {    # sshlist() will list all available ssh endpoints. ex: $ sshlist
+    local CONFIG_PATH=("$DOTFILEDIR/ssh/configs"/**/*(.))
+    for f in $CONFIG_PATH
+    do
+        cat "$f" |
+            grep -e "Host " -e "######## " -e "#### $" |
+            grep -v "Host \*" |
+            grep "Host \|####"
+    done
+}
+
+# copy primary public key to clipboard
+function pubkey() {    # pubkey() will copy a public key to the clipboard. ex: $ pubkey id_rsa_adobe.pub
+    if [ -z "${1}" ]; then
+        echo "ERROR: No key specified. The possible keys are:";
+        local keylist=$(ls ~/.ssh/*.pub);
+        echo $keylist;
+        return 1;
+    fi;
+    if [[ $(uname) == "Darwin" ]]; then
+        cat ~/.ssh/$1 | pbcopy && echo '=> Public key copied to clipboard.'
+    else
+        cat ~/.ssh/$1 | xclip -selection clipboard && echo '=> Public key copied to clipboard.'
+    fi
+}
+
+# open vnc connection
+function vnc() {    # vnc() will open a VNC connection to a given host. ex: $ vnc copper.jgrid.net
+    if [ -z "${1}" ]; then
+        echo "ERROR: No domain specified.";
+        return 1;
+    fi;
+    if [[ $(uname) == "Darwin" ]]; then
+        open vnc://$1
+    else
+        xdg-open vnc://$1
+    fi
+}
+
+# set the computer's hostname
+function sethostname() {    # sethostname() will set the machine's hostname to the given string. ex: $ sethostname JWORK
+    if [ -z "${1}" ]; then
+        echo "ERROR: No hostname specified.";
+        return 1;
+    fi;
+    if [[ $(uname) == "Darwin" ]]; then
+        sudo scutil --set ComputerName $1
+        sudo scutil --set HostName $1
+        sudo scutil --set LocalHostName $1
+        sudo defaults write /Library/Preferences/SystemConfiguration/com.apple.smb.server NetBIOSName -string $1
+    else
+        sudo hostnamectl set-hostname $1
+    fi
+}
+
+# lock screen / afk
+function afk() {    # afk() will lock the screen. ex: $ afk
+    if [[ $(uname) == "Darwin" ]]; then
+        osascript -e 'tell app "System Events" to key code 12 using {control down, command down}'
+    else
+        # works with most Linux DEs (GNOME, KDE, etc.)
+        if command -v gnome-screensaver-command &> /dev/null; then
+            gnome-screensaver-command -l
+        elif command -v loginctl &> /dev/null; then
+            loginctl lock-session
+        else
+            echo "No supported lock mechanism found"
+        fi
+    fi
+}
+
+##############################
+###### Claude Code Accounts
+##############################
+# Fable requires OAuth login (no API token), so work and personal need two
+# separate logins. CLAUDE_CONFIG_DIR is the supported isolation mechanism:
+# ~/.claude holds the personal login (the default -- desktop app and any
+# unwrapped launch lands there); ~/.claude-work holds the work login. The
+# claude() wrapper injects the work config dir whenever claude is launched
+# from inside ~/Git/work. A pre-set CLAUDE_CONFIG_DIR always wins, and
+# `claude --personal` (or CLAUDE_CONFIG_DIR=$HOME/.claude) forces the
+# personal account from a work dir. If ~/.claude-work does not exist yet,
+# claude creates it and prompts a fresh OAuth login for the work account.
+CLAUDE_WORK_CONFIG_DIR="$HOME/.claude-work"
+CLAUDE_WORK_TREE="$HOME/Git/work"
+
+# helper: resolve which config dir a claude launch would use from $PWD.
+# :A resolves symlinks on both sides so a symlinked path into ~/Git/work
+# still routes to the work account.
+function _claude_config_dir() {
+    if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+        echo "$CLAUDE_CONFIG_DIR"
+    elif [[ "${PWD:A}/" == "${CLAUDE_WORK_TREE:A}/"* ]]; then
+        echo "$CLAUDE_WORK_CONFIG_DIR"
+    else
+        echo "$HOME/.claude"
+    fi
+}
+
+function claude-account() {    # claude-account() prints which Claude account/config dir a launch from this directory would use. ex: $ claude-account
+    local cfg
+    cfg="$(_claude_config_dir)"
+    case "$cfg" in
+        "$CLAUDE_WORK_CONFIG_DIR") echo "work ($cfg)" ;;
+        "$HOME/.claude")           echo "personal ($cfg)" ;;
+        *)                         echo "custom ($cfg)" ;;
+    esac
+}
+
+function claude() {    # claude() will launch Claude Code with the work account inside ~/Git/work, personal elsewhere. Pass --personal to force the personal account. ex: $ claude --personal
+    local use_personal=0 arg cfg
+    local -a forwarded=()
+    for arg in "$@"; do
+        case "$arg" in
+            --personal) use_personal=1 ;;
+            *) forwarded+=("$arg") ;;
+        esac
+    done
+    if (( use_personal )); then
+        cfg="$HOME/.claude"
+    else
+        cfg="$(_claude_config_dir)"
+    fi
+    if [[ "$cfg" == "$HOME/.claude" ]]; then
+        command claude "${forwarded[@]}"
+    else
+        CLAUDE_CONFIG_DIR="$cfg" command claude "${forwarded[@]}"
+    fi
+}
+
+##############################
+###### Claude Code Plugins
+##############################
+
+# helper: record update epoch for a plugin
+function _claude_plugin_epoch_write() {
+    local name="$1"
+    zmodload zsh/datetime
+    mkdir -p "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}"
+    echo "LAST_${name:u}_EPOCH=$(( EPOCHSECONDS / 60 / 60 / 24 ))" > "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.${name}-update"
+}
+
+# helper: resolve install scope from args. Echoes "global" (the default) or "local".
+function _claude_plugin_scope() {
+    local scope="global" arg
+    for arg in "$@"; do
+        case "$arg" in
+            -l|--local)  scope="local" ;;
+            -g|--global) scope="global" ;;
+        esac
+    done
+    echo "$scope"
+}
+
+# --- ECC (Everything Claude Code) ---
+# Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
+# Rules: a curated subset is vendored into the dotfiles repo (claude/rules) and
+#   symlinked to ~/.claude/rules by link.sh. The ECC repo is kept only as the
+#   upstream source that ecc-sync-rules copies from; it no longer installs into
+#   ~/.claude. Edit ECC_VENDOR_LANGS to change which languages get vendored.
+# Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
+#   everything-claude-code v1 repo/marketplace is retired.
+ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
+ECC_REPO_DIR="$HOME/Git/personal/ECC"
+ECC_VENDOR_LANGS=(common python cpp rust web typescript)
+
+function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules into the dotfiles repo as a reviewable diff. ex: $ ecc-sync-rules
+    local ecc_dir="$ECC_REPO_DIR"
+    local dst="$DOTFILEDIR/claude/rules"
+    if [[ ! -d "$ecc_dir/rules" ]]; then
+        echo "[X] ECC repo rules not found at $ecc_dir/rules. Run 'ecc-install' first."
+        return 1
+    fi
+    mkdir -p "$dst"
+    local l
+    local -a vendored=() missing=() failed=()
+    for l in "${ECC_VENDOR_LANGS[@]}"; do
+        if [[ ! -d "$ecc_dir/rules/$l" ]]; then
+            missing+=("$l")
+            continue
+        fi
+        rm -rf "$dst/$l"
+        if cp -R "$ecc_dir/rules/$l" "$dst/$l"; then
+            vendored+=("$l")
+        else
+            failed+=("$l")
+        fi
+    done
+    echo "[OK] Vendored (${vendored[*]:-none}) from ECC @ $(git -C "$ecc_dir" rev-parse --short HEAD 2>/dev/null)"
+    (( ${#missing} > 0 )) && echo "[WARNING] Not in ECC repo, skipped: ${missing[*]}"
+    (( ${#failed} > 0 )) && echo "[X] Copy failed: ${failed[*]}"
+    echo "[INFO] Review and commit: git -C \"$DOTFILEDIR\" diff -- claude/rules"
+    # Fail (so ecc-install/ecc-update report it) only on a real copy error or a
+    # fully empty vendor; a lang merely absent upstream is a non-fatal warning.
+    (( ${#failed} == 0 && ${#vendored} > 0 ))
+}
+
+function codex-ecc-sync() {    # codex-ecc-sync() merges ECC into ~/.codex (AGENTS, prompts, MCP) and installs ECC git hooks into the dotfiles-owned hooks dir. ex: $ codex-ecc-sync
+    local ecc_dir="$ECC_REPO_DIR"
+    if [[ ! -d "$ecc_dir" ]]; then
+        echo "[X] ECC repo not found. Run 'ecc-install' first."
+        return 1
+    fi
+    # Codex is opt-in: only sync when the Codex CLI is actually installed.
+    if ! command -v codex &>/dev/null; then
+        echo "[INFO] Codex CLI not installed; skipping ECC -> Codex sync."
+        return 0
+    fi
+    # The sync's add-only TOML merge needs node deps (e.g. @iarna/toml).
+    if [[ ! -d "$ecc_dir/node_modules/@iarna/toml" ]]; then
+        echo "[INFO] Installing ECC node deps for Codex sync..."
+        (cd "$ecc_dir" && npm install --no-audit --no-fund --loglevel=error) \
+            || { echo "[X] npm install failed"; return 1; }
+    fi
+    # Point ECC's git-hook installer at the DOTFILES-owned global hooks dir
+    # (symlinked to $DOTFILEDIR/git/hooks) instead of ~/.codex/git-hooks, so
+    # core.hooksPath stays dotfiles-managed and one hooks dir serves Claude,
+    # Codex, and manual commits. AGENTS.md is already symlinked into dotfiles,
+    # so the AGENTS merge lands there too.
+    echo "[INFO] Syncing ECC into ~/.codex..."
+    (cd "$ecc_dir" && ECC_GLOBAL_HOOKS_DIR="$HOME/.config/git/hooks" bash scripts/sync-ecc-to-codex.sh) \
+        || { echo "[X] codex sync failed"; return 1; }
+    # The hook installer rewrites core.hooksPath to an absolute path; restore the
+    # canonical tilde form so the dotfiles-tracked .gitconfig stays stable.
+    local gc="$DOTFILEDIR/git/.gitconfig"
+    [[ -f "$gc" ]] && sed -i '' -E 's#^([[:space:]]*hooksPath = ).*#\1~/.config/git/hooks#' "$gc"
+    echo "[OK] ECC synced into Codex; git hooks live in dotfiles git/hooks"
+}
+
+function ecc-install() {    # ecc-install([--local]) will set up ECC from scratch (repo, vendored rules, plugin). ex: $ ecc-install
+    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local."
+    local ecc_dir="$ECC_REPO_DIR"
+
+    # clone repo if not present
+    if [[ ! -d "$ecc_dir" ]]; then
+        echo "[INFO] Cloning ECC repo..."
+        git clone "$ECC_REPO_URL" "$ecc_dir" || { echo "[X] clone failed"; return 1; }
+        (cd "$ecc_dir" && npm install --no-audit --no-fund --loglevel=error)
+    else
+        echo "[INFO] ECC repo already exists, pulling latest..."
+        (cd "$ecc_dir" && git pull origin main) || { echo "[X] git pull failed"; return 1; }
+    fi
+
+    # clean previous full install to avoid duplicates with plugin
+    if [[ -f "$HOME/.claude/ecc/install-state.json" ]]; then
+        echo "[INFO] Cleaning previous ECC install..."
+        (cd "$ecc_dir" && node scripts/uninstall.js 2>/dev/null)
+    fi
+
+    # vendor curated rules into the dotfiles repo — plugin handles everything else
+    echo "[INFO] Vendoring rules into dotfiles..."
+    ecc-sync-rules || { echo "[X] rules vendoring failed"; return 1; }
+
+    # ensure the ecc marketplace + plugin exist in EVERY account config dir
+    # (~/.claude personal, ~/.claude-work work). Explicit CLAUDE_CONFIG_DIR +
+    # `command claude` so the result does not depend on $PWD via the claude()
+    # wrapper. A dir that does not exist yet (e.g. work not set up) is skipped.
+    local cfg_dir
+    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+        [[ -d "$cfg_dir" ]] || continue
+        if CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace list 2>/dev/null | grep -qiw ecc; then
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update ecc 2>/dev/null
+        else
+            echo "[INFO] Adding ECC marketplace ($cfg_dir)..."
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace add "$ECC_REPO_URL" \
+                || { echo "[X] marketplace add failed ($cfg_dir)"; return 1; }
+        fi
+        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "ecc@ecc"; then
+            echo "[INFO] Installing ECC plugin ($cfg_dir)..."
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install ecc@ecc \
+                || { echo "[X] plugin install failed ($cfg_dir)"; return 1; }
+        else
+            echo "[INFO] ECC plugin already installed ($cfg_dir)"
+        fi
+    done
+
+    # mirror ECC into Codex (no-op when the Codex CLI is absent)
+    codex-ecc-sync || echo "[WARNING] Codex sync failed; Claude-side ECC install is unaffected"
+
+    _claude_plugin_epoch_write ecc
+    echo "[OK] ECC installed"
+}
+
+function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and update rules. ex: $ ecc-update
+    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local."
+    local ecc_dir="$ECC_REPO_DIR"
+
+    if [[ ! -d "$ecc_dir" ]]; then
+        echo "[X] ECC repo not found. Run 'ecc-install' first."
+        return 1
+    fi
+
+    echo "[INFO] Pulling latest ECC..."
+    (cd "$ecc_dir" && git pull origin main) || { echo "[X] git pull failed"; return 1; }
+
+    echo "[INFO] Re-vendoring rules into dotfiles..."
+    ecc-sync-rules || { echo "[X] rules vendoring failed"; return 1; }
+
+    # refresh the Codex mirror too (no-op when the Codex CLI is absent)
+    codex-ecc-sync || echo "[WARNING] Codex sync failed; Claude-side ECC update is unaffected"
+
+    _claude_plugin_epoch_write ecc
+    echo "[OK] ECC rules updated"
+}
+
+function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, and metadata; vendored rules in dotfiles are left intact. ex: $ ecc-uninstall
+    local ecc_dir="$ECC_REPO_DIR"
+
+    # remove installed rules via uninstall script if available
+    if [[ -f "$HOME/.claude/ecc/install-state.json" ]] && [[ -d "$ecc_dir" ]]; then
+        echo "[INFO] Removing ECC-managed files..."
+        (cd "$ecc_dir" && node scripts/uninstall.js 2>/dev/null)
+    fi
+    # always safe to remove ECC metadata; leave ~/.claude/rules intact
+    rm -rf "$HOME/.claude/ecc"
+
+    # remove plugin from every account config dir
+    local cfg_dir
+    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+        [[ -d "$cfg_dir" ]] || continue
+        if CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "ecc@ecc"; then
+            echo "[INFO] Removing ECC plugin ($cfg_dir)..."
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall ecc@ecc 2>/dev/null
+        fi
+    done
+
+    # remove repo
+    if [[ -d "$ecc_dir" ]]; then
+        echo "[INFO] Removing ECC repo..."
+        rm -rf "$ecc_dir"
+    fi
+
+    rm -f "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.ecc-update"
+    echo "[OK] ECC uninstalled"
+}
+
+# --- GSD (Get Shit Done, community "redux" fork) ---
+# Source of truth: npm @opengsd/get-shit-done-redux -- the safe community fork
+# (https://github.com/open-gsd/get-shit-done-redux). The original
+# get-shit-done-cc package was abandoned after a token rug-pull with publish
+# access retained, so it is treated as compromised: never reinstall it, and
+# gsd-uninstall actively removes it. The installer is npx-only (no global
+# package, no gsd-sdk shim); it writes skills/commands/agents/hooks into
+# ~/.claude (and ~/.codex when the codex CLI is present), and is idempotent.
+# Flags accepted by gsd-{install,update,uninstall}:
+#   -l, --local       install/remove under ./.claude (and ./.codex) in the current dir
+#   -g, --global      install/remove under ~/ (the default)
+#   --claude          target Claude Code only
+#   --codex           target Codex only
+#                     (default: both runtimes when codex is installed, else Claude only)
+#   anything else     forwarded verbatim to the installer (e.g. --profile=core, --minimal)
+GSD_REDUX_PKG="@opengsd/get-shit-done-redux@latest"
+
+function _codex_remove_legacy_mirror_symlinks() {
+    find "$HOME/.codex/skills" -maxdepth 1 -type l \
+        \( -name 'gsd-*' -o -name 'ecc-*' -o -name 'superpowers-*' \) -delete 2>/dev/null || true
+    find "$HOME/.codex/agents" -maxdepth 1 -type l \
+        \( -name 'ecc-*' -o -name 'superpowers-*' \) -delete 2>/dev/null || true
+}
+
+# helper: run a command in a subshell from a guaranteed-valid directory ($HOME), so
+# npm/npx/node don't crash with `uv_cwd ENOENT` when the shell's CWD has been deleted.
+# Only for *global* GSD operations — never wrap a --local install with this.
+function _gsd_at_home() {
+    ( cd "$HOME" 2>/dev/null || cd / ; "$@" )
+}
+
+# helper: bail out if a --local op was requested but the current directory is gone
+function _gsd_require_cwd() {
+    [[ "$1" != "local" ]] && return 0
+    [[ -n "$PWD" && -d "$PWD" ]] && return 0
+    echo "[X] current directory no longer exists; cd somewhere valid (or drop --local for a global op)."
+    return 1
+}
+
+# helper: run the redux installer at a scope (global runs from $HOME; local stays in CWD)
+function _gsd_run() {
+    local scope="$1"; shift
+    if [[ "$scope" == "global" ]]; then
+        _gsd_at_home npx -y "$GSD_REDUX_PKG" "$@"
+    else
+        npx -y "$GSD_REDUX_PKG" "$@"
+    fi
+}
+
+# helper: parse gsd-{install,update,uninstall} args into caller-scoped vars:
+#   gsd_scope       -> "global" (default) | "local"
+#   gsd_targets     -> array of "claude"/"codex" (default: claude + codex-if-installed)
+#   gsd_passthrough -> array of remaining args forwarded to the GSD installer
+function _gsd_parse_args() {
+    gsd_scope="global"; gsd_targets=(); gsd_passthrough=()
+    local arg want_claude=0 want_codex=0
+    for arg in "$@"; do
+        case "$arg" in
+            -l|--local)  gsd_scope="local" ;;
+            -g|--global) gsd_scope="global" ;;
+            --claude)    want_claude=1 ;;
+            --codex)     want_codex=1 ;;
+            *)           gsd_passthrough+=("$arg") ;;
+        esac
+    done
+    if (( want_claude || want_codex )); then
+        (( want_claude )) && gsd_targets+=("claude")
+        (( want_codex ))  && gsd_targets+=("codex")
+    else
+        gsd_targets=("claude")
+        command -v codex &>/dev/null && gsd_targets+=("codex")
+    fi
+}
+
+# helper: install/update GSD for one runtime target at a scope, forwarding any extra flags
+function _gsd_install_target() {
+    local scope="$1" target="$2"; shift 2
+    [[ "$target" == "codex" ]] && _codex_remove_legacy_mirror_symlinks
+    _gsd_run "$scope" --$target --$scope "$@"
+}
+
+# helper: install/update GSD for every parsed target
+function _gsd_install_targets() {
+    local verb="$1" scope="$2"; shift 2  # remaining args = installer passthrough
+    local target
+    for target in "${gsd_targets[@]}"; do
+        echo "[INFO] ${verb} GSD for ${target} (${scope})..."
+        _gsd_install_target "$scope" "$target" "$@" || { echo "[X] GSD ${target} ${verb:l} failed"; return 1; }
+    done
+}
+
+function gsd-install() {    # gsd-install([--local] [--claude|--codex] [installer flags]) installs the GSD redux fork (global, both runtimes by default). ex: $ gsd-install --local
+    local gsd_scope gsd_targets gsd_passthrough
+    _gsd_parse_args "$@"
+    _gsd_require_cwd "$gsd_scope" || return 1
+
+    _gsd_install_targets Installing "$gsd_scope" "${gsd_passthrough[@]}" || return 1
+
+    [[ "$gsd_scope" == "global" ]] && (( ${gsd_targets[(Ie)claude]} )) && _claude_plugin_epoch_write gsd
+    echo "[OK] GSD installed (${(j:+:)gsd_targets}, $gsd_scope)"
+}
+
+function gsd-update() {    # gsd-update([--local] [--claude|--codex] [installer flags]) updates the GSD redux fork by re-running the idempotent installer. ex: $ gsd-update --profile=core
+    local gsd_scope gsd_targets gsd_passthrough
+    _gsd_parse_args "$@"
+    _gsd_require_cwd "$gsd_scope" || return 1
+
+    _gsd_install_targets Updating "$gsd_scope" "${gsd_passthrough[@]}" || return 1
+
+    [[ "$gsd_scope" == "global" ]] && (( ${gsd_targets[(Ie)claude]} )) && _claude_plugin_epoch_write gsd
+    echo "[OK] GSD updated (${(j:+:)gsd_targets}, $gsd_scope)"
+}
+
+# helper: strip GSD hook registrations + gsd-sdk permission entries from a settings.json
+function _gsd_strip_settings() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    command -v python3 &>/dev/null || return 0
+    python3 - "$f" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    sys.exit(0)
+changed = False
+hooks = d.get("hooks", {})
+for ev in list(hooks):
+    groups = []
+    for g in hooks[ev]:
+        orig = g.get("hooks", [])
+        kept = [h for h in orig if "gsd" not in json.dumps(h).lower()]
+        if len(kept) != len(orig):
+            changed = True
+        if kept or not orig:
+            g = dict(g); g["hooks"] = kept; groups.append(g)
+    if groups:
+        hooks[ev] = groups
+    else:
+        del hooks[ev]; changed = True
+allow = d.get("permissions", {}).get("allow")
+if isinstance(allow, list):
+    na = [x for x in allow if "gsd" not in str(x).lower()]
+    if len(na) != len(allow):
+        d["permissions"]["allow"] = na; changed = True
+if changed:
+    d["hooks"] = hooks
+    json.dump(d, open(p, "w"), indent=2); open(p, "a").write("\n")
+    print("[INFO] stripped GSD entries from " + p)
+PY
+}
+
+function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) fully removes GSD: the redux fork, the legacy compromised package, and all leftover state. ex: $ gsd-uninstall
+    local gsd_scope gsd_targets gsd_passthrough
+    _gsd_parse_args "$@"
+    _gsd_require_cwd "$gsd_scope" || return 1
+    local base="$HOME/.claude"; [[ "$gsd_scope" == "local" ]] && base="./.claude"
+
+    # 1. official uninstaller per target (removes runtime skills + hook registrations)
+    local target
+    for target in "${gsd_targets[@]}"; do
+        echo "[INFO] Removing GSD from ${target} ($gsd_scope)..."
+        [[ "$target" == "codex" ]] && _codex_remove_legacy_mirror_symlinks
+        _gsd_run "$gsd_scope" --$target --$gsd_scope --uninstall 2>/dev/null || true
+    done
+
+    # 2. purge the legacy/compromised original package + its npx caches (global only)
+    if [[ "$gsd_scope" == "global" ]]; then
+        command -v npm &>/dev/null && _gsd_at_home npm uninstall -g get-shit-done-cc 2>/dev/null
+        local d
+        for d in "$HOME"/.npm/_npx/*(N/); do
+            [[ -e "$d/node_modules/get-shit-done-cc" ]] && rm -rf "$d"
+        done
+        rm -f "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.gsd-update"
+    fi
+
+    # 3. sweep any GSD files + runtime state the installer leaves behind, across
+    #    both the Claude base and the Codex base -- the codex uninstaller leaves
+    #    gsd-install-state.json/gsd-migration-journal/gsd-pristine residue behind.
+    local cbase="$HOME/.codex"; [[ "$gsd_scope" == "local" ]] && cbase="./.codex"
+    local -a junk
+    junk=( "$base"/skills/gsd-*(N) "$base"/commands/gsd-*(N) "$base"/agents/gsd-*(N) "$base"/hooks/gsd-*(N)
+           "$base"/get-shit-done(N) "$base"/commands/gsd(N) "$base"/.gsd-profile(N)
+           "$base"/gsd-migration-journal(N) "$base"/gsd-file-manifest.json(N) "$base"/gsd-pristine(N)
+           "$base"/gsd-install-state.json(N) "$base"/gsd-user-files-backup*(N)
+           "$cbase"/skills/gsd-*(N) "$cbase"/prompts/gsd-*(N) "$cbase"/commands/gsd-*(N) "$cbase"/agents/gsd-*(N)
+           "$cbase"/gsd-migration-journal(N) "$cbase"/gsd-file-manifest.json(N) "$cbase"/gsd-pristine(N)
+           "$cbase"/gsd-install-state.json(N) "$cbase"/gsd-user-files-backup*(N) )
+    (( ${#junk} )) && rm -rf "${junk[@]}"
+
+    # 4. strip GSD hook registrations + permission from settings.json
+    _gsd_strip_settings "$base/settings.json"
+
+    echo "[OK] GSD uninstalled (${(j:+:)gsd_targets}, $gsd_scope)"
+}
+
+# Codex integration:
+#   - ECC: codex-ecc-sync (run by ecc-install/ecc-update) merges ECC's AGENTS
+#     block, prompts, and MCP servers into ~/.codex via the upstream
+#     sync-ecc-to-codex.sh, and installs ECC's pre-commit/pre-push into the
+#     dotfiles-owned global hooks dir ($DOTFILEDIR/git/hooks) so core.hooksPath
+#     stays dotfiles-managed. Generated artifacts (~/.codex/prompts/ecc-*, the
+#     config.toml MCP merge) are reproduced idempotently, not committed; the
+#     static shared files (codex/AGENTS.md, git/hooks) live in this repo.
+#   - Superpowers: provided to Codex by Codex's own plugin marketplace
+#     ([plugins."superpowers@openai-curated"] in ~/.codex/config.toml) -- nothing
+#     for dotfiles to mirror.
+# install/common/link.sh still sweeps any leftover ~/.codex/{skills,agents}/{ecc,superpowers}-*
+# symlinks from older mirror-style installs (the current sync writes prompts, not
+# skill symlinks, so the sweep is harmless to it).
+
+# --- Superpowers ---
+# Plugin-only — no repo, no rules, no extra files
+
+function superpowers-install() {    # superpowers-install([--local]) will install the Superpowers plugin. ex: $ superpowers-install
+    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] Claude Code plugins are global-only; ignoring --local."
+    local cfg_dir
+    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+        [[ -d "$cfg_dir" ]] || continue
+        if CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "superpowers@claude-plugins-official"; then
+            echo "[INFO] Superpowers already installed ($cfg_dir)"
+            continue
+        fi
+        echo "[INFO] Installing Superpowers plugin ($cfg_dir)..."
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install superpowers@claude-plugins-official \
+            || { echo "[X] install failed ($cfg_dir)"; return 1; }
+        echo "[OK] Superpowers installed ($cfg_dir)"
+    done
+}
+
+function superpowers-update() {    # superpowers-update([--local]) will update the Superpowers plugin. ex: $ superpowers-update
+    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] Claude Code plugins are global-only; ignoring --local."
+    local cfg_dir updated=0
+    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+        [[ -d "$cfg_dir" ]] || continue
+        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "superpowers@claude-plugins-official"; then
+            echo "[INFO] Superpowers not installed ($cfg_dir); skipping"
+            continue
+        fi
+        echo "[INFO] Updating Superpowers plugin ($cfg_dir)..."
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update superpowers@claude-plugins-official \
+            || { echo "[X] update failed ($cfg_dir)"; return 1; }
+        updated=1
+    done
+    if (( updated )); then
+        echo "[OK] Superpowers updated (restart Claude Code to apply)"
+    else
+        echo "[X] Superpowers not installed in any config dir. Run 'superpowers-install' first."
+        return 1
+    fi
+}
+
+function superpowers-uninstall() {    # superpowers-uninstall() will remove the Superpowers plugin. ex: $ superpowers-uninstall
+    local cfg_dir
+    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+        [[ -d "$cfg_dir" ]] || continue
+        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "superpowers@claude-plugins-official"; then
+            echo "[INFO] Superpowers not installed ($cfg_dir)"
+            continue
+        fi
+        echo "[INFO] Removing Superpowers plugin ($cfg_dir)..."
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall superpowers@claude-plugins-official 2>/dev/null
+        echo "[OK] Superpowers uninstalled ($cfg_dir)"
+    done
+}
+
+# --- Startup update check (OMZ-style) ---
+
+function _claude_plugin_check_update() {
+    [[ ! -t 1 ]] && return
+    zmodload zsh/datetime
+    local current_epoch=$(( EPOCHSECONDS / 60 / 60 / 24 ))
+    local update_days=14
+    local cache_dir="${ZSH_CACHE_DIR:-$HOME/.cache/zsh}"
+    local stale=()
+
+    for plugin in ecc gsd; do
+        local update_file="$cache_dir/.${plugin}-update"
+        # Only remind for plugins actually managed here: the cache is written by
+        # {plugin}-install/update and removed by {plugin}-uninstall, so an
+        # uninstalled plugin has no cache file and is silently skipped (no nag).
+        [[ -f "$update_file" ]] || continue
+        source "$update_file"
+        local epoch_var="LAST_${plugin:u}_EPOCH"
+        local last=${(P)epoch_var:-0}
+        local days_since=$(( current_epoch - last ))
+        (( days_since >= update_days )) && stale+=("$plugin (${days_since}d)")
+    done
+
+    if (( ${#stale} > 0 )); then
+        echo "[INFO] Stale: ${(j:, :)stale}. Run '${stale[1]%% *}-update' to refresh."
+    fi
+}
+_claude_plugin_check_update
+
+# launch claude code with telegram channel enabled
+function claude-telegram() {    # claude-telegram() will launch Claude Code with the Telegram bot channel. ex: $ claude-telegram
+    claude --channels plugin:telegram@claude-plugins-official "$@"
+}
+
+# Check for Claude Code CLI updates (async, cached 24h)
+_claude_code_update_check() {
+    command -v claude &>/dev/null || return 0
+
+    local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles"
+    local cache_file="$cache_dir/claude-code-update-check"
+    local cache_ttl=86400  # 24 hours
+
+    # Skip if checked recently
+    if [[ -f "$cache_file" ]]; then
+        local cache_age=$(( $(date +%s) - $(stat -f%m "$cache_file" 2>/dev/null || stat -c%Y "$cache_file" 2>/dev/null || echo 0) ))
+        (( cache_age < cache_ttl )) && return 0
+    fi
+
+    # Run check in background
+    {
+        mkdir -p "$cache_dir"
+        local installed
+        installed="$(command claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+        local latest
+        latest="$(npm view @anthropic-ai/claude-code version 2>/dev/null)"
+
+        if [[ -n "$installed" && -n "$latest" && "$installed" != "$latest" ]]; then
+            echo "$installed:$latest" > "$cache_file"
+        else
+            touch "$cache_file"
+        fi
+    } &!
+
+    # Show cached result from previous check
+    if [[ -f "$cache_file" && -s "$cache_file" ]]; then
+        local versions
+        versions="$(cat "$cache_file")"
+        local current="${versions%%:*}"
+        local available="${versions##*:}"
+        echo "[INFO] Claude Code update available: $current -> $available. Run 'claude update' to upgrade."
+    fi
+}
+_claude_code_update_check

@@ -1,0 +1,54 @@
+NOTICE
+
+This repository is licensed under the MIT License (see LICENSE). It also
+vendors or adapts content from the third-party projects listed below. Each
+upstream is MIT-licensed; the original copyright and permission notices are
+reproduced here as required.
+
+--------------------------------------------------------------------------
+
+1. ECC (Everything Claude Code)
+
+   Paths in this repository:
+     claude/rules/            (curated subset of upstream rules, re-vendored
+                               by the ecc-sync-rules helper in
+                               zsh/functions.zsh)
+     git/hooks/pre-commit     (adapted from the ECC Codex git hooks)
+     git/hooks/pre-push       (adapted from the ECC Codex git hooks)
+
+   Upstream: https://github.com/affaan-m/ECC
+   License:  MIT
+   Copyright (c) 2026 Affaan Mustafa
+
+2. GSD (Get Shit Done, community "redux" fork)
+
+   Paths in this repository:
+     claude/statusline.js     (ported from GSD's statusline; the
+                               model/dir/context/todo render only)
+
+   Upstream: https://github.com/open-gsd/gsd-core (formerly get-shit-done-redux)
+             (npm: @opengsd/get-shit-done-redux)
+   License:  MIT
+   Copyright (c) 2025 Lex Christopherson
+
+--------------------------------------------------------------------------
+
+MIT License text applicable to the components above:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

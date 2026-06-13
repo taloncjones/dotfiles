@@ -1,0 +1,122 @@
+
+# Identity comes ONLY from the conditional includes below. useConfigOnly makes
+# git refuse to commit (loudly) in any repo outside ~/Git/personal and
+# ~/Git/work instead of silently guessing an identity -- if you hit that
+# error, move the repo under a convention dir or set a repo-local user.email
+# on purpose. gitdir/i is case-insensitive so ~/git/Work/... still routes
+# correctly on case-insensitive filesystems (APFS). Linked worktrees resolve
+# to the main repo's gitdir, so worktrees inherit the main checkout's
+# identity no matter where they live (including /tmp review worktrees).
+[user]
+	useConfigOnly = true
+[includeIf "gitdir/i:~/Git/personal/"]
+    path = ~/.gitconfig-personal
+[includeIf "gitdir/i:~/Git/work/"]
+    path = ~/.gitconfig-work
+[core]
+	editor = vscode
+	excludesfile = ~/.gitignore_global
+	# dotfiles-managed hooks dir (symlinked from this repo's git/hooks by link.sh).
+	# Holds post-checkout (hydrates .planning/ into new worktrees) plus ECC's
+	# secret-blocking pre-commit/pre-push (refreshed by codex-ecc-sync). One dir
+	# serves Claude, Codex, and manual commits -- git hooks are harness-agnostic.
+	hooksPath = ~/.config/git/hooks
+[difftool "sourcetree"]
+	cmd = opendiff \"$LOCAL\" \"$REMOTE\"
+	path = 
+[mergetool "sourcetree"]
+	cmd = /Applications/Sourcetree.app/Contents/Resources/opendiff-w.sh \"$LOCAL\" \"$REMOTE\" -ancestor \"$BASE\" -merge \"$MERGED\"
+	trustExitCode = true
+[commit]
+	template = ~/.stCommitMsg
+	# gpgsign lives in the per-identity includes (each pairs it with its own
+	# signingkey), NOT here: a base-level gpgsign=true would break the
+	# repo-local user.email escape hatch for repos outside ~/Git/{personal,work}
+	# (signing would demand a signingkey that only the includes define).
+[push]
+    autoSetupRemote = true
+[alias]
+	# list all git aliases
+	aliases = !git config -l | grep alias | cut -c 7- | highlight --style=duotone-dark-sky --syntax=bash --out-format=xterm256
+
+    # useful aliases
+    tags = tag -l
+	branches = branch --all
+	remotes = remote --verbose
+
+    # Full identity chain check for the current repo (path, email, signing
+    # key, remote routing, SSH key offered). See bin/identity-doctor.
+    identity = !identity-doctor
+
+    # LEGACY: rewrites the stored remote URL to the Git-work/Git-Personal ssh
+    # alias. No longer required -- url.insteadOf in ~/.gitconfig-{personal,work}
+    # now routes git@github.com: remotes automatically per directory. Kept for
+    # repos whose remotes were already rewritten and for explicit re-routing.
+    update-remote = "!f() { \
+        remote_name=$(git remote); \
+        current_url=$(git remote get-url $remote_name); \
+        repo_path=$(git rev-parse --show-toplevel); \
+        if [[ $repo_path == ~/Git/work/* ]]; then \
+            ssh_host='Git-work'; \
+        elif [[ $repo_path == ~/Git/personal/* ]]; then \
+            ssh_host='Git-Personal'; \
+        else \
+            echo \"No matching SSH config found for this repository\"; \
+            exit 1; \
+        fi; \
+        if [[ $current_url == https://github.com/* ]]; then \
+            new_url=$(echo $current_url | sed -E \"s|https://github.com/(.+)|git@$ssh_host:\\1|\"); \
+        elif [[ $current_url == git@github.com:* ]]; then \
+            new_url=$(echo $current_url | sed \"s|git@github.com:|git@$ssh_host:|\"); \
+        else \
+            new_url=$(echo $current_url | sed \"s/github.com/$ssh_host/\"); \
+        fi; \
+        git remote set-url $remote_name $new_url; \
+        git remote set-url --push $remote_name $new_url; \
+        echo \"Updated remote URL to: $new_url\"; \
+    }; f"
+
+
+    # Find commits by source code
+    fc = "!f() { git log --pretty=format:'%C(yellow)%h  %Cblue%ad  %Creset%s%Cgreen  [%cn] %Cred%d' --decorate --date=short -S$1; }; f"
+
+	# Find commits by commit message
+	fm = "!f() { git log --pretty=format:'%C(yellow)%h  %Cblue%ad  %Creset%s%Cgreen  [%cn] %Cred%d' --decorate --date=short --grep=$1; }; f"
+
+    # List contributors with number of commits.
+	contributors = shortlog --summary --numbered
+
+	# Show the user email for the current repository.
+	whoami = config user.email
+	
+	# useful displays
+	hist = log --graph --abbrev-commit --decorate --all --format=format:\"%C(bold blue)%h%C(reset) - %C(bold cyan)%aD%C(dim white) - %an%C(reset) %C(bold green)(%ar)%C(reset)%C(bold yellow)%d%C(reset)%n %C(white)%s%C(reset)\"
+	latest = for-each-ref --sort=committerdate refs/heads/ --format='%(committerdate:short) %(refname:short)'
+	quicklog = log --oneline --decorate -20 --pretty=format:'%C(yellow)%h%C(reset)%C(auto)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset'
+	# Delete local branches whose upstream is gone (skips worktree-checked-out branches)
+	branch-prune = !git fetch -p && git branch -vv | grep \": gone]\" | grep -v \"^+\" | sed 's/^[* ]*//' | awk '{print $1}' | xargs -r git branch -D
+
+	# Remove worktrees whose branch upstream is gone
+	worktree-prune = "!f() { \
+		git fetch -p; \
+		gone=$(git branch -vv | grep \": gone]\" | sed 's/^[* +]*//' | awk '{print $1}'); \
+		if [ -z \"$gone\" ]; then echo \"No worktrees to prune\"; return 0; fi; \
+		git worktree list --porcelain | while read -r key value; do \
+			if [ \"$key\" = \"worktree\" ]; then wt=\"$value\"; fi; \
+			if [ \"$key\" = \"branch\" ]; then \
+				br=\"${value#refs/heads/}\"; \
+				if echo \"$gone\" | grep -qxF \"$br\"; then \
+					echo \"Removing worktree: $wt ($br)\"; \
+					git worktree remove \"$wt\"; \
+				fi; \
+			fi; \
+		done; \
+	}; f"
+[pull]
+	rebase = true
+[gpg]
+	format = ssh
+[gpg "ssh"]
+	program = /Applications/1Password.app/Contents/MacOS/op-ssh-sign
+[fetch]
+	prune = true

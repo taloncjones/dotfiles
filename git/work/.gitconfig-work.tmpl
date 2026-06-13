@@ -1,0 +1,27 @@
+# Work git identity -- seeded to ~/.gitconfig-work on first install, then
+# machine-local (never tracked). Fill in the [user] block for your employer;
+# until you do, user.useConfigOnly in the base config makes git refuse to
+# commit inside ~/Git/work instead of silently using the wrong identity.
+# Run `identity-setup` to fill this in interactively, or edit by hand.
+#
+# [user]
+#   name = Your Name
+#   email = you@company.com
+#   signingkey = ssh-ed25519 AAAA... (the work key's public half)
+
+[gpg]
+  format = ssh
+
+[gpg "ssh"]
+  program = "/Applications/1Password.app/Contents/MacOS/op-ssh-sign"
+
+[commit]
+  gpgsign = true
+
+# Route every github.com remote in ~/Git/work through the Git-work ssh alias
+# (pinned to the work key in ~/.ssh/config) -- fresh clones authenticate with
+# the work key automatically, no manual `git update-remote` needed.
+[url "git@Git-work:"]
+  insteadOf = git@github.com:
+  insteadOf = ssh://git@github.com/
+  pushInsteadOf = https://github.com/

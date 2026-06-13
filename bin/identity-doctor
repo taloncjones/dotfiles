@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# identity-doctor - verify the whole personal/work identity chain.
+#
+# Checks, in order: dotfiles symlinks, git identity routing (includeIf),
+# SSH key pinning, 1Password agent, the current repo's resolved identity
+# (when run inside one), Claude Code account routing, and gh auth.
+# Read-only: never modifies anything. Exit 1 if any [X] check fails.
+#
+# Usage: identity-doctor            # machine checks + current-repo checks
+#        git identity               # same, via the git alias
+
+set -uo pipefail
+
+FAILED=0
+ok()   { printf '[OK]      %s\n' "$1"; }
+warn() { printf '[WARNING] %s\n' "$1"; }
+info() { printf '[INFO]    %s\n' "$1"; }
+fail() { printf '[X]       %s\n' "$1"; FAILED=1; }
+
+section() { printf '\n--- %s ---\n' "$1"; }
+
+# --- dotfiles links -------------------------------------------------------
+section "dotfiles links"
+
+check_symlink() {
+  local path="$1" label="$2"
+  if [[ -L "$path" && -e "$path" ]]; then
+    ok "$label -> $(readlink "$path")"
+  elif [[ -L "$path" ]]; then
+    fail "$label is a DANGLING symlink -> $(readlink "$path") (re-run link.sh)"
+  elif [[ -e "$path" ]]; then
+    warn "$label exists but is not a symlink (expected dotfiles-managed link)"
+  else
+    fail "$label missing (re-run link.sh)"
+  fi
+}
+
+check_symlink "$HOME/.gitconfig" "~/.gitconfig"
+check_symlink "$HOME/.gitconfig-personal" "~/.gitconfig-personal"
+check_symlink "$HOME/.ssh/config" "~/.ssh/config"
+
+# --- git identity routing -------------------------------------------------
+section "git identity"
+
+if [[ -L "$HOME/.gitconfig-work" ]]; then
+  fail "~/.gitconfig-work is a symlink into the repo -- it must be machine-local (re-run link.sh, then identity-setup)"
+elif [[ -f "$HOME/.gitconfig-work" ]]; then
+  work_email="$(git config --file "$HOME/.gitconfig-work" user.email 2>/dev/null || true)"
+  if [[ -n "$work_email" ]]; then
+    ok "~/.gitconfig-work sets work identity ($work_email)"
+  else
+    warn "~/.gitconfig-work has no user.email -- commits under ~/Git/work will be refused until identity-setup is run"
+  fi
+else
+  warn "~/.gitconfig-work missing -- run link.sh (seeds template), then identity-setup"
+fi
+
+if [[ "$(git config --global user.useConfigOnly 2>/dev/null)" == "true" ]]; then
+  ok "user.useConfigOnly=true (no silent fallback identity)"
+else
+  fail "user.useConfigOnly is not true -- repos outside ~/Git/{personal,work} would silently get a guessed identity"
+fi
+
+# --- ssh key pinning ------------------------------------------------------
+section "ssh keys"
+
+agent_sock="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+if [[ -S "$agent_sock" ]]; then
+  ok "1Password SSH agent socket present"
+else
+  warn "1Password SSH agent socket not found (is 1Password running with the SSH agent enabled?)"
+fi
+
+if [[ -f "$HOME/.config/1Password/ssh/agent.toml" ]]; then
+  ok "1Password agent.toml present (machine-local)"
+else
+  warn "~/.config/1Password/ssh/agent.toml missing -- agent serves default vault keys only (re-run link.sh to seed)"
+fi
+
+if [[ -e "$HOME/.ssh/id_ed25519_personal.pub" ]]; then
+  ok "personal pubkey present (~/.ssh/id_ed25519_personal.pub)"
+else
+  fail "personal pubkey missing -- Git-Personal/github.com pinning is broken (re-run link.sh)"
+fi
+
+if [[ -f "$HOME/.ssh/id_ed25519_work.pub" ]]; then
+  ok "work pubkey present (~/.ssh/id_ed25519_work.pub, machine-local)"
+else
+  info "work pubkey absent -- Git-work pushes will fail until identity-setup writes ~/.ssh/id_ed25519_work.pub (expected on personal-only machines)"
+fi
+
+pinned_personal="$(ssh -G github.com 2>/dev/null | awk '/^identityfile/ {print $2; exit}')"
+case "$pinned_personal" in
+  *id_ed25519_personal*) ok "github.com pins the personal key" ;;
+  "") warn "ssh -G github.com returned no identityfile (config not applied?)" ;;
+  *) fail "github.com would offer '$pinned_personal' instead of the personal key" ;;
+esac
+
+pinned_work="$(ssh -G Git-work 2>/dev/null | awk '/^identityfile/ {print $2; exit}')"
+case "$pinned_work" in
+  *id_ed25519_work*) ok "Git-work pins the work key" ;;
+  "") warn "ssh -G Git-work returned no identityfile" ;;
+  *) fail "Git-work would offer '$pinned_work' instead of the work key" ;;
+esac
+
+# --- current repo ---------------------------------------------------------
+if repo_top="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  section "current repo ($repo_top)"
+
+  case "$repo_top" in
+    "$HOME"/Git/personal/*) expected="personal" ;;
+    "$HOME"/Git/work/*)     expected="work" ;;
+    *)                      expected="none" ;;
+  esac
+
+  repo_email="$(git config user.email 2>/dev/null || true)"
+  if [[ "$expected" == "none" ]]; then
+    if [[ -n "$repo_email" ]]; then
+      warn "repo is outside ~/Git/{personal,work} but has identity '$repo_email' (repo-local override?)"
+    else
+      info "repo is outside ~/Git/{personal,work}: git will refuse to commit here until you set a repo-local user.email (this is the intended loud failure)"
+    fi
+  elif [[ -z "$repo_email" ]]; then
+    fail "$expected repo has NO resolved user.email -- commits will be refused (run identity-setup)"
+  else
+    personal_email="$(git config --file "$HOME/.gitconfig-personal" user.email 2>/dev/null || true)"
+    work_email="$(git config --file "$HOME/.gitconfig-work" user.email 2>/dev/null || true)"
+    if [[ "$expected" == "personal" && "$repo_email" == "$personal_email" ]] ||
+       [[ "$expected" == "work" && "$repo_email" == "$work_email" ]]; then
+      ok "identity matches path convention: $expected ($repo_email)"
+    else
+      fail "identity mismatch: $expected repo but user.email=$repo_email"
+    fi
+  fi
+
+  if remote_url="$(git ls-remote --get-url 2>/dev/null)" && [[ -n "$remote_url" ]]; then
+    case "$expected:$remote_url" in
+      personal:git@Git-Personal:*|personal:https://github.com/*) ok "remote routes via personal ($remote_url)" ;;
+      work:git@Git-work:*) ok "remote routes via work ($remote_url)" ;;
+      *:git@github.com:*)
+        if [[ "$expected" == "personal" ]]; then
+          ok "remote is plain github.com -- pinned to the personal key by ssh config ($remote_url)"
+        else
+          warn "work repo remote did not rewrite to Git-work ($remote_url) -- is ~/.gitconfig-work seeded with url.insteadOf?"
+        fi ;;
+      *) info "remote: $remote_url (no routing opinion)" ;;
+    esac
+  else
+    info "no remote configured"
+  fi
+fi
+
+# --- claude account routing ----------------------------------------------
+section "claude accounts"
+
+work_tree="${CLAUDE_WORK_TREE:-$HOME/Git/work}"
+if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+  warn "CLAUDE_CONFIG_DIR is exported in this shell ($CLAUDE_CONFIG_DIR) -- it overrides directory routing for every claude launch"
+fi
+# pwd -P matches the zsh wrapper's ${PWD:A} symlink resolution.
+phys_pwd="$(pwd -P)"
+case "$phys_pwd/" in
+  "$work_tree"/*) expected_claude="$HOME/.claude-work" ;;
+  *)              expected_claude="$HOME/.claude" ;;
+esac
+info "a claude launch here uses: ${CLAUDE_CONFIG_DIR:-$expected_claude}"
+[[ -d "$HOME/.claude" ]] && ok "~/.claude exists (personal account)" || warn "~/.claude missing"
+if [[ -d "$HOME/.claude-work" ]]; then
+  ok "~/.claude-work exists (work account)"
+else
+  info "~/.claude-work absent -- first 'claude' launch under ~/Git/work will create it and prompt the work OAuth login"
+fi
+
+# --- gh -------------------------------------------------------------------
+section "gh"
+if command -v gh >/dev/null 2>&1; then
+  if gh auth status >/dev/null 2>&1; then
+    ok "gh authenticated"
+  else
+    warn "gh installed but not authenticated (gh auth login)"
+  fi
+else
+  info "gh not installed"
+fi
+
+printf '\n'
+if [[ "$FAILED" -ne 0 ]]; then
+  printf 'identity-doctor: FAILURES found -- see [X] lines above.\n'
+  exit 1
+fi
+printf 'identity-doctor: all checks passed.\n'

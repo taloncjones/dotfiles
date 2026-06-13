@@ -1,0 +1,27 @@
+{
+  "myapp": {
+    "repo_paths": ["/Users/<user>/Git/work/myapp"],
+    "github_repos": ["acme/myapp", "acme/myapp-infra"],
+    "jira_project": "PROJ",
+    "allowed_jira_projects": ["PROJ"],
+    "cloud_id": "acme.atlassian.net",
+    "board_id": 42,
+    "jira_account_id": "<atlassian-account-id>",
+    "default_epic": "PROJ-123",
+    "sprint_board_name": "PROJ",
+    "sprint_board_id": 42,
+    "assignee": "currentUser()",
+    "default_base": "main",
+    "status_done": ["Done", "Won't Do"],
+    "status_in_flight": ["In Progress", "In Review"],
+    "status_blocked": ["Blocked"],
+    "status_todo": ["To Do"],
+    "confluence_space": "PROJ",
+    "weekly_page_pattern": "{date} Weekly Meeting",
+    "me": "<Display Name>",
+    "group_buckets": ["In review", "In progress", "Blocked"],
+    "merged_window_days": 9,
+    "groom_sprint_threshold": 3,
+    "jira_query_cap": 50
+  }
+}

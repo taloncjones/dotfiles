@@ -1,0 +1,291 @@
+#!/bin/sh
+# post-checkout — selectively hydrate the untracked .planning/ directory into
+# newly-created linked git worktrees.
+#
+# This is the global hook (referenced by core.hooksPath in ~/.gitconfig).
+# It fires for EVERY git repo on the machine. The early guards make it a
+# no-op for non-GSD repos and for non-branch-checkout invocations.
+#
+# Behavior: GSD's .planning/ directory contains both project-wide records
+# (the work history of every ticket) and per-worktree GSD execution state.
+# This hook lays out the worktree's .planning/ with that distinction:
+#
+#   --- symlink-vs-copy partition (LOCKED) ---
+#   codebase/     -> symlink to main   (project-wide; never diverges)
+#   quick/        -> symlink to main   (per-ticket phase records; uniquely named per ticket)
+#   todos/        -> symlink to main   (per-file uniqueness; fixes stale-pending drift)
+#   ROADMAP.md    -> symlink to main   (project roadmap; static in maintenance mode)
+#   TODO.md       -> symlink to main   (hand-curated cross-context index)
+#   STATE.md      -> copy from main    (per-branch GSD execution state; MUST stay isolated)
+#   config.json   -> copy from main    (per-worktree workflow config)
+#
+#   --- mode detection ---
+#   Two modes:
+#     maintenance (default): the partition above applies — 5 symlinks + 2 copies.
+#     workspace: hook is a hard skip. No symlinks. No copies. The workspace
+#         owns its .planning/ entirely. Pre-existing maintenance symlinks
+#         trigger a WARN; pass GSD_HOOK_ISOLATE=1 to convert them to copies.
+#
+#   Detection precedence (per-worktree, not from main):
+#     1. .planning/config.json has "mode": "workspace"  (authoritative)
+#     2. .planning/phases/ exists OR .planning/PROJECT.md exists  (inference)
+#     3. else maintenance
+#
+# This means per-ticket work records (CONTEXT, PLAN, REVIEWS, RESUME, SUMMARY)
+# flow back to main automatically — no manual sync, no loss on `rm -rf worktree`.
+# Per-worktree GSD state stays isolated so concurrent worktrees do not clobber
+# each other's STATE.md.
+#
+# --- post-GSD .todos/ hydration ---
+# Independently of .planning/, this hook also hydrates the untracked .todos/
+# directory used by the `todos` skill (a post-GSD replacement for
+# .planning/todos). .todos/ is a single project-wide backlog (pending/ +
+# completed/ + an auto-generated TODO.md) with NO per-branch state, so in
+# maintenance mode the WHOLE directory is symlinked to main. This runs even
+# when .planning/ is absent, so todos keep hydrating once GSD is fully retired.
+# Workspace worktrees own their own .todos/ (symmetric with .planning/) and are
+# skipped. GSD_HOOK_REPAIR=1 replaces a wrong-shape .todos with the symlink.
+#
+# --- environment flags ---
+# GSD_HOOK_REPAIR=1
+#   Maintenance mode only. Forces ensure_symlink to replace wrong-shape
+#   destinations (real dirs / non-canonical symlinks) with canonical
+#   symlinks to main. Destructive — rsync worktree-unique content into
+#   main BEFORE running. In workspace mode this flag is a no-op because
+#   ensure_symlink is never called.
+#
+# GSD_HOOK_ISOLATE=1
+#   Workspace mode only. Forces conversion of any leftover maintenance-mode
+#   symlinks (codebase/, quick/, todos/, ROADMAP.md, TODO.md) into
+#   per-worktree copies seeded from main's current content. Use when
+#   converting a maintenance worktree to workspace mode, or as the final
+#   step of `git worktree add` -> declare workspace markers -> isolate.
+#   In maintenance mode this flag is a no-op.
+#
+# --- assumptions and known limits ---
+# 1. canonical main: `git worktree list --porcelain`'s first entry must be the
+#    main worktree holding .planning/. True for plain repos. Fails (symlinks
+#    would point at the wrong filesystem path) if this repo is itself a
+#    linked sub-worktree of some outer repo.
+# 2. quick_id 2-second collision window: GSD's `quick_id` is `floor(s/2)` of
+#    seconds-since-midnight encoded as Base36. Two `/gsd-quick` invocations
+#    in different worktrees within the same 2-second window CAN collide on
+#    the directory name. Negligible for solo work.
+# 3. TODO.md is hand-curated, NOT GSD-regenerated. Concurrent writes from
+#    two GSD sessions silently lose the loser. Tolerated for single-developer
+#    + single-active-session use.
+# 4. Absolute symlink fragility: symlinks point at the main worktree by
+#    absolute path. Moving the main worktree on disk breaks every linked
+#    worktree's .planning/* symlinks; recovery is to re-run with
+#    GSD_HOOK_REPAIR=1 in each affected worktree.
+# 5. Windows is not in scope — `core.symlinks=true` plus Developer Mode are
+#    required there. The hook does not currently guard against this.
+#
+# Args from git: $1 = previous HEAD, $2 = new HEAD, $3 = 1 if branch checkout
+# (which is what `git worktree add` triggers), 0 if file checkout.
+
+# Branch-checkout only — skip `git checkout -- <file>` style invocations.
+[ "$3" = "1" ] || exit 0
+
+# Linked worktree only — the main checkout and `git clone` have .git as a
+# DIRECTORY; linked worktrees have .git as a FILE (a gitdir: pointer).
+[ -f .git ] || exit 0
+
+# Resolve the main worktree path. Awk picks the first `worktree <path>` line
+# from the porcelain output; that is always the canonical main per git docs.
+main_wt=$(git worktree list --porcelain | awk '/^worktree /{print substr($0, 10); exit}')
+[ -n "$main_wt" ] || exit 0
+
+# --- mode detection (runs before any hydration) ---
+# Determine whether this worktree runs a phase-based GSD workspace (its own
+# project tree) or the default maintenance + quick-task pattern. Detection
+# reads the worktree's own .planning/ — main's mode is irrelevant since a
+# single repo can host worktrees in different modes (e.g. main is
+# maintenance, workspace/feature-x is workspace). An absent .planning/
+# (fresh worktree, or a repo that has retired GSD) falls through to
+# maintenance — the correct default for the .todos/ hydration below.
+#
+# Precedence:
+#   1. .planning/config.json "mode" field if present (authoritative)
+#   2. File-presence inference: .planning/phases/ OR .planning/PROJECT.md
+#   3. Default: maintenance
+#
+# JSON detection strips ALL whitespace via tr so multi-line formatters
+# ("mode":\n  "workspace") still match. The compact-form regex has zero
+# practical false-positive risk because "mode" is a reserved top-level
+# key in this convention.
+gsd_mode=maintenance
+if [ -f .planning/config.json ]; then
+    if tr -d '[:space:]' < .planning/config.json | grep -q '"mode":"workspace"'; then
+        gsd_mode=workspace
+    fi
+fi
+if [ "$gsd_mode" = maintenance ]; then
+    if { [ -d .planning/phases ] && [ ! -L .planning/phases ]; } \
+        || { [ -f .planning/PROJECT.md ] && [ ! -L .planning/PROJECT.md ]; }; then
+        gsd_mode=workspace
+    fi
+fi
+
+# --- .todos/ hydration (post-GSD; independent of .planning/) ---
+# Whole-directory symlink to main in maintenance mode. .todos/ carries no
+# per-branch state, so unlike .planning/ there is nothing to isolate or copy.
+# Skipped in workspace mode (the workspace owns its own .todos/). Acts only
+# when main actually has a .todos/ to point at.
+if [ "$gsd_mode" = maintenance ] && [ -d "$main_wt/.todos" ]; then
+    todos_src="$main_wt/.todos"
+    if [ -L .todos ] && [ "$(readlink .todos)" = "$todos_src" ]; then
+        :  # already the canonical symlink
+    elif [ -e .todos ] || [ -L .todos ]; then
+        if [ "${GSD_HOOK_REPAIR:-0}" = "1" ]; then
+            rm -rf .todos
+            ln -sfn "$todos_src" .todos
+            echo "[post-checkout] repaired .todos -> $todos_src"
+        else
+            printf '[post-checkout] WARN: .todos has wrong shape (expected symlink to %s); rerun with GSD_HOOK_REPAIR=1 to repair\n' "$todos_src" >&2
+        fi
+    else
+        ln -sfn "$todos_src" .todos
+        echo "[post-checkout] hydrated .todos -> $todos_src"
+    fi
+fi
+
+# Workspace mode: a worktree must not write todos through a symlink into main.
+# A new worktree is symlinked while still in maintenance mode (workspace markers
+# are added afterwards), so this leftover symlink is the normal case. Convert it
+# to a per-worktree copy under GSD_HOOK_ISOLATE=1; otherwise warn. This runs
+# BEFORE the .planning retirement exit below so it still fires in a post-GSD
+# repo whose main has no .planning/ (where the .planning workspace block never
+# runs). Symmetric with the maintenance .todos hydration above.
+if [ "$gsd_mode" = workspace ] && [ -L .todos ] && [ "$(readlink .todos)" = "$main_wt/.todos" ]; then
+    if [ "${GSD_HOOK_ISOLATE:-0}" = "1" ]; then
+        rm -f .todos
+        cp -R "$main_wt/.todos" .todos
+        echo "[post-checkout] isolated .todos (was symlink, now copy)"
+    else
+        printf '[post-checkout] WARN: .todos is a maintenance-mode symlink to main; writes will leak to main. Run with GSD_HOOK_ISOLATE=1 to convert to a workspace copy.\n' >&2
+    fi
+fi
+
+# ensure_symlink <relpath>
+#   Ensures .planning/<relpath> in this worktree is a symlink to
+#   $main_wt/.planning/<relpath>. Behavior:
+#     a. If source missing in main, skip with notice (NO broken symlink).
+#     b. If dst is already a symlink with target equal to abs source, no-op.
+#     c. If dst exists in any other shape and GSD_HOOK_REPAIR is not 1,
+#        warn to stderr and skip — user must opt in to destructive replace.
+#     d. Otherwise rm -rf dst, then `ln -sfn` source to dst.
+#   NOTE: `ln -sfn` (with -n) is mandatory. Bare `ln -sf TARGET LINK` when
+#   LINK is already a symlink-to-directory creates a NEW symlink INSIDE the
+#   dereferenced target instead of replacing the existing symlink. The -n
+#   flag treats the existing symlink as the symlink itself, not the dir it
+#   points at. BSD-and-GNU safe.
+ensure_symlink() {
+    rel="$1"
+    src="$main_wt/.planning/$rel"
+    dst=".planning/$rel"
+
+    if [ ! -e "$src" ]; then
+        printf '[post-checkout] skip .planning/%s (no %s in main)\n' "$rel" "$src"
+        return 0
+    fi
+
+    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+        return 0
+    fi
+
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        if [ "${GSD_HOOK_REPAIR:-0}" != "1" ]; then
+            printf '[post-checkout] WARN: .planning/%s has wrong shape (expected symlink to %s); rerun with GSD_HOOK_REPAIR=1 to repair\n' "$rel" "$src" >&2
+            return 0
+        fi
+        rm -rf "$dst"
+    fi
+
+    ln -sfn "$src" "$dst"
+}
+
+# ensure_copy <relpath>
+#   Ensures .planning/<relpath> in this worktree is a per-worktree copy
+#   (NOT a symlink). Behavior:
+#     a. If source missing in main, return 0 silently (fresh project, etc.).
+#     b. If dst already exists, return 0 — NEVER clobber per-worktree state
+#        (STATE.md and config.json may have diverged legitimately).
+#     c. Otherwise `cp -p` from main into the worktree.
+ensure_copy() {
+    rel="$1"
+    src="$main_wt/.planning/$rel"
+    dst=".planning/$rel"
+
+    if [ ! -e "$src" ]; then
+        return 0
+    fi
+
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        return 0
+    fi
+
+    cp -p "$src" "$dst"
+}
+
+# --- .planning/ hydration (GSD-specific; exits once .planning/ is retired) ---
+# Everything below operates on the worktree's .planning/. If main has no
+# .planning/, there is nothing GSD-specific left to do — the .todos/ work
+# above has already run — so exit cleanly.
+if [ ! -d "$main_wt/.planning" ]; then
+    exit 0
+fi
+mkdir -p .planning
+
+# Workspace mode: hard skip. Do not symlink, do not copy. The workspace
+# owns its .planning/ entirely. Surface any pre-existing maintenance-mode
+# symlinks because writes through those symlinks would corrupt main.
+# Under GSD_HOOK_ISOLATE=1, convert those symlinks into per-worktree
+# copies seeded from main (symmetric to GSD_HOOK_REPAIR=1 but in the
+# opposite direction).
+if [ "$gsd_mode" = workspace ]; then
+    echo "[post-checkout] workspace mode detected; skipping .planning/ hydration"
+
+    isolate="${GSD_HOOK_ISOLATE:-0}"
+    for rel in codebase quick todos ROADMAP.md TODO.md; do
+        dst=".planning/$rel"
+        src="$main_wt/.planning/$rel"
+        [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ] || continue
+
+        if [ "$isolate" = "1" ]; then
+            if [ ! -e "$src" ]; then
+                printf '[post-checkout] WARN: .planning/%s cannot be isolated (source %s missing in main); leaving symlink in place\n' "$rel" "$src" >&2
+                continue
+            fi
+            rm -f "$dst"
+            if [ -d "$src" ]; then
+                cp -R "$src" "$dst"
+            else
+                cp -p "$src" "$dst"
+            fi
+            printf '[post-checkout] isolated .planning/%s (was symlink, now copy)\n' "$rel"
+        else
+            printf '[post-checkout] WARN: .planning/%s is a maintenance-mode symlink to main; writes will leak to main. Run with GSD_HOOK_ISOLATE=1 to convert to a workspace copy.\n' "$rel" >&2
+        fi
+    done
+
+    # Note: top-level .todos/ isolation runs earlier (before the .planning
+    # retirement exit) so it still fires in post-GSD repos. See the workspace
+    # .todos block above the ensure_symlink definitions.
+
+    echo "[post-checkout] workspace mode complete"
+    exit 0
+fi
+
+# Maintenance mode (default) — apply the partition. Order matters for the
+# user-visible log, not semantics.
+ensure_symlink codebase
+ensure_symlink quick
+ensure_symlink todos
+ensure_symlink ROADMAP.md
+ensure_symlink TODO.md
+
+ensure_copy STATE.md
+ensure_copy config.json
+
+echo "[post-checkout] hydrated .planning/ from $main_wt"

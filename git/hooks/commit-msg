@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Global commit-msg guard for portable commit message policy.
+
+if [[ "${DOTFILES_SKIP_COMMIT_MSG_GUARD:-0}" == "1" ]]; then
+  exit 0
+fi
+
+message_file="${1:-}"
+if [[ -z "$message_file" || ! -f "$message_file" ]]; then
+  exit 0
+fi
+
+if ! command -v rg >/dev/null 2>&1; then
+  printf 'commit-msg: rg not found; skipping attribution and emoji checks.\n' >&2
+  exit 0
+fi
+
+message="$(cat "$message_file")"
+
+# Permit directory/tool scopes like "claude:" while checking the summary/body.
+body="$(printf '%s\n' "$message" | sed -E '1s/^[A-Za-z0-9_-]+:[[:space:]]*//')"
+
+if printf '%s\n' "$body" | rg -qi 'generated[[:space:]]+(by|with)[[:space:]]+(claude|anthropic|copilot|chatgpt|gpt|codex|ai)|written[[:space:]]+by[[:space:]]+(claude|anthropic|copilot|chatgpt|gpt|codex|ai)|created[[:space:]]+by[[:space:]]+(claude|anthropic|copilot|chatgpt|gpt|codex|ai)|ai[- ]generated|generated[- ]by[- ]ai'; then
+  printf 'Blocked: commit message contains tool-attribution terms.\n' >&2
+  printf 'Remove attribution from the commit message.\n' >&2
+  exit 1
+fi
+
+if printf '%s\n' "$message" | rg -qi 'co-authored-by:.*(claude|anthropic|copilot|chatgpt|gpt|codex|ai\b)'; then
+  printf 'Blocked: commit message contains an AI/tool co-author line.\n' >&2
+  exit 1
+fi
+
+if printf '%s\n' "$message" | rg -q '[\x{1F1E0}-\x{1F1FF}\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}]'; then
+  printf 'Blocked: commit message contains emojis.\n' >&2
+  exit 1
+fi
+
+exit 0

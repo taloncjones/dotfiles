@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# dotfiles-repair - Bring a long-lived dotfiles machine back to a known-good state.
+#
+# What this fixes:
+#   * Dangling symlinks under ~/.gitconfig, ~/.zshrc, ~/.claude/, ~/.codex/, etc.
+#     left behind when an old dotfiles checkout (e.g. a deleted sibling clone)
+#     was the symlink target.
+#   * Reappearance of the compromised get-shit-done-cc package. dotfiles has
+#     moved off GSD; this script only flags it so it can be purged with the
+#     gsd-uninstall shell function.
+#   * Machine-local ~/.claude/settings.json that got truncated to a few bytes
+#     when something wrote through a stale symlink (e.g. Claude CLI updating
+#     a single field). Re-seeds from the canonical template.
+#
+# Safe to re-run. Each step is idempotent. Skips destructive ops when the
+# state is already correct.
+
+set -euo pipefail
+
+# Detect canonical dotfiles directory (assumes this script lives at $DOTFILES/bin/)
+SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+step() { echo -e "\n${BLUE}==>${NC} $*"; }
+ok() { echo -e "  ${GREEN}[OK]${NC} $*"; }
+warn() { echo -e "  ${YELLOW}[WARNING]${NC} $*"; }
+err() { echo -e "  ${RED}[X]${NC} $*"; }
+info() { echo -e "  ${BLUE}[INFO]${NC} $*"; }
+
+step "1/5  Pull latest dotfiles"
+if git -C "$DOTFILES" diff --quiet && git -C "$DOTFILES" diff --cached --quiet; then
+  if git -C "$DOTFILES" rev-parse --abbrev-ref HEAD | grep -qx main; then
+    git -C "$DOTFILES" pull --ff-only
+    ok "main fast-forwarded"
+  else
+    warn "dotfiles is not on main (currently $(git -C "$DOTFILES" rev-parse --abbrev-ref HEAD)); skipping pull"
+  fi
+else
+  warn "dotfiles has local changes; skipping pull"
+fi
+
+step "2/5  Re-link dotfiles (replaces dangling/stale symlinks)"
+case "$(uname)" in
+  Darwin)  bash "$DOTFILES/install/macos/link.sh" ;;
+  Linux)   bash "$DOTFILES/install/linux/link.sh" ;;
+  *)       err "Unsupported OS: $(uname)"; exit 1 ;;
+esac
+ok "symlinks refreshed"
+
+step "3/5  Verify ~/.claude/settings.json"
+SETTINGS="$HOME/.claude/settings.json"
+TEMPLATE="$DOTFILES/claude/settings.json.tmpl"
+if [ -L "$SETTINGS" ]; then
+  warn "settings.json is still a symlink after link.sh ran -- unexpected"
+  warn "  Path: $(readlink "$SETTINGS")"
+elif [ ! -f "$SETTINGS" ]; then
+  err "settings.json missing after link.sh -- copying template"
+  cp "$TEMPLATE" "$SETTINGS"
+else
+  tmpl_size=$(wc -c <"$TEMPLATE" 2>/dev/null | tr -d ' ')
+  dest_size=$(wc -c <"$SETTINGS" 2>/dev/null | tr -d ' ')
+  if [ -n "$tmpl_size" ] && [ -n "$dest_size" ] && [ "$tmpl_size" -gt 0 ] \
+      && [ "$(( dest_size * 2 ))" -lt "$tmpl_size" ]; then
+    warn "settings.json is ${dest_size}B but template is ${tmpl_size}B"
+    warn "  Re-seed manually if you have lost plugin/hook config:"
+    warn "    rm $SETTINGS && cp $TEMPLATE $SETTINGS"
+  else
+    ok "settings.json size looks healthy (${dest_size}B)"
+  fi
+fi
+
+step "4/5  Check for compromised GSD"
+
+# The original get-shit-done-cc package is compromised (token rug-pull, publish
+# access retained) and we have moved off it. dotfiles no longer installs GSD;
+# this step only flags a reappearance. The redux fork may be revisited later,
+# but for now removal is owned by the gsd-uninstall shell function.
+gsd_found=0
+command -v get-shit-done-cc >/dev/null 2>&1 && gsd_found=1
+command -v npm >/dev/null 2>&1 \
+  && npm list -g --depth=0 2>/dev/null | grep -qE 'get-shit-done-cc|@gsd-build/sdk' && gsd_found=1
+compgen -G "$HOME/.claude/skills/gsd-*" >/dev/null 2>&1 && gsd_found=1
+compgen -G "$HOME/.codex/skills/gsd-*" >/dev/null 2>&1 && gsd_found=1
+[ -d "$HOME/.claude/get-shit-done" ] && gsd_found=1
+if [ "$gsd_found" -eq 1 ]; then
+  warn "Compromised GSD detected -- run 'gsd-uninstall' to fully remove it"
+else
+  ok "No compromised GSD present"
+fi
+
+step "5/5  Verify final state"
+if [ -L "$HOME/.gitconfig" ] && [ -e "$HOME/.gitconfig" ]; then
+  ok "~/.gitconfig symlink resolves"
+else
+  err "~/.gitconfig symlink is missing or broken"
+fi
+if [ -L "$HOME/.codex/hooks/no_ai_attribution_bash.py" ] && [ -e "$HOME/.codex/hooks/no_ai_attribution_bash.py" ]; then
+  ok "~/.codex/hooks/no_ai_attribution_bash.py symlink resolves"
+else
+  warn "~/.codex/hooks/no_ai_attribution_bash.py symlink missing -- re-run link.sh"
+fi
+
+echo
+echo -e "${GREEN}dotfiles-repair complete.${NC}"
+echo "Restart Claude Code / Codex sessions to pick up reloaded plugins and hooks."
