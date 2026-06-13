@@ -86,12 +86,14 @@ link_claude_config_dir() {
     fi
   done
 
-  # Rules: a curated subset of the ECC ruleset is vendored into the dotfiles repo
-  # (claude/rules) and symlinked here, rather than installed by ecc-update. This
-  # keeps the rules version-controlled, lean (only languages we use), and free of
-  # the stale top-level/ecc-namespace duplication an older blanket copy produced.
-  # ecc-sync-rules re-vendors from the ECC repo as a reviewable git diff; it must
-  # never write into $cdir/rules (either account) now that this is a symlink.
+  # Rules: claude/rules is symlinked here as the single asset source. The ECC
+  # language dirs (common/ cpp/ python/ rust/ typescript/ web/) are installer-
+  # managed and UNTRACKED (claude/rules/.gitignore): ecc-install / ecc-update
+  # re-vendor them from the ECC repo via `cp -R`, so they are reproducible and
+  # never committed -- same model as ECC skills/commands/hooks. Only our own
+  # custom rules under claude/rules/personal/ are version-controlled.
+  # ecc-sync-rules writes into the dotfiles claude/rules dir (the symlink target),
+  # never into $cdir/rules directly (either account) now that this is a symlink.
   # One-time migration: older machines have rules as a REAL directory (from a
   # blanket ECC install). Preserve it as a timestamped backup before replacing
   # it with the symlink, in case it holds hand-edited rules not yet vendored.
