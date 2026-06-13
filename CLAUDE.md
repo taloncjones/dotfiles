@@ -17,8 +17,8 @@ setup-claude                # Add CLAUDE.md/.claude to .git/info/exclude in any 
 ```
 
 **Cloud sessions:** claude.ai/code containers are ephemeral; persist the Claude
-layer by adding this to the cloud environment's setup script (requires the
-GitHub grant to include this repo):
+layer by adding this to the cloud environment's setup script (the repo is
+public, so no GitHub grant is needed):
 
 ```bash
 git clone https://github.com/taloncjones/dotfiles "$HOME/dotfiles" 2>/dev/null || git -C "$HOME/dotfiles" pull

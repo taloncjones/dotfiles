@@ -44,11 +44,10 @@ Personal dotfiles for managing development environment configuration across macO
    This wizard writes `~/.gitconfig-work`, `~/.ssh/id_ed25519_work.pub`, and
    `~/.ssh/config_local`. Skip if you only use the personal identity.
 
-5. **Switch remote to SSH** (after 1Password SSH agent is configured):
-
-   ```bash
-   git remote set-url origin git@github.com:taloncjones/dotfiles.git
-   ```
+5. **No remote switch needed:** once the 1Password SSH agent is configured,
+   pushes route over SSH automatically — `url.insteadOf`/`pushInsteadOf` in
+   the identity includes rewrite `github.com` remotes to the pinned SSH
+   aliases, so the HTTPS clone URL is fine to keep.
 
 > **Note:** You can clone the repo to any directory — the install scripts dynamically resolve paths, so symlinks will work regardless of location.
 
