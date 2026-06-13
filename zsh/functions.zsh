@@ -726,7 +726,9 @@ function _claude_plugin_check_update() {
     local cache_dir="${ZSH_CACHE_DIR:-$HOME/.cache/zsh}"
     local stale=()
 
-    for plugin in ecc gsd; do
+    # gsd is deliberately absent: GSD is retired, and a leftover cache stamp
+    # would nag 'gsd-update' on machines where the right move is gsd-uninstall.
+    for plugin in ecc; do
         local update_file="$cache_dir/.${plugin}-update"
         # Only remind for plugins actually managed here: the cache is written by
         # {plugin}-install/update and removed by {plugin}-uninstall, so an
