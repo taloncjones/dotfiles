@@ -17,13 +17,23 @@ setup-claude                # Add CLAUDE.md/.claude to .git/info/exclude in any 
 ```
 
 **Cloud sessions:** claude.ai/code containers are ephemeral; persist the Claude
-layer by adding this to the cloud environment's setup script (the repo is
-public, so no GitHub grant is needed):
+layer by adding this to the cloud environment's **Setup script** field (the repo
+is public, so no GitHub grant is needed):
 
 ```bash
 git clone https://github.com/taloncjones/dotfiles "$HOME/dotfiles" 2>/dev/null || git -C "$HOME/dotfiles" pull
 "$HOME/dotfiles/bootstrap-cloud.sh"
 ```
+
+Placement is load-bearing. Plugins (ECC, Superpowers) load at Claude Code
+launch, and the Setup script runs _before_ launch — then its disk writes are
+filesystem-snapshotted and reused, so plugins are present on session 1 and the
+install is skipped on later sessions (the ~5-min Setup-script cap is one-time,
+not a per-session wait; our install is seconds). The repo SessionStart hook
+(`.claude/hooks/session-start.sh`) runs the same script _after_ launch as an
+idempotent self-heal, but a plugin installed there is not usable until the NEXT
+session — so the Setup-script field is required for first-session plugins, not
+optional. Custom base images are unsupported; the snapshot is the equivalent.
 
 ## Architecture
 

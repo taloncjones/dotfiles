@@ -15,9 +15,25 @@
 # defaults) and the work config dir (~/.claude-work): cloud containers are
 # single-account (personal) by design.
 #
-# Usage (cloud environment setup script or repo SessionStart hook):
-#   git clone https://github.com/taloncjones/dotfiles "$HOME/dotfiles" 2>/dev/null || true
-#   "$HOME/dotfiles/bootstrap-cloud.sh"
+# Placement matters. Plugins load at Claude Code launch, so WHERE this runs
+# decides whether they are usable on the FIRST session:
+#
+#   CANONICAL -- the cloud environment's Setup script field (claude.ai/code UI).
+#     Runs BEFORE Claude Code launches and its disk writes (plugin cache +
+#     installed_plugins.json + settings.json) are filesystem-snapshotted and
+#     reused, so plugins are present at launch on session 1 and the install is
+#     skipped on every later session. This is the only placement that makes
+#     plugins available on the first session. Paste into the Setup script field:
+#       git clone https://github.com/taloncjones/dotfiles "$HOME/dotfiles" 2>/dev/null || git -C "$HOME/dotfiles" pull
+#       "$HOME/dotfiles/bootstrap-cloud.sh"
+#
+#   FALLBACK -- the repo SessionStart hook (.claude/hooks/session-start.sh).
+#     Runs AFTER launch, so a plugin it installs is not usable until the NEXT
+#     session. Kept as an idempotent self-heal for snapshot/cache expiry; it is
+#     NOT a substitute for the Setup-script placement above.
+#
+# Custom base images are not supported by claude.ai/code; the Setup-script
+# snapshot is the sanctioned equivalent of a pre-baked image.
 #
 # Flags:
 #   --no-plugins   skip plugin installs (used by the smoke test; also useful offline)
@@ -33,7 +49,15 @@ ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 PERSONAL_GITCONFIG="$DOTFILEDIR/git/personal/.gitconfig-personal"
 PLATFORM_DEFAULT_EMAIL="noreply@anthropic.com"
 INSTALLED_PLUGINS_JSON="$HOME/.claude/plugins/installed_plugins.json"
-PLUGIN_RETRIES=5
+# Generous on purpose. The github-backed official marketplace warms its first
+# fetch asynchronously and can take 70s+ on a cold container -- longer than a
+# 5-retry budget (2+4+8+16 = 30s) survives, which is exactly how superpowers
+# lost the race while ECC's synchronous git marketplace won it. 8 retries with
+# exponential backoff (2+4+8+16+32+64 = ~126s) outlasts that warmup. This cost
+# is paid once: in the canonical Setup-script placement (see header) the install
+# runs pre-launch and the result is filesystem-snapshotted, so later sessions
+# skip it entirely.
+PLUGIN_RETRIES=8
 
 # True iff the plugin id (name@marketplace) is recorded in installed_plugins.json.
 # This file is the on-disk ground truth: `claude plugins install` can exit 0
