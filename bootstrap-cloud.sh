@@ -52,6 +52,10 @@ else
       || echo "[bootstrap-cloud] WARNING: ECC plugin install failed" >&2
   fi
   if ! claude plugins list 2>/dev/null | grep -q "superpowers@claude-plugins-official"; then
+    # Refresh the official marketplace first: a fresh container often ships a
+    # stale local copy that predates superpowers, so the install fails with
+    # "Plugin not found in marketplace" until the cache is updated.
+    claude plugin marketplace update claude-plugins-official >/dev/null 2>&1 || true
     claude plugins install superpowers@claude-plugins-official \
       || echo "[bootstrap-cloud] WARNING: Superpowers plugin install failed" >&2
   fi
