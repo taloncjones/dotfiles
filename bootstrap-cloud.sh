@@ -46,18 +46,26 @@ set -euo pipefail
 
 DOTFILEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
+# Add the official marketplace by git URL so bootstrap REGISTERS it itself
+# (synchronous ~1s clone) instead of waiting on the platform's async, launch-time
+# default registration -- which is undeclared in this repo and is not guaranteed
+# to exist yet when bootstrap runs from the pre-launch Setup script. Same repo the
+# platform default points at, so the pinned/curated superpowers version is
+# unchanged; we only control HOW/WHEN it is registered.
+OFFICIAL_REPO_URL="https://github.com/anthropics/claude-plugins-official.git"
 PERSONAL_GITCONFIG="$DOTFILEDIR/git/personal/.gitconfig-personal"
 PLATFORM_DEFAULT_EMAIL="noreply@anthropic.com"
 INSTALLED_PLUGINS_JSON="$HOME/.claude/plugins/installed_plugins.json"
-# Generous on purpose. The github-backed official marketplace warms its first
-# fetch asynchronously and can take 70s+ on a cold container -- longer than a
-# 5-retry budget (2+4+8+16 = 30s) survives, which is exactly how superpowers
-# lost the race while ECC's synchronous git marketplace won it. 8 retries with
-# exponential backoff (2+4+8+16+32+64 = ~126s) outlasts that warmup. This cost
-# is paid once: in the canonical Setup-script placement (see header) the install
-# runs pre-launch and the result is filesystem-snapshotted, so later sessions
-# skip it entirely.
+# Retry budget for the rare fallback path. With both marketplaces now added by
+# git URL (synchronous ~1s clones), the manifest is listed immediately and these
+# retries almost never engage. They exist only for transient network blips. The
+# backoff is CAPPED (see PLUGIN_RETRY_MAX_DELAY) because it is uncapped doubling
+# otherwise: 8 raw doublings would sleep 2+4+8+16+32+64+128 = 254s per phase, and
+# two phases across two plugins could blow past the Setup script's ~5-minute cap.
+# Capped at 15s, 8 attempts bound each phase to ~74s, keeping the worst case well
+# under the cap. Success is paid once and filesystem-snapshotted (see header).
 PLUGIN_RETRIES=8
+PLUGIN_RETRY_MAX_DELAY=15
 
 # True iff the plugin id (name@marketplace) is recorded in installed_plugins.json.
 # This file is the on-disk ground truth: `claude plugins install` can exit 0
@@ -132,7 +140,7 @@ ensure_plugin() {
     echo "[bootstrap-cloud] $marketplace manifest not warm yet" \
          "(attempt $attempt/$PLUGIN_RETRIES); retrying in ${delay}s..." >&2
     sleep "$delay"
-    delay=$(( delay * 2 ))
+    delay=$(( delay * 2 )); [ "$delay" -gt "$PLUGIN_RETRY_MAX_DELAY" ] && delay="$PLUGIN_RETRY_MAX_DELAY"
     attempt=$(( attempt + 1 ))
   done
 
@@ -152,7 +160,7 @@ ensure_plugin() {
       echo "[bootstrap-cloud] $plugin_id not in installed_plugins.json yet" \
            "(attempt $attempt/$PLUGIN_RETRIES); retrying in ${delay}s..." >&2
       sleep "$delay"
-      delay=$(( delay * 2 ))
+      delay=$(( delay * 2 )); [ "$delay" -gt "$PLUGIN_RETRY_MAX_DELAY" ] && delay="$PLUGIN_RETRY_MAX_DELAY"
     fi
     attempt=$(( attempt + 1 ))
   done
@@ -288,11 +296,15 @@ elif ! command -v claude >/dev/null 2>&1; then
 else
   echo "[bootstrap-cloud] Ensuring plugin marketplaces + installs..."
   # Both plugins go through the same verify-then-retry path so neither can fail
-  # silently. ECC ships its own git marketplace (added by URL); superpowers lives
-  # in the pre-bundled official github marketplace.
+  # silently, and BOTH are now registered by git URL so the marketplace is cloned
+  # synchronously before install (no async warmup race). ECC ships its own git
+  # marketplace; superpowers comes from the official marketplace repo, which we
+  # add by URL ourselves rather than relying on the platform's launch-time default
+  # (absent during the pre-launch Setup script). The marketplace add is guarded by
+  # ensure_plugin so it no-ops if the platform already registered it.
   plugin_status=0
   ensure_plugin "ecc@ecc" "ecc" "$ECC_REPO_URL" || plugin_status=1
-  ensure_plugin "superpowers@claude-plugins-official" "claude-plugins-official" || plugin_status=1
+  ensure_plugin "superpowers@claude-plugins-official" "claude-plugins-official" "$OFFICIAL_REPO_URL" || plugin_status=1
   if [ "$plugin_status" -ne 0 ]; then
     echo "[bootstrap-cloud] WARNING: one or more plugins did not install; see FAILED lines above." >&2
   fi
