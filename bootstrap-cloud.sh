@@ -7,10 +7,13 @@
 # skills, rules, statusline), the ECC and Superpowers plugins, and a
 # settings.json reconciled from the template so the full dotfiles config
 # (SessionStart orchestrator + account_guard hooks, statusLine, permissions,
-# env) is present -- not just the keys the plugin installers write. It
-# deliberately skips everything machine-bound in the full install (brew, zsh,
-# ssh, git identity, codex, macOS defaults) and the work config dir
-# (~/.claude-work): cloud containers are single-account (personal) by design.
+# env) is present -- not just the keys the plugin installers write. It also
+# reattributes git commits to the tracked personal identity, because the cloud
+# platform defaults the author to "Claude <noreply@anthropic.com>" and the
+# dotfiles rule is that commits are human-authored. It deliberately skips the
+# rest of the machine-bound full install (brew, zsh, ssh, codex, macOS
+# defaults) and the work config dir (~/.claude-work): cloud containers are
+# single-account (personal) by design.
 #
 # Usage (cloud environment setup script or repo SessionStart hook):
 #   git clone https://github.com/taloncjones/dotfiles "$HOME/dotfiles" 2>/dev/null || true
@@ -27,6 +30,8 @@ set -euo pipefail
 
 DOTFILEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
+PERSONAL_GITCONFIG="$DOTFILEDIR/git/personal/.gitconfig-personal"
+PLATFORM_DEFAULT_EMAIL="noreply@anthropic.com"
 INSTALLED_PLUGINS_JSON="$HOME/.claude/plugins/installed_plugins.json"
 PLUGIN_RETRIES=5
 
@@ -164,6 +169,42 @@ print("[bootstrap-cloud] Reconciled settings.json (SessionStart: "
 PY
 }
 
+# Reattribute git commits to the tracked personal identity.
+#
+# Cloud containers seed git user.name/email to "Claude <noreply@anthropic.com>";
+# the dotfiles rule is that commits are human-authored. Pull name + email ONLY
+# from the tracked personal gitconfig -- never its signing block, whose
+# commit.gpgsign via 1Password op-ssh-sign would make every commit fail in a
+# container without 1Password. Only overrides the platform default: a real
+# identity already set (e.g. by an includeIf in a mounted repo) is left alone.
+reattribute_git_identity() {
+  command -v git >/dev/null 2>&1 || return 0
+  if [ ! -f "$PERSONAL_GITCONFIG" ]; then
+    echo "[bootstrap-cloud] WARNING: $PERSONAL_GITCONFIG missing; leaving git identity as-is." >&2
+    return 1
+  fi
+
+  local cur_email
+  cur_email="$(git config --global user.email 2>/dev/null || true)"
+  if [ -n "$cur_email" ] && [ "$cur_email" != "$PLATFORM_DEFAULT_EMAIL" ]; then
+    return 0  # a real identity is already configured; do not clobber it
+  fi
+
+  local name email
+  name="$(git config -f "$PERSONAL_GITCONFIG" user.name 2>/dev/null || true)"
+  email="$(git config -f "$PERSONAL_GITCONFIG" user.email 2>/dev/null || true)"
+  if [ -z "$name" ] || [ -z "$email" ]; then
+    echo "[bootstrap-cloud] WARNING: personal name/email incomplete in $PERSONAL_GITCONFIG; identity unchanged." >&2
+    return 1
+  fi
+
+  git config --global user.name "$name"
+  git config --global user.email "$email"
+  # Signing is unavailable in a container; make sure nothing forces it on.
+  git config --global commit.gpgsign false
+  echo "[bootstrap-cloud] Git author set to $name <$email> (was the platform default)."
+}
+
 NO_PLUGINS=0
 for arg in "$@"; do
   case "$arg" in
@@ -176,6 +217,8 @@ source "$DOTFILEDIR/install/common/claude-links.sh"
 
 echo "[bootstrap-cloud] Linking Claude assets into $HOME/.claude..."
 link_claude_config_dir "$HOME/.claude"
+
+reattribute_git_identity || true
 
 if [ "$NO_PLUGINS" -eq 1 ]; then
   echo "[bootstrap-cloud] Skipping plugin installs (--no-plugins)."
