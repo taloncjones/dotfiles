@@ -49,6 +49,33 @@ exists, use a project-local `.worktrees/<topic-slug>` git worktree. Do not ask
 for consent again unless the user says to work in the current checkout or the
 worktree creation would require an unsafe or destructive action.
 
+## Default Skill Routing
+
+Use these skills by default when the task matches, for both dotfiles work and
+project work such as Peru BESS:
+
+- `workspace-surface-audit` for setup, plugin, MCP, connector, repo-surface, or
+  "what are we missing?" audits.
+- `superpowers:brainstorming`, `superpowers:writing-plans`,
+  `claude-plan-review` or `codex-plan-review`, and
+  `superpowers:executing-plans` for substantial implementation work.
+- `tdd-workflow` or `superpowers:test-driven-development` for new behavior,
+  regression fixes, and risky refactors.
+- `systematic-debugging` for startup failures, flaky tests, tool failures,
+  build failures, and confusing runtime symptoms.
+- `security-review` for secrets, auth, tokens, MCP/config, deploy, TLS/certs,
+  public-repo checks, and anything touching credentials or policy.
+- `rust-testing` for Rust crates, async edge/cloud/simulator code, and Cargo
+  test strategy.
+- `frontend-patterns` and `e2e-testing` for dashboard/UI changes; use
+  project-local UI agents when a repo provides them.
+- `database-migrations` and `postgres-patterns` for SQLx, Postgres,
+  TimescaleDB, schema, query, or migration work.
+- `deployment-patterns` for Docker, Compose, systemd, cloud deploy, CI, and
+  environment hardening.
+- `co-review` for top-level review orchestration after implementation, and
+  `superpowers:verification-before-completion` before claiming work is done.
+
 ## Superpowers Flow
 
 For substantial work, follow the same shape as Claude:

@@ -50,6 +50,10 @@ assert "Codex AGENTS references plugin-qualified Superpowers skills" \
     rg -q 'superpowers:brainstorming' codex/AGENTS.md
 assert "Codex AGENTS defaults implementation work to worktrees" \
     rg -q '## Worktree Default' codex/AGENTS.md
+assert "Codex AGENTS defines default skill routing" \
+    rg -q '## Default Skill Routing' codex/AGENTS.md
+assert "Codex AGENTS routes security and deployment skills by default" \
+    sh -c "rg -q 'security-review' codex/AGENTS.md && rg -q 'deployment-patterns' codex/AGENTS.md"
 
 dedupes_superpowers_plugins() {
     tmp_home="$(mktemp -d)"
