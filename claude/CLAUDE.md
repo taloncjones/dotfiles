@@ -74,14 +74,14 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 - Use TDD skills for new behavior, regression fixes, and risky refactors.
 - Use systematic debugging for startup failures, flaky tests, tool failures,
   build failures, and confusing runtime symptoms.
-- Use security-review for secrets, auth, tokens, MCP/config, deploy, TLS/certs,
+- Use security-review for secrets, auth, tokens, MCP/config, deploy,
+  certificates,
   public-repo checks, and anything touching credentials or policy.
-- Use Rust testing skills for Rust crates, async edge/cloud/simulator code, and
-  Cargo test strategy.
-- Use frontend and E2E testing skills for dashboard/UI changes; use
-  project-local UI agents when a repo provides them.
-- Use database migration and Postgres skills for SQLx, Postgres, TimescaleDB,
-  schema, query, or migration work.
+- Use Rust testing skills for Rust crates and Cargo test strategy.
+- Use frontend and E2E testing skills for frontend/UI changes; use
+  project-local agents when a repo provides them.
+- Use database migration and Postgres skills for SQLx, Postgres, schema, query,
+  or migration work.
 - Use deployment skills for Docker, Compose, systemd, cloud deploy, CI, and
   environment hardening.
 - Use co-review for top-level review orchestration after implementation, and

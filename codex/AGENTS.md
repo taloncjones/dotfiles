@@ -51,8 +51,7 @@ worktree creation would require an unsafe or destructive action.
 
 ## Default Skill Routing
 
-Use these skills by default when the task matches, for both dotfiles work and
-project work such as Peru BESS:
+Use these skills by default when the task matches:
 
 - `workspace-surface-audit` for setup, plugin, MCP, connector, repo-surface, or
   "what are we missing?" audits.
@@ -63,14 +62,13 @@ project work such as Peru BESS:
   regression fixes, and risky refactors.
 - `systematic-debugging` for startup failures, flaky tests, tool failures,
   build failures, and confusing runtime symptoms.
-- `security-review` for secrets, auth, tokens, MCP/config, deploy, TLS/certs,
+- `security-review` for secrets, auth, tokens, MCP/config, deploy, certificates,
   public-repo checks, and anything touching credentials or policy.
-- `rust-testing` for Rust crates, async edge/cloud/simulator code, and Cargo
-  test strategy.
-- `frontend-patterns` and `e2e-testing` for dashboard/UI changes; use
-  project-local UI agents when a repo provides them.
+- `rust-testing` for Rust crates and Cargo test strategy.
+- `frontend-patterns` and `e2e-testing` for frontend/UI changes; use
+  project-local agents when a repo provides them.
 - `database-migrations` and `postgres-patterns` for SQLx, Postgres,
-  TimescaleDB, schema, query, or migration work.
+  schema, query, or migration work.
 - `deployment-patterns` for Docker, Compose, systemd, cloud deploy, CI, and
   environment hardening.
 - `co-review` for top-level review orchestration after implementation, and

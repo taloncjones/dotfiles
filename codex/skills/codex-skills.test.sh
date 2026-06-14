@@ -54,6 +54,8 @@ assert "Codex AGENTS defines default skill routing" \
     rg -q '## Default Skill Routing' codex/AGENTS.md
 assert "Codex AGENTS routes security and deployment skills by default" \
     sh -c "rg -q 'security-review' codex/AGENTS.md && rg -q 'deployment-patterns' codex/AGENTS.md"
+assert "Codex AGENTS keeps project-specific product names out of global defaults" \
+    sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
 
 dedupes_superpowers_plugins() {
     tmp_home="$(mktemp -d)"
