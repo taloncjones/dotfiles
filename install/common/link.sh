@@ -216,34 +216,6 @@ add_codex_hook \
   'Edit|Write|MultiEdit|apply_patch' \
   "$HOME/.codex/hooks/no_ai_comments.py"
 
-dedupe_codex_superpowers_plugins() {
-  local config="$HOME"/.codex/config.toml
-  local tmp="$config.tmp.$$"
-
-  [ -f "$config" ] || return
-  codex_plugin_enabled "$config" "superpowers@openai-curated" || return
-  codex_plugin_enabled "$config" "superpowers@claude-plugins-official" || return
-
-  awk '
-    /^\[plugins\."superpowers@claude-plugins-official"\][[:space:]]*$/ {
-      in_official_superpowers = 1
-      print
-      next
-    }
-    /^\[.*\][[:space:]]*$/ {
-      in_official_superpowers = 0
-      print
-      next
-    }
-    in_official_superpowers && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
-      print "enabled = false"
-      next
-    }
-    { print }
-  ' "$config" >"$tmp"
-  mv "$tmp" "$config"
-}
-
 codex_plugin_enabled() {
   local config="$1"
   local plugin="$2"
@@ -265,6 +237,34 @@ codex_plugin_enabled() {
       exit found ? 0 : 1
     }
   ' "$config"
+}
+
+dedupe_codex_superpowers_plugins() {
+  local config="$HOME"/.codex/config.toml
+  local tmp="$config.tmp.$$"
+
+  [ -f "$config" ] || return
+  codex_plugin_enabled "$config" "superpowers@openai-curated" || return 0
+  codex_plugin_enabled "$config" "superpowers@claude-plugins-official" || return 0
+
+  awk '
+    /^\[plugins\."superpowers@claude-plugins-official"\][[:space:]]*$/ {
+      in_official_superpowers = 1
+      print
+      next
+    }
+    /^\[.*\][[:space:]]*$/ {
+      in_official_superpowers = 0
+      print
+      next
+    }
+    in_official_superpowers && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
+      print "enabled = false"
+      next
+    }
+    { print }
+  ' "$config" >"$tmp"
+  mv "$tmp" "$config"
 }
 
 dedupe_codex_superpowers_plugins
