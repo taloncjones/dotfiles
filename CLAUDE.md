@@ -16,24 +16,36 @@ reload                      # Reload ZSH config (alias)
 setup-claude                # Add CLAUDE.md/.claude to .git/info/exclude in any repo
 ```
 
-**Cloud sessions:** claude.ai/code containers are ephemeral; persist the Claude
-layer by adding this to the cloud environment's **Setup script** field (the repo
-is public, so no GitHub grant is needed):
+**Cloud sessions:** claude.ai/code containers are ephemeral. The Claude layer is
+restored two ways, both first-session-safe (no next-session lag):
+
+- **Plugins** — the repo's committed `.claude/settings.json` declares ECC +
+  Superpowers in `enabledPlugins` and pins both marketplaces by git URL in
+  `extraKnownMarketplaces`. The platform installs declared plugins natively at
+  session start (pre-launch, from the cloned repo), so they are live on session 1
+  with zero per-environment config. This is the primary mechanism.
+- **Assets, settings, git identity** — the repo SessionStart hook
+  (`.claude/hooks/session-start.sh`, gated on `CLAUDE_CODE_REMOTE`, matcher
+  `startup|resume`) runs `bootstrap-cloud.sh` to symlink the `~/.claude` assets,
+  reconcile `settings.json` from the template, and set the personal git author.
+  It also self-heals the plugin install if the native declaration is ever missed.
+
+Optional belt-and-suspenders (e.g. a repo that does NOT commit the declaration,
+or to pre-snapshot a slow install): paste this into the cloud environment's
+**Setup script** field — pre-launch and filesystem-snapshotted; the repo is
+public, so no GitHub grant is needed:
 
 ```bash
 git clone https://github.com/taloncjones/dotfiles "$HOME/dotfiles" 2>/dev/null || git -C "$HOME/dotfiles" pull
 "$HOME/dotfiles/bootstrap-cloud.sh"
 ```
 
-Placement is load-bearing. Plugins (ECC, Superpowers) load at Claude Code
-launch, and the Setup script runs _before_ launch — then its disk writes are
-filesystem-snapshotted and reused, so plugins are present on session 1 and the
-install is skipped on later sessions (the ~5-min Setup-script cap is one-time,
-not a per-session wait; our install is seconds). The repo SessionStart hook
-(`.claude/hooks/session-start.sh`) runs the same script _after_ launch as an
-idempotent self-heal, but a plugin installed there is not usable until the NEXT
-session — so the Setup-script field is required for first-session plugins, not
-optional. Custom base images are unsupported; the snapshot is the equivalent.
+Placement is load-bearing: plugins load at Claude Code launch, so only pre-launch
+placements (the native `.claude/settings.json` declaration, or the Setup script)
+make them usable on session 1. The SessionStart hook runs _after_ launch, so a
+plugin it installs is not usable until the NEXT session — which is why it is the
+self-heal, not the primary path. Custom base images are unsupported; the snapshot
+is the equivalent.
 
 ## Architecture
 
