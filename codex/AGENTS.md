@@ -41,6 +41,14 @@ In Codex, GSD is exposed as skills, not `/gsd` slash commands. Invoke GSD with `
 - Claude-specific statusline, slash commands, agents, and lifecycle hooks are not copied wholesale into Codex
 - Prefer git hooks for policies that must apply outside a single agent runtime
 
+## Worktree Default
+
+For implementation work, default to an isolated workspace before editing files.
+Use `superpowers:using-git-worktrees` when available; if no native worktree tool
+exists, use a project-local `.worktrees/<topic-slug>` git worktree. Do not ask
+for consent again unless the user says to work in the current checkout or the
+worktree creation would require an unsafe or destructive action.
+
 ## Superpowers Flow
 
 For substantial work, follow the same shape as Claude:

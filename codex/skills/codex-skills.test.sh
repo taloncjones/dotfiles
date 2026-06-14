@@ -48,6 +48,8 @@ assert "installer removes stale standalone ECC skill snapshots" \
     rg -q "name 'ecc-\*'" install/common/link.sh
 assert "Codex AGENTS references plugin-qualified Superpowers skills" \
     rg -q 'superpowers:brainstorming' codex/AGENTS.md
+assert "Codex AGENTS defaults implementation work to worktrees" \
+    rg -q '## Worktree Default' codex/AGENTS.md
 
 dedupes_superpowers_plugins() {
     tmp_home="$(mktemp -d)"

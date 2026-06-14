@@ -55,6 +55,16 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
   (e.g., confirm a removal actually happened, a worktree is actually clean, a PR
   is actually superseded). Summaries describe intent; the filesystem is truth.
 
+## Worktree Default
+
+- For implementation work, default to an isolated workspace before editing files.
+- Use the installed Superpowers worktree skill when available; if no native
+  worktree tool exists, use a project-local `.worktrees/<topic-slug>` git
+  worktree.
+- Do not ask for consent again unless the user says to work in the current
+  checkout or the worktree creation would require an unsafe or destructive
+  action.
+
 ## Code Cleanup
 
 - Never delete docstrings, comments, or seemingly-stray strings without first
