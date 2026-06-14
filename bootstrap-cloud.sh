@@ -44,6 +44,19 @@ plugin_installed() {
   grep -q "$plugin_id" "$INSTALLED_PLUGINS_JSON"
 }
 
+# True iff the marketplace's on-disk manifest declares the plugin. The manifest
+# (.claude-plugin/marketplace.json) is the resolver's source of truth: a
+# github-backed marketplace can be registered but still mid-fetch on a cold
+# container, and `claude plugins install` then no-ops with exit 0 because the
+# plugin is not yet listed. Waiting on this condition turns that blind timed
+# race into a deterministic wait.
+marketplace_lists_plugin() {
+  local plugin_name="$1" marketplace="$2"
+  local manifest="$HOME/.claude/plugins/marketplaces/$marketplace/.claude-plugin/marketplace.json"
+  [ -f "$manifest" ] || return 1
+  grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${plugin_name}\"" "$manifest"
+}
+
 # Deterministically install one plugin and PROVE it landed.
 #   $1 plugin id          e.g. superpowers@claude-plugins-official
 #   $2 marketplace name   e.g. claude-plugins-official
@@ -55,10 +68,13 @@ plugin_installed() {
 # failure this script exists to defeat. ECC's plain git marketplace clones
 # synchronously and usually wins the race, which is why it appeared to "work."
 # A later SessionStart:resume succeeded only because the cache had since warmed.
-# We refresh the marketplace before every attempt to force that warmup, then
-# verify against installed_plugins.json instead of trusting the exit code.
+# We first WAIT for the marketplace manifest to actually list the plugin (the
+# condition the install resolver checks), refreshing the cache to force warmup,
+# then install and verify against installed_plugins.json instead of trusting the
+# exit code.
 ensure_plugin() {
   local plugin_id="$1" marketplace="$2" add_url="${3:-}"
+  local plugin_name="${plugin_id%@*}"
 
   if plugin_installed "$plugin_id"; then
     echo "[bootstrap-cloud] OK: $plugin_id already installed."
@@ -76,7 +92,28 @@ ensure_plugin() {
     fi
   fi
 
+  # Phase 1: wait until the marketplace manifest lists the plugin. This is the
+  # cold-start race the github-backed official marketplace loses: it is
+  # registered but its first fetch has not landed, so install no-ops. Polling
+  # the manifest (refreshing between checks) is deterministic, not a blind timer.
   local attempt=1 delay=2
+  while ! marketplace_lists_plugin "$plugin_name" "$marketplace"; do
+    claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
+    marketplace_lists_plugin "$plugin_name" "$marketplace" && break
+    if [ "$attempt" -ge "$PLUGIN_RETRIES" ]; then
+      echo "[bootstrap-cloud] WARNING: $marketplace manifest never listed" \
+           "$plugin_name after $PLUGIN_RETRIES refreshes; installing anyway." >&2
+      break
+    fi
+    echo "[bootstrap-cloud] $marketplace manifest not warm yet" \
+         "(attempt $attempt/$PLUGIN_RETRIES); retrying in ${delay}s..." >&2
+    sleep "$delay"
+    delay=$(( delay * 2 ))
+    attempt=$(( attempt + 1 ))
+  done
+
+  # Phase 2: install and verify it actually landed in installed_plugins.json.
+  attempt=1; delay=2
   while [ "$attempt" -le "$PLUGIN_RETRIES" ]; do
     # Warm/refresh the marketplace cache before each install attempt.
     claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
