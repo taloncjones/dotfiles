@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Spec Review"
+  short_description: "Ask Claude to review a finalized spec before planning."
+  default_prompt: "Use $claude-spec-review to review the latest approved spec before writing the implementation plan."

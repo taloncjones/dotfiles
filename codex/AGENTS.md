@@ -45,12 +45,12 @@ In Codex, GSD is exposed as skills, not `/gsd` slash commands. Invoke GSD with `
 
 For substantial work, follow the same shape as Claude:
 
-1. `superpowers-brainstorming`
-2. `superpowers-writing-plans`
+1. `superpowers:brainstorming`
+2. `superpowers:writing-plans`
 3. `claude-plan-review` for a second-model plan review
-4. `superpowers-executing-plans`
+4. `superpowers:executing-plans`
 5. `co-review` for Claude + Codex code/PR review
-6. `superpowers-verification-before-completion`
+6. `superpowers:verification-before-completion`
 
 The `co-review` step is for top-level sessions where you orchestrate the review.
 When you were launched *as Claude's reviewer* (a plain "review this" request
@@ -110,9 +110,9 @@ When asked to review, default to a code review mindset:
 <!-- BEGIN ECC -->
 # Everything Claude Code (ECC) — Agent Instructions
 
-This is a **production-ready AI coding plugin** providing 63 specialized agents, 251 skills, 79 commands, and automated hook workflows for software development.
+This is a **production-ready AI coding plugin** providing 64 specialized agents, 262 skills, 84 commands, and automated hook workflows for software development.
 
-**Version:** 2.0.0-rc.1
+**Version:** 2.0.0
 
 ## Core Principles
 
@@ -259,9 +259,9 @@ Troubleshoot failures: check test isolation → verify mocks → fix implementat
 ## Project Structure
 
 ```
-agents/          — 63 specialized subagents
-skills/          — 251 workflow skills and domain knowledge
-commands/        — 79 slash commands
+agents/          — 64 specialized subagents
+skills/          — 262 workflow skills and domain knowledge
+commands/        — 84 slash commands
 hooks/           — Trigger-based automations
 rules/           — Always-follow guidelines (common + per-language)
 scripts/         — Cross-platform Node.js utilities
@@ -292,10 +292,10 @@ This supplements the root `AGENTS.md` with Codex-specific guidance.
 
 | Task Type | Recommended Model |
 |-----------|------------------|
-| Routine coding, tests, formatting | GPT 5.4 |
-| Complex features, architecture | GPT 5.4 |
-| Debugging, refactoring | GPT 5.4 |
-| Security review | GPT 5.4 |
+| Routine coding, tests, formatting | GPT 5.5 |
+| Complex features, architecture | GPT 5.5 |
+| Debugging, refactoring | GPT 5.5 |
+| Security review | GPT 5.5 |
 
 ## Skills Discovery
 
@@ -378,9 +378,9 @@ Sample role configs in this repo:
 | Security | Hook-based enforcement | Instruction + sandbox |
 | MCP | Full support | Supported via `config.toml` and `codex mcp add` |
 
-## Security With Portable Hooks
+## Security Without Hooks
 
-Codex supports hooks when enabled in `~/.codex/config.toml`, but security still needs layered checks:
+Since Codex lacks hooks, security enforcement is instruction-based:
 1. Always validate inputs at system boundaries
 2. Never hardcode secrets — use environment variables
 3. Run `npm audit` / `pip audit` before committing

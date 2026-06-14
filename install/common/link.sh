@@ -216,14 +216,65 @@ add_codex_hook \
   'Edit|Write|MultiEdit|apply_patch' \
   "$HOME/.codex/hooks/no_ai_comments.py"
 
-# ECC and Superpowers are used as Claude Code plugins only -- the dotfiles
-# does NOT mirror or sync their assets into ~/.codex. The old mirror loops
-# (skills + agent roles) duplicated work that the upstream plugins own, and
-# the ECC role files shipped without the `name = ` field codex 0.130+
-# requires, producing "must define a non-empty name" warnings on startup.
-# The sweep below wipes any leftover snapshots from older installs so
-# `update` self-heals. GSD-prefixed entries are managed by GSD's own
-# installer and are deliberately left alone.
+dedupe_codex_superpowers_plugins() {
+  local config="$HOME"/.codex/config.toml
+  local tmp="$config.tmp.$$"
+
+  [ -f "$config" ] || return
+  codex_plugin_enabled "$config" "superpowers@openai-curated" || return
+  codex_plugin_enabled "$config" "superpowers@claude-plugins-official" || return
+
+  awk '
+    /^\[plugins\."superpowers@claude-plugins-official"\][[:space:]]*$/ {
+      in_official_superpowers = 1
+      print
+      next
+    }
+    /^\[.*\][[:space:]]*$/ {
+      in_official_superpowers = 0
+      print
+      next
+    }
+    in_official_superpowers && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
+      print "enabled = false"
+      next
+    }
+    { print }
+  ' "$config" >"$tmp"
+  mv "$tmp" "$config"
+}
+
+codex_plugin_enabled() {
+  local config="$1"
+  local plugin="$2"
+  local target="[plugins.\"$plugin\"]"
+
+  awk -v target="$target" '
+    $0 == target {
+      in_plugin = 1
+      next
+    }
+    in_plugin && /^\[.*\][[:space:]]*$/ {
+      in_plugin = 0
+      next
+    }
+    in_plugin && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
+      found = 1
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  ' "$config"
+}
+
+dedupe_codex_superpowers_plugins
+
+# Codex plugins are the canonical owner for ECC and Superpowers workflow
+# surfaces. The dotfiles only link repo-managed bridge skills above. Older
+# installs mirrored plugin skills and agent roles into ~/.codex directly,
+# creating duplicate skill entries such as both $brainstorming and
+# $superpowers:brainstorming for byte-identical content. The sweep below wipes
+# those stale standalone snapshots so `update` self-heals.
 find "$HOME"/.codex/skills -maxdepth 1 \
   \( -name 'ecc-*' -o -name 'superpowers-*' \) -exec rm -rf {} + 2>/dev/null || true
 find "$HOME"/.codex/agents -maxdepth 1 \
