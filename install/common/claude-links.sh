@@ -72,6 +72,20 @@ link_claude_config_dir() {
   rm -rf "$cdir"/commands "$cdir"/agents "$cdir"/hooks "$cdir"/interview
   ln -sf "$DOTFILEDIR"/claude/CLAUDE.md "$cdir"/CLAUDE.md
 
+  # Standing operating principles: the committed, model-agnostic discipline file
+  # that CLAUDE.md @imports into every session.
+  ln -sf "$DOTFILEDIR"/claude/operating-principles.md "$cdir"/operating-principles.md
+
+  # Optional per-model audit deep-dives are local-only and gitignored (they hold
+  # private session content). Link them only when present, so a public clone that
+  # lacks them does not create dangling symlinks.
+  local ref
+  for ref in Fable5.md Opus4.md; do
+    if [ -f "$DOTFILEDIR/claude/$ref" ]; then
+      ln -sf "$DOTFILEDIR/claude/$ref" "$cdir/$ref"
+    fi
+  done
+
   # Rules: a curated subset of the ECC ruleset is vendored into the dotfiles repo
   # (claude/rules) and symlinked here, rather than installed by ecc-update. This
   # keeps the rules version-controlled, lean (only languages we use), and free of

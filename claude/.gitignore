@@ -1,0 +1,6 @@
+# Per-model behavioral audit deep-dives are personal, local-only reference:
+# they are derived from private session transcripts (project specifics, file
+# paths, commit hashes) and must never be committed to this public repo.
+# operating-principles.md is the committed, sanitized, model-agnostic distillation.
+Fable5.md
+Opus4.md

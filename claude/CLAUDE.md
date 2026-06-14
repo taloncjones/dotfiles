@@ -101,3 +101,9 @@ When creating or entering plan mode:
      ```
 
 3. If no Jira ticket: use default random naming
+
+## Standing Operating Principles
+
+The distilled engineering discipline below applies to every session in every repo.
+
+@operating-principles.md
