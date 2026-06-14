@@ -138,6 +138,9 @@ Brewfile.rb.lock.json
 # GSD/Codex runtime cache (mirrors of installed skills/hooks; source of truth lives elsewhere)
 .codex/
 
+# Git worktrees
+.worktrees/
+
 # ruff lint cache
 .ruff_cache/
 
