@@ -28,7 +28,7 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
 1. **Claude half — native `/code-review`, report mode.**
    - Invoke the built-in `/code-review` at `high` effort.
    - Do **not** pass `--fix` (we reconcile before changing anything). Pass
-     `--comment` only in PR mode if the user wants it posted (see step 5).
+     `--comment` only in PR mode if the user wants it posted (see step 6).
    - Capture its findings from the result.
    - Note: native `ultra` is user-triggered and billed and cannot be launched
      programmatically — do not attempt it. `high` is the ceiling here.
@@ -97,7 +97,26 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
    **default is "fix all"**. Apply approved fixes to the working tree with Edit.
    Re-run the relevant tests/build to confirm.
 
-5. **PR comment (optional, PR mode only).** If `--comment` was requested, post
+5. **Re-review the fix commit (bounded).** Applying fixes can introduce new
+   bugs the first pass never saw — a swallowed error, a changed return type a
+   caller missed, a lifecycle leak in code you just added. When step 4 produced
+   a **non-trivial** change (more than a few mechanical lines), run **one** more
+   co-review pass scoped to just the fix:
+   - Commit the fixes first (the PR branch is fine), then set the review base to
+     the **pre-fix commit** so both halves see only the new diff. When the fix
+     commit sits directly on the pushed head, Claude's `/code-review` (no arg)
+     picks up `@{upstream}...HEAD` automatically; Codex uses
+     `codex exec review --base <pre-fix-sha>`. Same base for both = parity.
+   - Tell each finder the diff is a fix commit and its job is to catch
+     regressions the fixes introduced, not to re-litigate the original change.
+   - Resolve any new findings (step 4 again), then **stop**. Hard cap: **2
+     passes total** (initial review + one re-review). Never start a third —
+     diminishing returns, and subjective findings start to thrash.
+   - **Skip entirely** when the fix was trivial (a one-line guard, a rename) or
+     when step 4 changed nothing. This step is the single allowed loop; default
+     to skipping unless the fix carried real risk.
+
+6. **PR comment (optional, PR mode only).** If `--comment` was requested, post
    to the PR with `gh pr comment`. The comment reflects the PR's **current
    state**, not a changelog of what was found and fixed — delete any prior
    co-review comment first so a stale one doesn't linger. No emojis.
@@ -124,5 +143,7 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
 
 ## Notes
 
-- Two reviewers, one merged report, one resolution pass. Do not loop.
+- Two reviewers, one merged report. Loop **at most once** — the bounded
+  re-review in step 5 — then stop. Hard cap of 2 review passes total; default to
+  a single pass unless the fix carried real risk.
 - If the diff is empty, say so and stop.
