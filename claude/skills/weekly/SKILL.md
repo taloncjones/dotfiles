@@ -33,8 +33,15 @@ propose → confirm → write.
    repo-qualified PR `<org>/<repo>#<n>`, (c) exact title. Collapse multiple PRs for
    one ticket; treat a reopened PR listed last week as reported; match prior-week
    plain-text entries too.
-6. **Compose** the two cells as bare inline Jira smart links (titles auto-import;
-   minimal notes). **Propose** them.
+6. **Compose** each cell as a short **executive summary**, not a list of links.
+   Lead each line with the _outcome / theme_ in plain language; put Jira keys as
+   trailing references in parentheses — e.g. "Shipped test-stand tooling: event
+   schema + scanner UX (PROJ-123, PROJ-124)." Collapse related tickets into one
+   themed line. Cap **~3-4 bullets per column**; summarize rather than enumerate
+   when there are more. **Ticket-reference style depends on whether the line
+   summarizes the ticket:** in a summary line, render keys as **plain text**
+   (`PROJ-123`) — no smart link; only when a line just _lists_ a ticket without
+   summarizing it should the key be an inline Jira smart link. **Propose** them.
 7. **Confirm → write only my row.** Enforce, do not assume:
    - Locate my row by `config.me` in the Updates table; **abort if 0 or >1** match.
    - Edit only my two cells; **diff the rendered body and assert no bytes change
@@ -45,4 +52,7 @@ propose → confirm → write.
 ## Notes
 
 - HTML round-trip edit; preserve every other row and all non-Updates content.
+- Build/splice the page body in a script behind the scenes (round-trip assert
+  that only my row changes); propose content as plain text and never paste raw
+  HTML into chat for review.
 - Best-effort: MCP down → `Jira: unavailable`; `gh` down → `GitHub: unavailable`.

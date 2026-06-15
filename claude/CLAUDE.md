@@ -49,6 +49,30 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 
 - Include Jira link at bottom if available: `[PROJ-###]($JIRA_URL/browse/PROJ-###)`
 
+## Jira
+
+Applies wherever a ticket is created (manually, `/start`, or `reconcile` backfill).
+
+**Titles are executive-summary-friendly — skimmable at a glance; the description holds the detail.**
+
+- Plain-language **outcome or impact**, not implementation. Lead with the result.
+- Imperative or short noun phrase, ~6-10 words.
+- No codenames, filenames, function names, error/fault codes, or unexpanded
+  abbreviations in the title. Those belong in the description.
+- Same title for the ticket and its PR where practical.
+
+```
+GOOD:
+  Fix dropped messages on the device bus
+  Add operating mode for shared resources
+  Stop flash race during firmware update
+
+AVOID:
+  svc: NewMode in Handler::tick()
+  fault-code trace + sensor error at threshold
+  flash race (component-A != component-B)
+```
+
 ## Verification
 
 - Verify live repo/disk state before trusting prior session summaries or claims

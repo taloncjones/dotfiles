@@ -60,13 +60,13 @@ project. **Never auto-apply.** Propose → confirm (batched where low-risk) → 
    needs-reviewer · needs-info · backfill-ticket — recommendation per item.
 6. **Confirm → apply.** Allowed mutations and their gates (do not exceed this set):
 
-   | Mutation               | Required evidence                                                                 | No-op when missing      |
-   | ---------------------- | --------------------------------------------------------------------------------- | ----------------------- |
-   | Transition ticket      | merged PR confirmed AND target transition offered by `getTransitionsForJiraIssue` | skip + report           |
-   | Add to active sprint   | exactly ONE active sprint on `board_id` AND `customfield_10020` in editmeta       | skip + report           |
-   | Create backfill ticket | untracked PR title/body; created in `jira_project`; sprint rule if non-To-Do      | confirm each            |
-   | Remove from sprint     | ticket terminal or todo-rolled; sprint membership read                            | skip if no sprint field |
-   | Create issue link      | both keys resolve                                                                 | skip if either missing  |
+   | Mutation               | Required evidence                                                                                                                                                | No-op when missing      |
+   | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+   | Transition ticket      | merged PR confirmed AND target transition offered by `getTransitionsForJiraIssue`                                                                                | skip + report           |
+   | Add to active sprint   | exactly ONE active sprint on `board_id` AND `customfield_10020` in editmeta                                                                                      | skip + report           |
+   | Create backfill ticket | untracked PR title/body; created in `jira_project`; sprint rule if non-To-Do; **title per `## Jira` in global CLAUDE.md (exec-summary, plain-language outcome)** | confirm each            |
+   | Remove from sprint     | ticket terminal or todo-rolled; sprint membership read                                                                                                           | skip if no sprint field |
+   | Create issue link      | both keys resolve                                                                                                                                                | skip if either missing  |
 
    **Sprint rule:** a ticket set to In Progress/In Review/Done must carry the
    single active sprint. No active sprint / multiple / closed-or-wrong board /
