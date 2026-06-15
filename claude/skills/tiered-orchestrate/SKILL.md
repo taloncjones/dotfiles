@@ -28,6 +28,20 @@ workflow and report: "planner model X unavailable - flip PLANNER_MODEL in
 claude/orchestrator.conf". Offer to re-run this one orchestration with
 opus. Never edit the conf yourself and never swap models silently.
 
+## Per-task quality gate (santa)
+
+After the Claude acceptance review approves a task, run a **quality gate**: a
+Claude code-quality reviewer and a Codex reviewer (via the `codex-task-review`
+skill) in parallel. **Both must pass** -- any finding from either blocks the
+task and feeds back to the implementer, bounded to 3 rounds then escalated.
+
+The Codex half MUST honor `codex-task-review`'s target invariant: run in the
+task's worktree against the implementer's captured `BASE_SHA`, with the
+empty-diff guard (an empty diff fails loud, never reports clean). Findings are
+tagged `[claude]` / `[codex]` / `[both]` and per-run counts are appended to
+`~/.claude/codex-gate-metrics.log` (machine-local, never committed) to inform a
+later ADD-vs-rebalance decision.
+
 ## Hard rules
 
 - Depth is one: the script never calls workflow(), and no agent prompt may
@@ -98,6 +112,26 @@ const VERDICT_SCHEMA = {
   },
 };
 
+const REVIEW_SCHEMA = {
+  type: "object",
+  required: ["findings"],
+  properties: {
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["severity", "location", "problem", "fix"],
+        properties: {
+          severity: { enum: ["critical", "high", "medium", "low"] },
+          location: { type: "string" },
+          problem: { type: "string" },
+          fix: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
 phase("Recon");
 const recon = await parallel(
   RECON_AREAS.map(
@@ -164,11 +198,15 @@ async function runTask(t, parallelWrite) {
     t.kind === "code" && parallelWrite ? { isolation: "worktree" } : {};
   let feedback = "";
   for (let round = 0; round <= 2; round++) {
+    // Implementer captures BASE_SHA BEFORE editing and reports it + worktree path.
     const diff = await agent(
-      `Implement: ${t.scope}. Files: ${t.files.join(", ")}.
+      `First run: BASE_SHA=$(git rev-parse HEAD); record it and your absolute
+       worktree path -- report BOTH verbatim at the end.
+       Implement: ${t.scope}. Files: ${t.files.join(", ")}.
        Acceptance: ${t.acceptance.join("; ")}. ${feedback}
-       Then run the repo's tests/lint/typecheck on what you changed and
-       report results. Do not invoke Workflow or orchestrate sub-agents.`,
+       Then run the repo's tests/lint/typecheck on what you changed, commit, and
+       report results, the captured BASE_SHA, and the worktree path.
+       Do not invoke Workflow or orchestrate sub-agents.`,
       { model, phase: "Implement", ...iso },
     );
     if (!diff) return null;
@@ -177,6 +215,7 @@ async function runTask(t, parallelWrite) {
        Report pass/fail with output. Read-only plus running checks.`,
       { model: "sonnet", phase: "Verify" },
     );
+    // Acceptance / spec-compliance review stays Claude-only.
     const verdict = await agent(
       `Review against plan. Scope: ${t.scope}.
        Acceptance: ${t.acceptance.join("; ")}.
@@ -185,8 +224,58 @@ async function runTask(t, parallelWrite) {
        Approve only if acceptance is met AND verification passed.`,
       { model: PLANNER, phase: "Review", schema: VERDICT_SCHEMA },
     );
-    if (verdict.approved) return { task: t.id, report: diff };
-    feedback = `Reviewer feedback (round ${round + 1}): ${verdict.feedback}.`;
+    if (!verdict.approved) {
+      feedback = `Reviewer feedback (round ${round + 1}): ${verdict.feedback}.`;
+      continue;
+    }
+    // QUALITY GATE: Claude + Codex in parallel; both must pass (santa-method).
+    const [claudeQ, codexQ] = await parallel([
+      () =>
+        agent(
+          `Code-quality review of the committed change for ${t.files.join(", ")}.
+           Find correctness bugs, edge cases, security, maintainability issues.
+           Return findings (severity, location file:line, problem, fix);
+           empty array if clean.`,
+          { model: PLANNER, phase: "Review", schema: REVIEW_SCHEMA },
+        ),
+      () =>
+        agent(
+          `Follow the codex-task-review skill EXACTLY. Use the BASE_SHA and
+           worktree path the implementer reported here: ${diff}
+           Assert BASE_SHA is set; enforce the empty-diff guard (fail loud if the
+           diff vs BASE_SHA is empty); run 'codex exec review --base $BASE_SHA'
+           inside that worktree with -c approval_policy=never
+           -c sandbox_mode=read-only; read the log; return findings
+           (severity, location, problem, fix) or empty array if clean.`,
+          { model: "sonnet", phase: "Review", schema: REVIEW_SCHEMA },
+        ),
+    ]);
+    // Tag + merge for metrics: [claude]-only, [codex]-only, [both].
+    const cf = (claudeQ && claudeQ.findings) || [];
+    const xf = (codexQ && codexQ.findings) || [];
+    const key = (f) => `${f.location}|${f.problem}`.toLowerCase();
+    const xkeys = new Set(xf.map(key));
+    const ckeys = new Set(cf.map(key));
+    const claudeUnique = cf.filter((f) => !xkeys.has(key(f))).length;
+    const codexUnique = xf.filter((f) => !ckeys.has(key(f))).length;
+    const both = cf.length - claudeUnique;
+    await agent(
+      `Append exactly one line to ~/.claude/codex-gate-metrics.log (create if
+       absent): "$(date -u +%FT%TZ) run=${meta.name} task=${t.id} ` +
+        `claude_unique=${claudeUnique} codex_unique=${codexUnique} both=${both}".
+       Read-only elsewhere; only this append.`,
+      { model: "haiku", phase: "Review" },
+    );
+    // Both must pass: any finding from EITHER reviewer blocks approval.
+    if (cf.length === 0 && xf.length === 0) {
+      return { task: t.id, report: diff };
+    }
+    const merged = [...cf, ...xf]
+      .map((f) => `- [${f.severity}] ${f.location}: ${f.problem} -> ${f.fix}`)
+      .join("\n");
+    feedback =
+      `Quality gate (round ${round + 1}) -- fix ALL of these, then it is ` +
+      `re-reviewed by both Claude and Codex:\n${merged}`;
   }
   return { task: t.id, needsHuman: true, feedback };
 }

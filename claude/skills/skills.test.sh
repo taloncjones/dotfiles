@@ -30,5 +30,21 @@ assert "codex-task-review enforces empty-diff guard" \
 assert "codex-task-review runs read-only" \
     rg -q 'sandbox_mode="read-only"' claude/skills/codex-task-review/SKILL.md
 
+# --- tiered-orchestrate per-task Claude+Codex santa quality gate ---
+assert "tiered-orchestrate has a quality gate" \
+    rg -q -i 'quality gate' claude/skills/tiered-orchestrate/SKILL.md
+assert "tiered-orchestrate references codex-task-review" \
+    rg -q 'codex-task-review' claude/skills/tiered-orchestrate/SKILL.md
+assert "tiered-orchestrate requires both reviewers to pass" \
+    rg -q -i 'both must pass|both reviewers' claude/skills/tiered-orchestrate/SKILL.md
+assert "tiered-orchestrate captures BASE_SHA before edits" \
+    rg -q 'BASE_SHA' claude/skills/tiered-orchestrate/SKILL.md
+assert "tiered-orchestrate enforces empty-diff guard via the skill" \
+    rg -q -i 'empty-diff guard|empty diff' claude/skills/tiered-orchestrate/SKILL.md
+assert "tiered-orchestrate tags findings by source" \
+    rg -q '\[both\]|claude_unique|codex_unique' claude/skills/tiered-orchestrate/SKILL.md
+assert "tiered-orchestrate logs gate metrics" \
+    rg -q 'codex-gate-metrics.log' claude/skills/tiered-orchestrate/SKILL.md
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
