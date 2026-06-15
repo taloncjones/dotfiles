@@ -50,5 +50,11 @@ assert "tiered-orchestrate logs gate metrics" \
 assert "co-review references codex-task-review" \
     rg -q 'codex-task-review' claude/skills/co-review/SKILL.md
 
+# --- quality-gate scope correctness (both reviewers see the full task diff) ---
+assert "tiered-orchestrate captures base once and reuses it across rounds" \
+    rg -q 'captured once on round 0 and reused across rounds' claude/skills/tiered-orchestrate/SKILL.md
+assert "tiered-orchestrate Claude quality reviewer is pointed at the worktree" \
+    rg -q 'Code-quality review of the committed change in worktree' claude/skills/tiered-orchestrate/SKILL.md
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

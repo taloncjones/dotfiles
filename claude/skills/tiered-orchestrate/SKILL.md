@@ -35,9 +35,12 @@ Claude code-quality reviewer and a Codex reviewer (via the `codex-task-review`
 skill) in parallel. **Both must pass** -- any finding from either blocks the
 task and feeds back to the implementer, bounded to 3 rounds then escalated.
 
-The Codex half MUST honor `codex-task-review`'s target invariant: run in the
-task's worktree against the implementer's captured `BASE_SHA`, with the
-empty-diff guard (an empty diff fails loud, never reports clean). Findings are
+`BASE_SHA` and the worktree path are captured **once** on the first round and
+reused across reworks, so every pass reviews the full task diff (not just the
+latest fix) -- and **both** reviewers run against that same worktree + base, not
+the orchestrator's checkout. The Codex half additionally honors
+`codex-task-review`'s empty-diff guard (an empty diff fails loud, never reports
+clean). Findings are
 tagged `[claude]` / `[codex]` / `[both]` and per-run counts are appended to
 `~/.claude/codex-gate-metrics.log` (machine-local, never committed) to inform a
 later ADD-vs-rebalance decision.
@@ -132,6 +135,16 @@ const REVIEW_SCHEMA = {
   },
 };
 
+const IMPL_SCHEMA = {
+  type: "object",
+  required: ["report", "baseSha", "worktreePath"],
+  properties: {
+    report: { type: "string" },
+    baseSha: { type: "string" },
+    worktreePath: { type: "string" },
+  },
+};
+
 phase("Recon");
 const recon = await parallel(
   RECON_AREAS.map(
@@ -197,29 +210,46 @@ async function runTask(t, parallelWrite) {
   const iso =
     t.kind === "code" && parallelWrite ? { isolation: "worktree" } : {};
   let feedback = "";
+  // Base + worktree are captured once on round 0 and reused across rounds, so
+  // every Codex pass reviews the FULL task diff from before implementation
+  // began -- not just the latest fix commit. A partial fix can't sneak through.
+  let baseSha = "";
+  let worktree = "";
   for (let round = 0; round <= 2; round++) {
-    // Implementer captures BASE_SHA BEFORE editing and reports it + worktree path.
-    const diff = await agent(
-      `First run: BASE_SHA=$(git rev-parse HEAD); record it and your absolute
-       worktree path -- report BOTH verbatim at the end.
+    // Round 0 captures BASE_SHA + worktree path BEFORE editing and returns them
+    // structurally; later rounds reuse the originals (never re-capture).
+    const capture =
+      round === 0
+        ? `Before editing, capture BASE_SHA=$(git rev-parse HEAD) and your
+           absolute worktree path; return them as baseSha and worktreePath.`
+        : `Reuse the ORIGINAL baseSha "${baseSha}" and worktreePath "${worktree}"
+           (captured before round 1) -- do NOT re-capture; return them unchanged.`;
+    const impl = await agent(
+      `${capture}
        Implement: ${t.scope}. Files: ${t.files.join(", ")}.
        Acceptance: ${t.acceptance.join("; ")}. ${feedback}
        Then run the repo's tests/lint/typecheck on what you changed, commit, and
-       report results, the captured BASE_SHA, and the worktree path.
+       report results in the report field.
        Do not invoke Workflow or orchestrate sub-agents.`,
-      { model, phase: "Implement", ...iso },
+      { model, phase: "Implement", schema: IMPL_SCHEMA, ...iso },
     );
-    if (!diff) return null;
+    if (!impl) return null;
+    if (round === 0) {
+      baseSha = impl.baseSha;
+      worktree = impl.worktreePath;
+    }
+    const report = impl.report;
     const verify = await agent(
-      `Run the repo's checks (tests, lint, typecheck) for ${t.files.join(", ")}.
-       Report pass/fail with output. Read-only plus running checks.`,
+      `In worktree ${worktree}: run the repo's checks (tests, lint, typecheck)
+       for ${t.files.join(", ")}. Report pass/fail with output. Read-only plus
+       running checks.`,
       { model: "sonnet", phase: "Verify" },
     );
     // Acceptance / spec-compliance review stays Claude-only.
     const verdict = await agent(
       `Review against plan. Scope: ${t.scope}.
        Acceptance: ${t.acceptance.join("; ")}.
-       Implementation report: ${diff}
+       Implementation report: ${report}
        Verification: ${verify}
        Approve only if acceptance is met AND verification passed.`,
       { model: PLANNER, phase: "Review", schema: VERDICT_SCHEMA },
@@ -229,21 +259,24 @@ async function runTask(t, parallelWrite) {
       continue;
     }
     // QUALITY GATE: Claude + Codex in parallel; both must pass (santa-method).
+    // BOTH reviewers get the same captured base + worktree so they review the
+    // committed task diff in the correct tree (not the orchestrator checkout).
     const [claudeQ, codexQ] = await parallel([
       () =>
         agent(
-          `Code-quality review of the committed change for ${t.files.join(", ")}.
-           Find correctness bugs, edge cases, security, maintainability issues.
-           Return findings (severity, location file:line, problem, fix);
-           empty array if clean.`,
+          `Code-quality review of the committed change in worktree ${worktree}
+           against base ${baseSha} (diff ${baseSha}...HEAD), for
+           ${t.files.join(", ")}. Find correctness bugs, edge cases, security,
+           maintainability issues. Return findings (severity, location file:line,
+           problem, fix); empty array if clean.`,
           { model: PLANNER, phase: "Review", schema: REVIEW_SCHEMA },
         ),
       () =>
         agent(
-          `Follow the codex-task-review skill EXACTLY. Use the BASE_SHA and
-           worktree path the implementer reported here: ${diff}
+          `Follow the codex-task-review skill EXACTLY. BASE_SHA="${baseSha}",
+           WORKTREE="${worktree}" (captured before round 1, reused this round).
            Assert BASE_SHA is set; enforce the empty-diff guard (fail loud if the
-           diff vs BASE_SHA is empty); run 'codex exec review --base $BASE_SHA'
+           diff vs BASE_SHA is empty); run 'codex exec review --base ${baseSha}'
            inside that worktree with -c approval_policy=never
            -c sandbox_mode=read-only; read the log; return findings
            (severity, location, problem, fix) or empty array if clean.`,
@@ -268,7 +301,7 @@ async function runTask(t, parallelWrite) {
     );
     // Both must pass: any finding from EITHER reviewer blocks approval.
     if (cf.length === 0 && xf.length === 0) {
-      return { task: t.id, report: diff };
+      return { task: t.id, report };
     }
     const merged = [...cf, ...xf]
       .map((f) => `- [${f.severity}] ${f.location}: ${f.problem} -> ${f.fix}`)
