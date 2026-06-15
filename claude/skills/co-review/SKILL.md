@@ -34,6 +34,11 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
      programmatically — do not attempt it. `high` is the ceiling here.
 
 2. **Codex half — `codex exec review`, built-in review prompt.**
+   The core Codex mechanic (flags, base resolution, the empty-diff guard, log
+   parsing) is defined once in the `codex-task-review` skill — this step applies
+   it at whole-branch / PR scope. Keep the two in sync; `codex-task-review` is
+   the source of truth for the invocation.
+
    Use Codex's dedicated review subcommand against the change base. It has its
    own review prompt and **cannot take a custom prompt** (the two are mutually
    exclusive), so do NOT try to pipe a rubric in:

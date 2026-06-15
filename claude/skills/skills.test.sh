@@ -46,5 +46,9 @@ assert "tiered-orchestrate tags findings by source" \
 assert "tiered-orchestrate logs gate metrics" \
     rg -q 'codex-gate-metrics.log' claude/skills/tiered-orchestrate/SKILL.md
 
+# --- co-review references the shared codex mechanic ---
+assert "co-review references codex-task-review" \
+    rg -q 'codex-task-review' claude/skills/co-review/SKILL.md
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
