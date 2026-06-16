@@ -68,13 +68,26 @@ When green: <review + merge flow, e.g. requesting-code-review -> /co-review -> r
 
 ## Step 5 -- SAVE it (this is what makes /kickoff work)
 
-- Repo root: `ROOT=$(git rev-parse --show-toplevel)`.
-- Ensure `mkdir -p "$ROOT/.claude/handoffs"`.
+- Resolve the MAIN repo root -- the same path from the main checkout OR any linked
+  worktree, so `/kickoff` finds the handoff no matter where it later runs:
+
+  ```bash
+  GIT_COMMON=$(git rev-parse --git-common-dir)            # shared .git (points at main repo from a worktree)
+  case "$GIT_COMMON" in /*) ;; *) GIT_COMMON="$(cd "$GIT_COMMON" && pwd)";; esac  # force absolute
+  MAIN_ROOT=$(dirname "$GIT_COMMON")
+  HANDOFF_DIR="$MAIN_ROOT/.claude/handoffs"
+  ```
+
+  Do NOT use `git rev-parse --show-toplevel` -- inside a worktree it returns the
+  worktree root, and the handoff lands where `/kickoff` (run from main) won't look.
+
+- Ensure `mkdir -p "$HANDOFF_DIR"`.
 - Ignore it locally (do NOT commit handoffs): if `.claude/handoffs/` is not already in
-  `"$ROOT/.git/info/exclude"`, append it.
+  `"$MAIN_ROOT/.git/info/exclude"`, append it. (Worktrees share this file, so one entry
+  covers every worktree.)
 - Timestamp + slug: `TS=$(date +%Y-%m-%d-%H%M)`, slug = kebab-case of the slice name.
-- Write the brief to BOTH `"$ROOT/.claude/handoffs/$TS-$slug.md"` (history) and overwrite
-  `"$ROOT/.claude/handoffs/latest.md"` (the pointer `/kickoff` reads). Prepend a 3-line
+- Write the brief to BOTH `"$HANDOFF_DIR/$TS-$slug.md"` (history) and overwrite
+  `"$HANDOFF_DIR/latest.md"` (the pointer `/kickoff` reads). Prepend a 3-line
   metadata header to each: `generated: <TS>`, `target: <slice>`, `branch-base: <commit/PR>`.
 
 ## Step 6 -- Tell the user (briefly)

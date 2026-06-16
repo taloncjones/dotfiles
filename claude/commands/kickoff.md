@@ -11,9 +11,33 @@ reconcile, then execute.
 
 ## Step 1 -- Load the handoff
 
-- `ROOT=$(git rev-parse --show-toplevel)`; read `"$ROOT/.claude/handoffs/latest.md"`.
-- If it does not exist: stop and say so -- tell the user to run `/handoff` in the
-  session that produced the work (or pass a path/paste the brief). Do nothing else.
+- Resolve the MAIN repo root the same way `/handoff` does, so the canonical location
+  matches from the main checkout OR any linked worktree:
+
+  ```bash
+  GIT_COMMON=$(git rev-parse --git-common-dir)            # shared .git (points at main repo from a worktree)
+  case "$GIT_COMMON" in /*) ;; *) GIT_COMMON="$(cd "$GIT_COMMON" && pwd)";; esac  # force absolute
+  MAIN_ROOT=$(dirname "$GIT_COMMON")
+  HANDOFF_DIR="$MAIN_ROOT/.claude/handoffs"
+  ```
+
+  Read `"$HANDOFF_DIR/latest.md"` -- this is the canonical pointer.
+
+- **Fallback scan (safety net).** If `"$HANDOFF_DIR/latest.md"` is missing, a handoff
+  written by older code (or from another tree) may be sitting in a worktree. `git worktree
+list` already includes the main checkout as its first entry, so scanning it alone covers
+  every tree. Pick the `latest.md` with the newest `generated:` header, and SAY which tree
+  it came from before resuming:
+
+  ```bash
+  for d in $(git worktree list --porcelain | awk '/^worktree /{print $2}'); do
+    [ -f "$d/.claude/handoffs/latest.md" ] && echo "$d/.claude/handoffs/latest.md"
+  done
+  ```
+
+- If no `latest.md` exists in ANY tree: stop and say so -- tell the user to run
+  `/handoff` in the session that produced the work (or pass a path/paste the brief).
+  Do nothing else.
 - Read the brief in full, including its `generated/target/branch-base` header.
 
 ## Step 2 -- Re-verify live state (read-only)
