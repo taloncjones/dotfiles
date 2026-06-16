@@ -28,23 +28,6 @@ workflow and report: "planner model X unavailable - flip PLANNER_MODEL in
 claude/orchestrator.conf". Offer to re-run this one orchestration with
 opus. Never edit the conf yourself and never swap models silently.
 
-## Per-task quality gate (santa)
-
-After the Claude acceptance review approves a task, run a **quality gate**: a
-Claude code-quality reviewer and a Codex reviewer (via the `codex-task-review`
-skill) in parallel. **Both must pass** -- any finding from either blocks the
-task and feeds back to the implementer, bounded to 3 rounds then escalated.
-
-`BASE_SHA` and the worktree path are captured **once** on the first round and
-reused across reworks, so every pass reviews the full task diff (not just the
-latest fix) -- and **both** reviewers run against that same worktree + base, not
-the orchestrator's checkout. The Codex half additionally honors
-`codex-task-review`'s empty-diff guard (an empty diff fails loud, never reports
-clean). Findings are
-tagged `[claude]` / `[codex]` / `[both]` and per-run counts are appended to
-`~/.claude/codex-gate-metrics.log` (machine-local, never committed) to inform a
-later ADD-vs-rebalance decision.
-
 ## Hard rules
 
 - Depth is one: the script never calls workflow(), and no agent prompt may
@@ -115,32 +98,14 @@ const VERDICT_SCHEMA = {
   },
 };
 
-const REVIEW_SCHEMA = {
-  type: "object",
-  required: ["findings"],
-  properties: {
-    findings: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["severity", "location", "problem", "fix"],
-        properties: {
-          severity: { enum: ["critical", "high", "medium", "low"] },
-          location: { type: "string" },
-          problem: { type: "string" },
-          fix: { type: "string" },
-        },
-      },
-    },
-  },
-};
-
+// Implement returns its worktree path so verification runs in the SAME tree.
+// Under parallel isolation each code worker writes in its own worktree; checks
+// must run there, not the orchestrator checkout, or they verify the wrong code.
 const IMPL_SCHEMA = {
   type: "object",
-  required: ["report", "baseSha", "worktreePath"],
+  required: ["report", "worktreePath"],
   properties: {
     report: { type: "string" },
-    baseSha: { type: "string" },
     worktreePath: { type: "string" },
   },
 };
@@ -210,105 +175,36 @@ async function runTask(t, parallelWrite) {
   const iso =
     t.kind === "code" && parallelWrite ? { isolation: "worktree" } : {};
   let feedback = "";
-  // Base + worktree are captured once on round 0 and reused across rounds, so
-  // every Codex pass reviews the FULL task diff from before implementation
-  // began -- not just the latest fix commit. A partial fix can't sneak through.
-  let baseSha = "";
-  let worktree = "";
   for (let round = 0; round <= 2; round++) {
-    // Round 0 captures BASE_SHA + worktree path BEFORE editing and returns them
-    // structurally; later rounds reuse the originals (never re-capture).
-    const capture =
-      round === 0
-        ? `Before editing, capture BASE_SHA=$(git rev-parse HEAD) and your
-           absolute worktree path; return them as baseSha and worktreePath.`
-        : `Reuse the ORIGINAL baseSha "${baseSha}" and worktreePath "${worktree}"
-           (captured before round 1) -- do NOT re-capture; return them unchanged.`;
     const impl = await agent(
-      `${capture}
-       Implement: ${t.scope}. Files: ${t.files.join(", ")}.
+      `Capture your absolute worktree path (run 'pwd') and return it as
+       worktreePath. Implement: ${t.scope}. Files: ${t.files.join(", ")}.
        Acceptance: ${t.acceptance.join("; ")}. ${feedback}
-       Then run the repo's tests/lint/typecheck on what you changed, commit, and
+       Then run the repo's tests/lint/typecheck on what you changed and
        report results in the report field.
        Do not invoke Workflow or orchestrate sub-agents.`,
       { model, phase: "Implement", schema: IMPL_SCHEMA, ...iso },
     );
     if (!impl) return null;
-    if (round === 0) {
-      baseSha = impl.baseSha;
-      worktree = impl.worktreePath;
-    }
-    const report = impl.report;
+    // Capture each round's worktree -- an isolated rework round runs in a fresh
+    // worktree, so verification must target THIS round's tree, not round 0's.
+    const worktree = impl.worktreePath;
     const verify = await agent(
       `In worktree ${worktree}: run the repo's checks (tests, lint, typecheck)
        for ${t.files.join(", ")}. Report pass/fail with output. Read-only plus
        running checks.`,
       { model: "sonnet", phase: "Verify" },
     );
-    // Acceptance / spec-compliance review stays Claude-only.
     const verdict = await agent(
       `Review against plan. Scope: ${t.scope}.
        Acceptance: ${t.acceptance.join("; ")}.
-       Implementation report: ${report}
+       Implementation report: ${impl.report}
        Verification: ${verify}
        Approve only if acceptance is met AND verification passed.`,
       { model: PLANNER, phase: "Review", schema: VERDICT_SCHEMA },
     );
-    if (!verdict.approved) {
-      feedback = `Reviewer feedback (round ${round + 1}): ${verdict.feedback}.`;
-      continue;
-    }
-    // QUALITY GATE: Claude + Codex in parallel; both must pass (santa-method).
-    // BOTH reviewers get the same captured base + worktree so they review the
-    // committed task diff in the correct tree (not the orchestrator checkout).
-    const [claudeQ, codexQ] = await parallel([
-      () =>
-        agent(
-          `Code-quality review of the committed change in worktree ${worktree}
-           against base ${baseSha} (diff ${baseSha}...HEAD), for
-           ${t.files.join(", ")}. Find correctness bugs, edge cases, security,
-           maintainability issues. Return findings (severity, location file:line,
-           problem, fix); empty array if clean.`,
-          { model: PLANNER, phase: "Review", schema: REVIEW_SCHEMA },
-        ),
-      () =>
-        agent(
-          `Follow the codex-task-review skill EXACTLY. BASE_SHA="${baseSha}",
-           WORKTREE="${worktree}" (captured before round 1, reused this round).
-           Assert BASE_SHA is set; enforce the empty-diff guard (fail loud if the
-           diff vs BASE_SHA is empty); run 'codex exec review --base ${baseSha}'
-           inside that worktree with -c approval_policy=never
-           -c sandbox_mode=read-only; read the log; return findings
-           (severity, location, problem, fix) or empty array if clean.`,
-          { model: "sonnet", phase: "Review", schema: REVIEW_SCHEMA },
-        ),
-    ]);
-    // Tag + merge for metrics: [claude]-only, [codex]-only, [both].
-    const cf = (claudeQ && claudeQ.findings) || [];
-    const xf = (codexQ && codexQ.findings) || [];
-    const key = (f) => `${f.location}|${f.problem}`.toLowerCase();
-    const xkeys = new Set(xf.map(key));
-    const ckeys = new Set(cf.map(key));
-    const claudeUnique = cf.filter((f) => !xkeys.has(key(f))).length;
-    const codexUnique = xf.filter((f) => !ckeys.has(key(f))).length;
-    const both = cf.length - claudeUnique;
-    await agent(
-      `Append exactly one line to ~/.claude/codex-gate-metrics.log (create if
-       absent): "$(date -u +%FT%TZ) run=${meta.name} task=${t.id} ` +
-        `claude_unique=${claudeUnique} codex_unique=${codexUnique} both=${both}".
-       Read-only elsewhere; only this append.`,
-      { model: "haiku", phase: "Review" },
-    );
-    // Both must pass: any finding from EITHER reviewer blocks approval.
-    if (cf.length === 0 && xf.length === 0) {
-      return { task: t.id, report };
-    }
-    const merged = [...cf, ...xf]
-      .map((f) => `- [${f.severity}] ${f.location}: ${f.problem} -> ${f.fix}`)
-      .join("\n");
-    feedback =
-      `Quality gate (round ${round + 1}) -- fix ALL of these, then it is ` +
-      `re-reviewed by both Claude and Codex:\n${merged}`;
+    if (verdict.approved) return { task: t.id, report: impl.report };
+    feedback = `Reviewer feedback (round ${round + 1}): ${verdict.feedback}.`;
   }
   return { task: t.id, needsHuman: true, feedback };
 }
