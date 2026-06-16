@@ -8,8 +8,9 @@ structural signals and emit a one-line routing suggestion as additionalContext.
 
 The suggestion is advisory only (PostToolUse cannot block). It distinguishes:
 
-- tiered-orchestrate (per-task Claude+Codex gate) -- pays off when tasks are
-  many, span several file-areas, or run in parallel.
+- tiered-orchestrate (tiered model routing: opus plans, sonnet implements,
+  haiku docs; Codex runs once via co-review at the branch gate) -- pays off when
+  tasks are many, span several file-areas, or run in parallel.
 - subagent-driven + co-review-at-end -- lighter and cheaper when the plan is
   linear, confined to one file-area, and already gated by TDD.
 
@@ -131,11 +132,11 @@ def _recommend(s: dict) -> tuple[str, str]:
     lean_light = tdd_covered and not wide and not parallel
 
     if lean_tiered and not lean_light:
-        rec = "tiered-orchestrate (per-task Claude+Codex gate)"
+        rec = "tiered-orchestrate (tiered model routing; co-review at end)"
     elif lean_light and not lean_tiered:
         rec = "subagent-driven + co-review at end (lighter, cheaper)"
     else:
-        rec = "borderline -- either fits; pick by appetite for the per-task gate"
+        rec = "borderline -- either fits; pick by orchestration weight"
 
     rationale = (
         f"{tasks} tasks, {areas} file-area(s), "

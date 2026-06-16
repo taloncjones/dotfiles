@@ -95,6 +95,12 @@ AVOID:
   "what are we missing?" questions.
 - Use brainstorming, writing-plans, cross-model plan review, and executing-plans
   for substantial implementation work.
+- Codex review pipeline (thorough spec/plan/implement): run `codex-spec-review`
+  after brainstorming and `codex-plan-review` after writing-plans, each a HUMAN
+  gate; implement via `tiered-orchestrate` (tiered model routing, per-task Claude
+  review); finish with `co-review` (Claude + Codex) at the branch gate -- the
+  single second-model pass. Keep spec/plan reviews human-gated, not absorbed into
+  the autonomous loop.
 - Use TDD skills for new behavior, regression fixes, and risky refactors.
 - Use systematic debugging for startup failures, flaky tests, tool failures,
   build failures, and confusing runtime symptoms.
