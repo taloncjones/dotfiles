@@ -98,6 +98,18 @@ const VERDICT_SCHEMA = {
   },
 };
 
+// Implement returns its worktree path so verification runs in the SAME tree.
+// Under parallel isolation each code worker writes in its own worktree; checks
+// must run there, not the orchestrator checkout, or they verify the wrong code.
+const IMPL_SCHEMA = {
+  type: "object",
+  required: ["report", "worktreePath"],
+  properties: {
+    report: { type: "string" },
+    worktreePath: { type: "string" },
+  },
+};
+
 phase("Recon");
 const recon = await parallel(
   RECON_AREAS.map(
@@ -164,28 +176,34 @@ async function runTask(t, parallelWrite) {
     t.kind === "code" && parallelWrite ? { isolation: "worktree" } : {};
   let feedback = "";
   for (let round = 0; round <= 2; round++) {
-    const diff = await agent(
-      `Implement: ${t.scope}. Files: ${t.files.join(", ")}.
+    const impl = await agent(
+      `Capture your absolute worktree path (run 'pwd') and return it as
+       worktreePath. Implement: ${t.scope}. Files: ${t.files.join(", ")}.
        Acceptance: ${t.acceptance.join("; ")}. ${feedback}
        Then run the repo's tests/lint/typecheck on what you changed and
-       report results. Do not invoke Workflow or orchestrate sub-agents.`,
-      { model, phase: "Implement", ...iso },
+       report results in the report field.
+       Do not invoke Workflow or orchestrate sub-agents.`,
+      { model, phase: "Implement", schema: IMPL_SCHEMA, ...iso },
     );
-    if (!diff) return null;
+    if (!impl) return null;
+    // Capture each round's worktree -- an isolated rework round runs in a fresh
+    // worktree, so verification must target THIS round's tree, not round 0's.
+    const worktree = impl.worktreePath;
     const verify = await agent(
-      `Run the repo's checks (tests, lint, typecheck) for ${t.files.join(", ")}.
-       Report pass/fail with output. Read-only plus running checks.`,
+      `In worktree ${worktree}: run the repo's checks (tests, lint, typecheck)
+       for ${t.files.join(", ")}. Report pass/fail with output. Read-only plus
+       running checks.`,
       { model: "sonnet", phase: "Verify" },
     );
     const verdict = await agent(
       `Review against plan. Scope: ${t.scope}.
        Acceptance: ${t.acceptance.join("; ")}.
-       Implementation report: ${diff}
+       Implementation report: ${impl.report}
        Verification: ${verify}
        Approve only if acceptance is met AND verification passed.`,
       { model: PLANNER, phase: "Review", schema: VERDICT_SCHEMA },
     );
-    if (verdict.approved) return { task: t.id, report: diff };
+    if (verdict.approved) return { task: t.id, report: impl.report };
     feedback = `Reviewer feedback (round ${round + 1}): ${verdict.feedback}.`;
   }
   return { task: t.id, needsHuman: true, feedback };
