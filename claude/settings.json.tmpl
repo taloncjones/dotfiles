@@ -180,6 +180,15 @@
         ]
       },
       {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/exec_route.py"
+          }
+        ]
+      },
+      {
         "matcher": "mcp__plugin_atlassian",
         "hooks": [
           {
