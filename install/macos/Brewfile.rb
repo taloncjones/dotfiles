@@ -98,5 +98,5 @@ cask "cloudflare-warp"
 
 # Third Party
 mas "Magnet", id: 441258766
-mas "Things", id: 904280696
-mas "Dropover", id: 1355679052
+mas "Things", id: 904280696 unless system("test -e /Applications/Things3.app")
+mas "Dropover", id: 1355679052 unless system("test -e /Applications/Dropover.app")

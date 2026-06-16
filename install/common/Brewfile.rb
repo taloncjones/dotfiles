@@ -83,6 +83,7 @@ brew "gemini-cli"
 # bun JavaScript runtime, used by Claude Code MCP servers
 brew "oven-sh/bun/bun"
 
-# docker CLI and compose plugin (daemon provided by Docker Desktop)
-brew "docker"
+# docker-compose CLI (docker CLI + daemon provided by Docker Desktop;
+# the standalone `docker` formula is redundant and conflicts with
+# docker-completion on etc/bash_completion.d/docker)
 brew "docker-compose"
