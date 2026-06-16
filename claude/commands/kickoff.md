@@ -11,9 +11,32 @@ reconcile, then execute.
 
 ## Step 1 -- Load the handoff
 
-- `ROOT=$(git rev-parse --show-toplevel)`; read `"$ROOT/.claude/handoffs/latest.md"`.
-- If it does not exist: stop and say so -- tell the user to run `/handoff` in the
-  session that produced the work (or pass a path/paste the brief). Do nothing else.
+- Resolve where `/handoff` writes (the canonical location), for your drift report:
+
+  ```bash
+  GIT_COMMON=$(git rev-parse --git-common-dir)            # shared .git (points at main repo from a worktree)
+  case "$GIT_COMMON" in /*) ;; *) GIT_COMMON="$(cd "$GIT_COMMON" && pwd)";; esac  # force absolute
+  MAIN_ROOT=$(dirname "$GIT_COMMON")                      # canonical handoffs: $MAIN_ROOT/.claude/handoffs
+  ```
+
+- Pick the NEWEST handoff across ALL trees -- do NOT just trust the canonical path. A
+  handoff written by older `/handoff` code (which saved into a worktree root) can be newer
+  than a stale `latest.md` sitting at the main root; "newest `generated:` wins". `git worktree
+list` already includes the main checkout as its first entry, so one scan covers the canonical
+  location and every worktree:
+
+  ```bash
+  PICK=$(for d in $(git worktree list --porcelain | awk '/^worktree /{print $2}'); do
+    f="$d/.claude/handoffs/latest.md"
+    [ -f "$f" ] && printf '%s\t%s\n' "$(awk -F': ' '/^generated:/{print $2; exit}' "$f")" "$f"
+  done | sort -r | head -1 | cut -f2)
+  ```
+
+- If `PICK` is empty (no `latest.md` in ANY tree): stop and say so -- tell the user to run
+  `/handoff` in the session that produced the work (or pass a path/paste the brief). Do
+  nothing else.
+- If `PICK` is NOT under `$MAIN_ROOT/.claude/handoffs` (it came from a worktree), SAY which
+  tree it came from before resuming.
 - Read the brief in full, including its `generated/target/branch-base` header.
 
 ## Step 2 -- Re-verify live state (read-only)
