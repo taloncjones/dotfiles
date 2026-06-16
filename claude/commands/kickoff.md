@@ -11,33 +11,32 @@ reconcile, then execute.
 
 ## Step 1 -- Load the handoff
 
-- Resolve the MAIN repo root the same way `/handoff` does, so the canonical location
-  matches from the main checkout OR any linked worktree:
+- Resolve where `/handoff` writes (the canonical location), for your drift report:
 
   ```bash
   GIT_COMMON=$(git rev-parse --git-common-dir)            # shared .git (points at main repo from a worktree)
   case "$GIT_COMMON" in /*) ;; *) GIT_COMMON="$(cd "$GIT_COMMON" && pwd)";; esac  # force absolute
-  MAIN_ROOT=$(dirname "$GIT_COMMON")
-  HANDOFF_DIR="$MAIN_ROOT/.claude/handoffs"
+  MAIN_ROOT=$(dirname "$GIT_COMMON")                      # canonical handoffs: $MAIN_ROOT/.claude/handoffs
   ```
 
-  Read `"$HANDOFF_DIR/latest.md"` -- this is the canonical pointer.
-
-- **Fallback scan (safety net).** If `"$HANDOFF_DIR/latest.md"` is missing, a handoff
-  written by older code (or from another tree) may be sitting in a worktree. `git worktree
-list` already includes the main checkout as its first entry, so scanning it alone covers
-  every tree. Pick the `latest.md` with the newest `generated:` header, and SAY which tree
-  it came from before resuming:
+- Pick the NEWEST handoff across ALL trees -- do NOT just trust the canonical path. A
+  handoff written by older `/handoff` code (which saved into a worktree root) can be newer
+  than a stale `latest.md` sitting at the main root; "newest `generated:` wins". `git worktree
+list` already includes the main checkout as its first entry, so one scan covers the canonical
+  location and every worktree:
 
   ```bash
-  for d in $(git worktree list --porcelain | awk '/^worktree /{print $2}'); do
-    [ -f "$d/.claude/handoffs/latest.md" ] && echo "$d/.claude/handoffs/latest.md"
-  done
+  PICK=$(for d in $(git worktree list --porcelain | awk '/^worktree /{print $2}'); do
+    f="$d/.claude/handoffs/latest.md"
+    [ -f "$f" ] && printf '%s\t%s\n' "$(awk -F': ' '/^generated:/{print $2; exit}' "$f")" "$f"
+  done | sort -r | head -1 | cut -f2)
   ```
 
-- If no `latest.md` exists in ANY tree: stop and say so -- tell the user to run
-  `/handoff` in the session that produced the work (or pass a path/paste the brief).
-  Do nothing else.
+- If `PICK` is empty (no `latest.md` in ANY tree): stop and say so -- tell the user to run
+  `/handoff` in the session that produced the work (or pass a path/paste the brief). Do
+  nothing else.
+- If `PICK` is NOT under `$MAIN_ROOT/.claude/handoffs` (it came from a worktree), SAY which
+  tree it came from before resuming.
 - Read the brief in full, including its `generated/target/branch-base` header.
 
 ## Step 2 -- Re-verify live state (read-only)
