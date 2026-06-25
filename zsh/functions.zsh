@@ -406,8 +406,13 @@ function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and
         return 1
     fi
 
-    echo "[INFO] Pulling latest ECC..."
-    (cd "$ecc_dir" && git pull origin main) || { echo "[X] git pull failed"; return 1; }
+    echo "[INFO] Syncing ECC to upstream main..."
+    # ECC is a read-only vendored mirror: we never commit here, and codex-ecc-sync's
+    # `npm install` rewrites the tracked lockfiles (package-lock.json, yarn.lock) every
+    # run. A rebase-pull (pull.rebase=true) then aborts on those unstaged changes. Fetch
+    # + hard-reset sidesteps that and guarantees we exactly match upstream each time.
+    (cd "$ecc_dir" && git fetch origin main && git reset --hard origin/main) \
+        || { echo "[X] ECC sync failed"; return 1; }
 
     echo "[INFO] Re-vendoring rules into dotfiles..."
     ecc-sync-rules || { echo "[X] rules vendoring failed"; return 1; }
