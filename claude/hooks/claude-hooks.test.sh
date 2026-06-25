@@ -53,74 +53,14 @@ assert_allows "allows emoji fixtures in workflow rules" \
     claude/hooks/emoji_guard.py \
     "$(printf '%b' '{"tool_name":"Write","tool_input":{"file_path":"codex/rules/example.rules","content":"fixture \360\237\230\200"}}')"
 
-# SessionStart hook: output assertions. The hook always exits 0; correctness
-# lives in the emitted JSON, so check the output instead.
-HOOK_TMP=$(mktemp -d)
-trap 'rm -rf "$HOOK_TMP"' EXIT
-
-assert_session_context() {
-    label="$1"
-    conf="$2"
-    expected="$3"
-    if printf '{}' | ORCHESTRATOR_CONF="$conf" claude/hooks/tiered_orchestrator.py \
-        >"$HOOK_TMP/out" 2>"$HOOK_TMP/err" \
-        && grep -qF "$expected" "$HOOK_TMP/out"; then
-        printf 'PASS  %s\n' "$label"
-        PASS=$((PASS + 1))
-    else
-        printf 'FAIL  %s\n' "$label" >&2
-        FAIL=$((FAIL + 1))
-    fi
-}
-
-assert_session_json() {
-    label="$1"
-    conf="$2"
-    if printf '{}' | ORCHESTRATOR_CONF="$conf" claude/hooks/tiered_orchestrator.py 2>/dev/null \
-        | python3 -c 'import json,sys; d=json.load(sys.stdin)["hookSpecificOutput"]; assert d["hookEventName"] == "SessionStart"; assert isinstance(d["additionalContext"], str) and d["additionalContext"]'; then
-        printf 'PASS  %s\n' "$label"
-        PASS=$((PASS + 1))
-    else
-        printf 'FAIL  %s\n' "$label" >&2
-        FAIL=$((FAIL + 1))
-    fi
-}
-
-printf 'PLANNER_MODEL=fable\n' >"$HOOK_TMP/conf-valid"
-printf 'PLANNER_MODEL=gpt5\n' >"$HOOK_TMP/conf-invalid"
-
-assert_session_json "orchestrator: emits valid SessionStart JSON" \
-    "$HOOK_TMP/conf-valid"
-
-assert_session_context "orchestrator: valid conf injects configured model" \
-    "$HOOK_TMP/conf-valid" \
-    "Planner/reviewer model: fable"
-
-assert_session_context "orchestrator: valid conf forbids nested orchestration" \
-    "$HOOK_TMP/conf-valid" \
-    "nesting is forbidden"
-
-assert_session_context "orchestrator: missing conf falls back to opus" \
-    "$HOOK_TMP/conf-absent" \
-    "Planner/reviewer model: opus"
-
-assert_session_context "orchestrator: missing conf warns visibly" \
-    "$HOOK_TMP/conf-absent" \
-    "[WARNING]"
-
-assert_session_context "orchestrator: invalid model disables orchestration" \
-    "$HOOK_TMP/conf-invalid" \
-    "DISABLED"
-
 # Settings drift: hand-merged machines that missed a SessionStart hook
-# entry must fail visibly instead of silently lacking default orchestration
-# or the account-mismatch guard. Both account config dirs carry their own
-# machine-local settings.json (~/.claude personal, ~/.claude-work work);
-# check every one that exists. Skipped when no live settings file exists
-# (fresh machine or CI).
+# entry must fail visibly instead of silently lacking the account-mismatch
+# guard. Both account config dirs carry their own machine-local settings.json
+# (~/.claude personal, ~/.claude-work work); check every one that exists.
+# Skipped when no live settings file exists (fresh machine or CI).
 for settings_dir in "$HOME/.claude" "$HOME/.claude-work"; do
     if [ -f "$settings_dir/settings.json" ]; then
-        for required_hook in tiered_orchestrator.py account_guard.py; do
+        for required_hook in account_guard.py; do
             if SETTINGS_PATH="$settings_dir/settings.json" REQUIRED_HOOK="$required_hook" python3 - <<'PY'
 import json
 import os
