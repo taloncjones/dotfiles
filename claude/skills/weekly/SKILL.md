@@ -1,12 +1,14 @@
 ---
 name: weekly
-description: Compose and (with confirmation) write my "Work Last Week / Work This Week" row on the weekly meeting Confluence page, from my merged/open PRs and active Jira. Edits only my row, never others. Per-project config in ~/.claude/reconcile/projects.json.
+description: Compose my "Work Last Week / Work This Week" row for the weekly meeting Confluence page from my merged/open PRs and active Jira, and output it as a copyable block by default. Writes to my row only if I explicitly ask. Per-project config in ~/.claude/reconcile/projects.json.
 ---
 
 # Weekly
 
-Compose my weekly-meeting update and write only my row. **Never auto-write**;
-propose → confirm → write.
+Compose my weekly-meeting update and, by default, output it as a copyable block
+for me to paste myself. **Never auto-write.** Write to my row only on an explicit
+request ("write it to my row"); the page is often edited live during the meeting,
+so copy-paste is the safe default.
 
 ## Steps
 
@@ -41,18 +43,28 @@ propose → confirm → write.
    when there are more. **Ticket-reference style depends on whether the line
    summarizes the ticket:** in a summary line, render keys as **plain text**
    (`PROJ-123`) — no smart link; only when a line just _lists_ a ticket without
-   summarizing it should the key be an inline Jira smart link. **Propose** them.
-7. **Confirm → write only my row.** Enforce, do not assume:
+   summarizing it should the key be an inline Jira smart link.
+7. **Output — copyable block by default.** Present the two cells as clean,
+   paste-ready text (markdown bullets, plain-text Jira keys), clearly labeled
+   **Work Last Week** / **Work This Week**. This is the default and final step —
+   do **not** write to the page unless I explicitly ask ("write it to my row").
+   Rationale: the page is frequently edited live during the meeting, and the
+   Confluence HTML round-trip is fragile (formatters/whitespace), so pasting
+   myself is safer and avoids clobbering concurrent edits.
+8. **Opt-in write (only when I explicitly ask).** Write only my row; enforce,
+   do not assume:
    - Locate my row by `config.me` in the Updates table; **abort if 0 or >1** match.
-   - Edit only my two cells; **diff the rendered body and assert no bytes change
-     outside my row** before writing — abort if they do.
+   - Splice only my two cells into the **raw** fetched page body (never a
+     formatter-touched copy); **diff and assert no bytes change outside my row**
+     before writing — abort if they do.
    - Capture the page version on read; if it changed on write (concurrent teammate
      edit), **abort and re-fetch** rather than overwrite.
 
 ## Notes
 
-- HTML round-trip edit; preserve every other row and all non-Updates content.
-- Build/splice the page body in a script behind the scenes (round-trip assert
-  that only my row changes); propose content as plain text and never paste raw
-  HTML into chat for review.
+- Default output is copy-paste; only the opt-in write (step 8) touches Confluence.
+- For the opt-in write: operate on the **raw fetched body**, not a formatter-
+  touched staging file — HTML formatters silently rewrite other rows' whitespace,
+  which would change bytes outside my row. Preserve every other row and all
+  non-Updates content; never paste raw HTML into chat for review.
 - Best-effort: MCP down → `Jira: unavailable`; `gh` down → `GitHub: unavailable`.
