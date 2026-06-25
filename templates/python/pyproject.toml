@@ -1,0 +1,36 @@
+# Baseline Python project config: ruff (lint + format) + pyright (type check).
+# Copy into a new project root, then set project.name, known-first-party, and
+# the Python version. Toolchain: uv for envs/deps, ruff for lint+format,
+# pyright for type checking.
+
+[project]
+name = "changeme"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# pycodestyle/pyflakes + isort + pyupgrade + bugbear + simplify + comprehensions
+# + ruff-specific. Line length is enforced by the formatter, so E501 is ignored.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["changeme"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+# "standard" is a sane default; bump to "strict" once the codebase is annotated.
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+venvPath = "."
+venv = ".venv"
