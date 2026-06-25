@@ -180,15 +180,6 @@
         ]
       },
       {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/exec_route.py"
-          }
-        ]
-      },
-      {
         "matcher": "mcp__plugin_atlassian",
         "hooks": [
           {
@@ -202,10 +193,6 @@
       {
         "matcher": "startup|clear|compact",
         "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/tiered_orchestrator.py"
-          },
           {
             "type": "command",
             "command": "~/.claude/hooks/account_guard.py"
