@@ -95,12 +95,29 @@ AVOID:
   "what are we missing?" questions.
 - Use brainstorming, writing-plans, cross-model plan review, and executing-plans
   for substantial implementation work.
+- Full pipeline for substantial implementation (standing order of operations):
+  isolated worktree -> brainstorming -> write spec (to `docs/superpowers/specs/`)
+  -> `codex-spec-review` -> writing-plans -> `codex-plan-review` ->
+  `subagent-driven-development` -> `co-review` at the branch gate. Do NOT improvise
+  a build plan and jump to implementation; do NOT skip the brainstorm/spec steps
+  even when an architecture spec already exists -- treat the existing spec as input.
 - Codex review pipeline (thorough spec/plan/implement): run `codex-spec-review`
   after brainstorming and `codex-plan-review` after writing-plans, each a HUMAN
-  gate; implement via `superpowers:subagent-driven-development` (or
-  `superpowers:executing-plans`); finish with `co-review` (Claude + Codex) at the branch gate -- the
-  single second-model pass. Keep spec/plan reviews human-gated, not absorbed into
-  the autonomous loop.
+  gate in normal interactive work; implement via
+  `superpowers:subagent-driven-development` (or `superpowers:executing-plans`);
+  finish with `co-review` (Claude + Codex) at the branch gate -- the single
+  second-model pass.
+- Autonomous mode (under `/goal`, or when told "be autonomous" / "don't rely on
+  me"): run the WHOLE pipeline end-to-end without pausing at the spec/plan gates.
+  Codex becomes the review gate -- run `codex-spec-review` / `codex-plan-review`,
+  resolve the findings autonomously (fold them back into the spec/plan), and
+  proceed. The HUMAN-gate wording above applies only to interactive work; in
+  autonomous mode the human gate becomes the Codex gate. Surface a brief status at
+  each gate for visibility, but do not block on approval.
+- Orchestrate multi-task implementation with the `Workflow` tool directly
+  (planner/reviewer on the stronger model, workers on cheaper models, per-task
+  review). Author the Workflow script to that tiered-routing intent rather than
+  relying on a separate orchestration skill.
 - Use TDD skills for new behavior, regression fixes, and risky refactors.
 - Use systematic debugging for startup failures, flaky tests, tool failures,
   build failures, and confusing runtime symptoms.
