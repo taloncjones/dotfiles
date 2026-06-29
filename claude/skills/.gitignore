@@ -12,6 +12,7 @@
 !/codex-spec-review/
 !/brief/
 !/lib/
+!/pipeline/
 !/post-merge/
 !/reconcile/
 !/ship/

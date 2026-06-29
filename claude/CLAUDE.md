@@ -95,12 +95,16 @@ AVOID:
   "what are we missing?" questions.
 - Use brainstorming, writing-plans, cross-model plan review, and executing-plans
   for substantial implementation work.
-- Codex review pipeline (thorough spec/plan/implement): run `codex-spec-review`
-  after brainstorming and `codex-plan-review` after writing-plans, each a HUMAN
-  gate; implement via `superpowers:subagent-driven-development` (or
-  `superpowers:executing-plans`); finish with `co-review` (Claude + Codex) at the branch gate -- the
-  single second-model pass. Keep spec/plan reviews human-gated, not absorbed into
-  the autonomous loop.
+- Delivery pipeline (thorough spec/plan/implement): use the `pipeline` skill. It
+  sequences `superpowers:brainstorming` -> spec review -> `writing-plans` -> plan
+  review -> `subagent-driven-development` (TDD) -> `co-review`, with Superpowers
+  as the engine. The second-model gate is codex when present (`codex-spec-review`,
+  `codex-plan-review`, `co-review`) and a second Claude pass when codex is absent
+  (e.g. cloud) -- never blocked on codex. It triages scope first and SKIPS phases
+  for trivial/small work, so cost matches task size.
+- Gating: under an active `/goal` the gates run inline (fully automated, the
+  user opted into autonomy). Without a goal, the spec and plan reviews stay HUMAN
+  checkpoints, not absorbed into an autonomous loop.
 - Use TDD skills for new behavior, regression fixes, and risky refactors.
 - Use systematic debugging for startup failures, flaky tests, tool failures,
   build failures, and confusing runtime symptoms.
