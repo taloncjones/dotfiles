@@ -88,6 +88,13 @@ AVOID:
 - Do not ask for consent again unless the user says to work in the current
   checkout or the worktree creation would require an unsafe or destructive
   action.
+- Enter worktrees via the native worktree tool so the session re-anchors into
+  them. Never drive a worktree by `cd`-ing into it from the main checkout: the
+  Bash cwd resets after every command, so relative-path edits and the statusline
+  follow the anchored dir (`workspace.current_dir`), not the `cd`. A `cd`-driven
+  worktree silently reads/writes the main checkout and the statusline keeps
+  showing the main branch. To resume work in an existing worktree mid-session,
+  re-anchor with the native tool's path-entry -- not `cd`, not a relaunch.
 
 ## Default Skill Routing
 

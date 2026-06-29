@@ -3,6 +3,13 @@
 // Shows: model | current in-progress todo | directory + git branch/worktree |
 // context-window meter.
 //
+// The git segment reflects the session's ANCHORED dir (workspace.current_dir),
+// never whatever a Bash command last `cd`'d into -- per-command cwd resets and
+// is invisible to this render process. Enter worktrees via the native worktree
+// tool (it re-anchors the session) so this segment tracks them; a worktree
+// driven by per-command `cd` from the main checkout keeps showing the main
+// branch because the anchor never moved.
+//
 // Ported from GSD's statusline (the model/dir/context/todo render only); all
 // GSD-specific state, update-check, and context-monitor bridge logic dropped.
 // Git branch/worktree segment added locally.
@@ -91,15 +98,26 @@ function readGitInfo(dir) {
         branch = "detached";
       }
     }
-    const isWorktree =
-      path.resolve(dir, gitDir) !== path.resolve(dir, commonDir);
+    const resolvedCommon = path.resolve(dir, commonDir);
+    const isWorktree = path.resolve(dir, gitDir) !== resolvedCommon;
+    // Repo-root name, stable across the main checkout and every linked
+    // worktree: the common dir is "<repo-root>/.git", so its parent's basename
+    // is the repo name. Without this the segment would show the worktree's own
+    // directory (e.g. "rw-bess-BESS-1704-..."), which duplicates the branch and
+    // pushes the context meter off-screen. Fall back to the cwd basename for
+    // non-standard layouts (custom git dir, bare repo) where the assumption
+    // does not hold.
+    const repoName =
+      path.basename(resolvedCommon) === ".git"
+        ? path.basename(path.dirname(resolvedCommon))
+        : path.basename(dir);
     let dirty = false;
     try {
       dirty = run(["status", "--porcelain"]) !== "";
     } catch (e) {
       dirty = false;
     }
-    return { branch, dirty, isWorktree };
+    return { branch, dirty, isWorktree, repoName };
   } catch (e) {
     return null; // not a git repo, or git not on PATH
   }
@@ -133,16 +151,18 @@ function buildContextMeter(remaining, totalCtx) {
 }
 
 /**
- * Build the directory segment, optionally suffixed with git branch/worktree
- * info, e.g. 'dotfiles  main*' or 'add-widget  ⑂ talon/add-widget*'.
+ * Build the directory segment, suffixed with git branch/worktree info. Inside a
+ * git repo the label is the repo-root name, not the cwd basename, so a linked
+ * worktree reads 'rw-bess  ⑂ talon/BESS-1704/...' instead of repeating the
+ * worktree's own long directory name. Outside git it falls back to the cwd
+ * basename, e.g. 'Downloads'.
  */
 function buildDirSegment(dir) {
-  const dirname = path.basename(dir);
   const git = readGitInfo(dir);
-  if (!git) return `${DIM}${dirname}${RESET}`;
+  if (!git) return `${DIM}${path.basename(dir)}${RESET}`;
   const wt = git.isWorktree ? `${WORKTREE_GLYPH} ` : "";
   const flag = git.dirty ? "*" : "";
-  return `${DIM}${dirname}  ${wt}${git.branch}${flag}${RESET}`;
+  return `${DIM}${git.repoName}  ${wt}${git.branch}${flag}${RESET}`;
 }
 
 function render(data) {
