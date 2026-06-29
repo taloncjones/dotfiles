@@ -45,9 +45,6 @@ alias ll='ls -alh'
 # add formatting to glow command
 alias glow='glow --style "$DOTFILEDIR/zsh/styles/glow_style.json" -w 120'
 
-# shorthand for lazygit
-alias lg='lazygit'
-
 ##############################
 ###### Networking
 ##############################
