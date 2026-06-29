@@ -180,8 +180,17 @@ function render(data) {
 
   const modelSeg = `${DIM}${model}${RESET}`;
   const dirSeg = buildDirSegment(dir);
-  if (task) return `${modelSeg} │ ${BOLD}${task}${RESET} │ ${dirSeg}${ctx}`;
-  return `${modelSeg} │ ${dirSeg}${ctx}`;
+
+  // Context meter leads the line so a long branch/dir can never push it
+  // off-screen. buildContextMeter returns a leading-space form built for
+  // end-of-line use; trim it for mid-line placement, and omit the segment
+  // entirely when the host reports no context.
+  const segments = [];
+  if (ctx) segments.push(ctx.trimStart());
+  segments.push(modelSeg);
+  if (task) segments.push(`${BOLD}${task}${RESET}`);
+  segments.push(dirSeg);
+  return segments.join(" │ ");
 }
 
 function main() {
