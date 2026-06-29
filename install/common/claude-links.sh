@@ -46,6 +46,38 @@ seed_machine_local_file() {
   fi
 }
 
+# Symlink each dotfiles-tracked skill into a REAL skills directory, leaving
+# foreign entries (cloud-platform skills, ECC marketplace skills, continuous-
+# learning's learned/) untouched. Replaces the old whole-dir symlink, which
+# clobbered platform/installer content and accumulated skills.bak.* dirs every
+# session -- the root cause of the web session-start breakage.
+link_tracked_skills() {
+  local cdir="${1:?link_tracked_skills: config dir required}"
+  local src="$DOTFILEDIR/claude/skills"
+
+  # Migrate the retired whole-dir symlink to a real directory (one-time flip;
+  # steady state this is already a real dir). Dropping a symlink never recurses
+  # into the dotfiles target.
+  [ -L "$cdir/skills" ] && rm -f "$cdir/skills"
+  mkdir -p "$cdir/skills"
+
+  # Prune stale per-session backups left by the old clobbering model. They only
+  # ever held platform/installer content -- never our tracked skills, which live
+  # in the repo -- so removing them is safe and stops the pileup.
+  rm -rf "$cdir"/skills.bak.* 2>/dev/null || true
+
+  # Link each tracked skill dir by name. rm the destination first so a same-named
+  # real dir cannot turn `ln -s` into a link-inside-directory; our skill names
+  # are distinctive, so this only ever replaces our own prior link.
+  local path name
+  for path in "$src"/*/; do
+    [ -d "$path" ] || continue
+    name="$(basename "$path")"
+    rm -rf "$cdir/skills/$name"
+    ln -s "${path%/}" "$cdir/skills/$name"
+  done
+}
+
 # Link the dotfiles-managed Claude Code assets into one config dir.
 # Two config dirs share the same dotfiles-managed assets via symlinks:
 #   ~/.claude       personal account (default; desktop app lands here)
@@ -106,18 +138,14 @@ link_claude_config_dir() {
   rm -rf "$cdir"/rules
   ln -sfn "$DOTFILEDIR"/claude/rules "$cdir"/rules
 
-  # Skills: whole-dir symlink into the dotfiles repo, but only PERSONAL skills
-  # are version-controlled (see claude/skills/.gitignore, which whitelists
-  # them). ECC marketplace skills and continuous-learning's generated
-  # `learned/` live in the same dir untracked, and their installers keep
-  # writing to this path through the symlink. Same real-dir -> symlink
-  # migration as rules above.
-  if [[ -d "$cdir/skills" && ! -L "$cdir/skills" ]]; then
-    mv "$cdir/skills" "$cdir/skills.bak.$(date +%Y%m%d-%H%M%S)"
-    echo "[claude-links] Backed up pre-existing $cdir/skills (real dir) before symlinking."
-  fi
-  rm -rf "$cdir"/skills
-  ln -sfn "$DOTFILEDIR"/claude/skills "$cdir"/skills
+  # Skills: per-item linking into a REAL skills dir (see link_tracked_skills).
+  # Only PERSONAL skills are version-controlled (claude/skills/.gitignore
+  # whitelists them); ECC marketplace skills, continuous-learning's generated
+  # `learned/`, and the cloud platform's own skills coexist in the same dir.
+  # A whole-dir symlink clobbered all of that on every session start and piled
+  # up skills.bak.* dirs -- the recurring session-start breakage. Per-item links
+  # leave foreign entries untouched.
+  link_tracked_skills "$cdir"
 
   # settings.json is machine-local (plugin installers like GSD/ECC write to it).
   # Seed from template on first install only; manual merge required when template changes.
