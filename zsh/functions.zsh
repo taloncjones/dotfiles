@@ -185,6 +185,22 @@ function afk() {    # afk() will lock the screen. ex: $ afk
     fi
 }
 
+# launch lazygit and follow it into the worktree/repo it left you in
+function lg() {    # lg() will run lazygit and cd into the worktree/repo selected on exit. ex: $ lg
+    # lazygit writes its final repo/worktree path here on exit; a child process
+    # cannot change the parent shell's cwd, so we cd after it quits. lazygit
+    # won't create the parent dir, so ensure it exists or the write is silently dropped.
+    export LAZYGIT_NEW_DIR_FILE=~/.lazygit/newdir
+    mkdir -p "${LAZYGIT_NEW_DIR_FILE:h}"
+
+    lazygit "$@"
+
+    if [[ -f $LAZYGIT_NEW_DIR_FILE ]]; then
+        cd "$(cat "$LAZYGIT_NEW_DIR_FILE")" || return
+        rm -f "$LAZYGIT_NEW_DIR_FILE"
+    fi
+}
+
 ##############################
 ###### Claude Code Accounts
 ##############################
