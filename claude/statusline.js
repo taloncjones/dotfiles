@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Claude Code statusline.
-// Shows: model | current in-progress todo | directory | context-window meter.
+// Shows: model | current in-progress todo | directory + git branch/worktree |
+// context-window meter.
 //
 // Ported from GSD's statusline (the model/dir/context/todo render only); all
 // GSD-specific state, update-check, and context-monitor bridge logic dropped.
+// Git branch/worktree segment added locally.
 
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { execFileSync } = require("child_process");
 
 // Default total context window when the host does not report one.
 const DEFAULT_TOTAL_CTX = 1_000_000;
@@ -18,6 +21,10 @@ const DEFAULT_AUTO_COMPACT_BUFFER_PCT = 16.5;
 const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
 const BOLD = "\x1b[1m";
+
+// Marker shown before the branch name when the cwd is a linked worktree, so a
+// glance tells you you are not in the main checkout.
+const WORKTREE_GLYPH = "⑂";
 
 /**
  * Find the activeForm of the most recent in-progress todo for this session.
@@ -51,6 +58,54 @@ function readActiveTask(session, claudeDir) {
 }
 
 /**
+ * Read git branch, dirty state, and whether `dir` is a linked worktree.
+ * Returns null when `dir` is not inside a git work tree or git is unavailable.
+ * Fails silently: the statusline must never break on a non-git dir.
+ */
+function readGitInfo(dir) {
+  if (!dir) return null;
+  const run = (args) =>
+    execFileSync("git", args, {
+      cwd: dir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1000,
+    }).trim();
+  try {
+    // One call yields the branch, the per-worktree git dir, and the shared
+    // common dir. A linked worktree has a git dir distinct from the common dir.
+    const out = run([
+      "rev-parse",
+      "--abbrev-ref",
+      "HEAD",
+      "--git-dir",
+      "--git-common-dir",
+    ]);
+    const [rawBranch, gitDir, commonDir] = out.split("\n");
+    let branch = rawBranch;
+    if (branch === "HEAD") {
+      // Detached HEAD: show the short commit instead of the literal "HEAD".
+      try {
+        branch = run(["rev-parse", "--short", "HEAD"]);
+      } catch (e) {
+        branch = "detached";
+      }
+    }
+    const isWorktree =
+      path.resolve(dir, gitDir) !== path.resolve(dir, commonDir);
+    let dirty = false;
+    try {
+      dirty = run(["status", "--porcelain"]) !== "";
+    } catch (e) {
+      dirty = false;
+    }
+    return { branch, dirty, isWorktree };
+  } catch (e) {
+    return null; // not a git repo, or git not on PATH
+  }
+}
+
+/**
  * Build the colored context-window meter segment, e.g. ' █████░░░░░ 47%'.
  * Returns '' when the host does not report remaining context.
  */
@@ -77,10 +132,22 @@ function buildContextMeter(remaining, totalCtx) {
   return ` \x1b[5;31m${bar} ${used}%${RESET}`;
 }
 
+/**
+ * Build the directory segment, optionally suffixed with git branch/worktree
+ * info, e.g. 'dotfiles  main*' or 'add-widget  ⑂ talon/add-widget*'.
+ */
+function buildDirSegment(dir) {
+  const dirname = path.basename(dir);
+  const git = readGitInfo(dir);
+  if (!git) return `${DIM}${dirname}${RESET}`;
+  const wt = git.isWorktree ? `${WORKTREE_GLYPH} ` : "";
+  const flag = git.dirty ? "*" : "";
+  return `${DIM}${dirname}  ${wt}${git.branch}${flag}${RESET}`;
+}
+
 function render(data) {
   const model = data.model?.display_name || "Claude";
   const dir = data.workspace?.current_dir || process.cwd();
-  const dirname = path.basename(dir);
   const session = data.session_id || "";
   const claudeDir =
     process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
@@ -92,7 +159,7 @@ function render(data) {
   const task = readActiveTask(session, claudeDir);
 
   const modelSeg = `${DIM}${model}${RESET}`;
-  const dirSeg = `${DIM}${dirname}${RESET}`;
+  const dirSeg = buildDirSegment(dir);
   if (task) return `${modelSeg} │ ${BOLD}${task}${RESET} │ ${dirSeg}${ctx}`;
   return `${modelSeg} │ ${dirSeg}${ctx}`;
 }
@@ -115,6 +182,12 @@ function main() {
   });
 }
 
-module.exports = { render, buildContextMeter, readActiveTask };
+module.exports = {
+  render,
+  buildContextMeter,
+  readActiveTask,
+  readGitInfo,
+  buildDirSegment,
+};
 
 if (require.main === module) main();
