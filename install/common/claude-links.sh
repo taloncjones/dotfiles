@@ -87,11 +87,14 @@ link_claude_config_dir() {
   done
 
   # Rules: claude/rules is symlinked here as the single asset source. The ECC
-  # language dirs (common/ cpp/ python/ rust/ typescript/ web/) are installer-
-  # managed and UNTRACKED (claude/rules/.gitignore): ecc-install / ecc-update
-  # re-vendor them from the ECC repo via `cp -R`, so they are reproducible and
-  # never committed -- same model as ECC skills/commands/hooks. Only our own
-  # custom rules under claude/rules/personal/ are version-controlled.
+  # language dirs (cpp/ python/ rust/ typescript/) are installer-managed and
+  # UNTRACKED (claude/rules/.gitignore): ecc-install / ecc-update re-vendor them
+  # from the ECC repo via `cp -R`, so they are reproducible and never committed
+  # -- same model as ECC skills/commands/hooks. They carry `paths:` frontmatter
+  # and load only for their language. ECC's always-on common/ and web/ rules are
+  # NOT vendored; our own always-on guidance lives in the tracked
+  # claude/rules/shared/ layer instead. Only our own custom rules under
+  # claude/rules/shared/ are version-controlled.
   # ecc-sync-rules writes into the dotfiles claude/rules dir (the symlink target),
   # never into $cdir/rules directly (either account) now that this is a symlink.
   # One-time migration: older machines have rules as a REAL directory (from a

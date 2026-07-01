@@ -284,17 +284,29 @@ function _claude_plugin_scope() {
     echo "$scope"
 }
 
-# --- ECC (Everything Claude Code) ---
+# --- ECC ---
 # Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
-# Rules: a curated subset is vendored into the dotfiles repo (claude/rules) and
-#   symlinked to ~/.claude/rules by link.sh. The ECC repo is kept only as the
-#   upstream source that ecc-sync-rules copies from; it no longer installs into
-#   ~/.claude. Edit ECC_VENDOR_LANGS to change which languages get vendored.
-# Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
-#   everything-claude-code v1 repo/marketplace is retired.
+# Rules: only the LANGUAGE-SCOPED dirs are vendored from ECC. Each carries a
+#   `paths:` frontmatter (e.g. **/*.py), so Claude Code's native ~/.claude/rules
+#   loader injects them ONLY when files of that language are in context -- zero
+#   cost otherwise. The vendored subset is symlinked to ~/.claude/rules by
+#   link.sh; the ECC repo is the upstream source ecc-sync-rules copies from.
+# We deliberately do NOT vendor ECC's `common/` and `web/` rules: they have no
+#   `paths:` field, so they load into EVERY session, and much of that content is
+#   generic or stale for the current model (e.g. old thinking/model-selection
+#   guidance). Our own always-on guidance lives in the tracked, model-tuned
+#   claude/rules/shared/ layer instead (loaded by the same native mechanism).
+#   Edit ECC_VENDOR_LANGS to change which languages get vendored; retired dirs
+#   are pruned from disk automatically on the next sync.
+# Upstream repo: affaan-m/ECC, plugin id ecc@ecc.
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
-ECC_VENDOR_LANGS=(common python cpp rust web typescript)
+ECC_VENDOR_LANGS=(python cpp rust typescript)
+# Every rule dir name ECC has ever shipped. The prune step only ever removes
+# names from THIS set that are not in ECC_VENDOR_LANGS -- so retiring common/ or
+# web/ cleans them up, but any hand-made top-level rules dir (or our shared/) is
+# never touched even if it is absent from the vendor list.
+ECC_MANAGED_LANGS=(common web python cpp rust typescript)
 
 function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules into the dotfiles repo as a reviewable diff. ex: $ ecc-sync-rules
     local ecc_dir="$ECC_REPO_DIR"
@@ -305,7 +317,7 @@ function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules i
     fi
     mkdir -p "$dst"
     local l
-    local -a vendored=() missing=() failed=()
+    local -a vendored=() missing=() failed=() pruned=()
     for l in "${ECC_VENDOR_LANGS[@]}"; do
         if [[ ! -d "$ecc_dir/rules/$l" ]]; then
             missing+=("$l")
@@ -318,8 +330,22 @@ function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules i
             failed+=("$l")
         fi
     done
+    # Prune retired ECC language dirs: a dir is removed only if ECC has shipped it
+    # (in ECC_MANAGED_LANGS) AND we no longer vendor it (not in ECC_VENDOR_LANGS) --
+    # e.g. common/ or web/ after they were dropped. Anything ECC never managed (our
+    # tracked shared/, or any hand-made dir) is left alone. Keeps ~/.claude/rules
+    # from keeping stale always-on ECC rules alive after a vendor-list change.
+    local d name
+    for d in "$dst"/*(/N); do
+        name="${d:t}"
+        if (( ${ECC_MANAGED_LANGS[(Ie)$name]} && ! ${ECC_VENDOR_LANGS[(Ie)$name]} )); then
+            rm -rf "$d"
+            pruned+=("$name")
+        fi
+    done
     echo "[OK] Vendored (${vendored[*]:-none}) from ECC @ $(git -C "$ecc_dir" rev-parse --short HEAD 2>/dev/null)"
     (( ${#missing} > 0 )) && echo "[WARNING] Not in ECC repo, skipped: ${missing[*]}"
+    (( ${#pruned} > 0 )) && echo "[INFO] Pruned retired rule dirs: ${pruned[*]}"
     (( ${#failed} > 0 )) && echo "[X] Copy failed: ${failed[*]}"
     echo "[INFO] Review and commit: git -C \"$DOTFILEDIR\" diff -- claude/rules"
     # Fail (so ecc-install/ecc-update report it) only on a real copy error or a
