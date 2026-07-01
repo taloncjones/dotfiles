@@ -1,8 +1,14 @@
-# ECC-vendored language rules (common/ cpp/ python/ rust/ typescript/ web/) are
-# installer-managed: ecc-install / ecc-update re-vendor them from the ECC repo
-# via `cp -R`, byte-identical to upstream. They are reproducible and not ours,
-# so they live on disk but stay untracked -- the same model already used for ECC
-# skills (claude/skills/.gitignore) and ECC commands/agents/hooks.
+# ECC-vendored language rules (cpp/ python/ rust/ typescript/) are installer-
+# managed: ecc-install / ecc-update re-vendor them from the ECC repo via `cp -R`,
+# byte-identical to upstream. They are reproducible and not ours, so they live on
+# disk but stay untracked -- the same model already used for ECC skills
+# (claude/skills/.gitignore) and ECC commands/agents/hooks. Each carries a
+# `paths:` frontmatter, so they load only when files of that language are open.
+#
+# ECC's common/ and web/ rules are deliberately NOT vendored: they have no
+# `paths:` field and would load into every session, and much of that content is
+# generic or stale for the current model. Our own always-on guidance lives in
+# claude/rules/personal/ instead. See ECC_VENDOR_LANGS in zsh/functions.zsh.
 #
 # Only our OWN custom rules are version-controlled. Put them under
 # claude/rules/personal/ (outside the ECC lang dirs, which ecc-sync-rules wipes
