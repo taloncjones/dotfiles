@@ -328,12 +328,13 @@ function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules i
     done
     # Prune retired language dirs: any subdir of claude/rules we no longer vendor
     # (e.g. common/ or web/ after they were dropped from ECC_VENDOR_LANGS). Our
-    # own tracked personal/ layer is never touched. Keeps ~/.claude/rules from
-    # keeping stale always-on ECC rules alive after a vendor-list change.
+    # own tracked general/ layer is never touched (it is the only tracked dir per
+    # claude/rules/.gitignore; keep this guard in sync with that whitelist). Keeps
+    # ~/.claude/rules from keeping stale always-on ECC rules alive after a change.
     local d name
     for d in "$dst"/*(/N); do
         name="${d:t}"
-        [[ "$name" == "personal" ]] && continue
+        [[ "$name" == "general" ]] && continue
         if (( ! ${ECC_VENDOR_LANGS[(Ie)$name]} )); then
             rm -rf "$d"
             pruned+=("$name")
