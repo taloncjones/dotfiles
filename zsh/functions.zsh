@@ -284,7 +284,7 @@ function _claude_plugin_scope() {
     echo "$scope"
 }
 
-# --- ECC (Everything Claude Code) ---
+# --- ECC ---
 # Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
 # Rules: only the LANGUAGE-SCOPED dirs are vendored from ECC. Each carries a
 #   `paths:` frontmatter (e.g. **/*.py), so Claude Code's native ~/.claude/rules
@@ -298,8 +298,7 @@ function _claude_plugin_scope() {
 #   claude/rules/shared/ layer instead (loaded by the same native mechanism).
 #   Edit ECC_VENDOR_LANGS to change which languages get vendored; retired dirs
 #   are pruned from disk automatically on the next sync.
-# Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
-#   everything-claude-code v1 repo/marketplace is retired.
+# Upstream repo: affaan-m/ECC, plugin id ecc@ecc.
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
 ECC_VENDOR_LANGS=(python cpp rust typescript)
