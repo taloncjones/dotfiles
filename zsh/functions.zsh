@@ -295,7 +295,7 @@ function _claude_plugin_scope() {
 #   `paths:` field, so they load into EVERY session, and much of that content is
 #   generic or stale for the current model (e.g. old thinking/model-selection
 #   guidance). Our own always-on guidance lives in the tracked, model-tuned
-#   claude/rules/general/ layer instead (loaded by the same native mechanism).
+#   claude/rules/shared/ layer instead (loaded by the same native mechanism).
 #   Edit ECC_VENDOR_LANGS to change which languages get vendored; retired dirs
 #   are pruned from disk automatically on the next sync.
 # Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
@@ -328,13 +328,13 @@ function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules i
     done
     # Prune retired language dirs: any subdir of claude/rules we no longer vendor
     # (e.g. common/ or web/ after they were dropped from ECC_VENDOR_LANGS). Our
-    # own tracked general/ layer is never touched (it is the only tracked dir per
+    # own tracked shared/ layer is never touched (it is the only tracked dir per
     # claude/rules/.gitignore; keep this guard in sync with that whitelist). Keeps
     # ~/.claude/rules from keeping stale always-on ECC rules alive after a change.
     local d name
     for d in "$dst"/*(/N); do
         name="${d:t}"
-        [[ "$name" == "general" ]] && continue
+        [[ "$name" == "shared" ]] && continue
         if (( ! ${ECC_VENDOR_LANGS[(Ie)$name]} )); then
             rm -rf "$d"
             pruned+=("$name")
