@@ -295,7 +295,7 @@ function _claude_plugin_scope() {
 #   `paths:` field, so they load into EVERY session, and much of that content is
 #   generic or stale for the current model (e.g. old thinking/model-selection
 #   guidance). Our own always-on guidance lives in the tracked, model-tuned
-#   claude/rules/personal/ layer instead (loaded by the same native mechanism).
+#   claude/rules/general/ layer instead (loaded by the same native mechanism).
 #   Edit ECC_VENDOR_LANGS to change which languages get vendored; retired dirs
 #   are pruned from disk automatically on the next sync.
 # Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older

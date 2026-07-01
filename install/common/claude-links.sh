@@ -93,8 +93,8 @@ link_claude_config_dir() {
   # -- same model as ECC skills/commands/hooks. They carry `paths:` frontmatter
   # and load only for their language. ECC's always-on common/ and web/ rules are
   # NOT vendored; our own always-on guidance lives in the tracked
-  # claude/rules/personal/ layer instead. Only our own custom rules under
-  # claude/rules/personal/ are version-controlled.
+  # claude/rules/general/ layer instead. Only our own custom rules under
+  # claude/rules/general/ are version-controlled.
   # ecc-sync-rules writes into the dotfiles claude/rules dir (the symlink target),
   # never into $cdir/rules directly (either account) now that this is a symlink.
   # One-time migration: older machines have rules as a REAL directory (from a

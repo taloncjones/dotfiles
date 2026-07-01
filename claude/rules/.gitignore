@@ -8,11 +8,11 @@
 # ECC's common/ and web/ rules are deliberately NOT vendored: they have no
 # `paths:` field and would load into every session, and much of that content is
 # generic or stale for the current model. Our own always-on guidance lives in
-# claude/rules/personal/ instead. See ECC_VENDOR_LANGS in zsh/functions.zsh.
+# claude/rules/general/ instead. See ECC_VENDOR_LANGS in zsh/functions.zsh.
 #
 # Only our OWN custom rules are version-controlled. Put them under
-# claude/rules/personal/ (outside the ECC lang dirs, which ecc-sync-rules wipes
+# claude/rules/general/ (outside the ECC lang dirs, which ecc-sync-rules wipes
 # with `rm -rf` on every sync) and they are tracked by the whitelist below.
 /*
 !/.gitignore
-!/personal/
+!/general/
