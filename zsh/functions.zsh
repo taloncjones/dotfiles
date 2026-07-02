@@ -39,12 +39,19 @@ function update() {    # update() will update the current dotfiles installation 
     tldr --update
 	
 	# execute the install script
-	# note: we manually specify bash here, since the install script is written in bash 
+	# note: we manually specify bash here, since the install script is written in bash
 	# and we're calling it from zsh. bad things happen if you use source instead
-	bash $DOTFILEDIR/install/install.sh
+	local install_status=0
+	bash $DOTFILEDIR/install/install.sh || install_status=$?
 
 	# return user to previous directory
 	cd $currentdir
+
+	# propagate a red install instead of masking it with the cd above
+	if (( install_status != 0 )); then
+		echo "[X] update failed: install.sh exited $install_status"
+		return $install_status
+	fi
 }
 
 # Extract a compressed archive without worrying about which tool to use
@@ -284,47 +291,130 @@ function _claude_plugin_scope() {
     echo "$scope"
 }
 
+# --- Plugin install ground truth (ported from bootstrap-cloud.sh) ---
+# `claude plugins install` can exit 0 without installing: a marketplace that is
+# registered but still mid-fetch resolves the plugin to "nothing to do" and the
+# command "succeeds". Exit codes and CLI output are therefore not evidence; the
+# on-disk record <config-dir>/plugins/installed_plugins.json is. These helpers
+# mirror bootstrap-cloud.sh's plugin_installed / marketplace_lists_plugin /
+# ensure_plugin, parameterized by config dir because machines have TWO
+# (~/.claude personal, ~/.claude-work work). The retry budget is smaller than
+# the cloud one: machines do not face the ~70s cold-container marketplace
+# warmup, only transient network blips.
+CLAUDE_OFFICIAL_MARKETPLACE_URL="https://github.com/anthropics/claude-plugins-official.git"
+CLAUDE_PLUGIN_RETRIES=3
+CLAUDE_PLUGIN_RETRY_DELAY=2
+CLAUDE_PLUGIN_RETRY_MAX_DELAY=5
+
+# helper: true iff the plugin id is recorded in the config dir's installed_plugins.json
+function _claude_plugin_installed() {
+    local cfg_dir="$1" plugin_id="$2"
+    local record="$cfg_dir/plugins/installed_plugins.json"
+    [[ -f "$record" ]] && grep -q "$plugin_id" "$record"
+}
+
+# helper: true iff the marketplace's on-disk manifest declares the plugin --
+# the condition the install resolver actually checks, so waiting on it is
+# deterministic rather than a blind timer.
+function _claude_marketplace_lists_plugin() {
+    local cfg_dir="$1" plugin_name="$2" marketplace="$3"
+    local manifest="$cfg_dir/plugins/marketplaces/$marketplace/.claude-plugin/marketplace.json"
+    [[ -f "$manifest" ]] && grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${plugin_name}\"" "$manifest"
+}
+
+# helper: install one plugin into one config dir and PROVE it landed.
+# Usage: _claude_ensure_plugin <config-dir> <plugin-id> <marketplace> [add-url]
+function _claude_ensure_plugin() {
+    local cfg_dir="$1" plugin_id="$2" marketplace="$3" add_url="${4:-}"
+    local plugin_name="${plugin_id%@*}"
+
+    if _claude_plugin_installed "$cfg_dir" "$plugin_id"; then
+        echo "[INFO] $plugin_id already installed ($cfg_dir)"
+        return 0
+    fi
+
+    # Register the marketplace if missing (idempotent). A pre-registered one
+    # (e.g. added by the platform or an earlier run) is left alone.
+    if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace list 2>/dev/null | grep -qiw "$marketplace"; then
+        if [[ -n "$add_url" ]]; then
+            echo "[INFO] Adding $marketplace marketplace ($cfg_dir)..."
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace add "$add_url" \
+                || { echo "[X] marketplace add failed for $marketplace ($cfg_dir)"; return 1; }
+        else
+            echo "[WARNING] Marketplace $marketplace not registered and no add URL known ($cfg_dir)"
+        fi
+    fi
+
+    # Phase 1: wait until the marketplace manifest lists the plugin, refreshing
+    # the cache between checks.
+    local attempt=1 delay=$CLAUDE_PLUGIN_RETRY_DELAY
+    while ! _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace"; do
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
+        _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace" && break
+        if [[ "$attempt" -ge "$CLAUDE_PLUGIN_RETRIES" ]]; then
+            echo "[WARNING] $marketplace manifest never listed $plugin_name after $CLAUDE_PLUGIN_RETRIES refreshes; installing anyway ($cfg_dir)"
+            break
+        fi
+        echo "[INFO] $marketplace manifest not warm yet (attempt $attempt/$CLAUDE_PLUGIN_RETRIES); retrying in ${delay}s..."
+        sleep "$delay"
+        delay=$(( delay * 2 ))
+        [[ "$delay" -gt "$CLAUDE_PLUGIN_RETRY_MAX_DELAY" ]] && delay=$CLAUDE_PLUGIN_RETRY_MAX_DELAY
+        attempt=$(( attempt + 1 ))
+    done
+
+    # Phase 2: install, then verify against installed_plugins.json.
+    attempt=1; delay=$CLAUDE_PLUGIN_RETRY_DELAY
+    while [[ "$attempt" -le "$CLAUDE_PLUGIN_RETRIES" ]]; do
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install "$plugin_id" >/dev/null 2>&1 || true
+        if _claude_plugin_installed "$cfg_dir" "$plugin_id"; then
+            echo "[OK] Installed $plugin_id ($cfg_dir, attempt $attempt/$CLAUDE_PLUGIN_RETRIES)"
+            return 0
+        fi
+        if [[ "$attempt" -lt "$CLAUDE_PLUGIN_RETRIES" ]]; then
+            echo "[INFO] $plugin_id not in installed_plugins.json yet (attempt $attempt/$CLAUDE_PLUGIN_RETRIES); retrying in ${delay}s..."
+            sleep "$delay"
+            delay=$(( delay * 2 ))
+            [[ "$delay" -gt "$CLAUDE_PLUGIN_RETRY_MAX_DELAY" ]] && delay=$CLAUDE_PLUGIN_RETRY_MAX_DELAY
+        fi
+        attempt=$(( attempt + 1 ))
+    done
+
+    echo "[X] $plugin_id not installed after $CLAUDE_PLUGIN_RETRIES attempts ($cfg_dir)."
+    echo "[X] Recover with: CLAUDE_CONFIG_DIR=$cfg_dir claude plugins install $plugin_id"
+    return 1
+}
+
 # --- ECC (Everything Claude Code) ---
 # Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
-# Rules: a curated subset is vendored into the dotfiles repo (claude/rules) and
-#   symlinked to ~/.claude/rules by link.sh. The ECC repo is kept only as the
-#   upstream source that ecc-sync-rules copies from; it no longer installs into
-#   ~/.claude. Edit ECC_VENDOR_LANGS to change which languages get vendored.
+# Rules: NOT vendored (retired 2026-07-02). Nothing auto-loads ~/.claude/rules;
+#   the only functional consumers are on-demand ECC skills (e.g. rules-distill's
+#   scan-rules.sh) whose paths are overridable. The full upstream rules tree
+#   ships inside the marketplace clone at
+#   ~/.claude/plugins/marketplaces/ecc/rules/ on every machine and container
+#   with the plugin installed -- point consumers there. Only personal rules
+#   (claude/rules/personal/, tracked) live at ~/.claude/rules now; leftover
+#   vendored language dirs from older installs are inert and safe to delete
+#   (_ecc_legacy_rules_notice flags them). The ECC repo clone remains only as
+#   the source for codex-ecc-sync.
 # Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
 #   everything-claude-code v1 repo/marketplace is retired.
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
-ECC_VENDOR_LANGS=(common python cpp rust web typescript)
 
-function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules into the dotfiles repo as a reviewable diff. ex: $ ecc-sync-rules
-    local ecc_dir="$ECC_REPO_DIR"
-    local dst="$DOTFILEDIR/claude/rules"
-    if [[ ! -d "$ecc_dir/rules" ]]; then
-        echo "[X] ECC repo rules not found at $ecc_dir/rules. Run 'ecc-install' first."
-        return 1
-    fi
-    mkdir -p "$dst"
+# helper: flag inert vendored rules left behind by pre-retirement installs
+function _ecc_legacy_rules_notice() {
     local l
-    local -a vendored=() missing=() failed=()
-    for l in "${ECC_VENDOR_LANGS[@]}"; do
-        if [[ ! -d "$ecc_dir/rules/$l" ]]; then
-            missing+=("$l")
-            continue
-        fi
-        rm -rf "$dst/$l"
-        if cp -R "$ecc_dir/rules/$l" "$dst/$l"; then
-            vendored+=("$l")
-        else
-            failed+=("$l")
-        fi
+    local -a leftovers=()
+    for l in common cpp python rust typescript web; do
+        [[ -d "$DOTFILEDIR/claude/rules/$l" ]] && leftovers+=("$l")
     done
-    echo "[OK] Vendored (${vendored[*]:-none}) from ECC @ $(git -C "$ecc_dir" rev-parse --short HEAD 2>/dev/null)"
-    (( ${#missing} > 0 )) && echo "[WARNING] Not in ECC repo, skipped: ${missing[*]}"
-    (( ${#failed} > 0 )) && echo "[X] Copy failed: ${failed[*]}"
-    echo "[INFO] Review and commit: git -C \"$DOTFILEDIR\" diff -- claude/rules"
-    # Fail (so ecc-install/ecc-update report it) only on a real copy error or a
-    # fully empty vendor; a lang merely absent upstream is a non-fatal warning.
-    (( ${#failed} == 0 && ${#vendored} > 0 ))
+    if (( ${#leftovers} > 0 )); then
+        echo "[INFO] Legacy vendored ECC rules present (${leftovers[*]}); vendoring is retired."
+        echo "[INFO] They are untracked and inert. Remove with:"
+        echo "[INFO]   rm -rf $DOTFILEDIR/claude/rules/{${(j:,:)leftovers}}"
+        echo "[INFO] The full upstream tree lives at ~/.claude/plugins/marketplaces/ecc/rules/"
+    fi
 }
 
 function codex-ecc-sync() {    # codex-ecc-sync() merges ECC into ~/.codex (AGENTS, prompts, MCP) and installs ECC git hooks into the dotfiles-owned hooks dir. ex: $ codex-ecc-sync
@@ -379,31 +469,20 @@ function ecc-install() {    # ecc-install([--local]) will set up ECC from scratc
         (cd "$ecc_dir" && node scripts/uninstall.js 2>/dev/null)
     fi
 
-    # vendor curated rules into the dotfiles repo — plugin handles everything else
-    echo "[INFO] Vendoring rules into dotfiles..."
-    ecc-sync-rules || { echo "[X] rules vendoring failed"; return 1; }
+    # rules vendoring retired (2026-07-02): the marketplace clone carries the
+    # upstream rules tree; only flag inert leftovers from older installs.
+    _ecc_legacy_rules_notice
 
     # ensure the ecc marketplace + plugin exist in EVERY account config dir
-    # (~/.claude personal, ~/.claude-work work). Explicit CLAUDE_CONFIG_DIR +
-    # `command claude` so the result does not depend on $PWD via the claude()
-    # wrapper. A dir that does not exist yet (e.g. work not set up) is skipped.
+    # (~/.claude personal, ~/.claude-work work), verified against each dir's
+    # installed_plugins.json rather than CLI output (_claude_ensure_plugin uses
+    # explicit CLAUDE_CONFIG_DIR + `command claude`, so the result does not
+    # depend on $PWD via the claude() wrapper). A dir that does not exist yet
+    # (e.g. work not set up) is skipped.
     local cfg_dir
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace list 2>/dev/null | grep -qiw ecc; then
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update ecc 2>/dev/null
-        else
-            echo "[INFO] Adding ECC marketplace ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace add "$ECC_REPO_URL" \
-                || { echo "[X] marketplace add failed ($cfg_dir)"; return 1; }
-        fi
-        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "ecc@ecc"; then
-            echo "[INFO] Installing ECC plugin ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install ecc@ecc \
-                || { echo "[X] plugin install failed ($cfg_dir)"; return 1; }
-        else
-            echo "[INFO] ECC plugin already installed ($cfg_dir)"
-        fi
+        _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || return 1
     done
 
     # mirror ECC into Codex (no-op when the Codex CLI is absent)
@@ -430,14 +509,14 @@ function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and
     (cd "$ecc_dir" && git fetch origin main && git reset --hard origin/main) \
         || { echo "[X] ECC sync failed"; return 1; }
 
-    echo "[INFO] Re-vendoring rules into dotfiles..."
-    ecc-sync-rules || { echo "[X] rules vendoring failed"; return 1; }
+    # rules vendoring retired (2026-07-02); flag inert leftovers only.
+    _ecc_legacy_rules_notice
 
     # refresh the Codex mirror too (no-op when the Codex CLI is absent)
     codex-ecc-sync || echo "[WARNING] Codex sync failed; Claude-side ECC update is unaffected"
 
     _claude_plugin_epoch_write ecc
-    echo "[OK] ECC rules updated"
+    echo "[OK] ECC updated"
 }
 
 function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, and metadata; vendored rules in dotfiles are left intact. ex: $ ecc-uninstall
@@ -455,7 +534,7 @@ function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, an
     local cfg_dir
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "ecc@ecc"; then
+        if _claude_plugin_installed "$cfg_dir" "ecc@ecc"; then
             echo "[INFO] Removing ECC plugin ($cfg_dir)..."
             CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall ecc@ecc 2>/dev/null
         fi
@@ -687,27 +766,16 @@ function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) full
 
 function superpowers-install() {    # superpowers-install([--local]) will install the Superpowers plugin. ex: $ superpowers-install
     [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] Claude Code plugins are global-only; ignoring --local."
+    # The official marketplace is usually pre-registered by Claude Code, but on
+    # a fresh machine it may be absent or still mid-fetch -- and `plugins
+    # install` then no-ops with exit 0. _claude_ensure_plugin registers the
+    # marketplace by git URL (synchronous clone), installs, and verifies against
+    # installed_plugins.json, mirroring bootstrap-cloud.sh ensure_plugin.
     local cfg_dir
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "superpowers@claude-plugins-official"; then
-            echo "[INFO] Superpowers already installed ($cfg_dir)"
-            continue
-        fi
-        # The official marketplace is usually pre-registered by Claude Code, but on
-        # a fresh machine it may be absent or still mid-fetch -- and `plugins
-        # install` then no-ops with exit 0 (the silent failure bootstrap-cloud.sh
-        # ensure_plugin defeats). Register it by git URL so the clone is
-        # synchronous before install, mirroring bootstrap-cloud.sh.
-        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace list 2>/dev/null | grep -qiw "claude-plugins-official"; then
-            echo "[INFO] Adding official plugin marketplace ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace add "https://github.com/anthropics/claude-plugins-official.git" \
-                || { echo "[X] marketplace add failed ($cfg_dir)"; return 1; }
-        fi
-        echo "[INFO] Installing Superpowers plugin ($cfg_dir)..."
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install superpowers@claude-plugins-official \
-            || { echo "[X] install failed ($cfg_dir)"; return 1; }
-        echo "[OK] Superpowers installed ($cfg_dir)"
+        _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
+            "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || return 1
     done
 }
 
@@ -716,7 +784,7 @@ function superpowers-update() {    # superpowers-update([--local]) will update t
     local cfg_dir updated=0
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "superpowers@claude-plugins-official"; then
+        if ! _claude_plugin_installed "$cfg_dir" "superpowers@claude-plugins-official"; then
             echo "[INFO] Superpowers not installed ($cfg_dir); skipping"
             continue
         fi
@@ -737,7 +805,7 @@ function superpowers-uninstall() {    # superpowers-uninstall() will remove the 
     local cfg_dir
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins list 2>/dev/null | grep -q "superpowers@claude-plugins-official"; then
+        if ! _claude_plugin_installed "$cfg_dir" "superpowers@claude-plugins-official"; then
             echo "[INFO] Superpowers not installed ($cfg_dir)"
             continue
         fi

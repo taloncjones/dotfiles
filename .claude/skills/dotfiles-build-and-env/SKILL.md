@@ -34,7 +34,7 @@ Jargon used below, defined once:
 | config dir     | A Claude Code state directory. Two exist: `~/.claude` (personal account) and `~/.claude-work` (work account). Both symlink shared assets from `claude/` in this repo.                        |
 | seed-once      | Copy a template to a machine-local file only if the destination is absent (`seed_machine_local_file` in `install/common/claude-links.sh`). Later template changes do NOT propagate (Trap 2). |
 | marketplace    | A Claude Code plugin source repo. This setup uses `ecc` (github.com/affaan-m/ECC) and `claude-plugins-official`.                                                                             |
-| vendored rules | ECC language rule files copied into `claude/rules/` by `ecc-sync-rules`; untracked per `claude/rules/.gitignore`, reproducible from the ECC repo.                                            |
+| vendored rules | RETIRED concept (2026-07-02): ECC rules now come from the marketplace clone (`~/.claude/plugins/marketplaces/ecc/rules/`); leftovers in `claude/rules/` are inert and ignored.               |
 
 ## Runbook 1: fresh macOS
 
@@ -110,7 +110,7 @@ packages failed to install.` means re-run `brew bundle` manually -- the rest
 
    Checkpoint: `identity-doctor: all checks passed.` (exit 0; `[WARNING]`
    lines are informational, `[X]` lines fail) and
-   `=== dotfiles-tests: 9 suites passed, 0 failed`.
+   `=== dotfiles-tests: 10 suites passed, 0 failed`.
 
 7. Log out and back in (or `exec zsh`) to pick up the Homebrew zsh login shell.
 
@@ -301,7 +301,7 @@ Everything above verified against the working tree on 2026-07-02 (HEAD
 | Superpowers marketplace fix landed             | `git show 5b799dd --stat`                                                                                                                                                                         |
 | Test-suite count (9 as of 2026-07-02) | `bin/dotfiles-tests --list` (expect 9 lines) |
 | Seed-once behavior                             | `grep -n 'seed_machine_local_file' -A 12 install/common/claude-links.sh`                                                                                                                          |
-| ECC vendored languages                         | `grep -n 'ECC_VENDOR_LANGS' zsh/functions.zsh`                                                                                                                                                    |
+| ECC rules vendoring retired                    | `grep -n '_ecc_legacy_rules_notice' zsh/functions.zsh`                                                                                                                                                    |
 | Cloud retry cap                                | `grep -n 'PLUGIN_RETRY_MAX_DELAY' bootstrap-cloud.sh`                                                                                                                                             |
 | Trap line numbers (7, 8, 10, 11, 12) | `grep -n linuxbrew/bin/zsh install/common/zsh.sh; grep -n chsh install/common/zsh.sh; grep -n "sed -i ''" zsh/functions.zsh; grep -n PlistBuddy install/macos/defaults.sh; grep -n 'command -v rg' git/hooks/commit-msg` |
 | ripgrep still macOS-only                       | `grep -rn ripgrep install/*/Brewfile.rb install/common/Brewfile.rb`                                                                                                                               |

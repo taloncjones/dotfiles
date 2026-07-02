@@ -68,8 +68,9 @@ else
   if [ -n "$tmpl_size" ] && [ -n "$dest_size" ] && [ "$tmpl_size" -gt 0 ] \
       && [ "$(( dest_size * 2 ))" -lt "$tmpl_size" ]; then
     warn "settings.json is ${dest_size}B but template is ${tmpl_size}B"
-    warn "  Re-seed manually if you have lost plugin/hook config:"
-    warn "    rm $SETTINGS && cp $TEMPLATE $SETTINGS"
+    warn "  Unexpected: step 2's link run reconciles settings from the template"
+    warn "  (reconcile_claude_settings_file); a still-small file means that merge"
+    warn "  failed -- check python3 availability and re-run link.sh by hand"
   else
     ok "settings.json size looks healthy (${dest_size}B)"
   fi

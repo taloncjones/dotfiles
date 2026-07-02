@@ -35,7 +35,10 @@ scan_added_lines() {
     return 0
   fi
 
-  if hits="$(printf '%s\n' "$added_lines" | rg -n --pcre2 "$regex" 2>/dev/null)"; then
+  # `--` is load-bearing: the private-key regex starts with dashes and rg
+  # would otherwise parse it as flags, erroring out and silently skipping the
+  # check (found by pre-commit.test.sh; divergence from upstream ECC).
+  if hits="$(printf '%s\n' "$added_lines" | rg -n --pcre2 -- "$regex" 2>/dev/null)"; then
     printf '\n[ECC pre-commit] Potential secret detected (%s) in %s\n' "$name" "$file" >&2
     printf '%s\n' "$hits" | head -n 3 >&2
     has_findings=1

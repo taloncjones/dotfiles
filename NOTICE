@@ -10,11 +10,11 @@ reproduced here as required.
 1. ECC (Everything Claude Code)
 
    Paths in this repository:
-     claude/rules/            (curated subset of upstream rules, re-vendored
-                               by the ecc-sync-rules helper in
-                               zsh/functions.zsh)
      git/hooks/pre-commit     (adapted from the ECC Codex git hooks)
      git/hooks/pre-push       (adapted from the ECC Codex git hooks)
+   (Historical: claude/rules/ carried an untracked vendored subset of the
+   upstream rules until vendoring was retired on 2026-07-02; machines may
+   still hold inert leftover copies covered by this same notice.)
 
    Upstream: https://github.com/affaan-m/ECC
    License:  MIT
