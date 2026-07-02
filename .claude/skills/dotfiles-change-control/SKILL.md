@@ -87,12 +87,12 @@ In order, for a change made inside a Claude Code session:
    does not link `~/.gitconfig`), so none of these hooks fire there and the
    Claude guard hooks plus CI are the only gates):
 
-   | Hook                                  | Fires                 | Blocks                                                                                             | Bypass (EMERGENCY ONLY)                          |
-   | ------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-   | `commit-msg`                          | commit                | attribution terms, AI co-author lines, emojis in the message                                       | `DOTFILES_SKIP_COMMIT_MSG_GUARD=1`               |
-   | `pre-commit` (ECC-vendored, UNTESTED) | commit                | staged high-signal secrets                                                                         | `ECC_SKIP_PRECOMMIT=1` or `ECC_SKIP_GIT_HOOKS=1` |
-   | `pre-push` (ECC-vendored, UNTESTED)   | push                  | failing lint/typecheck/test/build in Node projects (verification flow -- it does NOT scan secrets) | `ECC_SKIP_PREPUSH=1` or `ECC_SKIP_GIT_HOOKS=1`   |
-   | `post-checkout`                       | checkout/worktree add | nothing -- hydrates `.todos`/`.planning` into worktrees                                            | n/a                                              |
+   | Hook                        | Fires                 | Blocks                                                                                             | Bypass (EMERGENCY ONLY)                          |
+   | --------------------------- | --------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+   | `commit-msg`                | commit                | attribution terms, AI co-author lines, emojis in the message                                       | `DOTFILES_SKIP_COMMIT_MSG_GUARD=1`               |
+   | `pre-commit` (ECC-vendored) | commit                | staged high-signal secrets                                                                         | `ECC_SKIP_PRECOMMIT=1` or `ECC_SKIP_GIT_HOOKS=1` |
+   | `pre-push` (ECC-vendored)   | push                  | failing lint/typecheck/test/build in Node projects (verification flow -- it does NOT scan secrets) | `ECC_SKIP_PREPUSH=1` or `ECC_SKIP_GIT_HOOKS=1`   |
+   | `post-checkout`             | checkout/worktree add | nothing -- hydrates `.todos`/`.planning` into worktrees                                            | n/a                                              |
 
    Bypass discipline: use only when the hook itself is broken (e.g. `rg`
    missing false-positive), never to land content the hook correctly rejects.
@@ -237,6 +237,7 @@ containers use the platform checkout):
 | Cited commits (2304015, 52f807d, e140ab3, 910f2bc, c1c4500, 8d4507f, 9ad4dc8, 465ee17) | `git show -s --format='%h %s' <hash>`                                                                                      |
 
 Known-open as of 2026-07-02 (do not present as solved): no machine-side
-auto-merge for `settings.json.tmpl`; ECC `pre-commit`/`pre-push` untested;
-machine-path plugin installs still trust CLI output rather than
-`installed_plugins.json`.
+auto-merge for `settings.json.tmpl`; machine-path plugin installs still trust
+CLI output rather than `installed_plugins.json`. (Closed 2026-07-02: ECC
+`pre-commit`/`pre-push` now have behavioral suites, and post-checkout has a
+runtime suite -- `git/hooks/{pre-commit,pre-push,post-checkout-runtime}.test.sh`.)
