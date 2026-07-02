@@ -305,20 +305,23 @@ declaration-only repos, step 0.4 plus one plugin skill invocable in session 1.
 
 ## Phase 3 -- parity gaps to close
 
-Each gap: status, first step, measurable gate. Statuses are honest -- two are
-candidates (design known, unimplemented), two are open (decision not yet made).
-None of these is done; do not report them as fixed.
+Each gap: status, first step, measurable gate. Statuses are honest -- 3.1 is
+closed (2026-07-02), 3.2 is a candidate (design known, unimplemented), two are
+open (decision not yet made). Do not report an open one as fixed.
 
-**3.1 Machine-path installs verify against `installed_plugins.json` -- CANDIDATE.**
-`ecc-install`/`superpowers-install` (`zsh/functions.zsh`, functions at
-`ecc-install` and `superpowers-install`) grep CLI output; `bootstrap-cloud.sh
-ensure_plugin` is the gold standard (manifest wait + `installed_plugins.json`
-verify). First step: port `plugin_installed`/`ensure_plugin` semantics into
-the zsh functions, parameterized by config dir -- machines have TWO
-(`~/.claude` and `~/.claude-work`), each with its own
-`plugins/installed_plugins.json`. Gate: with a deliberately unreachable
-marketplace, `ecc-install` returns non-zero and says so; `bin/dotfiles-tests`
-stays green.
+**3.1 Machine-path installs verify against `installed_plugins.json` -- CLOSED
+(2026-07-02).** `bootstrap-cloud.sh ensure_plugin` semantics (manifest wait +
+`installed_plugins.json` verify, never trusting exit codes) now live in
+`zsh/functions.zsh` as `_claude_plugin_installed` /
+`_claude_marketplace_lists_plugin` / `_claude_ensure_plugin`, parameterized by
+config dir because machines have TWO (`~/.claude` and `~/.claude-work`).
+`ecc-install` and `superpowers-install` route through `_claude_ensure_plugin`;
+the update/uninstall presence checks read `installed_plugins.json` directly.
+The gate held: `zsh/functions.test.sh` (registered in `bin/dotfiles-tests`)
+proves an unreachable marketplace and a silent no-op install both return
+non-zero and say so. Machine retry budget is 3 attempts / 5s cap (no
+cold-container warmup on machines), overridable via `CLAUDE_PLUGIN_RETRIES` /
+`CLAUDE_PLUGIN_RETRY_DELAY` / `CLAUDE_PLUGIN_RETRY_MAX_DELAY`.
 
 **3.2 `reconcile_claude_settings` on machines -- CANDIDATE.** Template changes
 (`claude/settings.json.tmpl`) require manual merge on existing machines
