@@ -70,7 +70,7 @@ Run before anything public-facing (new file types, README claims, vendoring):
 ```bash
 cd ~/dotfiles
 sh git/hooks/public-safety.test.sh    # the public-posture gate alone
-bin/dotfiles-tests                    # all 9 suites, the full pre-push bar
+bin/dotfiles-tests                    # all suites, the full pre-push bar
 ```
 
 If `public-safety.test.sh` fails on your change, fix the content -- do not
@@ -171,7 +171,7 @@ cloud container (ephemeral, clean clone every session).
 # .claude/settings.json declares the plugins; verify the claim chain held:
 claude plugins list                          # expect ecc@ecc and superpowers@claude-plugins-official
 cat ~/.claude/plugins/installed_plugins.json # ground truth, not CLI output
-bin/dotfiles-tests                           # all 9 suites green on a clean clone
+bin/dotfiles-tests                           # all suites green on a clean clone
 ```
 
 For macOS/Linux-machine claims a container cannot prove (Homebrew, defaults,
@@ -200,7 +200,7 @@ Volatile items and their one-line re-verification commands:
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | Tracked key files = exactly `ssh/keys/id_ed25519_personal.pub`                               | `git ls-files ssh/keys`                                      |
 | public-safety suite is 3 assertions (todo.md, owner home prefix, secret regexes)             | `cat git/hooks/public-safety.test.sh`                        |
-| dotfiles-tests runs 9 suites incl. public-safety                                             | `bin/dotfiles-tests --list`                                  |
+| dotfiles-tests runs all suites incl. public-safety                                             | `bin/dotfiles-tests --list`                                  |
 | NOTICE lists ECC (pre-commit/pre-push; rules entry historical) and GSD redux (statusline.js) | `cat NOTICE`                                                 |
 | Fable5.md/Opus4.md gitignored                                                                | `cat claude/.gitignore`                                      |
 | ECC pinned URL                                                                               | `grep -n 'ECC_REPO_URL' zsh/functions.zsh`                   |

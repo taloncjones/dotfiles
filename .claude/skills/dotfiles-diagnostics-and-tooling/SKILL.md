@@ -57,7 +57,7 @@ degraded but by-design-possible. `[INFO]` = expected on some machine classes.
 "repo outside ~/Git/{personal,work} refuses to commit" is `[INFO]` -- that loud
 failure IS the design (`user.useConfigOnly`, see dotfiles-architecture-contract).
 
-## dotfiles-tests: the nine suites
+## dotfiles-tests: the suites
 
 Run: `bin/dotfiles-tests` (what CI `.github/workflows/tests.yml` runs).
 List without running: `bin/dotfiles-tests --list`. Each suite prints its own
@@ -276,7 +276,7 @@ Volatile facts and how to re-verify:
 | required plugin ids (ecc@ecc, superpowers@claude-plugins-official)       | `grep ensure_plugin bootstrap-cloud.sh`                                                                                                                               |
 | template-vs-live drift checker coverage                                  | `sed -n '80,110p' claude/hooks/claude-hooks.test.sh`                                                                                                                  |
 | symlink map (script transcription)                                       | `diff <(grep 'ln -sf' install/common/link.sh) <(grep check_link .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh)` -- eyeball, formats differ |
-| baseline (all 9 suites pass; any public-safety failure is stop-the-line) | `bin/dotfiles-tests`                                                                                                                                                  |
+| baseline (all suites pass; any public-safety failure is stop-the-line) | `bin/dotfiles-tests`                                                                                                                                                  |
 | platform default author email `noreply@anthropic.com`                    | `grep PLATFORM_DEFAULT_EMAIL bootstrap-cloud.sh`                                                                                                                      |
 
 Update triggers: adding/removing a test suite, renaming a doctor, changing the
