@@ -1,7 +1,10 @@
 {
   "enabledPlugins": {
     "ecc@ecc": true,
-    "superpowers@claude-plugins-official": true
+    "superpowers@claude-plugins-official": true,
+    "telegram@claude-plugins-official": false,
+    "code-review@claude-plugins-official": false,
+    "code-simplifier@claude-plugins-official": false
   },
   "extraKnownMarketplaces": {
     "ecc": {
@@ -16,6 +19,37 @@
         "url": "https://github.com/anthropics/claude-plugins-official.git"
       }
     }
+  },
+  "permissions": {
+    "allow": [
+      "Bash(bash bin/dotfiles-tests:*)",
+      "Bash(bash install/install.sh:*)",
+      "Bash(bash bootstrap-cloud.sh --no-plugins:*)",
+      "Bash(bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/cloud-doctor.sh:*)",
+      "Bash(bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh:*)",
+      "Bash(bash -n:*)",
+      "Bash(zsh -n:*)",
+      "Bash(sh -n:*)",
+      "Bash(readlink:*)",
+      "Bash(shellcheck:*)",
+      "Skill(claude-code-platform-reference)",
+      "Skill(dotfiles-architecture-contract)",
+      "Skill(dotfiles-build-and-env)",
+      "Skill(dotfiles-change-control)",
+      "Skill(dotfiles-cloud-first-campaign)",
+      "Skill(dotfiles-config-and-flags)",
+      "Skill(dotfiles-debugging-playbook)",
+      "Skill(dotfiles-diagnostics-and-tooling)",
+      "Skill(dotfiles-docs-and-writing)",
+      "Skill(dotfiles-external-positioning)",
+      "Skill(dotfiles-failure-archaeology)",
+      "Skill(dotfiles-research-frontier)",
+      "Skill(dotfiles-research-methodology)",
+      "Skill(dotfiles-run-and-operate)",
+      "Skill(dotfiles-validation-and-qa)",
+      "Skill(dotfiles-verification-toolkit)"
+    ],
+    "ask": ["Bash(bash bootstrap.sh:*)", "Bash(bash bootstrap-cloud.sh)"]
   },
   "hooks": {
     "SessionStart": [

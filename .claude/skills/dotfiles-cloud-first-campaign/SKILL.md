@@ -178,9 +178,16 @@ the enabled-but-dark class again). Consequences: (a) personal official-market
 plugins (code-review, code-simplifier, security-guidance, ...) need NO repo
 change, the account carries them; (b) to make account-enabled plugins from
 OTHER marketplaces work in cloud, pin that marketplace's git URL in the repo's
-`.claude/settings.json` `extraKnownMarketplaces`. Verify sync state per
-container: grep `"scope": "user"` in `~/.claude/plugins/installed_plugins.json`
-and compare against `enabledPlugins` in `~/.claude/settings.json`.
+`.claude/settings.json` `extraKnownMarketplaces`; (c) to EXCLUDE an
+account-synced plugin from this repo's sessions, set it to `false` in the
+repo's `.claude/settings.json` `enabledPlugins` (project layer overrides user
+-- asserted from settings precedence, verify on the next fresh session). This
+repo excludes `telegram` (unused) and the official `code-review` and
+`code-simplifier` plugins (name-collide with the built-in `/code-review` that
+the tracked `co-review` skill invokes, and with the built-in `/simplify` +
+ECC's simplifier). Verify sync state per container: grep `"scope": "user"` in
+`~/.claude/plugins/installed_plugins.json` and compare against
+`enabledPlugins` in `~/.claude/settings.json`.
 
 **Env-var alternative: ruled out.** The environment config's variables field
 carries data, not execution -- nothing in the platform installs plugins from
