@@ -39,12 +39,19 @@ function update() {    # update() will update the current dotfiles installation 
     tldr --update
 	
 	# execute the install script
-	# note: we manually specify bash here, since the install script is written in bash 
+	# note: we manually specify bash here, since the install script is written in bash
 	# and we're calling it from zsh. bad things happen if you use source instead
-	bash $DOTFILEDIR/install/install.sh
+	local install_status=0
+	bash $DOTFILEDIR/install/install.sh || install_status=$?
 
 	# return user to previous directory
 	cd $currentdir
+
+	# propagate a red install instead of masking it with the cd above
+	if (( install_status != 0 )); then
+		echo "[X] update failed: install.sh exited $install_status"
+		return $install_status
+	fi
 }
 
 # Extract a compressed archive without worrying about which tool to use

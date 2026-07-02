@@ -13,9 +13,9 @@ this file is safe to re-run.
 
 [WARNING] Front-loaded traps:
 
-- `update` does NOT propagate `install.sh` failure -- it exits with the status
-  of the final `cd` (zsh/functions.zsh:44-47). A red install can look green.
-  Scroll the output; do not trust `$?`. Open item, not fixed.
+- `update` propagates `install.sh` failure (fixed 2026-07-02): it captures the
+  install status before the final `cd`, prints `[X] update failed: install.sh
+exited N`, and returns that status. `$?` is trustworthy again.
 - `claude plugins install` can exit 0 without installing (commits 722c653,
   f91d7d2). Machine-path installers (`ecc-install`/`superpowers-install`) grep
   CLI output, not the ground truth. Verify against
