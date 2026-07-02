@@ -150,6 +150,23 @@ reattributed, `commit.gpgsign` false. Account sync landed atlassian,
 frontend-design, security-guidance at `"scope": "user"`; the three
 project-excluded plugins stayed disabled (see Phase 1, now verified).
 
+Re-verified (2026-07-02, fresh session-1 dotfiles-repo container created
+after PRs #26-#33 merged, NO Setup script): full Phase 0 pass again, now at
+`bin/dotfiles-tests` 14/14 suites green (runner grew from 9). cloud-doctor
+exit 0 (all `[OK]`); SessionStart transcript healthy-warm (`already
+installed` for both ids) and now includes the reconcile-refactor line
+`[claude-links] Reconciled settings.json (SessionStart: account_guard.py).`
+immediately after the "Linking Claude assets" line; both required plugin ids
+on disk with a superpowers skill invoked live in session 1 (ECC GateGuard
+also fired on the first Bash call); git author reattributed,
+`commit.gpgsign` false. NEW observation: `feature-dev@claude-code-plugins`
+was ABSENT everywhere -- not in `installed_plugins.json`, not in
+`claude plugin list` -- and the pinned `claude-code-plugins` marketplace was
+NOT registered (`known_marketplaces.json` and
+`claude plugin marketplace list` hold only `ecc` and
+`claude-plugins-official`). A pin whose every plugin is disabled never
+registers; see the corrected Phase 1 pin entry.
+
 Observed baseline (2026-07-02, session 1 of a NON-dotfiles repo): the
 hook-only rollout (latam-bess: no Setup script, no committed declaration;
 that repo's committed SessionStart hook clones this dotfiles repo and runs
@@ -248,14 +265,25 @@ Of the account-enabled ids from non-official marketplaces:
   `"name": "claude-code-plugins"`, lists `feature-dev`); a live
   `claude plugin marketplace add https://github.com/anthropics/claude-code.git`
   in a container registered it under exactly that name. Pinned in this repo's
-  `.claude/settings.json` `extraKnownMarketplaces` -- the pin stays (generic
-  pre-launch registration; the marketplace also carries commit-commands,
-  plugin-dev, ...). The PLUGIN itself was judged redundant with the standing
+  `.claude/settings.json` `extraKnownMarketplaces` -- the pin stays, but as a
+  DORMANT re-enable path, not "generic pre-launch registration" as first
+  assumed: a fresh-container audit (2026-07-02, post PR #33) showed a pin
+  alone does NOT register the marketplace. With every `claude-code-plugins`
+  plugin disabled at the project layer, the marketplace never appears in
+  `known_marketplaces.json` or `claude plugin marketplace list`; the platform
+  clones/registers a pinned marketplace only when an ENABLED plugin
+  references it. The PLUGIN itself was judged redundant with the standing
   superpowers pipeline and ECC's code-explorer/code-architect/code-reviewer
   agents (same reasoning that excluded official code-review/code-simplifier),
-  so it is `false` in this repo's `enabledPlugins` (expect
-  disabled-but-installed in dotfiles-repo containers) and `false` in
-  `claude/settings.json.tmpl` for fresh seeds. [WARNING] Disable-propagation
+  so it is `false` in this repo's `enabledPlugins` and `false` in
+  `claude/settings.json.tmpl` for fresh seeds. Expected shape in fresh
+  dotfiles-repo containers: ABSENT from `installed_plugins.json` entirely --
+  NOT disabled-but-installed, which occurs only when the marketplace is
+  registered anyway (as with the official-marketplace exclusions, whose
+  marketplace superpowers keeps registered). One mechanism covers all
+  observed states: registration requires an enabled referencing plugin;
+  installation requires registration; a project-layer `false` blocks loading
+  but not installation. [WARNING] Disable-propagation
   limit: the reconcile merge lets LIVE plugin keys win, so a template `false`
   can never turn a plugin OFF on an existing machine -- flipping to `false`
   reaches fresh seeds only. Turning something off everywhere takes the
