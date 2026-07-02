@@ -694,6 +694,16 @@ function superpowers-install() {    # superpowers-install([--local]) will instal
             echo "[INFO] Superpowers already installed ($cfg_dir)"
             continue
         fi
+        # The official marketplace is usually pre-registered by Claude Code, but on
+        # a fresh machine it may be absent or still mid-fetch -- and `plugins
+        # install` then no-ops with exit 0 (the silent failure bootstrap-cloud.sh
+        # ensure_plugin defeats). Register it by git URL so the clone is
+        # synchronous before install, mirroring bootstrap-cloud.sh.
+        if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace list 2>/dev/null | grep -qiw "claude-plugins-official"; then
+            echo "[INFO] Adding official plugin marketplace ($cfg_dir)..."
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace add "https://github.com/anthropics/claude-plugins-official.git" \
+                || { echo "[X] marketplace add failed ($cfg_dir)"; return 1; }
+        fi
         echo "[INFO] Installing Superpowers plugin ($cfg_dir)..."
         CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install superpowers@claude-plugins-official \
             || { echo "[X] install failed ($cfg_dir)"; return 1; }
