@@ -237,6 +237,29 @@ ECC's simplifier). Verify sync state per container: grep `"scope": "user"` in
 `~/.claude/plugins/installed_plugins.json` and compare against
 `enabledPlugins` in `~/.claude/settings.json`.
 
+**Other-marketplace pins (investigated 2026-07-02, from a cloud container).**
+Of the account-enabled ids from non-official marketplaces:
+
+- `feature-dev@claude-code-plugins` -- VERIFIED and PINNED. The marketplace
+  named `claude-code-plugins` is the manifest inside the
+  `anthropics/claude-code` repo itself (`.claude-plugin/marketplace.json`,
+  `"name": "claude-code-plugins"`, lists `feature-dev`); a live
+  `claude plugin marketplace add https://github.com/anthropics/claude-code.git`
+  in a container registered it under exactly that name. Pinned in this repo's
+  `.claude/settings.json` `extraKnownMarketplaces`. Remaining gate: confirm
+  account sync installs it on session 1 of a FRESH environment (promotion
+  protocol step 3).
+- `python-development` / `cicd-automation` / `code-documentation` /
+  `code-refactoring` `@claude-code-workflows` -- BLOCKED, NOT PINNED. No
+  reachable public marketplace both carries the name AND lists these plugins:
+  `github.com/anthropics/claude-code-workflows` 404s;
+  `shinpr/claude-code-workflows` DOES self-name `claude-code-workflows` but
+  ships different plugins (dev-workflows etc.) -- [WARNING] marketplace names
+  are not globally unique; pinning a same-named stranger would route these
+  plugin ids to unaudited code. Resolve from a MACHINE that has them working:
+  `python3 -c "import json;print(json.load(open('$HOME/.claude/plugins/known_marketplaces.json'))['claude-code-workflows'])"`
+  and pin THAT url. Until then these ids stay enabled-but-dark in cloud.
+
 **Env-var alternative: ruled out.** The environment config's variables field
 carries data, not execution -- nothing in the platform installs plugins from
 an env var, and no pre-launch code can run from one. Env vars remain useful
