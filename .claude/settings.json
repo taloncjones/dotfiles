@@ -18,6 +18,12 @@
         "source": "git",
         "url": "https://github.com/anthropics/claude-plugins-official.git"
       }
+    },
+    "claude-code-plugins": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/anthropics/claude-code.git"
+      }
     }
   },
   "permissions": {

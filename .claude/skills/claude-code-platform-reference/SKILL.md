@@ -150,9 +150,9 @@ claude plugins uninstall <name@marketplace>
 ```
 
 (Sources: bootstrap-cloud.sh `ensure_plugin`; `ecc-install` /
-`superpowers-install` in zsh/functions.zsh. The machine-path functions still
-verify via `claude plugins list` grep rather than installed_plugins.json --
-known open weak point; `ensure_plugin` is the gold standard.)
+`superpowers-install` in zsh/functions.zsh. Both paths verify against
+installed_plugins.json: the machine path adopted the `ensure_plugin`
+semantics as `_claude_ensure_plugin` on 2026-07-02.)
 
 The two plugins this repo declares: `ecc@ecc` (marketplace
 https://github.com/affaan-m/ECC.git) and

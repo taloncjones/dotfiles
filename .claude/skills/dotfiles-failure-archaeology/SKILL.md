@@ -24,10 +24,10 @@ recorded root cause no longer holds -- not a hunch.
 | --- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------- | --------------------------------------- |
 | 1   | Cloud first-session plugins              | Pre-launch placement required; SessionStart install is dark until next session | f2f13ab .. 8d4507f (root cause: c1c4500)              | Settled                                 |
 | 2   | Tiered-orchestrate + per-task Codex gate | Added, debugged, removed whole subsystem as slower/costlier                    | fc88aac, e401175, 7fefcb5                             | Settled (removed)                       |
-| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring necessity still OPEN |
+| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring retired 2026-07-02  |
 | 4   | Codex asset mirror into ~/.codex         | Overwrote hooksPath, wrote through symlink, orphaned agent files               | pre-public (no hash); sweep in install/common/link.sh | Settled (abandoned)                     |
 | 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; redux fork only                 | 9ad4dc8                                               | Settled                                 |
-| 6   | todo.md audit file deleted               | Tracking moved off-file; 2 low-priority items still open                       | 854228e, c0a9072                                      | Partially open                          |
+| 6   | todo.md audit file deleted               | Tracking moved off-file; all dropped items resolved 2026-07-02                 | 854228e, c0a9072                                      | Settled 2026-07-02                      |
 
 ## When NOT to use this skill
 
@@ -140,6 +140,17 @@ ECC skills read it), and cloud containers already have the full tree at
 `~/.claude/plugins/marketplaces/ecc/rules/`. Do not "fix" this either way
 without settling that question first -- see `dotfiles-research-frontier`.
 
+**Correction (2026-07-02, later the same day): sub-question SETTLED --
+vendoring RETIRED.** The decision gate ran: consumer enumeration over the ECC
+plugin payload (`grep -rln "claude/rules" ~/.claude/plugins/cache/ecc/`) found
+no runtime consumer (no hook reads `~/.claude/rules`; only on-demand skills
+with overridable paths, chiefly `rules-distill`'s `scan-rules.sh` via
+`RULES_DISTILL_DIR`). `ecc-sync-rules` and `ECC_VENDOR_LANGS` were removed;
+`ecc-install`/`ecc-update` now flag inert leftovers
+(`_ecc_legacy_rules_notice`); consumers point at the marketplace clone.
+Lesson: a vendored copy nobody loads is pure carrying cost -- enumerate
+consumers before building parity for an artifact.
+
 ## Saga 4: Codex asset mirror into ~/.codex (abandoned)
 
 **Symptom.** Running ECC's `sync-ecc-to-codex.sh` directly on a
@@ -204,15 +215,14 @@ lines). Recover the full list with `git show c0a9072^:todo.md`.
 
 **Live-verified status of the three dropped items (2026-07-02):**
 
-| Item                                           | Status                                                                                                                                                    | Evidence                                          |
-| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Replace backticks with `$(...)`                | OPEN in zsh/.zprofile (lines 6-7, `` `uname` ``); install/common/zsh.sh is clean (comment mention only)                                                   | `grep -n '\`uname' zsh/.zprofile`                 |
-| `update()` should propagate install.sh failure | OPEN -- `bash $DOTFILEDIR/install/install.sh` in zsh/functions.zsh `update()` has no `\|\| return 1`                                                      | `grep -A1 'install/install.sh' zsh/functions.zsh` |
-| Document Brewfile split in README              | RESOLVED -- README.md "Adding New Packages" now distinguishes install/common/Brewfile.rb (CLI, all platforms) from install/macos/Brewfile.rb (macOS apps) | `grep -n 'Adding New Packages' README.md`         |
+| Item                                           | Status                                                                                                                                                    | Evidence                                     |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Replace backticks with `$(...)`                | RESOLVED 2026-07-02 -- zsh/.zprofile now uses `$(uname)`/`$(uname -m)`; install/common/zsh.sh was already clean (comment mention only)                    | `grep -n 'uname' zsh/.zprofile`              |
+| `update()` should propagate install.sh failure | RESOLVED 2026-07-02 -- `update()` captures the install status before the final `cd` and returns it, printing `[X] update failed: install.sh exited N`     | `grep -n 'install_status' zsh/functions.zsh` |
+| Document Brewfile split in README              | RESOLVED -- README.md "Adding New Packages" now distinguishes install/common/Brewfile.rb (CLI, all platforms) from install/macos/Brewfile.rb (macOS apps) | `grep -n 'Adding New Packages' README.md`    |
 
-**Status: partially open.** Two items remain; track fixes via the `todos`
-skill or Jira, not a resurrected todo.md (repo rule: no new .md files without
-instruction).
+**Status: settled (2026-07-02).** All three dropped items are resolved; the
+deleted todo.md carries no remaining work.
 
 ## Minor settled fixes (2026-07-02, same-day -- know the CURRENT state)
 
@@ -253,16 +263,16 @@ All facts verified against the live repo on **2026-07-02**. History begins at
 93f2573 (initial public release, 2026-06-12); anything earlier is pre-public
 and hashless by design.
 
-| Volatile fact                                  | Re-verify with                                                                                                                                                                                                                       |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| All cited hashes exist and match descriptions  | `for h in f2f13ab 2304015 910f2bc 722c653 f91d7d2 7cb28b7 c1c4500 da54e17 8d4507f fc88aac e401175 7fefcb5 4d8255d e140ab3 9ad4dc8 854228e c0a9072 52f807d 5b799dd 465ee17 26eae6d 93f2573; do git show -s --format='%h %s' $h; done` |
-| tiered-orchestrate truly gone                  | `ls claude/skills/tiered-orchestrate claude/orchestrator.conf 2>&1` (expect: No such file)                                                                                                                                           |
-| ECC rules still untracked, personal/ tracked   | `cat claude/rules/.gitignore; git ls-files claude/rules/ \| head`                                                                                                                                                                    |
-| Cloud plugin declaration still primary         | `grep -n 'enabledPlugins\|extraKnownMarketplaces' .claude/settings.json`                                                                                                                                                             |
-| SessionStart hook still self-heal, gated       | `grep -n 'CLAUDE_CODE_REMOTE' .claude/hooks/session-start.sh`                                                                                                                                                                        |
-| GSD policy comment intact                      | `grep -n 'rug-pull' zsh/functions.zsh`                                                                                                                                                                                               |
-| codex-ecc-sync wrapper + hooks redirect intact | `grep -n 'ECC_GLOBAL_HOOKS_DIR' zsh/functions.zsh`                                                                                                                                                                                   |
-| link.sh leftover sweep intact                  | `grep -n "name 'ecc-\*'" install/common/link.sh`                                                                                                                                                                                     |
-| Open todo items 1-2 still open                 | `grep -n '\`uname' zsh/.zprofile; grep -A1 'install/install.sh' zsh/functions.zsh`                                                                                                                                                   |
-| Deleted todo.md recoverable                    | `git show c0a9072^:todo.md`                                                                                                                                                                                                          |
-| block_secrets segment matching present         | `grep -n 'segment' claude/hooks/block_secrets.py`                                                                                                                                                                                    |
+| Volatile fact                                         | Re-verify with                                                                                                                                                                                                                       |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| All cited hashes exist and match descriptions         | `for h in f2f13ab 2304015 910f2bc 722c653 f91d7d2 7cb28b7 c1c4500 da54e17 8d4507f fc88aac e401175 7fefcb5 4d8255d e140ab3 9ad4dc8 854228e c0a9072 52f807d 5b799dd 465ee17 26eae6d 93f2573; do git show -s --format='%h %s' $h; done` |
+| tiered-orchestrate truly gone                         | `ls claude/skills/tiered-orchestrate claude/orchestrator.conf 2>&1` (expect: No such file)                                                                                                                                           |
+| ECC rules still untracked, personal/ tracked          | `cat claude/rules/.gitignore; git ls-files claude/rules/ \| head`                                                                                                                                                                    |
+| Cloud plugin declaration still primary                | `grep -n 'enabledPlugins\|extraKnownMarketplaces' .claude/settings.json`                                                                                                                                                             |
+| SessionStart hook still self-heal, gated              | `grep -n 'CLAUDE_CODE_REMOTE' .claude/hooks/session-start.sh`                                                                                                                                                                        |
+| GSD policy comment intact                             | `grep -n 'rug-pull' zsh/functions.zsh`                                                                                                                                                                                               |
+| codex-ecc-sync wrapper + hooks redirect intact        | `grep -n 'ECC_GLOBAL_HOOKS_DIR' zsh/functions.zsh`                                                                                                                                                                                   |
+| link.sh leftover sweep intact                         | `grep -n "name 'ecc-\*'" install/common/link.sh`                                                                                                                                                                                     |
+| Saga 6 items resolved (backticks, update propagation) | `grep -n 'uname' zsh/.zprofile; grep -n 'install_status' zsh/functions.zsh`                                                                                                                                                          |
+| Deleted todo.md recoverable                           | `git show c0a9072^:todo.md`                                                                                                                                                                                                          |
+| block_secrets segment matching present                | `grep -n 'segment' claude/hooks/block_secrets.py`                                                                                                                                                                                    |

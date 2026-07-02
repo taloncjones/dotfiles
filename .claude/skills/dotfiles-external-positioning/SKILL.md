@@ -70,7 +70,7 @@ Run before anything public-facing (new file types, README claims, vendoring):
 ```bash
 cd ~/dotfiles
 sh git/hooks/public-safety.test.sh    # the public-posture gate alone
-bin/dotfiles-tests                    # all 9 suites, the full pre-push bar
+bin/dotfiles-tests                    # all suites, the full pre-push bar
 ```
 
 If `public-safety.test.sh` fails on your change, fix the content -- do not
@@ -115,9 +115,11 @@ When vendoring or deriving from any upstream, in the same PR:
    (`.claude/settings.json` `extraKnownMarketplaces`) and machine installers
    (`ECC_REPO_URL`, the official-marketplace URL in `superpowers-install`)
    already do this -- keep it that way.
-2. **Prefer reproducible vendoring over trusting installers.** `ecc-sync-rules`
-   copies bytes you can diff; an installer runs code you did not read. When
-   both are possible, vendor.
+2. **Prefer reproducible, auditable artifacts over trusting installers.** A
+   pinned git clone (the ECC marketplace clone) holds bytes you can diff; an
+   installer runs code you did not read. (The old `ecc-sync-rules` vendoring
+   copy was retired 2026-07-02 once nothing consumed it -- reproducibility is
+   now provided by the pinned marketplace URL, not a second local copy.)
 3. **Verify what an installer wrote; exit 0 is not evidence.** The cloud
    plugin saga proved installs can exit 0 without installing (commits 722c653,
    f91d7d2 -- verify `installed_plugins.json`, the gold standard in
@@ -169,7 +171,7 @@ cloud container (ephemeral, clean clone every session).
 # .claude/settings.json declares the plugins; verify the claim chain held:
 claude plugins list                          # expect ecc@ecc and superpowers@claude-plugins-official
 cat ~/.claude/plugins/installed_plugins.json # ground truth, not CLI output
-bin/dotfiles-tests                           # all 9 suites green on a clean clone
+bin/dotfiles-tests                           # all suites green on a clean clone
 ```
 
 For macOS/Linux-machine claims a container cannot prove (Homebrew, defaults,
@@ -198,10 +200,10 @@ Volatile items and their one-line re-verification commands:
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | Tracked key files = exactly `ssh/keys/id_ed25519_personal.pub`                               | `git ls-files ssh/keys`                                      |
 | public-safety suite is 3 assertions (todo.md, owner home prefix, secret regexes)             | `cat git/hooks/public-safety.test.sh`                        |
-| dotfiles-tests runs 9 suites incl. public-safety                                             | `bin/dotfiles-tests --list`                                  |
-| NOTICE lists ECC (rules + pre-commit/pre-push) and GSD redux (statusline.js)                 | `cat NOTICE`                                                 |
+| dotfiles-tests runs all suites incl. public-safety                                             | `bin/dotfiles-tests --list`                                  |
+| NOTICE lists ECC (pre-commit/pre-push; rules entry historical) and GSD redux (statusline.js) | `cat NOTICE`                                                 |
 | Fable5.md/Opus4.md gitignored                                                                | `cat claude/.gitignore`                                      |
-| ECC pinned URL + vendored langs                                                              | `grep -n 'ECC_REPO_URL\|ECC_VENDOR_LANGS' zsh/functions.zsh` |
+| ECC pinned URL                                                                               | `grep -n 'ECC_REPO_URL' zsh/functions.zsh`                   |
 | Cloud plugin/marketplace pins                                                                | `cat .claude/settings.json`                                  |
 | GSD redux repo name (NOTICE says gsd-core, functions.zsh comment says old name)              | `grep -n 'open-gsd' NOTICE zsh/functions.zsh`                |
 | pre-commit bypass vars (`ECC_SKIP_GIT_HOOKS`, `ECC_SKIP_PRECOMMIT`)                          | `grep -n 'ECC_SKIP' git/hooks/pre-commit git/hooks/pre-push` |

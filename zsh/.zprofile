@@ -3,8 +3,8 @@
 DIRECTORY=""
 
 # MacOS 
-if [[ `uname` == "Darwin" ]]; then
-    if [[ `uname -m` == "arm64" ]]; then
+if [[ $(uname) == "Darwin" ]]; then
+    if [[ $(uname -m) == "arm64" ]]; then
         DIRECTORY="/opt/homebrew/bin/brew"
     else 
         DIRECTORY="/usr/local/bin/brew"
