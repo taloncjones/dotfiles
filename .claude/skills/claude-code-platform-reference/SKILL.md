@@ -231,7 +231,7 @@ of the global one. Claude Code ALSO natively auto-loads every `.md` under
 an earlier "nothing auto-loads" finding here came from fresh clones where the
 untracked vendored dirs did not exist): a `paths:` frontmatter scopes a rule
 to sessions with matching files in context, no frontmatter loads every
-session. Our tracked always-on layer is `claude/rules/shared/`; ECC rules
+session. Our tracked always-on layer is `claude/rules/personal/`; ECC rules
 vendoring is retired (see dotfiles-architecture-contract).
 
 ## Cloud containers (claude.ai/code)

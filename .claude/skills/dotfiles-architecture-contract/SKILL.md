@@ -124,9 +124,9 @@ vendored dirs did not exist; leftover language dirs on older machines therefore
 still auto-load and should be deleted (`ecc-install`/`ecc-update` flag them).
 
 Invariant: never hand-edit vendored dirs; never `git add -f` them. Own rules
-go under `claude/rules/shared/` only (always-on unless given a `paths:`
+go under `claude/rules/personal/` only (always-on unless given a `paths:`
 frontmatter; `claude/rules/.gitignore` whitelists only `.gitignore` and
-`shared/`).
+`personal/`).
 
 ## Decision 5: the pre-launch placement INVARIANT (cloud plugins)
 

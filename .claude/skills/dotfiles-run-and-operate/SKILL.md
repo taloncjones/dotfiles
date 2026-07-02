@@ -126,7 +126,7 @@ origin/main` on it deliberately (lockfiles get dirtied by npm; rebase-pull
 - Rules: vendoring RETIRED (2026-07-02). Claude Code natively auto-loads every
   `.md` under `~/.claude/rules` (`paths:` frontmatter scopes to matching files;
   none = every session); the upstream tree lives in the marketplace clone
-  (`~/.claude/plugins/marketplaces/ecc/rules/`). Only `claude/rules/shared/`
+  (`~/.claude/plugins/marketplaces/ecc/rules/`). Only `claude/rules/personal/`
   is tracked (our always-on model-tuning layer); language dirs still on disk
   are leftovers that STILL auto-load, so `ecc-install`/`ecc-update` flag them
   for removal (\_ecc_legacy_rules_notice).

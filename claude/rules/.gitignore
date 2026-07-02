@@ -14,9 +14,10 @@
 # (no `paths:`) load every session. Delete them; this ignore keeps them from
 # ever being committed in the meantime.
 #
-# Only our OWN rules are version-controlled, under claude/rules/shared/
-# ("shared" = one asset source serving both the personal and work config dirs).
-# Tracked by the whitelist below.
+# Only our OWN rules are version-controlled, under claude/rules/personal/
+# ("personal" = authored by us, not vendored; the dir serves both the personal
+# and work config dirs via the claude/rules symlink). Tracked by the whitelist
+# below.
 /*
 !/.gitignore
-!/shared/
+!/personal/

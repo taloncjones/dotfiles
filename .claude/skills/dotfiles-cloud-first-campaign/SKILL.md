@@ -435,15 +435,15 @@ WRONG; the retirement decision still stands.** Claude Code natively auto-loads
 every `.md` under `~/.claude/rules` at launch -- `paths:` frontmatter scopes a
 rule to sessions with matching files in context, no frontmatter loads every
 session. Verified live: a cloud session observed
-`claude/rules/shared/claude-prompting.md` injected into its own context via the
+the tracked rules file `claude-prompting.md` injected into its own context via the
 `~/.claude/rules` symlink. The enumeration above missed the harness itself as a
 consumer because it ran in fresh cloud clones, where the untracked vendored
 dirs do not exist -- so nothing was there to load. Consequences: retirement
 survives on the marketplace-clone-superset argument alone; leftover vendored
 dirs on older machines are NOT inert (`common/`/`web/` have no `paths:` and
 load every session) and `_ecc_legacy_rules_notice` now says so; the tracked
-namespace was renamed `personal/` -> `shared/` when the always-on model-tuning
-layer (`claude-prompting.md`) landed there. Lesson: enumerate consumers in an
+namespace remains `claude/rules/personal/`, where the always-on model-tuning
+layer (`claude-prompting.md`) now lives. Lesson: enumerate consumers in an
 environment where the artifact actually exists -- an absence-of-effect
 observation on an absent artifact proves nothing.
 

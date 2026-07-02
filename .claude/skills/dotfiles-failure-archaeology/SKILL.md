@@ -133,7 +133,8 @@ re-vendorable via `ecc-install`/`ecc-update`. Own rules go under
 `claude/rules/personal/` (tracked). This is also why bootstrap installs ECC:
 a fresh clone has no language rules until it runs.
 
-**Status: settled, with one OPEN sub-question.** Whether vendoring into
+**Status: settled, with one OPEN sub-question [SUPERSEDED -- resolved by the
+corrections below; the auto-load claim here was wrong].** Whether vendoring into
 `claude/rules/` is needed AT ALL is unresolved as of 2026-07-02: nothing
 auto-loads `~/.claude/rules` (claude/CLAUDE.md never references it; only some
 ECC skills read it), and cloud containers already have the full tree at
@@ -156,14 +157,14 @@ consumers before building parity for an artifact.
 Claude Code natively auto-loads every `.md` under `~/.claude/rules` at launch
 (`paths:` frontmatter scopes a rule to matching files; none = every session) --
 verified live when a cloud session observed
-`claude/rules/shared/claude-prompting.md` injected into its own context. The
+the tracked rules file `claude-prompting.md` injected into its own context. The
 enumeration missed the harness itself as a consumer because it ran in fresh
 cloud clones where the untracked vendored dirs did not exist. Retirement
 survives on the marketplace-clone-superset argument; leftover vendored dirs
 are NOT inert (`common/`/`web/` load every session) and are now flagged as
-active by `_ecc_legacy_rules_notice`; the tracked namespace is
-`claude/rules/shared/` (renamed from `personal/`), home of the always-on
-model-tuning layer. Amended lesson: enumerate consumers in an environment
+active by `_ecc_legacy_rules_notice`; the tracked namespace remains
+`claude/rules/personal/`, now home of the always-on model-tuning layer.
+Amended lesson: enumerate consumers in an environment
 where the artifact exists -- absence of effect on an absent artifact proves
 nothing.
 

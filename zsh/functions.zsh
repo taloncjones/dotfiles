@@ -396,7 +396,7 @@ function _claude_ensure_plugin() {
 #   marketplace clone at ~/.claude/plugins/marketplaces/ecc/rules/ on every
 #   machine and container with the plugin installed -- point on-demand
 #   consumers (e.g. rules-distill's scan-rules.sh) there. Only our own
-#   always-on rules (claude/rules/shared/, tracked) live at ~/.claude/rules
+#   always-on rules (claude/rules/personal/, tracked) live at ~/.claude/rules
 #   now; leftover vendored language dirs from older installs still AUTO-LOAD
 #   (common/ and web/ have no `paths:`, so they load every session) and should
 #   be deleted (_ecc_legacy_rules_notice flags them). The ECC repo clone
@@ -418,7 +418,9 @@ function _ecc_legacy_rules_notice() {
     if (( ${#leftovers} > 0 )); then
         echo "[WARNING] Legacy vendored ECC rules present (${leftovers[*]}); vendoring is retired."
         echo "[WARNING] They are untracked but still auto-load into sessions. Remove with:"
-        echo "[WARNING]   rm -rf $DOTFILEDIR/claude/rules/{${(j:,:)leftovers}}"
+        # No brace form here: a single-element {web} does not brace-expand when
+        # pasted, so rm -rf would hit a literal '{web}' path and silently no-op.
+        echo "[WARNING]   rm -rf" "${leftovers[@]/#/$DOTFILEDIR/claude/rules/}"
         echo "[INFO] The full upstream tree lives at ~/.claude/plugins/marketplaces/ecc/rules/"
     fi
 }

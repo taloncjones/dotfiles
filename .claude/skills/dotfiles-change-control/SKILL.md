@@ -174,7 +174,7 @@ When you change the template:
   scopes to matching files; none = every session), so language dirs still under
   `claude/rules/` are NOT inert -- they auto-load and should be deleted
   (`_ecc_legacy_rules_notice` flags them; `claude/rules/.gitignore` keeps them
-  uncommitted). Your own rules go in `claude/rules/shared/` -- the only
+  uncommitted). Your own rules go in `claude/rules/personal/` -- the only
   whitelisted, tracked subdir. History: tracked vendored rules caused 39-file
   churn (untracked at e140ab3); vendoring was retired after consumer
   enumeration found no runtime reader of `~/.claude/rules` -- a finding later
