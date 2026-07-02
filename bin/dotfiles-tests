@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# dotfiles-tests - Run every dotfiles test suite and report one verdict.
+#
+# The repo's tests are standalone shell scripts with no shared runner; before
+# this script they only ran when a human remembered the right eight commands.
+# This is the single entrypoint for all of them (and what CI runs). Each suite
+# prints its own PASS/FAIL lines; this runner adds a per-suite verdict and a
+# final summary, and exits non-zero if any suite failed.
+#
+# Usage: dotfiles-tests            run all suites
+#        dotfiles-tests --list     list suites without running
+
+set -u
+
+SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
+cd "$DOTFILES"
+
+# interpreter<space>path, relative to repo root. Keep in sync when adding a
+# *.test.sh or a skill test; grep -rl 'passed, .* failed' is a quick audit.
+SUITES="
+sh install/install.test.sh
+sh claude/hooks/claude-hooks.test.sh
+sh codex/hooks/codex-hooks.test.sh
+sh codex/skills/codex-skills.test.sh
+sh git/hooks/commit-msg.test.sh
+sh git/hooks/post-checkout.test.sh
+sh git/hooks/public-safety.test.sh
+bash claude/skills/lib/test_work_state.sh
+bash claude/skills/todos/scripts/tests/todos_test.sh
+"
+
+if [ "${1:-}" = "--list" ]; then
+    printf '%s\n' "$SUITES" | sed '/^$/d'
+    exit 0
+fi
+
+pass=0
+fail=0
+failed_suites=""
+
+while read -r interp path; do
+    [ -n "${path:-}" ] || continue
+    if [ ! -f "$path" ]; then
+        echo "[X] MISSING $path"
+        fail=$((fail + 1))
+        failed_suites="$failed_suites $path"
+        continue
+    fi
+    echo "=== $path"
+    if "$interp" "$path"; then
+        echo "[OK] $path"
+        pass=$((pass + 1))
+    else
+        echo "[X] FAILED $path"
+        fail=$((fail + 1))
+        failed_suites="$failed_suites $path"
+    fi
+    echo
+done <<EOF
+$SUITES
+EOF
+
+echo "=== dotfiles-tests: $pass suites passed, $fail failed"
+if [ "$fail" -ne 0 ]; then
+    echo "[X] Failing suites:$failed_suites"
+    exit 1
+fi

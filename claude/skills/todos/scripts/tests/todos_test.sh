@@ -378,7 +378,13 @@ EOF
   local out; out=$(TODOS_TODAY=2026-06-08 TODOS_REGISTRY="$reg" bash "$TODOS" brief 2>"$errf")
   local err; err=$(cat "$errf"); rm -f "$errf"
   assert_contains "readable todo still shown" "$out" "Good stale item"
-  case "$out" in *"Locked item"*) bad "unreadable skipped" "leaked";; *) ok "unreadable skipped";; esac
+  # Root bypasses file permissions, so chmod 000 cannot make the file
+  # unreadable and the skip path never triggers; assert only as non-root.
+  if [ "$(id -u)" -eq 0 ]; then
+    ok "unreadable skipped (SKIP: running as root)"
+  else
+    case "$out" in *"Locked item"*) bad "unreadable skipped" "leaked";; *) ok "unreadable skipped";; esac
+  fi
   chmod 644 "$repo/.todos/pending/locked.md" 2>/dev/null || true
   rm -rf "$repo"; rm -f "$reg"
 }

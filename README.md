@@ -270,7 +270,9 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `/doc` - Generate or review documentation
 - `/done` - Finish work and clean up
 - `/explain` - Deep dive explanation
+- `/handoff` - Save a next-slice kickoff brief to `.claude/handoffs/`
 - `/jira` - Interact with linked Jira ticket
+- `/kickoff` - Resume the next slice from the saved handoff
 - `/lint` - Run linters and formatters
 - `/pr` - Create a pull request
 - `/ready` - Verify and finalize for review
@@ -289,6 +291,13 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `completeness-reviewer` - Verify structural integrity
 - `doc-implementer` - Write/update documentation
 - `doc-reviewer` - Documentation quality audit
+
+**Skills** (`claude/skills/`, loaded on demand by trigger phrases):
+
+- `brief`, `todos`, `weekly` - daily/weekly planning built on the `.todos/` backlog
+- `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) review gates
+- `ship`, `post-merge`, `reconcile`, `wrap` - delivery, teardown, Jira drift repair, session exit
+- `lib/work-state.sh` - shared PR/worktree state gathering (tested by `lib/test_work_state.sh`)
 
 **Hooks** (pre/post tool execution):
 

@@ -1,0 +1,45 @@
+name: tests
+
+# Every dotfiles test is a standalone shell script; bin/dotfiles-tests is the
+# single runner. Without CI these drift guards only fire when a human
+# remembers to run them -- this workflow makes drift visible on every push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # zsh: syntax-gate the shell layer (not installed on the runner image).
+      # ripgrep: commit-msg hook dependency; without it the hook (and its
+      # test's rg-missing notice path) can't exercise the real code path.
+      - name: Install zsh and ripgrep
+        run: sudo apt-get update && sudo apt-get install -y zsh ripgrep
+
+      - name: zsh syntax check
+        run: |
+          for f in zsh/.zshrc zsh/.zprofile zsh/aliases.zsh zsh/functions.zsh zsh/theme.zsh zsh/scripts/*.zsh; do
+            zsh -n "$f" && echo "[OK] $f"
+          done
+
+      - name: bash syntax check
+        run: |
+          for f in bootstrap.sh bootstrap-cloud.sh install/install.sh install/common/*.sh \
+                   install/linux/*.sh install/macos/*.sh bin/dotfiles-repair bin/dotfiles-tests \
+                   bin/identity-doctor bin/identity-setup bin/setup-claude \
+                   .claude/hooks/session-start.sh git/hooks/*; do
+            case "$f" in *.test.sh) continue ;; esac
+            bash -n "$f" && echo "[OK] $f"
+          done
+
+      - name: python syntax check
+        run: |
+          python3 -m py_compile claude/hooks/*.py codex/hooks/*.py
+          echo "[OK] hook scripts compile"
+
+      - name: Run all test suites
+        run: bash bin/dotfiles-tests

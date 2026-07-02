@@ -103,7 +103,8 @@ AVOID:
 - Use brainstorming, writing-plans, cross-model plan review, and executing-plans
   for substantial implementation work.
 - Full pipeline for substantial implementation (standing order of operations):
-  isolated worktree -> brainstorming -> write spec (to `docs/superpowers/specs/`)
+  isolated worktree -> brainstorming -> write spec (to `docs/specs/`, the
+  path codex-spec-review resolves first)
   -> `codex-spec-review` -> writing-plans -> `codex-plan-review` ->
   `subagent-driven-development` -> `co-review` at the branch gate. Do NOT improvise
   a build plan and jump to implementation; do NOT skip the brainstorm/spec steps
