@@ -24,7 +24,7 @@ recorded root cause no longer holds -- not a hunch.
 | --- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------- | --------------------------------------- |
 | 1   | Cloud first-session plugins              | Pre-launch placement required; SessionStart install is dark until next session | f2f13ab .. 8d4507f (root cause: c1c4500)              | Settled                                 |
 | 2   | Tiered-orchestrate + per-task Codex gate | Added, debugged, removed whole subsystem as slower/costlier                    | fc88aac, e401175, 7fefcb5                             | Settled (removed)                       |
-| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring necessity still OPEN |
+| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring retired 2026-07-02  |
 | 4   | Codex asset mirror into ~/.codex         | Overwrote hooksPath, wrote through symlink, orphaned agent files               | pre-public (no hash); sweep in install/common/link.sh | Settled (abandoned)                     |
 | 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; redux fork only                 | 9ad4dc8                                               | Settled                                 |
 | 6   | todo.md audit file deleted               | Tracking moved off-file; 2 low-priority items still open                       | 854228e, c0a9072                                      | Partially open                          |
@@ -139,6 +139,17 @@ auto-loads `~/.claude/rules` (claude/CLAUDE.md never references it; only some
 ECC skills read it), and cloud containers already have the full tree at
 `~/.claude/plugins/marketplaces/ecc/rules/`. Do not "fix" this either way
 without settling that question first -- see `dotfiles-research-frontier`.
+
+**Correction (2026-07-02, later the same day): sub-question SETTLED --
+vendoring RETIRED.** The decision gate ran: consumer enumeration over the ECC
+plugin payload (`grep -rln "claude/rules" ~/.claude/plugins/cache/ecc/`) found
+no runtime consumer (no hook reads `~/.claude/rules`; only on-demand skills
+with overridable paths, chiefly `rules-distill`'s `scan-rules.sh` via
+`RULES_DISTILL_DIR`). `ecc-sync-rules` and `ECC_VENDOR_LANGS` were removed;
+`ecc-install`/`ecc-update` now flag inert leftovers
+(`_ecc_legacy_rules_notice`); consumers point at the marketplace clone.
+Lesson: a vendored copy nobody loads is pure carrying cost -- enumerate
+consumers before building parity for an artifact.
 
 ## Saga 4: Codex asset mirror into ~/.codex (abandoned)
 

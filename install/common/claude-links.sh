@@ -86,17 +86,15 @@ link_claude_config_dir() {
     fi
   done
 
-  # Rules: claude/rules is symlinked here as the single asset source. The ECC
-  # language dirs (common/ cpp/ python/ rust/ typescript/ web/) are installer-
-  # managed and UNTRACKED (claude/rules/.gitignore): ecc-install / ecc-update
-  # re-vendor them from the ECC repo via `cp -R`, so they are reproducible and
-  # never committed -- same model as ECC skills/commands/hooks. Only our own
-  # custom rules under claude/rules/personal/ are version-controlled.
-  # ecc-sync-rules writes into the dotfiles claude/rules dir (the symlink target),
-  # never into $cdir/rules directly (either account) now that this is a symlink.
+  # Rules: claude/rules is symlinked here as the single asset source. Only our
+  # own rules under claude/rules/personal/ are tracked; ECC rules vendoring is
+  # RETIRED (2026-07-02) -- the upstream tree lives in the ECC marketplace
+  # clone (~/.claude/plugins/marketplaces/ecc/rules/), and any language dirs
+  # still sitting in claude/rules are inert pre-retirement leftovers
+  # (claude/rules/.gitignore keeps them uncommitted).
   # One-time migration: older machines have rules as a REAL directory (from a
   # blanket ECC install). Preserve it as a timestamped backup before replacing
-  # it with the symlink, in case it holds hand-edited rules not yet vendored.
+  # it with the symlink, in case it holds hand-edited rules not yet saved.
   # Steady state it is already a symlink, which rm -rf drops by link only
   # (never recursing into the dotfiles target), so re-runs stay idempotent.
   if [[ -d "$cdir/rules" && ! -L "$cdir/rules" ]]; then

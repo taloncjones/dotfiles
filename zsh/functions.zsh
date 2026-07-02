@@ -286,45 +286,34 @@ function _claude_plugin_scope() {
 
 # --- ECC (Everything Claude Code) ---
 # Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
-# Rules: a curated subset is vendored into the dotfiles repo (claude/rules) and
-#   symlinked to ~/.claude/rules by link.sh. The ECC repo is kept only as the
-#   upstream source that ecc-sync-rules copies from; it no longer installs into
-#   ~/.claude. Edit ECC_VENDOR_LANGS to change which languages get vendored.
+# Rules: NOT vendored (retired 2026-07-02). Nothing auto-loads ~/.claude/rules;
+#   the only functional consumers are on-demand ECC skills (e.g. rules-distill's
+#   scan-rules.sh) whose paths are overridable. The full upstream rules tree
+#   ships inside the marketplace clone at
+#   ~/.claude/plugins/marketplaces/ecc/rules/ on every machine and container
+#   with the plugin installed -- point consumers there. Only personal rules
+#   (claude/rules/personal/, tracked) live at ~/.claude/rules now; leftover
+#   vendored language dirs from older installs are inert and safe to delete
+#   (_ecc_legacy_rules_notice flags them). The ECC repo clone remains only as
+#   the source for codex-ecc-sync.
 # Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
 #   everything-claude-code v1 repo/marketplace is retired.
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
-ECC_VENDOR_LANGS=(common python cpp rust web typescript)
 
-function ecc-sync-rules() {    # ecc-sync-rules() re-vendors curated ECC rules into the dotfiles repo as a reviewable diff. ex: $ ecc-sync-rules
-    local ecc_dir="$ECC_REPO_DIR"
-    local dst="$DOTFILEDIR/claude/rules"
-    if [[ ! -d "$ecc_dir/rules" ]]; then
-        echo "[X] ECC repo rules not found at $ecc_dir/rules. Run 'ecc-install' first."
-        return 1
-    fi
-    mkdir -p "$dst"
+# helper: flag inert vendored rules left behind by pre-retirement installs
+function _ecc_legacy_rules_notice() {
     local l
-    local -a vendored=() missing=() failed=()
-    for l in "${ECC_VENDOR_LANGS[@]}"; do
-        if [[ ! -d "$ecc_dir/rules/$l" ]]; then
-            missing+=("$l")
-            continue
-        fi
-        rm -rf "$dst/$l"
-        if cp -R "$ecc_dir/rules/$l" "$dst/$l"; then
-            vendored+=("$l")
-        else
-            failed+=("$l")
-        fi
+    local -a leftovers=()
+    for l in common cpp python rust typescript web; do
+        [[ -d "$DOTFILEDIR/claude/rules/$l" ]] && leftovers+=("$l")
     done
-    echo "[OK] Vendored (${vendored[*]:-none}) from ECC @ $(git -C "$ecc_dir" rev-parse --short HEAD 2>/dev/null)"
-    (( ${#missing} > 0 )) && echo "[WARNING] Not in ECC repo, skipped: ${missing[*]}"
-    (( ${#failed} > 0 )) && echo "[X] Copy failed: ${failed[*]}"
-    echo "[INFO] Review and commit: git -C \"$DOTFILEDIR\" diff -- claude/rules"
-    # Fail (so ecc-install/ecc-update report it) only on a real copy error or a
-    # fully empty vendor; a lang merely absent upstream is a non-fatal warning.
-    (( ${#failed} == 0 && ${#vendored} > 0 ))
+    if (( ${#leftovers} > 0 )); then
+        echo "[INFO] Legacy vendored ECC rules present (${leftovers[*]}); vendoring is retired."
+        echo "[INFO] They are untracked and inert. Remove with:"
+        echo "[INFO]   rm -rf $DOTFILEDIR/claude/rules/{${(j:,:)leftovers}}"
+        echo "[INFO] The full upstream tree lives at ~/.claude/plugins/marketplaces/ecc/rules/"
+    fi
 }
 
 function codex-ecc-sync() {    # codex-ecc-sync() merges ECC into ~/.codex (AGENTS, prompts, MCP) and installs ECC git hooks into the dotfiles-owned hooks dir. ex: $ codex-ecc-sync
@@ -379,9 +368,9 @@ function ecc-install() {    # ecc-install([--local]) will set up ECC from scratc
         (cd "$ecc_dir" && node scripts/uninstall.js 2>/dev/null)
     fi
 
-    # vendor curated rules into the dotfiles repo — plugin handles everything else
-    echo "[INFO] Vendoring rules into dotfiles..."
-    ecc-sync-rules || { echo "[X] rules vendoring failed"; return 1; }
+    # rules vendoring retired (2026-07-02): the marketplace clone carries the
+    # upstream rules tree; only flag inert leftovers from older installs.
+    _ecc_legacy_rules_notice
 
     # ensure the ecc marketplace + plugin exist in EVERY account config dir
     # (~/.claude personal, ~/.claude-work work). Explicit CLAUDE_CONFIG_DIR +
@@ -430,14 +419,14 @@ function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and
     (cd "$ecc_dir" && git fetch origin main && git reset --hard origin/main) \
         || { echo "[X] ECC sync failed"; return 1; }
 
-    echo "[INFO] Re-vendoring rules into dotfiles..."
-    ecc-sync-rules || { echo "[X] rules vendoring failed"; return 1; }
+    # rules vendoring retired (2026-07-02); flag inert leftovers only.
+    _ecc_legacy_rules_notice
 
     # refresh the Codex mirror too (no-op when the Codex CLI is absent)
     codex-ecc-sync || echo "[WARNING] Codex sync failed; Claude-side ECC update is unaffected"
 
     _claude_plugin_epoch_write ecc
-    echo "[OK] ECC rules updated"
+    echo "[OK] ECC updated"
 }
 
 function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, and metadata; vendored rules in dotfiles are left intact. ex: $ ecc-uninstall

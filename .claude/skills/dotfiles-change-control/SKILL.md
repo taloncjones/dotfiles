@@ -157,11 +157,15 @@ When you change the template:
 
 ## Special protocol: vendored content
 
-- ECC language rules (`claude/rules/` except `personal/`): installer-managed,
-  untracked, wiped by `rm -rf` on every `ecc-sync-rules` run (see the rationale
-  in `claude/rules/.gitignore`). Your own rules go in `claude/rules/personal/`
-  -- the only whitelisted, tracked subdir. History: tracked vendored rules
-  caused 39-file churn, untracked at e140ab3.
+- ECC language rules: vendoring RETIRED (2026-07-02) -- `ecc-sync-rules` and
+  `ECC_VENDOR_LANGS` are gone; the upstream rules tree lives in the ECC
+  marketplace clone (`~/.claude/plugins/marketplaces/ecc/rules/`). Language
+  dirs still under `claude/rules/` are inert pre-retirement leftovers, kept
+  uncommitted by `claude/rules/.gitignore`. Your own rules go in
+  `claude/rules/personal/` -- the only whitelisted, tracked subdir. History:
+  tracked vendored rules caused 39-file churn (untracked at e140ab3), then
+  vendoring itself was retired once consumer enumeration found no runtime
+  reader of `~/.claude/rules`.
 - `codex/AGENTS.md`: everything between `<!-- BEGIN ECC -->` and the matching
   end marker is a sync-managed sentinel block. Edit only the text outside it;
   regenerate the block via `codex-ecc-sync` (in `zsh/functions.zsh`), which

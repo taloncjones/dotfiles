@@ -305,9 +305,9 @@ declaration-only repos, step 0.4 plus one plugin skill invocable in session 1.
 
 ## Phase 3 -- parity gaps to close
 
-Each gap: status, first step, measurable gate. Statuses are honest -- two are
-candidates (design known, unimplemented), two are open (decision not yet made).
-None of these is done; do not report them as fixed.
+Each gap: status, first step, measurable gate. Statuses are honest -- 3.4 is
+closed (2026-07-02, vendoring retired), 3.1/3.2 close in sibling optimization
+PRs, 3.3 remains open. Do not report an open one as fixed.
 
 **3.1 Machine-path installs verify against `installed_plugins.json` -- CANDIDATE.**
 `ecc-install`/`superpowers-install` (`zsh/functions.zsh`, functions at
@@ -338,21 +338,23 @@ claude.ai/code. First step: answer that question; if yes, spec
 (work values are machine-local secrets -- see dotfiles-external-positioning).
 Gate: a recorded decision; no implementation until then.
 
-**3.4 ECC rules vendoring for cloud -- OPEN.** Evidence: nothing auto-loads
-`~/.claude/rules` (`claude/CLAUDE.md` never references it; only some ECC
-skills read it), and cloud containers already carry the FULL upstream rules
-tree at `~/.claude/plugins/marketplaces/ecc/rules/` (verified 2026-07-02).
-The vendored copy in `claude/rules/` is untracked (`claude/rules/.gitignore`)
-and exists only via `ecc-sync-rules`. Decision options:
-
-| Option                                                   | Upside                   | Risk                                                                 |
-| -------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------- |
-| Stop vendoring; point consumers at the marketplace clone | One copy, zero sync code | Any ECC skill hardcoding `~/.claude/rules/...` paths breaks          |
-| Keep vendoring; symlink ECC language dirs to the clone   | Paths unchanged          | Symlink into installer-managed cache; cache relocation dangles links |
-
-Decision gate BEFORE either: enumerate actual consumers --
-`grep -rn "claude/rules\|\.claude/rules" ~/.claude/plugins/cache/ecc/` -- and
-test both config dirs on a machine. Until then, vendoring stays.
+**3.4 ECC rules vendoring -- CLOSED (2026-07-02): vendoring RETIRED.** The
+decision gate ran: consumer enumeration over the ECC plugin payload
+(`grep -rln "claude/rules" ~/.claude/plugins/cache/ecc/`) found NO runtime
+consumer -- no ECC hook reads `~/.claude/rules`; the only functional consumers
+are on-demand skills (`rules-distill`'s `scan-rules.sh`, overridable via
+`RULES_DISTILL_DIR`/arg; a doc example in `skill-comply`; prose elsewhere).
+Combined with the standing evidence (nothing auto-loads `~/.claude/rules`;
+cloud sessions passed every gate with zero vendored rules; the FULL upstream
+tree ships at `~/.claude/plugins/marketplaces/ecc/rules/` wherever the plugin
+is installed), the "stop vendoring" option won: it deletes sync code instead
+of adding parity code, and the marketplace clone is a superset of the
+6-language vendored subset. Implemented: `ecc-sync-rules` and
+`ECC_VENDOR_LANGS` removed from `zsh/functions.zsh`; `ecc-install`/`ecc-update`
+no longer vendor and instead flag inert pre-retirement leftovers
+(`_ecc_legacy_rules_notice`); `claude/rules/.gitignore` keeps leftovers
+uncommitted; `claude/rules/personal/` remains the only tracked rules content.
+Point any consumer that wants ECC rules at the marketplace clone path.
 
 ## Promotion protocol (non-negotiable)
 

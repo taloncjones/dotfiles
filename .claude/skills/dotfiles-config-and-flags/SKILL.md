@@ -100,9 +100,8 @@ silent degradation, not a documented skip.
 
 | Var                                         | Consumer                                                                                                                 | Default                                   | Effect                                                                                                                                                                                                                                                                                                                                                                     | Class      |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `ECC_REPO_URL`                              | `ecc-install` in `zsh/functions.zsh`; also an independent copy in `bootstrap-cloud.sh`                                   | `https://github.com/affaan-m/ECC.git`     | Upstream ECC repo cloned for rule vendoring and registered as the `ecc` plugin marketplace. Edit-in-file (both places; keep in sync)                                                                                                                                                                                                                                       | production |
-| `ECC_REPO_DIR`                              | `ecc-sync-rules`, `codex-ecc-sync`, `ecc-install/update/uninstall` in `zsh/functions.zsh`                                | `~/Git/personal/ECC`                      | Local clone of upstream ECC -- a read-only vendored mirror (`ecc-update` hard-resets it to `origin/main`). Edit-in-file                                                                                                                                                                                                                                                    | production |
-| `ECC_VENDOR_LANGS`                          | `ecc-sync-rules` in `zsh/functions.zsh`                                                                                  | `(common python cpp rust web typescript)` | Which ECC rule languages get vendored into `claude/rules/` (untracked; see `claude/rules/.gitignore`). Edit-in-file; procedure below                                                                                                                                                                                                                                       | production |
+| `ECC_REPO_URL`                              | `ecc-install` in `zsh/functions.zsh`; also an independent copy in `bootstrap-cloud.sh`                                   | `https://github.com/affaan-m/ECC.git`     | Upstream ECC repo registered as the `ecc` plugin marketplace; the local clone now serves only `codex-ecc-sync` (rules vendoring retired 2026-07-02). Edit-in-file (both places; keep in sync)                                                                                                                                                                                                                                       | production |
+| `ECC_REPO_DIR`                              | `codex-ecc-sync`, `ecc-install/update/uninstall` in `zsh/functions.zsh`                                                  | `~/Git/personal/ECC`                      | Local clone of upstream ECC -- a read-only vendored mirror (`ecc-update` hard-resets it to `origin/main`). Edit-in-file                                                                                                                                                                                                                                                    | production |
 | `ECC_GLOBAL_HOOKS_DIR`                      | Upstream ECC `scripts/sync-ecc-to-codex.sh`; set to `$HOME/.config/git/hooks` by `codex-ecc-sync` in `zsh/functions.zsh` | unset upstream                            | Redirects ECC's git-hook installer into the dotfiles-owned hooks dir so `core.hooksPath` stays dotfiles-managed. [WARNING] Never run `sync-ecc-to-codex.sh` directly without this -- it overwrites `core.hooksPath` and writes through the `~/.codex/AGENTS.md` symlink into this repo (see CLAUDE.md "Codex plugin integration"). Always use the `codex-ecc-sync` wrapper | production |
 | `GSD_REDUX_PKG`                             | `_gsd_run()` in `zsh/functions.zsh`                                                                                      | `@opengsd/get-shit-done-redux@latest`     | The ONLY sanctioned GSD package (community fork). The original `get-shit-done-cc` is compromised (token rug-pull, commit `9ad4dc8` retirement); `gsd-uninstall` purges it. Edit-in-file                                                                                                                                                                                    | production |
 | `PLUGIN_RETRIES` / `PLUGIN_RETRY_MAX_DELAY` | `ensure_plugin()` in `bootstrap-cloud.sh`                                                                                | `8` / `15` (seconds)                      | Retry budget for cloud plugin installs. The cap is load-bearing: uncapped doubling could blow the Setup script's ~5-minute limit (commit `da54e17`). Edit-in-file constants, not env                                                                                                                                                                                       | production |
@@ -162,18 +161,13 @@ into BOTH config dirs (`~/.claude` and, if it exists, `~/.claude-work`).
 
 ## Config knobs (edit-in-file)
 
-### ECC_VENDOR_LANGS -- change which rule languages are vendored
+### ECC rules vendoring -- RETIRED (2026-07-02)
 
-1. Edit the array in `zsh/functions.zsh` (search `ECC_VENDOR_LANGS=`).
-2. `reload` (or open a new shell), then `ecc-sync-rules`.
-3. Review: `git -C "$DOTFILEDIR" diff -- claude/rules` -- but note vendored
-   language dirs are UNTRACKED (`claude/rules/.gitignore` tracks only
-   `personal/`), so the diff shows only `.gitignore`-adjacent changes; the
-   payload lands on disk, not in git. Removing a language does not delete its
-   already-vendored dir; `rm -rf claude/rules/<lang>` yourself.
-4. Commit the `functions.zsh` edit. Whether vendoring is still needed at all
-   is an OPEN question (cloud containers get the full ECC rules tree via the
-   plugin at `~/.claude/plugins/marketplaces/ecc/rules/`).
+`ECC_VENDOR_LANGS` and `ecc-sync-rules` no longer exist. The upstream rules
+tree ships in the marketplace clone
+(`~/.claude/plugins/marketplaces/ecc/rules/`); point on-demand consumers (e.g.
+`RULES_DISTILL_DIR`) there. Language dirs left under `claude/rules/` are inert
+leftovers -- `ecc-install`/`ecc-update` print the removal command.
 
 ### settings.json key ownership
 
@@ -264,16 +258,16 @@ grep -n -- '--list' bin/dotfiles-tests
 grep -n '_claude_plugin_scope\|_gsd_parse_args' zsh/functions.zsh
 
 # Edit-in-file knob values
-grep -n 'ECC_VENDOR_LANGS=\|ECC_REPO_URL=\|ECC_REPO_DIR=\|GSD_REDUX_PKG=' zsh/functions.zsh
+grep -n 'ECC_REPO_URL=\|ECC_REPO_DIR=\|GSD_REDUX_PKG=' zsh/functions.zsh
 grep -n 'PLUGIN_RETRIES=\|PLUGIN_RETRY_MAX_DELAY=' bootstrap-cloud.sh
 
 # settings ownership + statusline
 grep -n '"env"\|statusLine\|enabledPlugins' claude/settings.json.tmpl .claude/settings.json
 ```
 
-Volatile facts most likely to drift: the `ECC_VENDOR_LANGS` list, the plugin
-retry constants, the template `env` keys, and the test-suite count (nine as of
-2026-07-02; `bin/dotfiles-tests --list`). Upstream URLs pinned as of today:
+Volatile facts most likely to drift: the plugin retry constants, the template
+`env` keys, and the test-suite count (`bin/dotfiles-tests --list`). Upstream
+URLs pinned as of today:
 `https://github.com/affaan-m/ECC.git`,
 `https://github.com/anthropics/claude-plugins-official.git`,
 `@opengsd/get-shit-done-redux` on npm.
