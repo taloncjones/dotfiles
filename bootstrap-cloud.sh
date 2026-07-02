@@ -171,71 +171,19 @@ ensure_plugin() {
   return 1
 }
 
-# Reconcile ~/.claude/settings.json with the dotfiles template.
-#
-# seed_machine_local_file (the linking step) only copies the template when the
-# destination is ABSENT. In a cloud container the plugin installers create
-# settings.json first -- writing just enabledPlugins/extraKnownMarketplaces --
-# so the seed is skipped and the dotfiles-managed keys (the SessionStart
-# orchestrator + account_guard hooks, statusLine, permissions, env) never land.
-# The result is a session that has the plugins but none of the dotfiles
-# behaviour. We run AFTER the installs and merge: the template supplies the
-# canonical dotfiles config, while the plugin-installer keys are unioned in so
-# nothing the installers wrote is lost. Idempotent.
+# Settings reconcile: the merge (template supplies the canonical dotfiles
+# config; plugin-installer keys are unioned in so nothing the installers wrote
+# is lost) lives in install/common/claude-links.sh as
+# reconcile_claude_settings_file, shared with the machine link path so both
+# environments get identical treatment. It matters here because in a cloud
+# container the plugin installers create settings.json first -- writing just
+# enabledPlugins/extraKnownMarketplaces -- so the seed-if-absent step is
+# skipped and the dotfiles-managed keys (SessionStart orchestrator +
+# account_guard hooks, statusLine, permissions, env) never land without the
+# merge (910f2bc).
 reconcile_claude_settings() {
-  local tmpl="$DOTFILEDIR/claude/settings.json.tmpl"
-  local dest="$HOME/.claude/settings.json"
-
-  if [ ! -f "$tmpl" ]; then
-    echo "[bootstrap-cloud] WARNING: settings template missing at $tmpl; skipping reconcile." >&2
-    return 1
-  fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "[bootstrap-cloud] WARNING: python3 not on PATH; cannot reconcile settings.json." >&2
-    echo "[bootstrap-cloud]          Orchestrator/account-guard hooks may be absent this session." >&2
-    return 1
-  fi
-
-  python3 - "$tmpl" "$dest" <<'PY'
-import json, os, sys
-
-tmpl_path, dest_path = sys.argv[1], sys.argv[2]
-with open(tmpl_path) as fh:
-    tmpl = json.load(fh)
-
-dest = {}
-if os.path.isfile(dest_path) and os.path.getsize(dest_path):
-    try:
-        with open(dest_path) as fh:
-            dest = json.load(fh)
-    except json.JSONDecodeError:
-        dest = {}  # corrupt/partial -- the template rebuild below is authoritative
-
-# Keys the plugin installers own: union them so installed plugins/marketplaces
-# survive (live state wins on conflict). Everything else comes from the template.
-PLUGIN_KEYS = ("enabledPlugins", "extraKnownMarketplaces")
-result = dict(tmpl)
-for key in PLUGIN_KEYS:
-    merged = dict(tmpl.get(key, {}))
-    merged.update(dest.get(key, {}))
-    if merged:
-        result[key] = merged
-
-# Preserve any platform/installer keys the template does not define.
-for key, value in dest.items():
-    if key not in result:
-        result[key] = value
-
-os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-with open(dest_path, "w") as fh:
-    json.dump(result, fh, indent=2)
-    fh.write("\n")
-
-ss = result.get("hooks", {}).get("SessionStart", [])
-cmds = [os.path.basename(h.get("command", "")) for grp in ss for h in grp.get("hooks", [])]
-print("[bootstrap-cloud] Reconciled settings.json (SessionStart: "
-      + (", ".join(c for c in cmds if c) or "none") + ").")
-PY
+  reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
+    "$HOME/.claude/settings.json" "[bootstrap-cloud]"
 }
 
 # Reattribute git commits to the tracked personal identity.

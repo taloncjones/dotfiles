@@ -119,13 +119,14 @@ Expected: `exit=0` and a reviewable PR produced without human edits.
 ## Problem 3 -- drift-proof reproducibility (status: open; partial coverage exists)
 
 **Gap in common practice.** Dotfiles drift is normally caught by eye ("my
-prompt looks wrong") or never. Seed-once machine-local files make it
-structural here: `claude/settings.json.tmpl` changes never reach existing
-machines automatically (`seed_machine_local_file` prints re-seed instructions
-and moves on). (The sibling gap -- machine-path plugin installers trusting
-CLI output rather than `installed_plugins.json` -- closed 2026-07-02:
-`_claude_ensure_plugin` in `zsh/functions.zsh` now mirrors
-`bootstrap-cloud.sh`'s `ensure_plugin`, tested by `zsh/functions.test.sh`.)
+prompt looks wrong") or never. Seed-once machine-local files made it
+structural here until 2026-07-02: template drift is now closed by
+`reconcile_claude_settings_file` (`install/common/claude-links.sh`) on every
+machine `update`/link run (step 1 below, done -- tested by
+`install/claude-links.test.sh`), and the machine-path plugin installers now
+verify against `installed_plugins.json` via `_claude_ensure_plugin` (tested by
+`zsh/functions.test.sh`). Remaining structural drift: a machine that never
+runs `update`, and the step 2/3 gaps below.
 
 **This repo's asset.** The drift-guard test suites under one runner
 (`bin/dotfiles-tests`, `--list` to enumerate), CI (`.github/workflows/tests.yml`,
@@ -135,10 +136,11 @@ already fails when a live `settings.json` misses a required SessionStart hook.
 
 **First three steps in this repo:**
 
-1. Machine-side settings reconcile: port `bootstrap-cloud.sh`
-   `reconcile_claude_settings` (merge template keys into live settings without
-   clobbering plugin-written keys) into the machine install path so `update`
-   closes template drift instead of printing instructions.
+1. DONE (2026-07-02): machine-side settings reconcile --
+   `reconcile_claude_settings_file` in `install/common/claude-links.sh`, run
+   per config dir by `link_claude_config_dir`, so `update` closes template
+   drift instead of printing instructions; `bootstrap-cloud.sh` delegates to
+   the same code.
 2. Scheduled CI: add a `schedule:` cron trigger to
    `.github/workflows/tests.yml` so drift-guard suites run without waiting for
    a push.

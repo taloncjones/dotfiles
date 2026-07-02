@@ -46,6 +46,80 @@ seed_machine_local_file() {
   fi
 }
 
+# Reconcile a machine-local settings.json with the tracked template.
+#
+# seed_machine_local_file copies the template only when the destination is
+# ABSENT, so template changes never reach an existing settings.json on their
+# own (seed-once design). This merge closes that gap and is safe to run on
+# every install/update:
+#   - template-owned keys (hooks, statusLine, permissions, env, ...) come from
+#     the template -- template drift is reconciled away;
+#   - plugin-installer-owned keys (enabledPlugins, extraKnownMarketplaces) are
+#     unioned with live state winning on conflict, so nothing an installer
+#     wrote is lost;
+#   - keys the template does not define are preserved as-is.
+# A corrupt/unparseable destination is rebuilt from the template. Idempotent.
+# History: the merge logic originated in bootstrap-cloud.sh (910f2bc), which
+# now delegates here; machines get the same treatment on every `update`.
+# Usage: reconcile_claude_settings_file <template> <dest> [label]
+reconcile_claude_settings_file() {
+  local tmpl="$1"
+  local dest="$2"
+  local label="${3:-[claude-links]}"
+
+  if [ ! -f "$tmpl" ]; then
+    echo "$label WARNING: settings template missing at $tmpl; skipping reconcile." >&2
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "$label WARNING: python3 not on PATH; cannot reconcile settings.json." >&2
+    echo "$label          Template changes must be merged into $dest by hand." >&2
+    return 1
+  fi
+
+  RECONCILE_LABEL="$label" python3 - "$tmpl" "$dest" <<'PY'
+import json, os, sys
+
+label = os.environ.get("RECONCILE_LABEL", "[claude-links]")
+tmpl_path, dest_path = sys.argv[1], sys.argv[2]
+with open(tmpl_path) as fh:
+    tmpl = json.load(fh)
+
+dest = {}
+if os.path.isfile(dest_path) and os.path.getsize(dest_path):
+    try:
+        with open(dest_path) as fh:
+            dest = json.load(fh)
+    except json.JSONDecodeError:
+        dest = {}  # corrupt/partial -- the template rebuild below is authoritative
+
+# Keys the plugin installers own: union them so installed plugins/marketplaces
+# survive (live state wins on conflict). Everything else comes from the template.
+PLUGIN_KEYS = ("enabledPlugins", "extraKnownMarketplaces")
+result = dict(tmpl)
+for key in PLUGIN_KEYS:
+    merged = dict(tmpl.get(key, {}))
+    merged.update(dest.get(key, {}))
+    if merged:
+        result[key] = merged
+
+# Preserve any platform/installer keys the template does not define.
+for key, value in dest.items():
+    if key not in result:
+        result[key] = value
+
+os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+with open(dest_path, "w") as fh:
+    json.dump(result, fh, indent=2)
+    fh.write("\n")
+
+ss = result.get("hooks", {}).get("SessionStart", [])
+cmds = [os.path.basename(h.get("command", "")) for grp in ss for h in grp.get("hooks", [])]
+print(label + " Reconciled settings.json (SessionStart: "
+      + (", ".join(c for c in cmds if c) or "none") + ").")
+PY
+}
+
 # Link the dotfiles-managed Claude Code assets into one config dir.
 # Two config dirs share the same dotfiles-managed assets via symlinks:
 #   ~/.claude       personal account (default; desktop app lands here)
@@ -120,8 +194,10 @@ link_claude_config_dir() {
   ln -sfn "$DOTFILEDIR"/claude/skills "$cdir"/skills
 
   # settings.json is machine-local (plugin installers like GSD/ECC write to it).
-  # Seed from template on first install only; manual merge required when template changes.
+  # Seed from template on first install, then reconcile template drift on every
+  # run -- plugin-installer keys survive the merge (see reconcile_claude_settings_file).
   seed_machine_local_file "$DOTFILEDIR"/claude/settings.json.tmpl "$cdir"/settings.json
+  reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$cdir"/settings.json || true
   ln -sf "$DOTFILEDIR"/claude/commands "$cdir"/commands
   ln -sf "$DOTFILEDIR"/claude/agents "$cdir"/agents
   ln -sf "$DOTFILEDIR"/claude/hooks "$cdir"/hooks
