@@ -149,6 +149,27 @@ reattributed, `commit.gpgsign` false. Account sync landed atlassian,
 frontend-design, security-guidance at `"scope": "user"`; the three
 project-excluded plugins stayed disabled (see Phase 1, now verified).
 
+Observed baseline (2026-07-02, session 1 of a NON-dotfiles repo): the
+hook-only rollout (latam-bess: no Setup script, no committed declaration;
+that repo's committed SessionStart hook clones this dotfiles repo and runs
+`bootstrap-cloud.sh`) was audited fresh the same day. The
+asset/identity/settings layer was fully live SAME-session: cloud-doctor exit
+0 and symlink-audit `--cloud` 9/9 OK via the hook-cloned checkout,
+`bin/dotfiles-tests` 9/9 suites green, git author reattributed (gpgsign
+false), statusline registered and resolving, permissions block present after
+reconcile, and guard hooks active in that very session (emoji_guard.py
+blocked a PostToolUse Write probe); symlinked skills/commands also loaded
+same-session. Plugin skills did NOT: ecc@ecc and
+superpowers@claude-plugins-official landed in `installed_plugins.json` only
+post-launch at `"scope": "user"` and no plugin skill was invocable (fence
+c1c4500 reconfirmed). Account sync wrote 13 ids into `enabledPlugins` but
+installed ZERO account plugins, because no marketplace was registered
+pre-launch (see the Phase 1 hard constraint). The project-layer exclusion
+override was not exercisable there (non-dotfiles repo, nothing
+account-installed); it is verified only by the dotfiles-repo sessions above
+and in Phase 1. Net: the hook-based rollout carries the whole
+asset/identity/settings layer same-session -- only plugin skills wait.
+
 ## Phase 1 -- placement decision (ranked menu)
 
 Decide, per environment/repo, WHERE the plugin install lives. Ranked:
@@ -187,16 +208,25 @@ containers at `"scope": "user"` in `installed_plugins.json` -- but ONLY for
 plugins whose marketplace is already registered in the container (observed:
 official-marketplace plugins installed; plugins from unregistered marketplaces
 like claude-code-workflows landed in `enabledPlugins` yet stayed uninstalled --
-the enabled-but-dark class again). Consequences: (a) personal official-market
-plugins (code-review, code-simplifier, security-guidance, ...) need NO repo
-change, the account carries them; (b) to make account-enabled plugins from
+the enabled-but-dark class again). Hard constraint (2026-07-02, non-dotfiles
+audit): "already registered" means registered BEFORE launch. Account sync
+runs at session start, and a hook-based bootstrap (option 3) registers
+marketplaces only post-launch -- so under hook-only rollout the platform
+synced 13 ids into `enabledPlugins` yet installed ZERO account plugins; even
+official-marketplace ones stayed enabled-but-dark. Option 3 can NEVER deliver
+account-synced plugins. Only pre-launch placements (option 1 declaration or
+option 2 Setup script) make account sync effective. Consequences: (a)
+personal official-market plugins (code-review, code-simplifier,
+security-guidance, ...) need NO repo change beyond a pre-launch placement
+that registers the official marketplace (the option 1 declaration already
+pins it), the account carries the selection; (b) to make account-enabled plugins from
 OTHER marketplaces work in cloud, pin that marketplace's git URL in the repo's
 `.claude/settings.json` `extraKnownMarketplaces`; (c) to EXCLUDE an
 account-synced plugin from this repo's sessions, set it to `false` in the
 repo's `.claude/settings.json` `enabledPlugins` (project layer overrides user
--- VERIFIED 2026-07-02 on a fresh session-1 container: all three excluded
-plugins reported `disabled` in `claude plugin list` despite `true` in the
-user layer. Nuance: the platform still INSTALLS them -- they appear at
+-- VERIFIED 2026-07-02 on two fresh session-1 dotfiles-repo containers: all
+three excluded plugins reported `disabled` in `claude plugin list` despite
+`true` in the user layer. Nuance: the platform still INSTALLS them -- they appear at
 `"scope": "project"` in `installed_plugins.json` with payloads on disk --
 but they load nothing; disabled-but-installed is the expected shape, so do
 not read their presence in the install record as a failed exclusion). This
