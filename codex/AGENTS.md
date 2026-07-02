@@ -26,13 +26,19 @@ These are hard constraints in Codex. Some are hook-enforced when `[features].hoo
 Use Codex as a backup for the Claude setup on this machine.
 
 - Dotfiles manages `~/.codex/AGENTS.md` and selected `~/.codex/hooks/*` symlinks only
-- GSD, Superpowers, ECC, and Codex plugins may install their own prompts, skills, rules, MCPs, agents, and git hooks under `~/.codex/`
+- Superpowers, ECC, and Codex plugins may install their own prompts, skills, rules, MCPs, agents, and git hooks under `~/.codex/`
 - Do not mirror Claude plugin assets into `~/.codex/` from this repo; let each plugin installer own its Codex surface
-- GSD skills may reference supporting material under `~/.claude/get-shit-done/`; read those files directly when needed
 
-If the user asks for GSD, ECC, Superpowers, phased planning, systematic debugging, verification, TDD, or review workflows, prefer installed Codex skills/prompts/plugins when available.
+If the user asks for ECC, Superpowers, phased planning, systematic debugging, verification, TDD, or review workflows, prefer installed Codex skills/prompts/plugins when available.
 
-In Codex, GSD is exposed as skills, not `/gsd` slash commands. Invoke GSD with `$gsd-*`, for example `$gsd-help`, `$gsd-new-project`, or `$gsd-progress`. Do not suggest `/gsd` unless Codex adds first-class custom slash command support and the command is actually installed.
+GSD is RETIRED on this setup. The original `get-shit-done-cc` npm package is
+treated as compromised (token rug-pull with publish access retained) -- never
+install or suggest it; `gsd-uninstall` purges it and `dotfiles-repair` flags a
+reappearance. The only sanctioned variant is the community redux fork
+(`@opengsd/get-shit-done-redux`, npx-only via `gsd-install`), and nothing on
+this setup installs it by default. If `$gsd-*` skills appear under `~/.codex/`,
+they are leftovers or an explicit opt-in -- do not treat GSD as part of the
+standing toolchain, and do not reinstall it unless the user explicitly asks.
 
 ## Enforcement Layers
 
@@ -86,7 +92,7 @@ For substantial work, follow the same shape as Claude:
 6. `superpowers:verification-before-completion`
 
 The `co-review` step is for top-level sessions where you orchestrate the review.
-When you were launched *as Claude's reviewer* (a plain "review this" request
+When you were launched _as Claude's reviewer_ (a plain "review this" request
 arriving via `codex exec`), just review the change yourself and return findings.
 Do NOT load or run the `co-review` skill in that case — it would shell back out
 to `claude -p "/code-review"` and create a Claude -> Codex -> Claude loop.
@@ -139,8 +145,8 @@ When asked to review, default to a code review mindset:
 - Run `cargo fmt` and `cargo clippy` before commits
 - Use snake_case for modules and files
 
-
 <!-- BEGIN ECC -->
+
 # Everything Claude Code (ECC) — Agent Instructions
 
 This is a **production-ready AI coding plugin** providing 67 specialized agents, 271 skills, 92 commands, and automated hook workflows for software development.
@@ -157,43 +163,44 @@ This is a **production-ready AI coding plugin** providing 67 specialized agents,
 
 ## Available Agents
 
-| Agent | Purpose | When to Use |
-|-------|---------|-------------|
-| planner | Implementation planning | Complex features, refactoring |
-| architect | System design and scalability | Architectural decisions |
-| tdd-guide | Test-driven development | New features, bug fixes |
-| code-reviewer | Code quality and maintainability | After writing/modifying code |
-| security-reviewer | Vulnerability detection | Before commits, sensitive code |
-| spec-miner | Brownfield spec extraction | Onboarding brownfield projects to spec-driven development |
-| build-error-resolver | Fix build/type errors | When build fails |
-| e2e-runner | End-to-end Playwright testing | Critical user flows |
-| refactor-cleaner | Dead code cleanup | Code maintenance |
-| doc-updater | Documentation and codemaps | Updating docs |
-| cpp-reviewer | C/C++ code review | C and C++ projects |
-| cpp-build-resolver | C/C++ build errors | C and C++ build failures |
-| fsharp-reviewer | F# functional code review | F# projects |
-| docs-lookup | Documentation lookup via Context7 | API/docs questions |
-| go-reviewer | Go code review | Go projects |
-| go-build-resolver | Go build errors | Go build failures |
-| kotlin-reviewer | Kotlin code review | Kotlin/Android/KMP projects |
-| kotlin-build-resolver | Kotlin/Gradle build errors | Kotlin build failures |
-| database-reviewer | PostgreSQL/Supabase specialist | Schema design, query optimization |
-| python-reviewer | Python code review | Python projects |
-| django-reviewer | Django code review | Django apps, DRF APIs, ORM, migrations |
-| django-build-resolver | Django build, migration, and setup errors | Django startup, dependency, migration, collectstatic failures |
-| java-reviewer | Java and Spring Boot code review | Java/Spring Boot projects |
-| java-build-resolver | Java/Maven/Gradle build errors | Java build failures |
-| loop-operator | Autonomous loop execution | Run loops safely, monitor stalls, intervene |
-| harness-optimizer | Harness config tuning | Reliability, cost, throughput |
-| rust-reviewer | Rust code review | Rust projects |
-| rust-build-resolver | Rust build errors | Rust build failures |
-| pytorch-build-resolver | PyTorch runtime/CUDA/training errors | PyTorch build/training failures |
-| mle-reviewer | Production ML pipeline review | ML pipelines, evals, serving, monitoring, rollback |
-| typescript-reviewer | TypeScript/JavaScript code review | TypeScript/JavaScript projects |
+| Agent                  | Purpose                                   | When to Use                                                   |
+| ---------------------- | ----------------------------------------- | ------------------------------------------------------------- |
+| planner                | Implementation planning                   | Complex features, refactoring                                 |
+| architect              | System design and scalability             | Architectural decisions                                       |
+| tdd-guide              | Test-driven development                   | New features, bug fixes                                       |
+| code-reviewer          | Code quality and maintainability          | After writing/modifying code                                  |
+| security-reviewer      | Vulnerability detection                   | Before commits, sensitive code                                |
+| spec-miner             | Brownfield spec extraction                | Onboarding brownfield projects to spec-driven development     |
+| build-error-resolver   | Fix build/type errors                     | When build fails                                              |
+| e2e-runner             | End-to-end Playwright testing             | Critical user flows                                           |
+| refactor-cleaner       | Dead code cleanup                         | Code maintenance                                              |
+| doc-updater            | Documentation and codemaps                | Updating docs                                                 |
+| cpp-reviewer           | C/C++ code review                         | C and C++ projects                                            |
+| cpp-build-resolver     | C/C++ build errors                        | C and C++ build failures                                      |
+| fsharp-reviewer        | F# functional code review                 | F# projects                                                   |
+| docs-lookup            | Documentation lookup via Context7         | API/docs questions                                            |
+| go-reviewer            | Go code review                            | Go projects                                                   |
+| go-build-resolver      | Go build errors                           | Go build failures                                             |
+| kotlin-reviewer        | Kotlin code review                        | Kotlin/Android/KMP projects                                   |
+| kotlin-build-resolver  | Kotlin/Gradle build errors                | Kotlin build failures                                         |
+| database-reviewer      | PostgreSQL/Supabase specialist            | Schema design, query optimization                             |
+| python-reviewer        | Python code review                        | Python projects                                               |
+| django-reviewer        | Django code review                        | Django apps, DRF APIs, ORM, migrations                        |
+| django-build-resolver  | Django build, migration, and setup errors | Django startup, dependency, migration, collectstatic failures |
+| java-reviewer          | Java and Spring Boot code review          | Java/Spring Boot projects                                     |
+| java-build-resolver    | Java/Maven/Gradle build errors            | Java build failures                                           |
+| loop-operator          | Autonomous loop execution                 | Run loops safely, monitor stalls, intervene                   |
+| harness-optimizer      | Harness config tuning                     | Reliability, cost, throughput                                 |
+| rust-reviewer          | Rust code review                          | Rust projects                                                 |
+| rust-build-resolver    | Rust build errors                         | Rust build failures                                           |
+| pytorch-build-resolver | PyTorch runtime/CUDA/training errors      | PyTorch build/training failures                               |
+| mle-reviewer           | Production ML pipeline review             | ML pipelines, evals, serving, monitoring, rollback            |
+| typescript-reviewer    | TypeScript/JavaScript code review         | TypeScript/JavaScript projects                                |
 
 ## Agent Orchestration
 
 Use agents proactively without user prompt:
+
 - Complex feature requests → **planner**
 - Code just written/modified → **code-reviewer**
 - Bug fix or new feature → **tdd-guide**
@@ -208,6 +215,7 @@ Use parallel execution for independent operations — launch multiple agents sim
 ## Security Guidelines
 
 **Before ANY commit:**
+
 - No hardcoded secrets (API keys, passwords, tokens)
 - All user inputs validated
 - SQL injection prevention (parameterized queries)
@@ -232,6 +240,7 @@ Use parallel execution for independent operations — launch multiple agents sim
 **Input validation:** Validate all user input at system boundaries. Use schema-based validation. Fail fast with clear messages. Never trust external data.
 
 **Code quality checklist:**
+
 - Functions small (<50 lines), files focused (<800 lines)
 - No deep nesting (>4 levels)
 - Proper error handling, no hardcoded values
@@ -242,11 +251,13 @@ Use parallel execution for independent operations — launch multiple agents sim
 **Minimum coverage: 80%**
 
 Test types (all required):
+
 1. **Unit tests** — Individual functions, utilities, components
 2. **Integration tests** — API endpoints, database operations
 3. **E2E tests** — Critical user flows
 
 **TDD workflow (mandatory):**
+
 1. Write test first (RED) — test should FAIL
 2. Write minimal implementation (GREEN) — test should PASS
 3. Refactor (IMPROVE) — verify coverage 80%+
@@ -314,7 +325,6 @@ tests/           — Test suite
 - Performance is acceptable
 - User requirements are met
 
-
 ---
 
 # Codex Supplement (From ECC .codex/AGENTS.md)
@@ -325,20 +335,22 @@ This supplements the root `AGENTS.md` with Codex-specific guidance.
 
 ## Model Recommendations
 
-| Task Type | Recommended Model |
-|-----------|------------------|
-| Routine coding, tests, formatting | GPT 5.5 |
-| Complex features, architecture | GPT 5.5 |
-| Debugging, refactoring | GPT 5.5 |
-| Security review | GPT 5.5 |
+| Task Type                         | Recommended Model |
+| --------------------------------- | ----------------- |
+| Routine coding, tests, formatting | GPT 5.5           |
+| Complex features, architecture    | GPT 5.5           |
+| Debugging, refactoring            | GPT 5.5           |
+| Security review                   | GPT 5.5           |
 
 ## Skills Discovery
 
 Skills are auto-loaded from `.agents/skills/`. Each skill contains:
+
 - `SKILL.md` — Detailed instructions and workflow
 - `agents/openai.yaml` — Codex interface metadata
 
 Available skills:
+
 - tdd-workflow — Test-driven development with 80%+ coverage
 - security-review — Comprehensive security checklist
 - coding-standards — Universal coding standards
@@ -397,25 +409,27 @@ Codex now supports multi-agent workflows behind the experimental `features.multi
 - Use `/agent` inside Codex CLI to inspect and steer child agents
 
 Sample role configs in this repo:
+
 - `.codex/agents/explorer.toml` — read-only evidence gathering
 - `.codex/agents/reviewer.toml` — correctness/security review
 - `.codex/agents/docs-researcher.toml` — API and release-note verification
 
 ## Key Differences from Claude Code
 
-| Feature | Claude Code | Codex CLI |
-|---------|------------|-----------|
-| Hooks | 8+ event types | Not yet supported |
-| Context file | CLAUDE.md + AGENTS.md | AGENTS.md only |
-| Skills | Skills loaded via plugin | `.agents/skills/` directory |
-| Commands | `/slash` commands | Instruction-based |
-| Agents | Subagent Task tool | Multi-agent via `/agent` and `[agents.<name>]` roles |
-| Security | Hook-based enforcement | Instruction + sandbox |
-| MCP | Full support | Supported via `config.toml` and `codex mcp add` |
+| Feature      | Claude Code              | Codex CLI                                            |
+| ------------ | ------------------------ | ---------------------------------------------------- |
+| Hooks        | 8+ event types           | Not yet supported                                    |
+| Context file | CLAUDE.md + AGENTS.md    | AGENTS.md only                                       |
+| Skills       | Skills loaded via plugin | `.agents/skills/` directory                          |
+| Commands     | `/slash` commands        | Instruction-based                                    |
+| Agents       | Subagent Task tool       | Multi-agent via `/agent` and `[agents.<name>]` roles |
+| Security     | Hook-based enforcement   | Instruction + sandbox                                |
+| MCP          | Full support             | Supported via `config.toml` and `codex mcp add`      |
 
 ## Security Without Hooks
 
 Since Codex lacks hooks, security enforcement is instruction-based:
+
 1. Always validate inputs at system boundaries
 2. Never hardcode secrets — use environment variables
 3. Run `npm audit` / `pip audit` before committing
