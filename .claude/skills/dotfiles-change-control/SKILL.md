@@ -22,8 +22,9 @@ your first blocked commit.
   `claude/rules/` (everything except `personal/`) and the `<!-- BEGIN ECC -->`
   sentinel block in `codex/AGENTS.md`. Installers overwrite both; your edit
   dies on the next `ecc-update`.
-- [WARNING] `claude/settings.json.tmpl` changes do NOT reach existing machines.
-  Seed-once design -- see the protocol below.
+- [WARNING] `claude/settings.json.tmpl` changes reach existing machines only at
+  their next `update`/link run (reconcile merge); until then live settings are
+  stale -- see the protocol below.
 - [WARNING] Hook bypass variables exist for emergencies only (broken hook,
   never a policy disagreement). Every bypass must be mentioned in the PR
   description.
@@ -146,14 +147,17 @@ When you change the template:
 
 1. Edit `claude/settings.json.tmpl` (e.g. register a new hook).
 2. Run `bash bin/dotfiles-tests` -- `claude/hooks/claude-hooks.test.sh`
-   drift-checks live `settings.json` against the template on each machine, so
-   the test suite is what surfaces the unmerged machines.
-3. Manually merge the change into `~/.claude/settings.json` AND
-   `~/.claude-work/settings.json` on every existing machine. There is no
-   machine-side auto-merge (open weak point as of 2026-07-02).
-4. Cloud is the exception: `bootstrap-cloud.sh` `reconcile_claude_settings`
-   merges template keys into the live file automatically (template supplies
-   defaults, live plugin keys win) -- history: 910f2bc.
+   drift-checks live `settings.json` against the template on each machine, and
+   `install/claude-links.test.sh` proves the reconcile merge semantics.
+3. Existing machines pick the change up at their next `update` (or any
+   `link.sh`/`dotfiles-repair` run): `reconcile_claude_settings_file`
+   (`install/common/claude-links.sh`) reasserts template-owned keys per config
+   dir while plugin-installer keys survive (closed 2026-07-02; previously a
+   manual hand-merge). A machine that never runs `update` stays stale -- the
+   drift check in step 2 is what surfaces it.
+4. Cloud uses the same shared merge: `bootstrap-cloud.sh`
+   `reconcile_claude_settings` delegates to `reconcile_claude_settings_file`
+   (template supplies defaults, live plugin keys win) -- history: 910f2bc.
 
 ## Special protocol: vendored content
 
@@ -236,7 +240,8 @@ containers use the platform checkout):
 | CI trigger + steps                                                                     | `cat .github/workflows/tests.yml`                                                                                          |
 | Cited commits (2304015, 52f807d, e140ab3, 910f2bc, c1c4500, 8d4507f, 9ad4dc8, 465ee17) | `git show -s --format='%h %s' <hash>`                                                                                      |
 
-Known-open as of 2026-07-02 (do not present as solved): no machine-side
-auto-merge for `settings.json.tmpl`; ECC `pre-commit`/`pre-push` untested;
-machine-path plugin installs still trust CLI output rather than
-`installed_plugins.json`.
+Known-open as of 2026-07-02 (do not present as solved): ECC
+`pre-commit`/`pre-push` untested; machine-path plugin installs still trust CLI
+output rather than `installed_plugins.json`. (Closed 2026-07-02: machine-side
+auto-merge for `settings.json.tmpl` via `reconcile_claude_settings_file` +
+`install/claude-links.test.sh`.)

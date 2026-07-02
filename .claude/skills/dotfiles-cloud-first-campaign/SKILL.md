@@ -85,6 +85,7 @@ are (verbatim from `bootstrap-cloud.sh` source):
 
 ```
 [bootstrap-cloud] Linking Claude assets into /root/.claude...
+[claude-links] Reconciled settings.json (SessionStart: account_guard.py).
 [bootstrap-cloud] Ensuring plugin marketplaces + installs...
 [bootstrap-cloud] OK: ecc@ecc already installed.
 [bootstrap-cloud] OK: superpowers@claude-plugins-official already installed.
@@ -305,9 +306,9 @@ declaration-only repos, step 0.4 plus one plugin skill invocable in session 1.
 
 ## Phase 3 -- parity gaps to close
 
-Each gap: status, first step, measurable gate. Statuses are honest -- two are
-candidates (design known, unimplemented), two are open (decision not yet made).
-None of these is done; do not report them as fixed.
+Each gap: status, first step, measurable gate. Statuses are honest -- 3.2 is
+closed (2026-07-02), 3.1 closes in the sibling plugin-verification PR, and two
+are open (decision not yet made). Do not report an open one as fixed.
 
 **3.1 Machine-path installs verify against `installed_plugins.json` -- CANDIDATE.**
 `ecc-install`/`superpowers-install` (`zsh/functions.zsh`, functions at
@@ -320,15 +321,22 @@ the zsh functions, parameterized by config dir -- machines have TWO
 marketplace, `ecc-install` returns non-zero and says so; `bin/dotfiles-tests`
 stays green.
 
-**3.2 `reconcile_claude_settings` on machines -- CANDIDATE.** Template changes
-(`claude/settings.json.tmpl`) require manual merge on existing machines
-(seed-once via `seed_machine_local_file`); cloud reconciles automatically.
-First step: extract the reconcile merge (bootstrap-cloud.sh
-`reconcile_claude_settings`) into shared code sourced by both
-`bootstrap-cloud.sh` and the machine install path, run per config dir. Gate:
-on a scratch `$HOME`, edit the template, run the installer, and
-`claude/hooks/claude-hooks.test.sh` drift check passes with no hand-merge --
-while a plugin-installer-written key survives the merge.
+**3.2 `reconcile_claude_settings` on machines -- CLOSED (2026-07-02).** The
+merge now lives in `install/common/claude-links.sh` as
+`reconcile_claude_settings_file` and runs per config dir inside
+`link_claude_config_dir`, so every machine `update`/link (and
+`dotfiles-repair` step 2) closes template drift automatically -- plugin-installer
+keys (`enabledPlugins`, `extraKnownMarketplaces`) are unioned with live state
+winning, unknown keys preserved. `bootstrap-cloud.sh
+reconcile_claude_settings` delegates to the shared function (its documented
+`[bootstrap-cloud] Reconciled settings.json ...` line is unchanged; the link
+step now additionally prints a `[claude-links]` reconcile line). The gate held
+in `install/claude-links.test.sh` (registered in `bin/dotfiles-tests`): a
+scratch config dir holding only installer-written keys gains the template
+hooks/permissions/statusLine while those keys survive, plus corrupt-rebuild,
+idempotency, and missing-template cases. Verified live on a cloud container
+(`bootstrap-cloud.sh --no-plugins`): both reconcile lines print, plugin keys
+survive.
 
 **3.3 Work-account cloud story -- OPEN.** Cloud containers are personal-account
 only by design (`bootstrap-cloud.sh` header: skips `~/.claude-work`

@@ -28,6 +28,7 @@ sh git/hooks/post-checkout.test.sh
 sh git/hooks/public-safety.test.sh
 bash claude/skills/lib/test_work_state.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
+sh install/claude-links.test.sh
 "
 
 if [ "${1:-}" = "--list" ]; then
