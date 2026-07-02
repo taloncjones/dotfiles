@@ -154,7 +154,13 @@ When you change the template:
    (`install/common/claude-links.sh`) reasserts template-owned keys per config
    dir while plugin-installer keys survive (closed 2026-07-02; previously a
    manual hand-merge). A machine that never runs `update` stays stale -- the
-   drift check in step 2 is what surfaces it.
+   drift check in step 2 is what surfaces it. [WARNING] This works for
+   template-owned keys only: `enabledPlugins`/`extraKnownMarketplaces` merge
+   with LIVE state winning, so flipping a plugin to `false` in the template
+   reaches fresh seeds but never disables it on an existing machine -- use the
+   claude.ai account toggle plus a one-time per-machine flip for that (worked
+   example: `feature-dev@claude-code-plugins`, see
+   dotfiles-cloud-first-campaign).
 4. Cloud uses the same shared merge: `bootstrap-cloud.sh`
    `reconcile_claude_settings` delegates to `reconcile_claude_settings_file`
    (template supplies defaults, live plugin keys win) -- history: 910f2bc.
@@ -231,7 +237,7 @@ containers use the platform checkout):
 
 | Fact                                                                                   | Re-verify                                                                                                                  |
 | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| 10 test suites in the runner                                                            | `bash bin/dotfiles-tests --list`                                                                                           |
+| 10 test suites in the runner                                                           | `bash bin/dotfiles-tests --list`                                                                                           |
 | Guard-hook registrations and matchers                                                  | `grep -n -A4 'matcher' claude/settings.json.tmpl`                                                                          |
 | Hook inventory                                                                         | `ls claude/hooks/ git/hooks/`                                                                                              |
 | `DOTFILES_SKIP_COMMIT_MSG_GUARD` still the commit-msg bypass                           | `grep -n 'SKIP' git/hooks/commit-msg`                                                                                      |

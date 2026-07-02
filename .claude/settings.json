@@ -3,6 +3,7 @@
     "ecc@ecc": true,
     "superpowers@claude-plugins-official": true,
     "telegram@claude-plugins-official": false,
+    "feature-dev@claude-code-plugins": false,
     "code-review@claude-plugins-official": false,
     "code-simplifier@claude-plugins-official": false
   },
