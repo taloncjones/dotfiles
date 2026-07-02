@@ -20,6 +20,7 @@ cd "$DOTFILES"
 # *.test.sh or a skill test; grep -rl 'passed, .* failed' is a quick audit.
 SUITES="
 sh install/install.test.sh
+sh zsh/functions.test.sh
 sh claude/hooks/claude-hooks.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
@@ -31,6 +32,7 @@ sh git/hooks/pre-push.test.sh
 sh git/hooks/public-safety.test.sh
 bash claude/skills/lib/test_work_state.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
+sh install/claude-links.test.sh
 "
 
 if [ "${1:-}" = "--list" ]; then
