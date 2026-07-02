@@ -3,9 +3,12 @@
 
 Blocks Read/Edit/Write operations on:
 - .env files (.env, .env.local, .env.production, etc.)
-- Credentials files (credentials.*, *credentials*)
-- Private keys (*.pem, *.key)
-- Secrets files (secrets.*, *secrets*, *_secret*)
+- Credentials/secrets directories and files (exact segment or filename match)
+- Private keys (*.pem, *.key, id_rsa, id_ed25519, *.p12, *.pfx)
+
+Matching mirrors codex/hooks/block_secrets.py: exact filenames, exact path
+segments, and basename patterns -- NOT substring-of-full-path, which blocked
+innocent sources like secrets_manager/util.py and this hook's own file.
 
 Runs as PreToolUse hook for Read, Edit, Write tools.
 """
@@ -14,12 +17,9 @@ import json
 import os
 import sys
 
-# Patterns that indicate sensitive files
+# Patterns matched against the basename only
 SENSITIVE_PATTERNS = [
     ".env",
-    "credentials",
-    "secrets",
-    "_secret",
     ".pem",
     ".key",
     "id_rsa",
@@ -41,31 +41,43 @@ SENSITIVE_FILES = {
     "service-account.json",
 }
 
+# Whole path segments to block (exact directory/file name, not substring)
+SENSITIVE_SEGMENTS = {
+    "credentials",
+    "secrets",
+}
+
 
 def is_sensitive_path(path: str) -> tuple[bool, str]:
     """Check if path refers to a sensitive file."""
     if not path:
         return False, ""
 
-    # Normalize path
     path = os.path.normpath(path)
     basename = os.path.basename(path).lower()
-    path_lower = path.lower()
+    path_segments = {part.lower() for part in path.split(os.sep)}
 
-    # Check exact filename matches
+    # Public keys are safe by definition
+    if basename.endswith(".pub"):
+        return False, ""
+
     if basename in SENSITIVE_FILES:
         return True, f"Blocked: '{basename}' contains secrets"
 
-    # Check pattern matches
+    for segment in SENSITIVE_SEGMENTS:
+        if segment in path_segments:
+            return True, f"Blocked: path contains sensitive segment '{segment}'"
+
+    basename_no_ext = os.path.splitext(basename)[0]
+    if basename_no_ext.endswith("_secret"):
+        return True, "Blocked: filename appears to contain a secret"
+
     for pattern in SENSITIVE_PATTERNS:
-        if pattern in basename or pattern in path_lower:
-            # Allow reading .env.example files
-            if basename.endswith(".example") or basename.endswith(".template"):
-                return False, ""
-            # Allow .pem in directory names like /etc/pki/tls/certs/
-            if pattern in [".pem", ".key"] and pattern not in basename:
-                return False, ""
-            return True, f"Blocked: path matches sensitive pattern '{pattern}'"
+        if pattern not in basename:
+            continue
+        if basename.endswith(".example") or basename.endswith(".template"):
+            return False, ""
+        return True, f"Blocked: path matches sensitive pattern '{pattern}'"
 
     return False, ""
 

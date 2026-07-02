@@ -53,6 +53,30 @@ assert_allows "allows emoji fixtures in workflow rules" \
     claude/hooks/emoji_guard.py \
     "$(printf '%b' '{"tool_name":"Write","tool_input":{"file_path":"codex/rules/example.rules","content":"fixture \360\237\230\200"}}')"
 
+assert_blocks "blocks sensitive env file path" \
+    claude/hooks/block_secrets.py \
+    '{"tool_name":"Read","tool_input":{"file_path":".env.local"}}'
+
+assert_blocks "blocks secrets path segment" \
+    claude/hooks/block_secrets.py \
+    '{"tool_name":"Read","tool_input":{"file_path":"config/secrets/prod.json"}}'
+
+assert_allows "allows env example path" \
+    claude/hooks/block_secrets.py \
+    '{"tool_name":"Read","tool_input":{"file_path":".env.example"}}'
+
+assert_allows "allows public key path" \
+    claude/hooks/block_secrets.py \
+    '{"tool_name":"Read","tool_input":{"file_path":"ssh/keys/id_ed25519_personal.pub"}}'
+
+assert_allows "allows benign secret word in source name" \
+    claude/hooks/block_secrets.py \
+    '{"tool_name":"Read","tool_input":{"file_path":"src/secrets_manager/util.py"}}'
+
+assert_allows "allows workflow hook secret checker path" \
+    claude/hooks/block_secrets.py \
+    '{"tool_name":"Read","tool_input":{"file_path":"claude/hooks/block_secrets.py"}}'
+
 # Settings drift: hand-merged machines that missed a SessionStart hook
 # entry must fail visibly instead of silently lacking the account-mismatch
 # guard. Both account config dirs carry their own machine-local settings.json
