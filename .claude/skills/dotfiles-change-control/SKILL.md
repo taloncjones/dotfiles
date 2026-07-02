@@ -22,8 +22,9 @@ your first blocked commit.
   `claude/rules/` (everything except `personal/`) and the `<!-- BEGIN ECC -->`
   sentinel block in `codex/AGENTS.md`. Installers overwrite both; your edit
   dies on the next `ecc-update`.
-- [WARNING] `claude/settings.json.tmpl` changes do NOT reach existing machines.
-  Seed-once design -- see the protocol below.
+- [WARNING] `claude/settings.json.tmpl` changes reach existing machines only at
+  their next `update`/link run (reconcile merge); until then live settings are
+  stale -- see the protocol below.
 - [WARNING] Hook bypass variables exist for emergencies only (broken hook,
   never a policy disagreement). Every bypass must be mentioned in the PR
   description.
@@ -103,7 +104,7 @@ In order, for a change made inside a Claude Code session:
 3. **Tests, before every push** -- the single runner:
 
    ```bash
-   bash bin/dotfiles-tests           # from the repo checkout: all 9 suites, one verdict
+   bash bin/dotfiles-tests           # from the repo checkout: all suites, one verdict
    bash bin/dotfiles-tests --list    # enumerate suites
    ```
 
@@ -146,22 +147,29 @@ When you change the template:
 
 1. Edit `claude/settings.json.tmpl` (e.g. register a new hook).
 2. Run `bash bin/dotfiles-tests` -- `claude/hooks/claude-hooks.test.sh`
-   drift-checks live `settings.json` against the template on each machine, so
-   the test suite is what surfaces the unmerged machines.
-3. Manually merge the change into `~/.claude/settings.json` AND
-   `~/.claude-work/settings.json` on every existing machine. There is no
-   machine-side auto-merge (open weak point as of 2026-07-02).
-4. Cloud is the exception: `bootstrap-cloud.sh` `reconcile_claude_settings`
-   merges template keys into the live file automatically (template supplies
-   defaults, live plugin keys win) -- history: 910f2bc.
+   drift-checks live `settings.json` against the template on each machine, and
+   `install/claude-links.test.sh` proves the reconcile merge semantics.
+3. Existing machines pick the change up at their next `update` (or any
+   `link.sh`/`dotfiles-repair` run): `reconcile_claude_settings_file`
+   (`install/common/claude-links.sh`) reasserts template-owned keys per config
+   dir while plugin-installer keys survive (closed 2026-07-02; previously a
+   manual hand-merge). A machine that never runs `update` stays stale -- the
+   drift check in step 2 is what surfaces it.
+4. Cloud uses the same shared merge: `bootstrap-cloud.sh`
+   `reconcile_claude_settings` delegates to `reconcile_claude_settings_file`
+   (template supplies defaults, live plugin keys win) -- history: 910f2bc.
 
 ## Special protocol: vendored content
 
-- ECC language rules (`claude/rules/` except `personal/`): installer-managed,
-  untracked, wiped by `rm -rf` on every `ecc-sync-rules` run (see the rationale
-  in `claude/rules/.gitignore`). Your own rules go in `claude/rules/personal/`
-  -- the only whitelisted, tracked subdir. History: tracked vendored rules
-  caused 39-file churn, untracked at e140ab3.
+- ECC language rules: vendoring RETIRED (2026-07-02) -- `ecc-sync-rules` and
+  `ECC_VENDOR_LANGS` are gone; the upstream rules tree lives in the ECC
+  marketplace clone (`~/.claude/plugins/marketplaces/ecc/rules/`). Language
+  dirs still under `claude/rules/` are inert pre-retirement leftovers, kept
+  uncommitted by `claude/rules/.gitignore`. Your own rules go in
+  `claude/rules/personal/` -- the only whitelisted, tracked subdir. History:
+  tracked vendored rules caused 39-file churn (untracked at e140ab3), then
+  vendoring itself was retired once consumer enumeration found no runtime
+  reader of `~/.claude/rules`.
 - `codex/AGENTS.md`: everything between `<!-- BEGIN ECC -->` and the matching
   end marker is a sync-managed sentinel block. Edit only the text outside it;
   regenerate the block via `codex-ecc-sync` (in `zsh/functions.zsh`), which
@@ -187,7 +195,7 @@ When you change the template:
 ## Pre-push checklist
 
 - [ ] Change classified (table above) and its class requirements met?
-- [ ] `bash bin/dotfiles-tests` green locally (all 9 suites)?
+- [ ] `bash bin/dotfiles-tests` green locally (all suites)?
 - [ ] Installer edits idempotent and platform-gated?
 - [ ] No secrets, no employer strings, no `/Users/<name>` paths in the diff?
 - [ ] Commit message `<scope>: <summary>`, <75 chars, imperative, no attribution, no emojis?
@@ -223,7 +231,7 @@ containers use the platform checkout):
 
 | Fact                                                                                   | Re-verify                                                                                                                  |
 | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| 9 test suites in the runner                                                            | `bash bin/dotfiles-tests --list`                                                                                           |
+| 10 test suites in the runner                                                            | `bash bin/dotfiles-tests --list`                                                                                           |
 | Guard-hook registrations and matchers                                                  | `grep -n -A4 'matcher' claude/settings.json.tmpl`                                                                          |
 | Hook inventory                                                                         | `ls claude/hooks/ git/hooks/`                                                                                              |
 | `DOTFILES_SKIP_COMMIT_MSG_GUARD` still the commit-msg bypass                           | `grep -n 'SKIP' git/hooks/commit-msg`                                                                                      |
@@ -236,7 +244,9 @@ containers use the platform checkout):
 | CI trigger + steps                                                                     | `cat .github/workflows/tests.yml`                                                                                          |
 | Cited commits (2304015, 52f807d, e140ab3, 910f2bc, c1c4500, 8d4507f, 9ad4dc8, 465ee17) | `git show -s --format='%h %s' <hash>`                                                                                      |
 
-Known-open as of 2026-07-02 (do not present as solved): no machine-side
-auto-merge for `settings.json.tmpl`; ECC `pre-commit`/`pre-push` untested;
-machine-path plugin installs still trust CLI output rather than
-`installed_plugins.json`.
+Known-open as of 2026-07-02 (do not present as solved): ECC
+`pre-commit`/`pre-push` untested. (Closed 2026-07-02: machine-path plugin
+installs now verify against `installed_plugins.json` via
+`_claude_ensure_plugin` + `zsh/functions.test.sh`; machine-side auto-merge for
+`settings.json.tmpl` via `reconcile_claude_settings_file` +
+`install/claude-links.test.sh`.)
