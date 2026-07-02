@@ -168,6 +168,20 @@ on `CLAUDE_CODE_REMOTE=true`, matcher `startup|resume`, idempotent. It repairs
 a container whose snapshot expired; anything it installs is usable NEXT
 session only.
 
+**Account-level plugin sync (observed 2026-07-02, live container).** The
+platform ALSO syncs the claude.ai account's own plugin selections into cloud
+containers at `"scope": "user"` in `installed_plugins.json` -- but ONLY for
+plugins whose marketplace is already registered in the container (observed:
+official-marketplace plugins installed; plugins from unregistered marketplaces
+like claude-code-workflows landed in `enabledPlugins` yet stayed uninstalled --
+the enabled-but-dark class again). Consequences: (a) personal official-market
+plugins (code-review, code-simplifier, security-guidance, ...) need NO repo
+change, the account carries them; (b) to make account-enabled plugins from
+OTHER marketplaces work in cloud, pin that marketplace's git URL in the repo's
+`.claude/settings.json` `extraKnownMarketplaces`. Verify sync state per
+container: grep `"scope": "user"` in `~/.claude/plugins/installed_plugins.json`
+and compare against `enabledPlugins` in `~/.claude/settings.json`.
+
 **Env-var alternative: ruled out.** The environment config's variables field
 carries data, not execution -- nothing in the platform installs plugins from
 an env var, and no pre-launch code can run from one. Env vars remain useful
