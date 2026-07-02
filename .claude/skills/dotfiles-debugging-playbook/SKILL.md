@@ -381,7 +381,7 @@ to re-verify:
 | post-checkout guard chain and env flags                                                                             | `sed -n '85,100p' git/hooks/post-checkout; grep -n 'GSD_HOOK_' git/hooks/post-checkout`  |
 | SSH pinning per host                                                                                                | `grep -n IdentityFile ssh/configs/personal/config_personal ssh/configs/work/config_work` |
 | `useConfigOnly` + includeIf routing                                                                                 | `grep -n 'useConfigOnly\|includeIf' git/.gitconfig`                                      |
-| Test suite list (9 suites as of 2026-07-02)                                                                         | `bin/dotfiles-tests --list`                                                              |
+| Test suite list (10 suites as of 2026-07-02)                                                                         | `bin/dotfiles-tests --list`                                                              |
 
 Open items carried as open (do not document as fixed): machine-path plugin
 installers trust CLI output; template changes need manual merge on machines;

@@ -104,7 +104,7 @@ In order, for a change made inside a Claude Code session:
 3. **Tests, before every push** -- the single runner:
 
    ```bash
-   bash bin/dotfiles-tests           # from the repo checkout: all 9 suites, one verdict
+   bash bin/dotfiles-tests           # from the repo checkout: all suites, one verdict
    bash bin/dotfiles-tests --list    # enumerate suites
    ```
 
@@ -191,7 +191,7 @@ When you change the template:
 ## Pre-push checklist
 
 - [ ] Change classified (table above) and its class requirements met?
-- [ ] `bash bin/dotfiles-tests` green locally (all 9 suites)?
+- [ ] `bash bin/dotfiles-tests` green locally (all suites)?
 - [ ] Installer edits idempotent and platform-gated?
 - [ ] No secrets, no employer strings, no `/Users/<name>` paths in the diff?
 - [ ] Commit message `<scope>: <summary>`, <75 chars, imperative, no attribution, no emojis?
@@ -227,7 +227,7 @@ containers use the platform checkout):
 
 | Fact                                                                                   | Re-verify                                                                                                                  |
 | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| 9 test suites in the runner                                                            | `bash bin/dotfiles-tests --list`                                                                                           |
+| 10 test suites in the runner                                                            | `bash bin/dotfiles-tests --list`                                                                                           |
 | Guard-hook registrations and matchers                                                  | `grep -n -A4 'matcher' claude/settings.json.tmpl`                                                                          |
 | Hook inventory                                                                         | `ls claude/hooks/ git/hooks/`                                                                                              |
 | `DOTFILES_SKIP_COMMIT_MSG_GUARD` still the commit-msg bypass                           | `grep -n 'SKIP' git/hooks/commit-msg`                                                                                      |
@@ -241,7 +241,8 @@ containers use the platform checkout):
 | Cited commits (2304015, 52f807d, e140ab3, 910f2bc, c1c4500, 8d4507f, 9ad4dc8, 465ee17) | `git show -s --format='%h %s' <hash>`                                                                                      |
 
 Known-open as of 2026-07-02 (do not present as solved): ECC
-`pre-commit`/`pre-push` untested; machine-path plugin installs still trust CLI
-output rather than `installed_plugins.json`. (Closed 2026-07-02: machine-side
-auto-merge for `settings.json.tmpl` via `reconcile_claude_settings_file` +
+`pre-commit`/`pre-push` untested. (Closed 2026-07-02: machine-path plugin
+installs now verify against `installed_plugins.json` via
+`_claude_ensure_plugin` + `zsh/functions.test.sh`; machine-side auto-merge for
+`settings.json.tmpl` via `reconcile_claude_settings_file` +
 `install/claude-links.test.sh`.)

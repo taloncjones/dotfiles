@@ -110,7 +110,7 @@ packages failed to install.` means re-run `brew bundle` manually -- the rest
 
    Checkpoint: `identity-doctor: all checks passed.` (exit 0; `[WARNING]`
    lines are informational, `[X]` lines fail) and
-   `=== dotfiles-tests: 9 suites passed, 0 failed`.
+   `=== dotfiles-tests: 10 suites passed, 0 failed`.
 
 7. Log out and back in (or `exec zsh`) to pick up the Homebrew zsh login shell.
 

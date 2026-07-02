@@ -123,10 +123,10 @@ prompt looks wrong") or never. Seed-once machine-local files made it
 structural here until 2026-07-02: template drift is now closed by
 `reconcile_claude_settings_file` (`install/common/claude-links.sh`) on every
 machine `update`/link run (step 1 below, done -- tested by
-`install/claude-links.test.sh`), and the machine-path plugin installers'
-CLI-output trust is closing in the sibling plugin-verification PR. Remaining
-structural drift: a machine that never runs `update`, and the step 2/3 gaps
-below.
+`install/claude-links.test.sh`), and the machine-path plugin installers now
+verify against `installed_plugins.json` via `_claude_ensure_plugin` (tested by
+`zsh/functions.test.sh`). Remaining structural drift: a machine that never
+runs `update`, and the step 2/3 gaps below.
 
 **This repo's asset.** The drift-guard test suites under one runner
 (`bin/dotfiles-tests`, `--list` to enumerate), CI (`.github/workflows/tests.yml`,
@@ -258,9 +258,9 @@ re-verify:
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | cloud-doctor path and exit-1-on-failure behavior                          | `head -20 .claude/skills/dotfiles-diagnostics-and-tooling/scripts/cloud-doctor.sh`          |
 | `.claude/settings.json` declares both plugins + SessionStart hook         | `cat .claude/settings.json`                                                                 |
-| 9 test suites; runner exists                                              | `bin/dotfiles-tests --list`                                                                 |
+| 10 test suites; runner exists                                             | `bin/dotfiles-tests --list`                                                                 |
 | CI triggers are push-to-main + PR only (no `schedule:` yet)               | `grep -n -A4 '^on:' .github/workflows/tests.yml`                                            |
-| Machine installers grep `claude plugins list`, not installed_plugins.json | `grep -n 'plugins list' zsh/functions.zsh`                                                  |
+| Machine installers verify via `_claude_ensure_plugin` (closed 2026-07-02) | `grep -n '_claude_ensure_plugin' zsh/functions.zsh; sh zsh/functions.test.sh`               |
 | `bootstrap-cloud.sh` hardcodes `$HOME/.claude` (no CLAUDE_CONFIG_DIR)     | `grep -c '\$HOME/.claude' bootstrap-cloud.sh; grep -c CLAUDE_CONFIG_DIR bootstrap-cloud.sh` |
 | Settings drift test covers SessionStart hooks only                        | `grep -n 'Settings drift' -A8 claude/hooks/claude-hooks.test.sh`                            |
 | identity-doctor exits 1 on failures                                       | `tail -8 bin/identity-doctor`                                                               |
