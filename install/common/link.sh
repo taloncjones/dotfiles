@@ -83,6 +83,7 @@ ln -sf "$DOTFILEDIR"/bin/dotfiles-repair "$HOME"/bin/dotfiles-repair
 ln -sf "$DOTFILEDIR"/bin/setup-claude "$HOME"/bin/setup-claude
 ln -sf "$DOTFILEDIR"/bin/identity-setup "$HOME"/bin/identity-setup
 ln -sf "$DOTFILEDIR"/bin/identity-doctor "$HOME"/bin/identity-doctor
+ln -sf "$DOTFILEDIR"/bin/dotfiles-tests "$HOME"/bin/dotfiles-tests
 
 # Ghostty terminal configuration
 echo "Setting up symbolic links for Ghostty..."
