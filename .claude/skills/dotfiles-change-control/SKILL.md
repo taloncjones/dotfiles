@@ -169,13 +169,18 @@ When you change the template:
 
 - ECC language rules: vendoring RETIRED (2026-07-02) -- `ecc-sync-rules` and
   `ECC_VENDOR_LANGS` are gone; the upstream rules tree lives in the ECC
-  marketplace clone (`~/.claude/plugins/marketplaces/ecc/rules/`). Language
-  dirs still under `claude/rules/` are inert pre-retirement leftovers, kept
-  uncommitted by `claude/rules/.gitignore`. Your own rules go in
-  `claude/rules/personal/` -- the only whitelisted, tracked subdir. History:
-  tracked vendored rules caused 39-file churn (untracked at e140ab3), then
-  vendoring itself was retired once consumer enumeration found no runtime
-  reader of `~/.claude/rules`.
+  marketplace clone (`~/.claude/plugins/marketplaces/ecc/rules/`). Claude Code
+  natively auto-loads every `.md` under `~/.claude/rules` (`paths:` frontmatter
+  scopes to matching files; none = every session), so language dirs still under
+  `claude/rules/` are NOT inert -- they auto-load and should be deleted
+  (`_ecc_legacy_rules_notice` flags them; `claude/rules/.gitignore` keeps them
+  uncommitted). Your own rules go in `claude/rules/personal/` -- the only
+  whitelisted, tracked subdir. History: tracked vendored rules caused 39-file
+  churn (untracked at e140ab3); vendoring was retired after consumer
+  enumeration found no runtime reader of `~/.claude/rules` -- a finding later
+  corrected (it ran in fresh cloud clones where the untracked vendored dirs did
+  not exist; the harness loader is real). The retirement stands on the
+  marketplace-clone-superset argument alone.
 - `codex/AGENTS.md`: everything between `<!-- BEGIN ECC -->` and the matching
   end marker is a sync-managed sentinel block. Edit only the text outside it;
   regenerate the block via `codex-ecc-sync` (in `zsh/functions.zsh`), which

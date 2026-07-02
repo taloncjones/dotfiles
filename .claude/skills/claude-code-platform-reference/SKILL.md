@@ -226,9 +226,13 @@ inlines the referenced file (resolved relative to the importing file's
 directory -- both are symlinks into `claude/`, so it resolves) into the
 session context. This is how `claude/operating-principles.md` applies to every
 session without being duplicated. Project CLAUDE.md (repo root) stacks on top
-of the global one. Nothing auto-loads `~/.claude/rules/` -- CLAUDE.md never
-references it; only some ECC skills read it (open question whether vendoring
-is still needed; see dotfiles-architecture-contract).
+of the global one. Claude Code ALSO natively auto-loads every `.md` under
+`~/.claude/rules/` at launch (verified live in a cloud session, 2026-07-02;
+an earlier "nothing auto-loads" finding here came from fresh clones where the
+untracked vendored dirs did not exist): a `paths:` frontmatter scopes a rule
+to sessions with matching files in context, no frontmatter loads every
+session. Our tracked always-on layer is `claude/rules/personal/`; ECC rules
+vendoring is retired (see dotfiles-architecture-contract).
 
 ## Cloud containers (claude.ai/code)
 

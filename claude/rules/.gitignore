@@ -1,13 +1,23 @@
-# ECC rules vendoring is RETIRED (2026-07-02). Nothing auto-loads
-# ~/.claude/rules; the full upstream rules tree ships inside the ECC
-# marketplace clone (~/.claude/plugins/marketplaces/ecc/rules/) wherever the
-# plugin is installed, so the local copies bought sync code and churn for
-# nothing. Machines that vendored before retirement may still have inert
-# language dirs (common/ cpp/ python/ rust/ typescript/ web/) here -- this
-# ignore keeps those leftovers from ever being committed.
+# ECC rules vendoring is RETIRED (2026-07-02): the full upstream rules tree
+# ships inside the ECC marketplace clone
+# (~/.claude/plugins/marketplaces/ecc/rules/) wherever the plugin is installed,
+# so local copies bought sync code and churn for nothing.
 #
-# Only our OWN custom rules are version-controlled. Put them under
-# claude/rules/personal/ and they are tracked by the whitelist below.
+# Claude Code natively auto-loads every .md under ~/.claude/rules at launch
+# (verified live in a cloud session, 2026-07-02): a `paths:` frontmatter scopes
+# a rule to sessions where matching files are in context; no frontmatter means
+# it loads EVERY session. Retirement-era docs said "nothing auto-loads
+# ~/.claude/rules" -- that observation came from fresh cloud clones, where the
+# untracked vendored dirs simply did not exist. Leftover vendored language dirs
+# (common/ cpp/ python/ rust/ typescript/ web/) on older machines are therefore
+# NOT inert: the language dirs activate on matching files, and common/ + web/
+# (no `paths:`) load every session. Delete them; this ignore keeps them from
+# ever being committed in the meantime.
+#
+# Only our OWN rules are version-controlled, under claude/rules/personal/
+# ("personal" = authored by us, not vendored; the dir serves both the personal
+# and work config dirs via the claude/rules symlink). Tracked by the whitelist
+# below.
 /*
 !/.gitignore
 !/personal/

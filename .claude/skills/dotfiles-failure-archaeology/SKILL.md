@@ -20,14 +20,14 @@ recorded root cause no longer holds -- not a hunch.
 
 ## One-screen summary
 
-| #   | Saga                                     | Verdict                                                                        | Key hashes                                            | Status                                  |
-| --- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------- | --------------------------------------- |
-| 1   | Cloud first-session plugins              | Pre-launch placement required; SessionStart install is dark until next session | f2f13ab .. 8d4507f (root cause: c1c4500)              | Settled                                 |
-| 2   | Tiered-orchestrate + per-task Codex gate | Added, debugged, removed whole subsystem as slower/costlier                    | fc88aac, e401175, 7fefcb5                             | Settled (removed)                       |
-| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring retired 2026-07-02  |
-| 4   | Codex asset mirror into ~/.codex         | Overwrote hooksPath, wrote through symlink, orphaned agent files               | pre-public (no hash); sweep in install/common/link.sh | Settled (abandoned)                     |
-| 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; redux fork only                 | 9ad4dc8                                               | Settled                                 |
-| 6   | todo.md audit file deleted               | Tracking moved off-file; all dropped items resolved 2026-07-02                 | 854228e, c0a9072                                      | Settled 2026-07-02                      |
+| #   | Saga                                     | Verdict                                                                        | Key hashes                                            | Status                                |
+| --- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------------------------------- |
+| 1   | Cloud first-session plugins              | Pre-launch placement required; SessionStart install is dark until next session | f2f13ab .. 8d4507f (root cause: c1c4500)              | Settled                               |
+| 2   | Tiered-orchestrate + per-task Codex gate | Added, debugged, removed whole subsystem as slower/costlier                    | fc88aac, e401175, 7fefcb5                             | Settled (removed)                     |
+| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring retired 2026-07-02 |
+| 4   | Codex asset mirror into ~/.codex         | Overwrote hooksPath, wrote through symlink, orphaned agent files               | pre-public (no hash); sweep in install/common/link.sh | Settled (abandoned)                   |
+| 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; redux fork only                 | 9ad4dc8                                               | Settled                               |
+| 6   | todo.md audit file deleted               | Tracking moved off-file; all dropped items resolved 2026-07-02                 | 854228e, c0a9072                                      | Settled 2026-07-02                    |
 
 ## When NOT to use this skill
 
@@ -133,7 +133,8 @@ re-vendorable via `ecc-install`/`ecc-update`. Own rules go under
 `claude/rules/personal/` (tracked). This is also why bootstrap installs ECC:
 a fresh clone has no language rules until it runs.
 
-**Status: settled, with one OPEN sub-question.** Whether vendoring into
+**Status: settled, with one OPEN sub-question [SUPERSEDED -- resolved by the
+corrections below; the auto-load claim here was wrong].** Whether vendoring into
 `claude/rules/` is needed AT ALL is unresolved as of 2026-07-02: nothing
 auto-loads `~/.claude/rules` (claude/CLAUDE.md never references it; only some
 ECC skills read it), and cloud containers already have the full tree at
@@ -150,6 +151,22 @@ with overridable paths, chiefly `rules-distill`'s `scan-rules.sh` via
 (`_ecc_legacy_rules_notice`); consumers point at the marketplace clone.
 Lesson: a vendored copy nobody loads is pure carrying cost -- enumerate
 consumers before building parity for an artifact.
+
+**Second correction (2026-07-02): the enumeration's "nothing auto-loads
+`~/.claude/rules`" premise was WRONG; the retirement outcome still stands.**
+Claude Code natively auto-loads every `.md` under `~/.claude/rules` at launch
+(`paths:` frontmatter scopes a rule to matching files; none = every session) --
+verified live when a cloud session observed
+the tracked rules file `claude-prompting.md` injected into its own context. The
+enumeration missed the harness itself as a consumer because it ran in fresh
+cloud clones where the untracked vendored dirs did not exist. Retirement
+survives on the marketplace-clone-superset argument; leftover vendored dirs
+are NOT inert (`common/`/`web/` load every session) and are now flagged as
+active by `_ecc_legacy_rules_notice`; the tracked namespace remains
+`claude/rules/personal/`, now home of the always-on model-tuning layer.
+Amended lesson: enumerate consumers in an environment
+where the artifact exists -- absence of effect on an absent artifact proves
+nothing.
 
 ## Saga 4: Codex asset mirror into ~/.codex (abandoned)
 

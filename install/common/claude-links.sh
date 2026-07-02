@@ -160,11 +160,14 @@ link_claude_config_dir() {
     fi
   done
 
-  # Rules: claude/rules is symlinked here as the single asset source. Only our
-  # own rules under claude/rules/personal/ are tracked; ECC rules vendoring is
-  # RETIRED (2026-07-02) -- the upstream tree lives in the ECC marketplace
+  # Rules: claude/rules is symlinked here as the single asset source. Claude
+  # Code natively auto-loads every .md under ~/.claude/rules at launch (`paths:`
+  # frontmatter scopes to matching files; none = every session). Only our own
+  # always-on rules under claude/rules/personal/ are tracked; ECC rules vendoring
+  # is RETIRED (2026-07-02) -- the upstream tree lives in the ECC marketplace
   # clone (~/.claude/plugins/marketplaces/ecc/rules/), and any language dirs
-  # still sitting in claude/rules are inert pre-retirement leftovers
+  # still sitting in claude/rules are pre-retirement leftovers that STILL
+  # auto-load, flagged for removal by _ecc_legacy_rules_notice
   # (claude/rules/.gitignore keeps them uncommitted).
   # One-time migration: older machines have rules as a REAL directory (from a
   # blanket ECC install). Preserve it as a timestamped backup before replacing
