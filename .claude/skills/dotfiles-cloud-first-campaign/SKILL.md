@@ -136,6 +136,19 @@ in the CURRENT session (try one, e.g. a superpowers skill). Present-on-disk
 but not invocable = post-launch install; acceptable only for the self-heal
 path.
 
+Baseline (2026-07-02, fresh session-1 dotfiles-repo container, NO Setup
+script): full Phase 0 pass. cloud-doctor exit 0 (all checks `[OK]`);
+symlink-audit `--cloud` all 9 entries OK, exit 0; `bin/dotfiles-tests` 9/9
+suites green; both required plugin ids at `"scope": "project"` in
+`installed_plugins.json` with their skills/hooks live in session 1 (ECC
+GateGuard fired on the first Bash call; superpowers injected at SessionStart;
+project skills invocable) -- the declaration path (option 1) carried the
+install with zero per-environment config. SessionStart hook printed the
+healthy-warm transcript (`already installed` for both ids). Git author
+reattributed, `commit.gpgsign` false. Account sync landed atlassian,
+frontend-design, security-guidance at `"scope": "user"`; the three
+project-excluded plugins stayed disabled (see Phase 1, now verified).
+
 ## Phase 1 -- placement decision (ranked menu)
 
 Decide, per environment/repo, WHERE the plugin install lives. Ranked:
@@ -181,7 +194,12 @@ OTHER marketplaces work in cloud, pin that marketplace's git URL in the repo's
 `.claude/settings.json` `extraKnownMarketplaces`; (c) to EXCLUDE an
 account-synced plugin from this repo's sessions, set it to `false` in the
 repo's `.claude/settings.json` `enabledPlugins` (project layer overrides user
--- asserted from settings precedence, verify on the next fresh session). This
+-- VERIFIED 2026-07-02 on a fresh session-1 container: all three excluded
+plugins reported `disabled` in `claude plugin list` despite `true` in the
+user layer. Nuance: the platform still INSTALLS them -- they appear at
+`"scope": "project"` in `installed_plugins.json` with payloads on disk --
+but they load nothing; disabled-but-installed is the expected shape, so do
+not read their presence in the install record as a failed exclusion). This
 repo excludes `telegram` (unused) and the official `code-review` and
 `code-simplifier` plugins (name-collide with the built-in `/code-review` that
 the tracked `co-review` skill invokes, and with the built-in `/simplify` +
