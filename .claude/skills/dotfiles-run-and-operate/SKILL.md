@@ -49,10 +49,9 @@ bin scripts are symlinked into `~/bin` by install/common/link.sh.
 | ----------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------- |
 | `update`                | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                              |
 | `reload`                | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                     |
-| `ecc-install`           | zsh function | Clone/pull ECC repo, vendor rules, add marketplace + install plugin in BOTH config dirs, codex sync, write cache stamp |
-| `ecc-update`            | zsh function | Hard-reset ECC repo to origin/main, re-vendor rules, codex sync, refresh stamp                                         |
-| `ecc-sync-rules`        | zsh function | Re-vendor `ECC_VENDOR_LANGS` from `~/Git/personal/ECC/rules` into `claude/rules/` as a reviewable diff                 |
-| `ecc-uninstall`         | zsh function | Remove plugin (both dirs), repo, metadata, cache stamp; vendored rules stay                                            |
+| `ecc-install`           | zsh function | Clone/pull ECC repo, add marketplace + install plugin in BOTH config dirs, flag legacy rules leftovers, codex sync, write cache stamp |
+| `ecc-update`            | zsh function | Hard-reset ECC repo to origin/main, flag legacy rules leftovers, codex sync, refresh stamp                             |
+| `ecc-uninstall`         | zsh function | Remove plugin (both dirs), repo, metadata, cache stamp                                                                 |
 | `superpowers-install`   | zsh function | Register official marketplace by git URL if absent, install plugin in BOTH config dirs                                 |
 | `superpowers-update`    | zsh function | `claude plugins update` in each dir that has it                                                                        |
 | `superpowers-uninstall` | zsh function | Uninstall from both config dirs                                                                                        |
@@ -103,10 +102,9 @@ ECC = "Everything Claude Code": skills/agents/commands/hooks come from the
 plugin; language RULES are vendored separately into the dotfiles repo.
 
 ```bash
-ecc-install     # from scratch: repo clone -> rules vendor -> marketplace+plugin (both dirs) -> codex sync
-ecc-update      # refresh: fetch+reset ECC repo to origin/main -> re-vendor -> codex sync
-ecc-sync-rules  # rules only; prints the review command
-ecc-uninstall   # plugin+repo+stamp gone; claude/rules/ vendored content left intact
+ecc-install     # from scratch: repo clone -> marketplace+plugin (both dirs) -> codex sync
+ecc-update      # refresh: fetch+reset ECC repo to origin/main -> codex sync
+ecc-uninstall   # plugin+repo+stamp gone
 ```
 
 Expected output lines (quoted from zsh/functions.zsh):
@@ -125,13 +123,11 @@ Facts that matter:
   read-only vendored mirror: `ecc-update` does `git fetch` + `git reset --hard
 origin/main` on it deliberately (lockfiles get dirtied by npm; rebase-pull
   would abort). Never commit there.
-- Vendored langs: `ECC_VENDOR_LANGS=(common python cpp rust web typescript)`
-  (zsh/functions.zsh:297). The vendored dirs under `claude/rules/` are
-  UNTRACKED (claude/rules/.gitignore); only `claude/rules/personal/` is
-  tracked. A rules diff after `ecc-sync-rules` therefore only shows if you
-  changed the gitignore or personal/. Whether vendoring is still needed at all
-  is an open question (cloud containers get the full tree via the plugin
-  marketplace clone) -- see dotfiles-architecture-contract.
+- Rules: vendoring RETIRED (2026-07-02). Nothing auto-loads `~/.claude/rules`;
+  the upstream tree lives in the marketplace clone
+  (`~/.claude/plugins/marketplaces/ecc/rules/`). Only `claude/rules/personal/`
+  is tracked; language dirs still on disk are inert leftovers that
+  `ecc-install`/`ecc-update` flag for removal (_ecc_legacy_rules_notice).
 - `--local` is accepted but ignored with
   `[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local.`
 
@@ -321,7 +317,7 @@ Re-verify before trusting:
 ```bash
 grep -n 'function update()' ~/dotfiles/zsh/functions.zsh              # update steps
 grep -n "alias reload" ~/dotfiles/zsh/aliases.zsh                     # reload
-grep -n 'ECC_VENDOR_LANGS\|ECC_REPO_DIR' ~/dotfiles/zsh/functions.zsh # vendor langs + repo path
+grep -n 'ECC_REPO_DIR' ~/dotfiles/zsh/functions.zsh                   # ECC repo path (codex sync source)
 grep -n 'update_days' ~/dotfiles/zsh/functions.zsh                    # 14-day nag threshold
 grep -n 'for plugin in' ~/dotfiles/zsh/functions.zsh                  # which plugins get nagged
 grep -n 'step "' ~/dotfiles/bin/dotfiles-repair                       # repair step list

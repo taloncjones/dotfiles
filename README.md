@@ -439,5 +439,5 @@ not repair pre-existing state.
 ## License
 
 Released under the MIT License. See [LICENSE](LICENSE) for terms.
-Third-party attributions (ECC rules/hooks, GSD-derived statusline) are listed
+Third-party attributions (ECC hooks, GSD-derived statusline) are listed
 in [NOTICE](NOTICE).
