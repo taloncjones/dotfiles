@@ -106,25 +106,27 @@ Invariant: identity comes only from the conditional includes. Never add a
 
 ## Decision 4: vendored-but-untracked upstream content
 
-ECC language rules (`claude/rules/{common,cpp,python,rust,typescript,web}`)
-live on disk inside the repo tree but are gitignored
-(`claude/rules/.gitignore` whitelists only `.gitignore` and `personal/`).
-`ecc-install` / `ecc-update` re-vendor them byte-identical from the ECC repo
-via `cp -R`. Same model for ECC skills/commands/hooks.
-
-Why: tracking them once caused 39-file churn on every upstream sync (fixed at
-e140ab3). They are reproducible from the installer, so tracking adds noise and
-invites local edits that die on the next `ecc-update`. The trade: a fresh
-clone has NO language rules until bootstrap runs -- which is why
+ECC skills/commands/hooks live on disk inside the repo tree but are gitignored;
+installers re-vendor them byte-identical from upstream. Why: tracking them once
+caused 39-file churn on every upstream sync (fixed at e140ab3). They are
+reproducible from the installer, so tracking adds noise and invites local edits
+that die on the next `ecc-update` -- which is why
 `install/common/claude-plugins.sh` runs during bootstrap and every `update`.
 
-Invariant: never hand-edit vendored dirs; never `git add -f` them. Own rules
-go under `claude/rules/personal/` only.
+ECC RULES vendoring is fully RETIRED (2026-07-02, settling the former open
+question): the upstream tree ships in the ECC marketplace clone
+(`~/.claude/plugins/marketplaces/ecc/rules/`), so local copies bought sync code
+for nothing. Claude Code natively auto-loads every `.md` under
+`~/.claude/rules` (`paths:` frontmatter scopes to matching files; none = every
+session) -- verified live in a cloud session 2026-07-02. The retirement-era
+"nothing auto-loads" finding came from fresh cloud clones where the untracked
+vendored dirs did not exist; leftover language dirs on older machines therefore
+still auto-load and should be deleted (`ecc-install`/`ecc-update` flag them).
 
-Open question (do not "fix" casually): whether rules vendoring is still needed
-at all -- nothing auto-loads `~/.claude/rules` (`claude/CLAUDE.md` never
-references it; only some ECC skills read it), and cloud containers already
-have the full tree at `~/.claude/plugins/marketplaces/ecc/rules/`.
+Invariant: never hand-edit vendored dirs; never `git add -f` them. Own rules
+go under `claude/rules/shared/` only (always-on unless given a `paths:`
+frontmatter; `claude/rules/.gitignore` whitelists only `.gitignore` and
+`shared/`).
 
 ## Decision 5: the pre-launch placement INVARIANT (cloud plugins)
 

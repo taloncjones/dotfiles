@@ -387,22 +387,28 @@ function _claude_ensure_plugin() {
 
 # --- ECC (Everything Claude Code) ---
 # Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
-# Rules: NOT vendored (retired 2026-07-02). Nothing auto-loads ~/.claude/rules;
-#   the only functional consumers are on-demand ECC skills (e.g. rules-distill's
-#   scan-rules.sh) whose paths are overridable. The full upstream rules tree
-#   ships inside the marketplace clone at
-#   ~/.claude/plugins/marketplaces/ecc/rules/ on every machine and container
-#   with the plugin installed -- point consumers there. Only personal rules
-#   (claude/rules/personal/, tracked) live at ~/.claude/rules now; leftover
-#   vendored language dirs from older installs are inert and safe to delete
-#   (_ecc_legacy_rules_notice flags them). The ECC repo clone remains only as
-#   the source for codex-ecc-sync.
+# Rules: NOT vendored (retired 2026-07-02). Claude Code natively auto-loads
+#   every .md under ~/.claude/rules at launch: a `paths:` frontmatter scopes a
+#   rule to sessions with matching files in context; none = every session.
+#   (Verified live in a cloud session 2026-07-02; the earlier "nothing
+#   auto-loads" finding came from fresh clones where the untracked vendored
+#   dirs did not exist.) The full upstream rules tree ships inside the
+#   marketplace clone at ~/.claude/plugins/marketplaces/ecc/rules/ on every
+#   machine and container with the plugin installed -- point on-demand
+#   consumers (e.g. rules-distill's scan-rules.sh) there. Only our own
+#   always-on rules (claude/rules/shared/, tracked) live at ~/.claude/rules
+#   now; leftover vendored language dirs from older installs still AUTO-LOAD
+#   (common/ and web/ have no `paths:`, so they load every session) and should
+#   be deleted (_ecc_legacy_rules_notice flags them). The ECC repo clone
+#   remains only as the source for codex-ecc-sync.
 # Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
 #   everything-claude-code v1 repo/marketplace is retired.
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
 
-# helper: flag inert vendored rules left behind by pre-retirement installs
+# helper: flag vendored rules left behind by pre-retirement installs. Not
+# inert: Claude Code auto-loads them (common/web every session, language dirs
+# on matching files), so leftovers inject stale upstream guidance until removed.
 function _ecc_legacy_rules_notice() {
     local l
     local -a leftovers=()
@@ -410,9 +416,9 @@ function _ecc_legacy_rules_notice() {
         [[ -d "$DOTFILEDIR/claude/rules/$l" ]] && leftovers+=("$l")
     done
     if (( ${#leftovers} > 0 )); then
-        echo "[INFO] Legacy vendored ECC rules present (${leftovers[*]}); vendoring is retired."
-        echo "[INFO] They are untracked and inert. Remove with:"
-        echo "[INFO]   rm -rf $DOTFILEDIR/claude/rules/{${(j:,:)leftovers}}"
+        echo "[WARNING] Legacy vendored ECC rules present (${leftovers[*]}); vendoring is retired."
+        echo "[WARNING] They are untracked but still auto-load into sessions. Remove with:"
+        echo "[WARNING]   rm -rf $DOTFILEDIR/claude/rules/{${(j:,:)leftovers}}"
         echo "[INFO] The full upstream tree lives at ~/.claude/plugins/marketplaces/ecc/rules/"
     fi
 }

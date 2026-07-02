@@ -45,23 +45,23 @@ exited N`, and returns that status. `$?` is trustworthy again.
 All shell functions live in zsh/functions.zsh; aliases in zsh/aliases.zsh;
 bin scripts are symlinked into `~/bin` by install/common/link.sh.
 
-| Command                 | What it is   | What it does                                                                                                           |
-| ----------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `update`                | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                              |
-| `reload`                | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                     |
+| Command                 | What it is   | What it does                                                                                                                          |
+| ----------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `update`                | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                                             |
+| `reload`                | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                                    |
 | `ecc-install`           | zsh function | Clone/pull ECC repo, add marketplace + install plugin in BOTH config dirs, flag legacy rules leftovers, codex sync, write cache stamp |
-| `ecc-update`            | zsh function | Hard-reset ECC repo to origin/main, flag legacy rules leftovers, codex sync, refresh stamp                             |
-| `ecc-uninstall`         | zsh function | Remove plugin (both dirs), repo, metadata, cache stamp                                                                 |
-| `superpowers-install`   | zsh function | Register official marketplace by git URL if absent, install plugin in BOTH config dirs                                 |
-| `superpowers-update`    | zsh function | `claude plugins update` in each dir that has it                                                                        |
-| `superpowers-uninstall` | zsh function | Uninstall from both config dirs                                                                                        |
-| `codex-ecc-sync`        | zsh function | SAFE wrapper around ECC's codex sync (redirects hooks dir, restores hooksPath)                                         |
-| `dotfiles-repair`       | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                          |
-| `setup-claude`          | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                     |
-| `claude-account`        | zsh function | Print which account a launch from `$PWD` would use                                                                     |
-| `claude [--personal]`   | zsh wrapper  | Launch Claude Code with directory-based account routing                                                                |
-| `identity-doctor`       | bin script   | Read-only git/ssh identity chain verifier (also `git identity`)                                                        |
-| `dotfiles-tests`        | bin script   | Aggregate runner for all nine test suites                                                                              |
+| `ecc-update`            | zsh function | Hard-reset ECC repo to origin/main, flag legacy rules leftovers, codex sync, refresh stamp                                            |
+| `ecc-uninstall`         | zsh function | Remove plugin (both dirs), repo, metadata, cache stamp                                                                                |
+| `superpowers-install`   | zsh function | Register official marketplace by git URL if absent, install plugin in BOTH config dirs                                                |
+| `superpowers-update`    | zsh function | `claude plugins update` in each dir that has it                                                                                       |
+| `superpowers-uninstall` | zsh function | Uninstall from both config dirs                                                                                                       |
+| `codex-ecc-sync`        | zsh function | SAFE wrapper around ECC's codex sync (redirects hooks dir, restores hooksPath)                                                        |
+| `dotfiles-repair`       | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                         |
+| `setup-claude`          | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                                    |
+| `claude-account`        | zsh function | Print which account a launch from `$PWD` would use                                                                                    |
+| `claude [--personal]`   | zsh wrapper  | Launch Claude Code with directory-based account routing                                                                               |
+| `identity-doctor`       | bin script   | Read-only git/ssh identity chain verifier (also `git identity`)                                                                       |
+| `dotfiles-tests`        | bin script   | Aggregate runner for all nine test suites                                                                                             |
 
 ## Update lifecycle
 
@@ -123,11 +123,13 @@ Facts that matter:
   read-only vendored mirror: `ecc-update` does `git fetch` + `git reset --hard
 origin/main` on it deliberately (lockfiles get dirtied by npm; rebase-pull
   would abort). Never commit there.
-- Rules: vendoring RETIRED (2026-07-02). Nothing auto-loads `~/.claude/rules`;
-  the upstream tree lives in the marketplace clone
-  (`~/.claude/plugins/marketplaces/ecc/rules/`). Only `claude/rules/personal/`
-  is tracked; language dirs still on disk are inert leftovers that
-  `ecc-install`/`ecc-update` flag for removal (_ecc_legacy_rules_notice).
+- Rules: vendoring RETIRED (2026-07-02). Claude Code natively auto-loads every
+  `.md` under `~/.claude/rules` (`paths:` frontmatter scopes to matching files;
+  none = every session); the upstream tree lives in the marketplace clone
+  (`~/.claude/plugins/marketplaces/ecc/rules/`). Only `claude/rules/shared/`
+  is tracked (our always-on model-tuning layer); language dirs still on disk
+  are leftovers that STILL auto-load, so `ecc-install`/`ecc-update` flag them
+  for removal (\_ecc_legacy_rules_notice).
 - `--local` is accepted but ignored with
   `[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local.`
 
