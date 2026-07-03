@@ -854,11 +854,6 @@ function _claude_plugin_check_update() {
 }
 _claude_plugin_check_update
 
-# launch claude code with telegram channel enabled
-function claude-telegram() {    # claude-telegram() will launch Claude Code with the Telegram bot channel. ex: $ claude-telegram
-    claude --channels plugin:telegram@claude-plugins-official "$@"
-}
-
 # Check for Claude Code CLI updates (async, cached 24h)
 _claude_code_update_check() {
     command -v claude &>/dev/null || return 0
