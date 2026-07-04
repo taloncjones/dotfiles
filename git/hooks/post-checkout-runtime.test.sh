@@ -23,6 +23,13 @@ fail() { printf 'FAIL  %s\n' "$1" >&2; FAIL=$((FAIL + 1)); }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/post-checkout-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
+# Canonicalize TMP so its path matches what the hook writes into symlink
+# targets. On macOS $TMPDIR lives under /var, a symlink to /private/var; the
+# hook resolves main to its real path, so an unresolved $TMP would mismatch
+# every readlink comparison below. pwd -P is a no-op where /tmp is already
+# canonical (Linux/CI).
+TMP="$(cd "$TMP" && pwd -P)"
+
 MAIN="$TMP/main"
 WT="$TMP/wt"
 
