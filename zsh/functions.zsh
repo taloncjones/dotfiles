@@ -744,6 +744,7 @@ function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) full
            "$base"/gsd-migration-journal(N) "$base"/gsd-file-manifest.json(N) "$base"/gsd-pristine(N)
            "$base"/gsd-install-state.json(N) "$base"/gsd-user-files-backup*(N)
            "$cbase"/skills/gsd-*(N) "$cbase"/prompts/gsd-*(N) "$cbase"/commands/gsd-*(N) "$cbase"/agents/gsd-*(N)
+           "$cbase"/hooks/gsd-*(N)
            "$cbase"/gsd-migration-journal(N) "$cbase"/gsd-file-manifest.json(N) "$cbase"/gsd-pristine(N)
            "$cbase"/gsd-install-state.json(N) "$cbase"/gsd-user-files-backup*(N) )
     (( ${#junk} )) && rm -rf "${junk[@]}"
