@@ -127,8 +127,8 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
      ```
      ### Co-review (Claude + Codex)
 
-     Reviewed at high effort by Claude (`/code-review`) and Codex
-     (`codex exec review`) against `<base>`.
+     Reviewed by Claude (`/code-review`, high effort) and Codex
+     (`codex exec review`, xhigh effort) against `<base>`.
 
      No outstanding issues. Ready for human review.
      ```
