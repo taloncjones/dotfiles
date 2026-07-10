@@ -31,14 +31,14 @@ Use Codex as a backup for the Claude setup on this machine.
 
 If the user asks for ECC, Superpowers, phased planning, systematic debugging, verification, TDD, or review workflows, prefer installed Codex skills/prompts/plugins when available.
 
-GSD is RETIRED on this setup. The original `get-shit-done-cc` npm package is
-treated as compromised (token rug-pull with publish access retained) -- never
-install or suggest it; `gsd-uninstall` purges it and `dotfiles-repair` flags a
-reappearance. The only sanctioned variant is the community redux fork
-(`@opengsd/get-shit-done-redux`, npx-only via `gsd-install`), and nothing on
-this setup installs it by default. If `$gsd-*` skills appear under `~/.codex/`,
-they are leftovers or an explicit opt-in -- do not treat GSD as part of the
-standing toolchain, and do not reinstall it unless the user explicitly asks.
+GSD is RETIRED on this setup -- no variant, no install path. The original
+`get-shit-done-cc` npm package is treated as compromised (token rug-pull with
+publish access retained) -- never install or suggest it; `gsd-uninstall` purges
+it and `dotfiles-repair` flags a reappearance. The community redux fork
+(`@opengsd/get-shit-done-redux`) is retired too: its install helpers were
+removed and the package is referenced only by the uninstaller. If `gsd-*`
+skills appear under `~/.codex/`, they are leftovers -- do not treat GSD as part
+of the toolchain, and do not reinstall any variant.
 
 ## Enforcement Layers
 
