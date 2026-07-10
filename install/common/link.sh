@@ -132,10 +132,10 @@ ensure_codex_hooks_feature() {
     mv "$tmp" "$config"
   fi
 
-  # Now: skip the additive "ensure hooks = true exists" steps when GSD's Codex
-  # installer owns this file (it manages [features].hooks itself). Writing here
-  # would race with the GSD installer and produce duplicate keys (TOML
-  # validation then fails and aborts the GSD install).
+  # Now: skip the additive "ensure hooks = true exists" steps when a leftover
+  # GSD manifest still owns this file ([features].hooks was GSD-managed). GSD
+  # is retired with no install path; this guard only protects pre-retirement
+  # machines until gsd-uninstall clears the manifest.
   if [ -f "$HOME"/.codex/gsd-file-manifest.json ]; then
     return
   fi

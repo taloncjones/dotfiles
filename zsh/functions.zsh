@@ -558,22 +558,28 @@ function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, an
     echo "[OK] ECC uninstalled"
 }
 
-# --- GSD (Get Shit Done, community "redux" fork) ---
-# Source of truth: npm @opengsd/get-shit-done-redux -- the safe community fork
-# (https://github.com/open-gsd/get-shit-done-redux). The original
-# get-shit-done-cc package was abandoned after a token rug-pull with publish
-# access retained, so it is treated as compromised: never reinstall it, and
-# gsd-uninstall actively removes it. The installer is npx-only (no global
-# package, no gsd-sdk shim); it writes skills/commands/agents/hooks into
-# ~/.claude (and ~/.codex when the codex CLI is present), and is idempotent.
-# Flags accepted by gsd-{install,update,uninstall}:
-#   -l, --local       install/remove under ./.claude (and ./.codex) in the current dir
-#   -g, --global      install/remove under ~/ (the default)
+# --- GSD (Get Shit Done) -- RETIRED; uninstall tooling only ---
+# GSD is no longer used on this setup and there is no install path here. The
+# original get-shit-done-cc package was abandoned after a token rug-pull with
+# publish access retained, so it is treated as compromised: never reinstall
+# it. The community redux fork (@opengsd/get-shit-done-redux) is retired too;
+# the package ref below exists only so gsd-uninstall can invoke the official
+# npx uninstaller. dotfiles-repair flags any GSD reappearance.
+# Flags accepted by gsd-uninstall:
+#   -l, --local       remove under ./.claude (and ./.codex) in the current dir
+#   -g, --global      remove under ~/ (the default)
 #   --claude          target Claude Code only
 #   --codex           target Codex only
 #                     (default: both runtimes when codex is installed, else Claude only)
-#   anything else     forwarded verbatim to the installer (e.g. --profile=core, --minimal)
 GSD_REDUX_PKG="@opengsd/get-shit-done-redux@latest"
+
+# Retired install entry points survive in long-running shells (re-sourcing a
+# file never undefines functions it no longer contains) -- drop them explicitly
+# so `reload` cannot leave a callable gsd-install behind.
+for _gsd_fn in gsd-install gsd-update _gsd_install_target _gsd_install_targets; do
+    (( ${+functions[$_gsd_fn]} )) && unfunction "$_gsd_fn"
+done
+unset _gsd_fn
 
 function _codex_remove_legacy_mirror_symlinks() {
     find "$HOME/.codex/skills" -maxdepth 1 -type l \
@@ -584,7 +590,7 @@ function _codex_remove_legacy_mirror_symlinks() {
 
 # helper: run a command in a subshell from a guaranteed-valid directory ($HOME), so
 # npm/npx/node don't crash with `uv_cwd ENOENT` when the shell's CWD has been deleted.
-# Only for *global* GSD operations — never wrap a --local install with this.
+# Only for *global* GSD operations — never wrap a --local op with this.
 function _gsd_at_home() {
     ( cd "$HOME" 2>/dev/null || cd / ; "$@" )
 }
@@ -597,7 +603,8 @@ function _gsd_require_cwd() {
     return 1
 }
 
-# helper: run the redux installer at a scope (global runs from $HOME; local stays in CWD)
+# helper: run the redux package at a scope (global runs from $HOME; local stays in CWD);
+# only used with --uninstall now that the install path is retired
 function _gsd_run() {
     local scope="$1"; shift
     if [[ "$scope" == "global" ]]; then
@@ -607,10 +614,11 @@ function _gsd_run() {
     fi
 }
 
-# helper: parse gsd-{install,update,uninstall} args into caller-scoped vars:
+# helper: parse gsd-uninstall args into caller-scoped vars:
 #   gsd_scope       -> "global" (default) | "local"
 #   gsd_targets     -> array of "claude"/"codex" (default: claude + codex-if-installed)
-#   gsd_passthrough -> array of remaining args forwarded to the GSD installer
+#   gsd_passthrough -> array of remaining args (rejected by gsd-uninstall --
+#                      with the installer gone there is nothing to forward to)
 function _gsd_parse_args() {
     gsd_scope="global"; gsd_targets=(); gsd_passthrough=()
     local arg want_claude=0 want_codex=0
@@ -630,45 +638,6 @@ function _gsd_parse_args() {
         gsd_targets=("claude")
         command -v codex &>/dev/null && gsd_targets+=("codex")
     fi
-}
-
-# helper: install/update GSD for one runtime target at a scope, forwarding any extra flags
-function _gsd_install_target() {
-    local scope="$1" target="$2"; shift 2
-    [[ "$target" == "codex" ]] && _codex_remove_legacy_mirror_symlinks
-    _gsd_run "$scope" --$target --$scope "$@"
-}
-
-# helper: install/update GSD for every parsed target
-function _gsd_install_targets() {
-    local verb="$1" scope="$2"; shift 2  # remaining args = installer passthrough
-    local target
-    for target in "${gsd_targets[@]}"; do
-        echo "[INFO] ${verb} GSD for ${target} (${scope})..."
-        _gsd_install_target "$scope" "$target" "$@" || { echo "[X] GSD ${target} ${verb:l} failed"; return 1; }
-    done
-}
-
-function gsd-install() {    # gsd-install([--local] [--claude|--codex] [installer flags]) installs the GSD redux fork (global, both runtimes by default). ex: $ gsd-install --local
-    local gsd_scope gsd_targets gsd_passthrough
-    _gsd_parse_args "$@"
-    _gsd_require_cwd "$gsd_scope" || return 1
-
-    _gsd_install_targets Installing "$gsd_scope" "${gsd_passthrough[@]}" || return 1
-
-    [[ "$gsd_scope" == "global" ]] && (( ${gsd_targets[(Ie)claude]} )) && _claude_plugin_epoch_write gsd
-    echo "[OK] GSD installed (${(j:+:)gsd_targets}, $gsd_scope)"
-}
-
-function gsd-update() {    # gsd-update([--local] [--claude|--codex] [installer flags]) updates the GSD redux fork by re-running the idempotent installer. ex: $ gsd-update --profile=core
-    local gsd_scope gsd_targets gsd_passthrough
-    _gsd_parse_args "$@"
-    _gsd_require_cwd "$gsd_scope" || return 1
-
-    _gsd_install_targets Updating "$gsd_scope" "${gsd_passthrough[@]}" || return 1
-
-    [[ "$gsd_scope" == "global" ]] && (( ${gsd_targets[(Ie)claude]} )) && _claude_plugin_epoch_write gsd
-    echo "[OK] GSD updated (${(j:+:)gsd_targets}, $gsd_scope)"
 }
 
 # helper: strip GSD hook registrations + gsd-sdk permission entries from a settings.json
@@ -713,6 +682,7 @@ PY
 function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) fully removes GSD: the redux fork, the legacy compromised package, and all leftover state. ex: $ gsd-uninstall
     local gsd_scope gsd_targets gsd_passthrough
     _gsd_parse_args "$@"
+    (( ${#gsd_passthrough} )) && { echo "[X] unknown args: ${gsd_passthrough[*]}"; return 1; }
     _gsd_require_cwd "$gsd_scope" || return 1
     local base="$HOME/.claude"; [[ "$gsd_scope" == "local" ]] && base="./.claude"
 

@@ -162,16 +162,13 @@ grep -rl 'passed, .* failed' "$HOME/dotfiles" --include='*.sh'   #   (runner's o
 
 ## Residual known drift (verified 2026-07-02; fix or file, do not re-discover)
 
-1. GSD stance split -- OPEN. `zsh/functions.zsh:760` (commit 9ad4dc8) says
-   "GSD is retired... the right move is gsd-uninstall", yet
-   `gsd-install`/`gsd-update` in the same file still offer the sanctioned
-   community redux fork, and the hand-maintained top of `codex/AGENTS.md`
-   ("Codex Backup Mode" section, codex/AGENTS.md:29-35) still describes GSD as
-   an active installed surface (`$gsd-*` skills, `~/.claude/get-shit-done/`).
-   Reconcile before citing either as authoritative. Ground truth on the
+1. GSD stance split -- CLOSED (2026-07-10). `gsd-install`/`gsd-update` were
+   removed from `zsh/functions.zsh` and `codex/AGENTS.md` now states no GSD
+   variant has an install path; `gsd-uninstall` plus the `dotfiles-repair`
+   tripwire are the only remaining GSD surface. Ground truth on the
    supply-chain history: the ORIGINAL `get-shit-done-cc` npm package is
    compromised (token rug-pull, publish access retained) and must never be
-   reinstalled; only the redux fork is sanctioned (functions.zsh:474-489).
+   reinstalled; the redux fork is retired as well.
 2. ECC sentinel block ages independently -- OPEN by design. The counts inside
    it ("67 specialized agents, 271 skills, 92 commands", "Version: 2.0.0",
    codex/AGENTS.md:146-148) are upstream facts frozen at the last

@@ -26,7 +26,7 @@ recorded root cause no longer holds -- not a hunch.
 | 2   | Tiered-orchestrate + per-task Codex gate | Added, debugged, removed whole subsystem as slower/costlier                    | fc88aac, e401175, 7fefcb5                             | Settled (removed)                     |
 | 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring retired 2026-07-02 |
 | 4   | Codex asset mirror into ~/.codex         | Overwrote hooksPath, wrote through symlink, orphaned agent files               | pre-public (no hash); sweep in install/common/link.sh | Settled (abandoned)                   |
-| 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; redux fork only                 | 9ad4dc8                                               | Settled                               |
+| 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; GSD fully retired 2026-07-10    | 9ad4dc8                                               | Settled                               |
 | 6   | todo.md audit file deleted               | Tracking moved off-file; all dropped items resolved 2026-07-02                 | 854228e, c0a9072                                      | Settled 2026-07-02                    |
 
 ## When NOT to use this skill
@@ -212,10 +212,12 @@ the standing policy lives in the comment block above `GSD_REDUX_PKG` in
 zsh/functions.zsh.
 
 **Resolution.** Treat `get-shit-done-cc` as hostile forever: never reinstall;
-`gsd-uninstall` actively purges it. The only sanctioned variant is the
-community fork `@opengsd/get-shit-done-redux`
-(github.com/open-gsd/get-shit-done-redux), installed npx-only via
-`gsd-install` (no global package, no gsd-sdk shim).
+`gsd-uninstall` actively purges it. The community fork
+`@opengsd/get-shit-done-redux` (github.com/open-gsd/get-shit-done-redux) was
+sanctioned for a time, then retired as well: its install path
+(`gsd-install`/`gsd-update`) was removed 2026-07-10, and the package is now
+referenced only by `gsd-uninstall`'s official-uninstaller call. No GSD
+variant is installed or installable from this repo.
 
 **Status: settled.** Lesson feeds `dotfiles-external-positioning`: pin what
 you can, and treat "abandoned with publish access retained" as compromised,
