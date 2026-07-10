@@ -1,6 +1,6 @@
 #!/bin/sh
-# functions.test.sh -- behavioral tests for the plugin ground-truth helpers in
-# zsh/functions.zsh (_claude_plugin_installed / _claude_ensure_plugin).
+# functions.test.sh -- behavioral tests for the Claude and Codex plugin
+# ground-truth helpers in zsh/functions.zsh.
 #
 # The helpers verify installs against <config-dir>/plugins/installed_plugins.json
 # instead of trusting `claude` exit codes (ported from bootstrap-cloud.sh; the
@@ -35,8 +35,20 @@ assert_grep "ecc-install goes through _claude_ensure_plugin" \
     grep -q '_claude_ensure_plugin "\$cfg_dir" "ecc@ecc"' "$FUNCS"
 assert_grep "superpowers-install goes through _claude_ensure_plugin" \
     grep -q '_claude_ensure_plugin "\$cfg_dir" "superpowers@claude-plugins-official"' "$FUNCS"
+assert_grep "ecc-install installs the native Codex plugin" \
+    grep -q '_codex_install_ecc_plugin' "$FUNCS"
+assert_grep "superpowers-install installs the native Codex plugin" \
+    grep -q '_codex_install_superpowers_plugin' "$FUNCS"
+assert_grep "Superpowers Codex install uses the dotfiles marketplace" \
+    grep -q '_codex_ensure_plugin "superpowers@dotfiles-workflows"' "$FUNCS"
+assert_grep "ECC no longer runs the unsafe upstream Codex sync" \
+    sh -c "! grep -q 'scripts/sync-ecc-to-codex.sh' $FUNCS"
+assert_grep "ECC uninstall removes the native Codex plugin" \
+    grep -q '_codex_remove_plugin "ecc@dotfiles-workflows"' "$FUNCS"
+assert_grep "Superpowers uninstall removes the native Codex plugin" \
+    grep -q '_codex_remove_plugin "superpowers@dotfiles-workflows"' "$FUNCS"
 assert_grep "install verification never greps CLI plugin listings" \
-    sh -c "! grep -q 'plugins list' $FUNCS"
+    sh -c "! grep -q 'claude plugins list' $FUNCS"
 assert_grep "ensure helper verifies installed_plugins.json" \
     grep -q 'installed_plugins.json' "$FUNCS"
 
@@ -100,6 +112,48 @@ exit 1
 EOF
 chmod +x "$TMP"/stubs/*/claude
 
+# Codex stub: records marketplace and plugin operations in HOME so the real
+# helpers can verify state through `codex plugin list --json`.
+mkdir -p "$TMP/stubs/codex-good"
+cat >"$TMP/stubs/codex-good/codex" <<'EOF'
+#!/bin/sh
+state="$HOME/codex-plugin-state"
+marketplaces="$HOME/codex-marketplaces"
+log="$HOME/codex-calls"
+printf '%s\n' "$*" >>"$log"
+case "$1 $2 ${3:-}" in
+    "plugin marketplace list")
+        printf 'MARKETPLACE ROOT\n'
+        [ -f "$marketplaces" ] && cat "$marketplaces"
+        ;;
+    "plugin marketplace add")
+        printf 'dotfiles-workflows %s\n' "$4" >"$marketplaces"
+        ;;
+    "plugin list --json")
+        if [ -f "$state" ]; then
+            plugin_id=$(cat "$state")
+            enabled=true
+            case "$plugin_id" in
+                disabled:*) enabled=false; plugin_id=${plugin_id#disabled:} ;;
+            esac
+            plugin_name=${plugin_id%%@*}
+            marketplace=${plugin_id#*@}
+            printf '{\n  "installed": [\n    {\n      "pluginId": "%s",\n      "name": "%s",\n      "marketplaceName": "%s",\n      "installed": true,\n      "enabled": %s\n    }\n  ]\n}\n' \
+                "$plugin_id" "$plugin_name" "$marketplace" "$enabled"
+        else
+            printf '{"installed":[]}'
+        fi
+        ;;
+    "plugin add "*)
+        printf '%s\n' "$3" >"$state"
+        ;;
+    "plugin remove "*)
+        rm -f "$state"
+        ;;
+esac
+EOF
+chmod +x "$TMP/stubs/codex-good/codex"
+
 # run_case <stub> <snippet>: source functions.zsh with claude OFF the PATH (so
 # source-time update checks no-op), then put the stub first and eval the
 # snippet with a fast retry budget. Output lands in $TMP/out.
@@ -111,6 +165,17 @@ run_case() {
         path=('$TMP/stubs/$stub' /usr/bin /bin)
         CLAUDE_PLUGIN_RETRIES=2
         CLAUDE_PLUGIN_RETRY_DELAY=0
+        $snippet
+    " >"$TMP/out" 2>&1
+}
+
+run_codex_case() {
+    snippet="$1"
+    HOME="$TMP/home-codex" DOTFILEDIR="$REPO" zsh -f -c "
+        path=(/usr/bin /bin)
+        source '$REPO/$FUNCS'
+        path=('$TMP/stubs/codex-good' /usr/bin /bin)
+        mkdir -p \"\$HOME\"
         $snippet
     " >"$TMP/out" 2>&1
 }
@@ -178,6 +243,86 @@ if run_case broken "_claude_plugin_installed '$CFG' ecc@ecc"; then
     pass "plugin_installed true when record present"
 else
     fail "plugin_installed true when record present"
+fi
+
+# 6. Codex install registers a local marketplace, installs the requested
+#    plugin, and verifies the enabled state from JSON readback.
+rm -rf "$TMP/home-codex"
+if run_codex_case "_codex_ensure_plugin ecc@dotfiles-workflows '$TMP/marketplace'"; then
+    pass "Codex plugin install is verified"
+else
+    fail "Codex plugin install is verified"
+fi
+if grep -q "plugin marketplace add $TMP/marketplace" "$TMP/home-codex/codex-calls" &&
+   grep -q "plugin add ecc@dotfiles-workflows" "$TMP/home-codex/codex-calls"; then
+    pass "Codex plugin install registers its marketplace"
+else
+    fail "Codex plugin install registers its marketplace"
+fi
+
+# 7. A self-contained ECC staging tree must carry the marketplace, plugin
+#    manifest, skills, MCP config, and assets into a Codex-only directory.
+ECC_FIXTURE="$TMP/ecc"
+STAGED="$TMP/staged-marketplace"
+mkdir -p "$ECC_FIXTURE/skills/sample" "$ECC_FIXTURE/skills/quoted" "$ECC_FIXTURE/assets"
+printf '%s\n' '---' 'name: sample' 'description: sample: workflow' '---' >"$ECC_FIXTURE/skills/sample/SKILL.md"
+printf '%s\n' '---' 'name: quoted' 'description: "Quoted: description"' '---' >"$ECC_FIXTURE/skills/quoted/SKILL.md"
+printf '%s\n' '{}' >"$ECC_FIXTURE/.mcp.json"
+printf '%s\n' 'asset' >"$ECC_FIXTURE/assets/ecc-icon.svg"
+if run_codex_case "ECC_REPO_DIR='$ECC_FIXTURE'; CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_stage_ecc_plugin"; then
+    pass "ECC Codex plugin staging succeeds"
+else
+    fail "ECC Codex plugin staging succeeds"
+fi
+if [ -f "$STAGED/.agents/plugins/marketplace.json" ] &&
+   [ -f "$STAGED/plugins/ecc/.codex-plugin/plugin.json" ] &&
+   [ -f "$STAGED/plugins/ecc/skills/sample/SKILL.md" ] &&
+   [ -f "$STAGED/plugins/ecc/.mcp.json" ] &&
+   [ -f "$STAGED/plugins/ecc/assets/ecc-icon.svg" ]; then
+    pass "ECC Codex plugin staging is self-contained"
+else
+    fail "ECC Codex plugin staging is self-contained"
+fi
+if grep -q '^description: >-$' "$STAGED/plugins/ecc/skills/sample/SKILL.md"; then
+    pass "ECC staging normalizes Codex skill frontmatter"
+else
+    fail "ECC staging normalizes Codex skill frontmatter"
+fi
+if grep -q '^description: "Quoted: description"$' "$STAGED/plugins/ecc/skills/quoted/SKILL.md"; then
+    pass "ECC staging preserves quoted frontmatter"
+else
+    fail "ECC staging preserves quoted frontmatter"
+fi
+
+# 8. Superpowers is independently staged into the same native marketplace,
+#    without depending on Codex's account-provisioned curated marketplace.
+SUPERPOWERS_FIXTURE="$TMP/superpowers"
+mkdir -p "$SUPERPOWERS_FIXTURE/.codex-plugin" "$SUPERPOWERS_FIXTURE/skills/brainstorming" "$SUPERPOWERS_FIXTURE/assets"
+printf '%s\n' '{"name":"superpowers","version":"1.0.0","description":"test","author":{"name":"test"},"skills":"./skills/","interface":{"displayName":"Superpowers","shortDescription":"test","longDescription":"test","developerName":"test","category":"Coding","capabilities":[],"defaultPrompt":[]}}' >"$SUPERPOWERS_FIXTURE/.codex-plugin/plugin.json"
+printf '%s\n' '---' 'name: brainstorming' 'description: Brainstorm before implementation.' '---' >"$SUPERPOWERS_FIXTURE/skills/brainstorming/SKILL.md"
+printf '%s\n' 'asset' >"$SUPERPOWERS_FIXTURE/assets/icon.svg"
+if run_codex_case "SUPERPOWERS_REPO_DIR='$SUPERPOWERS_FIXTURE'; CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_stage_superpowers_plugin"; then
+    pass "Superpowers Codex plugin staging succeeds"
+else
+    fail "Superpowers Codex plugin staging succeeds"
+fi
+if [ -f "$STAGED/plugins/ecc/skills/sample/SKILL.md" ] &&
+   [ -f "$STAGED/plugins/superpowers/.codex-plugin/plugin.json" ] &&
+   [ -f "$STAGED/plugins/superpowers/skills/brainstorming/SKILL.md" ] &&
+   [ -f "$STAGED/plugins/superpowers/assets/icon.svg" ]; then
+    pass "workflow staging preserves both native plugins"
+else
+    fail "workflow staging preserves both native plugins"
+fi
+
+# 9. Uninstall must remove a present-but-disabled plugin instead of treating it
+#    as absent and leaving stale config/cache state behind.
+printf '%s\n' 'disabled:ecc@dotfiles-workflows' >"$TMP/home-codex/codex-plugin-state"
+if run_codex_case "_codex_remove_plugin ecc@dotfiles-workflows" &&
+   [ ! -f "$TMP/home-codex/codex-plugin-state" ]; then
+    pass "Codex uninstall removes disabled plugins"
+else
+    fail "Codex uninstall removes disabled plugins"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
