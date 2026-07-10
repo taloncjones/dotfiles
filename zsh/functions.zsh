@@ -543,6 +543,14 @@ function _codex_stage_superpowers_plugin() {
     mkdir -p "$destination/.agents/plugins" "$staging/.codex-plugin" || return 1
     cp "$marketplace_template" "$destination/.agents/plugins/marketplace.json" || return 1
     cp "$source_dir/.codex-plugin/plugin.json" "$staging/.codex-plugin/plugin.json" || return 1
+    # Superpowers 6.1.1 added an empty top-level hooks object that Codex's
+    # plugin validator rejects. Hooks are not part of this skills-only package.
+    perl -0pi -e 's/\s*"hooks"\s*:\s*(?:"[^"]*"|\{[^{}]*\})\s*,//s' \
+        "$staging/.codex-plugin/plugin.json" || return 1
+    if grep -q '"hooks"[[:space:]]*:' "$staging/.codex-plugin/plugin.json"; then
+        echo "[X] unsupported Superpowers hooks field could not be removed"
+        return 1
+    fi
     cp -R "$source_dir/skills" "$staging/skills" || return 1
     _codex_normalize_skill_frontmatter "$staging/skills" || return 1
     if [[ -d "$source_dir/assets" ]]; then
