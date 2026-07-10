@@ -298,7 +298,7 @@ fi
 #    without depending on Codex's account-provisioned curated marketplace.
 SUPERPOWERS_FIXTURE="$TMP/superpowers"
 mkdir -p "$SUPERPOWERS_FIXTURE/.codex-plugin" "$SUPERPOWERS_FIXTURE/skills/brainstorming" "$SUPERPOWERS_FIXTURE/assets"
-printf '%s\n' '{"name":"superpowers","version":"1.0.0","description":"test","author":{"name":"test"},"skills":"./skills/","interface":{"displayName":"Superpowers","shortDescription":"test","longDescription":"test","developerName":"test","category":"Coding","capabilities":[],"defaultPrompt":[]}}' >"$SUPERPOWERS_FIXTURE/.codex-plugin/plugin.json"
+printf '%s\n' '{"name":"superpowers","version":"1.0.0","description":"test","author":{"name":"test"},"skills":"./skills/","hooks":{},"interface":{"displayName":"Superpowers","shortDescription":"test","longDescription":"test","developerName":"test","category":"Coding","capabilities":[],"defaultPrompt":[]}}' >"$SUPERPOWERS_FIXTURE/.codex-plugin/plugin.json"
 printf '%s\n' '---' 'name: brainstorming' 'description: Brainstorm before implementation.' '---' >"$SUPERPOWERS_FIXTURE/skills/brainstorming/SKILL.md"
 printf '%s\n' 'asset' >"$SUPERPOWERS_FIXTURE/assets/icon.svg"
 if run_codex_case "SUPERPOWERS_REPO_DIR='$SUPERPOWERS_FIXTURE'; CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_stage_superpowers_plugin"; then
@@ -313,6 +313,11 @@ if [ -f "$STAGED/plugins/ecc/skills/sample/SKILL.md" ] &&
     pass "workflow staging preserves both native plugins"
 else
     fail "workflow staging preserves both native plugins"
+fi
+if grep -q '"hooks"' "$STAGED/plugins/superpowers/.codex-plugin/plugin.json"; then
+    fail "Superpowers staging removes unsupported manifest hooks"
+else
+    pass "Superpowers staging removes unsupported manifest hooks"
 fi
 
 # 9. Uninstall must remove a present-but-disabled plugin instead of treating it
