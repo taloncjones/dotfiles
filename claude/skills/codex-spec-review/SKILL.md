@@ -74,7 +74,7 @@ declined an external review.
    === CONTEXT (optional, may be absent) ===
    <design / brief / CLAUDE.md excerpts>
    PROMPT
-   )" -c model_reasoning_effort="high" </dev/null 2>&1
+   )" -c model_reasoning_effort="xhigh" </dev/null 2>&1
    ```
 
    - Pass file contents inline in the prompt (Codex can also read the repo, but

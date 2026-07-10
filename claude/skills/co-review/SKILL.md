@@ -50,7 +50,7 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
      || { git worktree prune && git worktree add --detach "$WT"; }
    ( cd "$WT" && gh pr checkout <n> \
        && codex exec review --base <pr-base-branch> \
-            -c model_reasoning_effort="high" \
+            -c model_reasoning_effort="xhigh" \
             -c approval_policy="never" -c sandbox_mode="read-only" ) > "$WT.log" 2>&1
    git worktree remove --force "$WT"; git worktree prune
    # <pr-base-branch> = gh pr view <n> --json baseRefName -q .baseRefName
@@ -58,7 +58,7 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
    # branch mode: review the current branch's committed work against its fork point
    LOG=$(mktemp /tmp/coreview-branch.XXXXXX)
    codex exec review --base <branch-the-work-forked-from> \
-     -c model_reasoning_effort="high" \
+     -c model_reasoning_effort="xhigh" \
      -c approval_policy="never" -c sandbox_mode="read-only" > "$LOG" 2>&1
    ```
 
