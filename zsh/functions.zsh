@@ -573,6 +573,14 @@ function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, an
 #                     (default: both runtimes when codex is installed, else Claude only)
 GSD_REDUX_PKG="@opengsd/get-shit-done-redux@latest"
 
+# Retired install entry points survive in long-running shells (re-sourcing a
+# file never undefines functions it no longer contains) -- drop them explicitly
+# so `reload` cannot leave a callable gsd-install behind.
+for _gsd_fn in gsd-install gsd-update _gsd_install_target _gsd_install_targets; do
+    (( ${+functions[$_gsd_fn]} )) && unfunction "$_gsd_fn"
+done
+unset _gsd_fn
+
 function _codex_remove_legacy_mirror_symlinks() {
     find "$HOME/.codex/skills" -maxdepth 1 -type l \
         \( -name 'gsd-*' -o -name 'ecc-*' -o -name 'superpowers-*' \) -delete 2>/dev/null || true
@@ -582,7 +590,7 @@ function _codex_remove_legacy_mirror_symlinks() {
 
 # helper: run a command in a subshell from a guaranteed-valid directory ($HOME), so
 # npm/npx/node don't crash with `uv_cwd ENOENT` when the shell's CWD has been deleted.
-# Only for *global* GSD operations — never wrap a --local install with this.
+# Only for *global* GSD operations — never wrap a --local op with this.
 function _gsd_at_home() {
     ( cd "$HOME" 2>/dev/null || cd / ; "$@" )
 }
@@ -609,7 +617,8 @@ function _gsd_run() {
 # helper: parse gsd-uninstall args into caller-scoped vars:
 #   gsd_scope       -> "global" (default) | "local"
 #   gsd_targets     -> array of "claude"/"codex" (default: claude + codex-if-installed)
-#   gsd_passthrough -> array of remaining args (unused by gsd-uninstall)
+#   gsd_passthrough -> array of remaining args (rejected by gsd-uninstall --
+#                      with the installer gone there is nothing to forward to)
 function _gsd_parse_args() {
     gsd_scope="global"; gsd_targets=(); gsd_passthrough=()
     local arg want_claude=0 want_codex=0
@@ -673,6 +682,7 @@ PY
 function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) fully removes GSD: the redux fork, the legacy compromised package, and all leftover state. ex: $ gsd-uninstall
     local gsd_scope gsd_targets gsd_passthrough
     _gsd_parse_args "$@"
+    (( ${#gsd_passthrough} )) && { echo "[X] unknown args: ${gsd_passthrough[*]}"; return 1; }
     _gsd_require_cwd "$gsd_scope" || return 1
     local base="$HOME/.claude"; [[ "$gsd_scope" == "local" ]] && base="./.claude"
 
