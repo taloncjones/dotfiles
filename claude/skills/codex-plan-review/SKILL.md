@@ -56,7 +56,7 @@ Skip if there is no plan file, or the user explicitly declined an external revie
    === CONTEXT (optional, may be absent) ===
    <PLAN.md / spec / CLAUDE.md excerpts>
    PROMPT
-   )" -c model_reasoning_effort="high" </dev/null 2>&1
+   )" -c model_reasoning_effort="xhigh" </dev/null 2>&1
    ```
 
    - Pass file contents inline in the prompt (Codex can also read the repo, but

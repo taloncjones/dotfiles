@@ -738,14 +738,19 @@ function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) full
     #    both the Claude base and the Codex base -- the codex uninstaller leaves
     #    gsd-install-state.json/gsd-migration-journal/gsd-pristine residue behind.
     local cbase="$HOME/.codex"; [[ "$gsd_scope" == "local" ]] && cbase="./.codex"
+    # Shared globs sweep BOTH bases -- add a new installer artifact dir here
+    # once and both are covered (hooks/ was previously missed on the codex side
+    # because the lists were maintained per-base).
     local -a junk
-    junk=( "$base"/skills/gsd-*(N) "$base"/commands/gsd-*(N) "$base"/agents/gsd-*(N) "$base"/hooks/gsd-*(N)
-           "$base"/get-shit-done(N) "$base"/commands/gsd(N) "$base"/.gsd-profile(N)
-           "$base"/gsd-migration-journal(N) "$base"/gsd-file-manifest.json(N) "$base"/gsd-pristine(N)
-           "$base"/gsd-install-state.json(N) "$base"/gsd-user-files-backup*(N)
-           "$cbase"/skills/gsd-*(N) "$cbase"/prompts/gsd-*(N) "$cbase"/commands/gsd-*(N) "$cbase"/agents/gsd-*(N)
-           "$cbase"/gsd-migration-journal(N) "$cbase"/gsd-file-manifest.json(N) "$cbase"/gsd-pristine(N)
-           "$cbase"/gsd-install-state.json(N) "$cbase"/gsd-user-files-backup*(N) )
+    local b
+    for b in "$base" "$cbase"; do
+        junk+=( "$b"/skills/gsd-*(N) "$b"/commands/gsd-*(N) "$b"/agents/gsd-*(N) "$b"/hooks/gsd-*(N)
+                "$b"/gsd-migration-journal(N) "$b"/gsd-file-manifest.json(N) "$b"/gsd-pristine(N)
+                "$b"/gsd-install-state.json(N) "$b"/gsd-user-files-backup*(N) )
+    done
+    # base-specific residue
+    junk+=( "$base"/get-shit-done(N) "$base"/commands/gsd(N) "$base"/.gsd-profile(N)
+            "$cbase"/prompts/gsd-*(N) )
     (( ${#junk} )) && rm -rf "${junk[@]}"
 
     # 4. strip GSD hook registrations + permission from settings.json
