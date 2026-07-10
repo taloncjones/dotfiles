@@ -1,0 +1,28 @@
+{
+  "name": "ecc",
+  "version": "2.0.0",
+  "description": "Self-contained ECC workflows for Codex, staged from the upstream ECC checkout.",
+  "author": {
+    "name": "Affaan Mustafa",
+    "url": "https://github.com/affaan-m"
+  },
+  "homepage": "https://ecc.tools",
+  "repository": "https://github.com/affaan-m/ECC",
+  "license": "MIT",
+  "keywords": ["codex", "skills", "tdd", "security", "review", "workflow"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "ECC",
+    "shortDescription": "ECC workflows for TDD, security, review, and delivery.",
+    "longDescription": "A self-contained Codex package of ECC skills and MCP configuration, staged from the independently managed upstream ECC checkout.",
+    "developerName": "Affaan Mustafa",
+    "category": "Coding",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Use tdd-workflow to implement this change test-first.",
+      "Use security-review to audit this change.",
+      "Use verification-loop before declaring completion."
+    ]
+  }
+}

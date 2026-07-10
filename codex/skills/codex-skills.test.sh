@@ -42,6 +42,14 @@ assert "installer keeps ~/.codex/skills as a real directory" \
     rg -q 'mkdir -p "\$HOME"/\.codex/skills' install/common/link.sh
 assert "installer treats Codex plugins as canonical workflow owners" \
     rg -q 'Codex plugins are the canonical owner' install/common/link.sh
+assert "ECC lifecycle installs a native Codex plugin" \
+    rg -q '_codex_install_ecc_plugin' zsh/functions.zsh
+assert "Superpowers lifecycle installs the managed Codex plugin" \
+    rg -q '_codex_ensure_plugin "superpowers@dotfiles-workflows"' zsh/functions.zsh
+assert "bootstrap installs workflows for Claude and Codex" \
+    rg -q 'for Claude and Codex' install/common/claude-plugins.sh
+assert "ECC lifecycle never invokes the upstream Codex sync" \
+    sh -c "! rg -q 'scripts/sync-ecc-to-codex.sh' zsh/functions.zsh"
 assert "installer removes stale standalone Superpowers skill snapshots" \
     rg -q "name 'superpowers-\*'" install/common/link.sh
 assert "installer removes stale standalone ECC skill snapshots" \
@@ -53,7 +61,9 @@ assert "Codex AGENTS defaults implementation work to worktrees" \
 assert "Codex AGENTS defines default skill routing" \
     rg -q '## Default Skill Routing' codex/AGENTS.md
 assert "Codex AGENTS routes security and deployment skills by default" \
-    sh -c "rg -q 'security-review' codex/AGENTS.md && rg -q 'deployment-patterns' codex/AGENTS.md"
+    sh -c "rg -q 'ecc:security-review' codex/AGENTS.md && rg -q 'ecc:deployment-patterns' codex/AGENTS.md"
+assert "Codex AGENTS uses plugin-qualified ECC skills" \
+    sh -c "rg -q 'ecc:tdd-workflow' codex/AGENTS.md && rg -q 'ecc:workspace-surface-audit' codex/AGENTS.md"
 assert "Codex AGENTS keeps project-specific product names out of global defaults" \
     sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
 

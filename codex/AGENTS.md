@@ -25,9 +25,9 @@ These are hard constraints in Codex. Some are hook-enforced when `[features].hoo
 
 Use Codex as a backup for the Claude setup on this machine.
 
-- Dotfiles manages `~/.codex/AGENTS.md` and selected `~/.codex/hooks/*` symlinks only
-- Superpowers, ECC, and Codex plugins may install their own prompts, skills, rules, MCPs, agents, and git hooks under `~/.codex/`
-- Do not mirror Claude plugin assets into `~/.codex/` from this repo; let each plugin installer own its Codex surface
+- Dotfiles manages `~/.codex/AGENTS.md`, selected `~/.codex/hooks/*` symlinks, and native workflow plugin lifecycles
+- ECC and Superpowers are staged from separate upstream checkouts as self-contained `dotfiles-workflows` plugins
+- Claude and Codex plugin installations remain independent; never mirror one runtime's installed plugin files into the other
 
 If the user asks for ECC, Superpowers, phased planning, systematic debugging, verification, TDD, or review workflows, prefer installed Codex skills/prompts/plugins when available.
 
@@ -59,23 +59,23 @@ worktree creation would require an unsafe or destructive action.
 
 Use these skills by default when the task matches:
 
-- `workspace-surface-audit` for setup, plugin, MCP, connector, repo-surface, or
+- `ecc:workspace-surface-audit` for setup, plugin, MCP, connector, repo-surface, or
   "what are we missing?" audits.
 - `superpowers:brainstorming`, `superpowers:writing-plans`,
   `claude-plan-review` or `codex-plan-review`, and
   `superpowers:executing-plans` for substantial implementation work.
-- `tdd-workflow` or `superpowers:test-driven-development` for new behavior,
+- `ecc:tdd-workflow` or `superpowers:test-driven-development` for new behavior,
   regression fixes, and risky refactors.
-- `systematic-debugging` for startup failures, flaky tests, tool failures,
+- `superpowers:systematic-debugging` for startup failures, flaky tests, tool failures,
   build failures, and confusing runtime symptoms.
-- `security-review` for secrets, auth, tokens, MCP/config, deploy, certificates,
+- `ecc:security-review` for secrets, auth, tokens, MCP/config, deploy, certificates,
   public-repo checks, and anything touching credentials or policy.
-- `rust-testing` for Rust crates and Cargo test strategy.
-- `frontend-patterns` and `e2e-testing` for frontend/UI changes; use
+- `ecc:rust-testing` for Rust crates and Cargo test strategy.
+- `ecc:frontend-patterns` and `ecc:e2e-testing` for frontend/UI changes; use
   project-local agents when a repo provides them.
-- `database-migrations` and `postgres-patterns` for SQLx, Postgres,
+- `ecc:database-migrations` and `ecc:postgres-patterns` for SQLx, Postgres,
   schema, query, or migration work.
-- `deployment-patterns` for Docker, Compose, systemd, cloud deploy, CI, and
+- `ecc:deployment-patterns` for Docker, Compose, systemd, cloud deploy, CI, and
   environment hardening.
 - `co-review` for top-level review orchestration after implementation, and
   `superpowers:verification-before-completion` before claiming work is done.
@@ -349,7 +349,7 @@ Skills are auto-loaded from `.agents/skills/`. Each skill contains:
 - `SKILL.md` — Detailed instructions and workflow
 - `agents/openai.yaml` — Codex interface metadata
 
-Available skills:
+Available skills (use the `ecc:` prefix when invoking them in Codex):
 
 - tdd-workflow — Test-driven development with 80%+ coverage
 - security-review — Comprehensive security checklist
@@ -381,17 +381,9 @@ Treat the project-local `.codex/config.toml` as the default Codex baseline for E
 
 ECC's canonical Codex section name is `[mcp_servers.context7]`. The launcher package remains `@upstash/context7-mcp`; only the TOML section name is normalized for consistency with `codex mcp list` and the reference config.
 
-### Automatic config.toml merging
+### Native plugin ownership
 
-The sync script (`scripts/sync-ecc-to-codex.sh`) uses a Node-based TOML parser to safely merge ECC MCP servers into `~/.codex/config.toml`:
-
-- **Add-only by default** — missing ECC servers are appended; existing servers are never modified or removed.
-- **7 managed servers** — Supabase, Playwright, Context7, Exa, GitHub, Memory, Sequential Thinking.
-- **Canonical naming** — ECC manages Context7 as `[mcp_servers.context7]`; legacy `[mcp_servers.context7-mcp]` entries are treated as aliases during updates.
-- **Package-manager aware** — uses the project's configured package manager (npm/pnpm/yarn/bun) instead of hardcoding `pnpm`.
-- **Drift warnings** — if an existing server's config differs from the ECC recommendation, the script logs a warning.
-- **`--update-mcp`** — explicitly replaces all ECC-managed servers with the latest recommended config (safely removes subtables like `[mcp_servers.supabase.env]`).
-- **User config is always preserved** — custom servers, args, env vars, and credentials outside ECC-managed sections are never touched.
+The dotfiles-managed ECC Codex plugin declares its MCP servers through the plugin manifest. Never run upstream `scripts/sync-ecc-to-codex.sh`: it writes global Codex guidance, agent roles, MCP configuration, and git hooks outside the native plugin lifecycle.
 
 ## External Action Boundaries
 

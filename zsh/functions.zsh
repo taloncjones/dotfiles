@@ -385,6 +385,189 @@ function _claude_ensure_plugin() {
     return 1
 }
 
+# --- Codex plugin lifecycle ---
+# Codex plugins are global to CODEX_HOME. ECC and Superpowers are staged into a
+# dedicated local marketplace so every manifest reference is copied into the
+# plugin cache without depending on account-provisioned marketplaces.
+CODEX_WORKFLOW_MARKETPLACE_DIR="${CODEX_WORKFLOW_MARKETPLACE_DIR:-$HOME/.local/share/dotfiles/codex-workflows}"
+
+function _codex_plugin_installed() {
+    local plugin_id="$1"
+    command codex plugin list --json 2>/dev/null | awk -v target="$plugin_id" '
+        /"pluginId"[[:space:]]*:/ {
+            current = index($0, "\"" target "\"") > 0
+            installed = 0
+            enabled = 0
+        }
+        current && /"installed"[[:space:]]*:[[:space:]]*true/ { installed = 1 }
+        current && /"enabled"[[:space:]]*:[[:space:]]*true/ { enabled = 1 }
+        current && installed && enabled { found = 1 }
+        END { exit found ? 0 : 1 }
+    '
+}
+
+function _codex_plugin_present() {
+    local plugin_id="$1"
+    command codex plugin list --json 2>/dev/null | awk -v target="$plugin_id" '
+        /"pluginId"[[:space:]]*:/ && index($0, "\"" target "\"") > 0 { found = 1 }
+        END { exit found ? 0 : 1 }
+    '
+}
+
+function _codex_marketplace_installed() {
+    local marketplace="$1"
+    command codex plugin marketplace list 2>/dev/null | awk -v target="$marketplace" 'NR > 1 && $1 == target { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+# Usage: _codex_ensure_plugin <plugin-id> [marketplace-source]
+function _codex_ensure_plugin() {
+    local plugin_id="$1" marketplace_source="${2:-}"
+    local marketplace="${plugin_id#*@}"
+
+    if _codex_plugin_installed "$plugin_id"; then
+        echo "[INFO] $plugin_id already installed (Codex)"
+        return 0
+    fi
+
+    if [[ -n "$marketplace_source" ]] && ! _codex_marketplace_installed "$marketplace"; then
+        echo "[INFO] Adding $marketplace marketplace (Codex)..."
+        command codex plugin marketplace add "$marketplace_source" \
+            || { echo "[X] marketplace add failed for $marketplace (Codex)"; return 1; }
+    fi
+
+    echo "[INFO] Installing $plugin_id (Codex)..."
+    command codex plugin add "$plugin_id" \
+        || { echo "[X] install failed for $plugin_id (Codex)"; return 1; }
+    if _codex_plugin_installed "$plugin_id"; then
+        echo "[OK] Installed $plugin_id (Codex; start a new thread to apply)"
+        return 0
+    fi
+
+    echo "[X] $plugin_id is not installed and enabled after Codex reported success"
+    return 1
+}
+
+function _codex_remove_plugin() {
+    local plugin_id="$1"
+    command -v codex &>/dev/null || return 0
+    if ! _codex_plugin_present "$plugin_id"; then
+        echo "[INFO] $plugin_id not installed (Codex)"
+        return 0
+    fi
+    echo "[INFO] Removing $plugin_id (Codex)..."
+    command codex plugin remove "$plugin_id" \
+        || { echo "[X] removal failed for $plugin_id (Codex)"; return 1; }
+    if _codex_plugin_present "$plugin_id"; then
+        echo "[X] $plugin_id is still present after Codex reported successful removal"
+        return 1
+    fi
+    echo "[OK] Removed $plugin_id (Codex)"
+}
+
+function _codex_reinstall_plugin() {
+    local plugin_id="$1" marketplace_source="${2:-}"
+    _codex_remove_plugin "$plugin_id" || return 1
+    _codex_ensure_plugin "$plugin_id" "$marketplace_source"
+}
+
+function _codex_normalize_skill_frontmatter() {
+    local skills_dir="$1"
+    command -v perl &>/dev/null \
+        || { echo "[X] perl is required to normalize Codex skill frontmatter"; return 1; }
+    find "$skills_dir" -name SKILL.md -exec perl -pi -e \
+        'if (/^description: (?!["\x27|>])(.+)$/) { $_ = "description: >-\n  $1\n" }' {} +
+}
+
+function _codex_stage_ecc_plugin() {
+    local source_dir="$ECC_REPO_DIR"
+    local destination="$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    local template_dir="$DOTFILEDIR/codex/plugins/ecc"
+    local marketplace_template="$DOTFILEDIR/codex/.agents/plugins/marketplace.json"
+    local plugins_dir="$destination/plugins"
+    local staging="$plugins_dir/.ecc.tmp.$$"
+    local plugin_dir="$staging"
+
+    [[ -n "$destination" && "$destination" != "/" ]] \
+        || { echo "[X] invalid Codex workflow marketplace path"; return 1; }
+    [[ -d "$source_dir/skills" && -f "$source_dir/.mcp.json" ]] \
+        || { echo "[X] ECC checkout lacks Codex skills or MCP config: $source_dir"; return 1; }
+    [[ -f "$template_dir/.codex-plugin/plugin.json" && -f "$marketplace_template" ]] \
+        || { echo "[X] dotfiles ECC Codex plugin templates are incomplete"; return 1; }
+
+    rm -rf "$staging"
+    mkdir -p "$destination/.agents/plugins" "$plugin_dir/.codex-plugin" || return 1
+    cp "$marketplace_template" "$destination/.agents/plugins/marketplace.json" || return 1
+    cp "$template_dir/.codex-plugin/plugin.json" "$plugin_dir/.codex-plugin/plugin.json" || return 1
+    cp "$source_dir/.mcp.json" "$plugin_dir/.mcp.json" || return 1
+    cp -R "$source_dir/skills" "$plugin_dir/skills" || return 1
+    # Codex validates skill frontmatter as strict YAML. Convert upstream's
+    # single-line descriptions to folded scalars so embedded colons remain
+    # valid without changing the rendered description.
+    _codex_normalize_skill_frontmatter "$plugin_dir/skills" || return 1
+    if [[ -d "$source_dir/assets" ]]; then
+        cp -R "$source_dir/assets" "$plugin_dir/assets" || return 1
+    fi
+
+    rm -rf "$plugins_dir/ecc"
+    mv "$staging" "$plugins_dir/ecc" || return 1
+    echo "[OK] Staged self-contained ECC Codex plugin at $plugins_dir/ecc"
+}
+
+function _codex_install_ecc_plugin() {
+    command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
+    _codex_stage_ecc_plugin || return 1
+    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+}
+
+function _codex_update_ecc_plugin() {
+    command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
+    _codex_stage_ecc_plugin || return 1
+    _codex_reinstall_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+}
+
+function _codex_stage_superpowers_plugin() {
+    local source_dir="$SUPERPOWERS_REPO_DIR"
+    local destination="$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    local marketplace_template="$DOTFILEDIR/codex/.agents/plugins/marketplace.json"
+    local plugins_dir="$destination/plugins"
+    local staging="$plugins_dir/.superpowers.tmp.$$"
+
+    [[ -n "$destination" && "$destination" != "/" ]] \
+        || { echo "[X] invalid Codex workflow marketplace path"; return 1; }
+    [[ -f "$source_dir/.codex-plugin/plugin.json" && -d "$source_dir/skills" ]] \
+        || { echo "[X] Superpowers checkout lacks its Codex plugin: $source_dir"; return 1; }
+    [[ -f "$marketplace_template" ]] \
+        || { echo "[X] dotfiles Codex marketplace template is missing"; return 1; }
+
+    rm -rf "$staging"
+    mkdir -p "$destination/.agents/plugins" "$staging/.codex-plugin" || return 1
+    cp "$marketplace_template" "$destination/.agents/plugins/marketplace.json" || return 1
+    cp "$source_dir/.codex-plugin/plugin.json" "$staging/.codex-plugin/plugin.json" || return 1
+    cp -R "$source_dir/skills" "$staging/skills" || return 1
+    _codex_normalize_skill_frontmatter "$staging/skills" || return 1
+    if [[ -d "$source_dir/assets" ]]; then
+        cp -R "$source_dir/assets" "$staging/assets" || return 1
+    fi
+
+    rm -rf "$plugins_dir/superpowers"
+    mv "$staging" "$plugins_dir/superpowers" || return 1
+    echo "[OK] Staged self-contained Superpowers Codex plugin at $plugins_dir/superpowers"
+}
+
+function _codex_install_superpowers_plugin() {
+    _codex_stage_superpowers_plugin || return 1
+    # Remove the account-provisioned variant before installing the managed
+    # marketplace copy, preventing duplicate superpowers:* skill names.
+    _codex_remove_plugin "superpowers@openai-curated" || return 1
+    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+}
+
+function _codex_update_superpowers_plugin() {
+    _codex_stage_superpowers_plugin || return 1
+    _codex_remove_plugin "superpowers@openai-curated" || return 1
+    _codex_reinstall_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+}
+
 # --- ECC (Everything Claude Code) ---
 # Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
 # Rules: NOT vendored (retired 2026-07-02). Claude Code natively auto-loads
@@ -399,12 +582,14 @@ function _claude_ensure_plugin() {
 #   always-on rules (claude/rules/personal/, tracked) live at ~/.claude/rules
 #   now; leftover vendored language dirs from older installs still AUTO-LOAD
 #   (common/ and web/ have no `paths:`, so they load every session) and should
-#   be deleted (_ecc_legacy_rules_notice flags them). The ECC repo clone
-#   remains only as the source for codex-ecc-sync.
+#   be deleted (_ecc_legacy_rules_notice flags them). The ECC repo clone also
+#   provides source content for an independent, self-contained Codex plugin.
 # Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
 #   everything-claude-code v1 repo/marketplace is retired.
 ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
+SUPERPOWERS_REPO_URL="https://github.com/obra/superpowers.git"
+SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.local/share/dotfiles/sources/superpowers}"
 
 # helper: flag vendored rules left behind by pre-retirement installs. Not
 # inert: Claude Code auto-loads them (common/web every session, language dirs
@@ -425,39 +610,7 @@ function _ecc_legacy_rules_notice() {
     fi
 }
 
-function codex-ecc-sync() {    # codex-ecc-sync() merges ECC into ~/.codex (AGENTS, prompts, MCP) and installs ECC git hooks into the dotfiles-owned hooks dir. ex: $ codex-ecc-sync
-    local ecc_dir="$ECC_REPO_DIR"
-    if [[ ! -d "$ecc_dir" ]]; then
-        echo "[X] ECC repo not found. Run 'ecc-install' first."
-        return 1
-    fi
-    # Codex is opt-in: only sync when the Codex CLI is actually installed.
-    if ! command -v codex &>/dev/null; then
-        echo "[INFO] Codex CLI not installed; skipping ECC -> Codex sync."
-        return 0
-    fi
-    # The sync's add-only TOML merge needs node deps (e.g. @iarna/toml).
-    if [[ ! -d "$ecc_dir/node_modules/@iarna/toml" ]]; then
-        echo "[INFO] Installing ECC node deps for Codex sync..."
-        (cd "$ecc_dir" && npm install --no-audit --no-fund --loglevel=error) \
-            || { echo "[X] npm install failed"; return 1; }
-    fi
-    # Point ECC's git-hook installer at the DOTFILES-owned global hooks dir
-    # (symlinked to $DOTFILEDIR/git/hooks) instead of ~/.codex/git-hooks, so
-    # core.hooksPath stays dotfiles-managed and one hooks dir serves Claude,
-    # Codex, and manual commits. AGENTS.md is already symlinked into dotfiles,
-    # so the AGENTS merge lands there too.
-    echo "[INFO] Syncing ECC into ~/.codex..."
-    (cd "$ecc_dir" && ECC_GLOBAL_HOOKS_DIR="$HOME/.config/git/hooks" bash scripts/sync-ecc-to-codex.sh) \
-        || { echo "[X] codex sync failed"; return 1; }
-    # The hook installer rewrites core.hooksPath to an absolute path; restore the
-    # canonical tilde form so the dotfiles-tracked .gitconfig stays stable.
-    local gc="$DOTFILEDIR/git/.gitconfig"
-    [[ -f "$gc" ]] && sed -i '' -E 's#^([[:space:]]*hooksPath = ).*#\1~/.config/git/hooks#' "$gc"
-    echo "[OK] ECC synced into Codex; git hooks live in dotfiles git/hooks"
-}
-
-function ecc-install() {    # ecc-install([--local]) will set up ECC from scratch (repo, vendored rules, plugin). ex: $ ecc-install
+function ecc-install() {    # ecc-install([--local]) installs ECC independently for Claude and Codex. ex: $ ecc-install
     [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local."
     local ecc_dir="$ECC_REPO_DIR"
 
@@ -465,7 +618,6 @@ function ecc-install() {    # ecc-install([--local]) will set up ECC from scratc
     if [[ ! -d "$ecc_dir" ]]; then
         echo "[INFO] Cloning ECC repo..."
         git clone "$ECC_REPO_URL" "$ecc_dir" || { echo "[X] clone failed"; return 1; }
-        (cd "$ecc_dir" && npm install --no-audit --no-fund --loglevel=error)
     else
         echo "[INFO] ECC repo already exists, pulling latest..."
         (cd "$ecc_dir" && git pull origin main) || { echo "[X] git pull failed"; return 1; }
@@ -478,7 +630,7 @@ function ecc-install() {    # ecc-install([--local]) will set up ECC from scratc
     fi
 
     # rules vendoring retired (2026-07-02): the marketplace clone carries the
-    # upstream rules tree; only flag inert leftovers from older installs.
+    # upstream rules tree; flag active leftovers from older installs.
     _ecc_legacy_rules_notice
 
     # ensure the ecc marketplace + plugin exist in EVERY account config dir
@@ -487,17 +639,25 @@ function ecc-install() {    # ecc-install([--local]) will set up ECC from scratc
     # explicit CLAUDE_CONFIG_DIR + `command claude`, so the result does not
     # depend on $PWD via the claude() wrapper). A dir that does not exist yet
     # (e.g. work not set up) is skipped.
-    local cfg_dir
-    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-        [[ -d "$cfg_dir" ]] || continue
-        _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || return 1
-    done
+    local cfg_dir install_status=0
+    if command -v claude &>/dev/null; then
+        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+            [[ -d "$cfg_dir" ]] || continue
+            _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || install_status=1
+        done
+    else
+        echo "[INFO] Claude CLI not installed; skipping ECC Claude plugins."
+    fi
 
-    # mirror ECC into Codex (no-op when the Codex CLI is absent)
-    codex-ecc-sync || echo "[WARNING] Codex sync failed; Claude-side ECC install is unaffected"
+    _codex_install_ecc_plugin || install_status=1
 
     _claude_plugin_epoch_write ecc
-    echo "[OK] ECC installed"
+    if (( install_status == 0 )); then
+        echo "[OK] ECC installed for available Claude and Codex runtimes"
+    else
+        echo "[X] ECC installation was incomplete; review the runtime-specific errors above"
+        return 1
+    fi
 }
 
 function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and update rules. ex: $ ecc-update
@@ -510,25 +670,39 @@ function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and
     fi
 
     echo "[INFO] Syncing ECC to upstream main..."
-    # ECC is a read-only vendored mirror: we never commit here, and codex-ecc-sync's
-    # `npm install` rewrites the tracked lockfiles (package-lock.json, yarn.lock) every
-    # run. A rebase-pull (pull.rebase=true) then aborts on those unstaged changes. Fetch
-    # + hard-reset sidesteps that and guarantees we exactly match upstream each time.
+    # ECC is a read-only source mirror: fetch + hard-reset guarantees the staged
+    # Codex plugin and Claude marketplace both derive from upstream main.
     (cd "$ecc_dir" && git fetch origin main && git reset --hard origin/main) \
         || { echo "[X] ECC sync failed"; return 1; }
 
-    # rules vendoring retired (2026-07-02); flag inert leftovers only.
+    # rules vendoring retired (2026-07-02); flag active leftovers only.
     _ecc_legacy_rules_notice
 
-    # refresh the Codex mirror too (no-op when the Codex CLI is absent)
-    codex-ecc-sync || echo "[WARNING] Codex sync failed; Claude-side ECC update is unaffected"
+    local cfg_dir update_status=0
+    if command -v claude &>/dev/null; then
+        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+            [[ -d "$cfg_dir" ]] || continue
+            _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || { update_status=1; continue; }
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update ecc >/dev/null 2>&1 || true
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update ecc@ecc \
+                || { echo "[X] ECC update failed ($cfg_dir)"; update_status=1; }
+        done
+    fi
+
+    _codex_update_ecc_plugin || update_status=1
 
     _claude_plugin_epoch_write ecc
-    echo "[OK] ECC updated"
+    if (( update_status == 0 )); then
+        echo "[OK] ECC updated for available Claude and Codex runtimes"
+    else
+        echo "[X] ECC update was incomplete; review the runtime-specific errors above"
+        return 1
+    fi
 }
 
-function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, and metadata; vendored rules in dotfiles are left intact. ex: $ ecc-uninstall
+function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Codex plus its source checkout. ex: $ ecc-uninstall
     local ecc_dir="$ECC_REPO_DIR"
+    local uninstall_status=0
 
     # remove installed rules via uninstall script if available
     if [[ -f "$HOME/.claude/ecc/install-state.json" ]] && [[ -d "$ecc_dir" ]]; then
@@ -544,9 +718,11 @@ function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, an
         [[ -d "$cfg_dir" ]] || continue
         if _claude_plugin_installed "$cfg_dir" "ecc@ecc"; then
             echo "[INFO] Removing ECC plugin ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall ecc@ecc 2>/dev/null
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall ecc@ecc 2>/dev/null || uninstall_status=1
         fi
     done
+
+    _codex_remove_plugin "ecc@dotfiles-workflows" || uninstall_status=1
 
     # remove repo
     if [[ -d "$ecc_dir" ]]; then
@@ -555,7 +731,12 @@ function ecc-uninstall() {    # ecc-uninstall() removes the ECC plugin, repo, an
     fi
 
     rm -f "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.ecc-update"
-    echo "[OK] ECC uninstalled"
+    if (( uninstall_status == 0 )); then
+        echo "[OK] ECC uninstalled from Claude and Codex"
+    else
+        echo "[X] ECC uninstall was incomplete"
+        return 1
+    fi
 }
 
 # --- GSD (Get Shit Done) -- RETIRED; uninstall tooling only ---
@@ -730,22 +911,17 @@ function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) full
 }
 
 # Codex integration:
-#   - ECC: codex-ecc-sync (run by ecc-install/ecc-update) merges ECC's AGENTS
-#     block, prompts, and MCP servers into ~/.codex via the upstream
-#     sync-ecc-to-codex.sh, and installs ECC's pre-commit/pre-push into the
-#     dotfiles-owned global hooks dir ($DOTFILEDIR/git/hooks) so core.hooksPath
-#     stays dotfiles-managed. Generated artifacts (~/.codex/prompts/ecc-*, the
-#     config.toml MCP merge) are reproduced idempotently, not committed; the
-#     static shared files (codex/AGENTS.md, git/hooks) live in this repo.
-#   - Superpowers: provided to Codex by Codex's own plugin marketplace
-#     ([plugins."superpowers@openai-curated"] in ~/.codex/config.toml) -- nothing
-#     for dotfiles to mirror.
-# install/common/link.sh still sweeps any leftover ~/.codex/{skills,agents}/{ecc,superpowers}-*
-# symlinks from older mirror-style installs (the current sync writes prompts, not
-# skill symlinks, so the sweep is harmless to it).
+#   - ECC: staged as a self-contained plugin under
+#     ~/.local/share/dotfiles/codex-workflows and installed from the
+#     dotfiles-workflows marketplace. Claude and Codex installations do not
+#     share runtime files.
+#   - Superpowers: staged from its upstream repository into the same native
+#     marketplace without sharing Claude's installed plugin files.
+# install/common/link.sh still sweeps leftover mirror-style skill/agent links.
 
 # --- Superpowers ---
-# Plugin-only — no repo, no rules, no extra files
+# Claude uses its official plugin marketplace. Codex uses a separate upstream
+# checkout staged into the dotfiles-owned native marketplace.
 
 function superpowers-install() {    # superpowers-install([--local]) will install the Superpowers plugin. ex: $ superpowers-install
     [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] Claude Code plugins are global-only; ignoring --local."
@@ -754,38 +930,74 @@ function superpowers-install() {    # superpowers-install([--local]) will instal
     # install` then no-ops with exit 0. _claude_ensure_plugin registers the
     # marketplace by git URL (synchronous clone), installs, and verifies against
     # installed_plugins.json, mirroring bootstrap-cloud.sh ensure_plugin.
-    local cfg_dir
-    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-        [[ -d "$cfg_dir" ]] || continue
-        _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
-            "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || return 1
-    done
+    local cfg_dir install_status=0 codex_source_status=0
+    if command -v claude &>/dev/null; then
+        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+            [[ -d "$cfg_dir" ]] || continue
+            _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
+                "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || install_status=1
+        done
+    else
+        echo "[INFO] Claude CLI not installed; skipping Superpowers Claude plugins."
+    fi
+    if command -v codex &>/dev/null; then
+        if [[ ! -d "$SUPERPOWERS_REPO_DIR" ]]; then
+            echo "[INFO] Cloning Superpowers source for Codex..."
+            if mkdir -p "${SUPERPOWERS_REPO_DIR:h}"; then
+                git clone "$SUPERPOWERS_REPO_URL" "$SUPERPOWERS_REPO_DIR" || codex_source_status=1
+            else
+                codex_source_status=1
+            fi
+        else
+            echo "[INFO] Superpowers source already exists, pulling latest..."
+            (cd "$SUPERPOWERS_REPO_DIR" && git pull origin main) || codex_source_status=1
+        fi
+        if (( codex_source_status == 0 )); then
+            _codex_install_superpowers_plugin || install_status=1
+        else
+            install_status=1
+        fi
+    else
+        echo "[INFO] Codex CLI not installed; skipping Superpowers Codex plugin."
+    fi
+    (( install_status == 0 )) || return 1
+    echo "[OK] Superpowers installed for available Claude and Codex runtimes"
 }
 
 function superpowers-update() {    # superpowers-update([--local]) will update the Superpowers plugin. ex: $ superpowers-update
     [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] Claude Code plugins are global-only; ignoring --local."
-    local cfg_dir updated=0
-    for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-        [[ -d "$cfg_dir" ]] || continue
-        if ! _claude_plugin_installed "$cfg_dir" "superpowers@claude-plugins-official"; then
-            echo "[INFO] Superpowers not installed ($cfg_dir); skipping"
-            continue
-        fi
-        echo "[INFO] Updating Superpowers plugin ($cfg_dir)..."
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update superpowers@claude-plugins-official \
-            || { echo "[X] update failed ($cfg_dir)"; return 1; }
-        updated=1
-    done
-    if (( updated )); then
-        echo "[OK] Superpowers updated (restart Claude Code to apply)"
-    else
-        echo "[X] Superpowers not installed in any config dir. Run 'superpowers-install' first."
-        return 1
+    local cfg_dir update_status=0 codex_source_status=0
+    if command -v claude &>/dev/null; then
+        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
+            [[ -d "$cfg_dir" ]] || continue
+            _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
+                "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || { update_status=1; continue; }
+            echo "[INFO] Updating Superpowers plugin ($cfg_dir)..."
+            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update superpowers@claude-plugins-official \
+                || { echo "[X] update failed ($cfg_dir)"; update_status=1; }
+        done
     fi
+    if command -v codex &>/dev/null; then
+        if [[ ! -d "$SUPERPOWERS_REPO_DIR" ]]; then
+            echo "[X] Superpowers source not found. Run 'superpowers-install' first."
+            update_status=1
+        else
+            echo "[INFO] Syncing Superpowers source to upstream main..."
+            (cd "$SUPERPOWERS_REPO_DIR" && git fetch origin main && git reset --hard origin/main) \
+                || codex_source_status=1
+            if (( codex_source_status == 0 )); then
+                _codex_update_superpowers_plugin || update_status=1
+            else
+                update_status=1
+            fi
+        fi
+    fi
+    (( update_status == 0 )) || return 1
+    echo "[OK] Superpowers updated for available Claude and Codex runtimes; start new sessions to apply"
 }
 
 function superpowers-uninstall() {    # superpowers-uninstall() will remove the Superpowers plugin. ex: $ superpowers-uninstall
-    local cfg_dir
+    local cfg_dir uninstall_status=0
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
         if ! _claude_plugin_installed "$cfg_dir" "superpowers@claude-plugins-official"; then
@@ -793,9 +1005,16 @@ function superpowers-uninstall() {    # superpowers-uninstall() will remove the 
             continue
         fi
         echo "[INFO] Removing Superpowers plugin ($cfg_dir)..."
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall superpowers@claude-plugins-official 2>/dev/null
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall superpowers@claude-plugins-official 2>/dev/null || uninstall_status=1
         echo "[OK] Superpowers uninstalled ($cfg_dir)"
     done
+    _codex_remove_plugin "superpowers@dotfiles-workflows" || uninstall_status=1
+    _codex_remove_plugin "superpowers@openai-curated" || uninstall_status=1
+    if [[ -d "$SUPERPOWERS_REPO_DIR" ]]; then
+        echo "[INFO] Removing Superpowers source checkout..."
+        rm -rf "$SUPERPOWERS_REPO_DIR"
+    fi
+    (( uninstall_status == 0 )) || return 1
 }
 
 # --- Startup update check (OMZ-style) ---
