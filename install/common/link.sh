@@ -75,8 +75,12 @@ link_claude_config_dir "$HOME"/.claude-work
 # into ~/.claude so /resume and /rewind see every session from either root.
 # Link mode never moves data; on an unmigrated machine it warns and points
 # at `claude-unify-projects --merge` (one-time, run with no live sessions).
-"$DOTFILEDIR"/bin/claude-unify-projects \
-  || echo "[link] session store not unified yet; see warning above"
+if command -v python3 >/dev/null 2>&1; then
+  "$DOTFILEDIR"/bin/claude-unify-projects \
+    || echo "[link] session store not unified yet; see warning above"
+else
+  echo "[link] python3 not found; session store link step skipped"
+fi
 
 # The Dockerized Claude sandbox (claude/sandbox/, bin/claude-sandbox) was
 # retired along with GSD -- permission auto mode covers the same need. Sweep

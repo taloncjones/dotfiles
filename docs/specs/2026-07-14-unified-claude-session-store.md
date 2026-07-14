@@ -133,7 +133,15 @@ One script, two modes, idempotent in both:
   COPY-then-swap: the work-side trees are never mutated until the final
   atomic rename, so an interruption at any earlier stage leaves both roots
   fully working and the script safe to re-run from scratch.
-  1. Preflight (fail closed):
+  1. Per-tree merge input classification (half-migrated states): for each of
+     `projects`, `file-history` independently, classify the work-side path —
+     a real directory is merged; a symlink already resolving to the
+     personal-side path is excluded from the merge entirely (already
+     unified — walking it would self-collide every entry against itself and
+     corrupt collision bookkeeping for the other tree); a symlink pointing
+     anywhere else aborts with `[X]` and asks the operator to resolve it by
+     hand. If both trees classify as already-unified, merge mode is a no-op.
+  2. Preflight (fail closed):
      - `lsof +D` over all four trees (`projects/` and `file-history/` in
        both roots) must be empty; if `lsof` is unavailable or errors, stop.
      - Print the close-all-Claude-sessions reminder; require interactive
@@ -141,29 +149,39 @@ One script, two modes, idempotent in both:
      - Warn if `cleanupPeriodDays` differs between the two roots'
        `settings.json` (see D1).
      - Free-space check: destination filesystem must have headroom for a
-       full copy of the work trees plus the backup tar.
-  2. Backup: tar both `projects/` trees and both `file-history/` trees into
+       full copy of the work trees plus the backup tar. If the backup
+       directory shares a filesystem with the personal root, the two draws
+       come from the same free-space pool, so the check requires
+       `2 * work_bytes + total_bytes` free there instead of two independent
+       (and under-counting) checks.
+  3. Backup: tar both `projects/` trees and both `file-history/` trees into
      `~/tmp/claude-projects-backup-<timestamp>.tar.gz` with root-distinct
      archive paths (`claude/...`, `claude-work/...`), mode 0600. Validate
      with `tar -tzf` (list must succeed and entry count match the source
      inventory). Write the pre-merge inventory (path, size, mtime per file)
      next to the tar. Abort before any mutation if validation fails.
-  3. Compute collisions from the RUNTIME inventory, not from this spec's
+  4. Compute collisions from the RUNTIME inventory, not from this spec's
      snapshot. The two ids named in Measured state are expectation checks:
-     if the runtime scan finds duplicate ids beyond `41dfd579-...` and
-     `aaec0865-...`, list them and apply the same rule; if it does not find
-     those two, warn (state changed since the spec) and require re-confirm.
-  4. Merge work -> personal by COPY (`cp -a` semantics, no source deletion):
+     the runtime scan is diffed against them symmetrically — ids the runtime
+     scan found beyond `41dfd579-...`/`aaec0865-...`, or either of those two
+     NOT found, both produce a `[WARNING]` naming the missing/unexpected ids
+     and (unless `--yes`) a second interactive confirm ("duplicate set
+     differs from the reviewed snapshot; continue?") before proceeding.
+  5. Merge work -> personal by COPY (`cp -a` semantics, no source deletion):
      - encoded-cwd dir only in work: copy whole dir.
      - overlapping dir: copy entries one by one; never overwrite an existing
        personal-side file except via an explicit collision rule below.
        - `<session-id>.jsonl` collision (R3): larger byte size wins; equal
          size with identical bytes -> keep personal; equal size, different
          bytes -> newer mtime. The winner's side also supplies
-         the sidecar dir and the `file-history/<id>` entry. The losing copy
-         is simply not copied (work loser) or overwritten by the work winner
-         (personal loser); every loser survives in the backup tar and in the
-         untouched work tree until the swap.
+         the sidecar dir and the `file-history/<id>` entry — but only where
+         the winner actually has its own copy of that artifact. If the
+         losing side has a sidecar or `file-history/<id>` entry the winning
+         side lacks entirely, that artifact is copied (not dropped): the
+         "winner supplies" rule governs which copy is kept when BOTH sides
+         have one, not whether an only-one-side artifact survives. Every
+         true loser (an artifact the winner also has) survives in the backup
+         tar and in the untouched work tree until the swap.
        - `memory/` collision (R2): file-level union. Same filename,
          identical bytes -> keep one. Same filename, different bytes ->
          newer mtime wins in place; the losing version is preserved
@@ -172,6 +190,11 @@ One script, two modes, idempotent in both:
          then append work-only lines — a work line is "new" if its exact
          trimmed text does not appear in the personal file; the original
          work `MEMORY.md` is also preserved as `MEMORY.md.conflict-work.md`.
+         A dir-vs-file collision (work has a memory subdirectory where
+         personal has a plain file of the same name) keeps the personal
+         file and preserves the whole work subtree alongside as
+         `<name>.conflict-work`, reported the same way as a `.from-work`
+         rename.
        - any other name collision: keep both (work copy renamed with a
          `.from-work` suffix) and report; UUID keying makes this unexpected.
      - `file-history/`: copy all work-side session dirs not already present
@@ -180,18 +203,33 @@ One script, two modes, idempotent in both:
        transcript) are copied as-is; an id present in BOTH roots without a
        transcript collision (unexpected) keeps the personal copy and
        preserves the work copy alongside as `<id>.from-work`.
-  5. Swap (the only mutation of the work root, one rename per tree):
+     - Every whole-directory copy (work-only project dir, work-only
+       file-history id, work-only sidecar, or a winner-side sidecar/
+       file-history replacement) is staged at `<dst>.tmp-merge` and then
+       renamed into place atomically, so an interruption mid-copy leaves
+       only the `.tmp-merge` sibling — never a partial or half-replaced
+       `<dst>` that a rerun could misread as already merged. Stale
+       `.tmp-merge` paths from an interrupted prior run are purged when
+       merge mode starts.
+  6. Swap (the only mutation of the work root, one rename per tree):
+     immediately before the first rename, `lsof +D` re-checks quiescence
+     over all four trees (preflight's check may be minutes stale by now,
+     since backup+merge can take a while); if a session has opened a file
+     since, abort with `[X]` before touching anything and ask the operator
+     to close sessions and re-run. Otherwise:
      `mv ~/.claude-work/projects ~/.claude-work/projects.premerge-<ts>`,
      then `ln -s ~/.claude/projects ~/.claude-work/projects`. Same for
      `file-history`. If a `.premerge-*` from an earlier run exists, stop and
-     ask rather than guessing.
-  6. Verify (script-enforced, from the recorded inventory):
+     ask rather than guessing. On a mid-swap failure the rollback message
+     notes that any data already copied into the personal root remains
+     there (additive; safe to re-run).
+  7. Verify (script-enforced, from the recorded inventory):
      - `readlink` of both work-side paths resolves to the personal-side dirs;
      - every pre-merge file (both roots) is reachable post-merge via both
        root paths at its original relative path, except (a) dedupe losers,
        which are enumerated with their winning counterpart, and (b)
        `.conflict-*`/`.from-work` renames, which are enumerated;
-     - every duplicate id found in step 3 now exists exactly once;
+     - every duplicate id found in step 4 now exists exactly once;
      - every pre-merge `memory/` file is readable through BOTH root paths.
        On success, print that `projects.premerge-<ts>` and
        `file-history.premerge-<ts>` can be deleted after a manual `/resume`

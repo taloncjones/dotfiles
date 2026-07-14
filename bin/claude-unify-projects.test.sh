@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Tests for bin/claude-unify-projects. Fixture trees only -- never live roots.
 set -u
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "SKIP: python3 not installed; claude-unify-projects is a python3 script"
+  exit 0
+fi
 SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 UNIFY="$SCRIPT_DIR/claude-unify-projects"
 pass=0; fail=0
