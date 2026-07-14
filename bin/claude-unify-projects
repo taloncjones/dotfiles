@@ -106,6 +106,12 @@ def take_inventory(root: Path) -> dict:
         if not base.is_dir() or base.is_symlink():
             continue
         for p in base.rglob("*"):
+            # Staging directories must never enter the inventory (and so
+            # never the backup-validation set): purge_stale_staging() should
+            # already have removed them before this runs, so this is a pure
+            # safety net, not the primary defense.
+            if any(part.endswith(".tmp-merge") for part in p.relative_to(base).parts):
+                continue
             if p.is_file() and not p.is_symlink():
                 st = p.stat()
                 inv[f"{tree}/{p.relative_to(base)}"] = {"size": st.st_size, "mtime": st.st_mtime}
@@ -274,7 +280,16 @@ def copy_dir_staged(src: Path, dst: Path):
     """Copy a whole directory via a <dst>.tmp-merge staging path, then an
     atomic rename into place (replacing any existing dst). An interruption
     mid-copy leaves only the .tmp-merge sibling behind -- never a partial or
-    half-replaced dst that a rerun could misread as already-merged."""
+    half-replaced dst that a rerun could misread as already-merged.
+
+    Safety net: if src and dst resolve to the same canonical directory (a
+    half-migrated tree where one side is already a symlink into the other),
+    copying-then-rmtree-then-rename would delete the only copy of live data
+    on interruption. Callers are expected to avoid this via the per-tree
+    merge plan; this is a last-resort guard, not the primary defense."""
+    if src.resolve() == dst.resolve():
+        log("WARNING", f"staged copy src == dst ({dst}); skipping to avoid a destructive self-copy")
+        return
     tmp = dst.with_name(dst.name + ".tmp-merge")
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -345,22 +360,30 @@ def classify_work_tree(personal: Path, work: Path, name: str):
     return None
 
 
+def purge_stale_staging(personal: Path) -> None:
+    """Remove staging directories left behind by an interrupted prior run,
+    under the personal trees only. Only ever removes a DIRECTORY whose name
+    ends in ".tmp-merge" -- never a file, and never a symlink (rglob can
+    surface a symlinked dir; shutil.rmtree refuses to follow it, so it is
+    explicitly skipped rather than crashing)."""
+    for tree in TREES:
+        base = personal / tree
+        if not base.is_dir() or base.is_symlink():
+            continue
+        for stale in list(base.rglob("*.tmp-merge")):
+            if not stale.exists():  # already removed as an ancestor's child
+                continue
+            if stale.is_symlink():
+                continue
+            if stale.is_dir():
+                shutil.rmtree(stale)
+
+
 def merge_trees(personal: Path, work: Path, plan: dict) -> int:
     w_projects, p_projects = work / "projects", personal / "projects"
     w_fh, p_fh = work / "file-history", personal / "file-history"
     p_projects.mkdir(parents=True, exist_ok=True)
     p_fh.mkdir(parents=True, exist_ok=True)
-
-    # Purge staging left behind by an interrupted prior run before this one
-    # creates any new staging of its own.
-    for base in (p_projects, p_fh):
-        for stale in list(base.rglob("*.tmp-merge")):
-            if not stale.exists():  # already removed as an ancestor's child
-                continue
-            if stale.is_dir():
-                shutil.rmtree(stale)
-            else:
-                stale.unlink()
 
     fh_decided = set()  # ids whose file-history side followed a transcript winner
 
@@ -398,7 +421,20 @@ def merge_trees(personal: Path, work: Path, plan: dict) -> int:
                             if lp.exists():
                                 REPORT["dedupe_losers"].append(f"personal:{lp}")
                         shutil.copy2(entry, target)
-                        for pair_src, pair_dst in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
+                        # Only stage a pair for a tree that is actually being
+                        # merged. A "skip" tree's work side is the canonical
+                        # symlink into personal -- pair_src and pair_dst would
+                        # resolve to the SAME directory, and copy_dir_staged's
+                        # copy+rmtree+rename could destroy live history on
+                        # interruption (copy_dir_staged also self-guards this
+                        # as a last resort, but the plan check is the primary
+                        # defense: it skips the pair before any I/O happens).
+                        for pair_src, pair_dst, tree_plan in (
+                            (w_dir / sid, p_dir / sid, plan["projects"]),
+                            (w_fh / sid, p_fh / sid, plan["file-history"]),
+                        ):
+                            if tree_plan != "merge":
+                                continue
                             if pair_src.is_dir():
                                 copy_dir_staged(pair_src, pair_dst)
                     else:
@@ -463,6 +499,11 @@ def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int
     if all(v == "skip" for v in plan.values()):
         log("INFO", "work-root trees already symlinks; nothing to merge")
         return 0
+
+    # Purge staging left behind by an interrupted prior run before anything
+    # else touches the personal trees -- a leftover *.tmp-merge dir must not
+    # be inventoried, backed up, or deleted mid-merge after the swap.
+    purge_stale_staging(personal)
 
     b_res = backup_dir.resolve()
     for root in (personal, work):
@@ -571,7 +612,11 @@ def swap_and_verify(personal: Path, work: Path, inv_all: dict, stamp: str) -> in
         return 1
 
     for name in TREES:
-        if Path(os.readlink(work / name)).resolve() != (personal / name).resolve():
+        # Resolve the symlink itself, not the raw os.readlink() value against
+        # the process CWD -- a RELATIVE symlink target is resolved by the OS
+        # against the link's own parent dir, not our CWD, so reading it raw
+        # would false-fail a valid relative symlink.
+        if (work / name).resolve() != (personal / name).resolve():
             log("X", f"{work / name} does not resolve to {personal / name}")
             return 1
 

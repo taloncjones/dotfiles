@@ -256,5 +256,74 @@ echo "$out" | grep -q "duplicate set differs from the reviewed snapshot" \
   && ok "P2-9: warns when the duplicate set differs from the reviewed snapshot" \
   || bad "P2-9: warns when the duplicate set differs from the reviewed snapshot"
 
+# --- stale-purge: leftover .tmp-merge staging dir under personal/projects
+# from an interrupted prior run must be purged BEFORE inventory/backup, not
+# discovered mid-merge (which would inventory it, back it up, then delete it
+# out from under a same-named live entry and false-fail verify after the swap).
+base="$(fixture)"
+mkfile "$base/personal/projects/-p1/real.jsonl" "real-data"
+mkfile "$base/personal/projects/-p1/real.tmp-merge/leftover" "orphaned-staging-content"
+mkfile "$base/work/projects/-p2/w1.jsonl" "work-only"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "stale-purge: run completes exit 0 with leftover staging present" \
+  || bad "stale-purge: run completes exit 0 with leftover staging present (rc=$rc)"
+test -e "$base/personal/projects/-p1/real.tmp-merge" \
+  && bad "stale-purge: staging dir purged before merge" || ok "stale-purge: staging dir purged before merge"
+[ "$(cat "$base/personal/projects/-p1/real.jsonl")" = "real-data" ] \
+  && ok "stale-purge: real data alongside stale staging is intact" \
+  || bad "stale-purge: real data alongside stale staging is intact"
+test -f "$base/personal/projects/-p2/w1.jsonl" \
+  && ok "stale-purge: unrelated merge work still completed" || bad "stale-purge: unrelated merge work still completed"
+
+# --- half-migrated same-dir guard: file-history already unified (work-side
+# symlink into personal), projects still real, with a work-wins duplicate
+# whose file-history dir already lives in the canonical (personal) tree. The
+# work-wins pair (w_fh/<sid> -> p_fh/<sid>) must not be staged when the
+# file-history tree's plan is "skip" -- both paths resolve to the SAME
+# canonical directory, and copy+rmtree+rename on it risks destroying it.
+base="$(fixture)"
+mkfile "$base/personal/file-history/dupfh/cp" "canonical-fh-content"
+ln -s "$base/personal/file-history" "$base/work/file-history"
+mkfile "$base/personal/projects/-p1/dupfh.jsonl" "short"
+mkfile "$base/work/projects/-p1/dupfh.jsonl" "work-longer-transcript-content-wins"
+mkdir -p "$base/backups"
+# Capture the canonical dir's inode before merging: a same-dir staged
+# copy+rmtree+rename would recreate this directory (new inode) even when
+# content ends up byte-identical, so inode preservation is the strongest
+# available "never touched" signal without literally killing the process
+# mid-swap to reproduce the interruption itself.
+inode_before="$(stat -f %i "$base/personal/file-history/dupfh" 2>/dev/null || stat -c %i "$base/personal/file-history/dupfh")"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "same-dir: half-migrated work-wins merge exits 0" \
+  || bad "same-dir: half-migrated work-wins merge exits 0 (rc=$rc)"
+[ "$(cat "$base/personal/file-history/dupfh/cp")" = "canonical-fh-content" ] \
+  && ok "same-dir: canonical file-history content untouched by the same-dir pair" \
+  || bad "same-dir: canonical file-history content untouched by the same-dir pair"
+inode_after="$(stat -f %i "$base/personal/file-history/dupfh" 2>/dev/null || stat -c %i "$base/personal/file-history/dupfh")"
+[ "$inode_before" = "$inode_after" ] \
+  && ok "same-dir: canonical dir never recreated (inode unchanged, truly skipped not copy-restored)" \
+  || bad "same-dir: canonical dir never recreated (inode unchanged, truly skipped not copy-restored)"
+[ "$(cat "$base/personal/projects/-p1/dupfh.jsonl")" = "work-longer-transcript-content-wins" ] \
+  && ok "same-dir: work transcript still won the collision" \
+  || bad "same-dir: work transcript still won the collision"
+
+# --- relative half-migrated symlink: final verify must resolve the symlink
+# itself (not the raw readlink() text against the process CWD), so a valid
+# RELATIVE work-side symlink into the personal tree doesn't false-fail.
+base="$(fixture)"
+mkfile "$base/personal/file-history/existing/cp" "canonical"
+ln -s "../personal/file-history" "$base/work/file-history"
+mkfile "$base/work/projects/-p1/a.jsonl" "a"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "relative-symlink: half-migrated merge with relative fh symlink exits 0" \
+  || bad "relative-symlink: half-migrated merge with relative fh symlink exits 0 (rc=$rc)"
+[ "$(cat "$base/personal/file-history/existing/cp")" = "canonical" ] \
+  && ok "relative-symlink: canonical file-history content intact" \
+  || bad "relative-symlink: canonical file-history content intact"
+test -L "$base/work/projects" \
+  && ok "relative-symlink: projects swapped to symlink" || bad "relative-symlink: projects swapped to symlink"
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
