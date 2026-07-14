@@ -397,9 +397,67 @@ def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int
     return swap_and_verify(personal, work, inv_all)   # Task 4
 
 
-def swap_and_verify(personal, work, inv_all):
-    log("WARNING", "merge incomplete in this build: swap/verify not implemented yet")
-    return 2
+def swap_and_verify(personal: Path, work: Path, inv_all: dict) -> int:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    swapped = []
+    try:
+        for name in TREES:
+            src = work / name
+            if src.is_dir() and not src.is_symlink():
+                src.rename(work / f"{name}.premerge-{stamp}")
+                swapped.append(name)
+            if ensure_link(personal, work, name) != 0:
+                raise RuntimeError(f"could not link {work / name}")
+    except (OSError, RuntimeError) as exc:
+        log("X", f"swap failed ({exc}); rolling back the work root")
+        for name in reversed(swapped):
+            dst = work / name
+            if dst.is_symlink():
+                dst.unlink()
+            (work / f"{name}.premerge-{stamp}").rename(dst)
+        return 1
+
+    loser_paths = {p.split(":", 1)[1] for p in REPORT["dedupe_losers"] + REPORT["moved"]}
+    changed = set(REPORT["conflicts"])
+
+    def excused(origin: str) -> bool:
+        # dedupe losers and .from-work moves are dirs or files whose ORIGINAL
+        # path legitimately has no counterpart; children of a losing dir too
+        return any(origin == lp or origin.startswith(lp + "/") for lp in loser_paths)
+
+    missing = []
+    for key, meta in inv_all.items():
+        label, rel = key.split("/", 1)  # label: claude|claude-work; rel: <tree>/<relpath>
+        origin_root = personal if label == "claude" else work
+        if excused(str(origin_root / rel)):
+            continue
+        merged_path = personal / rel      # post-swap, both roots resolve here
+        via_work = work / rel
+        if not merged_path.is_file() or not via_work.is_file():
+            missing.append(f"{key} (unreachable at {merged_path} / {via_work})")
+            continue
+        if str(merged_path) in changed:
+            continue  # merged or conflict-replaced in place; original kept as .conflict-*
+        if merged_path.stat().st_size != meta["size"]:
+            missing.append(f"{key} (size {merged_path.stat().st_size} != inventoried {meta['size']})")
+    if missing:
+        log("X", f"verify failed; {len(missing)} pre-merge files unaccounted for, first: {missing[0]}")
+        return 1
+
+    for name in TREES:
+        if Path(os.readlink(work / name)).resolve() != (personal / name).resolve():
+            log("X", f"{work / name} does not resolve to {personal / name}")
+            return 1
+
+    log("OK", "verify passed: every pre-merge file reachable via both roots")
+    if REPORT["dedupe_losers"]:
+        log("INFO", "deduped (loser in backup only): " + ", ".join(REPORT["dedupe_losers"]))
+    if REPORT["conflicts"]:
+        log("WARNING", "conflicts preserved for manual review: " + ", ".join(REPORT["conflicts"]))
+    if REPORT["renamed"]:
+        log("WARNING", "unexpected collisions kept as .from-work: " + ", ".join(REPORT["renamed"]))
+    log("INFO", f"after a /resume and /rewind spot check, delete {work}/*.premerge-{stamp}")
+    return 0
 
 
 if __name__ == "__main__":

@@ -63,11 +63,9 @@ mkfile "$base/work/projects/-p1/s2.jsonl" "work-s2"
 mkfile "$base/work/file-history/u1/f1" "fh"
 mkdir -p "$base/backups"
 run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
-# Task 2 build: backup happens, merge declares itself incomplete (rc=2) and
-# the work tree is untouched. Task 4 Step 1 flips this to expect rc=0.
-[ "$rc" -eq 2 ] && ok "merge: incomplete build exits 2 after backup" || bad "merge: incomplete build exits 2 after backup (rc=$rc)"
-test -d "$base/work/projects" && ! test -L "$base/work/projects" \
-  && ok "merge: incomplete build leaves work tree untouched" || bad "merge: incomplete build leaves work tree untouched"
+[ "$rc" -eq 0 ] && ok "merge: complete run exits 0 after backup" || bad "merge: complete run exits 0 after backup (rc=$rc)"
+test -L "$base/work/projects" \
+  && ok "merge: work projects swapped to symlink" || bad "merge: work projects swapped to symlink"
 tarball="$(ls "$base/backups"/claude-projects-backup-*.tar.gz 2>/dev/null | head -1)"
 [ -n "$tarball" ] && ok "merge: backup tar created" || bad "merge: backup tar created"
 if [ -n "$tarball" ]; then
@@ -125,9 +123,7 @@ mkfile "$base/work/projects/-only/w1.jsonl" "work-only"
 mkfile "$base/work/file-history/workonly/cp" "fh-work-only"
 mkdir -p "$base/backups"
 run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
-# Task 3 build: trees merge but swap is still stubbed (rc=2); Task 4 Step 1
-# flips this to expect rc=0.
-[ "$rc" -eq 2 ] && ok "merge: task-3 build exits 2 after tree merge" || bad "merge: task-3 build exits 2 after tree merge (rc=$rc)"
+[ "$rc" -eq 0 ] && ok "merge: task-3 build exits 0 after tree merge" || bad "merge: task-3 build exits 0 after tree merge (rc=$rc)"
 P="$base/personal/projects/-p1"
 [ "$(cat "$P/dup.jsonl")" = "longer-content-wins" ] && ok "merge: larger jsonl wins" || bad "merge: larger jsonl wins"
 [ "$(cat "$P/same/tag.txt")" = "personal-side" ] && ok "merge: identical twin keeps personal sidecar" || bad "merge: identical twin keeps personal sidecar"
@@ -143,8 +139,32 @@ grep -q 'Beta' "$P/memory/MEMORY.md" && ok "merge: MEMORY.md gained work-only li
 test -f "$P/memory/MEMORY.md.conflict-work.md" && ok "merge: work MEMORY.md preserved" || bad "merge: work MEMORY.md preserved"
 test -f "$base/personal/projects/-only/w1.jsonl" && ok "merge: work-only project copied" || bad "merge: work-only project copied"
 test -f "$base/personal/file-history/workonly/cp" && ok "merge: work-only file-history copied" || bad "merge: work-only file-history copied"
+test -L "$base/work/projects" \
+  && ok "merge: work projects swapped to symlink" || bad "merge: work projects swapped to symlink"
+ls -d "$base/work/projects.premerge-"* >/dev/null 2>&1 \
+  && ok "merge: premerge tree kept" || bad "merge: premerge tree kept"
+
+# --- merge mode: swap guard + verify ---
+base="$(fixture)"
+mkfile "$base/work/projects/-p1/a.jsonl" "a"
+mkdir -p "$base/work/projects.premerge-20260101-000000"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "merge: stale premerge dir aborts" || bad "merge: stale premerge dir aborts"
 test -d "$base/work/projects" && ! test -L "$base/work/projects" \
-  && ok "merge: task-3 build leaves work tree untouched" || bad "merge: task-3 build leaves work tree untouched"
+  && ok "merge: aborted run leaves work tree untouched" || bad "merge: aborted run leaves work tree untouched"
+
+base="$(fixture)"
+mkfile "$base/work/projects/-p1/a.jsonl" "a"
+mkfile "$base/personal/projects/-p2/b.jsonl" "b"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1 \
+  && ok "merge: verify passes on clean merge" || bad "merge: verify passes on clean merge"
+test -f "$base/work/projects/-p2/b.jsonl" \
+  && ok "verify: personal file reachable via work path" || bad "verify: personal file reachable via work path"
+test -f "$base/work/projects/-p1/a.jsonl" \
+  && ok "verify: work file reachable via work path post-swap" || bad "verify: work file reachable via work path post-swap"
+run_link "$base" >/dev/null 2>&1 && ok "merge: link mode no-op after merge" || bad "merge: link mode no-op after merge"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
