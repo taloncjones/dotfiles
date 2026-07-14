@@ -166,5 +166,22 @@ test -f "$base/work/projects/-p1/a.jsonl" \
   && ok "verify: work file reachable via work path post-swap" || bad "verify: work file reachable via work path post-swap"
 run_link "$base" >/dev/null 2>&1 && ok "merge: link mode no-op after merge" || bad "merge: link mode no-op after merge"
 
+# --- merge mode: swap rollback on mid-swap failure ---
+# work/file-history is a live FOREIGN symlink: projects swaps first, then
+# ensure_link refuses the foreign link, forcing rollback of projects.
+base="$(fixture)"
+mkfile "$base/work/projects/-p1/a.jsonl" "a"
+mkdir -p "$base/elsewhere"; touch "$base/elsewhere/x"
+ln -s "$base/elsewhere" "$base/work/file-history"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "swap: mid-swap link failure exits nonzero" || bad "swap: mid-swap link failure exits nonzero"
+test -d "$base/work/projects" && ! test -L "$base/work/projects" \
+  && ok "swap: rollback restored work projects tree" || bad "swap: rollback restored work projects tree"
+ls -d "$base/work/projects.premerge-"* >/dev/null 2>&1 \
+  && bad "swap: rollback left no premerge dir" || ok "swap: rollback left no premerge dir"
+test -f "$base/work/projects/-p1/a.jsonl" \
+  && ok "swap: rolled-back tree content intact" || bad "swap: rolled-back tree content intact"
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
