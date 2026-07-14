@@ -1,0 +1,843 @@
+# Unified Claude Session Store Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** One shared transcript store: `~/.claude-work/{projects,file-history}` become symlinks into `~/.claude/`, with a one-time merge script and an idempotent installer link step.
+
+**Architecture:** A single Python 3 (stdlib-only) CLI, `bin/claude-unify-projects`, with a safe link mode (default) and a copy-then-swap merge mode (`--merge`). The installer calls link mode after `link_claude_config_dir`; a shell test suite drives both modes against fixture trees via root-override flags. Spec: `docs/specs/2026-07-14-unified-claude-session-store.md`.
+
+**Tech Stack:** Python 3 stdlib (`argparse`, `pathlib`, `shutil`, `tarfile`, `json`), bash test suites in the repo's existing `*.test.sh` style, `bin/dotfiles-tests` runner.
+
+## Global Constraints
+
+- No emojis anywhere; log tags are `[OK]`, `[X]`, `[WARNING]`, `[INFO]`.
+- No AI attribution in code or commits. Commit format `<scope>: <summary>` (<75 chars, imperative). The word "claude" must appear ONLY in the scope prefix of a commit message, never in the summary body (commit_guard.py blocks it otherwise).
+- Unix LF, no spaces in filenames, `#!/usr/bin/env python3` / `#!/usr/bin/env bash` shebangs.
+- The script must never touch live roots in tests: every invocation in tests passes `--personal-root` and `--work-root` pointing at a fixture under `mktemp -d`.
+- Link mode never moves or deletes data. Merge mode never mutates the work tree except the final rename-to-`.premerge-<ts>` swap.
+- Portable across macOS and Linux: no `stat -f`, no GNU-only flags in the test suite.
+
+## File Structure
+
+- Create: `bin/claude-unify-projects` — the CLI (link + merge modes).
+- Create: `bin/claude-unify-projects.test.sh` — fixture-based suite for both modes.
+- Modify: `install/common/link.sh` — call link mode after `link_claude_config_dir "$HOME"/.claude-work` (line 72); add `~/bin` symlink next to identity-setup (lines 84-85).
+- Modify: `bin/dotfiles-tests` — register the new suite in `SUITES`.
+- Modify: `install/claude-links.test.sh` — static assertion that the installer runs the link step.
+- Modify: `CLAUDE.md` — two entries in the symlink-targets list.
+
+---
+
+### Task 1: `bin/claude-unify-projects` link mode
+
+**Files:**
+
+- Create: `bin/claude-unify-projects`
+- Create: `bin/claude-unify-projects.test.sh`
+- Modify: `bin/dotfiles-tests` (SUITES block, after `sh install/claude-links.test.sh`)
+
+**Interfaces:**
+
+- Produces: CLI `claude-unify-projects [--personal-root P] [--work-root W] [--backup-dir B] [--merge] [--yes]`. Exit 0 = all trees linked/no-op; exit 1 = at least one tree needs `--merge` or was skipped with a warning. Link mode handles both trees: `projects`, `file-history`.
+- Produces (for Task 2-4): module-level constants `TREES = ("projects", "file-history")`, helpers `log(tag, msg)` and `ensure_link(personal, work, name) -> int`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `bin/claude-unify-projects.test.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Tests for bin/claude-unify-projects. Fixture trees only -- never live roots.
+set -u
+SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+UNIFY="$SCRIPT_DIR/claude-unify-projects"
+pass=0; fail=0
+ok()   { echo "[OK] $1"; pass=$((pass+1)); }
+bad()  { echo "[X] $1"; fail=$((fail+1)); }
+check() { # check <desc> <cmd...>
+  local desc="$1"; shift
+  if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
+}
+fixture() { # fresh personal/work roots; echoes base dir
+  local base; base="$(mktemp -d)"
+  mkdir -p "$base/personal" "$base/work"
+  echo "$base"
+}
+run_link() { # run_link <base> [extra args...]
+  local base="$1"; shift
+  python3 "$UNIFY" --personal-root "$base/personal" --work-root "$base/work" "$@"
+}
+
+# --- link mode ---
+base="$(fixture)"
+run_link "$base" >/dev/null 2>&1
+check "link: absent work trees become symlinks" test -L "$base/work/projects"
+check "link: file-history linked too" test -L "$base/work/file-history"
+check "link: canonical dirs created" test -d "$base/personal/projects"
+[ "$(readlink "$base/work/projects")" = "$base/personal/projects" ] \
+  && ok "link: symlink targets personal root" || bad "link: symlink targets personal root"
+run_link "$base" >/dev/null 2>&1 && ok "link: rerun is a no-op (exit 0)" || bad "link: rerun is a no-op (exit 0)"
+
+base="$(fixture)"
+mkdir -p "$base/work/projects"           # empty real dir -> converted
+run_link "$base" >/dev/null 2>&1
+check "link: empty real dir converted" test -L "$base/work/projects"
+
+base="$(fixture)"
+mkdir -p "$base/work/projects/-x"; touch "$base/work/projects/-x/a.jsonl"
+run_link "$base" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "link: non-empty dir exits non-zero" || bad "link: non-empty dir exits non-zero"
+test -d "$base/work/projects" && ! test -L "$base/work/projects" \
+  && ok "link: non-empty dir untouched" || bad "link: non-empty dir untouched"
+
+base="$(fixture)"
+ln -s "$base/nowhere" "$base/work/projects"   # dangling -> replaced
+run_link "$base" >/dev/null 2>&1
+[ "$(readlink "$base/work/projects")" = "$base/personal/projects" ] \
+  && ok "link: dangling symlink replaced" || bad "link: dangling symlink replaced"
+
+base="$(fixture)"
+mkdir -p "$base/elsewhere"; ln -s "$base/elsewhere" "$base/work/projects"
+run_link "$base" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && [ "$(readlink "$base/work/projects")" = "$base/elsewhere" ] \
+  && ok "link: foreign live symlink skipped with warning" || bad "link: foreign live symlink skipped with warning"
+
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: FAIL lines (script does not exist yet), non-zero exit.
+
+- [ ] **Step 3: Implement link mode**
+
+Create `bin/claude-unify-projects` (mode 0755):
+
+```python
+#!/usr/bin/env python3
+"""claude-unify-projects - one shared Claude Code session store across roots.
+
+Link mode (default): make <work-root>/{projects,file-history} symlinks to
+<personal-root>/{projects,file-history}. Safe and idempotent; never moves
+data. Exits non-zero if a tree still needs the one-time merge.
+
+Merge mode (--merge): one-time copy-then-swap migration of the work-root
+trees into the personal root. Spec:
+docs/specs/2026-07-14-unified-claude-session-store.md
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+TREES = ("projects", "file-history")
+
+
+def log(tag, msg):
+    print(f"[{tag}] {msg}")
+
+
+def ensure_link(personal: Path, work: Path, name: str) -> int:
+    """Return 0 if linked (or already linked), 1 if skipped with a warning."""
+    src = (personal / name).resolve()
+    dst = work / name
+    src.mkdir(parents=True, exist_ok=True)
+    if dst.is_symlink():
+        if dst.exists() and dst.resolve() == src:
+            return 0
+        if not dst.exists():  # dangling: safe to replace
+            dst.unlink()
+        else:
+            log("WARNING", f"{dst} is a live symlink to {dst.resolve()}, not touching it")
+            return 1
+    elif dst.exists():
+        if dst.is_dir() and not any(dst.iterdir()):
+            dst.rmdir()
+        elif dst.is_dir():
+            log("WARNING", f"{dst} has content; run claude-unify-projects --merge once")
+            return 1
+        else:
+            log("WARNING", f"{dst} is a regular file, not touching it")
+            return 1
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(src, dst)
+    log("OK", f"{dst} -> {src}")
+    return 0
+
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--personal-root", default=os.path.expanduser("~/.claude"))
+    ap.add_argument("--work-root", default=os.path.expanduser("~/.claude-work"))
+    ap.add_argument("--backup-dir", default=os.path.expanduser("~/tmp"))
+    ap.add_argument("--merge", action="store_true")
+    ap.add_argument("--yes", action="store_true")
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    personal, work = Path(args.personal_root), Path(args.work_root)
+    if not work.parent.exists():
+        log("INFO", f"{work.parent} missing; nothing to do")
+        return 0
+    if args.merge:
+        rc = merge(personal, work, Path(args.backup_dir), args.yes)
+        if rc != 0:
+            return rc
+    rc = 0
+    for name in TREES:
+        rc |= ensure_link(personal, work, name)
+    return rc
+
+
+def merge(personal, work, backup_dir, assume_yes):  # implemented in Task 2-4
+    log("X", "--merge not implemented yet")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 4: Run the tests, verify they pass**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: all `[OK]`, `N passed, 0 failed`, exit 0.
+
+- [ ] **Step 5: Register the suite and commit**
+
+In `bin/dotfiles-tests`, add to the `SUITES` block after `sh install/claude-links.test.sh`:
+
+```
+sh bin/claude-unify-projects.test.sh
+```
+
+```bash
+chmod +x bin/claude-unify-projects
+git add bin/claude-unify-projects bin/claude-unify-projects.test.sh bin/dotfiles-tests
+git commit -m "bin: Add session-store unify script (link mode)"
+```
+
+---
+
+### Task 2: Merge mode preflight, inventory, and backup
+
+**Files:**
+
+- Modify: `bin/claude-unify-projects` (replace the `merge()` stub)
+- Modify: `bin/claude-unify-projects.test.sh` (append merge-preflight cases)
+
+**Interfaces:**
+
+- Consumes: `TREES`, `log`, `parse_args` from Task 1.
+- Produces: `take_inventory(root: Path) -> dict` mapping `"<tree>/<rel>"` to `{"size": int, "mtime": float}` for every regular file; `make_backup(personal, work, backup_dir, inv_all) -> Path`; `preflight(personal, work, assume_yes) -> int`. Tasks 3-4 plug `merge_trees` and `swap_and_verify` in after these.
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `bin/claude-unify-projects.test.sh` before the summary lines:
+
+```bash
+# --- merge mode: preflight + backup ---
+mkfile() { mkdir -p "$(dirname "$1")"; printf '%s' "$2" > "$1"; }
+
+base="$(fixture)"
+mkfile "$base/personal/projects/-p1/s1.jsonl" "personal-s1"
+mkfile "$base/work/projects/-p1/s2.jsonl" "work-s2"
+mkfile "$base/work/file-history/u1/f1" "fh"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "merge: clean fixture merge exits 0" || bad "merge: clean fixture merge exits 0 (rc=$rc)"
+tarball="$(ls "$base/backups"/claude-projects-backup-*.tar.gz 2>/dev/null | head -1)"
+[ -n "$tarball" ] && ok "merge: backup tar created" || bad "merge: backup tar created"
+if [ -n "$tarball" ]; then
+  perms="$(ls -l "$tarball" | cut -c1-10)"
+  [ "$perms" = "-rw-------" ] && ok "merge: backup is 0600" || bad "merge: backup is 0600 ($perms)"
+  tar -tzf "$tarball" | grep -q 'claude-work/projects/-p1/s2.jsonl' \
+    && ok "merge: tar contains root-distinct paths" || bad "merge: tar contains root-distinct paths"
+fi
+inv="$(ls "$base/backups"/claude-projects-inventory-*.json 2>/dev/null | head -1)"
+if [ -n "$inv" ] && python3 -c "import json; json.load(open('$inv'))" 2>/dev/null; then
+  ok "merge: inventory json written"
+else
+  bad "merge: inventory json written"
+fi
+
+base="$(fixture)"
+mkfile "$base/work/projects/-p1/s2.jsonl" "w"
+run_link "$base" --merge --backup-dir "$base" </dev/null >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "merge: refuses without --yes when stdin is not a tty" \
+  || bad "merge: refuses without --yes when stdin is not a tty"
+```
+
+- [ ] **Step 2: Run to verify the new cases fail**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: link cases pass, merge cases FAIL (`--merge not implemented yet`).
+
+- [ ] **Step 3: Implement preflight, inventory, backup**
+
+Add `import json`, `import shutil`, `import subprocess`, `import tarfile`, `import time` to the imports, then replace the `merge()` stub with:
+
+```python
+def take_inventory(root: Path) -> dict:
+    inv = {}
+    for tree in TREES:
+        base = root / tree
+        if not base.is_dir() or base.is_symlink():
+            continue
+        for p in base.rglob("*"):
+            if p.is_file() and not p.is_symlink():
+                st = p.stat()
+                inv[f"{tree}/{p.relative_to(base)}"] = {"size": st.st_size, "mtime": st.st_mtime}
+    return inv
+
+
+def lsof_busy(paths) -> bool:
+    """True if any path has open files, or if lsof is unusable (fail closed)."""
+    existing = [str(p) for p in paths if Path(p).is_dir() and not Path(p).is_symlink()]
+    if not existing:
+        return False
+    if shutil.which("lsof") is None:
+        log("X", "lsof not found; cannot prove quiescence, refusing")
+        return True
+    r = subprocess.run(["lsof", "+D", *existing], capture_output=True, text=True)
+    # lsof exits 1 with no output when nothing is open; any stdout means busy.
+    if r.stdout.strip():
+        log("X", "open files detected under the session trees:")
+        print(r.stdout.splitlines()[0])
+        return True
+    return False
+
+
+def read_cleanup_days(root: Path):
+    try:
+        return json.load(open(root / "settings.json")).get("cleanupPeriodDays")
+    except (OSError, ValueError):
+        return None
+
+
+def preflight(personal: Path, work: Path, assume_yes: bool) -> int:
+    trees = [personal / t for t in TREES] + [work / t for t in TREES]
+    if lsof_busy(trees):
+        log("X", "close ALL Claude Code sessions (both roots), then re-run")
+        return 1
+    p_days, w_days = read_cleanup_days(personal), read_cleanup_days(work)
+    if p_days != w_days:
+        log("WARNING", f"cleanupPeriodDays differs (personal={p_days}, work={w_days}); "
+            "align them or one root's retention will prune the other's history")
+    need = sum(v["size"] for v in take_inventory(work).values()) * 2  # copy + tar
+    free = shutil.disk_usage(personal).free
+    if free < need:
+        log("X", f"not enough free space: need ~{need} bytes, have {free}")
+        return 1
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            log("X", "refusing to merge without --yes on non-interactive stdin")
+            return 1
+        reply = input("Merge work-root session trees into the personal root? [y/N] ")
+        if reply.strip().lower() != "y":
+            log("INFO", "aborted by user")
+            return 1
+    return 0
+
+
+def make_backup(personal: Path, work: Path, backup_dir: Path, inv_all: dict) -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    tar_path = backup_dir / f"claude-projects-backup-{stamp}.tar.gz"
+    fd = os.open(tar_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tar:
+        for label, root in (("claude", personal), ("claude-work", work)):
+            for tree in TREES:
+                src = root / tree
+                if src.is_dir() and not src.is_symlink():
+                    tar.add(src, arcname=f"{label}/{tree}")
+    with tarfile.open(tar_path, "r:gz") as tar:
+        n_file_entries = sum(1 for m in tar.getmembers() if m.isfile())
+    if n_file_entries < len(inv_all):
+        log("X", f"backup validation failed: {n_file_entries} tar file entries < {len(inv_all)} inventoried files")
+        tar_path.unlink()
+        raise SystemExit(1)
+    inv_path = backup_dir / f"claude-projects-inventory-{stamp}.json"
+    inv_path.write_text(json.dumps(inv_all, indent=1, sort_keys=True))
+    os.chmod(inv_path, 0o600)
+    log("OK", f"backup: {tar_path}")
+    log("OK", f"inventory: {inv_path}")
+    return tar_path
+
+
+def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int:
+    if all((work / name).is_symlink() for name in TREES):
+        log("INFO", "work-root trees already symlinks; nothing to merge")
+        return 0
+    rc = preflight(personal, work, assume_yes)
+    if rc != 0:
+        return rc
+    inv_all = {}
+    for label, root in (("claude", personal), ("claude-work", work)):
+        for key, meta in take_inventory(root).items():
+            inv_all[f"{label}/{key}"] = meta
+    make_backup(personal, work, backup_dir, inv_all)
+    rc = merge_trees(personal, work)                  # Task 3
+    if rc != 0:
+        return rc
+    return swap_and_verify(personal, work, inv_all)   # Task 4
+```
+
+Until Tasks 3-4 land, add temporary stubs so this commit stands alone and the Task 2 tests pass:
+
+```python
+def merge_trees(personal, work):
+    return 0
+
+
+def swap_and_verify(personal, work, inv_all):
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for name in TREES:
+        src = work / name
+        if src.is_dir() and not src.is_symlink():
+            src.rename(work / f"{name}.premerge-{stamp}")
+    return 0
+```
+
+- [ ] **Step 4: Run the tests, verify they pass**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: all cases pass (merge fixture: backup created, swap stub renames, `ensure_link` links).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add bin/claude-unify-projects bin/claude-unify-projects.test.sh
+git commit -m "bin: Add merge preflight, inventory, and backup to unify script"
+```
+
+---
+
+### Task 3: Merge logic — collisions, memory union, file-history
+
+**Files:**
+
+- Modify: `bin/claude-unify-projects` (replace the `merge_trees` stub)
+- Modify: `bin/claude-unify-projects.test.sh` (append collision cases)
+
+**Interfaces:**
+
+- Consumes: `TREES`, `log`.
+- Produces: `merge_trees(personal, work) -> int` and module-level `REPORT = {"dedupe_losers": [], "conflicts": [], "renamed": []}` (lists of absolute-path strings; `dedupe_losers` entries are `"personal:<abs>"` / `"work:<abs>"`), consumed by Task 4's verify/report.
+
+- [ ] **Step 1: Append failing tests**
+
+Append to `bin/claude-unify-projects.test.sh` before the summary lines:
+
+```bash
+# --- merge mode: collisions, memory union, file-history ---
+base="$(fixture)"
+# duplicated session: work copy larger -> work wins
+mkfile "$base/personal/projects/-p1/dup.jsonl" "short"
+mkfile "$base/work/projects/-p1/dup.jsonl" "longer-content-wins"
+mkfile "$base/personal/projects/-p1/dup/sidecar.txt" "personal-sidecar"
+mkfile "$base/work/projects/-p1/dup/sidecar.txt" "work-sidecar"
+mkfile "$base/personal/file-history/dup/cp1" "personal-fh"
+mkfile "$base/work/file-history/dup/cp1" "work-fh"
+# identical twins -> personal kept
+mkfile "$base/personal/projects/-p1/same.jsonl" "identical"
+mkfile "$base/work/projects/-p1/same.jsonl" "identical"
+# memory: distinct files union; same-name different content -> newer wins
+mkfile "$base/personal/projects/-p1/memory/MEMORY.md" "# Memory Index
+
+- [Alpha](alpha.md) - a
+"
+mkfile "$base/personal/projects/-p1/memory/alpha.md" "alpha"
+mkfile "$base/work/projects/-p1/memory/MEMORY.md" "# Memory Index
+
+- [Alpha](alpha.md) - a
+- [Beta](beta.md) - b
+"
+mkfile "$base/work/projects/-p1/memory/beta.md" "beta"
+mkfile "$base/work/projects/-p1/memory/alpha.md" "alpha-work-newer"
+touch -t 203001010000 "$base/work/projects/-p1/memory/alpha.md"
+# work-only project dir and file-history id
+mkfile "$base/work/projects/-only/w1.jsonl" "work-only"
+mkfile "$base/work/file-history/workonly/cp" "fh-work-only"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "merge: full merge exits 0" || bad "merge: full merge exits 0 (rc=$rc)"
+P="$base/personal/projects/-p1"
+[ "$(cat "$P/dup.jsonl")" = "longer-content-wins" ] && ok "merge: larger jsonl wins" || bad "merge: larger jsonl wins"
+[ "$(cat "$P/dup/sidecar.txt")" = "work-sidecar" ] && ok "merge: sidecar follows winner" || bad "merge: sidecar follows winner"
+[ "$(cat "$base/personal/file-history/dup/cp1")" = "work-fh" ] && ok "merge: file-history follows winner" || bad "merge: file-history follows winner"
+[ "$(cat "$P/same.jsonl")" = "identical" ] && ok "merge: identical twin kept once" || bad "merge: identical twin kept once"
+[ "$(cat "$P/memory/alpha.md")" = "alpha-work-newer" ] && ok "merge: newer memory fact wins" || bad "merge: newer memory fact wins"
+test -f "$P/memory/alpha.md.conflict-personal.md" && ok "merge: losing memory fact preserved" || bad "merge: losing memory fact preserved"
+[ "$(cat "$P/memory/beta.md")" = "beta" ] && ok "merge: work-only memory fact copied" || bad "merge: work-only memory fact copied"
+grep -q 'Beta' "$P/memory/MEMORY.md" && ok "merge: MEMORY.md gained work-only line" || bad "merge: MEMORY.md gained work-only line"
+[ "$(grep -c 'Alpha' "$P/memory/MEMORY.md")" = "1" ] && ok "merge: MEMORY.md lines deduped" || bad "merge: MEMORY.md lines deduped"
+test -f "$P/memory/MEMORY.md.conflict-work.md" && ok "merge: work MEMORY.md preserved" || bad "merge: work MEMORY.md preserved"
+test -f "$base/personal/projects/-only/w1.jsonl" && ok "merge: work-only project copied" || bad "merge: work-only project copied"
+test -f "$base/personal/file-history/workonly/cp" && ok "merge: work-only file-history copied" || bad "merge: work-only file-history copied"
+test -L "$base/work/projects" && ok "merge: work projects now a symlink" || bad "merge: work projects now a symlink"
+ls -d "$base/work/projects.premerge-"* >/dev/null 2>&1 && ok "merge: premerge tree kept" || bad "merge: premerge tree kept"
+```
+
+- [ ] **Step 2: Run to verify the new cases fail**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: the new collision cases FAIL (stub copies nothing); earlier cases pass.
+
+- [ ] **Step 3: Implement `merge_trees`**
+
+Replace the `merge_trees` stub:
+
+```python
+REPORT = {"dedupe_losers": [], "conflicts": [], "renamed": []}
+
+
+def jsonl_winner(p: Path, w: Path) -> Path:
+    """R3: larger wins; tie -> newer mtime; tie -> personal."""
+    ps, ws = p.stat().st_size, w.stat().st_size
+    if ws != ps:
+        return w if ws > ps else p
+    return w if w.stat().st_mtime > p.stat().st_mtime else p
+
+
+def copy_any(src: Path, dst: Path):
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def merge_memory(p_mem: Path, w_mem: Path):
+    """File-level union; newer wins on conflict, loser kept as .conflict-*."""
+    for wf in sorted(w_mem.iterdir()):
+        if wf.is_dir():
+            continue
+        pf = p_mem / wf.name
+        if not pf.exists():
+            shutil.copy2(wf, pf)
+            continue
+        if pf.read_bytes() == wf.read_bytes():
+            continue
+        if wf.name == "MEMORY.md":
+            p_lines = pf.read_text().splitlines()
+            seen = {ln.strip() for ln in p_lines}
+            extra = [ln for ln in wf.read_text().splitlines()
+                     if ln.strip() and ln.strip() not in seen]
+            if extra:
+                pf.write_text("\n".join(p_lines + extra) + "\n")
+            shutil.copy2(wf, p_mem / "MEMORY.md.conflict-work.md")
+            REPORT["conflicts"].append(str(pf))
+            continue
+        work_wins = wf.stat().st_mtime >= pf.stat().st_mtime
+        loser_tag = "personal" if work_wins else "work"
+        loser_src = pf if work_wins else wf
+        shutil.copy2(loser_src, p_mem / f"{wf.name}.conflict-{loser_tag}.md")
+        if work_wins:
+            shutil.copy2(wf, pf)
+        REPORT["conflicts"].append(str(pf))
+
+
+def merge_trees(personal: Path, work: Path) -> int:
+    w_projects, p_projects = work / "projects", personal / "projects"
+    w_fh, p_fh = work / "file-history", personal / "file-history"
+    p_projects.mkdir(parents=True, exist_ok=True)
+    p_fh.mkdir(parents=True, exist_ok=True)
+    fh_decided = set()  # ids whose file-history side followed a transcript winner
+
+    work_dirs = sorted(d for d in w_projects.iterdir() if d.is_dir()) if w_projects.is_dir() else []
+    for w_dir in work_dirs:
+        p_dir = p_projects / w_dir.name
+        if not p_dir.exists():
+            copy_any(w_dir, p_dir)
+            continue
+        for entry in sorted(w_dir.iterdir()):
+            target = p_dir / entry.name
+            if entry.name == "memory" and entry.is_dir():
+                if target.is_dir():
+                    merge_memory(target, entry)
+                else:
+                    copy_any(entry, target)
+                continue
+            if entry.is_dir() and (w_dir / (entry.name + ".jsonl")).exists():
+                continue  # sidecar dir: handled together with its transcript
+            if not target.exists():
+                copy_any(entry, target)
+                continue
+            if entry.suffix == ".jsonl" and entry.is_file() and target.is_file():
+                sid = entry.stem
+                win = jsonl_winner(target, entry)
+                fh_decided.add(sid)
+                if win is entry:  # work wins: transcript, sidecar, file-history
+                    for lp in (target, p_dir / sid, p_fh / sid):
+                        REPORT["dedupe_losers"].append(f"personal:{lp}")
+                    shutil.copy2(entry, target)
+                    for pair_src, pair_dst in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
+                        if pair_src.is_dir():
+                            if pair_dst.is_dir():
+                                shutil.rmtree(pair_dst)
+                            copy_any(pair_src, pair_dst)
+                else:
+                    for lp in (entry, w_dir / sid, w_fh / sid):
+                        REPORT["dedupe_losers"].append(f"work:{lp}")
+                continue
+            renamed = target.with_name(entry.name + ".from-work")
+            copy_any(entry, renamed)
+            REPORT["renamed"].append(str(renamed))
+            log("WARNING", f"unexpected collision, kept both: {renamed}")
+
+    if w_fh.is_dir():
+        for w_id in sorted(d for d in w_fh.iterdir() if d.is_dir()):
+            if w_id.name in fh_decided:
+                continue
+            p_id = p_fh / w_id.name
+            if not p_id.exists():
+                copy_any(w_id, p_id)
+            else:
+                # both roots have this id without a transcript collision:
+                # keep personal, flag it (orphan divergence is unexpected)
+                REPORT["conflicts"].append(f"file-history:{w_id.name}")
+    return 0
+```
+
+Placement note: `REPORT` and these functions go ABOVE `merge()` in the file; delete the stub.
+
+- [ ] **Step 4: Run the tests, verify they pass**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: all pass. (The sidecar of a personal-winning twin stays personal because the work sidecar dir is skipped via the `.jsonl`-companion guard, and the work jsonl loser is simply not copied.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add bin/claude-unify-projects bin/claude-unify-projects.test.sh
+git commit -m "bin: Add collision, memory-union, and file-history merge rules"
+```
+
+---
+
+### Task 4: Swap guard, verification, report
+
+**Files:**
+
+- Modify: `bin/claude-unify-projects` (replace the `swap_and_verify` stub)
+- Modify: `bin/claude-unify-projects.test.sh` (append verify cases)
+
+**Interfaces:**
+
+- Consumes: `REPORT`, `TREES`, `ensure_link`, `inv_all` (keys `claude/<tree>/<rel>` and `claude-work/<tree>/<rel>`).
+- Produces: `swap_and_verify(personal, work, inv_all) -> int`; exit 0 only when every inventoried file is accounted for.
+
+- [ ] **Step 1: Append failing tests**
+
+Append before the summary lines:
+
+```bash
+# --- merge mode: swap guard + verify ---
+base="$(fixture)"
+mkfile "$base/work/projects/-p1/a.jsonl" "a"
+mkdir -p "$base/work/projects.premerge-20260101-000000"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "merge: stale premerge dir aborts" || bad "merge: stale premerge dir aborts"
+test -d "$base/work/projects" && ! test -L "$base/work/projects" \
+  && ok "merge: aborted run leaves work tree untouched" || bad "merge: aborted run leaves work tree untouched"
+
+base="$(fixture)"
+mkfile "$base/work/projects/-p1/a.jsonl" "a"
+mkfile "$base/personal/projects/-p2/b.jsonl" "b"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1 \
+  && ok "merge: verify passes on clean merge" || bad "merge: verify passes on clean merge"
+test -f "$base/work/projects/-p2/b.jsonl" \
+  && ok "verify: personal file reachable via work path" || bad "verify: personal file reachable via work path"
+test -f "$base/work/projects/-p1/a.jsonl" \
+  && ok "verify: work file reachable via work path post-swap" || bad "verify: work file reachable via work path post-swap"
+run_link "$base" >/dev/null 2>&1 && ok "merge: link mode no-op after merge" || bad "merge: link mode no-op after merge"
+```
+
+- [ ] **Step 2: Run to verify the new cases fail**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: "stale premerge dir aborts" FAILS (the Task 2 stub renames unconditionally and never checks).
+
+- [ ] **Step 3: Implement `swap_and_verify`**
+
+Replace the stub. The stale-premerge check must run BEFORE `merge_trees` mutates the personal tree, so it lives in `merge()` too — move the guard there as shown:
+
+In `merge()`, insert immediately after the preflight call returns 0:
+
+```python
+    for name in TREES:
+        if list(work.glob(name + ".premerge-*")):
+            log("X", f"stale {name}.premerge-* exists under {work}; resolve it first")
+            return 1
+```
+
+Then replace `swap_and_verify`:
+
+```python
+def swap_and_verify(personal: Path, work: Path, inv_all: dict) -> int:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for name in TREES:
+        src = work / name
+        if src.is_dir() and not src.is_symlink():
+            src.rename(work / f"{name}.premerge-{stamp}")
+        rc = ensure_link(personal, work, name)
+        if rc != 0:
+            return rc
+
+    loser_paths = {p.split(":", 1)[1] for p in REPORT["dedupe_losers"]}
+    missing = []
+    for key in inv_all:
+        label, rel = key.split("/", 1)  # label: claude|claude-work; rel: <tree>/<relpath>
+        origin_root = personal if label == "claude" else work
+        origin = str(origin_root / rel)
+        if origin in loser_paths:
+            continue  # dedupe loser: dropped by rule, present in backup
+        for root in (personal, work):
+            path = root / rel
+            if not path.is_file():
+                missing.append(f"{key} (unreachable via {path})")
+                break
+    # .conflict-* and .from-work renames add files, never remove them, so they
+    # cannot appear in `missing`; conflicts are reported below instead.
+    if missing:
+        log("X", f"verify failed; {len(missing)} pre-merge files unreachable, first: {missing[0]}")
+        return 1
+
+    for name in TREES:
+        if Path(os.readlink(work / name)).resolve() != (personal / name).resolve():
+            log("X", f"{work / name} does not resolve to {personal / name}")
+            return 1
+
+    log("OK", "verify passed: every pre-merge file reachable via both roots")
+    if REPORT["dedupe_losers"]:
+        log("INFO", "deduped (loser in backup only): " + ", ".join(REPORT["dedupe_losers"]))
+    if REPORT["conflicts"]:
+        log("WARNING", "conflicts preserved for manual review: " + ", ".join(REPORT["conflicts"]))
+    if REPORT["renamed"]:
+        log("WARNING", "unexpected collisions kept as .from-work: " + ", ".join(REPORT["renamed"]))
+    log("INFO", f"after a /resume and /rewind spot check, delete {work}/*.premerge-{stamp}")
+    return 0
+```
+
+Correctness note: Task 3 records the WHOLE losing side (transcript, sidecar
+dir, file-history dir) in `REPORT["dedupe_losers"]`. Because sidecar and
+file-history losers are directories, the membership test must excuse both
+exact matches and children — replace the `if origin in loser_paths` line
+with:
+
+```python
+    def excused(origin: str) -> bool:
+        return any(origin == lp or origin.startswith(lp + "/") for lp in loser_paths)
+```
+
+used as `if excused(origin): continue`.
+
+- [ ] **Step 4: Run the full suite, verify green**
+
+Run: `sh bin/claude-unify-projects.test.sh`
+Expected: all pass, including Task 3 cases (the winner-side sidecar/file-history survive verification because the losing side's paths are excused).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add bin/claude-unify-projects bin/claude-unify-projects.test.sh
+git commit -m "bin: Add swap guard and inventory-based merge verification"
+```
+
+---
+
+### Task 5: Installer integration, shape check, docs
+
+**Files:**
+
+- Modify: `install/common/link.sh` (after line 72 `link_claude_config_dir "$HOME"/.claude-work`; and the `~/bin` block at lines 84-85)
+- Modify: `install/claude-links.test.sh` (static assertion; read the file first and reuse its existing pass/fail helper names)
+- Modify: `CLAUDE.md` (symlink-targets list)
+
+**Interfaces:**
+
+- Consumes: `bin/claude-unify-projects` link-mode CLI (non-zero exit tolerated by the installer).
+
+- [ ] **Step 1: Add the failing static test**
+
+In `install/claude-links.test.sh`, append an assertion in that suite's existing style (its helpers may be named differently — mirror the neighboring checks):
+
+```bash
+if grep -q 'bin/claude-unify-projects' install/common/link.sh; then
+  echo "[OK] link.sh runs the session-store link step"; pass=$((pass+1))
+else
+  echo "[X] link.sh runs the session-store link step"; fail=$((fail+1))
+fi
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `sh install/claude-links.test.sh`
+Expected: the new assertion FAILS, suite exits non-zero.
+
+- [ ] **Step 3: Wire the installer**
+
+In `install/common/link.sh`, insert after line 72:
+
+```bash
+# Unified session store: ~/.claude-work/{projects,file-history} are symlinks
+# into ~/.claude so /resume and /rewind see every session from either root.
+# Link mode never moves data; on an unmigrated machine it warns and points
+# at `claude-unify-projects --merge` (one-time, run with no live sessions).
+"$DOTFILEDIR"/bin/claude-unify-projects \
+  || echo "[link] session store not unified yet; see warning above"
+```
+
+Next to the identity-setup links (lines 84-85), add:
+
+```bash
+ln -sf "$DOTFILEDIR"/bin/claude-unify-projects "$HOME"/bin/claude-unify-projects
+```
+
+- [ ] **Step 4: Docs**
+
+In `CLAUDE.md`, in the "Symlink targets" list after the `claude/rules/` entry, add:
+
+```markdown
+- `~/.claude-work/projects`, `~/.claude-work/file-history` -> symlinks to the
+  same paths under `~/.claude` (unified session store: `/resume` and
+  `/rewind` see every session from either config root). Created idempotently
+  by `bin/claude-unify-projects` (link mode) on every install/update run; an
+  existing machine with real work-side trees runs `claude-unify-projects
+--merge` ONCE (backs up both trees, merges with collision rules, swaps; no
+  live sessions allowed). See
+  `docs/specs/2026-07-14-unified-claude-session-store.md`.
+```
+
+- [ ] **Step 5: Run everything, verify green, commit**
+
+Run: `bin/dotfiles-tests`
+Expected: all suites pass, including `bin/claude-unify-projects.test.sh` and `install/claude-links.test.sh`.
+
+```bash
+git add install/common/link.sh install/claude-links.test.sh CLAUDE.md
+git commit -m "install: Link unified session store on install and update"
+```
+
+---
+
+## Post-merge operational runbook (NOT part of the repo change)
+
+Executed manually on this machine after the PR merges, per the spec's
+Operational constraints:
+
+1. Close ALL Claude Code sessions (both roots, IDE and terminal).
+2. From a plain terminal: `~/bin/claude-unify-projects --merge`
+   (interactive confirm; `--yes` only if scripted).
+3. Spot-check `/resume` from both roots in `~/Git/work/rw-bess`, `/rewind`
+   in a cross-root resumed session, and that auto-memory loads.
+4. After the spot check: delete the `*.premerge-*` trees; keep the backup
+   tar until comfortable.
