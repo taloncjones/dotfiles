@@ -54,5 +54,40 @@ run_link "$base" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(readlink "$base/work/projects")" = "$base/elsewhere" ] \
   && ok "link: foreign live symlink skipped with warning" || bad "link: foreign live symlink skipped with warning"
 
+# --- merge mode: preflight + backup ---
+mkfile() { mkdir -p "$(dirname "$1")"; printf '%s' "$2" > "$1"; }
+
+base="$(fixture)"
+mkfile "$base/personal/projects/-p1/s1.jsonl" "personal-s1"
+mkfile "$base/work/projects/-p1/s2.jsonl" "work-s2"
+mkfile "$base/work/file-history/u1/f1" "fh"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+# Task 2 build: backup happens, merge declares itself incomplete (rc=2) and
+# the work tree is untouched. Task 4 Step 1 flips this to expect rc=0.
+[ "$rc" -eq 2 ] && ok "merge: incomplete build exits 2 after backup" || bad "merge: incomplete build exits 2 after backup (rc=$rc)"
+test -d "$base/work/projects" && ! test -L "$base/work/projects" \
+  && ok "merge: incomplete build leaves work tree untouched" || bad "merge: incomplete build leaves work tree untouched"
+tarball="$(ls "$base/backups"/claude-projects-backup-*.tar.gz 2>/dev/null | head -1)"
+[ -n "$tarball" ] && ok "merge: backup tar created" || bad "merge: backup tar created"
+if [ -n "$tarball" ]; then
+  perms="$(ls -l "$tarball" | cut -c1-10)"
+  [ "$perms" = "-rw-------" ] && ok "merge: backup is 0600" || bad "merge: backup is 0600 ($perms)"
+  tar -tzf "$tarball" | grep -q 'claude-work/projects/-p1/s2.jsonl' \
+    && ok "merge: tar contains root-distinct paths" || bad "merge: tar contains root-distinct paths"
+fi
+inv="$(ls "$base/backups"/claude-projects-inventory-*.json 2>/dev/null | head -1)"
+if [ -n "$inv" ] && python3 -c "import json; json.load(open('$inv'))" 2>/dev/null; then
+  ok "merge: inventory json written"
+else
+  bad "merge: inventory json written"
+fi
+
+base="$(fixture)"
+mkfile "$base/work/projects/-p1/s2.jsonl" "w"
+run_link "$base" --merge --backup-dir "$base" </dev/null >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "merge: refuses without --yes when stdin is not a tty" \
+  || bad "merge: refuses without --yes when stdin is not a tty"
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

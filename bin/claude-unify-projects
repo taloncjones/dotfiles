@@ -11,8 +11,13 @@ docs/specs/2026-07-14-unified-claude-session-store.md
 """
 
 import argparse
+import json
 import os
+import shutil
+import subprocess
 import sys
+import tarfile
+import time
 from pathlib import Path
 
 TREES = ("projects", "file-history")
@@ -81,9 +86,182 @@ def main(argv=None):
     return rc
 
 
-def merge(personal, work, backup_dir, assume_yes):  # implemented in Task 2-4
-    log("X", "--merge not implemented yet")
+def take_inventory(root: Path) -> dict:
+    inv = {}
+    for tree in TREES:
+        base = root / tree
+        if not base.is_dir() or base.is_symlink():
+            continue
+        for p in base.rglob("*"):
+            if p.is_file() and not p.is_symlink():
+                st = p.stat()
+                inv[f"{tree}/{p.relative_to(base)}"] = {"size": st.st_size, "mtime": st.st_mtime}
+    return inv
+
+
+def lsof_busy(paths) -> bool:
+    """True if any path has open files, or if lsof is unusable (fail closed)."""
+    existing = [str(p) for p in paths if Path(p).is_dir() and not Path(p).is_symlink()]
+    if not existing:
+        return False
+    if shutil.which("lsof") is None:
+        log("X", "lsof not found; cannot prove quiescence, refusing")
+        return True
+    for tree in existing:  # +D recurses one directory; check each tree alone
+        r = subprocess.run(["lsof", "+D", tree], capture_output=True, text=True)
+        # lsof exits 1 with no output when nothing is open; stdout means busy;
+        # any other outcome is indeterminate -> fail closed.
+        if r.stdout.strip():
+            log("X", f"open files detected under {tree}:")
+            print(r.stdout.splitlines()[0])
+            return True
+        if r.returncode not in (0, 1):
+            log("X", f"lsof failed on {tree} (rc={r.returncode}): {r.stderr.strip()[:200]}")
+            return True
+    return False
+
+
+def read_cleanup_days(root: Path):
+    try:
+        return json.load(open(root / "settings.json")).get("cleanupPeriodDays")
+    except (OSError, ValueError):
+        return None
+
+
+def preflight(personal: Path, work: Path, assume_yes: bool) -> int:
+    trees = [personal / t for t in TREES] + [work / t for t in TREES]
+    if lsof_busy(trees):
+        log("X", "close ALL Claude Code sessions (both roots), then re-run")
+        return 1
+    p_days, w_days = read_cleanup_days(personal), read_cleanup_days(work)
+    if p_days != w_days:
+        log("WARNING", f"cleanupPeriodDays differs (personal={p_days}, work={w_days}); "
+            "align them or one root's retention will prune the other's history")
+    elif p_days is None:
+        log("INFO", "cleanupPeriodDays unset in both roots (platform default applies "
+            "to the shared store); pin it in settings.json.tmpl to control retention")
+    work_bytes = sum(v["size"] for v in take_inventory(work).values())
+    if shutil.disk_usage(personal).free < work_bytes * 2:
+        log("X", f"not enough free space on {personal} for the merge copy")
+        return 1
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            log("X", "refusing to merge without --yes on non-interactive stdin")
+            return 1
+        reply = input("Merge work-root session trees into the personal root? [y/N] ")
+        if reply.strip().lower() != "y":
+            log("INFO", "aborted by user")
+            return 1
+    return 0
+
+
+def backup_space_ok(backup_dir: Path, total_bytes: int) -> bool:
+    """Tar worst case: no compression; backup_dir may be a different filesystem."""
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(backup_dir).free < total_bytes:
+        log("X", f"not enough free space under {backup_dir} for the backup tar")
+        return False
+    return True
+
+
+def make_backup(personal: Path, work: Path, backup_dir: Path, inv_all: dict) -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    tar_path = backup_dir / f"claude-projects-backup-{stamp}.tar.gz"
+    fd = os.open(tar_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tar:
+        for label, root in (("claude", personal), ("claude-work", work)):
+            for tree in TREES:
+                src = root / tree
+                if src.is_dir() and not src.is_symlink():
+                    tar.add(src, arcname=f"{label}/{tree}")
+    with tarfile.open(tar_path, "r:gz") as tar:
+        tar_files = {m.name for m in tar.getmembers() if m.isfile()}
+    if tar_files != set(inv_all):  # exact file-for-file match, both directions
+        diff = tar_files.symmetric_difference(inv_all)
+        log("X", f"backup validation failed: {len(diff)} mismatched entries, first: {sorted(diff)[0]}")
+        tar_path.unlink()
+        raise SystemExit(1)
+    inv_path = backup_dir / f"claude-projects-inventory-{stamp}.json"
+    inv_path.write_text(json.dumps(inv_all, indent=1, sort_keys=True))
+    os.chmod(inv_path, 0o600)
+    log("OK", f"backup: {tar_path}")
+    log("OK", f"inventory: {inv_path}")
+    return tar_path
+
+
+# The two duplicates known when the spec was written; the runtime scan is
+# authoritative, these are only an expectation check (spec, Measured state).
+EXPECTED_DUPLICATES = (
+    "41dfd579-c295-47be-a9c8-daf8b332273c",
+    "aaec0865-b3f1-4fa2-87d9-208a2498de6e",
+)
+
+
+def find_duplicates(personal: Path, work: Path) -> list:
+    """Session ids whose <id>.jsonl exists in the same encoded-cwd dir in both roots."""
+    dups = []
+    w_projects, p_projects = work / "projects", personal / "projects"
+    if not (w_projects.is_dir() and p_projects.is_dir()):
+        return dups
+    for w_dir in w_projects.iterdir():
+        p_dir = p_projects / w_dir.name
+        if not (w_dir.is_dir() and p_dir.is_dir()):
+            continue
+        for j in w_dir.glob("*.jsonl"):
+            if (p_dir / j.name).is_file():
+                dups.append(j.stem)
+    return dups
+
+
+def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int:
+    if all((work / name).is_symlink() for name in TREES):
+        log("INFO", "work-root trees already symlinks; nothing to merge")
+        return 0
+    for name in TREES:
+        if list(work.glob(name + ".premerge-*")):
+            log("X", f"stale {name}.premerge-* exists under {work}; resolve it first")
+            return 1
+    b_res = backup_dir.resolve()
+    for root in (personal, work):
+        for name in TREES:
+            tree = (root / name).resolve()
+            if b_res == tree or tree in b_res.parents:
+                log("X", f"backup dir {b_res} is inside {tree}; choose another --backup-dir")
+                return 1
+    rc = preflight(personal, work, assume_yes)
+    if rc != 0:
+        return rc
+    dups = find_duplicates(personal, work)
+    if dups:
+        log("INFO", f"duplicate session ids to dedupe: {', '.join(sorted(dups))}")
+    missing_expected = [d for d in EXPECTED_DUPLICATES if d not in dups]
+    if missing_expected and any((personal / "projects").glob("*/" + missing_expected[0] + "*")):
+        log("WARNING", "state differs from the spec snapshot "
+            f"(expected duplicates not found: {', '.join(missing_expected)}); re-check before proceeding")
+    inv_all = {}
+    for label, root in (("claude", personal), ("claude-work", work)):
+        for key, meta in take_inventory(root).items():
+            inv_all[f"{label}/{key}"] = meta
+    if not backup_space_ok(backup_dir, sum(v["size"] for v in inv_all.values())):
+        return 1
+    make_backup(personal, work, backup_dir, inv_all)
+    rc = merge_trees(personal, work)                  # Task 3
+    if rc != 0:
+        return rc
+    return swap_and_verify(personal, work, inv_all)   # Task 4
+
+
+# Until Tasks 3-4 land, these are temporary NON-DESTRUCTIVE stubs so this
+# commit stands alone: --merge performs preflight and backup, then declares
+# itself incomplete without moving or renaming anything.
+def merge_trees(personal, work):
+    log("WARNING", "merge incomplete in this build: tree merge not implemented yet")
     return 2
+
+
+def swap_and_verify(personal, work, inv_all):
+    raise AssertionError("unreachable until merge_trees is implemented")
 
 
 if __name__ == "__main__":
