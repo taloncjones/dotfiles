@@ -164,5 +164,17 @@ else
     fail "link path symlinks assets but keeps settings.json a real file"
 fi
 
+# --- static check: install/common/link.sh wires the unified session store ---
+if grep -q '"\$DOTFILEDIR"/bin/claude-unify-projects' install/common/link.sh; then
+    pass "link.sh runs the session-store link step"
+else
+    fail "link.sh runs the session-store link step"
+fi
+if grep -q 'claude-unify-projects "\$HOME"/bin/claude-unify-projects' install/common/link.sh; then
+    pass "link.sh installs claude-unify-projects into ~/bin"
+else
+    fail "link.sh installs claude-unify-projects into ~/bin"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

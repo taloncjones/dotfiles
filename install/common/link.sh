@@ -71,6 +71,17 @@ echo "Setting up symbolic links for Claude Code..."
 link_claude_config_dir "$HOME"/.claude
 link_claude_config_dir "$HOME"/.claude-work
 
+# Unified session store: ~/.claude-work/{projects,file-history} are symlinks
+# into ~/.claude so /resume and /rewind see every session from either root.
+# Link mode never moves data; on an unmigrated machine it warns and points
+# at `claude-unify-projects --merge` (one-time, run with no live sessions).
+if command -v python3 >/dev/null 2>&1; then
+  "$DOTFILEDIR"/bin/claude-unify-projects \
+    || echo "[link] session store not unified yet; see warning above"
+else
+  echo "[link] python3 not found; session store link step skipped"
+fi
+
 # The Dockerized Claude sandbox (claude/sandbox/, bin/claude-sandbox) was
 # retired along with GSD -- permission auto mode covers the same need. Sweep
 # the launcher symlink and the sandbox config dir so `update` self-heals.
@@ -84,6 +95,7 @@ ln -sf "$DOTFILEDIR"/bin/setup-claude "$HOME"/bin/setup-claude
 ln -sf "$DOTFILEDIR"/bin/identity-setup "$HOME"/bin/identity-setup
 ln -sf "$DOTFILEDIR"/bin/identity-doctor "$HOME"/bin/identity-doctor
 ln -sf "$DOTFILEDIR"/bin/dotfiles-tests "$HOME"/bin/dotfiles-tests
+ln -sf "$DOTFILEDIR"/bin/claude-unify-projects "$HOME"/bin/claude-unify-projects
 
 # Ghostty terminal configuration
 echo "Setting up symbolic links for Ghostty..."
