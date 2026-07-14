@@ -87,9 +87,10 @@ Risk review (why this is safe):
 - Cloud containers have no `~/.claude-work`; no cloud change.
 - Retention: `cleanupPeriodDays` from either root now prunes the shared
   store, so a shorter setting in one root would silently prune the other
-  root's history. Requirement: both roots' `settings.json` must carry the
-  same explicit `cleanupPeriodDays`; the migration script checks and warns
-  on mismatch.
+  root's history. The migration preflight warns when the two roots'
+  `settings.json` values differ, and notes when both are unset (platform
+  default applies). Pinning an explicit value in `settings.json.tmpl` is a
+  separate retention-policy decision, deferred to the user.
 
 ### D2. Also unify `file-history/` (settled 2026-07-14)
 
@@ -156,8 +157,9 @@ One script, two modes, idempotent in both:
      - encoded-cwd dir only in work: copy whole dir.
      - overlapping dir: copy entries one by one; never overwrite an existing
        personal-side file except via an explicit collision rule below.
-       - `<session-id>.jsonl` collision (R3): larger byte size wins; tie ->
-         newer mtime; tie -> keep personal. The winner's side also supplies
+       - `<session-id>.jsonl` collision (R3): larger byte size wins; equal
+         size with identical bytes -> keep personal; equal size, different
+         bytes -> newer mtime. The winner's side also supplies
          the sidecar dir and the `file-history/<id>` entry. The losing copy
          is simply not copied (work loser) or overwritten by the work winner
          (personal loser); every loser survives in the backup tar and in the
@@ -174,8 +176,10 @@ One script, two modes, idempotent in both:
          `.from-work` suffix) and report; UUID keying makes this unexpected.
      - `file-history/`: copy all work-side session dirs not already present
        (disjoint union); for ids present in both, the transcript winner's
-       side supplies the whole dir; orphan entries (no matching transcript)
-       are copied as-is.
+       side supplies the whole dir; work-only orphan entries (no matching
+       transcript) are copied as-is; an id present in BOTH roots without a
+       transcript collision (unexpected) keeps the personal copy and
+       preserves the work copy alongside as `<id>.from-work`.
   5. Swap (the only mutation of the work root, one rename per tree):
      `mv ~/.claude-work/projects ~/.claude-work/projects.premerge-<ts>`,
      then `ln -s ~/.claude/projects ~/.claude-work/projects`. Same for
@@ -195,9 +199,9 @@ One script, two modes, idempotent in both:
 
 ### C2. Installer integration (R5)
 
-`install/common/claude-links.sh` (`link_claude_config_dir` path) calls
-`bin/claude-unify-projects` in link mode for the work root on every
-install/update run. Fresh machine: work side has no `projects/` yet, so link
+`install/common/link.sh` calls `bin/claude-unify-projects` in link mode
+right after its two `link_claude_config_dir` calls (both roots must exist
+first) on every install/update run. Fresh machine: work side has no `projects/` yet, so link
 mode creates the symlinks outright — no merge ever needed. Existing machine
 with unmerged content: the installer prints the warning and CONTINUES (the
 link step never fails the install; it reports at the end like other link

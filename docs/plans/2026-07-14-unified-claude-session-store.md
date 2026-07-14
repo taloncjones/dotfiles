@@ -108,7 +108,7 @@ echo "$pass passed, $fail failed"
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: FAIL lines (script does not exist yet), non-zero exit.
 
 - [ ] **Step 3: Implement link mode**
@@ -181,9 +181,13 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv)
     personal, work = Path(args.personal_root), Path(args.work_root)
-    if not work.parent.exists():
-        log("INFO", f"{work.parent} missing; nothing to do")
+    if not work.exists():
+        log("INFO", f"{work} missing; nothing to do")
         return 0
+    p_res, w_res = personal.resolve(), work.resolve()
+    if p_res == w_res or p_res in w_res.parents or w_res in p_res.parents:
+        log("X", f"refusing: roots are equal or nested ({p_res} vs {w_res})")
+        return 1
     if args.merge:
         rc = merge(personal, work, Path(args.backup_dir), args.yes)
         if rc != 0:
@@ -205,7 +209,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run the tests, verify they pass**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: all `[OK]`, `N passed, 0 failed`, exit 0.
 
 - [ ] **Step 5: Register the suite and commit**
@@ -213,7 +217,7 @@ Expected: all `[OK]`, `N passed, 0 failed`, exit 0.
 In `bin/dotfiles-tests`, add to the `SUITES` block after `sh install/claude-links.test.sh`:
 
 ```
-sh bin/claude-unify-projects.test.sh
+bash bin/claude-unify-projects.test.sh
 ```
 
 ```bash
@@ -250,7 +254,11 @@ mkfile "$base/work/projects/-p1/s2.jsonl" "work-s2"
 mkfile "$base/work/file-history/u1/f1" "fh"
 mkdir -p "$base/backups"
 run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && ok "merge: clean fixture merge exits 0" || bad "merge: clean fixture merge exits 0 (rc=$rc)"
+# Task 2 build: backup happens, merge declares itself incomplete (rc=2) and
+# the work tree is untouched. Task 4 Step 1 flips this to expect rc=0.
+[ "$rc" -eq 2 ] && ok "merge: incomplete build exits 2 after backup" || bad "merge: incomplete build exits 2 after backup (rc=$rc)"
+test -d "$base/work/projects" && ! test -L "$base/work/projects" \
+  && ok "merge: incomplete build leaves work tree untouched" || bad "merge: incomplete build leaves work tree untouched"
 tarball="$(ls "$base/backups"/claude-projects-backup-*.tar.gz 2>/dev/null | head -1)"
 [ -n "$tarball" ] && ok "merge: backup tar created" || bad "merge: backup tar created"
 if [ -n "$tarball" ]; then
@@ -275,7 +283,7 @@ run_link "$base" --merge --backup-dir "$base" </dev/null >/dev/null 2>&1; rc=$?
 
 - [ ] **Step 2: Run to verify the new cases fail**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: link cases pass, merge cases FAIL (`--merge not implemented yet`).
 
 - [ ] **Step 3: Implement preflight, inventory, backup**
@@ -304,12 +312,17 @@ def lsof_busy(paths) -> bool:
     if shutil.which("lsof") is None:
         log("X", "lsof not found; cannot prove quiescence, refusing")
         return True
-    r = subprocess.run(["lsof", "+D", *existing], capture_output=True, text=True)
-    # lsof exits 1 with no output when nothing is open; any stdout means busy.
-    if r.stdout.strip():
-        log("X", "open files detected under the session trees:")
-        print(r.stdout.splitlines()[0])
-        return True
+    for tree in existing:  # +D recurses one directory; check each tree alone
+        r = subprocess.run(["lsof", "+D", tree], capture_output=True, text=True)
+        # lsof exits 1 with no output when nothing is open; stdout means busy;
+        # any other outcome is indeterminate -> fail closed.
+        if r.stdout.strip():
+            log("X", f"open files detected under {tree}:")
+            print(r.stdout.splitlines()[0])
+            return True
+        if r.returncode not in (0, 1):
+            log("X", f"lsof failed on {tree} (rc={r.returncode}): {r.stderr.strip()[:200]}")
+            return True
     return False
 
 
@@ -329,10 +342,12 @@ def preflight(personal: Path, work: Path, assume_yes: bool) -> int:
     if p_days != w_days:
         log("WARNING", f"cleanupPeriodDays differs (personal={p_days}, work={w_days}); "
             "align them or one root's retention will prune the other's history")
-    need = sum(v["size"] for v in take_inventory(work).values()) * 2  # copy + tar
-    free = shutil.disk_usage(personal).free
-    if free < need:
-        log("X", f"not enough free space: need ~{need} bytes, have {free}")
+    elif p_days is None:
+        log("INFO", "cleanupPeriodDays unset in both roots (platform default applies "
+            "to the shared store); pin it in settings.json.tmpl to control retention")
+    work_bytes = sum(v["size"] for v in take_inventory(work).values())
+    if shutil.disk_usage(personal).free < work_bytes * 2:
+        log("X", f"not enough free space on {personal} for the merge copy")
         return 1
     if not assume_yes:
         if not sys.stdin.isatty():
@@ -343,6 +358,15 @@ def preflight(personal: Path, work: Path, assume_yes: bool) -> int:
             log("INFO", "aborted by user")
             return 1
     return 0
+
+
+def backup_space_ok(backup_dir: Path, total_bytes: int) -> bool:
+    """Tar worst case: no compression; backup_dir may be a different filesystem."""
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(backup_dir).free < total_bytes:
+        log("X", f"not enough free space under {backup_dir} for the backup tar")
+        return False
+    return True
 
 
 def make_backup(personal: Path, work: Path, backup_dir: Path, inv_all: dict) -> Path:
@@ -357,9 +381,10 @@ def make_backup(personal: Path, work: Path, backup_dir: Path, inv_all: dict) -> 
                 if src.is_dir() and not src.is_symlink():
                     tar.add(src, arcname=f"{label}/{tree}")
     with tarfile.open(tar_path, "r:gz") as tar:
-        n_file_entries = sum(1 for m in tar.getmembers() if m.isfile())
-    if n_file_entries < len(inv_all):
-        log("X", f"backup validation failed: {n_file_entries} tar file entries < {len(inv_all)} inventoried files")
+        tar_files = {m.name for m in tar.getmembers() if m.isfile()}
+    if tar_files != set(inv_all):  # exact file-for-file match, both directions
+        diff = tar_files.symmetric_difference(inv_all)
+        log("X", f"backup validation failed: {len(diff)} mismatched entries, first: {sorted(diff)[0]}")
         tar_path.unlink()
         raise SystemExit(1)
     inv_path = backup_dir / f"claude-projects-inventory-{stamp}.json"
@@ -370,17 +395,61 @@ def make_backup(personal: Path, work: Path, backup_dir: Path, inv_all: dict) -> 
     return tar_path
 
 
+# The two duplicates known when the spec was written; the runtime scan is
+# authoritative, these are only an expectation check (spec, Measured state).
+EXPECTED_DUPLICATES = (
+    "41dfd579-c295-47be-a9c8-daf8b332273c",
+    "aaec0865-b3f1-4fa2-87d9-208a2498de6e",
+)
+
+
+def find_duplicates(personal: Path, work: Path) -> list:
+    """Session ids whose <id>.jsonl exists in the same encoded-cwd dir in both roots."""
+    dups = []
+    w_projects, p_projects = work / "projects", personal / "projects"
+    if not (w_projects.is_dir() and p_projects.is_dir()):
+        return dups
+    for w_dir in w_projects.iterdir():
+        p_dir = p_projects / w_dir.name
+        if not (w_dir.is_dir() and p_dir.is_dir()):
+            continue
+        for j in w_dir.glob("*.jsonl"):
+            if (p_dir / j.name).is_file():
+                dups.append(j.stem)
+    return dups
+
+
 def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int:
     if all((work / name).is_symlink() for name in TREES):
         log("INFO", "work-root trees already symlinks; nothing to merge")
         return 0
+    for name in TREES:
+        if list(work.glob(name + ".premerge-*")):
+            log("X", f"stale {name}.premerge-* exists under {work}; resolve it first")
+            return 1
+    b_res = backup_dir.resolve()
+    for root in (personal, work):
+        for name in TREES:
+            tree = (root / name).resolve()
+            if b_res == tree or tree in b_res.parents:
+                log("X", f"backup dir {b_res} is inside {tree}; choose another --backup-dir")
+                return 1
     rc = preflight(personal, work, assume_yes)
     if rc != 0:
         return rc
+    dups = find_duplicates(personal, work)
+    if dups:
+        log("INFO", f"duplicate session ids to dedupe: {', '.join(sorted(dups))}")
+    missing_expected = [d for d in EXPECTED_DUPLICATES if d not in dups]
+    if missing_expected and any((personal / "projects").glob("*/" + missing_expected[0] + "*")):
+        log("WARNING", "state differs from the spec snapshot "
+            f"(expected duplicates not found: {', '.join(missing_expected)}); re-check before proceeding")
     inv_all = {}
     for label, root in (("claude", personal), ("claude-work", work)):
         for key, meta in take_inventory(root).items():
             inv_all[f"{label}/{key}"] = meta
+    if not backup_space_ok(backup_dir, sum(v["size"] for v in inv_all.values())):
+        return 1
     make_backup(personal, work, backup_dir, inv_all)
     rc = merge_trees(personal, work)                  # Task 3
     if rc != 0:
@@ -388,25 +457,23 @@ def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int
     return swap_and_verify(personal, work, inv_all)   # Task 4
 ```
 
-Until Tasks 3-4 land, add temporary stubs so this commit stands alone and the Task 2 tests pass:
+Until Tasks 3-4 land, add temporary NON-DESTRUCTIVE stubs so this commit
+stands alone: `--merge` performs preflight and backup, then declares itself
+incomplete without moving or renaming anything.
 
 ```python
 def merge_trees(personal, work):
-    return 0
+    log("WARNING", "merge incomplete in this build: tree merge not implemented yet")
+    return 2
 
 
 def swap_and_verify(personal, work, inv_all):
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    for name in TREES:
-        src = work / name
-        if src.is_dir() and not src.is_symlink():
-            src.rename(work / f"{name}.premerge-{stamp}")
-    return 0
+    raise AssertionError("unreachable until merge_trees is implemented")
 ```
 
 - [ ] **Step 4: Run the tests, verify they pass**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: all cases pass (merge fixture: backup created, swap stub renames, `ensure_link` links).
 
 - [ ] **Step 5: Commit**
@@ -444,9 +511,14 @@ mkfile "$base/personal/projects/-p1/dup/sidecar.txt" "personal-sidecar"
 mkfile "$base/work/projects/-p1/dup/sidecar.txt" "work-sidecar"
 mkfile "$base/personal/file-history/dup/cp1" "personal-fh"
 mkfile "$base/work/file-history/dup/cp1" "work-fh"
-# identical twins -> personal kept
+# identical twins -> personal kept (distinguishable via their sidecars)
 mkfile "$base/personal/projects/-p1/same.jsonl" "identical"
 mkfile "$base/work/projects/-p1/same.jsonl" "identical"
+mkfile "$base/personal/projects/-p1/same/tag.txt" "personal-side"
+mkfile "$base/work/projects/-p1/same/tag.txt" "work-side"
+# work-only session INSIDE an overlapping project dir: sidecar must survive
+mkfile "$base/work/projects/-p1/wonly.jsonl" "work-only-session"
+mkfile "$base/work/projects/-p1/wonly/state.txt" "work-only-sidecar"
 # memory: distinct files union; same-name different content -> newer wins
 mkfile "$base/personal/projects/-p1/memory/MEMORY.md" "# Memory Index
 
@@ -466,9 +538,13 @@ mkfile "$base/work/projects/-only/w1.jsonl" "work-only"
 mkfile "$base/work/file-history/workonly/cp" "fh-work-only"
 mkdir -p "$base/backups"
 run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && ok "merge: full merge exits 0" || bad "merge: full merge exits 0 (rc=$rc)"
+# Task 3 build: trees merge but swap is still stubbed (rc=2); Task 4 Step 1
+# flips this to expect rc=0.
+[ "$rc" -eq 2 ] && ok "merge: task-3 build exits 2 after tree merge" || bad "merge: task-3 build exits 2 after tree merge (rc=$rc)"
 P="$base/personal/projects/-p1"
 [ "$(cat "$P/dup.jsonl")" = "longer-content-wins" ] && ok "merge: larger jsonl wins" || bad "merge: larger jsonl wins"
+[ "$(cat "$P/same/tag.txt")" = "personal-side" ] && ok "merge: identical twin keeps personal sidecar" || bad "merge: identical twin keeps personal sidecar"
+[ "$(cat "$P/wonly/state.txt")" = "work-only-sidecar" ] && ok "merge: work-only session sidecar survives" || bad "merge: work-only session sidecar survives"
 [ "$(cat "$P/dup/sidecar.txt")" = "work-sidecar" ] && ok "merge: sidecar follows winner" || bad "merge: sidecar follows winner"
 [ "$(cat "$base/personal/file-history/dup/cp1")" = "work-fh" ] && ok "merge: file-history follows winner" || bad "merge: file-history follows winner"
 [ "$(cat "$P/same.jsonl")" = "identical" ] && ok "merge: identical twin kept once" || bad "merge: identical twin kept once"
@@ -480,13 +556,16 @@ grep -q 'Beta' "$P/memory/MEMORY.md" && ok "merge: MEMORY.md gained work-only li
 test -f "$P/memory/MEMORY.md.conflict-work.md" && ok "merge: work MEMORY.md preserved" || bad "merge: work MEMORY.md preserved"
 test -f "$base/personal/projects/-only/w1.jsonl" && ok "merge: work-only project copied" || bad "merge: work-only project copied"
 test -f "$base/personal/file-history/workonly/cp" && ok "merge: work-only file-history copied" || bad "merge: work-only file-history copied"
-test -L "$base/work/projects" && ok "merge: work projects now a symlink" || bad "merge: work projects now a symlink"
-ls -d "$base/work/projects.premerge-"* >/dev/null 2>&1 && ok "merge: premerge tree kept" || bad "merge: premerge tree kept"
+test -d "$base/work/projects" && ! test -L "$base/work/projects" \
+  && ok "merge: task-3 build leaves work tree untouched" || bad "merge: task-3 build leaves work tree untouched"
 ```
+
+(The symlink-swap and premerge-kept assertions belong to Task 4, which
+implements the swap.)
 
 - [ ] **Step 2: Run to verify the new cases fail**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: the new collision cases FAIL (stub copies nothing); earlier cases pass.
 
 - [ ] **Step 3: Implement `merge_trees`**
@@ -494,14 +573,29 @@ Expected: the new collision cases FAIL (stub copies nothing); earlier cases pass
 Replace the `merge_trees` stub:
 
 ```python
-REPORT = {"dedupe_losers": [], "conflicts": [], "renamed": []}
+# dedupe_losers/moved hold "personal:<abs>" / "work:<abs>" origin strings;
+# conflicts holds destination paths whose content was merged or replaced in
+# place (original preserved as .conflict-*); renamed holds new .from-work paths.
+REPORT = {"dedupe_losers": [], "conflicts": [], "renamed": [], "moved": []}
+
+
+def conflict_path(base_dir: Path, name: str) -> Path:
+    """First non-existing of <name>, <name>.2, <name>.3 ... (rerun safety)."""
+    cand = base_dir / name
+    n = 2
+    while cand.exists():
+        cand = base_dir / f"{name}.{n}"
+        n += 1
+    return cand
 
 
 def jsonl_winner(p: Path, w: Path) -> Path:
-    """R3: larger wins; tie -> newer mtime; tie -> personal."""
+    """R3: larger wins; equal size + identical bytes -> personal; else newer mtime."""
     ps, ws = p.stat().st_size, w.stat().st_size
     if ws != ps:
         return w if ws > ps else p
+    if p.read_bytes() == w.read_bytes():
+        return p
     return w if w.stat().st_mtime > p.stat().st_mtime else p
 
 
@@ -514,11 +608,17 @@ def copy_any(src: Path, dst: Path):
 
 
 def merge_memory(p_mem: Path, w_mem: Path):
-    """File-level union; newer wins on conflict, loser kept as .conflict-*."""
+    """File-level union, recursive; newer wins on conflict, loser kept as .conflict-*."""
     for wf in sorted(w_mem.iterdir()):
-        if wf.is_dir():
-            continue
         pf = p_mem / wf.name
+        if wf.is_dir():
+            if pf.is_dir():
+                merge_memory(pf, wf)
+            elif not pf.exists():
+                shutil.copytree(wf, pf, symlinks=True)
+            else:
+                REPORT["conflicts"].append(str(pf))
+            continue
         if not pf.exists():
             shutil.copy2(wf, pf)
             continue
@@ -531,13 +631,13 @@ def merge_memory(p_mem: Path, w_mem: Path):
                      if ln.strip() and ln.strip() not in seen]
             if extra:
                 pf.write_text("\n".join(p_lines + extra) + "\n")
-            shutil.copy2(wf, p_mem / "MEMORY.md.conflict-work.md")
+            shutil.copy2(wf, conflict_path(p_mem, "MEMORY.md.conflict-work.md"))
             REPORT["conflicts"].append(str(pf))
             continue
         work_wins = wf.stat().st_mtime >= pf.stat().st_mtime
         loser_tag = "personal" if work_wins else "work"
         loser_src = pf if work_wins else wf
-        shutil.copy2(loser_src, p_mem / f"{wf.name}.conflict-{loser_tag}.md")
+        shutil.copy2(loser_src, conflict_path(p_mem, f"{wf.name}.conflict-{loser_tag}.md"))
         if work_wins:
             shutil.copy2(wf, pf)
         REPORT["conflicts"].append(str(pf))
@@ -564,8 +664,10 @@ def merge_trees(personal: Path, work: Path) -> int:
                 else:
                     copy_any(entry, target)
                 continue
-            if entry.is_dir() and (w_dir / (entry.name + ".jsonl")).exists():
-                continue  # sidecar dir: handled together with its transcript
+            if entry.is_dir() and (w_dir / (entry.name + ".jsonl")).exists() \
+                    and (p_dir / (entry.name + ".jsonl")).exists():
+                continue  # COLLIDING session's sidecar: handled with its transcript;
+                          # a work-only session's sidecar falls through and is copied
             if not target.exists():
                 copy_any(entry, target)
                 continue
@@ -579,16 +681,23 @@ def merge_trees(personal: Path, work: Path) -> int:
                     shutil.copy2(entry, target)
                     for pair_src, pair_dst in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
                         if pair_src.is_dir():
+                            # copy to a temp sibling first so an interruption
+                            # never leaves the destination half-deleted
+                            tmp = pair_dst.with_name(pair_dst.name + ".tmp-merge")
+                            if tmp.exists():
+                                shutil.rmtree(tmp)
+                            copy_any(pair_src, tmp)
                             if pair_dst.is_dir():
                                 shutil.rmtree(pair_dst)
-                            copy_any(pair_src, pair_dst)
+                            tmp.rename(pair_dst)
                 else:
                     for lp in (entry, w_dir / sid, w_fh / sid):
                         REPORT["dedupe_losers"].append(f"work:{lp}")
                 continue
-            renamed = target.with_name(entry.name + ".from-work")
+            renamed = conflict_path(p_dir, entry.name + ".from-work")
             copy_any(entry, renamed)
             REPORT["renamed"].append(str(renamed))
+            REPORT["moved"].append(f"work:{entry}")
             log("WARNING", f"unexpected collision, kept both: {renamed}")
 
     if w_fh.is_dir():
@@ -599,17 +708,29 @@ def merge_trees(personal: Path, work: Path) -> int:
             if not p_id.exists():
                 copy_any(w_id, p_id)
             else:
-                # both roots have this id without a transcript collision:
-                # keep personal, flag it (orphan divergence is unexpected)
-                REPORT["conflicts"].append(f"file-history:{w_id.name}")
+                # both roots have this id without a transcript collision
+                # (unexpected): keep personal, preserve the work copy alongside
+                kept = conflict_path(p_fh, w_id.name + ".from-work")
+                copy_any(w_id, kept)
+                REPORT["renamed"].append(str(kept))
+                REPORT["moved"].append(f"work:{w_id}")
+                log("WARNING", f"divergent file-history without transcript collision: kept both ({kept})")
     return 0
 ```
 
-Placement note: `REPORT` and these functions go ABOVE `merge()` in the file; delete the stub.
+Placement note: `REPORT` and these functions go ABOVE `merge()` in the file;
+delete the Task 2 `merge_trees` stub. Keep `swap_and_verify` stubbed, but
+replace its body so the Task 3 build stays non-destructive and testable:
+
+```python
+def swap_and_verify(personal, work, inv_all):
+    log("WARNING", "merge incomplete in this build: swap/verify not implemented yet")
+    return 2
+```
 
 - [ ] **Step 4: Run the tests, verify they pass**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: all pass. (The sidecar of a personal-winning twin stays personal because the work sidecar dir is skipped via the `.jsonl`-companion guard, and the work jsonl loser is simply not copied.)
 
 - [ ] **Step 5: Commit**
@@ -633,9 +754,21 @@ git commit -m "bin: Add collision, memory-union, and file-history merge rules"
 - Consumes: `REPORT`, `TREES`, `ensure_link`, `inv_all` (keys `claude/<tree>/<rel>` and `claude-work/<tree>/<rel>`).
 - Produces: `swap_and_verify(personal, work, inv_all) -> int`; exit 0 only when every inventoried file is accounted for.
 
-- [ ] **Step 1: Append failing tests**
+- [ ] **Step 1: Update earlier expectations and append failing tests**
 
-Append before the summary lines:
+Task 4 completes `--merge`, so first FLIP the interim expectations from
+Tasks 2-3 in `bin/claude-unify-projects.test.sh`:
+
+- Task 2 block: change `[ "$rc" -eq 2 ]` to `[ "$rc" -eq 0 ]` (label:
+  "merge: complete run exits 0 after backup") and replace the
+  "incomplete build leaves work tree untouched" assertion with
+  `test -L "$base/work/projects"` ("merge: work projects swapped to symlink").
+- Task 3 block: change `[ "$rc" -eq 2 ]` to `[ "$rc" -eq 0 ]` and replace the
+  "task-3 build leaves work tree untouched" assertion with two: `test -L
+"$base/work/projects"` and `ls -d "$base/work/projects.premerge-"*`
+  ("merge: premerge tree kept").
+
+Then append before the summary lines:
 
 ```bash
 # --- merge mode: swap guard + verify ---
@@ -663,52 +796,60 @@ run_link "$base" >/dev/null 2>&1 && ok "merge: link mode no-op after merge" || b
 
 - [ ] **Step 2: Run to verify the new cases fail**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: "stale premerge dir aborts" FAILS (the Task 2 stub renames unconditionally and never checks).
 
 - [ ] **Step 3: Implement `swap_and_verify`**
 
-Replace the stub. The stale-premerge check must run BEFORE `merge_trees` mutates the personal tree, so it lives in `merge()` too — move the guard there as shown:
-
-In `merge()`, insert immediately after the preflight call returns 0:
-
-```python
-    for name in TREES:
-        if list(work.glob(name + ".premerge-*")):
-            log("X", f"stale {name}.premerge-* exists under {work}; resolve it first")
-            return 1
-```
-
-Then replace `swap_and_verify`:
+(The stale-premerge guard already runs at the top of `merge()`, before any
+mutation — Task 2 put it there.) Replace the `swap_and_verify` stub:
 
 ```python
 def swap_and_verify(personal: Path, work: Path, inv_all: dict) -> int:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    for name in TREES:
-        src = work / name
-        if src.is_dir() and not src.is_symlink():
-            src.rename(work / f"{name}.premerge-{stamp}")
-        rc = ensure_link(personal, work, name)
-        if rc != 0:
-            return rc
+    swapped = []
+    try:
+        for name in TREES:
+            src = work / name
+            if src.is_dir() and not src.is_symlink():
+                src.rename(work / f"{name}.premerge-{stamp}")
+                swapped.append(name)
+            if ensure_link(personal, work, name) != 0:
+                raise RuntimeError(f"could not link {work / name}")
+    except (OSError, RuntimeError) as exc:
+        log("X", f"swap failed ({exc}); rolling back the work root")
+        for name in reversed(swapped):
+            dst = work / name
+            if dst.is_symlink():
+                dst.unlink()
+            (work / f"{name}.premerge-{stamp}").rename(dst)
+        return 1
 
-    loser_paths = {p.split(":", 1)[1] for p in REPORT["dedupe_losers"]}
+    loser_paths = {p.split(":", 1)[1] for p in REPORT["dedupe_losers"] + REPORT["moved"]}
+    changed = set(REPORT["conflicts"])
+
+    def excused(origin: str) -> bool:
+        # dedupe losers and .from-work moves are dirs or files whose ORIGINAL
+        # path legitimately has no counterpart; children of a losing dir too
+        return any(origin == lp or origin.startswith(lp + "/") for lp in loser_paths)
+
     missing = []
-    for key in inv_all:
+    for key, meta in inv_all.items():
         label, rel = key.split("/", 1)  # label: claude|claude-work; rel: <tree>/<relpath>
         origin_root = personal if label == "claude" else work
-        origin = str(origin_root / rel)
-        if origin in loser_paths:
-            continue  # dedupe loser: dropped by rule, present in backup
-        for root in (personal, work):
-            path = root / rel
-            if not path.is_file():
-                missing.append(f"{key} (unreachable via {path})")
-                break
-    # .conflict-* and .from-work renames add files, never remove them, so they
-    # cannot appear in `missing`; conflicts are reported below instead.
+        if excused(str(origin_root / rel)):
+            continue
+        merged_path = personal / rel      # post-swap, both roots resolve here
+        via_work = work / rel
+        if not merged_path.is_file() or not via_work.is_file():
+            missing.append(f"{key} (unreachable at {merged_path} / {via_work})")
+            continue
+        if str(merged_path) in changed:
+            continue  # merged or conflict-replaced in place; original kept as .conflict-*
+        if merged_path.stat().st_size != meta["size"]:
+            missing.append(f"{key} (size {merged_path.stat().st_size} != inventoried {meta['size']})")
     if missing:
-        log("X", f"verify failed; {len(missing)} pre-merge files unreachable, first: {missing[0]}")
+        log("X", f"verify failed; {len(missing)} pre-merge files unaccounted for, first: {missing[0]}")
         return 1
 
     for name in TREES:
@@ -727,22 +868,18 @@ def swap_and_verify(personal: Path, work: Path, inv_all: dict) -> int:
     return 0
 ```
 
-Correctness note: Task 3 records the WHOLE losing side (transcript, sidecar
-dir, file-history dir) in `REPORT["dedupe_losers"]`. Because sidecar and
-file-history losers are directories, the membership test must excuse both
-exact matches and children — replace the `if origin in loser_paths` line
-with:
+Correctness notes the implementer must preserve:
 
-```python
-    def excused(origin: str) -> bool:
-        return any(origin == lp or origin.startswith(lp + "/") for lp in loser_paths)
-```
-
-used as `if excused(origin): continue`.
+- Task 3 records the WHOLE losing side (transcript, sidecar dir,
+  file-history dir) in `REPORT["dedupe_losers"]`, and `.from-work` origins
+  in `REPORT["moved"]`; `excused()` covers exact matches and children.
+- The size check is skipped for paths in `REPORT["conflicts"]` — those were
+  merged or replaced in place (MEMORY.md union, newer-wins facts) and their
+  originals live on as `.conflict-*` files.
 
 - [ ] **Step 4: Run the full suite, verify green**
 
-Run: `sh bin/claude-unify-projects.test.sh`
+Run: `bash bin/claude-unify-projects.test.sh`
 Expected: all pass, including Task 3 cases (the winner-side sidecar/file-history survive verification because the losing side's paths are excused).
 
 - [ ] **Step 5: Commit**
@@ -771,10 +908,15 @@ git commit -m "bin: Add swap guard and inventory-based merge verification"
 In `install/claude-links.test.sh`, append an assertion in that suite's existing style (its helpers may be named differently — mirror the neighboring checks):
 
 ```bash
-if grep -q 'bin/claude-unify-projects' install/common/link.sh; then
+if grep -q '"\$DOTFILEDIR"/bin/claude-unify-projects' install/common/link.sh; then
   echo "[OK] link.sh runs the session-store link step"; pass=$((pass+1))
 else
   echo "[X] link.sh runs the session-store link step"; fail=$((fail+1))
+fi
+if grep -q 'claude-unify-projects "\$HOME"/bin/claude-unify-projects' install/common/link.sh; then
+  echo "[OK] link.sh installs claude-unify-projects into ~/bin"; pass=$((pass+1))
+else
+  echo "[X] link.sh installs claude-unify-projects into ~/bin"; fail=$((fail+1))
 fi
 ```
 
