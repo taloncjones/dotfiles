@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""claude-unify-projects - one shared Claude Code session store across roots.
+
+Link mode (default): make <work-root>/{projects,file-history} symlinks to
+<personal-root>/{projects,file-history}. Safe and idempotent; never moves
+data. Exits non-zero if a tree still needs the one-time merge.
+
+Merge mode (--merge): one-time copy-then-swap migration of the work-root
+trees into the personal root. Spec:
+docs/specs/2026-07-14-unified-claude-session-store.md
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+TREES = ("projects", "file-history")
+
+
+def log(tag, msg):
+    print(f"[{tag}] {msg}")
+
+
+def ensure_link(personal: Path, work: Path, name: str) -> int:
+    """Return 0 if linked (or already linked), 1 if skipped with a warning."""
+    src_unresolved = personal / name
+    src_resolved = src_unresolved.resolve()
+    dst = work / name
+    src_unresolved.mkdir(parents=True, exist_ok=True)
+    if dst.is_symlink():
+        if dst.exists() and dst.resolve() == src_resolved:
+            return 0
+        if not dst.exists():  # dangling: safe to replace
+            dst.unlink()
+        else:
+            log("WARNING", f"{dst} is a live symlink to {dst.resolve()}, not touching it")
+            return 1
+    elif dst.exists():
+        if dst.is_dir() and not any(dst.iterdir()):
+            dst.rmdir()
+        elif dst.is_dir():
+            log("WARNING", f"{dst} has content; run claude-unify-projects --merge once")
+            return 1
+        else:
+            log("WARNING", f"{dst} is a regular file, not touching it")
+            return 1
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(src_unresolved, dst)
+    log("OK", f"{dst} -> {src_unresolved}")
+    return 0
+
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--personal-root", default=os.path.expanduser("~/.claude"))
+    ap.add_argument("--work-root", default=os.path.expanduser("~/.claude-work"))
+    ap.add_argument("--backup-dir", default=os.path.expanduser("~/tmp"))
+    ap.add_argument("--merge", action="store_true")
+    ap.add_argument("--yes", action="store_true")
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    personal, work = Path(args.personal_root), Path(args.work_root)
+    if not work.exists():
+        log("INFO", f"{work} missing; nothing to do")
+        return 0
+    p_res, w_res = personal.resolve(), work.resolve()
+    if p_res == w_res or p_res in w_res.parents or w_res in p_res.parents:
+        log("X", f"refusing: roots are equal or nested ({p_res} vs {w_res})")
+        return 1
+    if args.merge:
+        rc = merge(personal, work, Path(args.backup_dir), args.yes)
+        if rc != 0:
+            return rc
+    rc = 0
+    for name in TREES:
+        rc |= ensure_link(personal, work, name)
+    return rc
+
+
+def merge(personal, work, backup_dir, assume_yes):  # implemented in Task 2-4
+    log("X", "--merge not implemented yet")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
