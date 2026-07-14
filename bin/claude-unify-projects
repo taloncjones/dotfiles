@@ -34,25 +34,32 @@ def ensure_link(personal: Path, work: Path, name: str) -> int:
     src_resolved = src_unresolved.resolve()
     dst = work / name
     src_unresolved.mkdir(parents=True, exist_ok=True)
-    if dst.is_symlink():
-        if dst.exists() and dst.resolve() == src_resolved:
-            return 0
-        if not dst.exists():  # dangling: safe to replace
-            dst.unlink()
-        else:
-            log("WARNING", f"{dst} is a live symlink to {dst.resolve()}, not touching it")
-            return 1
-    elif dst.exists():
-        if dst.is_dir() and not any(dst.iterdir()):
-            dst.rmdir()
-        elif dst.is_dir():
-            log("WARNING", f"{dst} has content; run claude-unify-projects --merge once")
-            return 1
-        else:
-            log("WARNING", f"{dst} is a regular file, not touching it")
-            return 1
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    os.symlink(src_unresolved, dst)
+    try:
+        if dst.is_symlink():
+            if dst.exists() and dst.resolve() == src_resolved:
+                return 0
+            if not dst.exists():  # dangling: safe to replace
+                dst.unlink()
+            else:
+                log("WARNING", f"{dst} is a live symlink to {dst.resolve()}, not touching it")
+                return 1
+        elif dst.exists():
+            if dst.is_dir() and not any(dst.iterdir()):
+                dst.rmdir()
+            elif dst.is_dir():
+                log("WARNING", f"{dst} has content; run claude-unify-projects --merge once")
+                return 1
+            else:
+                log("WARNING", f"{dst} is a regular file, not touching it")
+                return 1
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(src_unresolved, dst)
+    except OSError:
+        # A concurrent session created/removed something at dst between our
+        # check and the mutation (e.g. its first transcript triggered a
+        # rmdir-on-empty-dir race, or a symlink recreated by another run).
+        log("WARNING", f"{dst} changed underneath us; skipping (re-run update)")
+        return 1
     log("OK", f"{dst} -> {src_unresolved}")
     return 0
 
@@ -69,7 +76,12 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv)
-    personal, work = Path(args.personal_root), Path(args.work_root)
+    # Absolutize (not resolve(): keep symlink components as-is) so a relative
+    # --personal-root/--work-root can't produce a dangling symlink -- POSIX
+    # resolves a relative symlink target against the link's parent dir, not
+    # the caller's cwd.
+    personal = Path(os.path.abspath(args.personal_root))
+    work = Path(os.path.abspath(args.work_root))
     if not work.exists():
         log("INFO", f"{work} missing; nothing to do")
         return 0
@@ -124,7 +136,8 @@ def lsof_busy(paths) -> bool:
 
 def read_cleanup_days(root: Path):
     try:
-        return json.load(open(root / "settings.json")).get("cleanupPeriodDays")
+        with open(root / "settings.json") as fh:
+            return json.load(fh).get("cleanupPeriodDays")
     except (OSError, ValueError):
         return None
 
@@ -141,10 +154,6 @@ def preflight(personal: Path, work: Path, assume_yes: bool) -> int:
     elif p_days is None:
         log("INFO", "cleanupPeriodDays unset in both roots (platform default applies "
             "to the shared store); pin it in settings.json.tmpl to control retention")
-    work_bytes = sum(v["size"] for v in take_inventory(work).values())
-    if shutil.disk_usage(personal).free < work_bytes * 2:
-        log("X", f"not enough free space on {personal} for the merge copy")
-        return 1
     if not assume_yes:
         if not sys.stdin.isatty():
             log("X", "refusing to merge without --yes on non-interactive stdin")
@@ -156,18 +165,30 @@ def preflight(personal: Path, work: Path, assume_yes: bool) -> int:
     return 0
 
 
-def backup_space_ok(backup_dir: Path, total_bytes: int) -> bool:
-    """Tar worst case: no compression; backup_dir may be a different filesystem."""
+def check_free_space(personal: Path, backup_dir: Path, work_bytes: int, total_bytes: int) -> bool:
+    """Merge-copy headroom on personal's filesystem, plus backup-tar headroom
+    (worst case: no compression). If backup_dir shares personal's filesystem
+    the two draws come from the same free-space pool, so check the combined
+    requirement there instead of double-counting two independent checks."""
     backup_dir.mkdir(parents=True, exist_ok=True)
+    if os.stat(personal).st_dev == os.stat(backup_dir).st_dev:
+        needed = 2 * work_bytes + total_bytes
+        if shutil.disk_usage(personal).free < needed:
+            log("X", f"not enough free space on {personal} (shares a filesystem with "
+                f"{backup_dir}) for the merge copy plus the backup tar")
+            return False
+        return True
+    if shutil.disk_usage(personal).free < work_bytes * 2:
+        log("X", f"not enough free space on {personal} for the merge copy")
+        return False
     if shutil.disk_usage(backup_dir).free < total_bytes:
         log("X", f"not enough free space under {backup_dir} for the backup tar")
         return False
     return True
 
 
-def make_backup(personal: Path, work: Path, backup_dir: Path, inv_all: dict) -> Path:
+def make_backup(personal: Path, work: Path, backup_dir: Path, inv_all: dict, stamp: str) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
     tar_path = backup_dir / f"claude-projects-backup-{stamp}.tar.gz"
     fd = os.open(tar_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tar:
@@ -308,7 +329,23 @@ def merge_memory(p_mem: Path, w_mem: Path):
         REPORT["conflicts"].append(str(pf))
 
 
-def merge_trees(personal: Path, work: Path) -> int:
+def classify_work_tree(personal: Path, work: Path, name: str):
+    """Classify one work-side tree for merge planning.
+
+    Returns "merge" if merge_trees should walk it (a real directory, or
+    nothing there yet), "skip" if it is already the canonical symlink into
+    the personal side (already unified -- walking it would self-collide
+    every entry against itself), or None if it is a symlink pointing
+    somewhere else (ambiguous half-migrated state; caller must abort)."""
+    w_tree = work / name
+    if not w_tree.is_symlink():
+        return "merge"
+    if w_tree.resolve() == (personal / name).resolve():
+        return "skip"
+    return None
+
+
+def merge_trees(personal: Path, work: Path, plan: dict) -> int:
     w_projects, p_projects = work / "projects", personal / "projects"
     w_fh, p_fh = work / "file-history", personal / "file-history"
     p_projects.mkdir(parents=True, exist_ok=True)
@@ -327,64 +364,65 @@ def merge_trees(personal: Path, work: Path) -> int:
 
     fh_decided = set()  # ids whose file-history side followed a transcript winner
 
-    work_dirs = sorted(d for d in w_projects.iterdir() if d.is_dir()) if w_projects.is_dir() else []
-    for w_dir in work_dirs:
-        p_dir = p_projects / w_dir.name
-        if not p_dir.exists():
-            copy_dir_staged(w_dir, p_dir)
-            continue
-        for entry in sorted(w_dir.iterdir()):
-            target = p_dir / entry.name
-            if entry.name == "memory" and entry.is_dir():
-                if target.is_dir():
-                    merge_memory(target, entry)
-                else:
-                    copy_dir_staged(entry, target)
+    if plan["projects"] == "merge":
+        work_dirs = sorted(d for d in w_projects.iterdir() if d.is_dir()) if w_projects.is_dir() else []
+        for w_dir in work_dirs:
+            p_dir = p_projects / w_dir.name
+            if not p_dir.exists():
+                copy_dir_staged(w_dir, p_dir)
                 continue
-            if entry.is_dir() and (w_dir / (entry.name + ".jsonl")).exists() \
-                    and (p_dir / (entry.name + ".jsonl")).exists():
-                continue  # COLLIDING session's sidecar: handled with its transcript;
-                          # a work-only session's sidecar falls through and is copied
-            if not target.exists():
-                if entry.is_dir():
-                    copy_dir_staged(entry, target)
-                else:
-                    copy_any(entry, target)
-                continue
-            if entry.suffix == ".jsonl" and entry.is_file() and target.is_file():
-                sid = entry.stem
-                win = jsonl_winner(target, entry)
-                fh_decided.add(sid)
-                if win is entry:  # work wins: transcript, sidecar, file-history
-                    for lp in (target, p_dir / sid, p_fh / sid):
-                        if lp.exists():
-                            REPORT["dedupe_losers"].append(f"personal:{lp}")
-                    shutil.copy2(entry, target)
-                    for pair_src, pair_dst in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
-                        if pair_src.is_dir():
-                            copy_dir_staged(pair_src, pair_dst)
-                else:
-                    # personal wins the transcript; the sidecar and
-                    # file-history entries are independent artifacts -- drop
-                    # the work copy only where personal already has its own,
-                    # otherwise copy the work one so it is not silently lost
-                    # behind the swap.
-                    REPORT["dedupe_losers"].append(f"work:{entry}")
-                    for w_side, p_side in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
-                        if not w_side.exists():
-                            continue
-                        if p_side.exists():
-                            REPORT["dedupe_losers"].append(f"work:{w_side}")
-                        else:
-                            copy_dir_staged(w_side, p_side)
-                continue
-            renamed = conflict_path(p_dir, entry.name + ".from-work")
-            copy_any(entry, renamed)
-            REPORT["renamed"].append(str(renamed))
-            REPORT["moved"].append(f"work:{entry}")
-            log("WARNING", f"unexpected collision, kept both: {renamed}")
+            for entry in sorted(w_dir.iterdir()):
+                target = p_dir / entry.name
+                if entry.name == "memory" and entry.is_dir():
+                    if target.is_dir():
+                        merge_memory(target, entry)
+                    else:
+                        copy_dir_staged(entry, target)
+                    continue
+                if entry.is_dir() and (w_dir / (entry.name + ".jsonl")).exists() \
+                        and (p_dir / (entry.name + ".jsonl")).exists():
+                    continue  # COLLIDING session's sidecar: handled with its transcript;
+                              # a work-only session's sidecar falls through and is copied
+                if not target.exists():
+                    if entry.is_dir():
+                        copy_dir_staged(entry, target)
+                    else:
+                        copy_any(entry, target)
+                    continue
+                if entry.suffix == ".jsonl" and entry.is_file() and target.is_file():
+                    sid = entry.stem
+                    win = jsonl_winner(target, entry)
+                    fh_decided.add(sid)
+                    if win is entry:  # work wins: transcript, sidecar, file-history
+                        for lp in (target, p_dir / sid, p_fh / sid):
+                            if lp.exists():
+                                REPORT["dedupe_losers"].append(f"personal:{lp}")
+                        shutil.copy2(entry, target)
+                        for pair_src, pair_dst in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
+                            if pair_src.is_dir():
+                                copy_dir_staged(pair_src, pair_dst)
+                    else:
+                        # personal wins the transcript; the sidecar and
+                        # file-history entries are independent artifacts --
+                        # drop the work copy only where personal already has
+                        # its own, otherwise copy the work one so it is not
+                        # silently lost behind the swap.
+                        REPORT["dedupe_losers"].append(f"work:{entry}")
+                        for w_side, p_side in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
+                            if not w_side.exists():
+                                continue
+                            if p_side.exists():
+                                REPORT["dedupe_losers"].append(f"work:{w_side}")
+                            else:
+                                copy_dir_staged(w_side, p_side)
+                    continue
+                renamed = conflict_path(p_dir, entry.name + ".from-work")
+                copy_any(entry, renamed)
+                REPORT["renamed"].append(str(renamed))
+                REPORT["moved"].append(f"work:{entry}")
+                log("WARNING", f"unexpected collision, kept both: {renamed}")
 
-    if w_fh.is_dir():
+    if plan["file-history"] == "merge" and w_fh.is_dir():
         for w_id in sorted(d for d in w_fh.iterdir() if d.is_dir()):
             if w_id.name in fh_decided:
                 continue
@@ -403,13 +441,29 @@ def merge_trees(personal: Path, work: Path) -> int:
 
 
 def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int:
-    if all((work / name).is_symlink() for name in TREES):
-        log("INFO", "work-root trees already symlinks; nothing to merge")
-        return 0
     for name in TREES:
         if list(work.glob(name + ".premerge-*")):
             log("X", f"stale {name}.premerge-* exists under {work}; resolve it first")
             return 1
+
+    # Per-tree merge planning (half-migrated states): a tree already the
+    # canonical symlink into personal is excluded from merge_trees entirely
+    # (walking it would self-collide every entry against itself and corrupt
+    # fh_decided for the other tree); a symlink pointing anywhere else is
+    # ambiguous and must be resolved by hand.
+    plan = {}
+    for name in TREES:
+        cls = classify_work_tree(personal, work, name)
+        if cls is None:
+            log("X", f"{work / name} is a symlink to an unexpected target; "
+                f"resolve it by hand before merging (expected a real directory or "
+                f"a symlink to {personal / name})")
+            return 1
+        plan[name] = cls
+    if all(v == "skip" for v in plan.values()):
+        log("INFO", "work-root trees already symlinks; nothing to merge")
+        return 0
+
     b_res = backup_dir.resolve()
     for root in (personal, work):
         for name in TREES:
@@ -423,25 +477,53 @@ def merge(personal: Path, work: Path, backup_dir: Path, assume_yes: bool) -> int
     dups = find_duplicates(personal, work)
     if dups:
         log("INFO", f"duplicate session ids to dedupe: {', '.join(sorted(dups))}")
-    missing_expected = [d for d in EXPECTED_DUPLICATES if d not in dups]
-    if missing_expected and any((personal / "projects").glob("*/" + missing_expected[0] + "*")):
-        log("WARNING", "state differs from the spec snapshot "
-            f"(expected duplicates not found: {', '.join(missing_expected)}); re-check before proceeding")
+    dup_set, expected_set = set(dups), set(EXPECTED_DUPLICATES)
+    sym_diff = dup_set ^ expected_set
+    if sym_diff:
+        missing = sorted(expected_set - dup_set)
+        unexpected = sorted(dup_set - expected_set)
+        parts = []
+        if missing:
+            parts.append(f"missing: {', '.join(missing)}")
+        if unexpected:
+            parts.append(f"unexpected: {', '.join(unexpected)}")
+        log("WARNING", f"duplicate set differs from the reviewed snapshot ({'; '.join(parts)})")
+        if not assume_yes:
+            if not sys.stdin.isatty():
+                log("X", "refusing to proceed on a duplicate-set mismatch without --yes on non-interactive stdin")
+                return 1
+            reply = input("Duplicate set differs from the reviewed snapshot; continue? [y/N] ")
+            if reply.strip().lower() != "y":
+                log("INFO", "aborted by user")
+                return 1
+
     inv_all = {}
     for label, root in (("claude", personal), ("claude-work", work)):
         for key, meta in take_inventory(root).items():
             inv_all[f"{label}/{key}"] = meta
-    if not backup_space_ok(backup_dir, sum(v["size"] for v in inv_all.values())):
+    work_bytes = sum(meta["size"] for key, meta in inv_all.items() if key.startswith("claude-work/"))
+    total_bytes = sum(v["size"] for v in inv_all.values())
+    if not check_free_space(personal, backup_dir, work_bytes, total_bytes):
         return 1
-    make_backup(personal, work, backup_dir, inv_all)
-    rc = merge_trees(personal, work)                  # Task 3
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    make_backup(personal, work, backup_dir, inv_all, stamp)
+    rc = merge_trees(personal, work, plan)                    # Task 3
     if rc != 0:
         return rc
-    return swap_and_verify(personal, work, inv_all)   # Task 4
+    return swap_and_verify(personal, work, inv_all, stamp)    # Task 4
 
 
-def swap_and_verify(personal: Path, work: Path, inv_all: dict) -> int:
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+def swap_and_verify(personal: Path, work: Path, inv_all: dict, stamp: str) -> int:
+    # Preflight's lsof ran once, possibly minutes ago (backup+merge take
+    # time); re-check quiescence right before the only destructive step so a
+    # session opened in the meantime is caught BEFORE any rename, not after.
+    trees = [personal / t for t in TREES] + [work / t for t in TREES]
+    if lsof_busy(trees):
+        log("X", "a session opened during the merge; close ALL Claude Code sessions "
+            "(both roots) and re-run -- nothing has been renamed yet")
+        return 1
+
     swapped = []
     try:
         for name in TREES:
@@ -452,7 +534,8 @@ def swap_and_verify(personal: Path, work: Path, inv_all: dict) -> int:
             if ensure_link(personal, work, name) != 0:
                 raise RuntimeError(f"could not link {work / name}")
     except (OSError, RuntimeError) as exc:
-        log("X", f"swap failed ({exc}); rolling back the work root")
+        log("X", f"swap failed ({exc}); rolling back the work root "
+            "(data already merged into the personal root remains there -- additive, safe to re-run)")
         for name in reversed(swapped):
             dst = work / name
             if dst.is_symlink():

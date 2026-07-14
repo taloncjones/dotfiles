@@ -86,6 +86,12 @@ mkfile "$base/work/projects/-p1/s2.jsonl" "w"
 run_link "$base" --merge --backup-dir "$base" </dev/null >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && ok "merge: refuses without --yes when stdin is not a tty" \
   || bad "merge: refuses without --yes when stdin is not a tty"
+test -d "$base/personal" && ! test -L "$base/personal" \
+  && ok "merge: non-tty refusal leaves personal root a real dir" || bad "merge: non-tty refusal leaves personal root a real dir"
+test -d "$base/work" && ! test -L "$base/work" \
+  && ok "merge: non-tty refusal leaves work root a real dir" || bad "merge: non-tty refusal leaves work root a real dir"
+[ "$(cat "$base/work/projects/-p1/s2.jsonl")" = "w" ] \
+  && ok "merge: non-tty refusal leaves work tree content intact" || bad "merge: non-tty refusal leaves work tree content intact"
 
 # --- merge mode: collisions, memory union, file-history ---
 base="$(fixture)"
@@ -123,7 +129,7 @@ mkfile "$base/work/projects/-only/w1.jsonl" "work-only"
 mkfile "$base/work/file-history/workonly/cp" "fh-work-only"
 mkdir -p "$base/backups"
 run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && ok "merge: task-3 build exits 0 after tree merge" || bad "merge: task-3 build exits 0 after tree merge (rc=$rc)"
+[ "$rc" -eq 0 ] && ok "merge: complete merge exits 0" || bad "merge: complete merge exits 0 (rc=$rc)"
 P="$base/personal/projects/-p1"
 [ "$(cat "$P/dup.jsonl")" = "longer-content-wins" ] && ok "merge: larger jsonl wins" || bad "merge: larger jsonl wins"
 [ "$(cat "$P/same/tag.txt")" = "personal-side" ] && ok "merge: identical twin keeps personal sidecar" || bad "merge: identical twin keeps personal sidecar"
@@ -215,6 +221,36 @@ run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=
 [ "$(cat "$base/personal/projects/-p1/memory/notes.conflict-work/detail.md")" = "work-nested-detail" ] \
   && ok "P2-8: work memory subtree preserved as .conflict-work dir" \
   || bad "P2-8: work memory subtree preserved as .conflict-work dir"
+
+# --- P1-2: half-migrated state (projects already unified, file-history real) ---
+base="$(fixture)"
+mkfile "$base/personal/projects/-p1/sess1.jsonl" "personal-data"
+ln -s "$base/personal/projects" "$base/work/projects"
+# Real work file-history with an id that also names an existing personal
+# session dir, so a naive self-collision (from iterating the symlinked
+# projects tree) would wrongly mark it as already-decided and skip it.
+mkfile "$base/work/file-history/sess1/cp" "real-work-fh-content"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "P1-2: half-migrated merge exits 0" || bad "P1-2: half-migrated merge exits 0 (rc=$rc)"
+[ "$(cat "$base/personal/file-history/sess1/cp")" = "real-work-fh-content" ] \
+  && ok "P1-2: real work file-history content survives an already-symlinked projects tree" \
+  || bad "P1-2: real work file-history content survives an already-symlinked projects tree"
+test -L "$base/work/file-history" \
+  && ok "P1-2: work file-history swapped to symlink" || bad "P1-2: work file-history swapped to symlink"
+test -L "$base/work/projects" \
+  && ok "P1-2: work projects symlink untouched" || bad "P1-2: work projects symlink untouched"
+
+# --- P2-9: duplicate-set mismatch warns (and, with --yes, still proceeds) ---
+base="$(fixture)"
+mkfile "$base/work/projects/-only/w1.jsonl" "work-only"
+mkdir -p "$base/backups"
+out="$(run_link "$base" --merge --yes --backup-dir "$base/backups" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && ok "P2-9: proceeds past duplicate-set mismatch with --yes" \
+  || bad "P2-9: proceeds past duplicate-set mismatch with --yes (rc=$rc)"
+echo "$out" | grep -q "duplicate set differs from the reviewed snapshot" \
+  && ok "P2-9: warns when the duplicate set differs from the reviewed snapshot" \
+  || bad "P2-9: warns when the duplicate set differs from the reviewed snapshot"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
