@@ -11,6 +11,7 @@ docs/specs/2026-07-14-unified-claude-session-store.md
 """
 
 import argparse
+import filecmp
 import json
 import os
 import shutil
@@ -235,7 +236,7 @@ def jsonl_winner(p: Path, w: Path) -> Path:
     ps, ws = p.stat().st_size, w.stat().st_size
     if ws != ps:
         return w if ws > ps else p
-    if p.read_bytes() == w.read_bytes():
+    if filecmp.cmp(str(p), str(w), shallow=False):
         return p
     return w if w.stat().st_mtime > p.stat().st_mtime else p
 
@@ -248,6 +249,21 @@ def copy_any(src: Path, dst: Path):
         shutil.copy2(src, dst)
 
 
+def copy_dir_staged(src: Path, dst: Path):
+    """Copy a whole directory via a <dst>.tmp-merge staging path, then an
+    atomic rename into place (replacing any existing dst). An interruption
+    mid-copy leaves only the .tmp-merge sibling behind -- never a partial or
+    half-replaced dst that a rerun could misread as already-merged."""
+    tmp = dst.with_name(dst.name + ".tmp-merge")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    copy_any(src, tmp)
+    if dst.exists():
+        shutil.rmtree(dst)
+    tmp.rename(dst)
+
+
 def merge_memory(p_mem: Path, w_mem: Path):
     """File-level union, recursive; newer wins on conflict, loser kept as .conflict-*."""
     for wf in sorted(w_mem.iterdir()):
@@ -258,6 +274,14 @@ def merge_memory(p_mem: Path, w_mem: Path):
             elif not pf.exists():
                 shutil.copytree(wf, pf, symlinks=True)
             else:
+                # dir-vs-file collision: pf is a plain file where work has a
+                # whole subtree. There is no in-place union for that: keep
+                # pf, preserve wf's subtree alongside as .conflict-work, and
+                # tell verify() it was intentionally relocated (not lost).
+                conflict_dst = conflict_path(p_mem, wf.name + ".conflict-work")
+                shutil.copytree(wf, conflict_dst, symlinks=True)
+                REPORT["renamed"].append(str(conflict_dst))
+                REPORT["moved"].append(f"work:{wf}")
                 REPORT["conflicts"].append(str(pf))
             continue
         if not pf.exists():
@@ -289,13 +313,25 @@ def merge_trees(personal: Path, work: Path) -> int:
     w_fh, p_fh = work / "file-history", personal / "file-history"
     p_projects.mkdir(parents=True, exist_ok=True)
     p_fh.mkdir(parents=True, exist_ok=True)
+
+    # Purge staging left behind by an interrupted prior run before this one
+    # creates any new staging of its own.
+    for base in (p_projects, p_fh):
+        for stale in list(base.rglob("*.tmp-merge")):
+            if not stale.exists():  # already removed as an ancestor's child
+                continue
+            if stale.is_dir():
+                shutil.rmtree(stale)
+            else:
+                stale.unlink()
+
     fh_decided = set()  # ids whose file-history side followed a transcript winner
 
     work_dirs = sorted(d for d in w_projects.iterdir() if d.is_dir()) if w_projects.is_dir() else []
     for w_dir in work_dirs:
         p_dir = p_projects / w_dir.name
         if not p_dir.exists():
-            copy_any(w_dir, p_dir)
+            copy_dir_staged(w_dir, p_dir)
             continue
         for entry in sorted(w_dir.iterdir()):
             target = p_dir / entry.name
@@ -303,14 +339,17 @@ def merge_trees(personal: Path, work: Path) -> int:
                 if target.is_dir():
                     merge_memory(target, entry)
                 else:
-                    copy_any(entry, target)
+                    copy_dir_staged(entry, target)
                 continue
             if entry.is_dir() and (w_dir / (entry.name + ".jsonl")).exists() \
                     and (p_dir / (entry.name + ".jsonl")).exists():
                 continue  # COLLIDING session's sidecar: handled with its transcript;
                           # a work-only session's sidecar falls through and is copied
             if not target.exists():
-                copy_any(entry, target)
+                if entry.is_dir():
+                    copy_dir_staged(entry, target)
+                else:
+                    copy_any(entry, target)
                 continue
             if entry.suffix == ".jsonl" and entry.is_file() and target.is_file():
                 sid = entry.stem
@@ -318,22 +357,26 @@ def merge_trees(personal: Path, work: Path) -> int:
                 fh_decided.add(sid)
                 if win is entry:  # work wins: transcript, sidecar, file-history
                     for lp in (target, p_dir / sid, p_fh / sid):
-                        REPORT["dedupe_losers"].append(f"personal:{lp}")
+                        if lp.exists():
+                            REPORT["dedupe_losers"].append(f"personal:{lp}")
                     shutil.copy2(entry, target)
                     for pair_src, pair_dst in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
                         if pair_src.is_dir():
-                            # copy to a temp sibling first so an interruption
-                            # never leaves the destination half-deleted
-                            tmp = pair_dst.with_name(pair_dst.name + ".tmp-merge")
-                            if tmp.exists():
-                                shutil.rmtree(tmp)
-                            copy_any(pair_src, tmp)
-                            if pair_dst.is_dir():
-                                shutil.rmtree(pair_dst)
-                            tmp.rename(pair_dst)
+                            copy_dir_staged(pair_src, pair_dst)
                 else:
-                    for lp in (entry, w_dir / sid, w_fh / sid):
-                        REPORT["dedupe_losers"].append(f"work:{lp}")
+                    # personal wins the transcript; the sidecar and
+                    # file-history entries are independent artifacts -- drop
+                    # the work copy only where personal already has its own,
+                    # otherwise copy the work one so it is not silently lost
+                    # behind the swap.
+                    REPORT["dedupe_losers"].append(f"work:{entry}")
+                    for w_side, p_side in ((w_dir / sid, p_dir / sid), (w_fh / sid, p_fh / sid)):
+                        if not w_side.exists():
+                            continue
+                        if p_side.exists():
+                            REPORT["dedupe_losers"].append(f"work:{w_side}")
+                        else:
+                            copy_dir_staged(w_side, p_side)
                 continue
             renamed = conflict_path(p_dir, entry.name + ".from-work")
             copy_any(entry, renamed)
@@ -347,7 +390,7 @@ def merge_trees(personal: Path, work: Path) -> int:
                 continue
             p_id = p_fh / w_id.name
             if not p_id.exists():
-                copy_any(w_id, p_id)
+                copy_dir_staged(w_id, p_id)
             else:
                 # both roots have this id without a transcript collision
                 # (unexpected): keep personal, preserve the work copy alongside

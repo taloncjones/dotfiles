@@ -183,5 +183,38 @@ ls -d "$base/work/projects.premerge-"* >/dev/null 2>&1 \
 test -f "$base/work/projects/-p1/a.jsonl" \
   && ok "swap: rolled-back tree content intact" || bad "swap: rolled-back tree content intact"
 
+# --- P1-1: personal-wins collision must not drop a work-only sidecar/file-history ---
+base="$(fixture)"
+mkfile "$base/personal/projects/-p1/dup2.jsonl" "personal-longer-content-wins-woo"
+mkfile "$base/work/projects/-p1/dup2.jsonl" "work-short"
+# work has a sidecar and a file-history entry that personal lacks entirely.
+mkfile "$base/work/projects/-p1/dup2/state.txt" "worksidecar"
+mkfile "$base/work/file-history/dup2/cp" "workfh"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "P1-1: personal-wins merge exits 0" || bad "P1-1: personal-wins merge exits 0 (rc=$rc)"
+[ "$(cat "$base/personal/projects/-p1/dup2.jsonl")" = "personal-longer-content-wins-woo" ] \
+  && ok "P1-1: personal transcript kept as winner" || bad "P1-1: personal transcript kept as winner"
+[ "$(cat "$base/personal/projects/-p1/dup2/state.txt")" = "worksidecar" ] \
+  && ok "P1-1: work-only sidecar copied despite personal winning the transcript" \
+  || bad "P1-1: work-only sidecar copied despite personal winning the transcript"
+[ "$(cat "$base/personal/file-history/dup2/cp")" = "workfh" ] \
+  && ok "P1-1: work-only file-history copied despite personal winning the transcript" \
+  || bad "P1-1: work-only file-history copied despite personal winning the transcript"
+
+# --- P2-8: memory dir-vs-file collision must preserve the work subtree ---
+base="$(fixture)"
+mkfile "$base/personal/projects/-p1/keep.jsonl" "x"
+mkfile "$base/personal/projects/-p1/memory/notes" "personal-file-content"
+mkfile "$base/work/projects/-p1/memory/notes/detail.md" "work-nested-detail"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "P2-8: dir-vs-file memory collision verify passes" || bad "P2-8: dir-vs-file memory collision verify passes (rc=$rc)"
+[ "$(cat "$base/personal/projects/-p1/memory/notes")" = "personal-file-content" ] \
+  && ok "P2-8: personal memory file kept" || bad "P2-8: personal memory file kept"
+[ "$(cat "$base/personal/projects/-p1/memory/notes.conflict-work/detail.md")" = "work-nested-detail" ] \
+  && ok "P2-8: work memory subtree preserved as .conflict-work dir" \
+  || bad "P2-8: work memory subtree preserved as .conflict-work dir"
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
