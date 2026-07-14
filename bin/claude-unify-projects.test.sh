@@ -89,5 +89,62 @@ run_link "$base" --merge --backup-dir "$base" </dev/null >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && ok "merge: refuses without --yes when stdin is not a tty" \
   || bad "merge: refuses without --yes when stdin is not a tty"
 
+# --- merge mode: collisions, memory union, file-history ---
+base="$(fixture)"
+# duplicated session: work copy larger -> work wins
+mkfile "$base/personal/projects/-p1/dup.jsonl" "short"
+mkfile "$base/work/projects/-p1/dup.jsonl" "longer-content-wins"
+mkfile "$base/personal/projects/-p1/dup/sidecar.txt" "personal-sidecar"
+mkfile "$base/work/projects/-p1/dup/sidecar.txt" "work-sidecar"
+mkfile "$base/personal/file-history/dup/cp1" "personal-fh"
+mkfile "$base/work/file-history/dup/cp1" "work-fh"
+# identical twins -> personal kept (distinguishable via their sidecars)
+mkfile "$base/personal/projects/-p1/same.jsonl" "identical"
+mkfile "$base/work/projects/-p1/same.jsonl" "identical"
+mkfile "$base/personal/projects/-p1/same/tag.txt" "personal-side"
+mkfile "$base/work/projects/-p1/same/tag.txt" "work-side"
+# work-only session INSIDE an overlapping project dir: sidecar must survive
+mkfile "$base/work/projects/-p1/wonly.jsonl" "work-only-session"
+mkfile "$base/work/projects/-p1/wonly/state.txt" "work-only-sidecar"
+# memory: distinct files union; same-name different content -> newer wins
+mkfile "$base/personal/projects/-p1/memory/MEMORY.md" "# Memory Index
+
+- [Alpha](alpha.md) - a
+"
+mkfile "$base/personal/projects/-p1/memory/alpha.md" "alpha"
+mkfile "$base/work/projects/-p1/memory/MEMORY.md" "# Memory Index
+
+- [Alpha](alpha.md) - a
+- [Beta](beta.md) - b
+"
+mkfile "$base/work/projects/-p1/memory/beta.md" "beta"
+mkfile "$base/work/projects/-p1/memory/alpha.md" "alpha-work-newer"
+touch -t 203001010000 "$base/work/projects/-p1/memory/alpha.md"
+# work-only project dir and file-history id
+mkfile "$base/work/projects/-only/w1.jsonl" "work-only"
+mkfile "$base/work/file-history/workonly/cp" "fh-work-only"
+mkdir -p "$base/backups"
+run_link "$base" --merge --yes --backup-dir "$base/backups" >/dev/null 2>&1; rc=$?
+# Task 3 build: trees merge but swap is still stubbed (rc=2); Task 4 Step 1
+# flips this to expect rc=0.
+[ "$rc" -eq 2 ] && ok "merge: task-3 build exits 2 after tree merge" || bad "merge: task-3 build exits 2 after tree merge (rc=$rc)"
+P="$base/personal/projects/-p1"
+[ "$(cat "$P/dup.jsonl")" = "longer-content-wins" ] && ok "merge: larger jsonl wins" || bad "merge: larger jsonl wins"
+[ "$(cat "$P/same/tag.txt")" = "personal-side" ] && ok "merge: identical twin keeps personal sidecar" || bad "merge: identical twin keeps personal sidecar"
+[ "$(cat "$P/wonly/state.txt")" = "work-only-sidecar" ] && ok "merge: work-only session sidecar survives" || bad "merge: work-only session sidecar survives"
+[ "$(cat "$P/dup/sidecar.txt")" = "work-sidecar" ] && ok "merge: sidecar follows winner" || bad "merge: sidecar follows winner"
+[ "$(cat "$base/personal/file-history/dup/cp1")" = "work-fh" ] && ok "merge: file-history follows winner" || bad "merge: file-history follows winner"
+[ "$(cat "$P/same.jsonl")" = "identical" ] && ok "merge: identical twin kept once" || bad "merge: identical twin kept once"
+[ "$(cat "$P/memory/alpha.md")" = "alpha-work-newer" ] && ok "merge: newer memory fact wins" || bad "merge: newer memory fact wins"
+test -f "$P/memory/alpha.md.conflict-personal.md" && ok "merge: losing memory fact preserved" || bad "merge: losing memory fact preserved"
+[ "$(cat "$P/memory/beta.md")" = "beta" ] && ok "merge: work-only memory fact copied" || bad "merge: work-only memory fact copied"
+grep -q 'Beta' "$P/memory/MEMORY.md" && ok "merge: MEMORY.md gained work-only line" || bad "merge: MEMORY.md gained work-only line"
+[ "$(grep -c 'Alpha' "$P/memory/MEMORY.md")" = "1" ] && ok "merge: MEMORY.md lines deduped" || bad "merge: MEMORY.md lines deduped"
+test -f "$P/memory/MEMORY.md.conflict-work.md" && ok "merge: work MEMORY.md preserved" || bad "merge: work MEMORY.md preserved"
+test -f "$base/personal/projects/-only/w1.jsonl" && ok "merge: work-only project copied" || bad "merge: work-only project copied"
+test -f "$base/personal/file-history/workonly/cp" && ok "merge: work-only file-history copied" || bad "merge: work-only file-history copied"
+test -d "$base/work/projects" && ! test -L "$base/work/projects" \
+  && ok "merge: task-3 build leaves work tree untouched" || bad "merge: task-3 build leaves work tree untouched"
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
