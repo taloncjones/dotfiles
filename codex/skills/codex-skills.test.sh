@@ -36,6 +36,16 @@ assert "co-review does not spawn nested codex review" \
     rg -q 'Do not launch `codex review`' codex/skills/co-review/SKILL.md
 assert "co-review uses Claude native code review" \
     rg -q 'claude -p "/code-review' codex/skills/co-review/SKILL.md
+assert "Claude co-review pins Codex Sol" \
+    sh -c "[ \"\$(rg -o -- '-m gpt-5\\.6-sol' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 2 ]"
+assert "Claude co-review defaults Codex to high effort" \
+    sh -c "[ \"\$(rg -o 'model_reasoning_effort=\\\"high\\\"' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 2 ]"
+assert "Claude co-review defines an adversarial Codex rubric" \
+    sh -c "rg -q 'CODEX_REVIEW_RUBRIC=' claude/skills/co-review/SKILL.md && rg -q 'runtime correctness' claude/skills/co-review/SKILL.md"
+assert "Claude co-review reserves xhigh for high-risk changes" \
+    sh -c "rg -q 'Escalate Codex to .*xhigh.* only for' claude/skills/co-review/SKILL.md && rg -U -q '(?s)high-risk changes involving auth/security.*concurrency/lifecycle.*migrations.*hardware safety' claude/skills/co-review/SKILL.md"
+assert "Claude co-review reports the selected Codex effort" \
+    rg -q '<codex-effort> effort' claude/skills/co-review/SKILL.md
 assert "installer links repo-managed codex skills" \
     rg -q 'codex/skills' install/common/link.sh
 assert "installer keeps ~/.codex/skills as a real directory" \
