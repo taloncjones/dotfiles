@@ -33,10 +33,11 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
    - Note: native `ultra` is user-triggered and billed and cannot be launched
      programmatically — do not attempt it. `high` is the ceiling here.
 
-2. **Codex half — `codex exec review`, built-in review prompt.**
-   Use Codex's dedicated review subcommand against the change base. It has its
-   own review prompt and **cannot take a custom prompt** (the two are mutually
-   exclusive), so do NOT try to pipe a rubric in:
+2. **Codex half — `codex exec review`, adversarial review prompt.**
+   Use Codex's dedicated review subcommand against the change base. Pin the
+   model and effort so a machine-level default change cannot silently alter the
+   review. The current CLI accepts optional review instructions in addition to
+   its built-in prompt, so give it one compact, correctness-focused rubric:
 
    ```bash
    # PR mode: `codex exec review` has NO PR/GitHub concept -- it only diffs the
@@ -45,22 +46,33 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
    # half), review there against the PR's base branch, then clean up.
    # The worktree path MUST be unique per run (mktemp -u) -- a fixed path
    # collides with a concurrent or previously-killed run.
+   CODEX_REVIEW_RUBRIC='Review adversarially. Prioritize runtime correctness, removed behavior, error handling, lifecycle and concurrency, auth and security boundaries, data or hardware safety, and missing regression tests. Report only actionable findings introduced by this diff; cite the file and line and explain a concrete failure scenario.'
    WT=$(mktemp -u /tmp/coreview-pr-<n>.XXXXXX)
    git worktree add --detach "$WT" \
      || { git worktree prune && git worktree add --detach "$WT"; }
    ( cd "$WT" && gh pr checkout <n> \
        && codex exec review --base <pr-base-branch> \
-            -c model_reasoning_effort="xhigh" \
-            -c approval_policy="never" -c sandbox_mode="read-only" ) > "$WT.log" 2>&1
+            -m gpt-5.6-sol -c model_reasoning_effort="high" \
+            -c approval_policy="never" -c sandbox_mode="read-only" \
+            "$CODEX_REVIEW_RUBRIC" ) > "$WT.log" 2>&1
    git worktree remove --force "$WT"; git worktree prune
    # <pr-base-branch> = gh pr view <n> --json baseRefName -q .baseRefName
 
    # branch mode: review the current branch's committed work against its fork point
    LOG=$(mktemp /tmp/coreview-branch.XXXXXX)
    codex exec review --base <branch-the-work-forked-from> \
-     -c model_reasoning_effort="xhigh" \
-     -c approval_policy="never" -c sandbox_mode="read-only" > "$LOG" 2>&1
+     -m gpt-5.6-sol -c model_reasoning_effort="high" \
+     -c approval_policy="never" -c sandbox_mode="read-only" \
+     "$CODEX_REVIEW_RUBRIC" > "$LOG" 2>&1
    ```
+
+   - Default to `gpt-5.6-sol` at `high`. Escalate Codex to `xhigh` only for
+     high-risk changes involving auth/security, concurrency/lifecycle,
+     migrations or destructive data handling, hardware safety, or a large
+     cross-cutting diff (roughly 500+ changed lines or multiple packages).
+     When escalating, substitute `xhigh` for `high` in the selected command and
+     record the actual effort for step 6. Never select `max` or `ultra`
+     automatically.
 
    - **ALWAYS use the `codex exec review` subcommand. NEVER invoke Codex
      generically** (`codex exec "review this diff..."`). A generic prompt makes
@@ -109,6 +121,8 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
      `codex exec review --base <pre-fix-sha>`. Same base for both = parity.
    - Tell each finder the diff is a fix commit and its job is to catch
      regressions the fixes introduced, not to re-litigate the original change.
+   - Apply the Codex risk rule from step 2 to the fix diff independently. Do not
+     inherit `xhigh` merely because the initial review used it.
    - Resolve any new findings (step 4 again), then **stop**. Hard cap: **2
      passes total** (initial review + one re-review). Never start a third —
      diminishing returns, and subjective findings start to thrash.
@@ -128,7 +142,7 @@ Run the two reviews **in parallel** (issue both in one turn), then merge.
      ### Co-review (Claude + Codex)
 
      Reviewed by Claude (`/code-review`, high effort) and Codex
-     (`codex exec review`, xhigh effort) against `<base>`.
+     (`codex exec review`, <codex-effort> effort) against `<base>`.
 
      No outstanding issues. Ready for human review.
      ```

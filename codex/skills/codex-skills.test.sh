@@ -43,7 +43,7 @@ assert "Claude co-review defaults Codex to high effort" \
 assert "Claude co-review defines an adversarial Codex rubric" \
     sh -c "rg -q 'CODEX_REVIEW_RUBRIC=' claude/skills/co-review/SKILL.md && rg -q 'runtime correctness' claude/skills/co-review/SKILL.md"
 assert "Claude co-review reserves xhigh for high-risk changes" \
-    sh -c "rg -q 'Escalate.*xhigh.*high-risk' claude/skills/co-review/SKILL.md && rg -q 'auth.*concurrency.*migration.*hardware safety' claude/skills/co-review/SKILL.md"
+    sh -c "rg -q 'Escalate Codex to .*xhigh.* only for' claude/skills/co-review/SKILL.md && rg -U -q '(?s)high-risk changes involving auth/security.*concurrency/lifecycle.*migrations.*hardware safety' claude/skills/co-review/SKILL.md"
 assert "Claude co-review reports the selected Codex effort" \
     rg -q '<codex-effort> effort' claude/skills/co-review/SKILL.md
 assert "installer links repo-managed codex skills" \
