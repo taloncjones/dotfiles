@@ -141,6 +141,9 @@ Brewfile.rb.lock.json
 # Git worktrees
 .worktrees/
 
+# Private planning artifacts (local-only; never publish)
+/docs/superpowers/
+
 # ruff lint cache
 .ruff_cache/
 
