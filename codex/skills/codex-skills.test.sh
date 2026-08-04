@@ -77,6 +77,15 @@ assert "Codex AGENTS uses plugin-qualified ECC skills" \
 assert "Codex AGENTS keeps project-specific product names out of global defaults" \
     sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
 
+project_skill_bridge_is_complete() {
+    [ -L .agents/skills ] || return 1
+    [ "$(readlink .agents/skills)" = "../.claude/skills" ] || return 1
+    [ "$(cd .agents/skills && pwd -P)" = "$(cd .claude/skills && pwd -P)" ]
+}
+
+assert "project Codex skills bridge to canonical Claude sources" \
+    project_skill_bridge_is_complete
+
 dedupes_superpowers_plugins() {
     tmp_home="$(mktemp -d)"
     mkdir -p "$tmp_home/.codex"
