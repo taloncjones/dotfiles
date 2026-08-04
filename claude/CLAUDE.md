@@ -32,6 +32,14 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 - Default to 1-2 sentence explanations
 - Cite file paths with line numbers (e.g., `src/main.rs:42`)
 
+**Work summaries** (status reports, wrap-ups, "what happened"): use labeled
+bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --
+one line or a short bullet list each, never paragraphs.
+
+**Pre-send check:** first line answers or acts; last line says what's next or
+what remains. Delete preamble, closing questions, sidebars, and hedges. The
+reader should get the gist from the first and last lines alone.
+
 ## Commits
 
 - Never add Claude as commit author or co-author

@@ -459,5 +459,13 @@
   "security.promptForLocalFileProtocolHandling": false,
   "workbench.colorTheme": "GitHub Dark Colorblind (Beta)",
   "workbench.preferredDarkColorTheme": "GitHub Dark Colorblind (Beta)",
-  "workbench.preferredLightColorTheme": "GitHub Light Colorblind (Beta)"
+  "workbench.preferredLightColorTheme": "GitHub Light Colorblind (Beta)",
+  "yaml.disableSchemaDetection": [
+    "**/.github/workflows/*.yml",
+    "**/.github/workflows/*.yaml",
+    "**/.gitea/workflows/*.yml",
+    "**/.gitea/workflows/*.yaml",
+    "**/.forgejo/workflows/*.yml",
+    "**/.forgejo/workflows/*.yaml"
+  ]
 }
