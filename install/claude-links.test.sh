@@ -158,6 +158,16 @@ if jget "$CFG/settings.json" "'permissions' in d and 'statusLine' in d"; then
 else
     fail "link path delivers template permissions/statusLine"
 fi
+if jget "$CFG/settings.json" "d['model'] == 'claude-fable-5[1m]'"; then
+    pass "link path pins the shared Claude default to Fable 5 1M"
+else
+    fail "link path pins the shared Claude default to Fable 5 1M"
+fi
+if jget "$CFG/settings.json" "d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'claude-opus-4-8[1m]'"; then
+    pass "link path maps the Opus alias to Opus 4.8 1M"
+else
+    fail "link path maps the Opus alias to Opus 4.8 1M"
+fi
 if [ -L "$CFG/CLAUDE.md" ] && [ ! -L "$CFG/settings.json" ]; then
     pass "link path symlinks assets but keeps settings.json a real file"
 else
