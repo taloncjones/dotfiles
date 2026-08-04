@@ -156,5 +156,8 @@ TOML
 assert "installer disables duplicate managed workflow providers" \
     dedupes_managed_workflow_plugins
 
+assert "plugin lifecycle re-runs workflow dedupe post-install" \
+    sh -c "rg -q 'dedupe_codex_workflow_plugins' install/common/claude-plugins.sh"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

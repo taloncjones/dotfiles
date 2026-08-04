@@ -217,91 +217,10 @@ add_codex_hook \
   'Edit|Write|MultiEdit|apply_patch' \
   "$HOME/.codex/hooks/no_ai_comments.py"
 
-codex_plugin_enabled() {
-  local config="$1"
-  local plugin="$2"
-
-  awk -v plugin="$plugin" '
-    function clean(line) {
-      sub(/[[:space:]]*#.*/, "", line)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-      return line
-    }
-    {
-      line = clean($0)
-      if (line == "[plugins.\"" plugin "\"]") {
-        in_plugin = 1
-        next
-      }
-      if (in_plugin && line ~ /^\[/) {
-        in_plugin = 0
-      }
-      if (in_plugin && line ~ /^enabled[[:space:]]*=[[:space:]]*true$/) {
-        found = 1
-      }
-    }
-    END {
-      exit found ? 0 : 1
-    }
-  ' "$config"
-}
-
-disable_codex_plugin() {
-  local config="$1"
-  local plugin="$2"
-  local tmp="$config.tmp.$$"
-
-  codex_plugin_enabled "$config" "$plugin" || return 0
-  cp -p "$config" "$tmp" || return 1
-
-  if ! awk -v plugin="$plugin" '
-    function clean(line) {
-      sub(/[[:space:]]*#.*/, "", line)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-      return line
-    }
-    {
-      normalized = clean($0)
-      if (normalized == "[plugins.\"" plugin "\"]") {
-        in_plugin = 1
-      } else if (in_plugin && normalized ~ /^\[/) {
-        in_plugin = 0
-      }
-      if (in_plugin && normalized ~ /^enabled[[:space:]]*=[[:space:]]*true$/) {
-        code = $0
-        comment = ""
-        hash = index(code, "#")
-        if (hash) {
-          comment = substr(code, hash)
-          code = substr(code, 1, hash - 1)
-        }
-        sub(/true[[:space:]]*$/, "false", code)
-        print code (comment == "" ? "" : " " comment)
-        next
-      }
-      print
-    }
-  ' "$config" >"$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  mv "$tmp" "$config"
-}
-
-dedupe_codex_workflow_plugins() {
-  local config="$HOME/.codex/config.toml"
-
-  [ -f "$config" ] || return 0
-
-  if codex_plugin_enabled "$config" "ecc@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "ecc@ecc"
-  fi
-
-  if codex_plugin_enabled "$config" "superpowers@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "superpowers@openai-curated"
-    disable_codex_plugin "$config" "superpowers@claude-plugins-official"
-  fi
-}
+# Shared with claude-plugins.sh, which re-runs the dedupe after the managed
+# installs so a first install closes the duplicate-provider window in the same
+# cycle (this link-time run happens before the plugins exist on that path).
+source "$DOTFILEDIR"/install/common/codex-plugin-dedupe.sh
 
 dedupe_codex_workflow_plugins
 

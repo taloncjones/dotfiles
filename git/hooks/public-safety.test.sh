@@ -35,6 +35,32 @@ git_grep_clean() {
     fi
 }
 
+# Self-test: prove the scanner detects plants before trusting its green runs.
+# The staged-only case guards the index-scan fix -- content staged but
+# overwritten in the working tree must still be caught via --cached.
+git_grep_clean_detects_plants() {
+    tmp_repo="$(mktemp -d)" || return 1
+    (
+        cd "$tmp_repo" || exit 1
+        export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+        git init -q . || exit 1
+        echo "plant tracked_marker_zz" > tracked.txt
+        git add tracked.txt || exit 1
+        git -c user.email=t@example.invalid -c user.name=t commit -qm seed || exit 1
+        echo "plant staged_marker_zz" > staged.txt
+        git add staged.txt || exit 1
+        echo "clean working copy" > staged.txt
+        ! git_grep_clean 'tracked_marker_zz' . || exit 1
+        ! git_grep_clean 'staged_marker_zz' . || exit 1
+        git_grep_clean 'absent_marker_zz' . || exit 1
+    )
+    result=$?
+    rm -rf "$tmp_repo"
+    return "$result"
+}
+
+assert "scanner self-test catches tracked and staged-only plants" \
+    git_grep_clean_detects_plants
 assert "no tracked local backlog file" \
     sh -c "! git ls-files --error-unmatch todo.md"
 assert "no tracked planning artifacts" \
