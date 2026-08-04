@@ -37,8 +37,8 @@ git_grep_clean() {
 
 assert "no tracked local backlog file" \
     sh -c "! git ls-files --error-unmatch todo.md"
-assert "no tracked Superpowers planning artifacts" \
-    sh -c "! git ls-files 'docs/superpowers/**' | grep -q ."
+assert "no tracked planning artifacts" \
+    sh -c "! git ls-files 'docs/superpowers/**' 'docs/plans/**' 'docs/specs/**' | grep -q ."
 assert "no hardcoded local user paths" \
     git_grep_clean '/Users/talon' . ':(exclude)git/hooks/public-safety.test.sh'
 assert "no high-confidence secrets in tracked content" \

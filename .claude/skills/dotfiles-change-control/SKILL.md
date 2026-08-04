@@ -18,9 +18,9 @@ your first blocked commit.
   paths (`/Users/<name>` -- writing the real one out would itself trip the
   scan). The public-safety suite (`git/hooks/public-safety.test.sh`)
   fails the build on violations; do not rely on it as your only check.
-- [WARNING] Superpowers plans and specs are private working artifacts. Keep
-  `docs/superpowers/` ignored and untracked; approval to create one is not
-  approval to publish it.
+- [WARNING] Plans and specs are private working artifacts. Keep
+  `docs/superpowers/`, `docs/plans/`, and `docs/specs/` ignored and untracked;
+  approval to create one is not approval to publish it.
 - [WARNING] Never hand-edit vendored content: the ECC language dirs under
   `claude/rules/` (everything except `personal/`) and the `<!-- BEGIN ECC -->`
   sentinel block in `codex/AGENTS.md`. Installers overwrite both; your edit
@@ -45,7 +45,7 @@ your change needs.
 | Tracked asset (symlinked live) | `zsh/*.zsh`, `claude/CLAUDE.md`, `claude/skills/`, `claude/hooks/*.py`, `git/hooks/commit-msg`, `bin/*` | Normal commit + tests. Takes effect on machines at next symlink resolution (usually immediately -- symlinks point into the repo checkout). Hook changes: update `claude/hooks/claude-hooks.test.sh` drift checks. |
 | Installer logic                | `bootstrap.sh`, `bootstrap-cloud.sh`, `install/**`, `zsh/functions.zsh` install helpers                 | Must stay idempotent (`update` re-runs `install.sh`). Update `install/install.test.sh` if flow shape changes. Platform-gate macOS/Linux paths.                                                                    |
 | Machine-local template         | `claude/settings.json.tmpl`, `git/work/.gitconfig-work.tmpl`, `ssh/configs/agent.toml`                  | Seed-once: template edits reach only FRESH machines automatically. Follow the settings.json.tmpl protocol below.                                                                                                  |
-| Private planning artifact      | `docs/superpowers/plans/`, `docs/superpowers/specs/`                                                    | Keep local-only and ignored. Never force-add or publish these files in this public repository.                                                                                                                    |
+| Private planning artifact      | `docs/superpowers/`, `docs/plans/`, `docs/specs/`                                                       | Keep local-only and ignored. Never force-add or publish these files in this public repository.                                                                                                                    |
 | Vendored-untracked             | `claude/rules/{common,cpp,python,rust,typescript,web}/`, ECC skills/commands                            | NEVER edit by hand. Re-vendor via `ecc-update`/`ecc-sync-rules`. Untracked by design (`claude/rules/.gitignore` whitelists only `personal/`). To change behavior, change it upstream in ECC or wrap it.           |
 | Project `.claude/` config      | `.claude/settings.json`, `.claude/hooks/session-start.sh`, `.claude/skills/`                            | Tracked, load-bearing for CLOUD sessions (plugin declaration is the pre-launch install path -- see claude-code-platform-reference). Changes here alter what every fresh cloud container gets on session 1.        |
 
@@ -114,7 +114,7 @@ In order, for a change made inside a Claude Code session:
 
    Non-zero exit = do not push. The public-safety suite
    (`git/hooks/public-safety.test.sh`) is part of this run: no tracked
-   `todo.md`, no tracked Superpowers planning artifacts, no
+   `todo.md`, no tracked planning artifacts, no
    `/Users/<name>` paths, and no high-confidence secret patterns in tracked
    content.
 
@@ -215,7 +215,8 @@ When you change the template:
 - [ ] `bash bin/dotfiles-tests` green locally (all suites)?
 - [ ] Installer edits idempotent and platform-gated?
 - [ ] No secrets, no employer strings, no `/Users/<name>` paths in the diff?
-- [ ] No `docs/superpowers/` plans or specs tracked or staged?
+- [ ] No files under `docs/superpowers/`, `docs/plans/`, or `docs/specs/`
+      tracked or staged?
 - [ ] Commit message `<scope>: <summary>`, <75 chars, imperative, no attribution, no emojis?
 - [ ] Template edits: manual-merge plan for existing machines stated in the PR?
 - [ ] Vendored files untouched (or re-vendored, not hand-edited)?
