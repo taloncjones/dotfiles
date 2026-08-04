@@ -220,19 +220,25 @@ add_codex_hook \
 codex_plugin_enabled() {
   local config="$1"
   local plugin="$2"
-  local target="[plugins.\"$plugin\"]"
 
-  awk -v target="$target" '
-    $0 == target {
-      in_plugin = 1
-      next
+  awk -v plugin="$plugin" '
+    function clean(line) {
+      sub(/[[:space:]]*#.*/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      return line
     }
-    in_plugin && /^\[.*\][[:space:]]*$/ {
-      in_plugin = 0
-      next
-    }
-    in_plugin && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
-      found = 1
+    {
+      line = clean($0)
+      if (line == "[plugins.\"" plugin "\"]") {
+        in_plugin = 1
+        next
+      }
+      if (in_plugin && line ~ /^\[/) {
+        in_plugin = 0
+      }
+      if (in_plugin && line ~ /^enabled[[:space:]]*=[[:space:]]*true$/) {
+        found = 1
+      }
     }
     END {
       exit found ? 0 : 1
@@ -240,35 +246,64 @@ codex_plugin_enabled() {
   ' "$config"
 }
 
-dedupe_codex_superpowers_plugins() {
-  local config="$HOME"/.codex/config.toml
+disable_codex_plugin() {
+  local config="$1"
+  local plugin="$2"
   local tmp="$config.tmp.$$"
 
-  [ -f "$config" ] || return
-  codex_plugin_enabled "$config" "superpowers@openai-curated" || return 0
-  codex_plugin_enabled "$config" "superpowers@claude-plugins-official" || return 0
+  codex_plugin_enabled "$config" "$plugin" || return 0
+  cp -p "$config" "$tmp" || return 1
 
-  awk '
-    /^\[plugins\."superpowers@claude-plugins-official"\][[:space:]]*$/ {
-      in_official_superpowers = 1
+  if ! awk -v plugin="$plugin" '
+    function clean(line) {
+      sub(/[[:space:]]*#.*/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      return line
+    }
+    {
+      normalized = clean($0)
+      if (normalized == "[plugins.\"" plugin "\"]") {
+        in_plugin = 1
+      } else if (in_plugin && normalized ~ /^\[/) {
+        in_plugin = 0
+      }
+      if (in_plugin && normalized ~ /^enabled[[:space:]]*=[[:space:]]*true$/) {
+        code = $0
+        comment = ""
+        hash = index(code, "#")
+        if (hash) {
+          comment = substr(code, hash)
+          code = substr(code, 1, hash - 1)
+        }
+        sub(/true[[:space:]]*$/, "false", code)
+        print code (comment == "" ? "" : " " comment)
+        next
+      }
       print
-      next
     }
-    /^\[.*\][[:space:]]*$/ {
-      in_official_superpowers = 0
-      print
-      next
-    }
-    in_official_superpowers && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$/ {
-      print "enabled = false"
-      next
-    }
-    { print }
-  ' "$config" >"$tmp"
+  ' "$config" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
   mv "$tmp" "$config"
 }
 
-dedupe_codex_superpowers_plugins
+dedupe_codex_workflow_plugins() {
+  local config="$HOME/.codex/config.toml"
+
+  [ -f "$config" ] || return 0
+
+  if codex_plugin_enabled "$config" "ecc@dotfiles-workflows"; then
+    disable_codex_plugin "$config" "ecc@ecc"
+  fi
+
+  if codex_plugin_enabled "$config" "superpowers@dotfiles-workflows"; then
+    disable_codex_plugin "$config" "superpowers@openai-curated"
+    disable_codex_plugin "$config" "superpowers@claude-plugins-official"
+  fi
+}
+
+dedupe_codex_workflow_plugins
 
 # Codex plugins are the canonical owner for ECC and Superpowers workflow
 # surfaces. The dotfiles only link repo-managed bridge skills above. Older
