@@ -77,28 +77,87 @@ assert "Codex AGENTS uses plugin-qualified ECC skills" \
 assert "Codex AGENTS keeps project-specific product names out of global defaults" \
     sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
 
-dedupes_superpowers_plugins() {
+project_skill_bridge_is_complete() {
+    [ -L .agents/skills ] || return 1
+    [ "$(readlink .agents/skills)" = "../.claude/skills" ] || return 1
+    [ "$(cd .agents/skills && pwd -P)" = "$(cd .claude/skills && pwd -P)" ]
+}
+
+assert "project Codex skills bridge to canonical Claude sources" \
+    project_skill_bridge_is_complete
+
+plugin_enabled_value() {
+    config="$1"
+    plugin="$2"
+    awk -v plugin="$plugin" '
+        function clean(line) {
+            sub(/[[:space:]]*#.*/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            return line
+        }
+        {
+            line = clean($0)
+            if (line == "[plugins.\"" plugin "\"]") {
+                in_plugin = 1
+                next
+            }
+            if (in_plugin && line ~ /^\[/) exit
+        }
+        in_plugin && line ~ /^enabled[[:space:]]*=/ {
+            sub(/^[^=]*=[[:space:]]*/, "", line)
+            print line
+            exit
+        }
+    ' "$config"
+}
+
+dedupes_managed_workflow_plugins() {
     tmp_home="$(mktemp -d)"
     mkdir -p "$tmp_home/.codex"
     cat >"$tmp_home/.codex/config.toml" <<'TOML'
-[plugins."superpowers@openai-curated"]
+[plugins."superpowers@dotfiles-workflows"]
 enabled = true
 
+[plugins."superpowers@openai-curated"] # account-provisioned
+enabled = true # duplicate
+
 [plugins."superpowers@claude-plugins-official"]
+enabled = true
+
+[plugins."ecc@dotfiles-workflows"]
+enabled = true
+
+[plugins."ecc@ecc"] # upstream marketplace
+enabled = true # duplicate
+
+[plugins."unrelated@example"]
 enabled = true
 TOML
 
     HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
-    grep -q '\[plugins."superpowers@openai-curated"\]' "$tmp_home/.codex/config.toml" &&
-        grep -q '\[plugins."superpowers@claude-plugins-official"\]' "$tmp_home/.codex/config.toml" &&
-        grep -q 'enabled = false' "$tmp_home/.codex/config.toml"
-    result=$?
+
+    [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@dotfiles-workflows")" = true ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@openai-curated")" = false ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@claude-plugins-official")" = false ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@dotfiles-workflows")" = true ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@ecc")" = false ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "unrelated@example")" = true ] || {
+            rm -rf "$tmp_home"
+            return 1
+        }
+
+    first_cksum="$(cksum "$tmp_home/.codex/config.toml")"
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    second_cksum="$(cksum "$tmp_home/.codex/config.toml")"
     rm -rf "$tmp_home"
-    return "$result"
+    [ "$first_cksum" = "$second_cksum" ]
 }
 
-assert "installer disables duplicate official Superpowers plugin" \
-    dedupes_superpowers_plugins
+assert "installer disables duplicate managed workflow providers" \
+    dedupes_managed_workflow_plugins
+
+assert "plugin lifecycle re-runs workflow dedupe post-install" \
+    sh -c "rg -q 'dedupe_codex_workflow_plugins' install/common/claude-plugins.sh"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

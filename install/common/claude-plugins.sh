@@ -37,3 +37,11 @@ else
     (( ${ecc_status:-0} == 0 && ${superpowers_status:-0} == 0 ))
   ' || echo "[claude-plugins] WARNING: ECC/Superpowers install reported an error (offline, or claude not logged in?)." >&2
 fi
+
+# The installs above may have just enabled the canonical dotfiles-workflows
+# providers; re-run the dedupe so duplicate upstream entries are disabled in
+# this same cycle. The link-time run (link.sh) happens before the installs and
+# skips deduplication on a first install/migration, where the canonical
+# providers do not exist yet.
+source "$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"
+dedupe_codex_workflow_plugins
