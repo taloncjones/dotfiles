@@ -24,21 +24,13 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 
 ## Response Style
 
-- Be extremely concise - engineers scan, not read
-- Only include essential information
-- Prefer examples over prose
-- Assume technical competence - avoid obvious explanations
-- Front-load critical info (warnings, key concepts)
-- Default to 1-2 sentence explanations
+- Be extremely concise - engineers scan, not read. Assume technical competence.
+- Front-load the verdict; close with what's next or what remains.
 - Cite file paths with line numbers (e.g., `src/main.rs:42`)
 
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
 bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --
 one line or a short bullet list each, never paragraphs.
-
-**Pre-send check:** first line answers or acts; last line says what's next or
-what remains. Delete preamble, closing questions, sidebars, and hedges. The
-reader should get the gist from the first and last lines alone.
 
 ## Commits
 
@@ -106,10 +98,9 @@ AVOID:
 
 ## Default Skill Routing
 
-- Use setup/audit skills for plugin, MCP, connector, repo-surface, and
-  "what are we missing?" questions.
-- Use brainstorming, writing-plans, cross-model plan review, and executing-plans
-  for substantial implementation work.
+Skills carry their own triggers; reach for them on judgement. The standing
+orders below are deliberate policy, not hints.
+
 - Full pipeline for substantial implementation (standing order of operations):
   isolated worktree -> brainstorming -> write spec (to `docs/specs/`, the
   path codex-spec-review resolves first)
@@ -134,21 +125,7 @@ AVOID:
   (planner/reviewer on the stronger model, workers on cheaper models, per-task
   review). Author the Workflow script to that tiered-routing intent rather than
   relying on a separate orchestration skill.
-- Use TDD skills for new behavior, regression fixes, and risky refactors.
-- Use systematic debugging for startup failures, flaky tests, tool failures,
-  build failures, and confusing runtime symptoms.
-- Use security-review for secrets, auth, tokens, MCP/config, deploy,
-  certificates,
-  public-repo checks, and anything touching credentials or policy.
-- Use Rust testing skills for Rust crates and Cargo test strategy.
-- Use frontend and E2E testing skills for frontend/UI changes; use
-  project-local agents when a repo provides them.
-- Use database migration and Postgres skills for SQLx, Postgres, schema, query,
-  or migration work.
-- Use deployment skills for Docker, Compose, systemd, cloud deploy, CI, and
-  environment hardening.
-- Use co-review for top-level review orchestration after implementation, and
-  verification-before-completion before claiming work is done.
+- Run verification-before-completion before claiming work is done.
 
 ## Code Cleanup
 
@@ -163,7 +140,6 @@ AVOID:
 - ASCII unless file already uses other characters
 - Use existing toolchains over ad-hoc scripts
 - Use `.git/info/exclude` for personal ignores
-- Never create .md files unless explicitly instructed
 
 ## Python
 
