@@ -174,7 +174,6 @@ dotfiles/
 │   ├── CLAUDE.md           # Global instructions
 │   ├── settings.json.tmpl  # Settings template (seeded to ~/.claude/settings.json on first install)
 │   ├── commands/           # Custom slash commands
-│   ├── agents/             # Custom agents
 │   └── hooks/              # Pre/post tool hooks
 ├── codex/            # Codex (OpenAI CLI) configuration
 │   ├── AGENTS.md     # Codex project memory
@@ -261,13 +260,8 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 
 **Commands** (`/command`):
 
-- `/arch-review` - Architecture review
-- `/arewedone` - Structural completeness check
-- `/bugs` - Systematic bug hunting
 - `/checks` - View CI status
 - `/commit` - Create a commit with auto-detected scope
-- `/dev-review` - Comprehensive development review
-- `/doc` - Generate or review documentation
 - `/done` - Finish work and clean up
 - `/explain` - Deep dive explanation
 - `/handoff` - Save a next-slice kickoff brief to `.claude/handoffs/`
@@ -283,14 +277,6 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `/switch` - Switch between worktrees
 - `/test` - Run project tests
 - `/worktree` - Git worktree management
-
-**Agents** (subagent definitions):
-
-- `architecture-reviewer` - Design pattern review
-- `bug-finder` - Code audit for logical errors
-- `completeness-reviewer` - Verify structural integrity
-- `doc-implementer` - Write/update documentation
-- `doc-reviewer` - Documentation quality audit
 
 **Skills** (`claude/skills/`, loaded on demand by trigger phrases):
 
