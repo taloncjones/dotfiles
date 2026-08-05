@@ -90,9 +90,6 @@ ECC and Superpowers use native, independent plugin installations in both runtime
 
 ## Code Standards
 
-- No spaces in filenames
-- Unix LF line endings
-- Use `uv` for Python (not pip/poetry)
 - Shell scripts: `#!/usr/bin/env bash` or `#!/bin/zsh`
 - Platform detection: `if [[ $(uname) == "Darwin" ]]; then`
 
