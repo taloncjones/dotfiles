@@ -210,7 +210,7 @@ dotfiles-change-control.
 | ------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Skill   | `claude/skills/<name>/SKILL.md` | YAML frontmatter, exactly `name` + `description`; description carries the triggers                                                | model loads it on-demand when the description matches the task (see claude/skills/ship/SKILL.md for house style) |
 | Command | `claude/commands/<name>.md`     | frontmatter optional: `handoff.md`/`kickoff.md` carry a `description:` block, the rest are plain markdown; filename = `/name` | user types `/name`; body becomes the prompt                                                                      |
-| Agent   | `claude/agents/<name>.md`       | YAML frontmatter `name` + `description` (multi-line ok); dir currently empty -- review agents retired in favor of plugin skills                                          | dispatched as a subagent by name                                                                                 |
+| Agent   | `claude/agents/<name>.md`       | YAML frontmatter `name` + `description` (multi-line ok); directory currently contains only `.gitkeep` because review agents are plugin-owned                           | dispatched by name when a project-local agent is defined                                                         |
 
 Plugins contribute their own skills/commands/agents/hooks from their cache
 dir; those load only if the plugin is in installed_plugins.json AND enabled at

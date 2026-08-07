@@ -5,10 +5,11 @@ description: Per-model tuning deltas for current Claude models (Opus 4.8, Sonnet
 
 # Model Tuning (per-model deltas)
 
-Cross-model behaviors live in the always-on `~/.claude/rules/personal/
-claude-prompting.md`; this skill holds the churn layer - per-model deltas and
-the retirement playbook. Deep API mechanics (pricing, migration, parameter
-reference) live in the on-demand `claude-api` skill.
+Cross-model behaviors live in the always-on
+`~/.claude/rules/personal/claude-prompting.md`; this skill holds the churn
+layer - per-model deltas and the retirement playbook. Deep API mechanics
+(pricing, migration, parameter reference) live in the on-demand `claude-api`
+skill.
 
 ## Removed API surface (all current models)
 
