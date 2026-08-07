@@ -116,6 +116,6 @@ Status: READY FOR REVIEW
 Related commands:
 
 - `/pr` - Create pull request
-- `/dev-review` - Code review before ready
+- `co-review` skill - Claude + Codex review before ready
 - `/checks` - View CI status
 - `/done` - Cleanup after merge
