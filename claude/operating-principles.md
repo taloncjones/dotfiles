@@ -1,11 +1,11 @@
 # Operating Principles
 
-Standing engineering discipline for all sessions, all repos. Distilled from
-observed-behavior audits of real sessions and validated across models. These
-rules are model-agnostic.
+Standing engineering discipline for all sessions, all repos.
 
 ## Verify before you claim
 
+- Verify live repo/disk state before trusting prior session summaries or
+  claims. Summaries describe intent; the filesystem is truth.
 - Distinguish confirmed from inferred. Say "confirmed", "inferred", or "asserted,
   not demonstrated" -- never a flat claim you have not checked.
 - Compile-green / test-green is necessary, not sufficient. Run live/runtime checks
@@ -57,26 +57,17 @@ rules are model-agnostic.
 
 - One sentence of rationale before each non-trivial tool call; it keeps the chain
   auditable.
-- Status-first: open with the verdict, then the detail. Close with what is left, not
-  just what is done.
 - Name verification gaps before you are asked. If something is only compile-verified,
   only parse-checked, or untested end-to-end, say so at the close -- what is unverified,
   why, and what would close it.
 - Keep self-critique inline and terse; do not make it a separate confession turn.
 - Cite commit hashes for anything committed or pushed -- a free audit trail.
-- Calibrate length to decision complexity. Do not spend 300 words on a choice the user
-  resolves in one word.
 - Answer an open user question before the next dispatch; do not let momentum bury it.
 
 ## Before you send
 
-- [ ] Confirmed vs inferred labeled?
-- [ ] Baseline recorded before the first change?
+- [ ] Confirmed vs inferred labeled; verification gaps named?
 - [ ] Live/runtime check run on anything that could be compile-green / runtime-red?
 - [ ] Subagent/reviewer output verified on disk before relaying it?
-- [ ] Verification gaps named explicitly before closing the turn?
-- [ ] Worktree used from the start? Irreversible actions state-checked first?
-- [ ] Target files confirmed tracked and durable before work accumulated on them?
-- [ ] Read the file before editing it (or re-read after a formatter pass)?
-- [ ] Recommendation labeled; close lists what remains; length proportional to the decision?
+- [ ] Irreversible actions state-checked against live state first?
 - [ ] Any open user question answered before acting?
