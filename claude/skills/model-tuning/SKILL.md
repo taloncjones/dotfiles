@@ -1,15 +1,45 @@
 ---
 name: model-tuning
-description: Per-model tuning deltas for current Claude models (Opus 4.8, Sonnet 5, Fable 5) plus the model-retirement playbook. Use when authoring or pruning skills, subagent prompts, Workflow scripts, or API calls that pin a model, set effort or thinking mode, budget tokens, or handle safety-classifier refusals - and when a model is added, retired, or the default changes.
+description: Cross-model behaviors and per-model tuning deltas for current Claude models (Opus 4.8, Sonnet 5, Fable 5) plus the model-retirement playbook. Use when authoring or pruning skills, subagent prompts, Workflow scripts, or API calls that pin a model, set effort or thinking mode, budget tokens, or handle safety-classifier refusals - when prompting for code review or frontend work - and when a model is added, retired, or the default changes.
 ---
 
-# Model Tuning (per-model deltas)
+# Model Tuning
 
-Cross-model behaviors live in the always-on
-`~/.claude/rules/personal/claude-prompting.md`; this skill holds the churn
-layer - per-model deltas and the retirement playbook. Deep API mechanics
-(pricing, migration, parameter reference) live in the on-demand `claude-api`
-skill.
+A three-line always-on core (effort lever, literal instruction following,
+positive-example steering) lives in
+`~/.claude/rules/personal/claude-prompting.md`; this skill holds the rest -
+cross-model behaviors, per-model deltas, and the retirement playbook. Deep API
+mechanics (pricing, migration, parameter reference) live in the on-demand
+`claude-api` skill.
+
+## Cross-model behaviors (Opus 4.8, Sonnet 5, Fable 5)
+
+These hold across the current models; per-model exceptions below.
+
+- **Adaptive thinking** is the reasoning mode. If it thinks more than you want
+  on large/complex prompts, steer down: "think only when it materially improves
+  the answer; otherwise respond directly."
+- **Don't force interim-status scaffolding** ("summarize every 3 tool calls") --
+  user-facing progress updates are well-calibrated now. Describe the desired
+  shape only if it's off.
+- **Parallel tool calls:** independent reads/searches/commands run in parallel
+  by default and this is steerable; never use placeholder/guessed params, and
+  call dependent tools sequentially.
+- **Don't over-prompt tool use** ("if in doubt, use X") -- tools that
+  undertriggered on older models now overtrigger. Describe when a tool genuinely
+  helps instead.
+- **Code review:** at the finding stage prompt for coverage, not filtering --
+  report every issue with confidence + severity tags; rank/dedupe in a separate
+  pass. Telling a current model "only high-severity" / "be conservative" makes it
+  faithfully drop real bugs (lower recall). If self-filtering in one pass, define
+  the bar concretely, not with words like "important".
+- **Frontend:** current models settle into a default house style (warm cream /
+  serif / terracotta editorial) -- good for editorial/hospitality, wrong for
+  dashboards, fintech, healthcare, enterprise. For those, specify a concrete
+  palette + type system, or ask it to propose several directions first and pick
+  one. Generic "clean / minimal / no cream" just swaps to another fixed default. A
+  short anti-slop line suffices: avoid Inter/Roboto/system fonts, purple-on-white
+  gradients, cookie-cutter layouts; use distinctive type, cohesive color, motion.
 
 ## Removed API surface (all current models)
 
@@ -57,13 +87,13 @@ the hardest problems. Differs from Opus 4.8 enough to warrant scaffolding change
   and can degrade its output -- prune them.
 - **Safety classifiers** target offensive-cyber, biology/life-sciences, and
   reasoning-extraction; benign work can trip them, returning `stop_reason:
-  "refusal"`. Configure fallback to Opus 4.8. Do **not** instruct it to echo /
+"refusal"`. Configure fallback to Opus 4.8. Do **not** instruct it to echo /
   transcribe / explain its own reasoning as response text -- that triggers the
   reasoning-extraction refusal; read structured `thinking` blocks instead.
 
 ## Model retirement playbook
 
-Per-model deltas above are the churn layer; the cross-model rules file and
+Per-model deltas above are the churn layer; the cross-model section and
 `operating-principles.md` are the durable layer. When a model departs, delete
 its section and promote the fallback's defaults -- do not rewrite the file.
 

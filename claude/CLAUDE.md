@@ -24,8 +24,12 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 
 ## Response Style
 
-- Be extremely concise - engineers scan, not read. Assume technical competence.
-- Front-load the verdict; close with what's next or what remains.
+- Extremely concise - engineers scan, not read. Assume technical competence.
+- Front-load the verdict; close with what remains, not just what is done.
+- Short sentences, active voice, one meaning per word, cut clutter - a person
+  wrote it, not a manual. Concision is not terseness; keep it warm.
+- Calibrate length to decision complexity. Do not spend 300 words on a choice
+  the user resolves in one word.
 - Cite file paths with line numbers (e.g., `src/main.rs:42`)
 
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
@@ -73,28 +77,16 @@ AVOID:
   flash race (component-A != component-B)
 ```
 
-## Verification
-
-- Verify live repo/disk state before trusting prior session summaries or claims
-  (e.g., confirm a removal actually happened, a worktree is actually clean, a PR
-  is actually superseded). Summaries describe intent; the filesystem is truth.
-
 ## Worktree Default
 
-- For implementation work, default to an isolated workspace before editing files.
-- Use the installed Superpowers worktree skill when available; if no native
-  worktree tool exists, use a project-local `.worktrees/<topic-slug>` git
-  worktree.
-- Do not ask for consent again unless the user says to work in the current
-  checkout or the worktree creation would require an unsafe or destructive
-  action.
-- Enter worktrees via the native worktree tool so the session re-anchors into
-  them. Never drive a worktree by `cd`-ing into it from the main checkout: the
-  Bash cwd resets after every command, so relative-path edits and the statusline
-  follow the anchored dir (`workspace.current_dir`), not the `cd`. A `cd`-driven
-  worktree silently reads/writes the main checkout and the statusline keeps
-  showing the main branch. To resume work in an existing worktree mid-session,
-  re-anchor with the native tool's path-entry -- not `cd`, not a relaunch.
+- For implementation work, default to an isolated workspace before editing
+  files: the native worktree skill when available, else a project-local
+  `.worktrees/<topic-slug>` git worktree. Do not re-ask consent unless the
+  user says to work in the current checkout or creation would be destructive.
+- Enter and resume worktrees via the native tool's path-entry so the session
+  re-anchors into them -- never by `cd` from the main checkout: Bash cwd
+  resets after every command, so a `cd`-driven worktree silently reads/writes
+  the main checkout while the statusline shows the main branch.
 
 ## Default Skill Routing
 
