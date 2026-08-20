@@ -32,6 +32,17 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
   the user resolves in one word.
 - Cite file paths with line numbers (e.g., `src/main.rs:42`)
 
+**Stand-alone messages:** every message must be readable without the session
+in the reader's head -- and paste-safe into Slack, a PR thread, or Jira as-is.
+
+- Expand session-internal shorthand on first use: run "#17" becomes the run
+  ID/date, "the review" names which review, "item 3" restates the item.
+- No process narration in the body ("the re-review pass caught...", "result
+  coming when the background run finishes") -- state the facts; keep workflow
+  notes and next-action asks in a separate closing block.
+- No references that only resolve against earlier messages ("per the agreed
+  plan", "as discussed") -- restate the one-line substance instead.
+
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
 bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --
 one line or a short bullet list each, never paragraphs.
