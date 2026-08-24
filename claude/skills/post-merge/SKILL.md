@@ -36,9 +36,11 @@ gh pr view <n> --json number,state,mergedAt,headRefName,baseRefName,title,body,u
     local branch and re-anchors the session. Only the remote-branch deletion
     (allowed in-session) and the Jira half remain.
   - Any other worktree: plan the remote-branch deletion in-session, and hand
-    `git worktree prune` + `git branch -D` to the user as `!`-prefix commands
-    stated UP FRONT in the Step-2 proposal. Do NOT attempt them yourself and
-    do NOT `rm -rf` the session's own cwd.
+    `git worktree prune` + `git branch -D` to the user, stated UP FRONT in the
+    Step-2 proposal, to run OUTSIDE this session -- a plain terminal, or a
+    session anchored at the main checkout. `!`-prefix does NOT work: it runs
+    inside this session's shell, so the same isolation hook blocks it. Do NOT
+    attempt them yourself and do NOT `rm -rf` the session's own cwd.
 - **Remote branch:** `git ls-remote --heads origin <headRefName>` — GitHub
   auto-deletes the branch on merge in many repos, so this is often already gone.
 - **Co-review leftovers (if you ran co-review):** `refs/coreview/<n>`,
