@@ -208,6 +208,19 @@ function lg() {    # lg() will run lazygit and cd into the worktree/repo selecte
     fi
 }
 
+# sync the tracked VS Code extension list with the live installed set
+function vscode-ext-sync() {    # vscode-ext-sync() will rewrite vscode/extensions.txt from the installed extensions and show the diff to commit. ex: $ vscode-ext-sync
+    command -v code >/dev/null || { echo "code CLI not found" >&2; return 1; }
+    local file="$DOTFILEDIR/vscode/extensions.txt"
+    code --list-extensions | sort -u > "$file" || return
+    if git -C "$DOTFILEDIR" diff --quiet -- "$file"; then
+        echo "extensions.txt already matches the installed set ($(wc -l < "$file" | tr -d ' ') extensions)"
+    else
+        git -C "$DOTFILEDIR" --no-pager diff --stat -- "$file"
+        echo "[INFO] extensions.txt updated -- review and commit the diff"
+    fi
+}
+
 ##############################
 ###### Claude Code Accounts
 ##############################
