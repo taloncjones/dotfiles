@@ -80,6 +80,19 @@ is the equivalent.
 
 ECC and Superpowers use native, independent plugin installations in both runtimes. Claude installs `ecc@ecc` and `superpowers@claude-plugins-official` into both account config dirs. Codex stages self-contained copies from separate upstream checkouts under `~/.local/share/dotfiles/codex-workflows`, then installs `ecc@dotfiles-workflows` and `superpowers@dotfiles-workflows`. Never run ECC's `sync-ecc-to-codex.sh` on a dotfiles-managed machine: it mutates shared `AGENTS.md`, MCP, agent, and git-hook surfaces. `install/common/link.sh` continues to sweep stale direct skill/agent mirrors from older installs.
 
+**Herdr (agent terminal multiplexer):**
+
+Installed via the common Brewfile; usage is opt-in per machine (`herdr` to
+start/attach, `herdr server stop` to stop). Never run
+`herdr integration install claude` (or `codex`) on a dotfiles-managed machine:
+it writes `herdr-agent-state.sh` through the `~/.claude*/hooks` symlink into
+this repo and adds hook entries to `settings.json` that
+`reconcile_claude_settings_file` wipes on the next `update` (hooks are a
+template-owned key) and the settings drift check flags meanwhile. Herdr's
+agent-state detection works without the integration (screen manifest); if the
+integration is ever wanted, it needs the installer-owned pattern (post-reconcile
+idempotent install step) plus a gitignore entry for the generated script.
+
 **ZSH structure:**
 
 - `zsh/.zshrc` - Main config, sources other files

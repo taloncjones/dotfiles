@@ -87,3 +87,9 @@ brew "oven-sh/bun/bun"
 # the standalone `docker` formula is redundant and conflicts with
 # docker-completion on etc/bash_completion.d/docker)
 brew "docker-compose"
+
+# herdr agent multiplexer: background server owns agent terminal sessions
+# (survive terminal close/sleep) with working/blocked/idle status per pane.
+# Run `herdr` in a repo to start/attach; `herdr server stop` to stop.
+# https://herdr.dev
+brew "herdr"
