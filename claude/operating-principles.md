@@ -30,6 +30,17 @@ Standing engineering discipline for all sessions, all repos.
 - Before proposing or starting a merge or branch consolidation, verify the target
   branch's real state (commit count, recency, divergence). Branch names are not ground truth.
 - When dropping a bad commit that has good work, use `reset --mixed`, not `--hard`.
+- Before deleting a branch with unmerged or historically interesting commits, push
+  it as `archive/<name>` and verify with `ls-remote`. Prove supersession
+  (`git merge-base --is-ancestor`, `git cherry`) -- never infer it from branch
+  names or recency.
+- "Restore" and "revert" mean byte-for-byte reproduction of the prior state.
+  Propose annotations or pointers separately; never fold them in.
+- Merging needs a fresh human go with the final state visible. A prior "merge once
+  things pass" does not survive to the moment of merging; CI-green plus model
+  review means "ready to merge -- confirm", not approval.
+- Approvals do not bundle: a reply naming one action approves only that action,
+  and every outward post (PR comment, ticket, message) needs its own explicit go.
 - Before accumulating work on a file -- or dispatching a subagent to one -- confirm it is
   tracked and durable, not gitignored or plugin-managed (`git ls-files --error-unmatch`,
   `.git/info/exclude`). Mind the boundary between repo changes and ephemeral machine-state
@@ -52,6 +63,9 @@ Standing engineering discipline for all sessions, all repos.
   fold blindly; do not dismiss blindly.
 - Answer the meta-question behind the literal one when the phrasing implies it.
 - Ground advice in this project's specifics, not generic best practice.
+- Right-size follow-ups before filing them: a maybe-never edge case is documented
+  in a code comment, not a backlog ticket. File tickets only for work someone
+  will actually do.
 
 ## Craft and communication
 

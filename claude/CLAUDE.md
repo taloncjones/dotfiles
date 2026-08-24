@@ -58,6 +58,8 @@ one line or a short bullet list each, never paragraphs.
 - Format: `<scope>: <summary>` (<75 chars, imperative mood)
 - Scope is the affected area (e.g., `api`, `cli`, `docs`, `common`)
 - No emojis in commit messages
+- On pushed branches, fix forward with new commits; avoid amend + force-push
+  (squash merge collapses the noise). Amending local-only commits is fine.
 
 **Branches:**
 
@@ -133,6 +135,17 @@ orders below are deliberate policy, not hints.
   review). Author the Workflow script to that tiered-routing intent rather than
   relying on a separate orchestration skill.
 - Run verification-before-completion before claiming work is done.
+
+## Code Design
+
+- Write for a human maintainer working without AI tools: flat structure,
+  shallow call chains, single-purpose functions. Prefer separate plain code
+  paths or table-driven dispatch over one function juggling many scenarios
+  behind mode flags or branch pyramids.
+- Tests read as explicit top-to-bottom scripts -- setup, action, assert
+  visible in sequence -- even at 90% duplication between tests. Share only
+  spec/constant objects (one source of truth for expected values) and
+  assert/validation helpers; inline test-side orchestration wrappers.
 
 ## Code Cleanup
 
