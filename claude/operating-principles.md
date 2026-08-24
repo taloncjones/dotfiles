@@ -30,12 +30,9 @@ Standing engineering discipline for all sessions, all repos.
 - Before proposing or starting a merge or branch consolidation, verify the target
   branch's real state (commit count, recency, divergence). Branch names are not ground truth.
 - When dropping a bad commit that has good work, use `reset --mixed`, not `--hard`.
-- Before deleting a branch with unmerged or historically interesting commits, push
-  it as `archive/<name>` and verify with `ls-remote`. Prove supersession
-  (`git merge-base --is-ancestor`, `git cherry`) -- never infer it from branch
-  names or recency.
-- "Restore" and "revert" mean byte-for-byte reproduction of the prior state.
-  Propose annotations or pointers separately; never fold them in.
+- Restoring content means byte-for-byte reproduction of the prior state --
+  propose annotations or pointers separately; never fold them in. Reverting a
+  commit applies its inverse to the current head, preserving later changes.
 - Merging needs a fresh human go with the final state visible. A prior "merge once
   things pass" does not survive to the moment of merging; CI-green plus model
   review means "ready to merge -- confirm", not approval.
