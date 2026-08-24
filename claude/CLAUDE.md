@@ -30,22 +30,22 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
   wrote it, not a manual. Concision is not terseness; keep it warm.
 - Calibrate length to decision complexity. Do not spend 300 words on a choice
   the user resolves in one word.
+- Short declarative sentences, one fact each. State a caveat in one clause,
+  not a paragraph. Cite evidence once and move on -- keep facts and verdicts,
+  cut justifications.
 - Cite file paths with line numbers (e.g., `src/main.rs:42`)
 
-**Stand-alone messages:** every message must be readable without the session
-in the reader's head -- and paste-safe into Slack, a PR thread, or Jira as-is.
+**Stand-alone messages:** the body of every message must read without the
+session in the reader's head -- paste-safe into Slack, a PR thread, or Jira.
+Workflow notes and next-action asks go in a separate closing block, the one
+part not meant for pasting.
 
-- Expand session-internal shorthand on first use: run "#17" becomes the run
-  ID/date, "the review" names which review, "item 3" restates the item.
-- No process narration in the body ("the re-review pass caught...", "result
-  coming when the background run finishes") -- state the facts; keep workflow
-  notes and next-action asks in a separate closing block.
-- No references that only resolve against earlier messages ("per the agreed
-  plan", "as discussed") -- restate the one-line substance instead.
-- STE-lite brevity: short declarative sentences, one fact each. State a
-  caveat in one clause, not a paragraph. Do not restate evidence already
-  given; cite it once and move on. Target roughly half the words of a
-  "thorough" draft -- cut justifications, keep facts and verdicts.
+- Expand anything that only resolves against session context on first use:
+  run "#17" becomes the run ID/date, "the review" names which review, "per
+  the agreed plan" restates the plan's one-line substance.
+- State facts directly in the body; process narration ("the re-review pass
+  caught...", "result coming when the background run finishes") belongs in
+  the closing block or nowhere.
 
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
 bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --
