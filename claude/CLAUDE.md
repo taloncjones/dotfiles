@@ -30,7 +30,22 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
   wrote it, not a manual. Concision is not terseness; keep it warm.
 - Calibrate length to decision complexity. Do not spend 300 words on a choice
   the user resolves in one word.
+- Short declarative sentences, one fact each. State a caveat in one clause,
+  not a paragraph. Cite evidence once and move on -- keep facts and verdicts,
+  cut justifications.
 - Cite file paths with line numbers (e.g., `src/main.rs:42`)
+
+**Stand-alone messages:** the body of every message must read without the
+session in the reader's head -- paste-safe into Slack, a PR thread, or Jira.
+Workflow notes and next-action asks go in a separate closing block, the one
+part not meant for pasting.
+
+- Expand anything that only resolves against session context on first use:
+  run "#17" becomes the run ID/date, "the review" names which review, "per
+  the agreed plan" restates the plan's one-line substance.
+- State facts directly in the body; process narration ("the re-review pass
+  caught...", "result coming when the background run finishes") belongs in
+  the closing block or nowhere.
 
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
 bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --
