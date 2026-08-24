@@ -56,9 +56,13 @@ Skip if there is no plan file, or the user explicitly declined an external revie
    === CONTEXT (optional, may be absent) ===
    <PLAN.md / spec / CLAUDE.md excerpts>
    PROMPT
-   )" -c model_reasoning_effort="xhigh" </dev/null 2>&1
+   )" -c model_reasoning_effort="high" </dev/null 2>&1
    ```
 
+   - Effort stays at `high`, not `xhigh`: xhigh reviewers generate precision
+     demands indefinitely and never issue an approving verdict (see
+     codex-spec-review's note; learned on a work ticket). Expect 1-2 rounds max,
+     then triage and proceed on judgment -- do not loop for approval.
    - Pass file contents inline in the prompt (Codex can also read the repo, but
      inlining is deterministic).
    - Redirect `</dev/null` so Codex does not block reading stdin.

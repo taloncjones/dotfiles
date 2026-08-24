@@ -74,9 +74,14 @@ declined an external review.
    === CONTEXT (optional, may be absent) ===
    <design / brief / CLAUDE.md excerpts>
    PROMPT
-   )" -c model_reasoning_effort="xhigh" </dev/null 2>&1
+   )" -c model_reasoning_effort="high" </dev/null 2>&1
    ```
 
+   - Effort stays at `high`, not `xhigh`: an xhigh reviewer told to
+     interrogate a spec generates precision demands indefinitely and never
+     issues an approving verdict (observed live: four rounds, needs-rework every
+     time, rounds 3-4 pure test-procedure gold-plating). Expect 1-2 rounds
+     max, then triage and proceed on judgment -- do not loop for approval.
    - Pass file contents inline in the prompt (Codex can also read the repo, but
      inlining is deterministic).
    - Redirect `</dev/null` so Codex does not block reading stdin.
