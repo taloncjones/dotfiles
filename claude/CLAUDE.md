@@ -59,7 +59,8 @@ one line or a short bullet list each, never paragraphs.
 - Scope is the affected area (e.g., `api`, `cli`, `docs`, `common`)
 - No emojis in commit messages
 - On pushed branches, fix forward with new commits; avoid amend + force-push
-  (squash merge collapses the noise). Amending local-only commits is fine.
+  (squash merge collapses the noise). Amending local-only commits is fine
+  when asked.
 
 **Branches:**
 
