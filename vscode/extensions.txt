@@ -5,13 +5,11 @@ atlassian.atlascode
 cameron.vscode-pytest
 charliermarsh.ruff
 christian-kohler.path-intellisense
-codediagram.codediagram
 davidanson.vscode-markdownlint
 dbaeumer.vscode-eslint
 docker.docker
 eamodio.gitlens
 esbenp.prettier-vscode
-figma.figma-vscode-extension
 gerrnperl.outline-map
 github.github-vscode-theme
 github.vscode-github-actions
@@ -44,7 +42,6 @@ ms-vscode.cpptools
 ms-vscode.cpptools-extension-pack
 ms-vscode.makefile-tools
 ms-vscode.remote-explorer
-nautigsam.go-to-test
 pkief.material-icon-theme
 quicktype.quicktype
 redhat.vscode-yaml
