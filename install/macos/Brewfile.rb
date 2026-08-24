@@ -60,12 +60,10 @@ cask "raycast" unless system("test -e /Applications/Raycast.app")
 cask "alt-tab" unless system("test -e /Applications/AltTab.app")
 cask "bartender" unless system("test -e \"/Applications/Bartender 5.app\"")
 cask "cleanshot" unless system("test -e \"/Applications/CleanShot X.app\"")
-cask "itsycal" unless system("test -e \"/Applications/Itsycal.app\"")
 cask "bettertouchtool" unless system("test -e /Applications/BetterTouchTool.app")
 cask "adguard" unless system("test -e /Applications/AdGuard.app")
 
 # productivity
-cask "reminders-menubar" unless system("test -e \"/Applications/Reminders MenuBar.app\"")
 cask "fantastical" unless system("test -e /Applications/Fantastical.app")
 cask "cardhop" unless system("test -e /Applications/Cardhop.app")
 cask "microsoft-word" unless system("test -e \"/Applications/Microsoft Word.app\"")
