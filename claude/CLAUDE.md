@@ -42,6 +42,10 @@ in the reader's head -- and paste-safe into Slack, a PR thread, or Jira as-is.
   notes and next-action asks in a separate closing block.
 - No references that only resolve against earlier messages ("per the agreed
   plan", "as discussed") -- restate the one-line substance instead.
+- STE-lite brevity: short declarative sentences, one fact each. State a
+  caveat in one clause, not a paragraph. Do not restate evidence already
+  given; cite it once and move on. Target roughly half the words of a
+  "thorough" draft -- cut justifications, keep facts and verdicts.
 
 **Work summaries** (status reports, wrap-ups, "what happened"): use labeled
 bold sections -- **Issue / Fix / Implemented / Left** (adapt labels to fit) --
