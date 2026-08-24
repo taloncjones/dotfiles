@@ -27,6 +27,18 @@ gh pr view <n> --json number,state,mergedAt,headRefName,baseRefName,title,body,u
   PR's `headRefName`. Note its path and whether the working tree is clean
   (`git -C <wt> status --short`). Refuse to remove a dirty worktree without an
   explicit OK.
+- **Self-teardown check:** is the session anchored INSIDE the worktree being
+  removed? If so, the git half cannot finish from this session:
+  worktree-isolation hooks block git aimed at the shared checkout, and
+  removing your own cwd strands the shell mid-teardown.
+  - Worktree created by `EnterWorktree` this session: plan the entire git half
+    as `ExitWorktree(action: "remove")` — it deletes the directory AND the
+    local branch and re-anchors the session. Only the remote-branch deletion
+    (allowed in-session) and the Jira half remain.
+  - Any other worktree: plan the remote-branch deletion in-session, and hand
+    `git worktree prune` + `git branch -D` to the user as `!`-prefix commands
+    stated UP FRONT in the Step-2 proposal. Do NOT attempt them yourself and
+    do NOT `rm -rf` the session's own cwd.
 - **Remote branch:** `git ls-remote --heads origin <headRefName>` — GitHub
   auto-deletes the branch on merge in many repos, so this is often already gone.
 - **Co-review leftovers (if you ran co-review):** `refs/coreview/<n>`,
@@ -45,21 +57,26 @@ epic, comment). Then confirm. Default is "do all".
 
 ## Step 3 — Apply teardown
 
+Order matters: remote branch, then local branch, then the worktree LAST —
+never delete the directory while anything still needs to run from it. If the
+Step-1 self-teardown check fired, this whole block runs via `ExitWorktree` or
+the user's `!` commands instead — skip straight to the parts it left you.
+
 ```bash
-# Worktree removal. Plain `git worktree remove` FAILS on a worktree that
-# contains submodules ("working trees containing submodules cannot be moved or
-# removed"). Fall back to rm -rf + prune in that case.
-git worktree remove "<wt>" 2>/dev/null \
-  || { rm -rf "<wt>" && git worktree prune; }
+# Remote branch only if it lingered (usually already auto-deleted):
+git ls-remote --heads origin "<headRefName>" | grep -q . \
+  && git push origin --delete "<headRefName>"
 
 # Local branch: -D, not -d. A squash-merged branch's commits are NOT ancestors
 # of the base, so -d refuses ("not fully merged") even though the PR is merged.
 # Only force-delete after Step 0 confirmed state == MERGED.
 git branch -D "<headRefName>"
 
-# Remote branch only if it lingered (usually already auto-deleted):
-git ls-remote --heads origin "<headRefName>" | grep -q . \
-  && git push origin --delete "<headRefName>"
+# Worktree removal, LAST. Plain `git worktree remove` FAILS on a worktree that
+# contains submodules ("working trees containing submodules cannot be moved or
+# removed"). Fall back to rm -rf + prune in that case.
+git worktree remove "<wt>" 2>/dev/null \
+  || { rm -rf "<wt>" && git worktree prune; }
 
 # Co-review leftovers, if any:
 git update-ref -d refs/coreview/<n> 2>/dev/null || true
