@@ -45,6 +45,12 @@ fi
 git rebase "$TARGET"
 ```
 
+`git rebase` is not allowlisted, so this step prompts for permission. The
+recovery forms `git rebase --continue` and `git rebase --abort` ARE
+allowlisted, so a conflicted rebase can always be finished or unwound without
+another prompt. If the user declines the rebase prompt and Step 2 stashed
+changes, run `git stash pop` immediately to restore them before stopping.
+
 **Step 4: Restore stash**
 
 ```bash
@@ -63,17 +69,21 @@ If rebase conflicts occur:
    - `git rebase --abort` (to cancel)
 
 **Step 6: Push after successful rebase**
-If rebase completed successfully and branch has an upstream:
+If rebase completed successfully and branch has an upstream, STOP and ask the
+user to confirm the force-push first -- do not run it in the same turn as the
+rebase result:
 
 ```
-Rebase complete. Pushing with --force-with-lease...
+Rebase complete. Push with --force-with-lease? (rewrites remote history)
 ```
+
+Only after the user confirms:
 
 ```bash
 git push --force-with-lease
 ```
 
-Uses `--force-with-lease` (safer than `--force` - fails if remote has unexpected commits). `git push` is allowlisted, so no permission prompt fires -- confirm with the user before any force-push.
+Uses `--force-with-lease` (safer than `--force` - fails if remote has unexpected commits). The user's confirmation is the only gate on this push -- never substitute a permission prompt for it.
 
 Always fetch before rebasing. Never proceed if rebase already in progress.
 

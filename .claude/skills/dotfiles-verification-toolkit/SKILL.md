@@ -24,7 +24,7 @@ add) -- run it only in a scratch clone, never in the live checkout.**
 | --- | --------------------------------------- | --------------------------------------- |
 | 1   | Symlink chain is intact end-to-end      | `readlink -f` resolution                |
 | 2   | Plugin is actually installed            | `installed_plugins.json`                |
-| 3   | Repo resolves the intended git identity | `git config --show-origin`              |
+| 3   | Repo resolves the intended git identity | `git config --get --show-origin`        |
 | 4   | Host gets the intended SSH key          | `ssh -G` resolved config                |
 | 5   | Hook is registered AND fires            | settings.json parse + synthetic payload |
 | 6   | Live settings carry the template keys   | python3 key diff                        |
@@ -130,9 +130,9 @@ verification signal, not a bug.
 
 ```bash
 cd <repo>
-git config --show-origin user.email   # which FILE supplied the value
+git config --get --show-origin user.email   # which FILE supplied the value
 git var GIT_AUTHOR_IDENT              # exactly what a commit would record
-git config commit.gpgsign             # containers: must be false or unset
+git config --get commit.gpgsign       # containers: must be false or unset
 ```
 
 **Proof:** `--show-origin` prints `file:<path> <email>`. The path is the
@@ -148,7 +148,7 @@ tracked personal identity and forces `commit.gpgsign false` (the 1Password
 `op-ssh-sign` block must never reach a container).
 
 ```
-$ git config --show-origin user.email
+$ git config --get --show-origin user.email
 file:/root/.gitconfig   taloncjones@gmail.com
 ```
 
@@ -234,7 +234,7 @@ and the allow case (`.env.example`) exits 0. [OK] Registered and firing.
 For the full assertion matrix run the suite: `sh claude/hooks/claude-hooks.test.sh`
 (repo root; it also drift-checks both machine-local settings.json copies).
 Git hooks are separate plumbing: registration there is
-`git config core.hooksPath` -> `~/.config/git/hooks` (recipe 8 proves one
+`git config --get core.hooksPath` -> `~/.config/git/hooks` (recipe 8 proves one
 firing live).
 
 ## 6. Prove the settings merge result
@@ -342,7 +342,7 @@ lrwxrwxrwx 1 root root 101 Jul  2 17:33 ../scratch/.todos -> .../wt-demo/main/.t
 ```
 
 On a real machine, first prove the wiring on the live repo (read-only):
-`git config core.hooksPath` must print `~/.config/git/hooks`, and
+`git config --get core.hooksPath` must print `~/.config/git/hooks`, and
 `readlink -f ~/.config/git/hooks` must land in `<dotfiles>/git/hooks`. In
 this container hooksPath was unset (cloud bootstrap does not install the git
 layer) -- which is exactly why the demo sets it explicitly in the clone.

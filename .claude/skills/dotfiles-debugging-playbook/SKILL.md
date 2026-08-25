@@ -142,7 +142,7 @@ This is the INTENDED loud failure, not a bug. `git/.gitconfig` sets
 from `includeIf "gitdir/i:~/Git/personal/"` and `~/Git/work/`.
 
 ```bash
-git config user.email          # empty => no identity resolved here
+git config --get user.email    # empty => no identity resolved here
 git rev-parse --show-toplevel  # is the repo under ~/Git/personal or ~/Git/work?
 ```
 
@@ -155,7 +155,7 @@ reintroduces the silent-wrong-identity failure the design exists to prevent.
 Different from #4: a commit SUCCEEDS with the wrong author.
 
 ```bash
-git config --show-origin user.email   # which file supplied it?
+git config --get --show-origin user.email   # which file supplied it?
 identity-doctor                        # full chain verdict (also: git identity)
 ```
 
@@ -312,7 +312,7 @@ hydrates untracked `.todos/` (and legacy `.planning/`) into new linked
 worktrees. It exits early unless ALL guards pass -- check them in order:
 
 ```bash
-git config core.hooksPath                    # must be ~/.config/git/hooks
+git config --get core.hooksPath              # must be ~/.config/git/hooks
 ls -l ~/.config/git/hooks/post-checkout      # symlink resolves into the repo?
 ls -la .git                                  # linked worktree has .git as a FILE
 ls -ld /path/to/main/.todos                  # main must actually have .todos/
@@ -381,7 +381,7 @@ to re-verify:
 | post-checkout guard chain and env flags                                                                             | `sed -n '85,100p' git/hooks/post-checkout; grep -n 'GSD_HOOK_' git/hooks/post-checkout`  |
 | SSH pinning per host                                                                                                | `grep -n IdentityFile ssh/configs/personal/config_personal ssh/configs/work/config_work` |
 | `useConfigOnly` + includeIf routing                                                                                 | `grep -n 'useConfigOnly\|includeIf' git/.gitconfig`                                      |
-| Test suite list (10 suites as of 2026-07-02)                                                                         | `bin/dotfiles-tests --list`                                                              |
+| Test suite list (10 suites as of 2026-07-02)                                                                        | `bin/dotfiles-tests --list`                                                              |
 
 Open items carried as open (do not document as fixed): machine-path plugin
 installers trust CLI output; template changes need manual merge on machines;
