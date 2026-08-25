@@ -49,7 +49,7 @@ Commit 2: <scope-b>: <summary>
   M  <path/to/file4>
 ```
 
-Then proceed with commits in order. User can accept/decline at the git permission prompt, or interrupt to request different grouping.
+Then proceed with commits in order. Commits are allowlisted (no permission prompt fires), so present the plan before committing; the user can interrupt to request different grouping.
 
 **Step 2: Auto-detect scope from changed files**
 

@@ -73,7 +73,7 @@ Rebase complete. Pushing with --force-with-lease...
 git push --force-with-lease
 ```
 
-Uses `--force-with-lease` (safer than `--force` - fails if remote has unexpected commits). User can decline at the git permission prompt if needed.
+Uses `--force-with-lease` (safer than `--force` - fails if remote has unexpected commits). `git push` is allowlisted, so no permission prompt fires -- confirm with the user before any force-push.
 
 Always fetch before rebasing. Never proceed if rebase already in progress.
 
