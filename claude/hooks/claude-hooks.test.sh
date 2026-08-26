@@ -153,6 +153,12 @@ assert_blocks "blocks force push in compound command" \
 assert_blocks "blocks force push wrapped in sh -c" \
     claude/hooks/push_guard.py \
     "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'git push --force'\"}}"
+assert_blocks "blocks path-qualified git force push" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"/usr/bin/git push -f origin main"}}'
+assert_blocks "blocks override hidden in unrelated env value" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"FOO=DOTFILES_ALLOW_FORCE_PUSH=1 git push origin main --force"}}'
 assert_allows "allows plain git push" \
     claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push -u origin main"}}'
