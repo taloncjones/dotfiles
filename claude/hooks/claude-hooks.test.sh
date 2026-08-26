@@ -122,54 +122,61 @@ assert_allows "allows workflow hook secret checker path" \
     claude/hooks/block_secrets.py \
     '{"tool_name":"Read","tool_input":{"file_path":"claude/hooks/block_secrets.py"}}'
 
-# push_guard.py signals via JSON permissionDecision "ask" on stdout (exit 0
-# either way), so assert on the output, not the exit code.
-assert_asks() {
-    label="$1"
-    payload="$2"
-    out=$(printf '%s\n' "$payload" | claude/hooks/push_guard.py 2>/dev/null)
-    if printf '%s' "$out" | grep -q '"permissionDecision": "ask"'; then
-        printf 'PASS  %s\n' "$label"
-        PASS=$((PASS + 1))
-    else
-        printf 'FAIL  %s (expected ask decision, got: %s)\n' "$label" "$out" >&2
-        FAIL=$((FAIL + 1))
-    fi
-}
-
-assert_no_ask() {
-    label="$1"
-    payload="$2"
-    out=$(printf '%s\n' "$payload" | claude/hooks/push_guard.py 2>/dev/null)
-    if [ -z "$out" ]; then
-        printf 'PASS  %s\n' "$label"
-        PASS=$((PASS + 1))
-    else
-        printf 'FAIL  %s (expected silence, got: %s)\n' "$label" "$out" >&2
-        FAIL=$((FAIL + 1))
-    fi
-}
-
-assert_asks "asks on git push --force" \
+# push_guard.py: exit 2 (block) on history-rewriting pushes, 0 otherwise.
+assert_blocks "blocks git push --force" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}'
-assert_asks "asks on git push -f" \
+assert_blocks "blocks git push -f" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push -f"}}'
-assert_asks "asks on git push --force-with-lease" \
+assert_blocks "blocks git push --force-with-lease" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push --force-with-lease"}}'
-assert_asks "asks on trailing force flag" \
+assert_blocks "blocks trailing force flag" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push origin main --force"}}'
-assert_asks "asks on forced refspec" \
+assert_blocks "blocks bundled short force flag" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"git push -fu origin main"}}'
+assert_blocks "blocks quoted force flag" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"git push \"--force\" origin main"}}'
+assert_blocks "blocks forced refspec" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push origin +main"}}'
-assert_asks "asks on force push in compound command" \
+assert_blocks "blocks git push --mirror" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"git push --mirror origin"}}'
+assert_blocks "blocks force push in compound command" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git fetch origin && git push --force-with-lease"}}'
-assert_no_ask "silent on plain git push" \
+assert_blocks "blocks force push wrapped in sh -c" \
+    claude/hooks/push_guard.py \
+    "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'git push --force'\"}}"
+assert_allows "allows plain git push" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push -u origin main"}}'
-assert_no_ask "silent on force flag in non-push segment" \
+assert_allows "allows force flag in non-push segment" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"git push origin main && rm -f /tmp/x"}}'
-assert_no_ask "silent on non-git command" \
+assert_allows "allows force flag in newline-separated segment" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"git push origin main\nrm -f /tmp/x"}}'
+assert_allows "allows non-push git command with -f" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"git checkout push-fix -f"}}'
+assert_allows "allows force mention in commit message" \
+    claude/hooks/push_guard.py \
+    "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit -m 'never push --force to main'\"}}"
+assert_allows "allows non-git command" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"rsync --force a b"}}'
-assert_no_ask "silent on non-Bash tool" \
+assert_allows "allows non-Bash tool" \
+    claude/hooks/push_guard.py \
     '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}'
+assert_allows "allows override prefix after user confirmation" \
+    claude/hooks/push_guard.py \
+    '{"tool_name":"Bash","tool_input":{"command":"DOTFILES_ALLOW_FORCE_PUSH=1 git push --force-with-lease"}}'
 
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
@@ -222,47 +229,34 @@ guard_case "guard: fallback path check, default dir on personal repo -> silent" 
 # Skipped when no live settings file exists (fresh machine or CI).
 for settings_dir in "$HOME/.claude" "$HOME/.claude-work"; do
     if [ -f "$settings_dir/settings.json" ]; then
-        for required_hook in account_guard.py; do
-            if SETTINGS_PATH="$settings_dir/settings.json" REQUIRED_HOOK="$required_hook" python3 - <<'PY'
+        # Every hook command the template registers, for every event, must be
+        # registered live. Derived from the template so a new hook can never
+        # be invisible to this check.
+        if SETTINGS_PATH="$settings_dir/settings.json" python3 - <<'PY'
 import json
 import os
 import sys
 
-cfg = json.load(open(os.environ["SETTINGS_PATH"]))
-required = os.environ["REQUIRED_HOOK"]
-entries = cfg.get("hooks", {}).get("SessionStart", [])
-cmds = [h.get("command", "") for e in entries for h in e.get("hooks", [])]
-sys.exit(0 if any(c.endswith("hooks/" + required) for c in cmds) else 1)
+live = json.load(open(os.environ["SETTINGS_PATH"])).get("hooks", {})
+tmpl = json.load(open("claude/settings.json.tmpl")).get("hooks", {})
+missing = []
+for event, entries in tmpl.items():
+    wanted = [h.get("command", "") for e in entries for h in e.get("hooks", [])]
+    got = [h.get("command", "") for e in live.get(event, []) for h in e.get("hooks", [])]
+    for cmd in wanted:
+        if cmd not in got:
+            missing.append(event + ": " + cmd)
+for entry in missing:
+    print("  missing hook: " + entry)
+sys.exit(1 if missing else 0)
 PY
-            then
-                printf 'PASS  settings: %s SessionStart hooks register %s\n' "$settings_dir" "$required_hook"
-                PASS=$((PASS + 1))
-            else
-                printf 'FAIL  settings: %s SessionStart hooks missing %s (hand-merge required)\n' "$settings_dir" "$required_hook" >&2
-                FAIL=$((FAIL + 1))
-            fi
-        done
-
-        for required_hook in commit_guard.py no_ai_attribution_bash.py push_guard.py; do
-            if SETTINGS_PATH="$settings_dir/settings.json" REQUIRED_HOOK="$required_hook" python3 - <<'PY'
-import json
-import os
-import sys
-
-cfg = json.load(open(os.environ["SETTINGS_PATH"]))
-required = os.environ["REQUIRED_HOOK"]
-entries = cfg.get("hooks", {}).get("PreToolUse", [])
-cmds = [h.get("command", "") for e in entries for h in e.get("hooks", [])]
-sys.exit(0 if any(c.endswith("hooks/" + required) for c in cmds) else 1)
-PY
-            then
-                printf 'PASS  settings: %s PreToolUse hooks register %s\n' "$settings_dir" "$required_hook"
-                PASS=$((PASS + 1))
-            else
-                printf 'FAIL  settings: %s PreToolUse hooks missing %s (run update to reconcile)\n' "$settings_dir" "$required_hook" >&2
-                FAIL=$((FAIL + 1))
-            fi
-        done
+        then
+            printf 'PASS  settings: %s registers every template hook\n' "$settings_dir"
+            PASS=$((PASS + 1))
+        else
+            printf 'FAIL  settings: %s missing template hooks (run update to reconcile)\n' "$settings_dir" >&2
+            FAIL=$((FAIL + 1))
+        fi
 
         # Permissions drift: the reconcile treats permissions as a
         # template-owned key (reasserted wholesale on every update), so live
@@ -273,23 +267,28 @@ import json
 import os
 import sys
 
-live = json.load(open(os.environ["SETTINGS_PATH"])).get("permissions")
-tmpl = json.load(open("claude/settings.json.tmpl")).get("permissions")
+live = json.load(open(os.environ["SETTINGS_PATH"])).get("permissions") or {}
+tmpl = json.load(open("claude/settings.json.tmpl")).get("permissions") or {}
 if live == tmpl:
     sys.exit(0)
-live_allow = set((live or {}).get("allow", []))
-tmpl_allow = set((tmpl or {}).get("allow", []))
-for rule in sorted(live_allow - tmpl_allow):
-    print("  live-only rule: " + rule)
-for rule in sorted(tmpl_allow - live_allow):
-    print("  missing rule:   " + rule)
+for key in sorted(set(live) | set(tmpl)):
+    lv, tv = live.get(key), tmpl.get(key)
+    if lv == tv:
+        continue
+    if isinstance(lv, list) and isinstance(tv, list):
+        for rule in sorted(set(lv) - set(tv)):
+            print("  " + key + " live-only rule: " + rule)
+        for rule in sorted(set(tv) - set(lv)):
+            print("  " + key + " missing rule:   " + rule)
+    else:
+        print("  " + key + ": live=" + repr(lv) + " template=" + repr(tv))
 sys.exit(1)
 PY
         then
             printf 'PASS  settings: %s permissions match template\n' "$settings_dir"
             PASS=$((PASS + 1))
         else
-            printf 'FAIL  settings: %s permissions drifted from template (run update to reconcile)\n' "$settings_dir" >&2
+            printf 'FAIL  settings: %s permissions drifted (update reconciles: template rules reassert, live-only grants are DROPPED -- commit intentional grants to the template)\n' "$settings_dir" >&2
             FAIL=$((FAIL + 1))
         fi
     else
