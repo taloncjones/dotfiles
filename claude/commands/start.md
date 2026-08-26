@@ -113,7 +113,7 @@ If Jira ticket is linked:
 With Jira: `<user>/<PROJ-###>/<topic-slug>`
 Without Jira: `<user>/<topic-slug>`
 
-- User: extract from git config `user.email` (part before @), lowercase
+- User: extract from `git config --get user.email` (part before @), lowercase
 - Topic: slugified (lowercase, hyphens, max 40 chars, remove filler words)
 
 Examples:

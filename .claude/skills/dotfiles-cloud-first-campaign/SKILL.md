@@ -122,12 +122,12 @@ command printed (fence f91d7d2). Re-run bootstrap-cloud.
 **0.5 Git author.**
 
 ```bash
-git config --global user.name; git config --global user.email
+git config --get --global user.name; git config --get --global user.email
 ```
 
 Expected: the identity from `git/personal/.gitconfig-personal` (currently
 `Talon Jones` / `taloncjones@gmail.com`), never `Claude <noreply@anthropic.com>`.
-Also expect `git config --global commit.gpgsign` -> `false` (reattribution
+Also expect `git config --get --global commit.gpgsign` -> `false` (reattribution
 disables signing; fence 2304015). Platform default still present -> re-run
 bootstrap-cloud (`reattribute_git_identity` only overrides the platform
 default; a real identity is never clobbered).
