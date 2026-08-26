@@ -46,12 +46,18 @@ git rebase "$TARGET"
 ```
 
 `git rebase` is not allowlisted, so this step prompts for permission. The
-recovery forms `git rebase --continue` and `git rebase --abort` ARE
-allowlisted, so a conflicted rebase can always be finished or unwound without
-another prompt. If the user declines the rebase prompt and Step 2 stashed
-changes, run `git stash pop` immediately to restore them before stopping.
+plain spellings `git rebase --continue` and `git rebase --abort` ARE
+allowlisted for recovery; editor-override variants (`GIT_EDITOR=true git
+rebase --continue`, `git -c core.editor=true rebase --continue`) do not match
+the rule and still prompt. If the user declines the rebase prompt and Step 2
+stashed changes, run `git stash pop` immediately to restore them before
+stopping.
 
-**Step 4: Restore stash**
+**Step 4: Restore stash (only after the rebase fully completes)**
+
+Run this only once the rebase has finished cleanly -- including after any
+Step 5 conflict resolution ends with `git rebase --continue` or `--abort`.
+Never pop onto a mid-rebase conflicted tree.
 
 ```bash
 if [ "$STASHED" = true ]; then

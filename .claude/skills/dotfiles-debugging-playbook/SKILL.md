@@ -342,7 +342,7 @@ dotfiles-research-methodology):
    is wrong -- stop and update it before the next command.
 3. **Prefer state files over exit codes.** This repo's worst bug class was
    exit-0 lies (`plugins install`, commits 722c653/f91d7d2). Ground truth lives
-   in `installed_plugins.json`, the marketplace manifest, `git config
+   in `installed_plugins.json`, the marketplace manifest, `git config --get
 --show-origin`, `ssh -G`, and `readlink` -- not in return status.
 4. **Record the baseline first.** `bin/dotfiles-tests` before and after your
    fix; a fix that flips an unrelated suite is a new bug.
