@@ -6,9 +6,11 @@ Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 """
 
 import hashlib
+import json
 import os
 import re
-import time  # noqa: F401 -- used by state I/O added in a later task
+import sys  # noqa: F401 -- used by the CLI added in a later task
+import time
 from pathlib import Path
 
 WORKSPACE_ID_RE = re.compile(r"[A-Za-z0-9]+\Z")
@@ -84,3 +86,117 @@ def contained(path, root) -> bool:
     except OSError:
         return False
     return rp == rr or rr in rp.parents
+
+
+_HINTS = {"stopped", "blocked", "review-stopped"}
+_AUTH = {
+    "kickoff",
+    "phase-advanced",
+    "review-dispatched",
+    "completed",
+    "paused",
+    "failed",
+    "changes-requested",
+    "reviewed",
+    "abandoned",
+    "merged",
+}
+
+
+def repo_dir(slug: str) -> Path:
+    return state_root() / slug
+
+
+def index_path(rd, ws) -> Path:
+    return Path(rd) / "workspaces" / f"{ws}.json"
+
+
+def events_path(rd, ws) -> Path:
+    return Path(rd) / "workspaces" / f"{ws}.events.jsonl"
+
+
+def now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def write_json_atomic(path, data) -> None:
+    path = Path(path)
+    tmp = Path(f"{path}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(data))
+    os.replace(tmp, path)
+
+
+def read_index(rd, ws):
+    if not valid_workspace_id(ws):
+        return None
+    p = index_path(rd, ws)
+    try:
+        if p.is_symlink() or not contained(p, state_root()):
+            return None
+        with open(p) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def append_event(rd, ws, event, **fields) -> bool:
+    if not valid_workspace_id(ws):
+        return False
+    p = events_path(rd, ws)
+    rec = {"v": 1, "ts": now_iso(), "workspace_id": ws, "event": event}
+    rec.update(fields)
+    line = json.dumps(rec, separators=(",", ":")) + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(p, flags, 0o600)
+    except OSError:
+        return False
+    try:
+        os.write(fd, line.encode())
+    finally:
+        os.close(fd)
+    return True
+
+
+def parse_events(lines):
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("v") != 1:
+            continue
+        out.append(rec)
+    return out
+
+
+def fold_status(events):
+    """Latest authoritative event wins; last hint is surfaced separately."""
+    authoritative = None
+    last_hint = None
+    for rec in events:
+        ev = rec.get("event")
+        if ev in _AUTH:
+            authoritative = ev
+        elif ev in _HINTS:
+            last_hint = ev
+    return {"authoritative": authoritative, "last_hint": last_hint}
+
+
+def is_completed(task, done, live_head_sha) -> bool:
+    if not isinstance(done, dict) or done.get("outcome") != "completed":
+        return False
+    if done.get("task_id") != task.get("task_id"):
+        return False
+    if done.get("head_sha") != live_head_sha or done.get("base_sha") != task.get(
+        "base_sha"
+    ):
+        return False
+    return done.get("head_sha") != done.get(
+        "base_sha"
+    )  # at least one commit ahead of base
