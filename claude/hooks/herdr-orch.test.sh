@@ -253,5 +253,33 @@ printf '{"v":1,"ts":"2026-01-01T00:00:30Z","event":"blocked"}\n' > "$root/herdr-
 $CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert s['PROJ-1']['fold']['authoritative']=='completed',s;assert s['PROJ-2']['fold']['last_hint']=='blocked' and s['PROJ-2']['fold']['authoritative']!='completed',s"
 SH
 
+# args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)
+hook_case() {
+    label="$1"; env_ws="$2"; henv="$3"; payload="$4"; expect="$5"
+    outdir=$(mktemp -d); wsdir="$outdir/herdr-orch/slug-x/workspaces"; mkdir -p "$wsdir"
+    if [ "$env_ws" = "REGISTER" ]; then
+        printf '{"task_id":"PROJ-1","repo_slug":"slug-x","role":"impl"}' > "$wsdir/w1.json"; ws="w1"
+    elif [ "$env_ws" = "REGISTER_REVIEW" ]; then
+        printf '{"task_id":"PROJ-1","repo_slug":"slug-x","role":"review"}' > "$wsdir/w9.json"; ws="w9"
+    else ws="$env_ws"; fi
+    printf '%s' "$payload" | env CLAUDE_CONFIG_DIR="$outdir" HERDR_ENV="$henv" \
+        HERDR_WORKSPACE_ID="$ws" claude/hooks/herdr_worker_status.py >/dev/null 2>&1
+    got=$(tail -1 "$wsdir/$ws.events.jsonl" 2>/dev/null) || true
+    if [ "$expect" = "none" ]; then
+        [ -z "$got" ] && { printf 'PASS  %s\n' "$label"; PASS=$((PASS+1)); } || { printf 'FAIL  %s (got %s)\n' "$label" "$got" >&2; FAIL=$((FAIL+1)); }
+    else
+        printf '%s' "$got" | grep -q "\"event\":\"$expect\"" && { printf 'PASS  %s\n' "$label"; PASS=$((PASS+1)); } || { printf 'FAIL  %s (want %s got %s)\n' "$label" "$expect" "$got" >&2; FAIL=$((FAIL+1)); }
+    fi
+    rm -rf "$outdir"
+}
+hook_case "no HERDR_ENV -> no-op" REGISTER "" '{"hook_event_name":"Stop"}' none
+hook_case "no index -> no-op" "w9" "1" '{"hook_event_name":"Stop"}' none
+hook_case "unsafe workspace id -> no-op" "..x" "1" '{"hook_event_name":"Stop"}' none
+hook_case "impl Stop -> stopped" REGISTER "1" '{"hook_event_name":"Stop"}' stopped
+hook_case "review Stop -> review-stopped" REGISTER_REVIEW "1" '{"hook_event_name":"Stop"}' review-stopped
+hook_case "permission Notification -> blocked" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"permission_prompt"}' blocked
+hook_case "elicitation Notification -> blocked" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}' blocked
+hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"idle_prompt"}' none
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
