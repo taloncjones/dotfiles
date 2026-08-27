@@ -152,6 +152,17 @@ wrongly suppress the re-dispatch). This one rule recovers every "branch
 advanced" case from whichever review state the task was in, so no review state
 is ever permanently stranded -- the next check-in corrects it.
 
+If the stale state is `review-dispatched`, first **retire the old reviewer**:
+stop its agent and close its review workspace (the orchestrator owns both)
+before clearing the marker and re-dispatching. Otherwise the retired reviewer
+keeps running and can overwrite the replacement's `tasks/<task_id>.done.json`
+-- `emit-review` is worker-called and unfenced (a worker holds no ownership
+fence), so its writes are last-writer-wins. Known limitation (single-user-
+unreachable): two reviewer workers alive at once on one task can still race
+that file; stopping the prior reviewer removes the only writer this loop
+creates, and the merge gate's three-SHA correlation (section 6) is the
+backstop. Revisit only if review ever runs multi-worker.
+
 Report per-task status, workspace, latest note, and recommended next action.
 
 ## 5. Review dispatch (on confirmed `completed`) -- per revision, at most one
