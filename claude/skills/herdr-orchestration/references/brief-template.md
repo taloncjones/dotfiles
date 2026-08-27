@@ -47,6 +47,39 @@ Do not report completion any other way -- the orchestrator only recognizes
 this record.
 ```
 
+## Plan-phase brief variant (`plan-<t>`, raw items only)
+
+Sent instead of the implement brief when kickoff dispatches a `plan` worker for
+a raw item (SKILL.md section 2). Same workspace/ground-rules framing; the task
+section says to PRODUCE the spec + plan (not implement), and the close emits
+phase `plan`:
+
+```
+You are `<agent-name>` planning task `<task_id>` in repo `<repo_slug>`.
+
+## Task
+<task_id>: <task title/summary, pulled from Jira or the todo record>
+
+<task description / acceptance criteria, pulled from Jira or the todo body>
+
+PRODUCE (do NOT implement yet) the repo's spec + plan for this task, following
+its own pipeline: superpowers:brainstorming -> write spec to `docs/specs/` ->
+codex-spec-review -> superpowers:writing-plans (plan to `docs/plans/`) ->
+codex-plan-review. Fold review findings back into the spec/plan, then commit
+the spec + plan. Do NOT write implementation code -- a separate implement
+worker picks up from your committed plan next.
+
+## Close
+When the spec + plan are committed and reviewed:
+1. Commit all work.
+2. Run (note `--phase plan`):
+   `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase plan --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha>`
+3. Then run `/handoff`.
+
+Do not report completion any other way. The orchestrator advances to the
+implement phase only on this `phase: plan` record.
+```
+
 ## Reviewer brief variant (`rev-<t>`)
 
 Sent instead of the above when dispatching review (section 5 of SKILL.md).

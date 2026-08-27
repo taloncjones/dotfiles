@@ -64,9 +64,27 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
-Kickoff always starts an `impl-<...>` implement worker: the item already has
-a plan, and any planning it still needs happens inside that worker under the
-repo's own pipeline. The steps below call it "the worker".
+Kickoff dispatches a worker whose **phase and model depend on plan-maturity**,
+so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
+
+- **Plan-ready item** -- a refined Jira ticket, or a task that already has a
+  committed `docs/specs/` spec and `docs/plans/` plan: dispatch an `implement`
+  worker on the impl model (Sonnet) directly.
+- **Raw item** -- a bare todo/handoff with no spec/plan: dispatch a `plan`
+  worker on the **strong** planning-worker model (section 8) first. It runs the
+  repo's brainstorm -> spec -> codex-spec-review -> plan -> codex-plan-review
+  pipeline, commits the spec + plan, and emits completion as phase `plan`. On
+  confirmed plan completion the orchestrator advances the same task/branch to
+  its `implement` phase on Sonnet (section 2a).
+
+Maturity check: a Jira ticket in a refined/ready state, or an existing committed
+spec+plan for the task, is plan-ready; anything else is raw. When unsure, treat
+it as raw -- an extra plan phase is cheap insurance against a cheap model making
+design decisions.
+
+The steps below call the dispatched worker "the worker"; they apply to whichever
+phase is launched (`plan` for a raw item, else `implement`), with the
+phase-appropriate brief (references/brief-template.md) and model.
 
 1. Resolve the item (Jira MCP for a ticket key, the todos skill for a bare
    todo) -> `task_id`. Abort if unresolved.
@@ -88,7 +106,7 @@ repo's own pipeline. The steps below call it "the worker".
 6. **Launch the worker on its pinned model** into the new workspace's own pane
    -- see section 8, Model launch. Send the kickoff brief (template in
    references/brief-template.md), filled with `task_id`, worktree path,
-   branch, and phase (`implement`).
+   branch, and phase (`plan` for a raw item, else `implement`).
 7. **Publish state only after the worker is launched** -- so a failed launch
    leaves no stale task/index to unwind (no rollback verb needed). Write
    through the core CLI, not by hand:
@@ -106,6 +124,31 @@ repo's own pipeline. The steps below call it "the worker".
    narrow launch-to-publish gap leaves a running worker with no record, which
    the next status/triage poll surfaces via live `herdr agent list` for
    cleanup -- preferred over a stale record that would block re-kickoff.
+
+## 2a. Phase advancement (plan -> implement) -- raw items only
+
+A `plan` worker's confirmed completion advances the SAME task to its implement
+phase; it never marks the task `completed` and never dispatches review.
+
+1. **Plan completion is not task completion.** When a `done.json` correlates
+   (via `confirm-completion`, section 4) AND its `phase` is `plan`, that is a
+   plan milestone. Never set status `completed` off a `phase: plan` record --
+   task completion and review dispatch (sections 4-5) fire ONLY on a
+   `phase: implement` record. The orchestrator knows which phase is live from
+   the task record's latest `workers[]` entry; the `done.json.phase` must match
+   it.
+2. **Verify the plan landed:** spec + plan committed on the branch (HEAD ahead
+   of `base_sha`), worktree clean.
+3. **Advance in place.** Reuse the same worktree/branch (the committed spec+plan
+   live there). After the plan worker hands off (idle/exited), launch an
+   `implement` worker on the impl model (Sonnet) in that workspace's own pane
+   (section 8 launch) with the implement brief. Append a new `workers[]` entry
+   (`role: impl`, `phase: implement`, model `sonnet`, `created_by_this_orch:
+true`) via `write-task`; status stays `in-progress`. The plan worker's
+   `done.json` is later overwritten by the implement worker's -- expected; only
+   the implement record drives completion.
+4. A plan phase that emits `outcome: failed`/`paused` is handled exactly like an
+   implement-phase failure/pause (section 9) -- no implement worker is launched.
 
 ## 3. Triage (advisory only -- read-only)
 
@@ -149,6 +192,11 @@ Correlate these independent facts, all keyed to the same `task_id`/
    `--workspace` provenance check rejects a record from a foreign or older
    worker. Never re-derive this correlation by hand.
 4. Live `herdr agent` state consistent with a finished worker.
+5. **Phase gate:** the correlated `done.json`'s `phase` is `implement` (the
+   final phase). A `phase: plan` record is a plan milestone -- run section 2a
+   phase advancement, never `completed`/review. `confirm-completion` does not
+   itself check phase; the orchestrator gates on it here, matching the live
+   worker's `workers[]` phase.
 
 An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
 `confirm-completion` exit 1, is never completion.
@@ -294,11 +342,12 @@ Each role has an ordered model preference, resolved against the models the
 current account/CLI actually offers. First available wins; `config.json`
 may override any role's list.
 
-| Role / phase              | Preference (first available wins) | Effort  | Notes                                                                                               |
-| ------------------------- | --------------------------------- | ------- | --------------------------------------------------------------------------------------------------- |
-| Orchestrator              | fable -> opus                     | low/med | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)     |
-| Implementation worker     | sonnet -> opus                    | default | cheap execution                                                                                     |
-| Reviewer (`/code-review`) | opus -> sonnet                    | high    | report-only `/code-review` (no `--fix`); Opus reviewer gives model diversity vs a Fable/Sonnet impl |
+| Role / phase              | Preference (first available wins) | Effort  | Notes                                                                                                                                                 |
+| ------------------------- | --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Orchestrator              | fable -> opus                     | low/med | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)                                                       |
+| Planning worker (`plan`)  | fable -> opus                     | high    | raw items only: brainstorm/spec/plan on the strong model so design judgment is never delegated to the cheap impl worker; skipped for plan-ready items |
+| Implementation worker     | sonnet -> opus                    | default | cheap execution of an existing plan                                                                                                                   |
+| Reviewer (`/code-review`) | opus -> sonnet                    | high    | report-only `/code-review` (no `--fix`); Opus reviewer gives model diversity vs a Fable/Sonnet impl                                                   |
 
 Fallback scaffolding: when Fable is unavailable (enterprise account, usage
 exhausted, or the current session is already Opus), fall back to Opus and
@@ -353,21 +402,22 @@ The "Event" column below names the conceptual transition, not an emitted
 row's transition is committed solely by a `python3 "$CORE" write-task` call that sets
 the new `status`; that write is the authoritative record.
 
-| From                                         | Evidence / trigger                                                             | Event                                          | To                    | Terminal? |
-| -------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------- | --------------------- | --------- |
-| (none)                                       | human kickoff, resources created                                               | `kickoff`                                      | in-progress           | no        |
-| in-progress                                  | hook `blocked` + live `blocked`                                                | `blocked`                                      | blocked               | no        |
-| blocked                                      | live no longer blocked                                                         | (recheck)                                      | in-progress           | no        |
-| in-progress/blocked                          | correlated `done.json` completed + git ahead                                   | `completed`                                    | completed             | no        |
-| in-progress/blocked                          | Stop hint + no done.json + no commits                                          | `paused`                                       | in-progress           | no        |
-| in-progress/blocked                          | Stop hint + `outcome: failed` or errored, no usable branch                     | `failed`                                       | failed                | yes       |
-| in-progress/blocked/completed                | workspace+worktree gone, no completion                                         | `abandoned`                                    | abandoned             | yes       |
-| completed                                    | human/orch dispatch (guard: not already dispatched for this `review_head_sha`) | `review-dispatched`                            | review-dispatched     | no        |
-| review-dispatched                            | reviewer done (reviewed HEAD == dispatched == live), findings = blocking       | `changes-requested`                            | changes-requested     | no        |
-| review-dispatched                            | reviewer done (reviewed HEAD == dispatched == live), findings = none blocking  | `reviewed`                                     | reviewed              | no        |
-| review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)             | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress | no        |
-| changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                   | (re-kickoff impl or resume)                    | in-progress           | no        |
-| reviewed                                     | human merges; `/post-merge`                                                    | `merged`                                       | merged                | yes       |
+| From                                         | Evidence / trigger                                                             | Event                                          | To                      | Terminal? |
+| -------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------- | ----------------------- | --------- |
+| (none)                                       | kickoff (raw item -> plan phase; plan-ready -> implement)                      | `kickoff`                                      | in-progress             | no        |
+| in-progress                                  | hook `blocked` + live `blocked`                                                | `blocked`                                      | blocked                 | no        |
+| blocked                                      | live no longer blocked                                                         | (recheck)                                      | in-progress             | no        |
+| in-progress (plan phase)                     | correlated `done.json` `phase: plan` completed + git ahead                     | `phase-advance` (launch implement, section 2a) | in-progress (implement) | no        |
+| in-progress/blocked (implement)              | correlated `done.json` `phase: implement` completed + git ahead                | `completed`                                    | completed               | no        |
+| in-progress/blocked                          | Stop hint + no done.json + no commits                                          | `paused`                                       | in-progress             | no        |
+| in-progress/blocked                          | Stop hint + `outcome: failed` or errored, no usable branch                     | `failed`                                       | failed                  | yes       |
+| in-progress/blocked/completed                | workspace+worktree gone, no completion                                         | `abandoned`                                    | abandoned               | yes       |
+| completed                                    | human/orch dispatch (guard: not already dispatched for this `review_head_sha`) | `review-dispatched`                            | review-dispatched       | no        |
+| review-dispatched                            | reviewer done (reviewed HEAD == dispatched == live), findings = blocking       | `changes-requested`                            | changes-requested       | no        |
+| review-dispatched                            | reviewer done (reviewed HEAD == dispatched == live), findings = none blocking  | `reviewed`                                     | reviewed                | no        |
+| review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)             | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
+| changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                   | (re-kickoff impl or resume)                    | in-progress             | no        |
+| reviewed                                     | human merges; `/post-merge`                                                    | `merged`                                       | merged                  | yes       |
 
 `blocked` is a durable status here (the hint `blocked` drives it); there is
 no overlap between `failed` (errored, no usable branch) and `abandoned`
