@@ -1,0 +1,221 @@
+# State layout
+
+Account-scoped fixed state root:
+
+```
+STATE_ROOT = "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch"
+```
+
+Workers under `~/Git/work` run in the work account, so their state lands
+under `~/.claude-work`; orchestrator and workers for a repo share one
+account, hence one `STATE_ROOT`. Nothing under `STATE_ROOT` is ever
+git-tracked (it lives under the config dir, not the repo), and no marker is
+ever written into any worktree.
+
+## Layout
+
+```
+STATE_ROOT/
+  <repo_slug>/
+    owner.json                        # single-writer ownership claim
+    config.json                       # machine-local config
+    tasks/
+      <task_id>.json                  # durable task record
+      <task_id>.done.json             # worker-emitted completion record
+    workspaces/
+      <HERDR_WORKSPACE_ID>.json               # reverse index (task/repo/role)
+      <HERDR_WORKSPACE_ID>.events.jsonl       # per-workspace hint log
+```
+
+## Identity
+
+### Task identity
+
+- `task_id`: the canonical Jira key (`PROJ-123`) for a ticket; for a bare
+  todo, the todos skill's **stable identifier** (its durable id/filename
+  slug), never a truncated title -- so title edits and similar titles cannot
+  alias one id. If the todo store exposes no stable id, mint `td-<8hex>`
+  once and persist it in the todo record.
+- All per-task artifacts key on `task_id`.
+
+### Repo identity
+
+- `repo_slug`: canonical, collision-resistant, derived from
+  `git remote get-url origin` normalized to `<host>-<org>-<repo>`
+  (lowercased, non-`[a-z0-9]` -> `-`) with a short hash of the canonical
+  remote URL appended (`<normalized>-<8hex>`) so lossy normalization cannot
+  alias two distinct remotes. No remote -> `local-<8hex>` of the git
+  common-dir realpath. All worktrees of a repo share the common dir/remote,
+  so they resolve identically. Example: `github-com-org-repo-a1b2c3d4`.
+
+### Branch and worktree names
+
+- Branch: `<user>/<task_id>/<slug>` (slash form, matching the repo
+  convention; e.g. `<user>/PROJ-123/teardown-lifecycle`). `<user>` comes
+  from machine-local `config.json`; `<slug>` is the kebab-case summary
+  (<=32 chars).
+- Worktree directory name: the branch with `/` -> `+` (filesystem-safe flat
+  name under `.claude/worktrees/`; e.g.
+  `<user>+PROJ-123+teardown-lifecycle`). The `+` is a directory encoding
+  only, never the branch.
+
+### Agent names vs display labels
+
+- Agent name (herdr-compliant): `impl-<t>` / `rev-<t>` where `<t>` =
+  `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
+  Verify uniqueness via `agent list`; on collision append `-2`, `-3`. Phase
+  workers use `<phase>-<t>` (e.g. `plan-<t>`).
+- Display label (unconstrained): worker `<task_id>`, reviewer
+  `review:<task_id>`, orchestrator `orch:<repo>`.
+
+## Schemas
+
+### `owner.json`
+
+```json
+{
+  "session_id": "<id>",
+  "host": "<host>",
+  "pid": 12345,
+  "heartbeat_ts": "...",
+  "fence": 3
+}
+```
+
+- **Atomic claim:** ownership is acquired by an atomic filesystem operation
+  -- create-exclusive (`O_CREAT|O_EXCL`) of a lock file, or
+  write-temp-then-atomic-`rename` -- never a read-then-overwrite (which two
+  racing takeovers could both win). Each successful claim increments a
+  monotonic **fence** token.
+- **Fencing:** every state mutation re-reads `owner.json` and proceeds only
+  if the live `fence`/`session_id` still matches the one this session
+  claimed; a mutation under a stale fence aborts.
+- Preflight claims if the file is absent or `heartbeat_ts` is stale (e.g.
+  > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
+  > orchestrator whose claim fails **yields** to read-only reporting and
+  > offers an explicit takeover.
+
+### `config.json`
+
+```json
+{
+  "v": 1,
+  "user": "<user>",
+  "default_base": "origin/main",
+  "epics": ["PROJ-100"],
+  "soft_cap": 3,
+  "models": {
+    "orchestrator": ["fable", "opus"],
+    "planner": ["fable", "opus"],
+    "impl": ["sonnet", "opus"],
+    "reviewer": ["opus", "sonnet"]
+  }
+}
+```
+
+Validation: required `user`, `default_base`; `epics` a (possibly empty)
+list; `soft_cap` a positive int (default 3); `models` optional (falls back
+to the built-in preferences). Missing/invalid -> mutating actions refuse
+with a concrete message. This file holds the only employer/user
+identifiers; the shipped skill and fixtures never contain them.
+
+### `tasks/<task_id>.json` -- durable task record
+
+Written only by the owning orchestrator, via `$CORE write-task`.
+
+```json
+{
+  "v": 1,
+  "task_id": "PROJ-123",
+  "repo_slug": "github-com-org-repo-a1b2c3d4",
+  "kind": "jira",
+  "branch": "<user>/PROJ-123/teardown-lifecycle",
+  "worktree": "/abs/path/to/worktree",
+  "base_ref": "origin/main",
+  "base_sha": "<40hex>",
+  "workers": [
+    {
+      "role": "impl",
+      "phase": "implement",
+      "workspace_id": "w1",
+      "agent": "impl-proj-123",
+      "model": "sonnet",
+      "created_by_this_orch": true,
+      "started": "..."
+    }
+  ],
+  "review_head_sha": null,
+  "review_outcome": null,
+  "status": "kickoff|in-progress|blocked|completed|review-dispatched|changes-requested|reviewed|failed|abandoned|merged",
+  "created": "...",
+  "updated": "..."
+}
+```
+
+`workers` is a list, not a single field -- phase advancement (plan ->
+implement -> review) appends a new entry rather than overwriting.
+
+### `tasks/<task_id>.done.json` -- worker-emitted completion record
+
+The authoritative completion signal, **not** `/handoff`. Written by a
+worker via `$CORE emit-done` at end of a phase.
+
+```json
+{
+  "v": 1,
+  "task_id": "PROJ-123",
+  "workspace_id": "w1",
+  "agent": "impl-proj-123",
+  "phase": "implement",
+  "outcome": "completed|failed|paused",
+  "head_sha": "<40hex>",
+  "base_sha": "<40hex>",
+  "ts": "..."
+}
+```
+
+A **review** worker writes the discriminated review variant (same file
+namespace, `phase: "review"`), via `$CORE emit-review`, carrying the
+reviewed revision and the findings the merge gate needs:
+
+```json
+{
+  "v": 1,
+  "task_id": "PROJ-123",
+  "workspace_id": "w9",
+  "agent": "rev-proj-123",
+  "phase": "review",
+  "outcome": "approved|changes-requested",
+  "reviewed_head_sha": "<40hex>",
+  "findings": { "blocking": [], "advisory": [] },
+  "findings_ref": "<path to full /co-review output>",
+  "ts": "..."
+}
+```
+
+The merge gate reads `outcome` + `reviewed_head_sha`: only `approved` with
+`reviewed_head_sha` == current HEAD is merge-ready; `changes-requested` (or
+any non-empty `blocking`) is not.
+
+### `workspaces/<HERDR_WORKSPACE_ID>.json` -- reverse index
+
+Read by the monitoring hook; written by the orchestrator via
+`$CORE write-index`.
+
+```json
+{
+  "task_id": "PROJ-123",
+  "repo_slug": "github-com-org-repo-a1b2c3d4",
+  "role": "impl"
+}
+```
+
+`role` is one of `impl`, `plan`, `review` (matches the worker's phase/role,
+not the agent-name prefix directly).
+
+### `workspaces/<HERDR_WORKSPACE_ID>.events.jsonl` -- per-workspace hint log
+
+Append-only, **per-workspace**, written only by that workspace's hook
+(single writer per file, so no cross-writer interleaving). The
+orchestrator merges across files on read (`$CORE status`). See
+`event-schema.md` for the event vocabulary and fold rule.
