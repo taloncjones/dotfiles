@@ -31,37 +31,48 @@ verify.
    anything.**
    - Resolve the exact base/head this pass reviews, using the same target
      already picked in "Target resolution" above (PR head vs PR base; or
-     branch head vs fork point; or, for a purely local uncommitted diff,
-     commit it to a scratch branch first — same requirement step 2 below
-     already states for Codex, done here so it also covers steps 2.5 and
-     3.5). Every subagent dispatched below (step 2.5's attacker, step 3.5's
-     skeptics) gets this exact base/head range stated explicitly, with
-     explicit read-only instructions — never "figure out the diff yourself,"
-     which risks a subagent inspecting a different or since-changed checkout.
+     branch head vs fork point). For a purely local uncommitted diff, do
+     **not** commit it on the shared working tree — that would move HEAD
+     before step 1 runs and could make its auto-detected range wrong or
+     empty. Instead create the scratch commit in an isolated worktree (same
+     `mktemp -u` + `git worktree add --detach` pattern step 2 already uses for
+     Codex), and let step 1 review the original uncommitted diff directly via
+     its normal auto-detection (untouched by this step). Every subagent
+     dispatched below (step 2.5's attacker, step 3.5's skeptics) gets this
+     exact base/head range stated explicitly, pointed at the isolated
+     worktree checkout when one was created, with explicit read-only
+     instructions — never "figure out the diff yourself," which risks a
+     subagent inspecting a different or since-changed checkout.
    - Against that frozen diff, check each changed file's path,
      case-insensitive, for a whole path-segment match (a segment is text
      between `/`, `.`, `-`, or `_` — so this does not match `author` against
-     `auth`, or `invalid` against `valid`) against: `auth`, `guard`, `gate`,
-     `valid`, `validate`, `validator`, `permission`, `acl`, `verify`,
-     `verification`, `credential`, `token`, `sign`, `signature`, or a path
-     under this repo's `claude/hooks/` whose filename contains `guard` or
-     `review`. Exclude any path under a `test`/`tests`/`spec`/`docs`/
+     `auth`, or `invalid` against `valid`) against: `auth`, `authorization`,
+     `authentication`, `guard`, `gate`, `valid`, `validate`, `validator`,
+     `validation`, `validators`, `permission`, `permissions`, `acl`, `verify`,
+     `verification`, `credential`, `credentials`, `token`, `tokens`, `sign`,
+     `signature`, `signatures`, `secret`, `secrets`, or a path under this
+     repo's `claude/hooks/` whose filename contains `guard`, `review`, or
+     `secret` (covers this repo's own `claude/hooks/block_secrets.py` and
+     similar). Exclude any path under a `test`/`tests`/`spec`/`docs`/
      `examples` directory even if it matches (it exercises or documents a
      gate, it is not the gate). Example matches: `claude/hooks/commit_guard.py`,
-     `src/auth/validator.py`. Example non-matches: `src/author_bio.py`,
-     `tests/auth/test_login.py` (excluded by the `tests/` rule),
-     `docs/signing-guide.md` (excluded by the `docs/` rule).
-   - Record **two** things, not just a boolean: whether _any_ changed file
-     matched (`gate_detected: yes/no`), and the **set of matched paths**
-     themselves (`gate_paths: {...}`). `gate_detected` gates step 2.5's
-     attacker dispatch (probe the whole diff if any part of it is gate-like).
-     `gate_paths` gates step 3.5's per-finding escalation rule (escalate only
-     a finding whose _own_ file is in this set — a finding in an unrelated
-     file elsewhere in the same diff does not escalate just because some
-     other file in the diff happened to match).
+     `src/auth/validator.py`, `src/permissions.ts`, `lib/tokens.go`. Example
+     non-matches: `src/author_bio.py`, `tests/auth/test_login.py` (excluded
+     by the `tests/` rule), `docs/signing-guide.md` (excluded by the `docs/`
+     rule).
+   - Record the **set of matched paths** (`gate_paths: {...}`); treat
+     `gate_detected` as shorthand for "`gate_paths` is non-empty," not a
+     separate value to track independently (one source of truth, so a future
+     edit to the matching logic can't update one and silently leave the
+     other stale). `gate_detected` gates step 2.5's attacker dispatch (probe
+     the whole diff if any part of it is gate-like). `gate_paths` gates step
+     3.5's per-finding escalation rule (escalate only a finding whose _own_
+     file is in this set — a finding in an unrelated file elsewhere in the
+     same diff does not escalate just because some other file in the diff
+     happened to match).
    - Re-run this entire step independently on each review pass (initial pass
      and the bounded re-review in step 5), against that pass's own frozen
-     diff — a fresh `gate_detected`/`gate_paths` each time.
+     diff — a fresh `gate_paths` each time.
 
 1. **Claude half — native `/code-review`, report mode.**
    - Invoke the built-in `/code-review` at `high` effort.
@@ -151,7 +162,9 @@ parallel with steps 1-2.** Dispatch one `Agent`-tool subagent (general-purpose,
 fresh context) with: the full diff, step 0's frozen base/head (explicit,
 read-only), and any governing invariant the gate is meant to enforce —
 pulled from the diff's own tests, docstrings, or comments, or an explicit
-statement of intent if one exists in the task description. Its brief:
+statement of intent if one exists in the task description. Its brief: never
+invoke `codex exec` yourself, with or without a custom prompt — Bash access
+does not exempt this subagent from the recursion hazard step 2 describes.
 
 - If no governing invariant can be identified, stop and report
   `INCONCLUSIVE -- no stated policy to test against`. Do not guess intended
@@ -159,8 +172,12 @@ statement of intent if one exists in the task description. Its brief:
   attack that only proves the implementation matches itself proves nothing.
 - Otherwise, attempt at least 3 distinct concrete bypass vectors (specific
   call/input sequences) that would make the gate accept something the
-  identified invariant says it should reject. Report each vector attempted
-  and exactly what blocked it, or that it succeeded.
+  identified invariant says it should reject, where the gate's surface
+  genuinely supports that many. For a narrow gate with fewer real distinct
+  angles (e.g. a one-line permission check), attempt all of them and say
+  explicitly how many distinct angles exist rather than padding the report
+  with a contrived or near-duplicate vector to hit the count. Report each
+  vector attempted and exactly what blocked it, or that it succeeded.
 - Each vector that succeeds is reported as a separate bypass, with all of:
   a severity (critical/high/medium/low, the same scale the merged list
   sorts by in step 3), the file:line it enters at, the concrete sequence,
@@ -177,7 +194,10 @@ statement of intent if one exists in the task description. Its brief:
    If a `[threat-model]` finding dedupes against (same file:line + issue as)
    an existing `[claude]`/`[codex]`/`[both]` finding, compose the tag instead
    of adding a parallel entry (e.g. a `[claude]` finding independently
-   reproduced by the attacker becomes `[claude+threat-model]`). Any finding
+   reproduced by the attacker becomes `[claude+threat-model]`). If the
+   composed finding's sources assigned it different severities, keep the
+   higher (more severe) of the two — never silently keep a lower severity
+   that understates a bypass's real impact. Any finding
    whose tag includes `threat-model` qualifies for the escalation rule in
    step 3.5 the same as a plain `[both]` finding, regardless of whether its
    file is in step 0's `gate_paths` (the attacker already vetted it). If step
@@ -191,7 +211,9 @@ For each merged finding, dispatch one `Agent`-tool skeptic subagent (fresh
 context) with: the finding's file:line, description, source tag, the cited
 code region, and step 0's frozen base/head (explicit, read-only), with
 instructions to Grep/Read that snapshot for callers, guards, tests, or
-contracts bearing on the claim.
+contracts bearing on the claim. Never invoke `codex exec` yourself, with or
+without a custom prompt — Bash access does not exempt this subagent from the
+recursion hazard step 2 describes.
 
 Instruct the skeptic to _prove_ the finding is a false positive or
 unreachable, using only these admissible evidence classes:
@@ -215,34 +237,41 @@ out, or returns a non-conforming response counts as `NOT-REFUTED`
 (fail-closed).
 
 **Escalate to a 3-skeptic majority vote** only when the single skeptic
-returns `REFUTED` for a finding that is _either_ tagged `[both]` (or any
-composite tag including `threat-model`, per step 3) _or_ whose own
-file:line is inside step 0's `gate_paths` set (not merely "somewhere in a
-diff that has a gate-like file elsewhere"). Dispatch 2 _additional_
-independent skeptics (3 verdicts total, none sees another's verdict). 2+
-`REFUTED` -> refuted; otherwise (including any fail-closed outcome) -> not
-refuted. This bounds fan-out to at most 3 skeptic calls per finding, and
-only for findings that are both refuted by the first pass and meet one of
-the two escalation conditions.
+returns `REFUTED` for a finding that meets _any_ of: tagged `[both]` (or any
+composite tag including `threat-model`, per step 3); whose own file:line is
+inside step 0's `gate_paths` set (not merely "somewhere in a diff that has a
+gate-like file elsewhere"); or whose assigned severity is critical or high —
+a single skeptic's say-so is not enough to silently demote a high-stakes
+finding regardless of source or file. Dispatch 2 _additional_ independent
+skeptics (3 verdicts total, none sees another's verdict). 2+ `REFUTED` ->
+refuted; otherwise (including any fail-closed outcome) -> not refuted. This
+bounds fan-out to at most 3 skeptic calls per finding, and only for findings
+that are both refuted by the first pass and meet one of the three escalation
+conditions.
 
 Re-tier, do not delete: findings that survive (not refuted, single or
-majority) sort first as today. Findings that are refuted sort last, tagged
-`[refuted -- low confidence]` with the skeptic's one-line rationale inline.
-Never silently dropped, and never described as resolved or absent in chat
-or the PR comment.
+majority) sort first as today, by severity. Findings that are refuted sort
+last, tagged `[refuted -- low confidence]` with the skeptic's one-line
+rationale inline, also ordered by severity within that tier (same convention
+as the survived tier, so a human skimming the refuted section can still find
+the highest-severity suppressed finding first). Never silently dropped, and
+never described as resolved or absent in chat or the PR comment.
 
 Run this stage inside both the initial pass and the bounded re-review pass
 (step 5) — it does not add a pass, it runs against whichever diff that
 pass is reviewing.
 
 4. **Resolve (triage-first).** Present the merged, tiered list: survived
-   findings first, then any coverage note from step 3.5's threat-model probe,
-   then refuted findings last under a clear `[refuted -- low confidence]`
-   heading. Ask which to fix; **default "fix all" applies to the survived tier
-   only** — a refuted finding is fixed only if the human names it explicitly
-   (e.g. "fix #N too"), since demotion already represents the skeptic's
-   best-effort judgment that it's noise. Apply approved fixes to the working
-   tree with Edit. Re-run the relevant tests/build to confirm.
+   findings first, then any coverage note carried from the threat-model probe
+   (step 2.5, folded in during step 3), then refuted findings last under a
+   clear `[refuted -- low confidence]` heading. Ask which to fix; **default
+   "fix all" applies to the survived tier only** — a refuted finding is fixed
+   only if the human names it explicitly (e.g. "fix #N too"), since demotion
+   already represents the skeptic's best-effort judgment that it's noise.
+   Apply approved fixes to the working tree with Edit. Re-run the relevant
+   tests/build to confirm. Track each finding's disposition (fixed / not
+   fixed) as you go — step 5's carry-forward relies on this record, not on
+   re-deriving it later.
 
 5. **Re-review the fix commit (bounded).** Applying fixes can introduce new
    bugs the first pass never saw — a swallowed error, a changed return type a
@@ -265,14 +294,19 @@ pass is reviewing.
    - **Carry forward pass 1's unresolved state.** Pass 2's own merge (step 3)
      only covers the fix-commit diff — it does not automatically re-surface
      pass 1's findings that were survived-but-not-fixed or refuted-but-not-fixed.
-     Maintain a running current-state list across both passes: every finding
-     from pass 1 that is still not fixed (survived or refuted) stays in its
-     tier in the final report; pass 2's newly-found findings are added to the
-     same two tiers. The final report (step 4's re-presentation after pass 2,
-     and step 6's PR comment) always reflects this union, not just pass 2's
-     fresh merge — a finding is removed from the report only once it is
-     actually fixed and verified, never merely because a later pass didn't
-     re-flag it.
+     Using step 4's per-finding disposition record, carry every finding from
+     pass 1 that is still not fixed (survived or refuted) into the final
+     report in its existing tier; add pass 2's newly-found findings to the
+     same two tiers. Before carrying a finding forward unchanged, check
+     whether the fix commit touched the code its tier verdict relied on (the
+     guard, caller, or contract a skeptic cited, or the invariant an attacker
+     tested against) — if it did, reverify that finding against the pass-2
+     snapshot instead of keeping the pass-1 tier automatically; a fix
+     elsewhere in the diff can invalidate a prior refutation's evidence. The
+     final report (step 4's re-presentation after pass 2, and step 6's PR
+     comment) always reflects this union, not just pass 2's fresh merge — a
+     finding is removed from the report only once it is actually fixed and
+     verified, never merely because a later pass didn't re-flag it.
    - Resolve any new findings (step 4 again), then **stop**. Hard cap: **2
      passes total** (initial review + one re-review). Never start a third —
      diminishing returns, and subjective findings start to thrash.
