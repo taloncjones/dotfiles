@@ -203,15 +203,20 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900):
         "fence": 1,
     }
     excl = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:  # fast path: first-ever claim is an atomic exclusive create
-        fd = os.open(p, excl, 0o600)
+    tmp = Path(f"{p}.new.{os.getpid()}")
+    try:  # fast path: first-ever claim publishes atomically via link, so `p`
+        # never appears on disk with partial/empty content for a racing reader.
+        tmp.write_text(json.dumps(rec))
         try:
-            os.write(fd, json.dumps(rec).encode())
-        finally:
-            os.close(fd)
-        return 1
-    except FileExistsError:
-        pass
+            os.link(tmp, p)
+            return 1
+        except FileExistsError:
+            pass  # someone else won the first claim; fall through to takeover
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     lock = Path(f"{p}.lock")
     try:  # serialize the read-modify-write of an existing owner
         lfd = os.open(lock, excl, 0o600)

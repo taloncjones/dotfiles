@@ -155,5 +155,30 @@ assert c.check_fence(rd,owner["session_id"],owner["fence"])
 sys.exit(0)
 PY
 
+check "ownership: concurrent FIRST-ever claim never yields a lost fence" <<PY
+$LOAD
+import subprocess, textwrap
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-fresh");rd.mkdir(parents=True)          # no pre-existing owner
+prog=textwrap.dedent('''
+import importlib.util,os,sys
+s=importlib.util.spec_from_file_location("core","claude/hooks/herdr_orch_core.py")
+c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+rd=c.repo_dir("slug-fresh")
+f=c.claim_owner(rd,sys.argv[1],"h",int(sys.argv[1][1:] or 0))
+print(f if f is not None else "None")
+''')
+env=dict(os.environ)
+procs=[subprocess.Popen([sys.executable,"-c",prog,f"s{i}"],stdout=subprocess.PIPE,env=env) for i in range(8)]
+outs=[p.communicate()[0].decode().strip() for p in procs]
+# every session that reports a non-None fence must really be the on-disk
+# owner for that fence -- a lost-fence bug lets a loser believe it won.
+winners=[(f"s{i}",out) for i,out in enumerate(outs) if out!="None"]
+assert len(winners)>=1, outs
+for sid,fence in winners:
+    assert c.check_fence(rd,sid,int(fence)), (sid,fence,outs)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
