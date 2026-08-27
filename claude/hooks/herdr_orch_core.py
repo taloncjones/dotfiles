@@ -504,7 +504,9 @@ def main(argv=None) -> int:
             by_task[tid].sort(key=lambda r: (r.get("ts", ""), r.get("event", "")))
         result = {}
         for tf in sorted((rd / "tasks").glob("*.json")):
-            if tf.name.endswith(".done.json"):
+            # Only the primary <task_id>.json record; the .done.json/.review.json
+            # sidecars sort after it and would otherwise overwrite the entry.
+            if tf.name.endswith((".done.json", ".review.json")):
                 continue
             try:
                 task = json.loads(tf.read_text())

@@ -354,6 +354,18 @@ printf '{"v":1,"ts":"2026-01-01T00:00:30Z","event":"blocked"}\n' > "$root/herdr-
 $CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert s['PROJ-1']['fold']['authoritative']=='completed',s;assert s['PROJ-2']['fold']['last_hint']=='blocked' and s['PROJ-2']['fold']['authoritative']!='completed',s"
 SH
 
+check "CLI status ignores .review.json sidecars (does not overwrite the task's status)" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"reviewed","review_head_sha":"h1"}'
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+  --reviewed-head-sha h1 --outcome approved
+# the sidecar sorts after PROJ-1.json; status must still report the real status
+$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1'] and s['PROJ-1']['status']=='reviewed',s"
+SH
+
 check "CLI should-dispatch-review: once per HEAD, re-review on new HEAD" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_orch_core.py"

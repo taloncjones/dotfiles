@@ -145,23 +145,30 @@ An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
 (`review-dispatched`, `reviewed`, or `changes-requested`) is honored only
 while its recorded `review_head_sha` equals current HEAD. If HEAD has advanced
 past it -- the branch moved during or after review, at any moment including
-just before a merge -- the verdict is stale: reset the task to `completed`
-(or `in-progress` if the new HEAD is not a confirmed-complete revision) AND
-clear `review_head_sha` to `null`. Clearing the marker is what lets
+just before a merge -- the verdict is stale. Recover it in three steps:
+(a) if a reviewer for this task is still running, **stop its agent and close
+its workspace** (the orchestrator owns both; the review is now moot) -- do this
+on every stale reset, whether it lands on `completed` or `in-progress`, because
+a reset to `in-progress` will not re-dispatch and so cannot rely on section 5's
+dispatch preflight to stop the reviewer; (b) reset the task to `completed` (or
+`in-progress` if the new HEAD is not a confirmed-complete revision); (c) clear
+`review_head_sha` to `null`. Clearing the marker is what lets
 `should-dispatch-review` re-fire for the new HEAD (it compares
 `review_head_sha` against live HEAD, so a leftover value equal to HEAD would
-wrongly suppress the re-dispatch). This one rule recovers every "branch
-advanced" case from whichever review state the task was in, so no review state
-is ever permanently stranded -- the next check-in corrects it.
+wrongly suppress the re-dispatch). This recovers every "branch advanced" case
+from whichever review state the task was in, so no review state is ever
+permanently stranded -- the next check-in corrects it.
 
-Re-dispatch always goes through section 5's dispatch preflight, which stops any
-reviewer still running on the task before starting a new one -- so a stale
-reset never leaves two reviewers racing the unfenced
-`tasks/<task_id>.done.json`. Known limitation (single-user-unreachable): two
-reviewer workers alive at once on one task would still race that write
-(last-writer-wins); the preflight removes the only extra writer this loop
-creates, and the merge gate's three-SHA correlation (section 6) is the
-backstop. Revisit only if review ever runs multi-worker.
+The stopped reviewer's `role:review` index entry is left behind (there is no
+delete-index verb), but it is inert: its workspace is gone, so
+`should-dispatch-review` and reconciliation ignore it, and the provenance-bound
+merge gate rejects its record (a stale `workspace_id`). Known limitation
+(single-user-unreachable): two reviewer workers alive at once on one task would
+still race the unfenced `tasks/<task_id>.review.json` write (last-writer-wins);
+stopping the prior reviewer on every reset, plus section 5's dispatch preflight,
+removes the only extra writer this loop creates, and the merge gate's
+provenance + three-SHA correlation (section 6) is the backstop. Revisit only if
+review ever runs multi-worker.
 
 Report per-task status, workspace, latest note, and recommended next action.
 
@@ -173,13 +180,15 @@ exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
 recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
 exits 1. Rely on this verb, never re-derive the guard by hand.
 
-**Dispatch preflight (no concurrent reviewers).** Before starting a reviewer,
-reconcile live `herdr agent`/workspace state for this task and stop/close any
-reviewer already running on it -- there must be exactly zero live reviewers
-before you start one. This covers both a re-dispatch after the section-4
-stale-verdict reset and an orphan reviewer left running by a crash in the
-launch-to-publish gap (step 3), where the task can still read `completed`.
-Because `emit-review` is unfenced (last-writer-wins on
+**Reviewer-dispatch preflight (no concurrent reviewers).** Before starting a
+reviewer, reconcile live `herdr agent`/workspace state for this task and
+stop/close any reviewer already running on it -- there must be exactly zero live
+reviewers before you start one. This is the belt-and-suspenders for the
+`completed`->dispatch path; the section-4 stale-verdict reset stops the reviewer
+on its own paths (including a reset to `in-progress`, which never reaches this
+preflight). It also catches a reviewer orphaned by a crash in step 3 below,
+between starting the reviewer agent and publishing its state, where the task can
+still read `completed`. Because `emit-review` is unfenced (last-writer-wins on
 `tasks/<task_id>.review.json`), a single live reviewer is the invariant that
 keeps the recorded verdict trustworthy.
 
