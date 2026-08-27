@@ -73,8 +73,8 @@ repo's own pipeline. The steps below call it "the worker".
 5. `herdr worktree create` (or `worktree open` if adopting); parse the
    `.result` for the new `HERDR_WORKSPACE_ID` and worktree path -- never
    derive them. Label the workspace `<task_id>`.
-6. **Launch the worker on its pinned model** via the argv-safe pane-split
-   path -- see section 8, Model launch. Send the kickoff brief (template in
+6. **Launch the worker on its pinned model** into the new workspace's own pane
+   -- see section 8, Model launch. Send the kickoff brief (template in
    references/brief-template.md), filled with `task_id`, worktree path,
    branch, and phase (`implement`).
 7. **Publish state only after the worker is launched** -- so a failed launch
@@ -130,10 +130,12 @@ Correlate these independent facts, all keyed to the same `task_id`/
 1. Resolve live HEAD in the task's worktree: `git rev-parse HEAD`.
 2. Live git ancestry: that HEAD is ahead of the task record's `base_sha`
    (the orchestrator checks this itself -- it is not part of `$CORE`).
-3. `$CORE confirm-completion --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
+3. `$CORE confirm-completion --repo-slug <slug> --task-id <task_id> --workspace <impl_ws> --head-sha <sha>`
    (exit 0/1) -- correlates `tasks/<task_id>.done.json` (`outcome: completed`,
-   matching `head_sha`/`base_sha`) against the task record and the live HEAD
-   passed in. Never re-derive this correlation by hand.
+   matching `head_sha`/`base_sha`, and `workspace_id` == the dispatched impl
+   workspace) against the task record and the live HEAD passed in. The
+   `--workspace` provenance check rejects a record from a foreign or older
+   worker. Never re-derive this correlation by hand.
 4. Live `herdr agent` state consistent with a finished worker.
 
 An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
@@ -178,30 +180,36 @@ before you start one. This covers both a re-dispatch after the section-4
 stale-verdict reset and an orphan reviewer left running by a crash in the
 launch-to-publish gap (step 3), where the task can still read `completed`.
 Because `emit-review` is unfenced (last-writer-wins on
-`tasks/<task_id>.done.json`), a single live reviewer is the invariant that
+`tasks/<task_id>.review.json`), a single live reviewer is the invariant that
 keeps the recorded verdict trustworthy.
 
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture
    the HEAD SHA as the intended `review_head_sha`.
 2. `herdr worktree open` a fresh workspace on the branch, label
-   `review:<task_id>`. `$CORE write-index ... --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "review"}'`.
-   Do not resume the implementer while review is pending.
-3. Start a unique `rev-<...>` agent on the reviewer model (section 8,
-   argv-safe launch). **Only after the agent successfully starts**, commit
-   the dispatch: `$CORE write-task ... --json '<record with review_head_sha, status "review-dispatched">'`.
-   This task-record `status` transition is the authoritative dispatch
-   record -- `events.jsonl` is hook-owned (worker lifecycle hints only) and
-   the orchestrator does not write to it. On start failure, clean up the
-   review workspace/index and leave the task at `completed` (retryable) --
-   never leave a half-dispatched state.
+   `review:<task_id>`; capture its `<ws_id>` and root pane from the `.result`.
+   Do not resume the implementer while review is pending. Do **not** write the
+   index yet -- publish state only after the agent starts (step 3).
+3. Start a unique `rev-<...>` agent on the reviewer model (section 8 launch).
+   **Only after the agent successfully starts**, publish state under the fence,
+   both writes together: `$CORE write-index ... --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "review"}'` and
+   `$CORE write-task ... --json '<record with review_head_sha, status "review-dispatched">'`.
+   Publishing the index _after_ launch (like kickoff, section 2) means a failed
+   launch leaves no orphan index -- there is nothing to clean up and no
+   delete-index verb is needed. The task-record `status` transition is the
+   authoritative dispatch record; `events.jsonl` is hook-owned (worker
+   lifecycle hints only) and the orchestrator does not write to it. On start
+   failure, nothing was published: leave the task at `completed` (retryable).
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
 5. Prompt the reviewer to run report-only `/code-review` (no `--fix`, no
    `--comment`) against the branch -- NOT `/co-review`, which fixes findings
    by default and would edit the very branch under review, destroying review
    independence -- then
-   `$CORE emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --findings-ref <path>`,
-   then `/handoff`. Reviewer and orchestrator never push or open PRs.
+   `$CORE emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>`
+   (`<n>` = count of blocking findings; the merge gate rejects any non-zero
+   count even under `approved`), then `/handoff`. Reviewer and orchestrator
+   never push or open PRs. The verdict lands in `tasks/<task_id>.review.json`,
+   separate from the impl `.done.json`.
 6. At the next check-in, read the reviewer's completion record. First confirm
    it covers the dispatched revision: the reviewer's `reviewed_head_sha` must
    equal both the dispatched `review_head_sha` and current HEAD. If any
@@ -218,14 +226,16 @@ keeps the recorded verdict trustworthy.
 ## 6. Surface for merge (human gate) -- only on `reviewed`
 
 A task is surfaced as merge-ready only when `status: reviewed` AND
-`$CORE confirm-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
-exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb ties three
-SHAs together -- the task record's dispatched `review_head_sha`, the review
-`done.json`'s `reviewed_head_sha`, and live HEAD must all equal `<sha>` (with
-`phase == "review"` and `outcome == "approved"`) -- so a branch advance after
-dispatch never clears the gate against an unreviewed revision, even if the
-reviewer logged the new live SHA rather than the one it actually reviewed.
-Rely on the verb, never re-derive the check by hand.
+`$CORE confirm-review --repo-slug <slug> --task-id <task_id> --workspace <review_ws> --head-sha <sha>`
+exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb reads
+`tasks/<task_id>.review.json` and passes only when ALL hold: `outcome ==
+"approved"`; `blocking_count` is 0; the record's `workspace_id` equals the
+dispatched review workspace (provenance); and the task record's dispatched
+`review_head_sha`, the review record's `reviewed_head_sha`, and live HEAD all
+equal `<sha>`. So an approved-with-blocking verdict, a foreign worker's record,
+or a branch advance after dispatch (even one where the reviewer logged the new
+live SHA) never clears the gate. Rely on the verb, never re-derive the check by
+hand.
 
 Surface: "`<task_id>` reviewed clean @ `<sha>`. Ready for your review and
 merge." `changes-requested` is never surfaced as merge-ready. Merge, `/ship`,
@@ -279,28 +289,37 @@ for every Fable role (safety classifiers can trip on benign work); never
 prompt Fable to transcribe its own reasoning (status/triage and design docs
 are work product / external state, which is safe).
 
-**Model launch (argv-safe, single path).** ALWAYS build the slot explicitly:
+**Model launch.** Launch into the new workspace's OWN pane -- the
+`worktree create`/`worktree open` result returns it; use that
+`.result.root_pane.pane_id` (the labelled pane the create call reports). Do
+**not** do a bare `herdr pane split` with no target: `--cwd` does not select the
+new workspace, so an untargeted split can land in another workspace's (or the
+UI's) pane, and the worker then inherits the wrong `HERDR_WORKSPACE_ID` so its
+hook events never match the published index.
 
-1. `herdr pane split --cwd <worktree> --no-focus` -> read `.result.pane.pane_id`.
-2. `herdr pane run <pane_id> "claude --model <model> <flags>"` -- `<model>`
-   comes from the config allowlist; keep the command a plain `claude`
-   invocation with no shell metacharacters.
-3. Register the pane as a tracked agent -- resolve the exact flags against
-   live `herdr pane report-agent --help` (it needs `--source`, `--agent`,
-   `--state`, and the `<pane_id>`); values are workflow-specific. Note:
-   `herdr pane run "claude ..."` may let herdr natively detect the claude
-   agent from the pane process, making an explicit `report-agent` call
-   unnecessary -- confirm which applies at first use rather than treating
-   `report-agent` as an unconditional step.
+To **pin a model**, run `claude` explicitly in that pane:
 
-Do **not** use `herdr agent start`'s trailing `-- <argv>` passthrough to pin
-a model -- it is unreliable across herdr versions (0.7.5+ made `--kind` a
-closed whitelist; herdr-swarm and herdr-conductor both avoid it). The
-pane-split path above is the single launch mechanism for every role.
+1. `<pane_id>` = the new workspace's root pane from the create/open result.
+2. `herdr pane run <pane_id> "claude --model <model> <flags>"` -- `<model>` from
+   the config allowlist; keep it a plain `claude` invocation with no shell
+   metacharacters.
+3. Register the pane as a tracked agent -- resolve exact flags against live
+   `herdr pane report-agent --help`; `herdr pane run "claude ..."` may let herdr
+   natively detect the agent, making the explicit call unnecessary -- confirm at
+   first use.
 
-Confirm the launched model via `herdr agent read` (or equivalent) on the
-worker's first turn, and **fail visibly** rather than let the wrong model
-run silently.
+When you are **not** pinning a model, the simpler `herdr agent start <name>
+--kind claude --pane <pane_id>` launches directly. The agent `<name>` must match
+the herdr-compliant form `[a-z][a-z0-9_-]{0,31}` (use the `agent_name` value,
+not the display label -- a spaced/capitalized name is rejected with
+`invalid_agent_name`). Do **not** use `agent start`'s trailing `-- <argv>`
+passthrough to pin a model -- it is unreliable across herdr versions (0.7.5+
+made `--kind` a closed whitelist; herdr-swarm and herdr-conductor both avoid it).
+
+Submit the brief and confirm the worker is live in one call:
+`herdr agent prompt <pane_id> "<brief>" --wait --until working`. Then confirm
+the launched model via `herdr agent read` and **fail visibly** rather than let
+the wrong model run silently.
 
 ## 9. State transition table (authoritative)
 

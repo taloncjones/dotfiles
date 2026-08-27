@@ -21,7 +21,8 @@ STATE_ROOT/
     config.json                       # machine-local config
     tasks/
       <task_id>.json                  # durable task record
-      <task_id>.done.json             # worker-emitted completion record
+      <task_id>.done.json             # impl worker completion record
+      <task_id>.review.json           # review worker verdict (separate file)
     workspaces/
       <HERDR_WORKSPACE_ID>.json               # reverse index (task/repo/role)
       <HERDR_WORKSPACE_ID>.events.jsonl       # per-workspace hint log
@@ -172,9 +173,13 @@ worker via `$CORE emit-done` at end of a phase.
 }
 ```
 
-A **review** worker writes the discriminated review variant (same file
-namespace, `phase: "review"`), via `$CORE emit-review`, carrying the
-reviewed revision and the findings the merge gate needs:
+### `tasks/<task_id>.review.json` -- review worker verdict
+
+A **review** worker writes its verdict to a **separate** file via
+`$CORE emit-review` (never the impl `.done.json`, so a review verdict can never
+clobber the completion record). `blocking_count` is the number of blocking
+findings the reviewer classified; the merge gate rejects any non-zero count
+even under an `approved` outcome:
 
 ```json
 {
@@ -185,17 +190,21 @@ reviewed revision and the findings the merge gate needs:
   "phase": "review",
   "outcome": "approved|changes-requested",
   "reviewed_head_sha": "<40hex>",
-  "findings": { "blocking": [], "advisory": [] },
+  "blocking_count": 0,
   "findings_ref": "<path to full /code-review output>",
   "ts": "..."
 }
 ```
 
-The merge gate (`$CORE confirm-review`) requires `outcome == "approved"` with
-the task record's dispatched `review_head_sha`, this record's
-`reviewed_head_sha`, and current HEAD all equal; `changes-requested` (or any
-non-empty `blocking`), or a dispatched/reviewed/HEAD mismatch, is never
-merge-ready.
+The merge gate (`$CORE confirm-review --workspace <review_ws> --head-sha <sha>`)
+is merge-ready only when ALL hold: `outcome == "approved"`; `blocking_count`
+is 0; the record's `workspace_id` equals the dispatched review workspace
+(provenance -- a foreign or older worker's record is rejected); and the task
+record's dispatched `review_head_sha`, this record's `reviewed_head_sha`, and
+current HEAD are all equal. `changes-requested`, any blocking finding, a
+provenance mismatch, or a dispatched/reviewed/HEAD mismatch is never
+merge-ready. `$CORE confirm-completion` takes the same `--workspace` provenance
+check for the impl `.done.json`.
 
 ### `workspaces/<HERDR_WORKSPACE_ID>.json` -- reverse index
 

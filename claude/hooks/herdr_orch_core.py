@@ -281,10 +281,16 @@ def refresh_owner(rd, session_id, fence) -> bool:
     return True
 
 
-def is_completed(task, done, live_head_sha) -> bool:
-    if not isinstance(done, dict) or done.get("outcome") != "completed":
+def is_completed(task, done, live_head_sha, workspace) -> bool:
+    if not isinstance(task, dict) or not isinstance(done, dict):
+        return False
+    if done.get("outcome") != "completed":
         return False
     if done.get("task_id") != task.get("task_id"):
+        return False
+    # Provenance: the record must come from the workspace the orchestrator
+    # dispatched for this task, not a foreign/older worker that raced the file.
+    if done.get("workspace_id") != workspace:
         return False
     if done.get("head_sha") != live_head_sha or done.get("base_sha") != task.get(
         "base_sha"
@@ -301,18 +307,24 @@ def should_dispatch_review(task, head_sha) -> bool:
     return task.get("review_head_sha") != head_sha
 
 
-def is_reviewed(task, done, head_sha) -> bool:
+def is_reviewed(task, done, head_sha, workspace) -> bool:
     """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
-    live HEAD all agree. Requiring the task record's dispatched `review_head_sha`
-    too (not just `done.reviewed_head_sha` == HEAD) stops a branch advance after
-    dispatch from slipping an unreviewed revision through: if the reviewer records
-    the new live SHA while `/code-review` actually ran against the old one, the
-    dispatched SHA no longer matches and the gate holds."""
+    live HEAD all agree, the record comes from the dispatched review workspace,
+    and no blocking finding was reported. Requiring the task record's dispatched
+    `review_head_sha` too (not just `done.reviewed_head_sha` == HEAD) stops a
+    branch advance after dispatch from slipping an unreviewed revision through;
+    the `blocking_count` guard stops an `approved` verdict that still carries
+    blocking findings from clearing the gate."""
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
     if done.get("task_id") != task.get("task_id"):
         return False
+    # Provenance: only the workspace the orchestrator dispatched for review.
+    if done.get("workspace_id") != workspace:
+        return False
     if done.get("phase") != "review" or done.get("outcome") != "approved":
+        return False
+    if int(done.get("blocking_count", 0)) != 0:
         return False
     return task.get("review_head_sha") == head_sha and (
         done.get("reviewed_head_sha") == head_sha
@@ -379,10 +391,11 @@ def main(argv=None) -> int:
         "--outcome",
     )
     er.add_argument("--findings-ref", default=None)
+    er.add_argument("--blocking-count", type=int, default=0)
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
-    add("confirm-completion", "--task-id", "--head-sha")
-    add("confirm-review", "--task-id", "--head-sha")
+    add("confirm-completion", "--task-id", "--workspace", "--head-sha")
+    add("confirm-review", "--task-id", "--workspace", "--head-sha")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "claim-owner":
@@ -423,8 +436,15 @@ def main(argv=None) -> int:
     if ns.cmd == "write-index":
         rd = _fenced(ns)
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
+        try:
+            rec = json.loads(ns.json)
+        except ValueError:
+            rec = None
+        # Same guard as write-task: a non-dict index would read back as None
+        # (read_index rejects it), silently orphaning the workspace's events.
+        _require(isinstance(rec, dict), "index json must be a JSON object")
         (rd / "workspaces").mkdir(parents=True, exist_ok=True)
-        write_json_atomic(index_path(rd, ns.workspace), json.loads(ns.json))
+        write_json_atomic(index_path(rd, ns.workspace), rec)
         return 0
     if ns.cmd in ("emit-done", "emit-review"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -444,6 +464,7 @@ def main(argv=None) -> int:
                 "base_sha": ns.base_sha,
                 "ts": now_iso(),
             }
+            out = rd / "tasks" / f"{ns.task_id}.done.json"
         else:
             done = {
                 "v": 1,
@@ -453,11 +474,14 @@ def main(argv=None) -> int:
                 "phase": "review",
                 "outcome": ns.outcome,
                 "reviewed_head_sha": ns.reviewed_head_sha,
+                "blocking_count": int(ns.blocking_count),
                 "ts": now_iso(),
             }
             if ns.findings_ref:
                 done["findings_ref"] = ns.findings_ref
-        out = rd / "tasks" / f"{ns.task_id}.done.json"
+            # A distinct file so a review verdict never clobbers the impl
+            # completion record -- the two coexist and are read independently.
+            out = rd / "tasks" / f"{ns.task_id}.review.json"
         _require(contained(out, state_root()), "escapes state root")
         write_json_atomic(out, done)
         return 0
@@ -507,6 +531,7 @@ def main(argv=None) -> int:
     if ns.cmd == "confirm-completion":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(valid_workspace_id(ns.workspace), "invalid workspace")
         rd = repo_dir(ns.repo_slug)
         tf = rd / "tasks" / f"{ns.task_id}.json"
         df = rd / "tasks" / f"{ns.task_id}.done.json"
@@ -520,24 +545,25 @@ def main(argv=None) -> int:
             done = json.loads(df.read_text())
         except (OSError, ValueError):
             done = None
-        return 0 if is_completed(task, done, ns.head_sha) else 1
+        return 0 if is_completed(task, done, ns.head_sha, ns.workspace) else 1
     if ns.cmd == "confirm-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(valid_workspace_id(ns.workspace), "invalid workspace")
         rd = repo_dir(ns.repo_slug)
         tf = rd / "tasks" / f"{ns.task_id}.json"
-        df = rd / "tasks" / f"{ns.task_id}.done.json"
+        rf = rd / "tasks" / f"{ns.task_id}.review.json"
         _require(contained(tf, state_root()), "escapes state root")
-        _require(contained(df, state_root()), "escapes state root")
+        _require(contained(rf, state_root()), "escapes state root")
         try:
             task = json.loads(tf.read_text())
         except (OSError, ValueError):
             return 1
         try:
-            done = json.loads(df.read_text())
+            done = json.loads(rf.read_text())
         except (OSError, ValueError):
             done = None
-        return 0 if is_reviewed(task, done, ns.head_sha) else 1
+        return 0 if is_reviewed(task, done, ns.head_sha, ns.workspace) else 1
     return 2
 
 

@@ -65,8 +65,9 @@ Classify every finding as blocking or advisory.
 
 ## Close
 When review is complete:
-1. Run:
-   `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-review --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --findings-ref <path to full /code-review output>`
+1. Run (`--blocking-count` is the number of findings you classified as
+   blocking; set `--outcome changes-requested` whenever it is non-zero):
+   `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-review --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path to full /code-review output>`
 2. Then run `/handoff`.
 
 Never push, merge, or open a PR.

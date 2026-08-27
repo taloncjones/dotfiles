@@ -104,31 +104,34 @@ assert c.read_index(rd,"w2") is None
 sys.exit(0)
 PY
 
-check "is_completed: outcome + task-id + HEAD==live + ahead-of-base" <<PY
+check "is_completed: outcome + task-id + workspace + HEAD==live + ahead-of-base" <<PY
 $LOAD
 task={"task_id":"PROJ-1","base_sha":"b0"}
-good={"outcome":"completed","task_id":"PROJ-1","head_sha":"h1","base_sha":"b0"}
-assert c.is_completed(task,good,"h1")
-assert not c.is_completed(task,good,"h2")                                   # HEAD moved
-assert not c.is_completed(task,{**good,"task_id":"PROJ-2"},"h1")            # wrong task
-assert not c.is_completed(task,{**good,"head_sha":"b0"},"b0")              # zero commits (head==base)
-assert not c.is_completed(task,{**good,"outcome":"paused"},"h1")
-assert not c.is_completed(task,None,"h1")
+good={"outcome":"completed","task_id":"PROJ-1","workspace_id":"w1","head_sha":"h1","base_sha":"b0"}
+assert c.is_completed(task,good,"h1","w1")
+assert not c.is_completed(task,good,"h2","w1")                              # HEAD moved
+assert not c.is_completed(task,good,"h1","w2")                             # foreign workspace (provenance)
+assert not c.is_completed(task,{**good,"task_id":"PROJ-2"},"h1","w1")       # wrong task
+assert not c.is_completed(task,{**good,"head_sha":"b0"},"b0","w1")         # zero commits (head==base)
+assert not c.is_completed(task,{**good,"outcome":"paused"},"h1","w1")
+assert not c.is_completed(task,None,"h1","w1")
 sys.exit(0)
 PY
 
-check "is_reviewed: dispatched==reviewed==HEAD; stale HEAD/dispatch/outcome/task rejected" <<PY
+check "is_reviewed: dispatched==reviewed==HEAD + workspace + no blocking; else rejected" <<PY
 $LOAD
 task={"task_id":"PROJ-1","review_head_sha":"h1"}
-done={"task_id":"PROJ-1","phase":"review","outcome":"approved","reviewed_head_sha":"h1"}
-assert c.is_reviewed(task,done,"h1")
-assert not c.is_reviewed(task,done,"h2")                              # HEAD advanced past the reviewed SHA
-assert not c.is_reviewed(task,{**done,"reviewed_head_sha":"h2"},"h2") # reviewer logged new HEAD, dispatch was h1
-assert not c.is_reviewed({"task_id":"PROJ-1","review_head_sha":"h0"},done,"h1")  # dispatch != reviewed/HEAD
-assert not c.is_reviewed(task,{**done,"outcome":"changes-requested"},"h1")
-assert not c.is_reviewed(task,{**done,"phase":"implement"},"h1")      # an impl done.json, not a review
-assert not c.is_reviewed(task,{**done,"task_id":"PROJ-2"},"h1")
-assert not c.is_reviewed(task,None,"h1")
+done={"task_id":"PROJ-1","workspace_id":"w9","phase":"review","outcome":"approved","reviewed_head_sha":"h1","blocking_count":0}
+assert c.is_reviewed(task,done,"h1","w9")
+assert not c.is_reviewed(task,done,"h2","w9")                              # HEAD advanced past the reviewed SHA
+assert not c.is_reviewed(task,done,"h1","w8")                             # foreign review workspace (provenance)
+assert not c.is_reviewed(task,{**done,"blocking_count":2},"h1","w9")      # approved but blocking findings remain
+assert not c.is_reviewed(task,{**done,"reviewed_head_sha":"h2"},"h2","w9") # reviewer logged new HEAD, dispatch was h1
+assert not c.is_reviewed({"task_id":"PROJ-1","review_head_sha":"h0"},done,"h1","w9")  # dispatch != reviewed/HEAD
+assert not c.is_reviewed(task,{**done,"outcome":"changes-requested"},"h1","w9")
+assert not c.is_reviewed(task,{**done,"phase":"implement"},"h1","w9")     # not a review record
+assert not c.is_reviewed(task,{**done,"task_id":"PROJ-2"},"h1","w9")
+assert not c.is_reviewed(task,None,"h1","w9")
 sys.exit(0)
 PY
 
@@ -277,40 +280,63 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
 test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 SH
 
-check "CLI confirm-review: dispatched==reviewed==HEAD passes; advance/records-new-HEAD/changes fail" <<'SH'
+check "CLI write-index rejects a non-dict payload (would orphan the workspace)" <<'SH'
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py claim-owner \
+   --repo-slug slug-x --session S --host h --pid 1)
+# a bare array reads back as None from read_index -> events silently orphaned; must be refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-index \
+   --repo-slug slug-x --workspace w1 --session S --fence "$f" --json '[]' 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/slug-x/workspaces/w1.json"
+# a well-formed object persists
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-index \
+   --repo-slug slug-x --workspace w1 --session S --fence "$f" --json '{"task_id":"PROJ-1","role":"impl"}'
+test -f "$root/herdr-orch/slug-x/workspaces/w1.json"
+SH
+
+check "CLI confirm-review: dispatched==reviewed==HEAD+workspace+no-blocking passes; else fails" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_orch_core.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
-# no task/done yet -> not reviewed
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+# no task/review yet -> not reviewed
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"h1"}'
-# task dispatched at h1 but no done.json yet -> not reviewed
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+# task dispatched at h1 but no review.json yet -> not reviewed
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome approved
-# dispatched == reviewed == HEAD (h1) -> merge-ready
-$CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1
+# dispatched == reviewed == HEAD (h1), right workspace, no blocking -> merge-ready
+$CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1
+# a foreign review workspace's record does not clear the gate (provenance)
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w8 --head-sha h1 2>/dev/null; then exit 1; fi
 # HEAD advanced to h2 after a clean review of h1 -> gate holds
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h2 2>/dev/null; then exit 1; fi
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h2 2>/dev/null; then exit 1; fi
 # reviewer records the new live SHA h2 though dispatch was h1 -> still rejected
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h2 --outcome approved
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h2 2>/dev/null; then exit 1; fi
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h2 2>/dev/null; then exit 1; fi
+# approved but blocking findings remain -> rejected
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+  --reviewed-head-sha h1 --outcome approved --blocking-count 1
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
 # a changes-requested review is never merge-ready
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome changes-requested
-if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
 SH
 
-check "CLI emit-review records reviewed_head_sha + outcome" <<'SH'
+check "CLI emit-review writes a separate review.json with blocking_count, never clobbering done.json" <<'SH'
 root=$(mktemp -d)
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py emit-review \
   --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
-  --reviewed-head-sha h9 --outcome changes-requested --findings-ref /tmp/f.md
+  --reviewed-head-sha h9 --outcome changes-requested --blocking-count 3 --findings-ref /tmp/f.md
 python3 - <<PY
-import json;d=json.load(open("$root/herdr-orch/slug-x/tasks/PROJ-1.done.json"))
+import json,os
+d=json.load(open("$root/herdr-orch/slug-x/tasks/PROJ-1.review.json"))
 assert d["phase"]=="review" and d["outcome"]=="changes-requested" and d["reviewed_head_sha"]=="h9"
+assert d["blocking_count"]==3
+assert not os.path.exists("$root/herdr-orch/slug-x/tasks/PROJ-1.done.json")  # review record is a distinct file
 PY
 SH
 
@@ -341,19 +367,21 @@ if $CLI should-dispatch-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1
 $CLI should-dispatch-review --repo-slug slug-x --task-id PROJ-1 --head-sha h2
 SH
 
-check "CLI confirm-completion: matching HEAD/base completes, mismatch does not" <<'SH'
+check "CLI confirm-completion: matching HEAD/base/workspace completes, mismatch does not" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_orch_core.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress"}'
 # no done.json yet -> not completed
-if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h1 2>/dev/null; then exit 1; fi
 $CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 \
   --phase implement --outcome completed --head-sha h1 --base-sha b0
-$CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --head-sha h1
+$CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h1
+# a foreign workspace's record does not satisfy the gate (provenance)
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w2 --head-sha h1 2>/dev/null; then exit 1; fi
 # HEAD moved past the recorded done.json -> not completed
-if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --head-sha h2 2>/dev/null; then exit 1; fi
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h2 2>/dev/null; then exit 1; fi
 SH
 
 # args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)

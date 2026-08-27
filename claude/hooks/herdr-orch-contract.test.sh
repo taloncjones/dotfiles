@@ -64,11 +64,11 @@ t['review_head_sha']='h1'
 assert not c.should_dispatch_review(t,'h1') and c.should_dispatch_review(t,'h2')
 PY"
 
-# 5. review changes-requested is recorded (not merge-ready)
+# 5. review changes-requested recorded in a separate file; impl done.json survives
 $CLI emit-review --repo-slug "$SLUG" --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome changes-requested --findings-ref /tmp/f.md
-ok "review record is changes-requested" \
-  "python3 -c \"import json;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json'));import sys;sys.exit(0 if d['outcome']=='changes-requested' and d['reviewed_head_sha']=='h1' else 1)\""
+ok "review record is a separate review.json; the impl completion record is not clobbered" \
+  "python3 -c \"import json,sys;r=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.review.json'));d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json'));sys.exit(0 if r['outcome']=='changes-requested' and r['reviewed_head_sha']=='h1' and d['outcome']=='completed' and d['head_sha']=='h1' else 1)\""
 
 # 6. fenced writes fail after ownership takeover (yield semantics)
 F2=$($CLI claim-owner --repo-slug "$SLUG" --session T --host h --pid 2 --stale-secs 0 2>/dev/null || true)
