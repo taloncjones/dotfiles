@@ -41,6 +41,11 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
    - On every subsequent turn this session acts in the repo, call
      `$CORE refresh-owner --repo-slug <slug> --session <id> --fence <fence>`
      to keep the heartbeat alive.
+   - Fencing otherwise happens implicitly inside `write-task`/`write-index`
+     (each aborts under a stale fence); before a multi-call sequence like
+     kickoff, the orchestrator may proactively call
+     `$CORE check-fence --repo-slug <slug> --session <id> --fence <fence>`
+     to fail fast rather than partway through.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
@@ -76,9 +81,12 @@ read "impl" as "the initial-phase worker".
    path -- see section 8, Model launch. Send the kickoff brief (template in
    references/brief-template.md), filled with `task_id`, worktree path,
    branch, and phase.
-8. Append the `kickoff` event and set `status: in-progress` (via a follow-up
-   `write-task` call under the same fence). **Jira writeback** (kind ==
-   `"jira"` only): transition the ticket to In Progress -- see section 10.
+8. The authoritative record of kickoff is the task record's `status` field:
+   a follow-up `$CORE write-task` call under the same fence sets
+   `status: in-progress`. `events.jsonl` is hook-owned (worker lifecycle
+   hints only, see references/event-schema.md) -- the orchestrator does not
+   write to it. **Jira writeback** (kind == `"jira"` only): transition the
+   ticket to In Progress -- see section 10.
 9. **Partial-failure/crash:** on any failure during steps 3-7, clean up only
    resources this attempt created (`created_by_this_orch: true`); never
    delete adopted/pre-existing resources.
@@ -140,8 +148,10 @@ never re-derive the guard by hand).
    Do not resume the implementer while review is pending.
 3. Start a unique `rev-<...>` agent on the reviewer model (section 8,
    argv-safe launch). **Only after the agent successfully starts**, commit
-   the dispatch: `$CORE write-task ... --json '<record with review_head_sha, status "review-dispatched">'`
-   and append the `review-dispatched` event. On start failure, clean up the
+   the dispatch: `$CORE write-task ... --json '<record with review_head_sha, status "review-dispatched">'`.
+   This task-record `status` transition is the authoritative dispatch
+   record -- `events.jsonl` is hook-owned (worker lifecycle hints only) and
+   the orchestrator does not write to it. On start failure, clean up the
    review workspace/index and leave the task at `completed` (retryable) --
    never leave a half-dispatched state.
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
@@ -219,8 +229,13 @@ are work product / external state, which is safe).
 2. `herdr pane run <pane_id> "claude --model <model> <flags>"` -- `<model>`
    comes from the config allowlist; keep the command a plain `claude`
    invocation with no shell metacharacters.
-3. `herdr pane report-agent <pane_id> --name <agent-name> ...` to register
-   the pane as a tracked agent.
+3. Register the pane as a tracked agent -- resolve the exact flags against
+   live `herdr pane report-agent --help` (it needs `--source`, `--agent`,
+   `--state`, and the `<pane_id>`); values are workflow-specific. Note:
+   `herdr pane run "claude ..."` may let herdr natively detect the claude
+   agent from the pane process, making an explicit `report-agent` call
+   unnecessary -- confirm which applies at first use rather than treating
+   `report-agent` as an unconditional step.
 
 Do **not** use `herdr agent start`'s trailing `-- <argv>` passthrough to pin
 a model -- it is unreliable across herdr versions (0.7.5+ made `--kind` a
