@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import re
-import sys  # noqa: F401 -- used by the CLI added in a later task
+import sys
 import time
 from pathlib import Path
 
@@ -273,3 +273,171 @@ def is_completed(task, done, live_head_sha) -> bool:
     return done.get("head_sha") != done.get(
         "base_sha"
     )  # at least one commit ahead of base
+
+
+def should_dispatch_review(task, head_sha) -> bool:
+    if task.get("status") != "completed":
+        return False
+    return task.get("review_dispatched_head") != head_sha
+
+
+def _require(cond, msg) -> None:
+    if not cond:
+        sys.stderr.write(f"[X] {msg}\n")
+        raise SystemExit(2)
+
+
+def _fenced(ns):
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    rd = repo_dir(ns.repo_slug)
+    _require(check_fence(rd, ns.session, int(ns.fence)), "stale or missing fence")
+    return rd
+
+
+def main(argv=None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def add(name, *args, fenced=False):
+        p = sub.add_parser(name)
+        p.add_argument("--repo-slug", required=True)
+        if fenced:
+            p.add_argument("--session", required=True)
+            p.add_argument("--fence", required=True)
+        for a in args:
+            p.add_argument(a, required=True)
+        return p
+
+    co = add("claim-owner", "--session", "--host", "--pid")
+    co.add_argument("--stale-secs", type=int, default=None)  # test/override hook
+    add("refresh-owner", "--session", "--fence")
+    add("check-fence", "--session", "--fence")
+    add("write-task", "--task-id", "--json", fenced=True)
+    add("write-index", "--workspace", "--json", fenced=True)
+    add(
+        "emit-done",
+        "--task-id",
+        "--workspace",
+        "--agent",
+        "--phase",
+        "--outcome",
+        "--head-sha",
+        "--base-sha",
+    )
+    er = add(
+        "emit-review",
+        "--task-id",
+        "--workspace",
+        "--agent",
+        "--reviewed-head-sha",
+        "--outcome",
+    )
+    er.add_argument("--findings-ref", default=None)
+    add("status")
+    ns = ap.parse_args(argv)
+
+    if ns.cmd == "claim-owner":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        kw = {} if ns.stale_secs is None else {"stale_secs": ns.stale_secs}
+        fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid, **kw)
+        if fence is None:
+            print("BUSY")
+            return 1
+        print(fence)
+        return 0
+    if ns.cmd == "check-fence":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        return (
+            0 if check_fence(repo_dir(ns.repo_slug), ns.session, int(ns.fence)) else 1
+        )
+    if ns.cmd == "refresh-owner":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        return (
+            0 if refresh_owner(repo_dir(ns.repo_slug), ns.session, int(ns.fence)) else 1
+        )
+    if ns.cmd == "write-task":
+        rd = _fenced(ns)
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        (rd / "tasks").mkdir(parents=True, exist_ok=True)
+        write_json_atomic(rd / "tasks" / f"{ns.task_id}.json", json.loads(ns.json))
+        return 0
+    if ns.cmd == "write-index":
+        rd = _fenced(ns)
+        _require(valid_workspace_id(ns.workspace), "invalid workspace")
+        (rd / "workspaces").mkdir(parents=True, exist_ok=True)
+        write_json_atomic(index_path(rd, ns.workspace), json.loads(ns.json))
+        return 0
+    if ns.cmd in ("emit-done", "emit-review"):
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(valid_workspace_id(ns.workspace), "invalid workspace")
+        rd = repo_dir(ns.repo_slug)
+        (rd / "tasks").mkdir(parents=True, exist_ok=True)
+        if ns.cmd == "emit-done":
+            done = {
+                "v": 1,
+                "task_id": ns.task_id,
+                "workspace_id": ns.workspace,
+                "agent": ns.agent,
+                "phase": ns.phase,
+                "outcome": ns.outcome,
+                "head_sha": ns.head_sha,
+                "base_sha": ns.base_sha,
+                "ts": now_iso(),
+            }
+        else:
+            done = {
+                "v": 1,
+                "task_id": ns.task_id,
+                "workspace_id": ns.workspace,
+                "agent": ns.agent,
+                "phase": "review",
+                "outcome": ns.outcome,
+                "reviewed_head_sha": ns.reviewed_head_sha,
+                "ts": now_iso(),
+            }
+            if ns.findings_ref:
+                done["findings_ref"] = ns.findings_ref
+        out = rd / "tasks" / f"{ns.task_id}.done.json"
+        _require(contained(out, state_root()), "escapes state root")
+        write_json_atomic(out, done)
+        return 0
+    if ns.cmd == "status":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        # Associate each workspace's events with its task via the workspace index,
+        # then order per-task events chronologically (ts, event tie-breaker).
+        by_task = {}
+        for ef in (rd / "workspaces").glob("*.events.jsonl"):
+            ws = ef.name[: -len(".events.jsonl")]
+            idx = read_index(rd, ws) or {}
+            tid = idx.get("task_id")
+            if not tid:
+                continue
+            by_task.setdefault(tid, []).extend(
+                parse_events(ef.read_text().splitlines())
+            )
+        for tid in by_task:
+            by_task[tid].sort(key=lambda r: (r.get("ts", ""), r.get("event", "")))
+        result = {}
+        for tf in sorted((rd / "tasks").glob("*.json")):
+            if tf.name.endswith(".done.json"):
+                continue
+            try:
+                task = json.loads(tf.read_text())
+            except ValueError:
+                continue
+            tid = task.get("task_id")
+            result[tid] = {
+                "status": task.get("status"),
+                "fold": fold_status(by_task.get(tid, [])),
+            }
+        print(json.dumps(result))
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

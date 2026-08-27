@@ -5,11 +5,22 @@ set -e
 PASS=0
 FAIL=0
 
-# check LABEL  -- runs a python snippet on stdin; exit 0 pass / non-0 fail.
+# check LABEL  -- runs a python (<<PY, body starts with the $LOAD "import"
+# line) or shell (<<'SH', body starts with a shell assignment) snippet on
+# stdin; exit 0 pass / non-0 fail.
 check() {
     label="$1"
-    if python3 - ; then printf 'PASS  %s\n' "$label"; PASS=$((PASS + 1))
-    else printf 'FAIL  %s\n' "$label" >&2; FAIL=$((FAIL + 1)); fi
+    body=$(cat)
+    first_line=$(printf '%s\n' "$body" | head -n 1)
+    case "$first_line" in
+        import*) runner="python3 -" ;;
+        *) runner="sh -e -" ;;
+    esac
+    if printf '%s\n' "$body" | $runner; then
+        printf 'PASS  %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s\n' "$label" >&2; FAIL=$((FAIL + 1))
+    fi
 }
 # load helper prefixed to every snippet
 LOAD='import importlib.util,sys,os,tempfile,json,re
@@ -179,6 +190,68 @@ for sid,fence in winners:
     assert c.check_fence(rd,sid,int(fence)), (sid,fence,outs)
 sys.exit(0)
 PY
+
+CLI="python3 claude/hooks/herdr_orch_core.py"
+
+check "should_dispatch_review: once per HEAD, re-review on new HEAD" <<PY
+$LOAD
+t={"status":"completed","review_dispatched_head":None}
+assert c.should_dispatch_review(t,"h1")
+t["review_dispatched_head"]="h1"
+assert not c.should_dispatch_review(t,"h1")            # already dispatched for h1
+assert c.should_dispatch_review(t,"h2")                # new HEAD -> re-review
+assert not c.should_dispatch_review({"status":"in-progress"},"h1")
+sys.exit(0)
+PY
+
+check "CLI emit-done rejects path-escaping ids" <<'SH'
+root=$(mktemp -d)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py emit-done \
+  --repo-slug "../evil" --task-id "PROJ-1" --workspace w1 --agent a --phase implement \
+  --outcome completed --head-sha h --base-sha b 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py emit-done \
+  --repo-slug "slug-x" --task-id "../evil" --workspace w1 --agent a --phase implement \
+  --outcome completed --head-sha h --base-sha b 2>/dev/null; then exit 1; fi
+test ! -e "$root/../evil"
+SH
+
+check "CLI write-task requires a live fence" <<'SH'
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py claim-owner \
+   --repo-slug slug-x --session S --host h --pid 1)
+task='{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress"}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+   --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json "$task"
+test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
+# wrong fence is refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+   --repo-slug slug-x --task-id PROJ-1 --session S --fence 999 --json "$task" 2>/dev/null; then exit 1; fi
+SH
+
+check "CLI emit-review records reviewed_head_sha + outcome" <<'SH'
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py emit-review \
+  --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+  --reviewed-head-sha h9 --outcome changes-requested --findings-ref /tmp/f.md
+python3 - <<PY
+import json;d=json.load(open("$root/herdr-orch/slug-x/tasks/PROJ-1.done.json"))
+assert d["phase"]=="review" and d["outcome"]=="changes-requested" and d["reviewed_head_sha"]=="h9"
+PY
+SH
+
+check "CLI status folds events per task, not cross-contaminated" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" --json '{"task_id":"PROJ-1","status":"in-progress"}'
+$CLI write-task --repo-slug slug-x --task-id PROJ-2 --session S --fence "$F" --json '{"task_id":"PROJ-2","status":"in-progress"}'
+$CLI write-index --repo-slug slug-x --workspace w1 --session S --fence "$F" --json '{"task_id":"PROJ-1","role":"impl"}'
+$CLI write-index --repo-slug slug-x --workspace w2 --session S --fence "$F" --json '{"task_id":"PROJ-2","role":"impl"}'
+# w1 -> PROJ-1 completed; w2 -> PROJ-2 blocked. Events must not cross tasks.
+printf '{"v":1,"ts":"2026-01-01T00:00:00Z","event":"kickoff"}\n{"v":1,"ts":"2026-01-01T00:01:00Z","event":"completed"}\n' > "$root/herdr-orch/slug-x/workspaces/w1.events.jsonl"
+printf '{"v":1,"ts":"2026-01-01T00:00:30Z","event":"blocked"}\n' > "$root/herdr-orch/slug-x/workspaces/w2.events.jsonl"
+$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert s['PROJ-1']['fold']['authoritative']=='completed',s;assert s['PROJ-2']['fold']['last_hint']=='blocked' and s['PROJ-2']['fold']['authoritative']!='completed',s"
+SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
