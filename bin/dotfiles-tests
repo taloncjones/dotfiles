@@ -23,6 +23,7 @@ sh install/install.test.sh
 sh zsh/functions.test.sh
 sh claude/hooks/claude-hooks.test.sh
 sh claude/hooks/herdr-orch.test.sh
+sh claude/hooks/herdr-orch-contract.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
 sh git/hooks/commit-msg.test.sh
