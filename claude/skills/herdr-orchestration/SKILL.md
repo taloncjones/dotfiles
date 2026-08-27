@@ -152,14 +152,12 @@ wrongly suppress the re-dispatch). This one rule recovers every "branch
 advanced" case from whichever review state the task was in, so no review state
 is ever permanently stranded -- the next check-in corrects it.
 
-If the stale state is `review-dispatched`, first **retire the old reviewer**:
-stop its agent and close its review workspace (the orchestrator owns both)
-before clearing the marker and re-dispatching. Otherwise the retired reviewer
-keeps running and can overwrite the replacement's `tasks/<task_id>.done.json`
--- `emit-review` is worker-called and unfenced (a worker holds no ownership
-fence), so its writes are last-writer-wins. Known limitation (single-user-
-unreachable): two reviewer workers alive at once on one task can still race
-that file; stopping the prior reviewer removes the only writer this loop
+Re-dispatch always goes through section 5's dispatch preflight, which stops any
+reviewer still running on the task before starting a new one -- so a stale
+reset never leaves two reviewers racing the unfenced
+`tasks/<task_id>.done.json`. Known limitation (single-user-unreachable): two
+reviewer workers alive at once on one task would still race that write
+(last-writer-wins); the preflight removes the only extra writer this loop
 creates, and the merge gate's three-SHA correlation (section 6) is the
 backstop. Revisit only if review ever runs multi-worker.
 
@@ -172,6 +170,16 @@ Guard: `$CORE status` reports `completed` and
 exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
 recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
 exits 1. Rely on this verb, never re-derive the guard by hand.
+
+**Dispatch preflight (no concurrent reviewers).** Before starting a reviewer,
+reconcile live `herdr agent`/workspace state for this task and stop/close any
+reviewer already running on it -- there must be exactly zero live reviewers
+before you start one. This covers both a re-dispatch after the section-4
+stale-verdict reset and an orphan reviewer left running by a crash in the
+launch-to-publish gap (step 3), where the task can still read `completed`.
+Because `emit-review` is unfenced (last-writer-wins on
+`tasks/<task_id>.done.json`), a single live reviewer is the invariant that
+keeps the recorded verdict trustworthy.
 
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture
    the HEAD SHA as the intended `review_head_sha`.
