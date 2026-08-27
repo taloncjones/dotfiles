@@ -62,11 +62,11 @@ STATE_ROOT/
 
 ### Agent names vs display labels
 
-- Agent name (herdr-compliant): `impl-<t>` / `rev-<t>` where `<t>` =
-  `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
+- Agent name (herdr-compliant): `plan-<t>` / `impl-<t>` / `rev-<t>` where `<t>`
+  = `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
   Verify uniqueness via `agent list`; on collision append `-2`, `-3`.
-- Display label (unconstrained): worker `<task_id>`, reviewer
-  `review:<task_id>`, orchestrator `orch:<repo>`.
+- Display label (unconstrained): plan worker `plan:<task_id>`, implement worker
+  `<task_id>`, reviewer `review:<task_id>`, orchestrator `orch:<repo>`.
 
 ## Schemas
 
@@ -220,7 +220,9 @@ Read by the monitoring hook; written by the orchestrator via
 ```
 
 `role` is one of `impl`, `review` (matches the worker's phase/role, not the
-agent-name prefix directly).
+agent-name prefix directly). A `plan`-phase worker uses `impl` -- its lifecycle
+hints are impl-like (`stopped`/`blocked`), not review; the plan-vs-implement
+distinction lives in the task record's `workers[].phase`, not the index role.
 
 ### `workspaces/<HERDR_WORKSPACE_ID>.events.jsonl` -- per-workspace hint log
 
