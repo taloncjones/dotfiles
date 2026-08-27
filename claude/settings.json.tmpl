@@ -231,6 +231,12 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "~/.claude/hooks/herdr_worker_status.py" } ] }
+    ],
+    "Notification": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "~/.claude/hooks/herdr_worker_status.py" } ] }
     ]
   },
   "statusLine": {
