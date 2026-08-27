@@ -117,15 +117,18 @@ assert not c.is_completed(task,None,"h1")
 sys.exit(0)
 PY
 
-check "is_reviewed: approved + phase review + HEAD match; stale HEAD/outcome/task rejected" <<PY
+check "is_reviewed: dispatched==reviewed==HEAD; stale HEAD/dispatch/outcome/task rejected" <<PY
 $LOAD
-good={"task_id":"PROJ-1","phase":"review","outcome":"approved","reviewed_head_sha":"h1"}
-assert c.is_reviewed(good,"PROJ-1","h1")
-assert not c.is_reviewed(good,"PROJ-1","h2")                       # review is for a prior HEAD
-assert not c.is_reviewed({**good,"outcome":"changes-requested"},"PROJ-1","h1")
-assert not c.is_reviewed({**good,"phase":"implement"},"PROJ-1","h1")  # an impl done.json, not a review
-assert not c.is_reviewed({**good,"task_id":"PROJ-2"},"PROJ-1","h1")
-assert not c.is_reviewed(None,"PROJ-1","h1")
+task={"task_id":"PROJ-1","review_head_sha":"h1"}
+done={"task_id":"PROJ-1","phase":"review","outcome":"approved","reviewed_head_sha":"h1"}
+assert c.is_reviewed(task,done,"h1")
+assert not c.is_reviewed(task,done,"h2")                              # HEAD advanced past the reviewed SHA
+assert not c.is_reviewed(task,{**done,"reviewed_head_sha":"h2"},"h2") # reviewer logged new HEAD, dispatch was h1
+assert not c.is_reviewed({"task_id":"PROJ-1","review_head_sha":"h0"},done,"h1")  # dispatch != reviewed/HEAD
+assert not c.is_reviewed(task,{**done,"outcome":"changes-requested"},"h1")
+assert not c.is_reviewed(task,{**done,"phase":"implement"},"h1")      # an impl done.json, not a review
+assert not c.is_reviewed(task,{**done,"task_id":"PROJ-2"},"h1")
+assert not c.is_reviewed(task,None,"h1")
 sys.exit(0)
 PY
 
@@ -274,15 +277,25 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
 test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 SH
 
-check "CLI confirm-review: approved@HEAD passes, stale HEAD / changes-requested fail" <<'SH'
+check "CLI confirm-review: dispatched==reviewed==HEAD passes; advance/records-new-HEAD/changes fail" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_orch_core.py"
-# no done.json yet -> not reviewed
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+# no task/done yet -> not reviewed
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"h1"}'
+# task dispatched at h1 but no done.json yet -> not reviewed
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome approved
+# dispatched == reviewed == HEAD (h1) -> merge-ready
 $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1
-# HEAD moved past the reviewed revision -> stale review must not clear the gate
+# HEAD advanced to h2 after a clean review of h1 -> gate holds
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h2 2>/dev/null; then exit 1; fi
+# reviewer records the new live SHA h2 though dispatch was h1 -> still rejected
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+  --reviewed-head-sha h2 --outcome approved
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h2 2>/dev/null; then exit 1; fi
 # a changes-requested review is never merge-ready
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \

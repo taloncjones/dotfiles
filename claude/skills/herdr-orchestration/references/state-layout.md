@@ -191,9 +191,11 @@ reviewed revision and the findings the merge gate needs:
 }
 ```
 
-The merge gate reads `outcome` + `reviewed_head_sha`: only `approved` with
-`reviewed_head_sha` == current HEAD is merge-ready; `changes-requested` (or
-any non-empty `blocking`) is not.
+The merge gate (`$CORE confirm-review`) requires `outcome == "approved"` with
+the task record's dispatched `review_head_sha`, this record's
+`reviewed_head_sha`, and current HEAD all equal; `changes-requested` (or any
+non-empty `blocking`), or a dispatched/reviewed/HEAD mismatch, is never
+merge-ready.
 
 ### `workspaces/<HERDR_WORKSPACE_ID>.json` -- reverse index
 

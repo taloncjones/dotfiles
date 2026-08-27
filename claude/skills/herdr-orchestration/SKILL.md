@@ -181,11 +181,13 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 
 A task is surfaced as merge-ready only when `status: reviewed` AND
 `$CORE confirm-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
-exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb correlates
-the review `done.json` to the current HEAD -- it requires `phase == "review"`,
-`outcome == "approved"`, and `reviewed_head_sha == <sha>` -- so a stale review
-approving a prior HEAD (the implementer pushed again after approval) never
-clears the gate. Rely on the verb, never re-derive the check by hand.
+exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb ties three
+SHAs together -- the task record's dispatched `review_head_sha`, the review
+`done.json`'s `reviewed_head_sha`, and live HEAD must all equal `<sha>` (with
+`phase == "review"` and `outcome == "approved"`) -- so a branch advance after
+dispatch never clears the gate against an unreviewed revision, even if the
+reviewer logged the new live SHA rather than the one it actually reviewed.
+Rely on the verb, never re-derive the check by hand.
 
 Surface: "`<task_id>` reviewed clean @ `<sha>`. Ready for your review and
 merge." `changes-requested` is never surfaced as merge-ready. Merge, `/ship`,

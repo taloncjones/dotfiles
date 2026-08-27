@@ -301,18 +301,22 @@ def should_dispatch_review(task, head_sha) -> bool:
     return task.get("review_head_sha") != head_sha
 
 
-def is_reviewed(done, task_id, head_sha) -> bool:
-    """A review is merge-ready only when its record approves the exact HEAD
-    under review -- a stale review from a prior HEAD must never clear the gate."""
-    if not isinstance(done, dict):
+def is_reviewed(task, done, head_sha) -> bool:
+    """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
+    live HEAD all agree. Requiring the task record's dispatched `review_head_sha`
+    too (not just `done.reviewed_head_sha` == HEAD) stops a branch advance after
+    dispatch from slipping an unreviewed revision through: if the reviewer records
+    the new live SHA while `/code-review` actually ran against the old one, the
+    dispatched SHA no longer matches and the gate holds."""
+    if not isinstance(task, dict) or not isinstance(done, dict):
         return False
-    if done.get("task_id") != task_id:
+    if done.get("task_id") != task.get("task_id"):
         return False
-    if done.get("phase") != "review":
+    if done.get("phase") != "review" or done.get("outcome") != "approved":
         return False
-    if done.get("outcome") != "approved":
-        return False
-    return done.get("reviewed_head_sha") == head_sha
+    return task.get("review_head_sha") == head_sha and (
+        done.get("reviewed_head_sha") == head_sha
+    )
 
 
 def _require(cond, msg) -> None:
@@ -521,13 +525,19 @@ def main(argv=None) -> int:
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
         rd = repo_dir(ns.repo_slug)
+        tf = rd / "tasks" / f"{ns.task_id}.json"
         df = rd / "tasks" / f"{ns.task_id}.done.json"
+        _require(contained(tf, state_root()), "escapes state root")
         _require(contained(df, state_root()), "escapes state root")
+        try:
+            task = json.loads(tf.read_text())
+        except (OSError, ValueError):
+            return 1
         try:
             done = json.loads(df.read_text())
         except (OSError, ValueError):
             done = None
-        return 0 if is_reviewed(done, ns.task_id, ns.head_sha) else 1
+        return 0 if is_reviewed(task, done, ns.head_sha) else 1
     return 2
 
 
