@@ -170,7 +170,14 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
    independence -- then
    `$CORE emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --findings-ref <path>`,
    then `/handoff`. Reviewer and orchestrator never push or open PRs.
-6. At the next check-in, read the reviewer's completion record:
+6. At the next check-in, read the reviewer's completion record. First confirm
+   it covers the dispatched revision: the reviewer's `reviewed_head_sha` must
+   equal both the dispatched `review_head_sha` and current HEAD. If they
+   disagree, the branch advanced during review -- the review is stale, so
+   discard it and re-run the section-4 status correlation against current HEAD
+   (which drops the task back to `completed`/`in-progress` and re-dispatches a
+   fresh review once the new HEAD is confirmed complete). Do **not** record a
+   verdict from a stale review. Only when the SHAs agree:
    - blocking findings -> `status: changes-requested`, event
      `changes-requested`, surface the findings; a subsequent implementer
      push to a new HEAD clears the dispatch guard so a fresh review runs
@@ -272,20 +279,21 @@ The "Event" column below names the conceptual transition, not an emitted
 row's transition is committed solely by a `$CORE write-task` call that sets
 the new `status`; that write is the authoritative record.
 
-| From                          | Evidence / trigger                                                             | Event                       | To                | Terminal? |
-| ----------------------------- | ------------------------------------------------------------------------------ | --------------------------- | ----------------- | --------- |
-| (none)                        | human kickoff, resources created                                               | `kickoff`                   | in-progress       | no        |
-| in-progress                   | hook `blocked` + live `blocked`                                                | `blocked`                   | blocked           | no        |
-| blocked                       | live no longer blocked                                                         | (recheck)                   | in-progress       | no        |
-| in-progress/blocked           | correlated `done.json` completed + git ahead                                   | `completed`                 | completed         | no        |
-| in-progress/blocked           | Stop hint + no done.json + no commits                                          | `paused`                    | in-progress       | no        |
-| in-progress/blocked           | Stop hint + `outcome: failed` or errored, no usable branch                     | `failed`                    | failed            | yes       |
-| in-progress/blocked/completed | workspace+worktree gone, no completion                                         | `abandoned`                 | abandoned         | yes       |
-| completed                     | human/orch dispatch (guard: not already dispatched for this `review_head_sha`) | `review-dispatched`         | review-dispatched | no        |
-| review-dispatched             | reviewer done, findings = blocking                                             | `changes-requested`         | changes-requested | no        |
-| review-dispatched             | reviewer done, findings = none blocking                                        | `reviewed`                  | reviewed          | no        |
-| changes-requested             | implementer pushes new HEAD (new `head_sha`)                                   | (re-kickoff impl or resume) | in-progress       | no        |
-| reviewed                      | human merges; `/post-merge`                                                    | `merged`                    | merged            | yes       |
+| From                          | Evidence / trigger                                                              | Event                         | To                    | Terminal? |
+| ----------------------------- | ------------------------------------------------------------------------------- | ----------------------------- | --------------------- | --------- |
+| (none)                        | human kickoff, resources created                                                | `kickoff`                     | in-progress           | no        |
+| in-progress                   | hook `blocked` + live `blocked`                                                 | `blocked`                     | blocked               | no        |
+| blocked                       | live no longer blocked                                                          | (recheck)                     | in-progress           | no        |
+| in-progress/blocked           | correlated `done.json` completed + git ahead                                    | `completed`                   | completed             | no        |
+| in-progress/blocked           | Stop hint + no done.json + no commits                                           | `paused`                      | in-progress           | no        |
+| in-progress/blocked           | Stop hint + `outcome: failed` or errored, no usable branch                      | `failed`                      | failed                | yes       |
+| in-progress/blocked/completed | workspace+worktree gone, no completion                                          | `abandoned`                   | abandoned             | yes       |
+| completed                     | human/orch dispatch (guard: not already dispatched for this `review_head_sha`)  | `review-dispatched`           | review-dispatched     | no        |
+| review-dispatched             | reviewer done (reviewed HEAD == dispatched == live), findings = blocking        | `changes-requested`           | changes-requested     | no        |
+| review-dispatched             | reviewer done (reviewed HEAD == dispatched == live), findings = none blocking   | `reviewed`                    | reviewed              | no        |
+| review-dispatched             | reviewer done but reviewed HEAD != dispatched/live (branch advanced mid-review) | (discard stale, re-correlate) | completed/in-progress | no        |
+| changes-requested             | implementer pushes new HEAD (new `head_sha`)                                    | (re-kickoff impl or resume)   | in-progress           | no        |
+| reviewed                      | human merges; `/post-merge`                                                     | `merged`                      | merged                | yes       |
 
 `blocked` is a durable status here (the hint `blocked` drives it); there is
 no overlap between `failed` (errored, no usable branch) and `abandoned`
