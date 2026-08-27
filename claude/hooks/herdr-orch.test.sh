@@ -138,6 +138,23 @@ assert c.refresh_owner(rd,"B",f2) and not c.refresh_owner(rd,"A",f1)
 sys.exit(0)
 PY
 
+check "ownership: stale owner.json.lock (crashed holder) is broken by mtime, not wedged forever" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-lock");rd.mkdir(parents=True)
+f1=c.claim_owner(rd,"OLD","h",1);assert f1==1
+o=json.loads((rd/"owner.json").read_text());o["heartbeat_ts"]=0
+(rd/"owner.json").write_text(json.dumps(o))            # stale the stored owner
+lock=rd/"owner.json.lock"
+lock.write_text("")                                     # simulate a SIGKILLed holder's leaked lock
+os.utime(lock,(0,0))                                    # ancient mtime: no unlink ever ran
+f2=c.claim_owner(rd,"NEW","h",2,stale_secs=1)
+assert f2 is not None, "stale lock permanently wedged claim_owner"
+assert c.check_fence(rd,"NEW",f2)
+assert not lock.exists()                                # broken lock cleaned up, not left behind
+sys.exit(0)
+PY
+
 check "ownership: concurrent stale takeover yields exactly one winner" <<PY
 $LOAD
 import subprocess, textwrap
@@ -195,9 +212,9 @@ CLI="python3 claude/hooks/herdr_orch_core.py"
 
 check "should_dispatch_review: once per HEAD, re-review on new HEAD" <<PY
 $LOAD
-t={"status":"completed","review_dispatched_head":None}
+t={"status":"completed","review_head_sha":None}
 assert c.should_dispatch_review(t,"h1")
-t["review_dispatched_head"]="h1"
+t["review_head_sha"]="h1"
 assert not c.should_dispatch_review(t,"h1")            # already dispatched for h1
 assert c.should_dispatch_review(t,"h2")                # new HEAD -> re-review
 assert not c.should_dispatch_review({"status":"in-progress"},"h1")
@@ -251,6 +268,34 @@ $CLI write-index --repo-slug slug-x --workspace w2 --session S --fence "$F" --js
 printf '{"v":1,"ts":"2026-01-01T00:00:00Z","event":"kickoff"}\n{"v":1,"ts":"2026-01-01T00:01:00Z","event":"completed"}\n' > "$root/herdr-orch/slug-x/workspaces/w1.events.jsonl"
 printf '{"v":1,"ts":"2026-01-01T00:00:30Z","event":"blocked"}\n' > "$root/herdr-orch/slug-x/workspaces/w2.events.jsonl"
 $CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert s['PROJ-1']['fold']['authoritative']=='completed',s;assert s['PROJ-2']['fold']['last_hint']=='blocked' and s['PROJ-2']['fold']['authoritative']!='completed',s"
+SH
+
+check "CLI should-dispatch-review: once per HEAD, re-review on new HEAD" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"completed","review_head_sha":null}'
+$CLI should-dispatch-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"completed","review_head_sha":"h1"}'
+if $CLI should-dispatch-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+$CLI should-dispatch-review --repo-slug slug-x --task-id PROJ-1 --head-sha h2
+SH
+
+check "CLI confirm-completion: matching HEAD/base completes, mismatch does not" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress"}'
+# no done.json yet -> not completed
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+$CLI emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 \
+  --phase implement --outcome completed --head-sha h1 --base-sha b0
+$CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --head-sha h1
+# HEAD moved past the recorded done.json -> not completed
+if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --head-sha h2 2>/dev/null; then exit 1; fi
 SH
 
 # args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)

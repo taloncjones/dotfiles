@@ -32,7 +32,7 @@ chmod +x "$BIN/herdr"; PATH="$BIN:$PATH"
 F=$($CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid 1)
 ok "claim-owner returns a fence" "[ -n '$F' ]"
 $CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress","review_dispatched_head":null}'
+  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress","review_head_sha":null}'
 $CLI write-index --repo-slug "$SLUG" --workspace w1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","repo_slug":"'"$SLUG"'","role":"impl"}'
 ok "kickoff wrote one task record" "[ -f '$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json' ]"
@@ -43,7 +43,7 @@ ok "kickoff wrote one task record" "[ -f '$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.js
 # this core guarantee.
 ok "status shows the task" "$CLI status --repo-slug '$SLUG' | grep -q PROJ-1"
 $CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"re-kicked-off","review_dispatched_head":null}'
+  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"re-kicked-off","review_head_sha":null}'
 ok "write-task is single-record last-write-wins per task_id" \
   "[ \"\$(ls '$ROOT/herdr-orch/$SLUG/tasks/'PROJ-1.json | wc -l)\" -eq 1 ] && python3 -c \"import json;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json'));import sys;sys.exit(0 if d['status']=='re-kicked-off' else 1)\""
 
@@ -58,9 +58,9 @@ ok "dispatch once per HEAD; re-review on new HEAD" "python3 - <<PY
 import importlib.util
 s=importlib.util.spec_from_file_location('core','claude/hooks/herdr_orch_core.py')
 c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
-t={'status':'completed','review_dispatched_head':None}
+t={'status':'completed','review_head_sha':None}
 assert c.should_dispatch_review(t,'h1')
-t['review_dispatched_head']='h1'
+t['review_head_sha']='h1'
 assert not c.should_dispatch_review(t,'h1') and c.should_dispatch_review(t,'h2')
 PY"
 

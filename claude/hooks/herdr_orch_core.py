@@ -221,7 +221,22 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900):
     try:  # serialize the read-modify-write of an existing owner
         lfd = os.open(lock, excl, 0o600)
     except FileExistsError:
-        return None  # another takeover in progress; caller may retry
+        try:  # a crashed holder (e.g. SIGKILL before the finally unlink) can
+            # leave this lock forever; break it by mtime so ownership never
+            # wedges permanently, retrying the exclusive-create exactly once.
+            stale_lock = time.time() - os.stat(lock).st_mtime > stale_secs
+        except OSError:
+            stale_lock = False
+        if not stale_lock:
+            return None  # fresh lock: another takeover in progress; caller may retry
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+        try:
+            lfd = os.open(lock, excl, 0o600)
+        except FileExistsError:
+            return None  # lost the race to break it; caller may retry
     try:
         try:
             cur = json.loads(p.read_text())
@@ -278,7 +293,7 @@ def is_completed(task, done, live_head_sha) -> bool:
 def should_dispatch_review(task, head_sha) -> bool:
     if task.get("status") != "completed":
         return False
-    return task.get("review_dispatched_head") != head_sha
+    return task.get("review_head_sha") != head_sha
 
 
 def _require(cond, msg) -> None:
@@ -336,6 +351,8 @@ def main(argv=None) -> int:
     )
     er.add_argument("--findings-ref", default=None)
     add("status")
+    add("should-dispatch-review", "--task-id", "--head-sha")
+    add("confirm-completion", "--task-id", "--head-sha")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "claim-owner":
@@ -436,6 +453,34 @@ def main(argv=None) -> int:
             }
         print(json.dumps(result))
         return 0
+    if ns.cmd == "should-dispatch-review":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        rd = repo_dir(ns.repo_slug)
+        tf = rd / "tasks" / f"{ns.task_id}.json"
+        _require(contained(tf, state_root()), "escapes state root")
+        try:
+            task = json.loads(tf.read_text())
+        except (OSError, ValueError):
+            return 1
+        return 0 if should_dispatch_review(task, ns.head_sha) else 1
+    if ns.cmd == "confirm-completion":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        rd = repo_dir(ns.repo_slug)
+        tf = rd / "tasks" / f"{ns.task_id}.json"
+        df = rd / "tasks" / f"{ns.task_id}.done.json"
+        _require(contained(tf, state_root()), "escapes state root")
+        _require(contained(df, state_root()), "escapes state root")
+        try:
+            task = json.loads(tf.read_text())
+        except (OSError, ValueError):
+            return 1
+        try:
+            done = json.loads(df.read_text())
+        except (OSError, ValueError):
+            done = None
+        return 0 if is_completed(task, done, ns.head_sha) else 1
     return 2
 
 

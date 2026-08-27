@@ -120,26 +120,30 @@ per-task status. Reconcile that against a live `herdr agent list` /
 | absent (agent+worktree both gone) | `abandoned`, if never completed                                                                                                            |
 
 **Completion is orchestrator-confirmed, never inferred from `done`.**
-Correlate three independent facts, all keyed to the same `task_id`/
+Correlate these independent facts, all keyed to the same `task_id`/
 `workspace_id`:
 
-1. A `tasks/<task_id>.done.json` with `outcome: completed` whose `head_sha`
-   and `base_sha` match the task record.
-2. Live git: the branch's HEAD equals that `head_sha` and is ahead of
-   `base_sha`.
-3. Live `herdr agent` state consistent with a finished worker.
+1. Resolve live HEAD in the task's worktree: `git rev-parse HEAD`.
+2. Live git ancestry: that HEAD is ahead of the task record's `base_sha`
+   (the orchestrator checks this itself -- it is not part of `$CORE`).
+3. `$CORE confirm-completion --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
+   (exit 0/1) -- correlates `tasks/<task_id>.done.json` (`outcome: completed`,
+   matching `head_sha`/`base_sha`) against the task record and the live HEAD
+   passed in. Never re-derive this correlation by hand.
+4. Live `herdr agent` state consistent with a finished worker.
 
-An unmatched, stale, or missing `done.json`, or a HEAD that disagrees, is
-never completion.
+An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
+`confirm-completion` exit 1, is never completion.
 
 Report per-task status, workspace, latest note, and recommended next action.
 
 ## 5. Review dispatch (on confirmed `completed`) -- per revision, at most one
 
-Guard: `$CORE status` reports `completed` and no review has been dispatched
-for the current HEAD (the `should_dispatch_review` check inside `$CORE`
-compares the recorded `review_head_sha` against live HEAD -- rely on it,
-never re-derive the guard by hand).
+Guard: `$CORE status` reports `completed` and
+`$CORE should-dispatch-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
+exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
+recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
+exits 1. Rely on this verb, never re-derive the guard by hand.
 
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture
    the HEAD SHA as the intended `review_head_sha`.
@@ -247,6 +251,12 @@ worker's first turn, and **fail visibly** rather than let the wrong model
 run silently.
 
 ## 9. State transition table (authoritative)
+
+The "Event" column below names the conceptual transition, not an emitted
+`events.jsonl` record -- `events.jsonl` carries only hook hints
+(`stopped`/`blocked`/`review-stopped`, see references/event-schema.md). Each
+row's transition is committed solely by a `$CORE write-task` call that sets
+the new `status`; that write is the authoritative record.
 
 | From                          | Evidence / trigger                                                             | Event                       | To                | Terminal? |
 | ----------------------------- | ------------------------------------------------------------------------------ | --------------------------- | ----------------- | --------- |
