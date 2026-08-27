@@ -30,7 +30,12 @@ here.
 Each line of `<workspace>.events.jsonl` is one JSON object:
 
 ```json
-{ "v": 1, "event": "stopped", "ts": "2026-08-26T12:00:00Z" }
+{
+  "v": 1,
+  "ts": "2026-08-26T12:00:00Z",
+  "workspace_id": "w1",
+  "event": "stopped"
+}
 ```
 
 ## Fold rule

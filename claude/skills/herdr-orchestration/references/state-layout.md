@@ -77,7 +77,7 @@ STATE_ROOT/
   "session_id": "<id>",
   "host": "<host>",
   "pid": 12345,
-  "heartbeat_ts": "...",
+  "heartbeat_ts": 1756300000.5,
   "fence": 3
 }
 ```

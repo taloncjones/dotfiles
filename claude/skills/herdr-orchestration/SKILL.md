@@ -15,7 +15,10 @@ This skill is a **thin caller**. All state mutation goes through the tested
 core CLI; the skill never hand-writes state JSON.
 
 ```
-CORE="python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
+# zsh does NOT word-split an unquoted variable, so a bare `python3 "$CORE" claim-owner`
+# runs a command literally named "python3 .../herdr_orch_core.py" and fails.
+# Store only the PATH and always call it as: python3 "$CORE" <subcommand> ...
+CORE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
 ```
 
 Every `$CORE` subcommand that mutates state (`write-task`, `write-index`)
@@ -34,17 +37,26 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
    references/state-layout.md for the normalization rule); ensure
    `STATE_ROOT/<repo_slug>/` exists.
 3. Claim/refresh ownership:
-   - `$CORE claim-owner --repo-slug <slug> --session <id> --host <host> --pid <pid>`
+   - `python3 "$CORE" claim-owner --repo-slug <slug> --session <id> --host <host> --pid <pid>`
      -> prints a `fence` token on success, or `BUSY` (exit 1) if another
      session holds a live claim. On `BUSY`, yield to read-only status/triage
      and offer the user an explicit takeover; do not mutate state.
+   - **On the initial claim only** (not on refresh), label THIS session's own
+     workspace so the Herdr UI shows the standing orchestrator, not a bare
+     name: `herdr workspace rename "$HERDR_WORKSPACE_ID" "orch:<repo>"`
+     (`<repo>` = short repo name, e.g. `orch:dotfiles`). Idempotent -- skip if
+     the workspace label already equals it (`herdr workspace get
+"$HERDR_WORKSPACE_ID"` -> `.result.workspace.label`). This is display-only
+     Herdr state, never repo/worktree state; a worker's own workspace is
+     labelled `<task_id>` at `worktree create` (section 2), so no worker is
+     ever left as a generic "Worker N".
    - On every subsequent turn this session acts in the repo, call
-     `$CORE refresh-owner --repo-slug <slug> --session <id> --fence <fence>`
+     `python3 "$CORE" refresh-owner --repo-slug <slug> --session <id> --fence <fence>`
      to keep the heartbeat alive.
    - Fencing otherwise happens implicitly inside `write-task`/`write-index`
      (each aborts under a stale fence); before a multi-call sequence like
      kickoff, the orchestrator may proactively call
-     `$CORE check-fence --repo-slug <slug> --session <id> --fence <fence>`
+     `python3 "$CORE" check-fence --repo-slug <slug> --session <id> --fence <fence>`
      to fail fast rather than partway through.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
@@ -58,7 +70,7 @@ repo's own pipeline. The steps below call it "the worker".
 
 1. Resolve the item (Jira MCP for a ticket key, the todos skill for a bare
    todo) -> `task_id`. Abort if unresolved.
-2. **Idempotency:** `$CORE status --repo-slug <slug>` plus a check of
+2. **Idempotency:** `python3 "$CORE" status --repo-slug <slug>` plus a check of
    `tasks/<task_id>.json`. Existing record + live worker -> refuse, report,
    offer to focus the existing workspace. Existing record + worker gone ->
    offer resume or cleanup. No record -> proceed.
@@ -80,8 +92,8 @@ repo's own pipeline. The steps below call it "the worker".
 7. **Publish state only after the worker is launched** -- so a failed launch
    leaves no stale task/index to unwind (no rollback verb needed). Write
    through the core CLI, not by hand:
-   - `$CORE write-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id> --json '<task record, status "in-progress">'`
-   - `$CORE write-index --repo-slug <slug> --session <id> --fence <fence> --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "impl"}'`
+   - `python3 "$CORE" write-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id> --json '<task record, status "in-progress">'`
+   - `python3 "$CORE" write-index --repo-slug <slug> --session <id> --fence <fence> --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "impl"}'`
      The task record's `status` field is the authoritative kickoff record;
      `events.jsonl` is hook-owned (worker lifecycle hints only, see
      references/event-schema.md) -- the orchestrator does not write to it.
@@ -111,7 +123,7 @@ Creates no task/worktree/agent/index/record.
 
 ## 4. Status (check-in; turn-driven) -- full live-state reconciliation
 
-`$CORE status --repo-slug <slug>` folds the per-workspace event logs into
+`python3 "$CORE" status --repo-slug <slug>` folds the per-workspace event logs into
 per-task status. Reconcile that against a live `herdr agent list` /
 `herdr workspace list` poll for each task's current worker:
 
@@ -130,7 +142,7 @@ Correlate these independent facts, all keyed to the same `task_id`/
 1. Resolve live HEAD in the task's worktree: `git rev-parse HEAD`.
 2. Live git ancestry: that HEAD is ahead of the task record's `base_sha`
    (the orchestrator checks this itself -- it is not part of `$CORE`).
-3. `$CORE confirm-completion --repo-slug <slug> --task-id <task_id> --workspace <impl_ws> --head-sha <sha>`
+3. `python3 "$CORE" confirm-completion --repo-slug <slug> --task-id <task_id> --workspace <impl_ws> --head-sha <sha>`
    (exit 0/1) -- correlates `tasks/<task_id>.done.json` (`outcome: completed`,
    matching `head_sha`/`base_sha`, and `workspace_id` == the dispatched impl
    workspace) against the task record and the live HEAD passed in. The
@@ -146,8 +158,10 @@ An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
 while its recorded `review_head_sha` equals current HEAD. If HEAD has advanced
 past it -- the branch moved during or after review, at any moment including
 just before a merge -- the verdict is stale. Recover it in three steps:
-(a) if a reviewer for this task is still running, **stop its agent and close
-its workspace** (the orchestrator owns both; the review is now moot) -- do this
+(a) if a reviewer for this task is still running, **close its workspace**
+(`herdr workspace close <ws_id>`, which also ends the agent -- there is no
+`agent stop` verb; `herdr pane release-agent` is the pane-level equivalent),
+since the orchestrator owns both and the review is now moot -- do this
 on every stale reset, whether it lands on `completed` or `in-progress`, because
 a reset to `in-progress` will not re-dispatch and so cannot rely on section 5's
 dispatch preflight to stop the reviewer; (b) reset the task to `completed` (or
@@ -174,16 +188,16 @@ Report per-task status, workspace, latest note, and recommended next action.
 
 ## 5. Review dispatch (on confirmed `completed`) -- per revision, at most one
 
-Guard: `$CORE status` reports `completed` and
-`$CORE should-dispatch-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
+Guard: `python3 "$CORE" status` reports `completed` and
+`python3 "$CORE" should-dispatch-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
 exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
 recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
 exits 1. Rely on this verb, never re-derive the guard by hand.
 
 **Reviewer-dispatch preflight (no concurrent reviewers).** Before starting a
-reviewer, reconcile live `herdr agent`/workspace state for this task and
-stop/close any reviewer already running on it -- there must be exactly zero live
-reviewers before you start one. This is the belt-and-suspenders for the
+reviewer, reconcile live `herdr agent`/workspace state for this task and close
+any reviewer already running on it (`herdr workspace close`, which ends its
+agent) -- there must be exactly zero live reviewers before you start one. This is the belt-and-suspenders for the
 `completed`->dispatch path; the section-4 stale-verdict reset stops the reviewer
 on its own paths (including a reset to `in-progress`, which never reaches this
 preflight). It also catches a reviewer orphaned by a crash in step 3 below,
@@ -200,8 +214,8 @@ keeps the recorded verdict trustworthy.
    index yet -- publish state only after the agent starts (step 3).
 3. Start a unique `rev-<...>` agent on the reviewer model (section 8 launch).
    **Only after the agent successfully starts**, publish state under the fence,
-   both writes together: `$CORE write-index ... --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "review"}'` and
-   `$CORE write-task ... --json '<record with review_head_sha, status "review-dispatched">'`.
+   both writes together: `python3 "$CORE" write-index ... --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "review"}'` and
+   `python3 "$CORE" write-task ... --json '<record with review_head_sha, status "review-dispatched">'`.
    Publishing the index _after_ launch (like kickoff, section 2) means a failed
    launch leaves no orphan index -- there is nothing to clean up and no
    delete-index verb is needed. The task-record `status` transition is the
@@ -214,7 +228,7 @@ keeps the recorded verdict trustworthy.
    `--comment`) against the branch -- NOT `/co-review`, which fixes findings
    by default and would edit the very branch under review, destroying review
    independence -- then
-   `$CORE emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>`
+   `python3 "$CORE" emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>`
    (`<n>` = count of blocking findings; the merge gate rejects any non-zero
    count even under `approved`), then `/handoff`. Reviewer and orchestrator
    never push or open PRs. The verdict lands in `tasks/<task_id>.review.json`,
@@ -235,7 +249,7 @@ keeps the recorded verdict trustworthy.
 ## 6. Surface for merge (human gate) -- only on `reviewed`
 
 A task is surfaced as merge-ready only when `status: reviewed` AND
-`$CORE confirm-review --repo-slug <slug> --task-id <task_id> --workspace <review_ws> --head-sha <sha>`
+`python3 "$CORE" confirm-review --repo-slug <slug> --task-id <task_id> --workspace <review_ws> --head-sha <sha>`
 exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb reads
 `tasks/<task_id>.review.json` and passes only when ALL hold: `outcome ==
 "approved"`; `blocking_count` is 0; the record's `workspace_id` equals the
@@ -298,44 +312,45 @@ for every Fable role (safety classifiers can trip on benign work); never
 prompt Fable to transcribe its own reasoning (status/triage and design docs
 are work product / external state, which is safe).
 
-**Model launch.** Launch into the new workspace's OWN pane -- the
-`worktree create`/`worktree open` result returns it; use that
-`.result.root_pane.pane_id` (the labelled pane the create call reports). Do
-**not** do a bare `herdr pane split` with no target: `--cwd` does not select the
-new workspace, so an untargeted split can land in another workspace's (or the
-UI's) pane, and the worker then inherits the wrong `HERDR_WORKSPACE_ID` so its
-hook events never match the published index.
+**Model launch** (validated live against herdr 0.8.2). Launch into the new
+workspace's OWN pane -- `worktree create`/`worktree open` returns it at
+`.result.root_pane.pane_id`, already in the new workspace with the worktree as
+its cwd (the result also carries `.result.workspace.workspace_id` and
+`.result.tab`). Do **not** `herdr pane split`: a split defaults to the CURRENT
+(orchestrator's) workspace, so the worker would inherit the wrong
+`HERDR_WORKSPACE_ID` and its hook events would never match the published index.
 
-To **pin a model**, run `claude` explicitly in that pane:
+Launch the worker -- always pinning its model -- in that root pane:
 
-1. `<pane_id>` = the new workspace's root pane from the create/open result.
-2. `herdr pane run <pane_id> "claude --model <model> <flags>"` -- `<model>` from
-   the config allowlist; keep it a plain `claude` invocation with no shell
-   metacharacters.
-3. Register the pane as a tracked agent -- resolve exact flags against live
-   `herdr pane report-agent --help`; `herdr pane run "claude ..."` may let herdr
-   natively detect the agent, making the explicit call unnecessary -- confirm at
-   first use.
+1. `<pane_id>` = `.result.root_pane.pane_id` from the create/open result.
+2. `herdr pane run <pane_id> "claude --model <model> --permission-mode auto"` --
+   `<model>` from the config allowlist. Use `--permission-mode auto`, **not**
+   `--dangerously-skip-permissions`: an auto-mode orchestrator's classifier
+   BLOCKS spawning a skip-permissions worker. Keep it a plain `claude`
+   invocation with no shell metacharacters.
+3. Registration is normally automatic -- `pane run "claude ..."` lets herdr
+   natively detect the agent (it appears in `herdr agent list` within a second
+   or two). If it does not, `herdr pane report-agent <pane_id>` registers it --
+   this verb takes **no** `--kind` flag (`--kind` belongs to `agent start`).
 
-When you are **not** pinning a model, the simpler `herdr agent start <name>
---kind claude --pane <pane_id>` launches directly. The agent `<name>` must match
-the herdr-compliant form `[a-z][a-z0-9_-]{0,31}` (use the `agent_name` value,
-not the display label -- a spaced/capitalized name is rejected with
-`invalid_agent_name`). Do **not** use `agent start`'s trailing `-- <argv>`
-passthrough to pin a model -- it is unreliable across herdr versions (0.7.5+
-made `--kind` a closed whitelist; herdr-swarm and herdr-conductor both avoid it).
+Do **not** use `herdr agent start` to launch the worker: its `-- <argv>`
+passthrough for pinning a model is unreliable across herdr versions (0.7.5+
+made `--kind` a closed whitelist), and unlike `pane run` in the worktree's root
+pane it does not create or target the correct pane.
 
-Submit the brief and confirm the worker is live in one call:
-`herdr agent prompt <pane_id> "<brief>" --wait --until working`. Then confirm
-the launched model via `herdr agent read` and **fail visibly** rather than let
-the wrong model run silently.
+Submit the brief and confirm the worker started working in one call:
+`herdr agent prompt <pane_id> "<brief>" --wait --until working --timeout 60000`
+(`working` is a valid `--until` status; `--timeout` guards the 5s
+`agent_prompt_stalled` and indefinite-wait edges). Then confirm the launched
+model via `herdr agent read` and **fail visibly** rather than let the wrong
+model run silently.
 
 ## 9. State transition table (authoritative)
 
 The "Event" column below names the conceptual transition, not an emitted
 `events.jsonl` record -- `events.jsonl` carries only hook hints
 (`stopped`/`blocked`/`review-stopped`, see references/event-schema.md). Each
-row's transition is committed solely by a `$CORE write-task` call that sets
+row's transition is committed solely by a `python3 "$CORE" write-task` call that sets
 the new `status`; that write is the authoritative record.
 
 | From                                         | Evidence / trigger                                                             | Event                                          | To                    | Terminal? |
