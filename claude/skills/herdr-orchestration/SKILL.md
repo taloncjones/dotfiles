@@ -206,35 +206,41 @@ An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
 while its recorded `review_head_sha` equals current HEAD. If HEAD has advanced
 past it -- the branch moved during or after review, at any moment including
 just before a merge -- the verdict is stale. Recover it in three steps:
-(a) if a reviewer for this task is still running, **close its workspace**
-(`herdr workspace close <ws_id>`, which also ends the agent -- there is no
-`agent stop` verb; `herdr pane release-agent` is the pane-level equivalent),
-since the orchestrator owns both and the review is now moot -- do this
-on every stale reset, whether it lands on `completed` or `in-progress`, because
-a reset to `in-progress` will not re-dispatch and so cannot rely on section 5's
-dispatch preflight to stop the reviewer; (b) reset the task to `completed` (or
-`in-progress` if the new HEAD is not a confirmed-complete revision); (c) clear
-`review_head_sha` to `null`. Clearing the marker is what lets
-`should-dispatch-review` re-fire for the new HEAD (it compares
-`review_head_sha` against live HEAD, so a leftover value equal to HEAD would
-wrongly suppress the re-dispatch). This recovers every "branch advanced" case
-from whichever review state the task was in, so no review state is ever
+(a) if a review agent for this task is still running, **stop it** (exit/kill the
+`rev-<...>` agent -- `herdr pane release-agent`, or `/exit` to its pane; do
+**not** `herdr workspace close`, which would tear down the shared task worktree),
+since the review is now moot -- do this on every stale reset, whether it lands on
+`completed` or `in-progress`, because a reset to `in-progress` will not
+re-dispatch and so cannot rely on section 5's dispatch preflight to stop it;
+(b) reset the task to `completed` (or `in-progress` if the new HEAD is not a
+confirmed-complete revision); (c) clear `review_head_sha` to `null`. Clearing
+the marker is what lets `should-dispatch-review` re-fire for the new HEAD (it
+compares `review_head_sha` against live HEAD, so a leftover value equal to HEAD
+would wrongly suppress the re-dispatch). This recovers every "branch advanced"
+case from whichever review state the task was in, so no review state is ever
 permanently stranded -- the next check-in corrects it.
 
-The stopped reviewer's `role:review` index entry is left behind (there is no
-delete-index verb), but it is inert: its workspace is gone, so
-`should-dispatch-review` and reconciliation ignore it, and the provenance-bound
-merge gate rejects its record (a stale `workspace_id`). Known limitation
-(single-user-unreachable): two reviewer workers alive at once on one task would
-still race the unfenced `tasks/<task_id>.review.json` write (last-writer-wins);
-stopping the prior reviewer on every reset, plus section 5's dispatch preflight,
-removes the only extra writer this loop creates, and the merge gate's
-provenance + three-SHA correlation (section 6) is the backstop. Revisit only if
-review ever runs multi-worker.
+Because review runs in the task's own workspace (section 5), stopping the review
+agent leaves the workspace and its `role: review` index entry intact for the
+re-dispatch -- nothing is orphaned. Known limitation (single-user-unreachable):
+two review agents alive at once in one workspace would race the unfenced
+`tasks/<task_id>.review.json` write (last-writer-wins); stopping the prior agent
+on every reset, plus section 5's dispatch preflight, removes the only extra
+writer this loop creates, and the merge gate's provenance + three-SHA
+correlation (section 6) is the backstop.
 
 Report per-task status, workspace, latest note, and recommended next action.
 
 ## 5. Review dispatch (on confirmed `completed`) -- per revision, at most one
+
+The review runs **in the task's own worktree**, not a separate workspace. git
+allows only one worktree per branch, so a second workspace on the branch is
+impossible (`herdr worktree open` just re-attaches to the impl workspace); and
+`co-review` already spins up independent Claude (`/code-review`) and Codex
+(`codex exec review`) contexts, so a separate reviewer workspace would duplicate
+what co-review provides. Independence comes from a **fresh review agent** (clean
+context, distinct from the impl session) plus co-review's Codex model, run
+**report-only** so the gate never edits its own subject.
 
 Guard: `python3 "$CORE" status` reports `completed` and
 `python3 "$CORE" should-dispatch-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
@@ -242,43 +248,45 @@ exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
 recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
 exits 1. Rely on this verb, never re-derive the guard by hand.
 
-**Reviewer-dispatch preflight (no concurrent reviewers).** Before starting a
-reviewer, reconcile live `herdr agent`/workspace state for this task and close
-any reviewer already running on it (`herdr workspace close`, which ends its
-agent) -- there must be exactly zero live reviewers before you start one. This is the belt-and-suspenders for the
-`completed`->dispatch path; the section-4 stale-verdict reset stops the reviewer
-on its own paths (including a reset to `in-progress`, which never reaches this
-preflight). It also catches a reviewer orphaned by a crash in step 3 below,
-between starting the reviewer agent and publishing its state, where the task can
-still read `completed`. Because `emit-review` is unfenced (last-writer-wins on
-`tasks/<task_id>.review.json`), a single live reviewer is the invariant that
-keeps the recorded verdict trustworthy.
+**Reviewer-dispatch preflight (one review agent at a time).** Reconcile live
+`herdr agent` state for this task's workspace and stop any `rev-<...>` agent
+already running in it (exit/kill the agent -- do **not** `herdr workspace close`,
+which would tear down the shared task worktree). There must be zero live review
+agents before you start one. Because `emit-review` is unfenced (last-writer-wins
+on `tasks/<task_id>.review.json`), a single live review agent is the invariant
+that keeps the recorded verdict trustworthy.
 
-1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture
-   the HEAD SHA as the intended `review_head_sha`.
-2. `herdr worktree open` a fresh workspace on the branch, label
-   `review:<task_id>`; capture its `<ws_id>` and root pane from the `.result`.
-   Do not resume the implementer while review is pending. Do **not** write the
-   index yet -- publish state only after the agent starts (step 3).
-3. Start a unique `rev-<...>` agent on the reviewer model (section 8 launch).
-   **Only after the agent successfully starts**, publish state under the fence,
-   both writes together: `python3 "$CORE" write-index ... --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "review"}'` and
+1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture the
+   HEAD SHA as the intended `review_head_sha`.
+2. **Reuse the task's own worktree/workspace** (`<ws_id>`, the impl phase's).
+   The impl agent has handed off; free its root pane (send it `/exit`, or launch
+   in a fresh self-owned `pane split`) and start the review agent there -- no
+   `worktree open`, no new workspace. Do not resume the implementer while review
+   is pending.
+3. Start a unique `rev-<...>` agent on the reviewer model (section 8 launch) in
+   the task workspace. **Only after the agent successfully starts**, publish
+   state under the fence, both writes together:
+   `python3 "$CORE" write-index ... --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "review"}'`
+   (this overwrites the same workspace's `role: impl` entry -- expected; the impl
+   `done.json` completion was already confirmed, and the role now reflects the
+   live phase so the monitoring hook classes a review Stop as `review-stopped`)
+   and
    `python3 "$CORE" write-task ... --json '<record with review_head_sha, status "review-dispatched">'`.
-   Publishing the index _after_ launch (like kickoff, section 2) means a failed
-   launch leaves no orphan index -- there is nothing to clean up and no
-   delete-index verb is needed. The task-record `status` transition is the
-   authoritative dispatch record; `events.jsonl` is hook-owned (worker
-   lifecycle hints only) and the orchestrator does not write to it. On start
-   failure, nothing was published: leave the task at `completed` (retryable).
+   The task-record `status` transition is the authoritative dispatch record. On
+   start failure, nothing was published: leave the task at `completed`
+   (retryable).
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
-5. Prompt the reviewer to run report-only `/code-review` (no `--fix`, no
-   `--comment`) against the branch -- NOT `/co-review`, which fixes findings
-   by default and would edit the very branch under review, destroying review
-   independence -- then
+5. Prompt the review agent to run **`co-review` in report-only mode** against the
+   branch -- both finders (Claude `/code-review` + Codex `codex exec review`)
+   plus the adversarial-verify stage, but **no fix application**: report only, so
+   the gate never edits the branch it reviews and cannot trigger a fix ->
+   re-review loop. (`co-review` stays herdr-agnostic -- the herdr-specific
+   `emit-review` call lives in this brief, not in the skill; if invoked outside a
+   Herdr session the review agent just runs co-review and reports.) Then
    `python3 "$CORE" emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>`
    (`<n>` = count of blocking findings; the merge gate rejects any non-zero
-   count even under `approved`), then `/handoff`. Reviewer and orchestrator
+   count even under `approved`), then `/handoff`. Review agent and orchestrator
    never push or open PRs. The verdict lands in `tasks/<task_id>.review.json`,
    separate from the impl `.done.json`.
 6. At the next check-in, read the reviewer's completion record. First confirm
@@ -307,6 +315,20 @@ equal `<sha>`. So an approved-with-blocking verdict, a foreign worker's record,
 or a branch advance after dispatch (even one where the reviewer logged the new
 live SHA) never clears the gate. Rely on the verb, never re-derive the check by
 hand.
+
+**Vibe-audit gate for grown resolutions.** co-review (section 5) gates the diff
+for BUGS; it does not check whether the change stayed honest to its plan. When a
+task reached `reviewed` only after a review-resolution cycle whose fixes grew
+beyond trivial -- new scope, new files/functions, chat-directed changes, not a
+one-line fix -- run `vibe-audit` on the resolution before surfacing merge-ready:
+those commits skipped brainstorm/spec/plan, which is exactly vibe-audit's domain
+(verified beliefs + test coverage, not bug-finding, so it complements rather than
+repeats co-review). A failing vibe-audit blocks the surface (the task stays
+`reviewed` but not merge-ready) and its findings feed a fix pass (a new HEAD ->
+fresh co-review); a clean vibe-audit, or a resolution trivial enough never to
+trigger it, clears the gate. Planned work that never grew past its plan needs no
+vibe-audit -- its front-pipeline gates already ran. `vibe-audit` is
+herdr-agnostic; the orchestrator just invokes it here as the last gate.
 
 Surface: "`<task_id>` reviewed clean @ `<sha>`. Ready for your review and
 merge." `changes-requested` is never surfaced as merge-ready. Merge, `/ship`,
@@ -342,12 +364,12 @@ Each role has an ordered model preference, resolved against the models the
 current account/CLI actually offers. First available wins; `config.json`
 may override any role's list.
 
-| Role / phase              | Preference (first available wins) | Effort  | Notes                                                                                                                                                 |
-| ------------------------- | --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Orchestrator              | fable -> opus                     | low/med | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)                                                       |
-| Planning worker (`plan`)  | fable -> opus                     | high    | raw items only: brainstorm/spec/plan on the strong model so design judgment is never delegated to the cheap impl worker; skipped for plan-ready items |
-| Implementation worker     | sonnet -> opus                    | default | cheap execution of an existing plan                                                                                                                   |
-| Reviewer (`/code-review`) | opus -> sonnet                    | high    | report-only `/code-review` (no `--fix`); Opus reviewer gives model diversity vs a Fable/Sonnet impl                                                   |
+| Role / phase             | Preference (first available wins) | Effort  | Notes                                                                                                                                                 |
+| ------------------------ | --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Orchestrator             | fable -> opus                     | low/med | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)                                                       |
+| Planning worker (`plan`) | fable -> opus                     | high    | raw items only: brainstorm/spec/plan on the strong model so design judgment is never delegated to the cheap impl worker; skipped for plan-ready items |
+| Implementation worker    | sonnet -> opus                    | default | cheap execution of an existing plan                                                                                                                   |
+| Reviewer (co-review)     | opus -> sonnet                    | high    | co-review report-only (Claude `/code-review` + Codex) in the task worktree, fresh agent; Opus Claude-half adds model diversity vs a Sonnet impl       |
 
 Fallback scaffolding: when Fable is unavailable (enterprise account, usage
 exhausted, or the current session is already Opus), fall back to Opus and

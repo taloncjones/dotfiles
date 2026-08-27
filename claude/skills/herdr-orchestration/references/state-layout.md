@@ -67,6 +67,12 @@ STATE_ROOT/
   Verify uniqueness via `agent list`; on collision append `-2`, `-3`.
 - Display label (unconstrained): plan worker `plan:<task_id>`, implement worker
   `<task_id>`, reviewer `review:<task_id>`, orchestrator `orch:<repo>`.
+- **One workspace/worktree per task.** git allows only one worktree per branch,
+  so a task's plan -> implement -> review phases all run in the SAME
+  worktree-backed workspace (a fresh agent per phase, sequentially). The
+  workspace label and its index `role` are updated to the current phase as it
+  advances (`<task_id>` for impl, `review:<task_id>` + `role: review` for
+  review); there is never a second workspace on the same branch.
 
 ## Schemas
 
