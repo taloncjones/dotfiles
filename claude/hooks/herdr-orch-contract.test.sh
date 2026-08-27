@@ -76,17 +76,20 @@ F2=$($CLI claim-owner --repo-slug "$SLUG" --session T --host h --pid 2 --stale-s
 ok "stale-fence write refused" \
   "! $CLI write-task --repo-slug '$SLUG' --task-id PROJ-1 --session S --fence '$F' --json '{}' 2>/dev/null"
 
-# 7. launch shape: build a slot via pane split -> pane run "claude --model <m>" ->
-# pane report-agent (argv-safe; NO agent-start argv passthrough).
-# FIXTURE-ONLY: the orchestrator's worker launch is skill-prose (SKILL.md),
-# not a Python function; this documents the intended argv-safe command shape
-# and proves the fake-CLI mechanics. It would need rewiring to call a real
-# launch wrapper only if one is ever added.
+# 7. launch shape: run claude in the worktree's OWN root pane ->
+# "claude --model <m> --permission-mode auto" (auto mode, NOT
+# --dangerously-skip-permissions: an auto-mode orchestrator's classifier blocks
+# a skip-permissions worker). NO pane split (a split lands in the current
+# workspace, giving the worker the wrong HERDR_WORKSPACE_ID); NO agent-start
+# argv. herdr auto-detects the agent from pane run; report-agent, if ever used,
+# takes NO --kind. Validated live against herdr 0.8.2.
+# FIXTURE-ONLY: the orchestrator's worker launch is skill-prose (SKILL.md
+# section 8), not a Python function; this documents the intended argv-safe
+# command shape and proves the fake-CLI mechanics.
 : > "$BIN/calls.log"
-PID=$(herdr pane split --cwd /tmp/wt --no-focus | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['pane']['pane_id'])")
-herdr pane run "$PID" "claude --model sonnet --dangerously-skip-permissions"
-herdr pane report-agent "$PID" --kind claude
-ok "launch uses pane split+run+report-agent with model, not agent start, in order" "python3 - <<PY
+PID=$(herdr worktree create --branch talon/PROJ-1/x --base origin/main --label PROJ-1 | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
+herdr pane run "$PID" "claude --model sonnet --permission-mode auto"
+ok "launch runs claude in the worktree root pane in auto mode, no split, no skip-permissions, no agent start" "python3 - <<PY
 lines = open('$BIN/calls.log').read().splitlines()
 
 def idx(prefix):
@@ -95,11 +98,12 @@ def idx(prefix):
             return i
     return -1
 
-s = idx('pane split')
-r = idx('pane run w1:p2 claude --model sonnet')
-p = idx('pane report-agent w1:p2')
-a = idx('agent start')
-assert s >= 0 and r >= 0 and p >= 0 and s < r < p and a == -1
+c = idx('worktree create')
+r = idx('pane run w1:p1 claude --model sonnet --permission-mode auto')
+assert c >= 0 and r >= 0 and c < r
+assert idx('pane split') == -1
+assert idx('agent start') == -1
+assert not any('dangerously-skip-permissions' in l for l in lines)
 PY"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
