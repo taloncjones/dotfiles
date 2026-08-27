@@ -188,6 +188,74 @@ def fold_status(events):
     return {"authoritative": authoritative, "last_hint": last_hint}
 
 
+def _owner_path(rd) -> Path:
+    return Path(rd) / "owner.json"
+
+
+def claim_owner(rd, session_id, host, pid, stale_secs=900):
+    Path(rd).mkdir(parents=True, exist_ok=True)
+    p = _owner_path(rd)
+    rec = {
+        "session_id": session_id,
+        "host": host,
+        "pid": pid,
+        "heartbeat_ts": time.time(),
+        "fence": 1,
+    }
+    excl = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:  # fast path: first-ever claim is an atomic exclusive create
+        fd = os.open(p, excl, 0o600)
+        try:
+            os.write(fd, json.dumps(rec).encode())
+        finally:
+            os.close(fd)
+        return 1
+    except FileExistsError:
+        pass
+    lock = Path(f"{p}.lock")
+    try:  # serialize the read-modify-write of an existing owner
+        lfd = os.open(lock, excl, 0o600)
+    except FileExistsError:
+        return None  # another takeover in progress; caller may retry
+    try:
+        try:
+            cur = json.loads(p.read_text())
+        except (OSError, ValueError):
+            cur = {}
+        fresh = time.time() - float(cur.get("heartbeat_ts", 0)) <= stale_secs
+        if fresh and cur.get("session_id") != session_id:
+            return None
+        fence = int(cur.get("fence", 0)) + 1
+        rec["fence"] = fence
+        write_json_atomic(p, rec)
+        return fence
+    finally:
+        os.close(lfd)
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+
+
+def check_fence(rd, session_id, fence) -> bool:
+    try:
+        cur = json.loads(_owner_path(rd).read_text())
+    except (OSError, ValueError):
+        return False
+    return cur.get("session_id") == session_id and int(cur.get("fence", -1)) == int(
+        fence
+    )
+
+
+def refresh_owner(rd, session_id, fence) -> bool:
+    if not check_fence(rd, session_id, fence):
+        return False
+    cur = json.loads(_owner_path(rd).read_text())
+    cur["heartbeat_ts"] = time.time()
+    write_json_atomic(_owner_path(rd), cur)
+    return True
+
+
 def is_completed(task, done, live_head_sha) -> bool:
     if not isinstance(done, dict) or done.get("outcome") != "completed":
         return False

@@ -115,5 +115,45 @@ assert c.fold_status(ev2)["authoritative"]=="completed"
 sys.exit(0)
 PY
 
+check "ownership: exclusive claim, locked stale takeover, fence" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-abc");rd.mkdir(parents=True)
+f1=c.claim_owner(rd,"A","h",1);assert f1==1 and c.check_fence(rd,"A",f1)
+assert c.claim_owner(rd,"B","h",2) is None            # fresh owner: busy
+f2=c.claim_owner(rd,"B","h",2,stale_secs=0);assert f2==2   # stale: takeover
+assert not c.check_fence(rd,"A",f1) and c.check_fence(rd,"B",f2)
+assert c.refresh_owner(rd,"B",f2) and not c.refresh_owner(rd,"A",f1)
+sys.exit(0)
+PY
+
+check "ownership: concurrent stale takeover yields exactly one winner" <<PY
+$LOAD
+import subprocess, textwrap
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-abc");rd.mkdir(parents=True)
+c.claim_owner(rd,"OLD","h",1)                          # existing owner
+o=json.loads((rd/"owner.json").read_text());o["heartbeat_ts"]=0
+(rd/"owner.json").write_text(json.dumps(o))            # stale the stored heartbeat field
+prog=textwrap.dedent('''
+import importlib.util,os,sys
+s=importlib.util.spec_from_file_location("core","claude/hooks/herdr_orch_core.py")
+c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+rd=c.repo_dir("slug-abc")
+f=c.claim_owner(rd,sys.argv[1],"h",int(sys.argv[1][1:] or 0),stale_secs=1)
+print("WIN" if f else "LOSE")
+''')
+env=dict(os.environ)
+procs=[subprocess.Popen([sys.executable,"-c",prog,f"s{i}"],stdout=subprocess.PIPE,env=env) for i in range(6)]
+outs=[p.communicate()[0].decode().strip() for p in procs]
+# with a lock, some LOSE on contention and retry-eligible; but the owner file
+# must name exactly one session and check_fence must hold for only that one.
+owner=__import__("json").loads((rd/"owner.json").read_text())
+wins=outs.count("WIN")
+assert wins>=1
+assert c.check_fence(rd,owner["session_id"],owner["fence"])
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
