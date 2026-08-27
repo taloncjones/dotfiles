@@ -63,8 +63,7 @@ STATE_ROOT/
 
 - Agent name (herdr-compliant): `impl-<t>` / `rev-<t>` where `<t>` =
   `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
-  Verify uniqueness via `agent list`; on collision append `-2`, `-3`. Phase
-  workers use `<phase>-<t>` (e.g. `plan-<t>`).
+  Verify uniqueness via `agent list`; on collision append `-2`, `-3`.
 - Display label (unconstrained): worker `<task_id>`, reviewer
   `review:<task_id>`, orchestrator `orch:<repo>`.
 
@@ -106,7 +105,6 @@ STATE_ROOT/
   "soft_cap": 3,
   "models": {
     "orchestrator": ["fable", "opus"],
-    "planner": ["fable", "opus"],
     "impl": ["sonnet", "opus"],
     "reviewer": ["opus", "sonnet"]
   }
@@ -152,8 +150,8 @@ Written only by the owning orchestrator, via `$CORE write-task`.
 }
 ```
 
-`workers` is a list, not a single field -- phase advancement (plan ->
-implement -> review) appends a new entry rather than overwriting.
+`workers` is a list, not a single field -- phase advancement (implement ->
+review) appends a new entry rather than overwriting.
 
 ### `tasks/<task_id>.done.json` -- worker-emitted completion record
 
@@ -188,7 +186,7 @@ reviewed revision and the findings the merge gate needs:
   "outcome": "approved|changes-requested",
   "reviewed_head_sha": "<40hex>",
   "findings": { "blocking": [], "advisory": [] },
-  "findings_ref": "<path to full /co-review output>",
+  "findings_ref": "<path to full /code-review output>",
   "ts": "..."
 }
 ```
@@ -210,8 +208,8 @@ Read by the monitoring hook; written by the orchestrator via
 }
 ```
 
-`role` is one of `impl`, `plan`, `review` (matches the worker's phase/role,
-not the agent-name prefix directly).
+`role` is one of `impl`, `review` (matches the worker's phase/role, not the
+agent-name prefix directly).
 
 ### `workspaces/<HERDR_WORKSPACE_ID>.events.jsonl` -- per-workspace hint log
 

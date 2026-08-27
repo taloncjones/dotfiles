@@ -12,7 +12,7 @@ Only the Stop/Notification hook (`herdr_worker_status.py`, via
 `append_event`, one writer per `<workspace>.events.jsonl`) ever appends to
 `events.jsonl`:
 
-- `stopped` -- Stop hook fired for an `impl`/`plan` role workspace.
+- `stopped` -- Stop hook fired for an `impl` role workspace.
 - `blocked` -- an approval/question Notification fired.
 - `review-stopped` -- Stop hook fired for a `review` role workspace.
 

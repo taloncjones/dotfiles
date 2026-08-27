@@ -52,10 +52,9 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
-**Initial phase** is explicit: default `implement` (the common case -- the
-item already has a plan) starts an `impl-<...>` worker; `--phase plan`
-instead starts a `plan-<...>` worker as the first phase. The steps below
-read "impl" as "the initial-phase worker".
+Kickoff always starts an `impl-<...>` implement worker: the item already has
+a plan, and any planning it still needs happens inside that worker under the
+repo's own pipeline. The steps below call it "the worker".
 
 1. Resolve the item (Jira MCP for a ticket key, the todos skill for a bare
    todo) -> `task_id`. Abort if unresolved.
@@ -70,26 +69,31 @@ read "impl" as "the initial-phase worker".
    already exists, verify it belongs to this task (branch name matches
    `<user>/<task_id>/<slug>`) before adopting, and mark it
    `created_by_this_orch: false`. Otherwise create it and mark `true`. This
-   flag gates cleanup on failure (step 8).
+   flag gates cleanup on failure (step 9).
 5. `herdr worktree create` (or `worktree open` if adopting); parse the
    `.result` for the new `HERDR_WORKSPACE_ID` and worktree path -- never
    derive them. Label the workspace `<task_id>`.
-6. Write state through the core CLI, not by hand:
-   - `$CORE write-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id> --json '<task record, status "kickoff">'`
-   - `$CORE write-index --repo-slug <slug> --session <id> --fence <fence> --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "impl"}'`
-7. **Launch the worker on its pinned model** via the argv-safe pane-split
+6. **Launch the worker on its pinned model** via the argv-safe pane-split
    path -- see section 8, Model launch. Send the kickoff brief (template in
    references/brief-template.md), filled with `task_id`, worktree path,
-   branch, and phase.
-8. The authoritative record of kickoff is the task record's `status` field:
-   a follow-up `$CORE write-task` call under the same fence sets
-   `status: in-progress`. `events.jsonl` is hook-owned (worker lifecycle
-   hints only, see references/event-schema.md) -- the orchestrator does not
-   write to it. **Jira writeback** (kind == `"jira"` only): transition the
-   ticket to In Progress -- see section 10.
-9. **Partial-failure/crash:** on any failure during steps 3-7, clean up only
+   branch, and phase (`implement`).
+7. **Publish state only after the worker is launched** -- so a failed launch
+   leaves no stale task/index to unwind (no rollback verb needed). Write
+   through the core CLI, not by hand:
+   - `$CORE write-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id> --json '<task record, status "in-progress">'`
+   - `$CORE write-index --repo-slug <slug> --session <id> --fence <fence> --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "impl"}'`
+     The task record's `status` field is the authoritative kickoff record;
+     `events.jsonl` is hook-owned (worker lifecycle hints only, see
+     references/event-schema.md) -- the orchestrator does not write to it.
+8. **Jira writeback** (kind == `"jira"` only): transition the ticket to In
+   Progress -- see section 10.
+9. **Partial-failure/crash:** on any failure during steps 3-6, clean up only
    resources this attempt created (`created_by_this_orch: true`); never
-   delete adopted/pre-existing resources.
+   delete adopted/pre-existing resources. A launch that fails at step 6 has
+   published no task/index, so nothing needs unwinding there; a crash in the
+   narrow launch-to-publish gap leaves a running worker with no record, which
+   the next status/triage poll surfaces via live `herdr agent list` for
+   cleanup -- preferred over a stale record that would block re-kickoff.
 
 ## 3. Triage (advisory only -- read-only)
 
@@ -160,7 +164,10 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
    never leave a half-dispatched state.
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
-5. Prompt the reviewer to run `/co-review` against the branch, then
+5. Prompt the reviewer to run report-only `/code-review` (no `--fix`, no
+   `--comment`) against the branch -- NOT `/co-review`, which fixes findings
+   by default and would edit the very branch under review, destroying review
+   independence -- then
    `$CORE emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --findings-ref <path>`,
    then `/handoff`. Reviewer and orchestrator never push or open PRs.
 6. At the next check-in, read the reviewer's completion record:
@@ -172,11 +179,17 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 
 ## 6. Surface for merge (human gate) -- only on `reviewed`
 
-Only a task at `status: reviewed` with `review_head_sha` == current HEAD is
-surfaced as merge-ready: "`<task_id>` reviewed clean @ `<sha>`. Ready for
-your review and merge." `changes-requested` is never surfaced as
-merge-ready. Merge, `/ship`, `/post-merge` remain human actions; `/post-merge`
-sets `merged`.
+A task is surfaced as merge-ready only when `status: reviewed` AND
+`$CORE confirm-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
+exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb correlates
+the review `done.json` to the current HEAD -- it requires `phase == "review"`,
+`outcome == "approved"`, and `reviewed_head_sha == <sha>` -- so a stale review
+approving a prior HEAD (the implementer pushed again after approval) never
+clears the gate. Rely on the verb, never re-derive the check by hand.
+
+Surface: "`<task_id>` reviewed clean @ `<sha>`. Ready for your review and
+merge." `changes-requested` is never surfaced as merge-ready. Merge, `/ship`,
+`/post-merge` remain human actions; `/post-merge` sets `merged`.
 
 ## 7. Worker-created panes (self-managed)
 
@@ -208,12 +221,11 @@ Each role has an ordered model preference, resolved against the models the
 current account/CLI actually offers. First available wins; `config.json`
 may override any role's list.
 
-| Role / phase            | Preference (first available wins) | Effort     | Notes                                                                                             |
-| ----------------------- | --------------------------------- | ---------- | ------------------------------------------------------------------------------------------------- |
-| Orchestrator            | fable -> opus                     | low/med    | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)   |
-| Planner / architect     | fable -> opus                     | high/xhigh | hardest design reasoning                                                                          |
-| Implementation worker   | sonnet -> opus                    | default    | cheap execution                                                                                   |
-| Reviewer (`/co-review`) | opus -> sonnet                    | high       | deliberate cross-model diversity vs a Fable planner/impl; `/co-review` adds Codex as a third view |
+| Role / phase              | Preference (first available wins) | Effort  | Notes                                                                                               |
+| ------------------------- | --------------------------------- | ------- | --------------------------------------------------------------------------------------------------- |
+| Orchestrator              | fable -> opus                     | low/med | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)     |
+| Implementation worker     | sonnet -> opus                    | default | cheap execution                                                                                     |
+| Reviewer (`/code-review`) | opus -> sonnet                    | high    | report-only `/code-review` (no `--fix`); Opus reviewer gives model diversity vs a Fable/Sonnet impl |
 
 Fallback scaffolding: when Fable is unavailable (enterprise account, usage
 exhausted, or the current session is already Opus), fall back to Opus and

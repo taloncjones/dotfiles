@@ -117,6 +117,18 @@ assert not c.is_completed(task,None,"h1")
 sys.exit(0)
 PY
 
+check "is_reviewed: approved + phase review + HEAD match; stale HEAD/outcome/task rejected" <<PY
+$LOAD
+good={"task_id":"PROJ-1","phase":"review","outcome":"approved","reviewed_head_sha":"h1"}
+assert c.is_reviewed(good,"PROJ-1","h1")
+assert not c.is_reviewed(good,"PROJ-1","h2")                       # review is for a prior HEAD
+assert not c.is_reviewed({**good,"outcome":"changes-requested"},"PROJ-1","h1")
+assert not c.is_reviewed({**good,"phase":"implement"},"PROJ-1","h1")  # an impl done.json, not a review
+assert not c.is_reviewed({**good,"task_id":"PROJ-2"},"PROJ-1","h1")
+assert not c.is_reviewed(None,"PROJ-1","h1")
+sys.exit(0)
+PY
+
 check "fold_status: latest authoritative wins, blocked hint surfaces" <<PY
 $LOAD
 ev=[{"v":1,"event":"kickoff"},{"v":1,"event":"stopped"},{"v":1,"event":"blocked"}]
@@ -243,6 +255,39 @@ test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 # wrong fence is refused
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
    --repo-slug slug-x --task-id PROJ-1 --session S --fence 999 --json "$task" 2>/dev/null; then exit 1; fi
+SH
+
+check "CLI write-task rejects non-dict json and task_id mismatch" <<'SH'
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py claim-owner \
+   --repo-slug slug-x --session S --host h --pid 1)
+# a bare array would persist and later crash `status` on .get -> must be refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+   --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json '[]' 2>/dev/null; then exit 1; fi
+# a dict whose task_id disagrees with --task-id is refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+   --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json '{"task_id":"PROJ-2"}' 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
+# the matching record persists
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+   --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json '{"task_id":"PROJ-1","status":"kickoff"}'
+test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
+SH
+
+check "CLI confirm-review: approved@HEAD passes, stale HEAD / changes-requested fail" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+# no done.json yet -> not reviewed
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+  --reviewed-head-sha h1 --outcome approved
+$CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1
+# HEAD moved past the reviewed revision -> stale review must not clear the gate
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h2 2>/dev/null; then exit 1; fi
+# a changes-requested review is never merge-ready
+$CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
+  --reviewed-head-sha h1 --outcome changes-requested
+if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --head-sha h1 2>/dev/null; then exit 1; fi
 SH
 
 check "CLI emit-review records reviewed_head_sha + outcome" <<'SH'

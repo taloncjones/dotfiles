@@ -1,9 +1,12 @@
 # Kickoff brief template
 
-Sent to a freshly-launched worker (`impl-<t>`, `plan-<t>`, or a phase-advanced
+Sent to a freshly-launched worker (`impl-<t>`, or a phase-advanced
 successor) after its pane is running and registered as an agent. Fill every
 `<...>` placeholder from the task record and preflight state before sending;
-never leave a placeholder unfilled.
+never leave a placeholder unfilled. The worker runs in its own shell with no
+`$CORE` var defined, so its close commands spell out the full
+`python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py` path --
+the same config dir (and thus `STATE_ROOT`) the orchestrator used.
 
 ```
 You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
@@ -17,7 +20,7 @@ You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
 - Branch: <branch>
 - Worktree: <worktree_path>
 - Base: <base_ref> @ <base_sha>
-- Phase: <phase>  (plan | implement | review)
+- Phase: implement
 
 ## Ground rules
 - This is your own workspace -- commit as you go, don't leave uncommitted
@@ -37,7 +40,7 @@ You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
 When you finish, pause, or fail this phase:
 1. Commit all work.
 2. Run:
-   `$CORE emit-done --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase <phase> --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha>`
+   `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha>`
 3. Then run `/handoff`.
 
 Do not report completion any other way -- the orchestrator only recognizes
@@ -55,13 +58,15 @@ You are `<agent-name>` reviewing task `<task_id>` in repo `<repo_slug>` at
 HEAD `<review_head_sha>`.
 
 ## Task
-Run `/co-review` against this branch. Classify every finding as blocking or
-advisory.
+Run `/code-review` (report-only -- no `--fix`, no `--comment`) against this
+branch. Do NOT run `/co-review`: it fixes findings by default, which would
+edit the very branch you are reviewing and destroy review independence.
+Classify every finding as blocking or advisory.
 
 ## Close
 When review is complete:
 1. Run:
-   `$CORE emit-review --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --findings-ref <path to full /co-review output>`
+   `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-review --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --findings-ref <path to full /code-review output>`
 2. Then run `/handoff`.
 
 Never push, merge, or open a PR.

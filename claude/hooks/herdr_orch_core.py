@@ -229,6 +229,11 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900):
             stale_lock = False
         if not stale_lock:
             return None  # fresh lock: another takeover in progress; caller may retry
+        # Known limitation (single-user-unreachable): two contenders can race
+        # this unlink/re-create -- one may unlink a lock the other just remade.
+        # The loser's exclusive-create then fails and it returns None to retry;
+        # the fence still names exactly one winner, so it self-heals. Only
+        # reachable with concurrent orchestrators on one repo.
         try:
             os.unlink(lock)
         except OSError:
@@ -296,6 +301,20 @@ def should_dispatch_review(task, head_sha) -> bool:
     return task.get("review_head_sha") != head_sha
 
 
+def is_reviewed(done, task_id, head_sha) -> bool:
+    """A review is merge-ready only when its record approves the exact HEAD
+    under review -- a stale review from a prior HEAD must never clear the gate."""
+    if not isinstance(done, dict):
+        return False
+    if done.get("task_id") != task_id:
+        return False
+    if done.get("phase") != "review":
+        return False
+    if done.get("outcome") != "approved":
+        return False
+    return done.get("reviewed_head_sha") == head_sha
+
+
 def _require(cond, msg) -> None:
     if not cond:
         sys.stderr.write(f"[X] {msg}\n")
@@ -303,6 +322,12 @@ def _require(cond, msg) -> None:
 
 
 def _fenced(ns):
+    # Known limitation (single-user-unreachable): this fence check and the
+    # caller's subsequent write are not one atomic step -- a just-superseded
+    # owner could pass here and then write in the gap after a concurrent
+    # takeover. Fence-mitigated (the next refresh/claim by the live owner wins)
+    # and needs two contending orchestrators on one repo; revisit only if this
+    # ever becomes multi-user.
     _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
     rd = repo_dir(ns.repo_slug)
     _require(check_fence(rd, ns.session, int(ns.fence)), "stale or missing fence")
@@ -353,6 +378,7 @@ def main(argv=None) -> int:
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--head-sha")
+    add("confirm-review", "--task-id", "--head-sha")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "claim-owner":
@@ -377,8 +403,18 @@ def main(argv=None) -> int:
     if ns.cmd == "write-task":
         rd = _fenced(ns)
         _require(valid_task_id(ns.task_id), "invalid task-id")
+        try:
+            rec = json.loads(ns.json)
+        except ValueError:
+            rec = None
+        # Persisting a non-dict (e.g. a bare `[]`) would later crash `status`
+        # on `.get`; a task_id mismatch would mislabel the record under its file.
+        _require(
+            isinstance(rec, dict) and rec.get("task_id") == ns.task_id,
+            "task json must be a JSON object whose task_id equals --task-id",
+        )
         (rd / "tasks").mkdir(parents=True, exist_ok=True)
-        write_json_atomic(rd / "tasks" / f"{ns.task_id}.json", json.loads(ns.json))
+        write_json_atomic(rd / "tasks" / f"{ns.task_id}.json", rec)
         return 0
     if ns.cmd == "write-index":
         rd = _fenced(ns)
@@ -481,6 +517,17 @@ def main(argv=None) -> int:
         except (OSError, ValueError):
             done = None
         return 0 if is_completed(task, done, ns.head_sha) else 1
+    if ns.cmd == "confirm-review":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        rd = repo_dir(ns.repo_slug)
+        df = rd / "tasks" / f"{ns.task_id}.done.json"
+        _require(contained(df, state_root()), "escapes state root")
+        try:
+            done = json.loads(df.read_text())
+        except (OSError, ValueError):
+            done = None
+        return 0 if is_reviewed(done, ns.task_id, ns.head_sha) else 1
     return 2
 
 
