@@ -44,16 +44,26 @@ def valid_capabilities(rec, session_id) -> bool:
 
 
 def role_preference(role, config):
-    """Ordered alias preference for a role, or None if the role is unknown or
-    the config 'models' block is malformed (not a dict, an override that is not
-    a list, or a token outside CAP_MODELS). Duplicates dropped, first order kept."""
+    """Ordered alias preference for a role, or None (-> exit 5) if the role is
+    unknown or the config 'models' block is malformed: not a dict, a key outside
+    the canonical roles, an override that is not a list, an empty override, or a
+    token outside CAP_MODELS. Fail closed on any malformed override so a config
+    mistake surfaces rather than silently reverting to defaults. Duplicates
+    dropped, first order kept."""
     models = (config or {}).get("models")
     if models is not None:
         if not isinstance(models, dict):
             return None
+        # A key outside the canonical roles (typo, or a legacy
+        # orchestrator/reviewer key) makes the whole block malformed -> exit 5,
+        # matching references/state-layout.md.
+        if any(k not in ROLE_DEFAULTS for k in models):
+            return None
         override = models.get(role)
         if override is not None:
-            if not isinstance(override, list):
+            # An empty override is a config error, not "no model available"
+            # (which would mislabel it as an availability failure, exit 4).
+            if not isinstance(override, list) or not override:
                 return None
             seen = []
             for m in override:
@@ -88,10 +98,18 @@ def classify_probe(result, alias):
     if not isinstance(result, dict):
         return "indeterminate"
     if result.get("is_error") is True:
-        if result.get("api_error_status") in _AVAIL_ERROR_STATUS:
+        # Coerce -- the CLI may surface api_error_status as a string ("429").
+        try:
+            status = int(result.get("api_error_status"))
+        except (TypeError, ValueError):
+            status = None
+        if status in _AVAIL_ERROR_STATUS:
             return "unavailable"
         return "indeterminate"
     if result.get("is_error") is False:
+        # Shape verified live 2026-08-28: a successful probe reports the resolved
+        # model as a modelUsage key like "claude-<alias>-<n>" (spike observed
+        # "claude-sonnet-5"), so the alias is a substring of its key.
         mu = result.get("modelUsage")
         if isinstance(mu, dict) and any(alias in str(k) for k in mu):
             return "available"

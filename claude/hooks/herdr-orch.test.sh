@@ -465,6 +465,9 @@ assert c.role_preference("plan",{"models":{"plan":["opus","opus","fable"]}})==("
 assert c.role_preference("plan",{"models":{"plan":["gpt"]}}) is None
 assert c.role_preference("plan",{"models":["opus"]}) is None
 assert c.role_preference("plan",{"models":{"plan":"opus"}}) is None
+assert c.role_preference("plan",{"models":{"plan":[]}}) is None          # empty override -> exit 5, not 4
+assert c.role_preference("impl",{"models":{"orchestrator":["opus"]}}) is None  # legacy/unknown key -> malformed
+assert c.role_preference("impl",{"models":{"implement":["opus"]}}) is None     # typo'd role key -> malformed
 sys.exit(0)
 PY
 
@@ -532,6 +535,7 @@ assert c.classify_probe(ok,"fable")=="available"
 assert c.classify_probe({"is_error":False,"modelUsage":{"claude-sonnet-5":{}}},"fable")=="indeterminate"
 assert c.classify_probe({"is_error":True,"api_error_status":429},"fable")=="unavailable"
 assert c.classify_probe({"is_error":True,"api_error_status":403},"fable")=="unavailable"
+assert c.classify_probe({"is_error":True,"api_error_status":"429"},"fable")=="unavailable"  # string status coerced
 assert c.classify_probe({"is_error":True,"api_error_status":500},"fable")=="indeterminate"
 assert c.classify_probe({"is_error":True},"fable")=="indeterminate"
 assert c.classify_probe("not a dict","fable")=="indeterminate"
