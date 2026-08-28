@@ -305,9 +305,10 @@ that keeps the recorded verdict trustworthy.
    Herdr session the review agent just runs co-review and reports.) Then
    `python3 "$CORE" emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>`
    (`<n>` = count of blocking findings; the merge gate rejects any non-zero
-   count even under `approved`), then `/handoff`. Review agent and orchestrator
-   never push or open PRs. The verdict lands in `tasks/<task_id>.review.json`,
-   separate from the impl `.done.json`.
+   count even under `approved`), then the review agent goes idle and hands
+   back -- it does NOT run `/handoff`; `emit-review` is its only signal. Review
+   agent and orchestrator never push or open PRs. The verdict lands in
+   `tasks/<task_id>.review.json`, separate from the impl `.done.json`.
 6. At the next check-in, read the reviewer's completion record. First confirm
    it covers the dispatched revision: the reviewer's `reviewed_head_sha` must
    equal both the dispatched `review_head_sha` and current HEAD. If any
