@@ -87,7 +87,7 @@ ok "stale-fence write refused" \
 # section 8), not a Python function; this documents the intended argv-safe
 # command shape and proves the fake-CLI mechanics.
 : > "$BIN/calls.log"
-PID=$(herdr worktree create --branch talon/PROJ-1/x --base origin/main --label PROJ-1 | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
+PID=$(herdr worktree create --cwd "$PWD" --branch talon/PROJ-1/x --base origin/main --label PROJ-1 | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
 herdr pane run "$PID" "claude --model sonnet --permission-mode auto"
 ok "launch runs claude in the worktree root pane in auto mode, no split, no skip-permissions, no agent start" "python3 - <<PY
 lines = open('$BIN/calls.log').read().splitlines()

@@ -528,14 +528,22 @@ F2=$($CLI claim-owner --repo-slug slug-y --session S --host h --pid 1)
 rc=0; $CLI disable-model --repo-slug slug-y --session S --fence "$F2" --model fable 2>/dev/null || rc=$?; test "$rc" != "0"
 SH
 
-check "classify_probe: available / 429+403 unavailable / else indeterminate" <<PY
+check "classify_probe: available / 403+credit-429 unavailable / ambiguous-429+else indeterminate" <<PY
 $LOAD
 ok={"is_error":False,"modelUsage":{"claude-fable-5":{"in":1}}}
 assert c.classify_probe(ok,"fable")=="available"
 assert c.classify_probe({"is_error":False,"modelUsage":{"claude-sonnet-5":{}}},"fable")=="indeterminate"
-assert c.classify_probe({"is_error":True,"api_error_status":429},"fable")=="unavailable"
+# 403 restriction is a hard "not launchable" signal
 assert c.classify_probe({"is_error":True,"api_error_status":403},"fable")=="unavailable"
-assert c.classify_probe({"is_error":True,"api_error_status":"429"},"fable")=="unavailable"  # string status coerced
+# a 429 whose message names usage/credit exhaustion -> unavailable (out of credits; fall back to Opus)
+assert c.classify_probe({"is_error":True,"api_error_status":429,"result":"You're out of usage credits"},"fable")=="unavailable"
+assert c.classify_probe({"is_error":True,"api_error_status":429,"error":{"message":"Usage limit reached"}},"fable")=="unavailable"
+assert c.classify_probe({"is_error":True,"api_error_status":"429","result":"out of usage credits"},"fable")=="unavailable"  # string status coerced
+# a bare/transient 429 (rate limit, no exhaustion message) stays indeterminate -> caller aborts
+assert c.classify_probe({"is_error":True,"api_error_status":429},"fable")=="indeterminate"
+assert c.classify_probe({"is_error":True,"api_error_status":429,"result":"rate limit exceeded, retry later"},"fable")=="indeterminate"
+# an exhaustion message without a 429 status is not the exhaustion signal (do not over-broaden)
+assert c.classify_probe({"is_error":True,"result":"out of usage credits"},"fable")=="indeterminate"
 assert c.classify_probe({"is_error":True,"api_error_status":500},"fable")=="indeterminate"
 assert c.classify_probe({"is_error":True},"fable")=="indeterminate"
 assert c.classify_probe("not a dict","fable")=="indeterminate"
@@ -545,8 +553,10 @@ PY
 
 check "classify-probe CLI prints classification" <<'SH'
 CLI="python3 claude/hooks/herdr_orch_core.py"
-out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":true,"api_error_status":429}')
+out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":true,"api_error_status":429,"result":"usage limit reached"}')
 test "$out" = "unavailable"
+out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":true,"api_error_status":429}')
+test "$out" = "indeterminate"
 out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":false,"modelUsage":{"claude-fable-5":{}}}')
 test "$out" = "available"
 SH

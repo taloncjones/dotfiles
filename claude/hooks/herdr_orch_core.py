@@ -26,7 +26,14 @@ ROLE_DEFAULTS = {
     "review": ("opus", "sonnet"),
 }
 
-_AVAIL_ERROR_STATUS = (429, 403)
+# A 429 whose message names usage/credit exhaustion is reliable "this model is
+# not launchable" data (the account is out of credits); a bare 429 is an
+# ambiguous transient rate limit. Matched against the probe's result/error text.
+_USAGE_EXHAUSTION_RE = re.compile(
+    r"out of usage credits|usage limit|usage credits|"
+    r"insufficient credits?|out of credits?|credit balance",
+    re.IGNORECASE,
+)
 
 
 def valid_capabilities(rec, session_id) -> bool:
@@ -89,12 +96,31 @@ def resolve_model(role, available, config):
     return (survivors[0], None)
 
 
+def _usage_exhausted(result) -> bool:
+    """True when the probe's result/error text names usage/credit exhaustion.
+    Scans the string-ish fields a `claude -p` error can carry (`result`,
+    `error`, `message`, and an `error` object's `message`)."""
+    parts = []
+    for key in ("result", "error", "message"):
+        v = result.get(key)
+        if isinstance(v, str):
+            parts.append(v)
+        elif isinstance(v, dict):
+            m = v.get("message")
+            if isinstance(m, str):
+                parts.append(m)
+    return bool(_USAGE_EXHAUSTION_RE.search(" ".join(parts)))
+
+
 def classify_probe(result, alias):
     """Classify a `claude -p --output-format json` result for the strong model.
     available: no error and a modelUsage key names the alias.
-    unavailable: an availability-class api_error_status (restriction/exhaustion).
-    indeterminate: anything else (no claude, other error, success without the
-    model confirmed) -- caller must abort, not assume."""
+    unavailable: a hard "not launchable" signal -- a 403 restriction, or a 429
+    whose result/error text names usage/credit exhaustion (out of credits ->
+    fall back deterministically, do not wait on a human).
+    indeterminate: anything else, including a bare/transient 429 (rate limit),
+    other statuses, no claude, network error, or an unparseable/success-without-
+    the-model result -- caller must abort, not assume."""
     if not isinstance(result, dict):
         return "indeterminate"
     if result.get("is_error") is True:
@@ -103,7 +129,14 @@ def classify_probe(result, alias):
             status = int(result.get("api_error_status"))
         except (TypeError, ValueError):
             status = None
-        if status in _AVAIL_ERROR_STATUS:
+        # 403 is a hard restriction (model not offered to this account).
+        if status == 403:
+            return "unavailable"
+        # A 429 is ambiguous on its own (transient rate limit -> abort/retry),
+        # but a 429 whose message names usage/credit exhaustion is reliable
+        # "this model is not launchable" data -> unavailable, so the caller
+        # falls back to Opus instead of waiting for a human to unblock.
+        if status == 429 and _usage_exhausted(result):
             return "unavailable"
         return "indeterminate"
     if result.get("is_error") is False:

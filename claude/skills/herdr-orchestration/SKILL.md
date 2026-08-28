@@ -117,9 +117,26 @@ phase-appropriate brief (references/brief-template.md) and model.
    `<user>/<task_id>/<slug>`) before adopting, and mark it
    `created_by_this_orch: false`. Otherwise create it and mark `true`. This
    flag gates cleanup on failure (step 9).
-5. `herdr worktree create` (or `worktree open` if adopting); parse the
-   `.result` for the new `HERDR_WORKSPACE_ID` and worktree path -- never
-   derive them. Label the workspace `<task_id>`.
+5. **`herdr worktree create --cwd <repo_root>`** (or `worktree open --cwd
+<repo_root>` if adopting) -- the explicit `--cwd` is MANDATORY, never a bare
+   path. Resolve `<repo_root>` first as the intended repo's top level:
+   `REPO_ROOT="$(git -C <path-in-repo> rev-parse --show-toplevel)"`.
+   **Why (submodule-adjacency mis-anchor):** when the target path sits inside or
+   beside a git submodule, a bare `worktree create` can anchor the new worktree
+   to the SUBMODULE instead of the intended repo -- incident 2026-08-28, rw-bess:
+   a `BESS-2334` create defaulted to the `rw-test-infrastructure` submodule
+   (`repo_root: .../rw-test-infrastructure`) because several active workspaces
+   lived there, risking a ticket's work built in the wrong repo. Explicit
+   `--cwd <repo_root>` pins the anchor.
+   Parse the `.result` for the new `HERDR_WORKSPACE_ID` and worktree path --
+   never derive them. **Then verify the anchor before doing anything else:** read
+   `.result...repo_root` / `.result...repo_name` and confirm they equal the
+   intended `<repo_root>` (and its basename). On a mismatch the create
+   mis-anchored -- do NOT launch a worker; **unwind** the stray resources
+   (remove the empty worktree: `herdr worktree remove --workspace <ws_id>`, and
+   delete the stray branch: `git -C <mis-anchored repo_root> branch -D <branch>`),
+   then surface the mismatch and stop. Only a verified-correct anchor proceeds.
+   Label the workspace `<task_id>`.
 6. **Launch the worker on its pinned model** into the new workspace's own pane
    -- see section 8, Model launch. Send the kickoff brief (template in
    references/brief-template.md), filled with `task_id`, worktree path,
@@ -281,7 +298,10 @@ that keeps the recorded verdict trustworthy.
    The impl agent has handed off; free its root pane (send it `/exit`, or launch
    in a fresh self-owned `pane split`) and start the review agent there -- no
    `worktree open`, no new workspace. Do not resume the implementer while review
-   is pending.
+   is pending. (Should a `worktree open` ever be needed here despite the above,
+   it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
+   repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
+   applies to every `worktree create`/`open`, no exceptions.)
 3. Start a unique `rev-<...>` agent on the reviewer model (section 8 launch) in
    the task workspace. **Only after the agent successfully starts**, publish
    state under the fence, both writes together:
@@ -451,8 +471,28 @@ Submit the brief and confirm the worker started working in one call:
 (`working` is a valid `--until` status; `--timeout` guards the 5s
 `agent_prompt_stalled` and indefinite-wait edges).
 
-**Verify-after-launch (self-heal, backstop to the section-1 probe).** Read the
-running model via `herdr agent read` BEFORE submitting the brief, and classify:
+**Verify-after-launch (D4 self-heal, best-effort backstop -- fails safe).** The
+PRIMARY availability guarantee is the section-1 headless probe (`claude -p
+--output-format json` -> reliable structured JSON). This D4 backstop only tries
+to catch an interactive pane that silently DOWNGRADED after a clean probe; when
+it cannot read the running model it does NOT guess -- it fails closed (abort +
+surface), so a weak read never advances a launch on inference.
+
+Read the running model as early as possible, before the banner scrolls off:
+immediately after `pane run "claude ..."`, and no later than right after
+`agent prompt --until working`, via `herdr agent read` / `herdr pane read`,
+capturing the `Claude Code v...` banner line that names the model. Retry the
+read within a short bounded window (a few reads over a few seconds); the banner
+is transient, so a single late read is unreliable -- that unreliability is the
+incident this section fixes (2026-08-28, BESS-2334: the banner had scrolled off,
+the model line was unreadable, and the launch wrongly PROCEEDED ON INFERENCE).
+herdr 0.8.2 exposes NO structural model field on `agent list` / `agent get`
+(verified 2026-08-28: the agent record carries `agent` / `agent_status` / `cwd`
+/ `pane_id` / `terminal_title` and no model), so the banner is the only source;
+if a future herdr adds a launched-model field to `agent get` / `agent list`,
+prefer that structured field over scraping the banner.
+
+Classify the read:
 
 - **DOWNGRADE** (running model != requested `$MODEL`) or a model-attributable
   launch failure -> mark the REQUESTED alias unavailable (never the observed
@@ -461,14 +501,17 @@ running model via `herdr agent read` BEFORE submitting the brief, and classify:
   Confirm the wrong worker is terminated, then re-run `resolve-model` and
   relaunch on the next survivor. Cap relaunch attempts per dispatch at 2, then
   surface failure -- do not loop.
-- **INFRASTRUCTURE-INDETERMINATE** (pane didn't start, herdr error, no banner
-  within timeout, no model signal) -> do NOT disable any model; abort and
-  surface. This is not availability data.
+- **INFRASTRUCTURE-INDETERMINATE** (pane didn't start, herdr error, or the model
+  banner is not readable within the bounded window -- no model signal) -> do NOT
+  disable any model and NEVER infer the model ("the probe fell back to Sonnet, so
+  it's probably Sonnet" is exactly the forbidden inference); abort and surface.
+  This is not availability data.
 
 Downward-only within a session; upward recovery waits for the next startup
 re-probe (section 1 step 5). Headless `-p` (the probe) errors on an unavailable
 model, but an interactive pane launch can silently DOWNGRADE to Sonnet -- which
-is exactly what this backstop catches.
+is exactly what this backstop catches when the banner is readable, and fails
+closed (abort) when it is not.
 
 ## 9. State transition table (authoritative)
 
