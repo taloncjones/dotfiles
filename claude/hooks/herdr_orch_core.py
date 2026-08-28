@@ -18,6 +18,103 @@ AGENT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 REPO_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 TASK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
+CAP_MODELS = ("fable", "opus", "sonnet")
+
+ROLE_DEFAULTS = {
+    "plan": ("fable", "opus"),
+    "impl": ("sonnet", "opus"),
+    "review": ("opus", "sonnet"),
+}
+
+_AVAIL_ERROR_STATUS = (429, 403)
+
+
+def valid_capabilities(rec, session_id) -> bool:
+    if not isinstance(rec, dict):
+        return False
+    v = rec.get("v")
+    if not isinstance(v, int) or isinstance(v, bool) or v != 1:
+        return False
+    if rec.get("session_id") != session_id:
+        return False
+    avail = rec.get("available")
+    if not isinstance(avail, dict) or set(avail.keys()) != set(CAP_MODELS):
+        return False
+    return all(isinstance(avail[k], bool) for k in CAP_MODELS)
+
+
+def role_preference(role, config):
+    """Ordered alias preference for a role, or None (-> exit 5) if the role is
+    unknown or the config 'models' block is malformed: not a dict, a key outside
+    the canonical roles, an override that is not a list, an empty override, or a
+    token outside CAP_MODELS. Fail closed on any malformed override so a config
+    mistake surfaces rather than silently reverting to defaults. Duplicates
+    dropped, first order kept."""
+    models = (config or {}).get("models")
+    if models is not None:
+        if not isinstance(models, dict):
+            return None
+        # A key outside the canonical roles (typo, or a legacy
+        # orchestrator/reviewer key) makes the whole block malformed -> exit 5,
+        # matching references/state-layout.md.
+        if any(k not in ROLE_DEFAULTS for k in models):
+            return None
+        override = models.get(role)
+        if override is not None:
+            # An empty override is a config error, not "no model available"
+            # (which would mislabel it as an availability failure, exit 4).
+            if not isinstance(override, list) or not override:
+                return None
+            seen = []
+            for m in override:
+                if m not in CAP_MODELS:
+                    return None
+                if m not in seen:
+                    seen.append(m)
+            return tuple(seen)
+    return ROLE_DEFAULTS.get(role)
+
+
+def resolve_model(role, available, config):
+    """(model, None) on success; (None, code) on failure.
+    3 = capabilities absent/stale; 4 = zero survivors; 5 = invalid role/config."""
+    prefs = role_preference(role, config)
+    if prefs is None:
+        return (None, 5)
+    if available is None:
+        return (None, 3)
+    survivors = [m for m in prefs if available.get(m) is True]
+    if not survivors:
+        return (None, 4)
+    return (survivors[0], None)
+
+
+def classify_probe(result, alias):
+    """Classify a `claude -p --output-format json` result for the strong model.
+    available: no error and a modelUsage key names the alias.
+    unavailable: an availability-class api_error_status (restriction/exhaustion).
+    indeterminate: anything else (no claude, other error, success without the
+    model confirmed) -- caller must abort, not assume."""
+    if not isinstance(result, dict):
+        return "indeterminate"
+    if result.get("is_error") is True:
+        # Coerce -- the CLI may surface api_error_status as a string ("429").
+        try:
+            status = int(result.get("api_error_status"))
+        except (TypeError, ValueError):
+            status = None
+        if status in _AVAIL_ERROR_STATUS:
+            return "unavailable"
+        return "indeterminate"
+    if result.get("is_error") is False:
+        # Shape verified live 2026-08-28: a successful probe reports the resolved
+        # model as a modelUsage key like "claude-<alias>-<n>" (spike observed
+        # "claude-sonnet-5"), so the alias is a substring of its key.
+        mu = result.get("modelUsage")
+        if isinstance(mu, dict) and any(alias in str(k) for k in mu):
+            return "available"
+    return "indeterminate"
+
 
 def state_root() -> Path:
     base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
@@ -138,6 +235,32 @@ def read_index(rd, ws):
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def read_config(rd):
+    p = Path(rd) / "config.json"
+    try:
+        if p.is_symlink() or not contained(p, state_root()):
+            return {}
+        cfg = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def read_capabilities(rd, session_id):
+    """Validated 'available' dict, or None if the map is absent, unreadable,
+    malformed, or stamped with a different session (stale)."""
+    p = Path(rd) / "capabilities.json"
+    try:
+        if p.is_symlink() or not contained(p, state_root()):
+            return None
+        cap = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    if not valid_capabilities(cap, session_id):
+        return None
+    return cap.get("available")
 
 
 def append_event(rd, ws, event, **fields) -> bool:
@@ -372,6 +495,10 @@ def main(argv=None) -> int:
     add("check-fence", "--session", "--fence")
     add("write-task", "--task-id", "--json", fenced=True)
     add("write-index", "--workspace", "--json", fenced=True)
+    add("write-capabilities", "--json", fenced=True)
+    add("resolve-model", "--role", "--session")
+    add("disable-model", "--model", fenced=True)
+    add("classify-probe", "--model", "--json")
     add(
         "emit-done",
         "--task-id",
@@ -445,6 +572,53 @@ def main(argv=None) -> int:
         _require(isinstance(rec, dict), "index json must be a JSON object")
         (rd / "workspaces").mkdir(parents=True, exist_ok=True)
         write_json_atomic(index_path(rd, ns.workspace), rec)
+        return 0
+    if ns.cmd == "write-capabilities":
+        rd = _fenced(ns)
+        try:
+            rec = json.loads(ns.json)
+        except ValueError:
+            rec = None
+        _require(
+            valid_capabilities(rec, ns.session),
+            "capabilities json must be {v:1, session_id==--session, "
+            "available:{fable,opus,sonnet all bool}}",
+        )
+        Path(rd).mkdir(parents=True, exist_ok=True)
+        write_json_atomic(rd / "capabilities.json", rec)
+        return 0
+    if ns.cmd == "resolve-model":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        available = read_capabilities(rd, ns.session)
+        model, code = resolve_model(ns.role, available, read_config(rd))
+        if code is not None:
+            sys.stderr.write(
+                {
+                    3: "[X] capabilities map absent or stale; re-probe first\n",
+                    4: "[X] no available model for role\n",
+                    5: "[X] invalid role or config models override\n",
+                }[code]
+            )
+            return code
+        print(model)
+        return 0
+    if ns.cmd == "disable-model":
+        rd = _fenced(ns)
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet")
+        available = read_capabilities(rd, ns.session)
+        _require(available is not None, "capabilities map absent or stale")
+        rec = {"v": 1, "session_id": ns.session, "available": dict(available)}
+        rec["available"][ns.model] = False
+        write_json_atomic(rd / "capabilities.json", rec)
+        return 0
+    if ns.cmd == "classify-probe":
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet")
+        try:
+            result = json.loads(ns.json)
+        except ValueError:
+            result = None
+        print(classify_probe(result, ns.model))
         return 0
     if ns.cmd in ("emit-done", "emit-review"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")

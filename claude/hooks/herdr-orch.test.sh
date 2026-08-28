@@ -424,5 +424,132 @@ hook_case "permission Notification -> blocked" REGISTER "1" '{"hook_event_name":
 hook_case "elicitation Notification -> blocked" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}' blocked
 hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"idle_prompt"}' none
 
+# --- model discovery: write-capabilities / resolve-model / disable-model / classify-probe ---
+
+check "valid_capabilities strict: exact keys, int-not-bool v, session match" <<PY
+$LOAD
+ok={"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True}}
+assert c.valid_capabilities(ok,"S")
+assert not c.valid_capabilities(ok,"OTHER")
+assert not c.valid_capabilities({"v":True,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"opus":True,"sonnet":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"gpt":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":0,"opus":True,"sonnet":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":[]},"S")
+assert not c.valid_capabilities([],"S")
+sys.exit(0)
+PY
+
+check "write-capabilities CLI round-trips; rejects bad payload and stale fence" <<'SH'
+CLI="python3 claude/hooks/herdr_orch_core.py"
+export CLAUDE_CONFIG_DIR="$(mktemp -d)"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}'
+test -f "$CLAUDE_CONFIG_DIR/herdr-orch/slug-x/capabilities.json"
+rc=0; $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
+  --json '{"v":1,"session_id":"T","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null || rc=$?
+test "$rc" != "0"
+rc=0; $CLI write-capabilities --repo-slug slug-x --session S --fence 999 \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null || rc=$?
+test "$rc" != "0"
+SH
+
+check "role_preference: defaults, override precedence, malformed -> None" <<PY
+$LOAD
+assert c.role_preference("plan",{})==("fable","opus")
+assert c.role_preference("impl",{})==("sonnet","opus")
+assert c.role_preference("review",{})==("opus","sonnet")
+assert c.role_preference("bogus",{}) is None
+assert c.role_preference("plan",{"models":{"plan":["opus","opus","fable"]}})==("opus","fable")
+assert c.role_preference("plan",{"models":{"plan":["gpt"]}}) is None
+assert c.role_preference("plan",{"models":["opus"]}) is None
+assert c.role_preference("plan",{"models":{"plan":"opus"}}) is None
+assert c.role_preference("plan",{"models":{"plan":[]}}) is None          # empty override -> exit 5, not 4
+assert c.role_preference("impl",{"models":{"orchestrator":["opus"]}}) is None  # legacy/unknown key -> malformed
+assert c.role_preference("impl",{"models":{"implement":["opus"]}}) is None     # typo'd role key -> malformed
+sys.exit(0)
+PY
+
+check "resolve_model: filtering and error codes" <<PY
+$LOAD
+full={"fable":True,"opus":True,"sonnet":True}
+nofable={"fable":False,"opus":True,"sonnet":True}
+assert c.resolve_model("plan",full,{})==("fable",None)
+assert c.resolve_model("plan",nofable,{})==("opus",None)
+assert c.resolve_model("impl",nofable,{})==("sonnet",None)
+assert c.resolve_model("review",nofable,{})==("opus",None)
+assert c.resolve_model("plan",None,{})==(None,3)
+assert c.resolve_model("plan",{"fable":False,"opus":False,"sonnet":False},{})==(None,4)
+assert c.resolve_model("bogus",full,{})==(None,5)
+assert c.resolve_model("plan",full,{"models":{"plan":["gpt"]}})==(None,5)
+sys.exit(0)
+PY
+
+check "resolve-model CLI: exit codes, stdout discipline, config override" <<'SH'
+CLI="python3 claude/hooks/herdr_orch_core.py"
+export CLAUDE_CONFIG_DIR="$(mktemp -d)"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+rc=0; out=$($CLI resolve-model --repo-slug slug-x --role plan --session S 2>/dev/null) || rc=$?
+test "$rc" = "3"; test -z "$out"
+$CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}'
+m=$($CLI resolve-model --repo-slug slug-x --role plan --session S); test "$m" = "opus"
+$CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":false,"sonnet":false}}'
+rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session S >/dev/null 2>&1 || rc=$?; test "$rc" = "4"
+rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session OTHER >/dev/null 2>&1 || rc=$?; test "$rc" = "3"
+rc=0; $CLI resolve-model --repo-slug slug-x --role nope --session S >/dev/null 2>&1 || rc=$?; test "$rc" = "5"
+printf 'not json' > "$CLAUDE_CONFIG_DIR/herdr-orch/slug-x/capabilities.json"
+rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session S >/dev/null 2>&1 || rc=$?; test "$rc" = "3"
+SH
+
+check "disable-model: flips one alias false, downward-only, guards session+alias" <<'SH'
+CLI="python3 claude/hooks/herdr_orch_core.py"
+export CLAUDE_CONFIG_DIR="$(mktemp -d)"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":true,"opus":true,"sonnet":true}}'
+$CLI disable-model --repo-slug slug-x --session S --fence "$F" --model fable
+python3 - <<PY
+import json,os
+d=json.load(open(os.environ["CLAUDE_CONFIG_DIR"]+"/herdr-orch/slug-x/capabilities.json"))
+assert d["available"]=={"fable":False,"opus":True,"sonnet":True}, d
+PY
+$CLI disable-model --repo-slug slug-x --session S --fence "$F" --model sonnet
+python3 - <<PY
+import json,os
+d=json.load(open(os.environ["CLAUDE_CONFIG_DIR"]+"/herdr-orch/slug-x/capabilities.json"))
+assert d["available"]=={"fable":False,"opus":True,"sonnet":False}, d
+PY
+rc=0; $CLI disable-model --repo-slug slug-x --session S --fence "$F" --model gpt 2>/dev/null || rc=$?; test "$rc" != "0"
+export CLAUDE_CONFIG_DIR="$(mktemp -d)"
+F2=$($CLI claim-owner --repo-slug slug-y --session S --host h --pid 1)
+rc=0; $CLI disable-model --repo-slug slug-y --session S --fence "$F2" --model fable 2>/dev/null || rc=$?; test "$rc" != "0"
+SH
+
+check "classify_probe: available / 429+403 unavailable / else indeterminate" <<PY
+$LOAD
+ok={"is_error":False,"modelUsage":{"claude-fable-5":{"in":1}}}
+assert c.classify_probe(ok,"fable")=="available"
+assert c.classify_probe({"is_error":False,"modelUsage":{"claude-sonnet-5":{}}},"fable")=="indeterminate"
+assert c.classify_probe({"is_error":True,"api_error_status":429},"fable")=="unavailable"
+assert c.classify_probe({"is_error":True,"api_error_status":403},"fable")=="unavailable"
+assert c.classify_probe({"is_error":True,"api_error_status":"429"},"fable")=="unavailable"  # string status coerced
+assert c.classify_probe({"is_error":True,"api_error_status":500},"fable")=="indeterminate"
+assert c.classify_probe({"is_error":True},"fable")=="indeterminate"
+assert c.classify_probe("not a dict","fable")=="indeterminate"
+assert c.classify_probe({},"fable")=="indeterminate"
+sys.exit(0)
+PY
+
+check "classify-probe CLI prints classification" <<'SH'
+CLI="python3 claude/hooks/herdr_orch_core.py"
+out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":true,"api_error_status":429}')
+test "$out" = "unavailable"
+out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":false,"modelUsage":{"claude-fable-5":{}}}')
+test "$out" = "available"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

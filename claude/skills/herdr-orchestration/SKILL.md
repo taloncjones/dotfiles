@@ -61,6 +61,21 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
+5. **Strong-model availability (startup discovery, after config validation).**
+   Model selection for every worker launch is deterministic (`resolve-model`,
+   section 8), driven by a session-stamped `capabilities.json`. Refresh it only
+   when stale: if `resolve-model` exits 3 (map absent, or its `session_id` !=
+   this session -- i.e. a restart or `/clear`) for a role this turn, re-probe
+   the strong model headlessly and record the result:
+   - `PROBE_JSON="$(claude --model fable -p 'Reply with the single word: ok' --output-format json </dev/null)"`
+   - `CLS="$(python3 "$CORE" classify-probe --repo-slug <slug> --model fable --json "$PROBE_JSON")"`
+   - `available`/`unavailable` -> write the map (opus/sonnet default true):
+     `python3 "$CORE" write-capabilities --repo-slug <slug> --session <id> --fence <fence> --json '{"v":1,"session_id":"<id>","available":{"fable":<true|false>,"opus":true,"sonnet":true}}'`
+   - `indeterminate` (no `claude`, network error, other status, unparseable) ->
+     write NO map; ABORT launches this turn and surface it -- never assume.
+     A non-owner (claim returned `BUSY`) never probes or writes -- it is
+     read-only. The map is machine-local (`references/state-layout.md`), never
+     committed.
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
@@ -69,13 +84,15 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
 
 - **Plan-ready item** -- a refined Jira ticket, or a task that already has a
   committed `docs/specs/` spec and `docs/plans/` plan: dispatch an `implement`
-  worker on the impl model (Sonnet) directly.
+  worker directly, on the model `resolve-model --role impl` returns (default
+  `sonnet -> opus`; section 8).
 - **Raw item** -- a bare todo/handoff with no spec/plan: dispatch a `plan`
-  worker on the **strong** planning-worker model (section 8) first. It runs the
+  worker on the model `resolve-model --role plan` returns (the **strong**
+  planning model, default `fable -> opus`; section 8) first. It runs the
   repo's brainstorm -> spec -> codex-spec-review -> plan -> codex-plan-review
   pipeline, commits the spec + plan, and emits completion as phase `plan`. On
   confirmed plan completion the orchestrator advances the same task/branch to
-  its `implement` phase on Sonnet (section 2a).
+  its `implement` phase (impl-role model, section 2a).
 
 Maturity check: a Jira ticket in a refined/ready state, or an existing committed
 spec+plan for the task, is plan-ready; anything else is raw. When unsure, treat
@@ -141,10 +158,12 @@ phase; it never marks the task `completed` and never dispatches review.
    of `base_sha`), worktree clean.
 3. **Advance in place.** Reuse the same worktree/branch (the committed spec+plan
    live there). After the plan worker hands off (idle/exited), launch an
-   `implement` worker on the impl model (Sonnet) in that workspace's own pane
-   (section 8 launch) with the implement brief. Append a new `workers[]` entry
-   (`role: impl`, `phase: implement`, model `sonnet`, `created_by_this_orch:
-true`) via `write-task`; status stays `in-progress`. The plan worker's
+   `implement` worker in that workspace's own pane on the model
+   `resolve-model --role impl` returns (section 8 launch; impl default
+   `sonnet -> opus`) with the implement brief. Append a new `workers[]` entry
+   (`role: impl`, `phase: implement`, `model` = that resolved alias,
+   `created_by_this_orch: true`) via `write-task`; status stays `in-progress`.
+   The plan worker's
    `done.json` is later overwritten by the implement worker's -- expected; only
    the implement record drives completion.
 4. A plan phase that emits `outcome: failed`/`paused` is handled exactly like an
@@ -361,8 +380,14 @@ processes, agent panels for the orchestrator only.
 ## 8. Model routing
 
 Each role has an ordered model preference, resolved against the models the
-current account/CLI actually offers. First available wins; `config.json`
-may override any role's list.
+current account actually offers -- deterministically, via
+`python3 "$CORE" resolve-model --role <plan|impl|review>` (canonical defaults in
+the core; `config.json` `models` may override any role's list under the same
+`plan`/`impl`/`review` keys). First available wins. Availability comes from the
+session-stamped `capabilities.json` the section-1 probe writes; the orchestrator
+never picks a worker model by judgment. The `Orchestrator` row below is
+advisory only -- its model is fixed when this session launched and is NOT
+resolved by `resolve-model` (the resolver has no `orchestrator` role).
 
 | Role / phase             | Preference (first available wins) | Effort  | Notes                                                                                                                                                 |
 | ------------------------ | --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -394,11 +419,22 @@ its cwd (the result also carries `.result.workspace.workspace_id` and
 Launch the worker -- always pinning its model -- in that root pane:
 
 1. `<pane_id>` = `.result.root_pane.pane_id` from the create/open result.
-2. `herdr pane run <pane_id> "claude --model <model> --permission-mode auto"` --
-   `<model>` from the config allowlist. Use `--permission-mode auto`, **not**
-   `--dangerously-skip-permissions`: an auto-mode orchestrator's classifier
-   BLOCKS spawning a skip-permissions worker. Keep it a plain `claude`
-   invocation with no shell metacharacters.
+2. **Resolve the role's model deterministically -- never pick it by judgment,
+   never use `--fallback-model`:**
+   `MODEL="$(python3 "$CORE" resolve-model --repo-slug <slug> --role <plan|impl|review> --session <id>)"`
+   Treat a nonzero exit as a hard stop, not a default: exit 3 -> re-probe
+   (section 1 step 5) then retry; exit 4 -> surface "no available model for
+   <role>" and halt; exit 5 -> surface the config/role error and halt. Never
+   launch on empty output. Then
+   `herdr pane run <pane_id> "claude --model $MODEL --permission-mode auto"`.
+   Use `--permission-mode auto`, **not** `--dangerously-skip-permissions`: an
+   auto-mode orchestrator's classifier BLOCKS spawning a skip-permissions
+   worker. Keep it a plain `claude` invocation with no shell metacharacters.
+   **Never** `claude --model fable --fallback-model opus`: `--fallback-model`
+   fires only on overload, not on an account restriction, and silently lands on
+   the account default (Sonnet) -- the rw-bess incident, 2026-08-28. The
+   persisted `workers[]` `model` field records this resolved `$MODEL`, never a
+   hard-coded constant.
 3. Registration is normally automatic -- `pane run "claude ..."` lets herdr
    natively detect the agent (it appears in `herdr agent list` within a second
    or two). If it does not, `herdr pane report-agent <pane_id>` registers it --
@@ -412,9 +448,26 @@ pane it does not create or target the correct pane.
 Submit the brief and confirm the worker started working in one call:
 `herdr agent prompt <pane_id> "<brief>" --wait --until working --timeout 60000`
 (`working` is a valid `--until` status; `--timeout` guards the 5s
-`agent_prompt_stalled` and indefinite-wait edges). Then confirm the launched
-model via `herdr agent read` and **fail visibly** rather than let the wrong
-model run silently.
+`agent_prompt_stalled` and indefinite-wait edges).
+
+**Verify-after-launch (self-heal, backstop to the section-1 probe).** Read the
+running model via `herdr agent read` BEFORE submitting the brief, and classify:
+
+- **DOWNGRADE** (running model != requested `$MODEL`) or a model-attributable
+  launch failure -> mark the REQUESTED alias unavailable (never the observed
+  one, never re-enable another) with an atomic downward-only flip:
+  `python3 "$CORE" disable-model --repo-slug <slug> --session <id> --fence <fence> --model <requested-alias>`.
+  Confirm the wrong worker is terminated, then re-run `resolve-model` and
+  relaunch on the next survivor. Cap relaunch attempts per dispatch at 2, then
+  surface failure -- do not loop.
+- **INFRASTRUCTURE-INDETERMINATE** (pane didn't start, herdr error, no banner
+  within timeout, no model signal) -> do NOT disable any model; abort and
+  surface. This is not availability data.
+
+Downward-only within a session; upward recovery waits for the next startup
+re-probe (section 1 step 5). Headless `-p` (the probe) errors on an unavailable
+model, but an interactive pane launch can silently DOWNGRADE to Sonnet -- which
+is exactly what this backstop catches.
 
 ## 9. State transition table (authoritative)
 

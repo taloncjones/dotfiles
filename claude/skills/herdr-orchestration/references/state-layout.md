@@ -111,18 +111,44 @@ STATE_ROOT/
   "epics": ["PROJ-100"],
   "soft_cap": 3,
   "models": {
-    "orchestrator": ["fable", "opus"],
+    "plan": ["fable", "opus"],
     "impl": ["sonnet", "opus"],
-    "reviewer": ["opus", "sonnet"]
+    "review": ["opus", "sonnet"]
   }
 }
 ```
 
 Validation: required `user`, `default_base`; `epics` a (possibly empty)
 list; `soft_cap` a positive int (default 3); `models` optional (falls back
-to the built-in preferences). Missing/invalid -> mutating actions refuse
-with a concrete message. This file holds the only employer/user
-identifiers; the shipped skill and fixtures never contain them.
+to the built-in preferences). `models`, when present, must be an object keyed
+by the canonical resolver roles `plan`/`impl`/`review` (no `orchestrator` --
+its model is fixed at session launch), each value a list of the aliases
+`fable`/`opus`/`sonnet`. A malformed `models` block (non-object, a non-list
+override, or a token outside the alias set) makes `resolve-model` exit 5.
+Missing/invalid config -> mutating actions refuse with a concrete message. This
+file holds the only employer/user identifiers; the shipped skill and fixtures
+never contain them.
+
+### `capabilities.json` -- session-stamped strong-model availability
+
+Machine-local, per `repo_slug`, written by `write-capabilities` at preflight
+(section 1 step 5) and flipped downward by `disable-model` (section 8
+verify-after-launch). Never committed.
+
+```json
+{
+  "v": 1,
+  "session_id": "<orchestrator session id>",
+  "available": { "fable": false, "opus": true, "sonnet": true }
+}
+```
+
+`v` must be the integer 1 (not `true`); `available` must carry exactly the three
+aliases, each a boolean. `resolve-model` treats the map as stale (exit 3) when
+`session_id` != the live orchestrator session, so a restart / `/clear` triggers
+a fresh probe. `resolve-model` filters each role's preference list by this map
+and prints the first available alias, or exits 3 (stale/absent), 4 (no
+survivor), or 5 (invalid role / malformed `models`).
 
 ### `tasks/<task_id>.json` -- durable task record
 
