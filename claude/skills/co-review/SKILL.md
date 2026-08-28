@@ -30,19 +30,56 @@ verify.
 0. **Freeze the snapshot, then run gate detection once, before dispatching
    anything.**
    - Resolve the exact base/head this pass reviews, using the same target
-     already picked in "Target resolution" above (PR head vs PR base; or
-     branch head vs fork point). For a purely local uncommitted diff, do
-     **not** commit it on the shared working tree — that would move HEAD
-     before step 1 runs and could make its auto-detected range wrong or
-     empty. Instead create the scratch commit in an isolated worktree (same
-     `mktemp -u` + `git worktree add --detach` pattern step 2 already uses for
-     Codex), and let step 1 review the original uncommitted diff directly via
-     its normal auto-detection (untouched by this step). Every subagent
-     dispatched below (step 2.5's attacker, step 3.5's skeptics) gets this
-     exact base/head range stated explicitly, pointed at the isolated
-     worktree checkout when one was created, with explicit read-only
+     already picked in "Target resolution" above (PR head vs PR base; branch
+     head vs fork point; or the local working tree vs HEAD), then materialize
+     that head as **one durable frozen worktree** that every reviewer below
+     reads — the Codex finder (step 2), the threat-model attacker (step 2.5),
+     and the skeptics (step 3.5). One worktree per pass, provisioned here and
+     torn down only after step 3.5 finishes; the shared working tree is never
+     committed or moved, so step 1's native `/code-review` still auto-detects
+     the original diff directly. Provision it per mode (run in the shared
+     tree):
+
+     ```bash
+     # Unique per run -- a fixed path collides with a concurrent/killed run.
+     WT=$(mktemp -u /tmp/coreview-snap.XXXXXX)
+     git worktree add --detach "$WT" HEAD \
+       || { git worktree prune && git worktree add --detach "$WT" HEAD; }
+
+     # PR mode: check the PR head out INTO $WT (this also keeps the shared tree
+     # free for the parallel Claude half). Pin base + head so the finders and
+     # skeptics all read the same commit even if the PR is pushed to mid-review.
+     ( cd "$WT" && gh pr checkout <n> )
+     SNAP_BASE=$(gh pr view <n> --json baseRefName -q .baseRefName)
+     SNAP_HEAD=$(git -C "$WT" rev-parse HEAD)
+
+     # branch mode (committed work, no PR): head is already committed.
+     SNAP_BASE=<branch-the-work-forked-from>; SNAP_HEAD=$(git rev-parse HEAD)
+     git -C "$WT" checkout --detach "$SNAP_HEAD"
+
+     # local-uncommitted mode: the change is committed NOWHERE, so a plain
+     # `worktree add --detach HEAD` gives a CLEAN checkout that omits it and
+     # `review --base` then diffs empty (silent false-clean -- the bug this
+     # fixes). Capture the full working state (tracked edits AND new untracked
+     # files, minus gitignored) into a snapshot commit WITHOUT touching the
+     # shared HEAD or index, via a throwaway index:
+     SNAP_BASE=$(git rev-parse HEAD)
+     GIT_INDEX_FILE="$WT.idx" git read-tree HEAD
+     GIT_INDEX_FILE="$WT.idx" git add -A
+     SNAP_TREE=$(GIT_INDEX_FILE="$WT.idx" git write-tree); rm -f "$WT.idx"
+     SNAP_HEAD=$(git commit-tree "$SNAP_TREE" -p "$SNAP_BASE" -m "co-review snapshot")
+     git -C "$WT" checkout --detach "$SNAP_HEAD"
+     ```
+
+     `codex exec review --base "$SNAP_BASE"` run inside `$WT` (step 2) now sees
+     the real change in every mode. If the local-uncommitted capture yields
+     `$SNAP_HEAD`'s tree equal to `$SNAP_BASE`'s (nothing to review), the diff
+     is empty: say so and stop (per Notes). Every subagent dispatched below
+     (step 2.5's attacker, step 3.5's skeptics) gets `$SNAP_BASE`/`$SNAP_HEAD`
+     stated explicitly and is pointed at `$WT` with explicit read-only
      instructions — never "figure out the diff yourself," which risks a
      subagent inspecting a different or since-changed checkout.
+
    - Against that frozen diff, check each changed file's path,
      case-insensitive, for a whole path-segment match (a segment is text
      between `/`, `.`, `-`, or `_` — so this does not match `author` against
@@ -88,31 +125,20 @@ verify.
    review. The current CLI accepts optional review instructions in addition to
    its built-in prompt, so give it one compact, correctness-focused rubric:
 
-   ```bash
-   # PR mode: `codex exec review` has NO PR/GitHub concept -- it only diffs the
-   # current worktree against --base. So check the PR out into an isolated
-   # worktree (this also keeps the shared tree free for the parallel Claude
-   # half), review there against the PR's base branch, then clean up.
-   # The worktree path MUST be unique per run (mktemp -u) -- a fixed path
-   # collides with a concurrent or previously-killed run.
-   CODEX_REVIEW_RUBRIC='Review adversarially. Prioritize runtime correctness, removed behavior, error handling, lifecycle and concurrency, auth and security boundaries, data or hardware safety, and missing regression tests. Report only actionable findings introduced by this diff; cite the file and line and explain a concrete failure scenario.'
-   WT=$(mktemp -u /tmp/coreview-pr-<n>.XXXXXX)
-   git worktree add --detach "$WT" \
-     || { git worktree prune && git worktree add --detach "$WT"; }
-   ( cd "$WT" && gh pr checkout <n> \
-       && codex exec review --base <pr-base-branch> \
-            -m gpt-5.6-sol -c model_reasoning_effort="high" \
-            -c approval_policy="never" -c sandbox_mode="read-only" \
-            "$CODEX_REVIEW_RUBRIC" ) > "$WT.log" 2>&1
-   git worktree remove --force "$WT"; git worktree prune
-   # <pr-base-branch> = gh pr view <n> --json baseRefName -q .baseRefName
+   `codex exec review` has NO PR/GitHub concept — it only diffs the worktree
+   it runs in against `--base`. Step 0 already put the reviewed code into the
+   frozen worktree `$WT` and pinned `$SNAP_BASE` for every mode, so this step
+   is one command run inside `$WT` — no per-mode branching, no worktree of its
+   own to create or remove (step 0 owns `$WT`'s lifecycle; it is torn down
+   after step 3.5, not here).
 
-   # branch mode: review the current branch's committed work against its fork point
-   LOG=$(mktemp /tmp/coreview-branch.XXXXXX)
-   codex exec review --base <branch-the-work-forked-from> \
-     -m gpt-5.6-sol -c model_reasoning_effort="high" \
-     -c approval_policy="never" -c sandbox_mode="read-only" \
-     "$CODEX_REVIEW_RUBRIC" > "$LOG" 2>&1
+   ```bash
+   CODEX_REVIEW_RUBRIC='Review adversarially. Prioritize runtime correctness, removed behavior, error handling, lifecycle and concurrency, auth and security boundaries, data or hardware safety, and missing regression tests. Report only actionable findings introduced by this diff; cite the file and line and explain a concrete failure scenario.'
+   LOG=$(mktemp /tmp/coreview.XXXXXX)
+   ( cd "$WT" && codex exec review --base "$SNAP_BASE" \
+       -m gpt-5.6-sol -c model_reasoning_effort="high" \
+       -c approval_policy="never" -c sandbox_mode="read-only" \
+       "$CODEX_REVIEW_RUBRIC" ) > "$LOG" 2>&1
    ```
 
    - Default to `gpt-5.6-sol` at `high`. Escalate Codex to `xhigh` only for
@@ -139,16 +165,17 @@ verify.
 
    - `-c approval_policy="never" -c sandbox_mode="read-only"` keeps it
      non-interactive and side-effect-free (it only reads + reports).
-   - For a purely local, uncommitted diff, commit to a scratch branch (or use
-     the PR branch) first — `review --base` compares committed changes against
-     the base. (Step 0 already does this before gate detection, so this is
-     already done by the time this step runs.)
-   - Run the Codex review(s) in a detached git worktree per branch so they
-     parallelize without branch-switching the shared tree under a running stack.
+   - `review --base` only diffs **committed** changes, so a purely local
+     uncommitted diff must already be captured into `$WT` as a commit — step 0
+     does exactly that (its snapshot commit for local-uncommitted mode, the PR
+     head for PR mode, the branch head for branch mode). This step never
+     commits anything itself.
+   - Codex runs inside step 0's frozen `$WT`, so it parallelizes with the
+     Claude half without branch-switching the shared tree under a running stack.
    - **Target parity:** in PR mode both halves must review the _same_ PR — the
-     Claude half gets the PR ref via `/code-review <pr>`, the Codex half gets the
-     PR head via the worktree checkout above. Do not let Codex fall back to the
-     local branch while Claude reviews the PR.
+     Claude half gets the PR ref via `/code-review <pr>`, the Codex half reads
+     the PR head that step 0 checked out into `$WT` and pinned as `$SNAP_HEAD`.
+     Do not let Codex fall back to the local branch while Claude reviews the PR.
    - **Read findings from the log file with the Read tool** — do not rely on
      Bash-captured stdout, which truncates on long reviews. Use the final
      `codex` message block (after the header, before `tokens used`); ignore
@@ -159,8 +186,10 @@ verify.
 
 2.5. **Threat-model attacker (only if step 0's `gate_detected` is yes), run in
 parallel with steps 1-2.** Dispatch one `Agent`-tool subagent (general-purpose,
-fresh context) with: the full diff, step 0's frozen base/head (explicit,
-read-only), and any governing invariant the gate is meant to enforce —
+fresh context) with: the full diff, step 0's frozen base/head
+(`$SNAP_BASE`/`$SNAP_HEAD`, explicit, read-only) and the path to step 0's
+frozen worktree `$WT` to Grep/Read the reviewed code from, and any governing
+invariant the gate is meant to enforce —
 pulled from the diff's own tests, docstrings, or comments, or an explicit
 statement of intent if one exists in the task description. Its brief: never
 invoke `codex exec` yourself, with or without a custom prompt — Bash access
@@ -209,11 +238,14 @@ does not exempt this subagent from the recursion hazard step 2 describes.
 3.5. **Adversarial-verify (skip if the merged list from step 3 is empty).**
 For each merged finding, dispatch one `Agent`-tool skeptic subagent (fresh
 context) with: the finding's file:line, description, source tag, the cited
-code region, and step 0's frozen base/head (explicit, read-only), with
-instructions to Grep/Read that snapshot for callers, guards, tests, or
-contracts bearing on the claim. Never invoke `codex exec` yourself, with or
-without a custom prompt — Bash access does not exempt this subagent from the
-recursion hazard step 2 describes.
+code region, step 0's frozen base/head (`$SNAP_BASE`/`$SNAP_HEAD`, explicit,
+read-only), and the path to step 0's frozen worktree `$WT` — a durable
+checkout of the reviewed head that exists in **every** mode (PR head, branch
+head, or the local-uncommitted snapshot commit), so the skeptic always has
+real code to Grep/Read for callers, guards, tests, or contracts bearing on
+the claim rather than defaulting to fail-closed for lack of a snapshot. Never
+invoke `codex exec` yourself, with or without a custom prompt — Bash access
+does not exempt this subagent from the recursion hazard step 2 describes.
 
 Instruct the skeptic to _prove_ the finding is a false positive or
 unreachable, using only these admissible evidence classes:
@@ -260,6 +292,17 @@ never described as resolved or absent in chat or the PR comment.
 Run this stage inside both the initial pass and the bounded re-review pass
 (step 5) — it does not add a pass, it runs against whichever diff that
 pass is reviewing.
+
+**Tear down step 0's frozen worktree only after this stage completes** — it
+must outlive the Codex finder (step 2), the attacker (step 2.5), and all
+skeptics (step 3.5), which all read it:
+
+```bash
+git worktree remove --force "$WT"; git worktree prune; rm -f "$LOG"
+```
+
+Step 5's re-review re-runs step 0 and provisions its own fresh `$WT` against
+the fix diff, so tearing this one down here does not starve it.
 
 4. **Resolve (triage-first).** Present the merged, tiered list: survived
    findings first, then any coverage note carried from the threat-model probe
