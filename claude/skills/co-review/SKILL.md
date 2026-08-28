@@ -35,7 +35,9 @@ verify.
      that head as **one durable frozen worktree** that every reviewer below
      reads — the Codex finder (step 2), the threat-model attacker (step 2.5),
      and the skeptics (step 3.5). One worktree per pass, provisioned here and
-     torn down only after step 3.5 finishes; the shared working tree is never
+     torn down unconditionally in step 3.6 (on the clean/empty path, on early
+     stop, and on any abort — never gated under step 3.5's skip-if-empty
+     heading); the shared working tree is never
      committed or moved, so step 1's native `/code-review` still auto-detects
      the original diff directly. Provision it per mode (run in the shared
      tree):
@@ -49,9 +51,18 @@ verify.
      # PR mode: check the PR head out INTO $WT (this also keeps the shared tree
      # free for the parallel Claude half). Pin base + head so the finders and
      # skeptics all read the same commit even if the PR is pushed to mid-review.
-     ( cd "$WT" && gh pr checkout <n> )
+     # gh pr checkout can FAIL (network/auth, or the PR branch is already checked
+     # out in another worktree) and leave $WT at the shared HEAD -- then Codex
+     # would silently review the reviewer's own branch, not the PR. So resolve
+     # the PR head SHA up front and refuse to proceed unless $WT is actually at
+     # it (fail loudly, before any reviewer is dispatched).
      SNAP_BASE=$(gh pr view <n> --json baseRefName -q .baseRefName)
+     PR_HEAD=$(gh pr view <n> --json headRefOid -q .headRefOid)
+     ( cd "$WT" && gh pr checkout <n> ) \
+       || { echo "co-review: 'gh pr checkout <n>' failed -- aborting, would review the wrong commit" >&2; exit 1; }
      SNAP_HEAD=$(git -C "$WT" rev-parse HEAD)
+     [ "$SNAP_HEAD" = "$PR_HEAD" ] \
+       || { echo "co-review: \$WT is at $SNAP_HEAD, not PR head $PR_HEAD -- aborting" >&2; exit 1; }
 
      # branch mode (committed work, no PR): head is already committed.
      SNAP_BASE=<branch-the-work-forked-from>; SNAP_HEAD=$(git rev-parse HEAD)
@@ -74,7 +85,8 @@ verify.
      `codex exec review --base "$SNAP_BASE"` run inside `$WT` (step 2) now sees
      the real change in every mode. If the local-uncommitted capture yields
      `$SNAP_HEAD`'s tree equal to `$SNAP_BASE`'s (nothing to review), the diff
-     is empty: say so and stop (per Notes). Every subagent dispatched below
+     is empty: tear down `$WT` per step 3.6 (already provisioned above), say so,
+     and stop (per Notes). Every subagent dispatched below
      (step 2.5's attacker, step 3.5's skeptics) gets `$SNAP_BASE`/`$SNAP_HEAD`
      stated explicitly and is pointed at `$WT` with explicit read-only
      instructions — never "figure out the diff yourself," which risks a
@@ -130,7 +142,7 @@ verify.
    frozen worktree `$WT` and pinned `$SNAP_BASE` for every mode, so this step
    is one command run inside `$WT` — no per-mode branching, no worktree of its
    own to create or remove (step 0 owns `$WT`'s lifecycle; it is torn down
-   after step 3.5, not here).
+   in step 3.6, not here).
 
    ```bash
    CODEX_REVIEW_RUBRIC='Review adversarially. Prioritize runtime correctness, removed behavior, error handling, lifecycle and concurrency, auth and security boundaries, data or hardware safety, and missing regression tests. Report only actionable findings introduced by this diff; cite the file and line and explain a concrete failure scenario.'
@@ -293,16 +305,28 @@ Run this stage inside both the initial pass and the bounded re-review pass
 (step 5) — it does not add a pass, it runs against whichever diff that
 pass is reviewing.
 
-**Tear down step 0's frozen worktree only after this stage completes** — it
-must outlive the Codex finder (step 2), the attacker (step 2.5), and all
-skeptics (step 3.5), which all read it:
+3.6. **Tear down step 0's frozen worktree — unconditional finalization.** `$WT`
+(and `$LOG`) must be removed on **every** exit path, not only when step 3.5
+ran: the clean / empty-merge case where step 3.5 is skipped, the step-0
+empty-diff early stop, and any error or abort anywhere in steps 0-3.5 (e.g.
+step 0's PR-checkout guard exiting non-zero). `$WT` is a registered detached
+worktree at a unique `mktemp -u` path, so a leaked one is **not** reaped by a
+later run's `git worktree prune` (its directory still exists) — it lingers in
+`git worktree list` and accumulates across runs. So treat this as finalization,
+not a normal-path step: whichever exit path you reach, run the teardown once
+before finishing.
 
 ```bash
 git worktree remove --force "$WT"; git worktree prune; rm -f "$LOG"
 ```
 
-Step 5's re-review re-runs step 0 and provisions its own fresh `$WT` against
-the fix diff, so tearing this one down here does not starve it.
+The commands are safe to run even if a resource is already gone (`$LOG` may
+never have been created if step 2 didn't run). Order still holds: `$WT` must
+outlive the Codex finder (step 2), the attacker (step 2.5), and all skeptics
+(step 3.5), which all read it — so on the normal path run this only after
+step 3.5 has finished or been skipped, never before. Step 5's re-review re-runs
+step 0 and provisions its own fresh `$WT` against the fix diff, so tearing this
+one down here does not starve it.
 
 4. **Resolve (triage-first).** Present the merged, tiered list: survived
    findings first, then any coverage note carried from the threat-model probe
