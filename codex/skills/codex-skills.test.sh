@@ -173,9 +173,11 @@ removes_stale_claude_web_codex_hook() {
     done
 
     HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
     result=0
     test ! -e "$tmp_repo/.codex/hooks.json" || result=1
     test ! -e "$tmp_repo/.codex/hooks/session-start.sh" || result=1
+    test ! -e "$tmp_repo/.codex" || result=1
     rm -rf "$tmp_home"
     return "$result"
 }
@@ -209,6 +211,26 @@ preserves_multi_command_codex_hook_manifest() {
 
 assert "installer preserves a multi-command Codex hook manifest" \
     preserves_multi_command_codex_hook_manifest
+
+sweeps_empty_codex_project_dirs() {
+    tmp_home="$(mktemp -d)"
+    tmp_repo="$tmp_home/dotfiles"
+    mkdir -p "$tmp_repo/.codex/hooks"
+
+    for path in install zsh git ssh claude bin ghostty codex; do
+        ln -s "$PWD/$path" "$tmp_repo/$path"
+    done
+
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    result=0
+    test ! -e "$tmp_repo/.codex" || result=1
+    rm -rf "$tmp_home"
+    return "$result"
+}
+
+assert "installer sweeps empty legacy Codex project dirs" \
+    sweeps_empty_codex_project_dirs
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

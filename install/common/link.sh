@@ -104,8 +104,11 @@ if [ -f "$stale_codex_hook_manifest" ] && [ -f "$stale_codex_hook_script" ] &&
   grep -F -q 'CLAUDE_CODE_REMOTE' "$stale_codex_hook_script" &&
   grep -F -q 'bootstrap-cloud.sh' "$stale_codex_hook_script"; then
   rm -f "$stale_codex_hook_manifest" "$stale_codex_hook_script"
-  rmdir "$DOTFILEDIR/.codex/hooks" "$DOTFILEDIR/.codex" 2>/dev/null || true
 fi
+# Sweep the leftover dirs even when the files are already gone (some machines
+# were cleaned by hand): rmdir only ever removes empty dirs, so anything still
+# in use is untouched.
+rmdir "$DOTFILEDIR/.codex/hooks" "$DOTFILEDIR/.codex" 2>/dev/null || true
 
 mkdir -p "$HOME"/.codex
 ln -sf "$DOTFILEDIR"/codex/AGENTS.md "$HOME"/.codex/AGENTS.md
