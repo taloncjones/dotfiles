@@ -41,7 +41,11 @@ When you finish, pause, or fail this phase:
 1. Commit all work.
 2. Run:
    `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha>`
-3. Then run `/handoff`.
+3. Then STOP and go idle -- hand back to the orchestrator. Do NOT run
+   `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
+   NOT open a PR or merge. Your `emit-done` record is the ONLY completion
+   signal; the orchestrator detects it on its next check-in and drives what
+   comes next (review dispatch, phase advance, surface-for-merge).
 
 Do not report completion any other way -- the orchestrator only recognizes
 this record.
@@ -74,7 +78,11 @@ When the spec + plan are committed and reviewed:
 1. Commit all work.
 2. Run (note `--phase plan`):
    `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase plan --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha>`
-3. Then run `/handoff`.
+3. Then STOP and go idle -- hand back to the orchestrator. Do NOT run
+   `/handoff`, do NOT author a resume brief, do NOT plan or start the
+   implement slice, do NOT open a PR or merge. Your `emit-done` record is the
+   ONLY completion signal; the orchestrator detects it on its next check-in
+   and launches the implement worker.
 
 Do not report completion any other way. The orchestrator advances to the
 implement phase only on this `phase: plan` record.
@@ -103,7 +111,12 @@ When review is complete:
 1. Run (`--blocking-count` is the number of findings you classified as
    blocking; set `--outcome changes-requested` whenever it is non-zero):
    `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-review --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path to full co-review output>`
-2. Then run `/handoff`.
+2. Then STOP and go idle -- hand back to the orchestrator. Do NOT run
+   `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
+   NOT apply fixes, push, merge, or open a PR. Your `emit-review` record is
+   the ONLY signal; the orchestrator reads it on its next check-in and drives
+   what comes next (re-dispatch on changes-requested, surface-for-merge on
+   approved).
 
 Never push, merge, or open a PR.
 ```
