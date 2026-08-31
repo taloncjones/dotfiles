@@ -91,6 +91,22 @@ mkdir -p "$HOME"/.config/ghostty
 ln -sf "$DOTFILEDIR"/ghostty/config "$HOME"/.config/ghostty/config
 
 # Codex configuration
+# A retired local setup registered the Claude web bootstrap as a project-level
+# Codex SessionStart hook. In remote Codex sessions it tries to rewrite
+# ~/.claude from the workspace sandbox and fails with Operation not permitted.
+# Remove only that exact single-command legacy surface; leave every other
+# project hook manifest untouched.
+stale_codex_hook_manifest="$DOTFILEDIR/.codex/hooks.json"
+stale_codex_hook_script="$DOTFILEDIR/.codex/hooks/session-start.sh"
+if [ -f "$stale_codex_hook_manifest" ] && [ -f "$stale_codex_hook_script" ] &&
+  grep -F -q '.codex/hooks/session-start.sh' "$stale_codex_hook_manifest" &&
+  [ "$(grep -c '"command"' "$stale_codex_hook_manifest" || true)" -eq 1 ] &&
+  grep -F -q 'CLAUDE_CODE_REMOTE' "$stale_codex_hook_script" &&
+  grep -F -q 'bootstrap-cloud.sh' "$stale_codex_hook_script"; then
+  rm -f "$stale_codex_hook_manifest" "$stale_codex_hook_script"
+  rmdir "$DOTFILEDIR/.codex/hooks" "$DOTFILEDIR/.codex" 2>/dev/null || true
+fi
+
 mkdir -p "$HOME"/.codex
 ln -sf "$DOTFILEDIR"/codex/AGENTS.md "$HOME"/.codex/AGENTS.md
 mkdir -p "$HOME"/.codex/skills
