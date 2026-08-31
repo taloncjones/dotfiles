@@ -138,5 +138,12 @@ json.dump({"v":1,"user":"u","default_base":"origin/main","models":{"plan":["gpt"
 PY
 rc=0; $CLI resolve-model --repo-slug "$MSLUG" --role plan --session M >/dev/null 2>&1 || rc=$?; [ "$rc" = 5 ]'
 
+# watch: documented arm-command shape works read-only against fresh state
+WSLUG="github-com-org-watch-cafe0001"
+mkdir -p "$ROOT/herdr-orch/$WSLUG/tasks"
+echo '{}' > "$ROOT/herdr-orch/$WSLUG/tasks/PROJ-9.done.json"
+WOUT=$($CLI watch --repo-slug "$WSLUG" --once --since-epoch 0)
+ok "watch --once emits signal for recorded task state" "[ '$WOUT' = 'signal' ]"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

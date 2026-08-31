@@ -7,6 +7,7 @@ Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -442,6 +443,34 @@ def watch_tick(st, changed, active, now, heartbeat_secs, debounce_secs):
     return None
 
 
+def _watch_loop(rd, interval, heartbeat_secs, debounce_secs, exit_on_signal,
+                since_epoch):
+    """Poll the watched set; print watch_tick's decisions (closed vocabulary,
+    at most one line per pass). Runs until killed, unless exit_on_signal,
+    which returns 0 after the first emitted line. since_epoch (optional)
+    seeds the baseline: files newer than it count as already-changed."""
+    prev, _failed = watch_scan(rd, {})
+    st = {"pending": False, "suppress_until": 0.0,
+          "last_emit": time.monotonic()}
+    if since_epoch is not None:
+        since_ns = int(since_epoch * 1e9)
+        st["pending"] = any(m > since_ns for m, _s in prev.values())
+    while True:
+        time.sleep(interval)
+        snap, _failed = watch_scan(rd, prev)
+        changed = watch_changed(prev, snap)
+        prev = snap
+        now = time.monotonic()
+        due = now - st["last_emit"] >= heartbeat_secs
+        active = due and heartbeat_active(rd)
+        line = watch_tick(st, changed, active, now, heartbeat_secs,
+                          debounce_secs)
+        if line:
+            print(line, flush=True)
+            if exit_on_signal:
+                return 0
+
+
 def _owner_path(rd) -> Path:
     return Path(rd) / "owner.json"
 
@@ -654,6 +683,13 @@ def main(argv=None) -> int:
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
+    w = add("watch")
+    w.add_argument("--interval", type=int, default=15)
+    w.add_argument("--heartbeat-secs", type=int, default=1800)
+    w.add_argument("--debounce-secs", type=int, default=60)
+    w.add_argument("--exit-on-signal", action="store_true")
+    w.add_argument("--once", action="store_true")
+    w.add_argument("--since-epoch", type=float, default=None)
     ns = ap.parse_args(argv)
 
     if ns.cmd == "claim-owner":
@@ -871,6 +907,31 @@ def main(argv=None) -> int:
         except (OSError, ValueError):
             done = None
         return 0 if is_reviewed(task, done, ns.head_sha, ns.workspace) else 1
+    if ns.cmd == "watch":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(ns.interval >= 1, "interval must be >= 1")
+        _require(ns.heartbeat_secs >= 1, "heartbeat-secs must be >= 1")
+        _require(ns.debounce_secs >= 1, "debounce-secs must be >= 1")
+        _require(not (ns.once and ns.exit_on_signal), "once excludes exit-on-signal")
+        _require(not ns.once or ns.since_epoch is not None, "once requires since-epoch")
+        if ns.since_epoch is not None:
+            _require(
+                math.isfinite(ns.since_epoch) and ns.since_epoch >= 0,
+                "since-epoch must be a finite float >= 0",
+            )
+        rd = repo_dir(ns.repo_slug)
+        if ns.once:
+            snap, _failed = watch_scan(rd, {})
+            since_ns = int(ns.since_epoch * 1e9)
+            if any(mtime_ns > since_ns for mtime_ns, _size in snap.values()):
+                print("signal", flush=True)
+            if heartbeat_active(rd):
+                print("heartbeat", flush=True)
+            return 0
+        return _watch_loop(
+            rd, ns.interval, ns.heartbeat_secs, ns.debounce_secs,
+            ns.exit_on_signal, ns.since_epoch,
+        )
     return 2
 
 
