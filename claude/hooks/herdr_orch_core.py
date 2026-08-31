@@ -29,8 +29,11 @@ ROLE_DEFAULTS = {
 # A 429 whose message names usage/credit exhaustion is reliable "this model is
 # not launchable" data (the account is out of credits); a bare 429 is an
 # ambiguous transient rate limit. Matched against the probe's result/error text.
+# "usage limit" deliberately matches the subscription-window rate limit
+# ("Usage limit reached") too, not just spend-balance exhaustion -- both mean
+# "do not wait on a human, fall back to the next model now."
 _USAGE_EXHAUSTION_RE = re.compile(
-    r"out of usage credits|usage limit|usage credits|"
+    r"usage limit|usage credits|"
     r"insufficient credits?|out of credits?|credit balance",
     re.IGNORECASE,
 )

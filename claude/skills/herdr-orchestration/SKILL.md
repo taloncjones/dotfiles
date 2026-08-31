@@ -71,7 +71,8 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
    - `CLS="$(python3 "$CORE" classify-probe --repo-slug <slug> --model fable --json "$PROBE_JSON")"`
    - `available`/`unavailable` -> write the map (opus/sonnet default true):
      `python3 "$CORE" write-capabilities --repo-slug <slug> --session <id> --fence <fence> --json '{"v":1,"session_id":"<id>","available":{"fable":<true|false>,"opus":true,"sonnet":true}}'`
-   - `indeterminate` (no `claude`, network error, other status, unparseable) ->
+   - `indeterminate` (no `claude`, network error, transient 429 rate limit,
+     other status, unparseable) ->
      write NO map; ABORT launches this turn and surface it -- never assume.
      A non-owner (claim returned `BUSY`) never probes or writes -- it is
      read-only. The map is machine-local (`references/state-layout.md`), never
@@ -129,14 +130,27 @@ phase-appropriate brief (references/brief-template.md) and model.
    lived there, risking a ticket's work built in the wrong repo. Explicit
    `--cwd <repo_root>` pins the anchor.
    Parse the `.result` for the new `HERDR_WORKSPACE_ID` and worktree path --
-   never derive them. **Then verify the anchor before doing anything else:** read
-   `.result...repo_root` / `.result...repo_name` and confirm they equal the
-   intended `<repo_root>` (and its basename). On a mismatch the create
-   mis-anchored -- do NOT launch a worker; **unwind** the stray resources
-   (remove the empty worktree: `herdr worktree remove --workspace <ws_id>`, and
-   delete the stray branch: `git -C <mis-anchored repo_root> branch -D <branch>`),
-   then surface the mismatch and stop. Only a verified-correct anchor proceeds.
-   Label the workspace `<task_id>`.
+   never derive them. **Then verify the anchor before doing anything else,
+   comparing canonical repo identity, not checkout path:** herdr reports the
+   shared repository root in `.result...repo_root`, but in a linked worktree
+   (every herdr workspace) `git rev-parse --show-toplevel` on `<path-in-repo>`
+   returns that worktree's own checkout path, not the shared root -- a
+   `--show-toplevel` comparison false-flags every correctly anchored create.
+   Instead resolve `COMMON_DIR="$(git -C <path-in-repo> rev-parse
+--git-common-dir)"` and confirm `.result...repo_root` matches the repo root
+   implied by `COMMON_DIR` (its parent when `COMMON_DIR` ends in `/.git`, else
+   `COMMON_DIR` itself) and `.result...repo_name` matches that root's basename.
+   On a mismatch the create mis-anchored -- do NOT launch a worker.
+   **Unwind, but only for a resource this orchestrator created**
+   (`created_by_this_orch: true` from step 4 -- mirrors the failure-cleanup
+   gate in step 9): remove the empty worktree
+   (`herdr worktree remove --workspace <ws_id>`) and delete the stray branch
+   (`git -C <mis-anchored repo_root> branch -D <branch>`). For an **adopted**
+   resource (`created_by_this_orch: false`) never unwind -- a mismatch there
+   means the pre-existing branch/worktree is not what step 4 expected; leave it
+   untouched (no `worktree remove`, no `branch -D`) and just surface the
+   mismatch. Either way, stop after surfacing the mismatch. Only a
+   verified-correct anchor proceeds. Label the workspace `<task_id>`.
 6. **Launch the worker on its pinned model** into the new workspace's own pane
    -- see section 8, Model launch. Send the kickoff brief (template in
    references/brief-template.md), filled with `task_id`, worktree path,
