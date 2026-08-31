@@ -347,6 +347,101 @@ def fold_status(events):
     return {"authoritative": authoritative, "last_hint": last_hint}
 
 
+WATCH_DIRS = {
+    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id)),
+    "workspaces": ((".events.jsonl", valid_workspace_id),),
+}
+ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
+
+
+def watch_scan(rd, prev):
+    """Snapshot {path: (mtime_ns, size)} of the watched completion/hint files.
+
+    Read-only. A missing subdir is an empty set. A subdir whose listing
+    fails (OSError other than absence) is reported in `failed` and its
+    entries are carried over from `prev`; a per-file stat() failure likewise
+    retains the prior entry -- so transient errors and recovery can never
+    signal-storm.
+    """
+    snap, failed = {}, set()
+    for sub, suffixes in WATCH_DIRS.items():
+        d = Path(rd) / sub
+        try:
+            names = sorted(os.listdir(d))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            failed.add(sub)
+            prefix = str(d) + os.sep
+            for k, v in prev.items():
+                if k.startswith(prefix):
+                    snap[k] = v
+            continue
+        for name in names:
+            for suffix, valid in suffixes:
+                if name.endswith(suffix) and valid(name[: -len(suffix)]):
+                    key = str(d / name)
+                    try:
+                        st = (d / name).stat()
+                    except OSError:
+                        if key in prev:
+                            snap[key] = prev[key]
+                        break
+                    snap[key] = (st.st_mtime_ns, st.st_size)
+                    break
+    return snap, failed
+
+
+def watch_changed(prev, snap) -> bool:
+    """True iff snap has a new or modified entry. Deletions never signal."""
+    return any(prev.get(k) != v for k, v in snap.items())
+
+
+def heartbeat_active(rd) -> bool:
+    """True iff any validated primary tasks/<task_id>.json record has an
+    active status. Sidecars and foreign filenames never count."""
+    d = Path(rd) / "tasks"
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return False
+    for name in names:
+        if not name.endswith(".json") or name.endswith(
+            (".done.json", ".review.json")
+        ):
+            continue
+        if not valid_task_id(name[: -len(".json")]):
+            continue
+        try:
+            rec = json.loads((d / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("status") in ACTIVE_STATUSES:
+            return True
+    return False
+
+
+def watch_tick(st, changed, active, now, heartbeat_secs, debounce_secs):
+    """One poll-pass decision (pure; clock injected via `now`).
+
+    st: {"pending": bool, "suppress_until": float, "last_emit": float},
+    mutated in place. Returns "signal", "heartbeat", or None. At most one
+    line per pass; signal takes precedence; any emit resets the heartbeat
+    timer.
+    """
+    if changed:
+        st["pending"] = True
+    if st["pending"] and now >= st["suppress_until"]:
+        st["pending"] = False
+        st["suppress_until"] = now + debounce_secs
+        st["last_emit"] = now
+        return "signal"
+    if now - st["last_emit"] >= heartbeat_secs and active:
+        st["last_emit"] = now
+        return "heartbeat"
+    return None
+
+
 def _owner_path(rd) -> Path:
     return Path(rd) / "owner.json"
 

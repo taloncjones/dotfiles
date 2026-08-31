@@ -561,5 +561,94 @@ out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":false,
 test "$out" = "available"
 SH
 
+check "watch_scan snapshots only validated watched files" <<PY
+$LOAD
+import pathlib
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True); (rd/"workspaces").mkdir(parents=True)
+(rd/"tasks"/"PROJ-1.done.json").write_text("{}")
+(rd/"tasks"/"PROJ-1.review.json").write_text("{}")
+(rd/"workspaces"/"w1.events.jsonl").write_text("")
+(rd/"tasks"/"PROJ-1.json").write_text("{}")             # primary record: not watched
+(rd/"tasks"/"a b.done.json").write_text("{}")           # invalid stem: ignored
+(rd/"tasks"/"notes.txt").write_text("")                 # outside globs: ignored
+snap,failed=c.watch_scan(rd,{})
+names=sorted(pathlib.Path(k).name for k in snap)
+assert names==["PROJ-1.done.json","PROJ-1.review.json","w1.events.jsonl"],names
+assert failed==set()
+for v in snap.values():
+    assert isinstance(v,tuple) and len(v)==2
+sys.exit(0)
+PY
+
+check "watch_scan missing dirs empty; watch_changed semantics" <<PY
+$LOAD
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")   # nothing created
+snap,failed=c.watch_scan(rd,{})
+assert snap=={} and failed==set()
+assert not c.watch_changed({},{})
+assert c.watch_changed({},{"a":(1,1)})          # new file
+assert c.watch_changed({"a":(1,1)},{"a":(2,1)}) # mtime bump
+assert not c.watch_changed({"a":(1,1)},{})      # deletion is silent
+assert not c.watch_changed({"a":(1,1)},{"a":(1,1)})
+sys.exit(0)
+PY
+
+check "watch_scan retains prev entries under an unreadable dir" <<PY
+$LOAD
+if hasattr(os,"geteuid") and os.geteuid()==0:
+    sys.exit(0)  # chmod 0 is not a barrier for root; skip
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True)
+p=rd/"tasks"/"PROJ-1.done.json"; p.write_text("{}")
+snap,_=c.watch_scan(rd,{})
+os.chmod(rd/"tasks",0)
+try:
+    snap2,failed=c.watch_scan(rd,snap)
+finally:
+    os.chmod(rd/"tasks",0o700)
+assert "tasks" in failed
+assert str(p) in snap2 and snap2[str(p)]==snap[str(p)]
+assert not c.watch_changed(snap,snap2)
+sys.exit(0)
+PY
+
+check "heartbeat_active gates on validated primary record status" <<PY
+$LOAD
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True)
+assert not c.heartbeat_active(rd)                       # empty
+(rd/"tasks"/"PROJ-1.json").write_text(json.dumps({"status":"merged"}))
+assert not c.heartbeat_active(rd)                       # terminal only
+(rd/"tasks"/"PROJ-2.json").write_text("not json")
+assert not c.heartbeat_active(rd)                       # malformed = inactive
+(rd/"tasks"/"PROJ-3.done.json").write_text(json.dumps({"status":"in-progress"}))
+assert not c.heartbeat_active(rd)                       # sidecar never counts
+(rd/"tasks"/"a b.json").write_text(json.dumps({"status":"in-progress"}))
+assert not c.heartbeat_active(rd)                       # invalid stem never counts
+for s in ("in-progress","blocked","review-dispatched"):
+    (rd/"tasks"/"PROJ-4.json").write_text(json.dumps({"status":s}))
+    assert c.heartbeat_active(rd), s
+sys.exit(0)
+PY
+
+check "watch_tick debounce, precedence, heartbeat reset" <<PY
+$LOAD
+st={"pending":False,"suppress_until":0.0,"last_emit":0.0}
+assert c.watch_tick(st,True,False,10.0,1800,60)=="signal"
+assert c.watch_tick(st,True,False,20.0,1800,60) is None      # debounced
+assert c.watch_tick(st,False,False,71.0,1800,60)=="signal"   # coalesced after window
+assert c.watch_tick(st,False,True,100.0,1800,60) is None     # heartbeat not due
+assert c.watch_tick(st,True,True,2000.0,1800,60)=="signal"   # signal precedence
+assert c.watch_tick(st,False,True,4000.0,1800,60)=="heartbeat"
+assert c.watch_tick(st,False,True,4001.0,1800,60) is None    # reset by emit
+assert c.watch_tick(st,False,False,9000.0,1800,60) is None   # inactive: silent
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
