@@ -232,5 +232,31 @@ sweeps_empty_codex_project_dirs() {
 assert "installer sweeps empty legacy Codex project dirs" \
     sweeps_empty_codex_project_dirs
 
+preserves_codex_hook_with_unrecognized_script() {
+    tmp_home="$(mktemp -d)"
+    tmp_repo="$tmp_home/dotfiles"
+    mkdir -p "$tmp_repo/.codex/hooks"
+    printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s/.codex/hooks/session-start.sh"}]}]}}\n' \
+        "$tmp_repo" >"$tmp_repo/.codex/hooks.json"
+    printf '#!/bin/sh\necho not-the-legacy-bootstrap\n' \
+        >"$tmp_repo/.codex/hooks/session-start.sh"
+
+    for path in install zsh git ssh claude bin ghostty codex; do
+        ln -s "$PWD/$path" "$tmp_repo/$path"
+    done
+
+    cp "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before"
+    cp "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before"
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    result=0
+    cmp -s "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before" || result=1
+    cmp -s "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before" || result=1
+    rm -rf "$tmp_home"
+    return "$result"
+}
+
+assert "installer preserves a Codex hook whose script is not the legacy bootstrap" \
+    preserves_codex_hook_with_unrecognized_script
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
