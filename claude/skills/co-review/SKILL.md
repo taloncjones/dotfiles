@@ -65,8 +65,14 @@ verify.
        || { echo "co-review: \$WT is at $SNAP_HEAD, not PR head $PR_HEAD -- aborting" >&2; exit 1; }
 
      # branch mode (committed work, no PR): head is already committed.
+     # checkout --detach can still fail (e.g. an untracked file already in $WT
+     # collides with a tracked path at $SNAP_HEAD) and leave $WT at whatever
+     # it was provisioned at -- verify it landed before dispatching anything.
      SNAP_BASE=<branch-the-work-forked-from>; SNAP_HEAD=$(git rev-parse HEAD)
-     git -C "$WT" checkout --detach "$SNAP_HEAD"
+     git -C "$WT" checkout --detach "$SNAP_HEAD" \
+       || { echo "co-review: checkout of $SNAP_HEAD into \$WT failed -- aborting, would review the wrong commit" >&2; exit 1; }
+     [ "$(git -C "$WT" rev-parse HEAD)" = "$SNAP_HEAD" ] \
+       || { echo "co-review: \$WT is at $(git -C "$WT" rev-parse HEAD), not $SNAP_HEAD -- aborting" >&2; exit 1; }
 
      # local-uncommitted mode: the change is committed NOWHERE, so a plain
      # `worktree add --detach HEAD` gives a CLEAN checkout that omits it and
@@ -79,7 +85,14 @@ verify.
      GIT_INDEX_FILE="$WT.idx" git add -A
      SNAP_TREE=$(GIT_INDEX_FILE="$WT.idx" git write-tree); rm -f "$WT.idx"
      SNAP_HEAD=$(git commit-tree "$SNAP_TREE" -p "$SNAP_BASE" -m "co-review snapshot")
-     git -C "$WT" checkout --detach "$SNAP_HEAD"
+     # Same checkout-success guard as the other two modes: an untracked file
+     # already sitting in $WT (e.g. an ignored symlink) can make this abort
+     # and leave $WT at the pre-snapshot commit -- silently reviewing an
+     # empty diff instead of failing loudly.
+     git -C "$WT" checkout --detach "$SNAP_HEAD" \
+       || { echo "co-review: checkout of $SNAP_HEAD into \$WT failed -- aborting, would review the wrong commit" >&2; exit 1; }
+     [ "$(git -C "$WT" rev-parse HEAD)" = "$SNAP_HEAD" ] \
+       || { echo "co-review: \$WT is at $(git -C "$WT" rev-parse HEAD), not $SNAP_HEAD -- aborting" >&2; exit 1; }
      ```
 
      `codex exec review --base "$SNAP_BASE"` run inside `$WT` (step 2) now sees
