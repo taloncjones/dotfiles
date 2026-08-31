@@ -37,9 +37,9 @@ assert "co-review does not spawn nested codex review" \
 assert "co-review uses Claude native code review" \
     rg -q 'claude -p "/code-review' codex/skills/co-review/SKILL.md
 assert "Claude co-review pins Codex Sol" \
-    sh -c "[ \"\$(rg -o -- '-m gpt-5\\.6-sol' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 2 ]"
+    sh -c "[ \"\$(rg -o -- '-m gpt-5\\.6-sol' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 1 ]"
 assert "Claude co-review defaults Codex to high effort" \
-    sh -c "[ \"\$(rg -o 'model_reasoning_effort=\\\"high\\\"' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 2 ]"
+    sh -c "[ \"\$(rg -o 'model_reasoning_effort=\\\"high\\\"' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 1 ]"
 assert "Claude co-review defines an adversarial Codex rubric" \
     sh -c "rg -q 'CODEX_REVIEW_RUBRIC=' claude/skills/co-review/SKILL.md && rg -q 'runtime correctness' claude/skills/co-review/SKILL.md"
 assert "Claude co-review reserves xhigh for high-risk changes" \
