@@ -159,5 +159,104 @@ assert "installer disables duplicate managed workflow providers" \
 assert "plugin lifecycle re-runs workflow dedupe post-install" \
     sh -c "rg -q 'dedupe_codex_workflow_plugins' install/common/claude-plugins.sh"
 
+removes_stale_claude_web_codex_hook() {
+    tmp_home="$(mktemp -d)"
+    tmp_repo="$tmp_home/dotfiles"
+    mkdir -p "$tmp_repo/.codex/hooks"
+    printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s/.codex/hooks/session-start.sh"}]}]}}\n' \
+        "$tmp_repo" >"$tmp_repo/.codex/hooks.json"
+    printf '#!/bin/sh\n[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0\nexec "$PWD/bootstrap-cloud.sh"\n' \
+        >"$tmp_repo/.codex/hooks/session-start.sh"
+
+    for path in install zsh git ssh claude bin ghostty codex; do
+        ln -s "$PWD/$path" "$tmp_repo/$path"
+    done
+
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    result=0
+    test ! -e "$tmp_repo/.codex/hooks.json" || result=1
+    test ! -e "$tmp_repo/.codex/hooks/session-start.sh" || result=1
+    test ! -e "$tmp_repo/.codex" || result=1
+    rm -rf "$tmp_home"
+    return "$result"
+}
+
+assert "installer removes stale Claude-web hooks from the Codex project surface" \
+    removes_stale_claude_web_codex_hook
+
+preserves_multi_command_codex_hook_manifest() {
+    tmp_home="$(mktemp -d)"
+    tmp_repo="$tmp_home/dotfiles"
+    mkdir -p "$tmp_repo/.codex/hooks"
+    printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s/.codex/hooks/session-start.sh"},{"type":"command","command":"echo keep-me"}]}]}}\n' \
+        "$tmp_repo" >"$tmp_repo/.codex/hooks.json"
+    printf '#!/bin/sh\n[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0\nexec "$PWD/bootstrap-cloud.sh"\n' \
+        >"$tmp_repo/.codex/hooks/session-start.sh"
+
+    for path in install zsh git ssh claude bin ghostty codex; do
+        ln -s "$PWD/$path" "$tmp_repo/$path"
+    done
+
+    cp "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before"
+    cp "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before"
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    result=0
+    cmp -s "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before" || result=1
+    cmp -s "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before" || result=1
+    rm -rf "$tmp_home"
+    return "$result"
+}
+
+assert "installer preserves a multi-command Codex hook manifest" \
+    preserves_multi_command_codex_hook_manifest
+
+sweeps_empty_codex_project_dirs() {
+    tmp_home="$(mktemp -d)"
+    tmp_repo="$tmp_home/dotfiles"
+    mkdir -p "$tmp_repo/.codex/hooks"
+
+    for path in install zsh git ssh claude bin ghostty codex; do
+        ln -s "$PWD/$path" "$tmp_repo/$path"
+    done
+
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    result=0
+    test ! -e "$tmp_repo/.codex" || result=1
+    rm -rf "$tmp_home"
+    return "$result"
+}
+
+assert "installer sweeps empty legacy Codex project dirs" \
+    sweeps_empty_codex_project_dirs
+
+preserves_codex_hook_with_unrecognized_script() {
+    tmp_home="$(mktemp -d)"
+    tmp_repo="$tmp_home/dotfiles"
+    mkdir -p "$tmp_repo/.codex/hooks"
+    printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s/.codex/hooks/session-start.sh"}]}]}}\n' \
+        "$tmp_repo" >"$tmp_repo/.codex/hooks.json"
+    printf '#!/bin/sh\necho not-the-legacy-bootstrap\n' \
+        >"$tmp_repo/.codex/hooks/session-start.sh"
+
+    for path in install zsh git ssh claude bin ghostty codex; do
+        ln -s "$PWD/$path" "$tmp_repo/$path"
+    done
+
+    cp "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before"
+    cp "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before"
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    result=0
+    cmp -s "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before" || result=1
+    cmp -s "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before" || result=1
+    rm -rf "$tmp_home"
+    return "$result"
+}
+
+assert "installer preserves a Codex hook whose script is not the legacy bootstrap" \
+    preserves_codex_hook_with_unrecognized_script
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
