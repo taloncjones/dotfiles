@@ -100,7 +100,7 @@ stale_codex_hook_manifest="$DOTFILEDIR/.codex/hooks.json"
 stale_codex_hook_script="$DOTFILEDIR/.codex/hooks/session-start.sh"
 if [ -f "$stale_codex_hook_manifest" ] && [ -f "$stale_codex_hook_script" ] &&
   grep -F -q '.codex/hooks/session-start.sh' "$stale_codex_hook_manifest" &&
-  [ "$(grep -c '"command"' "$stale_codex_hook_manifest" || true)" -eq 1 ] &&
+  [ "$(grep -o -F '"command":' "$stale_codex_hook_manifest" | wc -l)" -eq 1 ] &&
   grep -F -q 'CLAUDE_CODE_REMOTE' "$stale_codex_hook_script" &&
   grep -F -q 'bootstrap-cloud.sh' "$stale_codex_hook_script"; then
   rm -f "$stale_codex_hook_manifest" "$stale_codex_hook_script"

@@ -183,5 +183,32 @@ removes_stale_claude_web_codex_hook() {
 assert "installer removes stale Claude-web hooks from the Codex project surface" \
     removes_stale_claude_web_codex_hook
 
+preserves_multi_command_codex_hook_manifest() {
+    tmp_home="$(mktemp -d)"
+    tmp_repo="$tmp_home/dotfiles"
+    mkdir -p "$tmp_repo/.codex/hooks"
+    printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s/.codex/hooks/session-start.sh"},{"type":"command","command":"echo keep-me"}]}]}}\n' \
+        "$tmp_repo" >"$tmp_repo/.codex/hooks.json"
+    printf '#!/bin/sh\n[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0\nexec "$PWD/bootstrap-cloud.sh"\n' \
+        >"$tmp_repo/.codex/hooks/session-start.sh"
+
+    for path in install zsh git ssh claude bin ghostty codex; do
+        ln -s "$PWD/$path" "$tmp_repo/$path"
+    done
+
+    cp "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before"
+    cp "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before"
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    result=0
+    cmp -s "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before" || result=1
+    cmp -s "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before" || result=1
+    rm -rf "$tmp_home"
+    return "$result"
+}
+
+assert "installer preserves a multi-command Codex hook manifest" \
+    preserves_multi_command_codex_hook_manifest
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
