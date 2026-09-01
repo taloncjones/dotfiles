@@ -175,5 +175,112 @@ acct_case "claude-account: personal label" "$SBHOME/elsewhere" "" "personal"
 acct_case "claude-account: work label" "$SBHOME/Git/work/proj" "" "work"
 acct_case "claude-account: custom label" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR=$SBHOME/custom" "custom"
 
+# --- shell-mode matrix: wrapper defined via .zshenv in -lc / -c / -ic ---
+# ZDOTDIR sandbox mirrors the installed layout: $ZDOTDIR/.zshenv is a
+# symlink to the repo file, so the sibling-path resolution is exercised.
+ZDIR="$TMP/zdot"
+mkdir -p "$ZDIR"
+ln -s "$REPO/zsh/.zshenv" "$ZDIR/.zshenv"
+
+# run_mode <label> <zsh-flags> <cwd> <zsh-body> <expected-cfg>
+run_mode() {
+    label="$1" flags="$2" cwd="$3" body="$4" want_cfg="$5"
+    rec="$TMP/rec"
+    : > "$rec"
+    RECORD="$rec" HOME="$SBHOME" ZDOTDIR="$ZDIR" PATH="$TMP/bin:$PATH" \
+        zsh "$flags" "cd '$cwd' && $body" >/dev/null 2>&1
+    got_cfg="$(sed -n 's/^cfg=//p' "$rec")"
+    if [ "$got_cfg" = "$want_cfg" ]; then
+        pass "$label"
+    else
+        fail "$label (cfg='$got_cfg')"
+    fi
+}
+
+# The full precedence ladder per startup mode (spec: matrix rows apply to
+# every shell mode). Reuses the sandbox dirs and work-shortcut symlink
+# created by the Task 1 cases.
+for mode in "-lc" "-c" "-ic"; do
+    run_mode "zsh $mode: personal cwd routes to ~/.claude" \
+        "$mode" "$SBHOME/elsewhere" "claude" "$SBHOME/.claude"
+    run_mode "zsh $mode: work cwd routes to ~/.claude-work" \
+        "$mode" "$SBHOME/Git/work/proj" "claude" "$SBHOME/.claude-work"
+    run_mode "zsh $mode: symlinked work path routes to work" \
+        "$mode" "$SBHOME/work-shortcut" "claude" "$SBHOME/.claude-work"
+    run_mode "zsh $mode: non-empty env wins" \
+        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
+    run_mode "zsh $mode: exported-empty env consumed (work cwd)" \
+        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR= claude" "$SBHOME/.claude-work"
+    run_mode "zsh $mode: exported-empty env consumed (personal cwd)" \
+        "$mode" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR= claude" "$SBHOME/.claude"
+    run_mode "zsh $mode: --personal beats custom env" \
+        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude --personal" "$SBHOME/.claude"
+done
+
+# .zshenv contract: silent on success, no external commands.
+out="$(HOME="$SBHOME" ZDOTDIR="$ZDIR" zsh -c 'true' 2>&1)"
+if [ -z "$out" ]; then
+    pass ".zshenv is silent on startup"
+else
+    fail ".zshenv is silent on startup (got: $out)"
+fi
+if grep -vE '^[[:space:]]*#|^[[:space:]]*$' zsh/.zshenv | grep -qE '\$\(|`'; then
+    fail ".zshenv runs no external commands (no command substitution)"
+else
+    pass ".zshenv runs no external commands (no command substitution)"
+fi
+
+# Degraded state 1: dangling ~/.zshenv symlink is a silent no-op.
+ZBROKEN="$TMP/zdot-broken"
+mkdir -p "$ZBROKEN"
+ln -s "$TMP/nonexistent/.zshenv" "$ZBROKEN/.zshenv"
+out="$(HOME="$SBHOME" ZDOTDIR="$ZBROKEN" zsh -c 'true' 2>&1)"
+if [ -z "$out" ]; then
+    pass "broken .zshenv link degrades to silent no-op"
+else
+    fail "broken .zshenv link degrades to silent no-op (got: $out)"
+fi
+
+# Degraded state 2: the tracked .zshenv runs but its sibling
+# claude-account.zsh is missing -> silent, and claude falls through to
+# the bare binary (stub sees no injected value).
+ZDEG="$TMP/zdot-degraded"
+mkdir -p "$ZDEG/zsh-copy"
+cp "$REPO/zsh/.zshenv" "$ZDEG/zsh-copy/.zshenv"
+ln -s "$ZDEG/zsh-copy/.zshenv" "$ZDEG/.zshenv"
+: > "$TMP/rec"
+out="$(RECORD="$TMP/rec" HOME="$SBHOME" ZDOTDIR="$ZDEG" PATH="$TMP/bin:$PATH" \
+    zsh -c "cd '$SBHOME/Git/work/proj' && claude" 2>&1)"
+got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+if [ -z "$out" ] && [ "$got_cfg" = "UNSET" ]; then
+    pass "missing sibling: silent no-op, bare binary runs"
+else
+    fail "missing sibling: silent no-op, bare binary runs (out='$out' cfg='$got_cfg')"
+fi
+
+# Degraded state 3: unreadable sibling -> same silent no-op (-r guard).
+cp "$REPO/zsh/claude-account.zsh" "$ZDEG/zsh-copy/claude-account.zsh"
+chmod 000 "$ZDEG/zsh-copy/claude-account.zsh"
+: > "$TMP/rec"
+out="$(RECORD="$TMP/rec" HOME="$SBHOME" ZDOTDIR="$ZDEG" PATH="$TMP/bin:$PATH" \
+    zsh -c "cd '$SBHOME/Git/work/proj' && claude" 2>&1)"
+got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+chmod 644 "$ZDEG/zsh-copy/claude-account.zsh"
+if [ -z "$out" ] && [ "$got_cfg" = "UNSET" ]; then
+    pass "unreadable sibling: silent no-op, bare binary runs"
+else
+    fail "unreadable sibling: silent no-op, bare binary runs (out='$out' cfg='$got_cfg')"
+fi
+
+# ~/.zshenv.local is sourced when present.
+echo 'export ZSHENV_LOCAL_MARK=1' > "$SBHOME/.zshenv.local"
+val="$(HOME="$SBHOME" ZDOTDIR="$ZDIR" zsh -c 'echo "${ZSHENV_LOCAL_MARK:-missing}"' 2>/dev/null)"
+rm -f "$SBHOME/.zshenv.local"
+if [ "$val" = "1" ]; then
+    pass ".zshenv sources ~/.zshenv.local"
+else
+    fail ".zshenv sources ~/.zshenv.local (got '$val')"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
