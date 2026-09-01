@@ -14,7 +14,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-import time  # noqa: F401
+import time
 from collections import namedtuple
 from pathlib import Path
 
@@ -288,7 +288,11 @@ def eligible(path, root, kind):
         rel = path.relative_to(root)
     except (OSError, ValueError):
         return False
-    if resolved != root and root not in resolved.parents:
+    # root may carry unresolved symlink components (e.g. a config dir built
+    # from an unresolved $HOME); resolve it too so the containment check
+    # compares like with like instead of rejecting every file under it.
+    root_resolved = Path(root).resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
         return False
     if _has_symlink_component(path, root) or _excluded_dir(rel.parts[:-1]):
         return False
@@ -433,6 +437,174 @@ def is_corruption(exc):
     return isinstance(exc, sqlite3.DatabaseError) and msg.startswith(CORRUPTION_MARKERS)
 
 
+# --- index I/O -------------------------------------------------------------
+
+RefreshStats = namedtuple("RefreshStats", "files added modified removed chunks")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS files (
+  path TEXT PRIMARY KEY, display TEXT NOT NULL, kind TEXT NOT NULL,
+  mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
+  display UNINDEXED, kind UNINDEXED, line UNINDEXED, heading, body,
+  tokenize = 'porter unicode61');
+"""
+
+
+def _busy_timeout():
+    return int(os.environ.get("RECALL_BUSY_TIMEOUT_MS", BUSY_TIMEOUT_MS))
+
+
+def _connect(path):
+    conn = sqlite3.connect(str(path), timeout=_busy_timeout() / 1000)
+    conn.execute(f"PRAGMA busy_timeout = {_busy_timeout()}")
+    return conn
+
+
+def _quarantine(path, quiet):
+    backup = Path(str(path) + ".corrupt")
+    if backup.exists():
+        backup.unlink()
+    Path(path).rename(backup)
+    warn(f"index was corrupt; moved to {backup} and rebuilding", quiet)
+
+
+def _create_schema(conn, ctx):
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (SCHEMA_VERSION,))
+    conn.execute("INSERT OR REPLACE INTO meta VALUES ('toplevel', ?)", (str(ctx.toplevel),))
+    conn.execute("INSERT OR IGNORE INTO meta VALUES ('last_index_ok', '0')")
+    conn.commit()
+
+
+def _meta(conn, key):
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def open_index(ctx, quiet=False):
+    """Open this tree's index. The schema is written only for a fresh
+    (empty) file or after a quarantine / schema rebuild, so opening an
+    existing index takes no write lock and works while another process
+    holds one. Quarantines on the documented corruption markers only."""
+    ensure_index_dir(ctx.index_file)
+    path = ctx.index_file
+    fresh = path.stat().st_size == 0
+    for attempt in range(2):
+        try:
+            conn = _connect(path)
+            if not fresh:
+                check = conn.execute("PRAGMA quick_check").fetchone()[0]
+                if check != "ok":
+                    raise sqlite3.DatabaseError("database disk image is malformed")
+                has_meta = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='meta'").fetchone()
+                if not has_meta or _meta(conn, "schema_version") != SCHEMA_VERSION:
+                    conn.close()
+                    path.unlink()
+                    warn("index schema outdated; rebuilding", quiet)
+                    ensure_index_dir(path)
+                    conn = _connect(path)
+                    fresh = True
+            if fresh:
+                _create_schema(conn, ctx)
+            return conn
+        except sqlite3.DatabaseError as exc:
+            if attempt == 0 and is_corruption(exc):
+                _quarantine(path, quiet)
+                ensure_index_dir(path)
+                fresh = True
+                continue
+            raise
+    raise ConfigError(f"cannot open index at {path}")
+
+
+def has_index(conn):
+    return _meta(conn, "last_index_ok") == "1"
+
+
+def _index_one(conn, src, text):
+    conn.execute("DELETE FROM chunks WHERE display = ?", (src.display,))
+    for c in chunk_file(src.path, text):
+        conn.execute("INSERT INTO chunks (display, kind, line, heading, body) VALUES (?,?,?,?,?)",
+                     (src.display, src.kind, c.line, c.heading, c.body))
+
+
+def refresh(conn, ctx, full=False, quiet=False):
+    sources = collect_sources(ctx.toplevel, ctx.canonical, ctx.config_dir, quiet=quiet)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower():
+            raise LockedError("index is locked by another process") from exc
+        raise
+    try:
+        if full:
+            conn.execute("DELETE FROM files")
+            conn.execute("DELETE FROM chunks")
+        known = {row[0]: row for row in conn.execute(
+            "SELECT path, display, kind, mtime_ns, size, sha256 FROM files")}
+        added = modified = removed = 0
+        current = set()
+        for src in sources:
+            try:
+                st = src.path.stat()
+            except OSError as exc:
+                warn(f"skipping {src.display}: {exc}", quiet)
+                continue
+            row = known.get(str(src.path))
+            if row and row[3] == st.st_mtime_ns and row[4] == st.st_size and row[2] == src.kind:
+                current.add(str(src.path))  # unchanged: stat only, no read
+                continue
+            try:
+                data = src.path.read_bytes()
+                text = data.decode("utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                warn(f"skipping {src.display}: {exc}", quiet)
+                continue
+            current.add(str(src.path))
+            digest = hashlib.sha256(data).hexdigest()
+            if row and row[5] == digest and row[2] == src.kind:
+                conn.execute("UPDATE files SET mtime_ns=?, size=? WHERE path=?",
+                             (st.st_mtime_ns, st.st_size, str(src.path)))
+                continue
+            _index_one(conn, src, text)
+            conn.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?)",
+                         (str(src.path), src.display, src.kind, st.st_mtime_ns, st.st_size, digest))
+            if row:
+                modified += 1
+            else:
+                added += 1
+        for path, row in known.items():
+            if path not in current:
+                conn.execute("DELETE FROM chunks WHERE display = ?", (row[1],))
+                conn.execute("DELETE FROM files WHERE path = ?", (path,))
+                removed += 1
+        files = conn.execute("SELECT count(*) FROM files").fetchone()[0]
+        chunks = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('last_index_at', ?)", (now,))
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('last_index_ok', '1')")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return RefreshStats(files, added, modified, removed, chunks)
+
+
+def format_stats(s):
+    return f"indexed {s.files} files (+{s.added} ~{s.modified} -{s.removed}), {s.chunks} chunks"
+
+
+def cmd_index(args):
+    ctx = Context()
+    conn = open_index(ctx, args.quiet)
+    stats = refresh(conn, ctx, full=args.full, quiet=args.quiet)
+    print(format_stats(stats))
+    return EXIT_OK
+
+
 # --- CLI -------------------------------------------------------------------
 
 class Parser(argparse.ArgumentParser):
@@ -523,7 +695,7 @@ def cmd_not_implemented(args):
 
 
 COMMANDS = {
-    "index": cmd_not_implemented,
+    "index": cmd_index,
     "search": cmd_not_implemented,
     "status": cmd_status,
     "eval": cmd_not_implemented,

@@ -104,5 +104,105 @@ test_routing_override
 test_index_inside_repo_exits_6
 test_usage_and_help
 
+echo "== task 4: index"
+# seed_repo <repo> <config_dir>: docs, todo, handoff, finding, memory (+ MEMORY.md index).
+seed_repo() {
+  local r="$1" cfg="$2"
+  mkdir -p "$r/docs/specs" "$r/docs/findings" "$r/.claude/handoffs" "$r/.todos/pending"
+  printf '# Widget spec\n\nThe widget frobnicates gizmos.\n\n## Decision\n\nWe chose the frobnicator over the gizmo mangler.\n' > "$r/docs/specs/widget.md"
+  printf -- '---\ntitle: Fix the mangler\npriority: high\n---\n\n## Problem\n\nMangler leaks memory.\n' > "$r/.todos/pending/2026-01-01-fix-mangler.md"
+  printf '# Handoff\n\nNext slice: wire the frobnicator to the widget bus. The decision is pending.\n' > "$r/.claude/handoffs/latest.md"
+  printf 'finding: mangler leak reproduced under load\n' > "$r/docs/findings/leak.txt"
+  local mem; mem=$(mem_dir "$cfg" "$r")
+  mkdir -p "$mem"; printf '# Memory\n\nUser prefers the frobnicator naming.\n' > "$mem/naming.md"
+  printf 'index\n' > "$mem/MEMORY.md"
+}
+db_path() { printf '%s/recall/%s/index.db' "$1" "$(repo_id "$2")"; }
+hold_lock() { # hold_lock <db> <seconds>: background writer holding BEGIN IMMEDIATE
+  python3 - "$1" "$2" <<'PY' &
+import sqlite3, sys, time
+c = sqlite3.connect(sys.argv[1]); c.execute("BEGIN IMMEDIATE"); time.sleep(float(sys.argv[2]))
+PY
+  LOCK_PID=$!; sleep 0.5
+}
+test_index_builds_and_reports() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  assert_eq "index exits 0" "$RC" 0
+  assert_contains "index summary counts files" "$OUT" "indexed 5 files (+5 ~0 -0)"
+  local db; db=$(db_path "$HOME/.claude" "$r")
+  assert_file "index file exists" "$db"
+  assert_eq "index file mode 600" "$(file_mode "$db")" 600
+  assert_eq "index dir mode 700" "$(file_mode "$(dirname "$db")")" 700
+  recall "$r" index
+  assert_contains "second index is a no-op" "$OUT" "(+0 ~0 -0)"
+}
+test_index_incremental() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  sleep 1; printf '\n## Addendum\n\nNew paragraph.\n' >> "$r/docs/specs/widget.md"
+  unlink "$r/docs/findings/leak.txt"
+  printf '# New\n\nfresh doc\n' > "$r/docs/new.md"
+  recall "$r" index
+  assert_contains "incremental counts +1 ~1 -1" "$OUT" "(+1 ~1 -1)"
+  head -c $((1024*1024+1)) /dev/zero | tr '\0' 'x' > "$r/docs/new.md"
+  recall "$r" index
+  assert_contains "oversized file removed" "$OUT" "(+0 ~0 -1)"
+  printf '\xff\xfe not utf8\n' > "$r/docs/bad.md"
+  recall "$r" index
+  assert_contains "non-utf8 skipped with warning" "$ERR" "skipping docs/bad.md"
+  RECALL_EXTRA_GLOBS="docs/specs/*.md" recall "$r" index
+  assert_contains "kind change re-indexes the file" "$OUT" "(+0 ~1 -0)"
+  local kind; kind=$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"SELECT kind FROM files WHERE display='docs/specs/widget.md'\").fetchone()[0])" "$(db_path "$HOME/.claude" "$r")")
+  assert_eq "kind change lands in the index" "$kind" extra
+  recall "$r" index --full
+  assert_contains "full rebuild reindexes all" "$OUT" "(+4 ~0 -0)"
+}
+test_index_no_sources_and_git_clean() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/empty")
+  local before; before=$(cd "$r" && git status --porcelain)
+  recall "$r" index
+  assert_eq "index with no sources exits 0" "$RC" 0
+  assert_contains "index with no sources says so" "$OUT" "indexed 0 files"
+  recall "$r" status
+  recall "$r" search anything
+  local after; after=$(cd "$r" && git status --porcelain)
+  assert_eq "index, status and search leave git status unchanged" "$after" "$before"
+}
+test_index_corrupt_quarantined() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  local db; db=$(db_path "$HOME/.claude" "$r")
+  printf 'garbage garbage garbage' > "$db"
+  recall "$r" index
+  assert_eq "corrupt index rebuild exits 0" "$RC" 0
+  assert_contains "corrupt index warned" "$ERR" "corrupt"
+  assert_file "corrupt index quarantined" "$db.corrupt"
+  assert_contains "corrupt index rebuilt fully" "$OUT" "(+5 ~0 -0)"
+}
+test_index_schema_mismatch_rebuilds() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  local db; db=$(db_path "$HOME/.claude" "$r")
+  python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE meta SET value='0' WHERE key='schema_version'\"); c.commit()" "$db"
+  recall "$r" index
+  assert_contains "schema mismatch warns" "$ERR" "schema"
+  assert_contains "schema mismatch rebuilds" "$OUT" "(+5 ~0 -0)"
+}
+test_index_locked_exits_7() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  hold_lock "$(db_path "$HOME/.claude" "$r")" 6
+  RECALL_BUSY_TIMEOUT_MS=500 recall "$r" index
+  assert_eq "locked index exits 7" "$RC" 7
+  wait "$LOCK_PID"
+}
+test_index_builds_and_reports
+test_index_incremental
+test_index_no_sources_and_git_clean
+test_index_corrupt_quarantined
+test_index_schema_mismatch_rebuilds
+test_index_locked_exits_7
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
