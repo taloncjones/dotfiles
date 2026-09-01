@@ -65,7 +65,7 @@ assert c.validate_messaging_socket("/tmp/other/1.sock")[2]=="dir-not-canonical"
 assert c.validate_messaging_socket("/tmp/cc-socks/../cc-socks/1.sock")[2]=="dir-not-canonical"
 assert c.validate_messaging_socket("/tmp/cc-socks/12345-0123abcd.sock")[2]=="basename-not-pid-sock"
 assert c.validate_messaging_socket("/tmp/cc-socks/abcdef.sock")[2]=="basename-not-pid-sock"
-assert c.validate_messaging_socket("/tmp/cc-socks/1.sock/")[2]=="basename-not-pid-sock"
+assert c.validate_messaging_socket("/tmp/cc-socks/1.sock/")[2]=="dir-not-canonical"   # trailing slash: dir is ".../1.sock"
 sys.exit(0)
 PY
 
