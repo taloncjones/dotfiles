@@ -147,7 +147,8 @@ dotfiles/
 │   ├── .zshrc        # Main ZSH config
 │   ├── .zprofile     # ZSH profile
 │   ├── aliases.zsh   # Shell aliases
-│   ├── functions.zsh # Shell functions (includes claude() account wrapper)
+│   ├── claude-account.zsh # claude() account wrapper (sourced by .zshenv)
+│   ├── functions.zsh # Shell functions
 │   ├── scripts/      # Modular utility scripts
 │   └── theme.zsh     # Custom theme
 ├── git/              # Git configuration
@@ -236,7 +237,7 @@ Git and SSH identity is split between a tracked personal config and machine-loca
 - `url.insteadOf` in each include rewrites `git@github.com:` remotes to the correct SSH alias (`Git-Personal` or `Git-work`) automatically — no manual `update-remote` needed.
 - SSH: `~/.ssh/config` includes `~/.ssh/config_local` (machine-local hosts) first, then `config_personal` and `config_work`. The personal key is pinned for `github.com` and `Git-Personal`. The work key (`~/.ssh/id_ed25519_work.pub`) is machine-local and pinned via `config_work`.
 - 1Password agent config (`~/.config/1Password/ssh/agent.toml`) is seeded from `ssh/configs/agent.toml` on first install — real vault/item names stay off the repo.
-- The `claude()` ZSH wrapper selects `~/.claude-work` when launching under `~/Git/work`, `~/.claude` otherwise. `claude-account` shows the active routing.
+- The `claude()` ZSH wrapper selects `~/.claude-work` when launching under `~/Git/work`, `~/.claude` otherwise. `claude-account` shows the active routing. Defined in `zsh/claude-account.zsh`, sourced from `~/.zshenv`, so routing works in non-interactive and login shells (headless probes, orchestrator dispatches) -- the launched process always gets an explicit non-empty `CLAUDE_CONFIG_DIR`.
 
 **Setting up work identity on a new machine:**
 
