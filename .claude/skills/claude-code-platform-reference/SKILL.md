@@ -51,8 +51,8 @@ runs TWO config dirs off one asset source:
 | `~/.claude`      | personal (default; desktop app, unwrapped launches) | nothing -- the fallback                                  |
 | `~/.claude-work` | work                                                | `claude()` zsh wrapper when `$PWD` is under `~/Git/work` |
 
-Resolution logic lives in `_claude_config_dir` in `zsh/functions.zsh` (near
-line 222): a pre-set `CLAUDE_CONFIG_DIR` always wins; `claude --personal`
+Resolution logic lives in `_claude_config_dir` in `zsh/claude-account.zsh`
+(near line 32): a pre-set `CLAUDE_CONFIG_DIR` always wins; `claude --personal`
 forces `~/.claude` from a work dir; `claude-account` prints which dir a launch
 from the cwd would use. Launch paths that bypass the wrapper (desktop app, IDE
 extensions, `command claude`) land on the default -- `account_guard.py`
@@ -206,11 +206,11 @@ dotfiles-change-control.
 
 ## Skills vs commands vs agents
 
-| Kind    | Location                        | File shape                                                                                                                        | Loaded when                                                                                                      |
-| ------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Skill   | `claude/skills/<name>/SKILL.md` | YAML frontmatter, exactly `name` + `description`; description carries the triggers                                                | model loads it on-demand when the description matches the task (see claude/skills/ship/SKILL.md for house style) |
-| Command | `claude/commands/<name>.md`     | frontmatter optional: `handoff.md`/`kickoff.md` carry a `description:` block, the rest are plain markdown; filename = `/name` | user types `/name`; body becomes the prompt                                                                      |
-| Agent   | `claude/agents/<name>.md`       | YAML frontmatter `name` + `description` (multi-line ok); directory currently contains only `.gitkeep` because review agents are plugin-owned                           | dispatched by name when a project-local agent is defined                                                         |
+| Kind    | Location                        | File shape                                                                                                                                   | Loaded when                                                                                                      |
+| ------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Skill   | `claude/skills/<name>/SKILL.md` | YAML frontmatter, exactly `name` + `description`; description carries the triggers                                                           | model loads it on-demand when the description matches the task (see claude/skills/ship/SKILL.md for house style) |
+| Command | `claude/commands/<name>.md`     | frontmatter optional: `handoff.md`/`kickoff.md` carry a `description:` block, the rest are plain markdown; filename = `/name`                | user types `/name`; body becomes the prompt                                                                      |
+| Agent   | `claude/agents/<name>.md`       | YAML frontmatter `name` + `description` (multi-line ok); directory currently contains only `.gitkeep` because review agents are plugin-owned | dispatched by name when a project-local agent is defined                                                         |
 
 Plugins contribute their own skills/commands/agents/hooks from their cache
 dir; those load only if the plugin is in installed_plugins.json AND enabled at
@@ -292,7 +292,7 @@ the authoring cloud container. Volatile facts and how to re-verify:
 
 | Fact                                    | Re-verify with                                                                                                 |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Config-dir routing logic                | `grep -n "_claude_config_dir" zsh/functions.zsh`                                                               |
+| Config-dir routing logic                | `grep -n "_claude_config_dir" zsh/claude-account.zsh`                                                          |
 | Symlink set per config dir              | `grep -n "ln -sf" install/common/claude-links.sh`                                                              |
 | User-layer hook registrations           | `python3 -c "import json; print(json.dumps(json.load(open('claude/settings.json.tmpl'))['hooks'], indent=2))"` |
 | Project-layer plugin declaration + hook | `cat .claude/settings.json`                                                                                    |

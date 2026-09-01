@@ -254,7 +254,7 @@ self-seeds if not).
    under `~/Git/work` (`user.useConfigOnly=true`) -- that loud failure is the
    design, not a bug.
 
-5. Claude work account: the `claude()` wrapper in `zsh/functions.zsh` routes
+5. Claude work account: the `claude()` wrapper in `zsh/claude-account.zsh` routes
    launches under `~/Git/work` to `CLAUDE_CONFIG_DIR=~/.claude-work`
    (`_claude_config_dir`); the first such launch prompts the work OAuth login.
    `claude-account` prints the routing; `claude --personal` overrides.
