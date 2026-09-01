@@ -149,7 +149,9 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
 
 - **Plan-ready item** -- a refined Jira ticket, or a task that already has a
   committed `docs/specs/` spec and `docs/plans/` plan: dispatch an `implement`
-  worker directly, on the model `resolve-model --role impl` returns (default
+  worker directly (only after the contract pinning steps at the end of this
+  section; a plan-ready item without a committed contract is treated as raw),
+  on the model `resolve-model --role impl` returns (default
   `sonnet -> opus`; section 8).
 - **Raw item** -- a bare todo/handoff with no spec/plan: dispatch a `plan`
   worker on the model `resolve-model --role plan` returns (the **strong**
@@ -243,6 +245,22 @@ phase-appropriate brief (references/brief-template.md) and model.
    the next status/triage poll surfaces via live `herdr agent list` for
    cleanup -- preferred over a stale record that would block re-kickoff.
 
+**Contract pinning (implement dispatch, both paths).** Before launching any
+`implement` worker (plan-ready kickoff here, or phase advancement in section
+2a), pin the task's verification contract into the fenced task record:
+require the task worktree clean (`git status --porcelain` empty) and the
+contract tracked at HEAD (`git cat-file -e
+HEAD:docs/plans/<task_id>-contract.json`); then run
+`python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
+--worktree <path> --contract docs/plans/<task_id>-contract.json
+--allow-unpinned --validate-only` -- it prints the sha256 -- and `write-task`
+the record with `contract_path` and `contract_sha256` set. A missing or
+invalid contract blocks the dispatch exactly like a missing plan. The pin is
+written once; the orchestrator never re-pins on its own -- a later hash
+mismatch is an integrity halt surfaced to the human, and only an explicit
+human instruction (after a deliberate committed contract change) re-runs
+these pinning steps.
+
 ## 2a. Phase advancement (plan -> implement) -- raw items only
 
 A `plan` worker's confirmed completion advances the SAME task to its implement
@@ -256,7 +274,9 @@ phase; it never marks the task `completed` and never dispatches review.
    the task record's latest `workers[]` entry; the `done.json.phase` must match
    it.
 2. **Verify the plan landed:** spec + plan committed on the branch (HEAD ahead
-   of `base_sha`), worktree clean.
+   of `base_sha`), worktree clean, including `docs/plans/<task_id>-contract.json`
+   -- then run the section-2 contract pinning steps now, before the implement
+   launch in step 3.
 3. **Advance in place.** Reuse the same worktree/branch (the committed spec+plan
    live there). After the plan worker hands off (idle/exited), launch an
    `implement` worker in that workspace's own pane on the model
@@ -335,6 +355,22 @@ Correlate these independent facts, all keyed to the same `task_id`/
    phase advancement, never `completed`/review. `confirm-completion` does not
    itself check phase; the orchestrator gates on it here, matching the live
    worker's `workers[]` phase.
+6. **Contract gate:** the task worktree is clean (`git status --porcelain`
+   empty), `python3 "$CORE" verify-contract --repo-slug <slug> --task-id
+<task_id> --worktree <path>` exits 0, and `git rev-parse HEAD` afterwards
+   still equals the correlated HEAD (an advance during the run discards the
+   result; re-correlate next check-in). On exit 1 the task stays
+   `in-progress`: surface the failing command output and recommend
+   resuming/re-briefing the implement worker -- never dispatch review. Exit 2
+   (invalid schema/path or corrupt task record), 3 (contract file missing),
+   or 4 (hash mismatch) is an integrity halt: surface it and stop advancing
+   this task; never dispatch review, never re-pin to clear it. Exit 5 fires
+   only on a valid record lacking pin fields -- the grandfather path (task
+   predates contracts): warn `[WARNING] no contract pinned (pre-contract
+task)` and treat this gate as passed. This gate augments facts 1-5; it
+   never replaces them. Every `write-task` in sections 4-6 rewrites the FULL
+   record -- always carry `contract_path`, `contract_sha256`, and
+   `merge_check` forward from the prior record on every status transition.
 
 An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
 `confirm-completion` exit 1, is never completion.
@@ -351,8 +387,10 @@ since the review is now moot -- do this on every stale reset, whether it lands o
 `completed` or `in-progress`, because a reset to `in-progress` will not
 re-dispatch and so cannot rely on section 5's dispatch preflight to stop it;
 (b) reset the task to `completed` (or `in-progress` if the new HEAD is not a
-confirmed-complete revision); (c) clear `review_head_sha` to `null`. Clearing
-the marker is what lets `should-dispatch-review` re-fire for the new HEAD (it
+confirmed-complete revision); (c) clear `review_head_sha` to `null` and reset
+`merge_check` to `null` (a stale review invalidates any recorded merge
+check). Clearing the marker is what lets `should-dispatch-review` re-fire for
+the new HEAD (it
 compares `review_head_sha` against live HEAD, so a leftover value equal to HEAD
 would wrongly suppress the re-dispatch). This recovers every "branch advanced"
 case from whichever review state the task was in, so no review state is ever
@@ -471,6 +509,34 @@ fresh co-review); a clean vibe-audit, or a resolution trivial enough never to
 trigger it, clears the gate. Planned work that never grew past its plan needs no
 vibe-audit -- its front-pipeline gates already ran. `vibe-audit` is
 herdr-agnostic; the orchestrator just invokes it here as the last gate.
+
+**Post-rebase contract check (speculative merge check).** After
+`confirm-review` and the vibe-audit gate clear, and before surfacing:
+`git fetch`, capture `MAIN_SHA` (`origin/<default>`) and live HEAD. A
+recorded `merge_check` with `result: "pass"` matching both exactly means
+skip and surface. Otherwise, in a scratch location OUTSIDE the task
+worktree: `git worktree add --detach <tmp> <head>`; `git -C <tmp> rebase
+<MAIN_SHA>`. On conflict: `git -C <tmp> rebase --abort`, record
+`result: "conflict"`. On a clean rebase:
+`python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
+--worktree <tmp>` and record `result: "pass"` (exit 0) or `"fail"` (exit 1).
+Always `git worktree remove --force <tmp>` then `git worktree prune` (a
+failed removal is surfaced for manual cleanup but does not invalidate the
+result). Before recording or surfacing, recapture live HEAD and
+`origin/<default>`: if either moved during the check, discard the result
+(record nothing) and re-run next check-in. Write the `merge_check` object
+(`base_main_sha`, `branch_head_sha`, `result`, `ts`) via `write-task`,
+carrying all other record fields forward. Fetch/worktree/rebase
+infrastructure errors and verify exits 2/3 record NOTHING -- surface and
+retry next check-in; exit 4 (or an exit 5 despite a pinned record) is the
+integrity halt of section 4. Surface merge-ready ONLY on a matching
+`result: "pass"`; on `fail`/`conflict` the task stays `reviewed` unsurfaced,
+with the cause and the recommended fix path reported (rebase/fix -> new HEAD
+-> stale-review reset -> fresh cycle). This is an advisory compatibility
+check, not a serializing queue: the human merge remains the serialization
+point. A grandfathered pinless task skips this check with the section-4
+`[WARNING]`. The branch itself never moves here, so this check can never
+trip the stale-review rule.
 
 Surface: "`<task_id>` reviewed clean @ `<sha>`. Ready for your review and
 merge." `changes-requested` is never surfaced as merge-ready. Merge, `/ship`,
