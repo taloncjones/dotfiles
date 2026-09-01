@@ -29,13 +29,45 @@ EOF
 chmod +x "$BIN/herdr"; PATH="$BIN:$PATH"
 
 # 1. ownership + kickoff writes exactly one task record
-F=$($CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid 1)
+SOCKDIR="/tmp/cc-socks-9$(python3 -c 'import random;print("%09d"%random.randrange(10**9))')"
+mkdir -m 700 "$SOCKDIR"
+INBOX="$SOCKDIR/4242.sock"
+trap 'kill "$INBOX_PID" 2>/dev/null; rm -rf "$SOCKDIR"' EXIT
+python3 - "$INBOX" "$SOCKDIR/got.txt" <<'PY' &
+import socket,sys
+srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(sys.argv[1]); srv.listen(2); srv.settimeout(10)
+try:
+    conn,_=srv.accept()
+except socket.timeout:
+    sys.exit(1)
+buf=b""
+while not buf.endswith(b"\n"):
+    d=conn.recv(4096)
+    if not d: break
+    buf+=d
+open(sys.argv[2],"wb").write(buf)
+PY
+INBOX_PID=$!
+i=0; while [ ! -S "$INBOX" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+ok "fake inbox listener is up" "[ -S '$INBOX' ]"
+F=$($CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid 4242 --messaging-socket "$INBOX")
 ok "claim-owner returns a fence" "[ -n '$F' ]"
+ok "claim-owner recorded the inbox socket" \
+  "python3 -c \"import json;o=json.load(open('$ROOT/herdr-orch/$SLUG/owner.json'));assert o['messaging_socket']=='$INBOX' and o['pid']==4242,o\""
+$CLI refresh-owner --repo-slug "$SLUG" --session S --fence "$F" --messaging-socket "$INBOX"
 $CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress","review_head_sha":null}'
 $CLI write-index --repo-slug "$SLUG" --workspace w1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","repo_slug":"'"$SLUG"'","role":"impl"}'
 ok "kickoff wrote one task record" "[ -f '$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json' ]"
+
+# 1b. the worker hook (Stop) appends the hint AND pushes one wake to the inbox
+printf '{"hook_event_name":"Stop"}' | HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 python3 claude/hooks/herdr_worker_status.py
+wait "$INBOX_PID" 2>/dev/null || true
+ok "hook appended the stopped hint" "grep -q '\"event\":\"stopped\"' '$ROOT/herdr-orch/$SLUG/workspaces/w1.events.jsonl'"
+ok "hook pushed one herdr-wake line to the orchestrator inbox" \
+  "python3 -c \"import json;l=open('$SOCKDIR/got.txt','rb').read();assert l.count(b'\\\\n')==1;c=json.loads(l)['message']['content'];assert c.startswith('herdr-wake v=1 repo=$SLUG workspace=w1 event=stopped ts='),c\""
+rm -rf "$SOCKDIR"; trap - EXIT
 
 # 2. write-task is single-record last-write-wins per task_id (idempotency
 # substrate): a re-kickoff never duplicates the task record. Skill-level

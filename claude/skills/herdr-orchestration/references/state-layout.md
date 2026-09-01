@@ -85,7 +85,8 @@ STATE_ROOT/
   "host": "<host>",
   "pid": 12345,
   "heartbeat_ts": 1756300000.5,
-  "fence": 3
+  "fence": 3,
+  "messaging_socket": "/tmp/cc-socks/12345.sock"
 }
 ```
 
@@ -97,6 +98,12 @@ STATE_ROOT/
 - **Fencing:** every state mutation re-reads `owner.json` and proceeds only
   if the live `fence`/`session_id` still matches the one this session
   claimed; a mutation under a stale fence aborts.
+- **Inbox socket:** `messaging_socket` is the owner's Claude Code inbox
+  socket (`CLAUDE_CODE_MESSAGING_SOCKET`), or `null`. Written by
+  `claim-owner`/`refresh-owner --messaging-socket`; `pid` is taken from the
+  socket basename when one is stored (the Claude process). Read by the
+  worker hook (`post_wake`) to push a wake line; absent in older records
+  and treated as `null`.
 - Preflight claims if the file is absent or `heartbeat_ts` is stale (e.g.
   > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
   > orchestrator whose claim fails **yields** to read-only reporting and
@@ -171,6 +178,7 @@ Written only by the owning orchestrator, via `$CORE write-task`.
       "phase": "implement",
       "workspace_id": "w1",
       "agent": "impl-proj-123",
+      "peer_name": "impl-proj-123",
       "model": "sonnet",
       "created_by_this_orch": true,
       "started": "..."
@@ -186,6 +194,10 @@ Written only by the owning orchestrator, via `$CORE write-task`.
 
 `workers` is a list, not a single field -- phase advancement (implement ->
 review) appends a new entry rather than overwriting.
+
+`peer_name` is the worker's Claude Code session name as `ListAgents` showed
+it after launch (the target of `notify_when_idle` subscriptions), or `null`
+when discovery found zero or several candidates.
 
 ### `tasks/<task_id>.done.json` -- worker-emitted completion record
 
