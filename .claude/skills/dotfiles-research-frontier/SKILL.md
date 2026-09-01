@@ -203,7 +203,7 @@ Open until the boundary is ratified -- do not build past step 2 without it.
 
 **Gap in common practice.** Nobody's dotfiles handle two agent accounts in one
 ephemeral container. This repo solved dual accounts on machines (the `claude()`
-wrapper and `claude-account` in `zsh/functions.zsh` route `~/Git/work` launches
+wrapper and `claude-account` in `zsh/claude-account.zsh` route `~/Git/work` launches
 to `~/.claude-work`), but cloud containers are personal-account only:
 `bootstrap-cloud.sh` hardcodes `$HOME/.claude` (5 occurrences, no
 `CLAUDE_CONFIG_DIR` support), and cloud-doctor merely defaults to `~/.claude`

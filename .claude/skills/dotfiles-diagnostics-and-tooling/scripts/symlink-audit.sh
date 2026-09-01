@@ -112,6 +112,7 @@ else
   echo "--- zsh ---"
   check_link "$HOME/.zprofile"                "$DOTFILES/zsh/.zprofile"
   check_link "$HOME/.zshrc"                   "$DOTFILES/zsh/.zshrc"
+  check_link "$HOME/.zshenv"                  "$DOTFILES/zsh/.zshenv"
   check_link "$HOME/.config/.aliases.zsh"     "$DOTFILES/zsh/aliases.zsh"
   check_link "$HOME/.config/.functions.zsh"   "$DOTFILES/zsh/functions.zsh"
   check_link "$HOME/.config/.trippy.toml"     "$DOTFILES/zsh/.trippy.toml"

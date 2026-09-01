@@ -67,7 +67,7 @@ Why: accounts must be isolated (separate OAuth, separate plugin state) but the
 assets -- CLAUDE.md, skills, hooks, rules -- must never fork. Duplicate asset
 trees would drift silently.
 
-Routing: the `claude()` wrapper in `zsh/functions.zsh` sets
+Routing: the `claude()` wrapper in `zsh/claude-account.zsh` sets
 `CLAUDE_CONFIG_DIR=$HOME/.claude-work` when launched under `~/Git/work`
 (symlinks resolved on both sides); a pre-set `CLAUDE_CONFIG_DIR` always wins;
 `claude --personal` forces the personal account. `claude-account` prints the
@@ -258,7 +258,7 @@ with `git log --format="%h %s" -n1 <hash>` this day. Re-verify volatile facts
 before trusting them:
 
 - Symlink/seed behavior: `grep -n "seed_machine_local_file\|ln -sfn" install/common/claude-links.sh`
-- Account routing: `grep -n "_claude_config_dir\|CLAUDE_WORK_TREE" zsh/functions.zsh`
+- Account routing: `grep -n "_claude_config_dir\|CLAUDE_WORK_TREE" zsh/claude-account.zsh`
 - Identity chain: `grep -n "useConfigOnly\|includeIf\|hooksPath" git/.gitconfig` and run `bin/identity-doctor`
 - Vendored-untracked model: `cat claude/rules/.gitignore`
 - Pre-launch plugin declaration: `cat .claude/settings.json` (enabledPlugins + extraKnownMarketplaces); self-heal gate: `head -25 .claude/hooks/session-start.sh`

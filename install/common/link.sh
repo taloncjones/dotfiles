@@ -29,6 +29,16 @@ source "$DOTFILEDIR"/install/common/claude-links.sh
 echo "Setting up symbolic links for ZSH..."
 ln -sf "$DOTFILEDIR"/zsh/.zprofile "$HOME"/.zprofile
 ln -sf "$DOTFILEDIR"/zsh/.zshrc "$HOME"/.zshrc
+
+# ~/.zshenv is tracked (account routing must exist in non-interactive
+# shells); a pre-existing machine-local file is migrated to ~/.zshenv.local.
+# ln -sfn, not -sf: a foreign symlink pointing at a directory would
+# otherwise be followed, planting the new link INSIDE that directory.
+source "$DOTFILEDIR"/install/common/zshenv-migrate.sh
+if migrate_home_zshenv "$HOME" "$DOTFILEDIR/zsh/.zshenv"; then
+  ln -sfn "$DOTFILEDIR"/zsh/.zshenv "$HOME"/.zshenv
+fi
+
 ln -sf "$DOTFILEDIR"/zsh/aliases.zsh "$HOME"/.config/.aliases.zsh
 ln -sf "$DOTFILEDIR"/zsh/functions.zsh "$HOME"/.config/.functions.zsh
 ln -sf "$DOTFILEDIR"/zsh/.trippy.toml "$HOME"/.config/.trippy.toml

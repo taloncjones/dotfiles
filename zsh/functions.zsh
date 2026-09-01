@@ -221,64 +221,9 @@ function vscode-ext-sync() {    # vscode-ext-sync() will rewrite vscode/extensio
     fi
 }
 
-##############################
-###### Claude Code Accounts
-##############################
-# Fable requires OAuth login (no API token), so work and personal need two
-# separate logins. CLAUDE_CONFIG_DIR is the supported isolation mechanism:
-# ~/.claude holds the personal login (the default -- desktop app and any
-# unwrapped launch lands there); ~/.claude-work holds the work login. The
-# claude() wrapper injects the work config dir whenever claude is launched
-# from inside ~/Git/work. A pre-set CLAUDE_CONFIG_DIR always wins, and
-# `claude --personal` (or CLAUDE_CONFIG_DIR=$HOME/.claude) forces the
-# personal account from a work dir. If ~/.claude-work does not exist yet,
-# claude creates it and prompts a fresh OAuth login for the work account.
-CLAUDE_WORK_CONFIG_DIR="$HOME/.claude-work"
-CLAUDE_WORK_TREE="$HOME/Git/work"
-
-# helper: resolve which config dir a claude launch would use from $PWD.
-# :A resolves symlinks on both sides so a symlinked path into ~/Git/work
-# still routes to the work account.
-function _claude_config_dir() {
-    if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
-        echo "$CLAUDE_CONFIG_DIR"
-    elif [[ "${PWD:A}/" == "${CLAUDE_WORK_TREE:A}/"* ]]; then
-        echo "$CLAUDE_WORK_CONFIG_DIR"
-    else
-        echo "$HOME/.claude"
-    fi
-}
-
-function claude-account() {    # claude-account() prints which Claude account/config dir a launch from this directory would use. ex: $ claude-account
-    local cfg
-    cfg="$(_claude_config_dir)"
-    case "$cfg" in
-        "$CLAUDE_WORK_CONFIG_DIR") echo "work ($cfg)" ;;
-        "$HOME/.claude")           echo "personal ($cfg)" ;;
-        *)                         echo "custom ($cfg)" ;;
-    esac
-}
-
-function claude() {    # claude() will launch Claude Code with the work account inside ~/Git/work, personal elsewhere. Pass --personal to force the personal account. ex: $ claude --personal
-    local use_personal=0 arg cfg
-    local -a forwarded=()
-    for arg in "$@"; do
-        case "$arg" in
-            --personal) use_personal=1 ;;
-            *) forwarded+=("$arg") ;;
-        esac
-    done
-    if (( use_personal )); then
-        cfg="$HOME/.claude"
-    else
-        cfg="$(_claude_config_dir)"
-    fi
-    if [[ "$cfg" == "$HOME/.claude" ]]; then
-        command claude "${forwarded[@]}"
-    else
-        CLAUDE_CONFIG_DIR="$cfg" command claude "${forwarded[@]}"
-    fi
-}
+# Claude account routing (claude(), claude-account) lives in
+# zsh/claude-account.zsh, sourced from zsh/.zshenv so it exists in
+# non-interactive shells too.
 
 ##############################
 ###### Claude Code Plugins

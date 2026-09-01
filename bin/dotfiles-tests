@@ -20,7 +20,9 @@ cd "$DOTFILES"
 # *.test.sh or a skill test; grep -rl 'passed, .* failed' is a quick audit.
 SUITES="
 sh install/install.test.sh
+sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
+sh zsh/claude-account.test.sh
 sh claude/hooks/claude-hooks.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh

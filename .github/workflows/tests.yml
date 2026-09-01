@@ -22,7 +22,7 @@ jobs:
 
       - name: zsh syntax check
         run: |
-          for f in zsh/.zshrc zsh/.zprofile zsh/aliases.zsh zsh/functions.zsh zsh/theme.zsh zsh/scripts/*.zsh; do
+          for f in zsh/.zshenv zsh/.zshrc zsh/.zprofile zsh/aliases.zsh zsh/claude-account.zsh zsh/functions.zsh zsh/theme.zsh zsh/scripts/*.zsh; do
             zsh -n "$f" && echo "[OK] $f"
           done
 
