@@ -72,6 +72,8 @@ locked or missing, 8 bad eval input, 64 usage.
   `index --full`. Editors and git checkouts change mtime, so this does not
   occur in normal use.
 - Headings deeper than `###` stay inside their parent section.
+- Symlinked directories (e.g. `.todos` shared across worktrees) are never
+  indexed — symlinks are deliberately not descended to prevent scope expansion.
 
 ## Golden set and the embeddings decision
 
