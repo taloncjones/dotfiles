@@ -6,7 +6,7 @@
 
 **Architecture:** `recall.py` is a single-file CLI (`index`, `search`, `status`, `eval`, `eval add`) organised as pure functions (routing, source discovery, chunking, query building) plus thin SQLite I/O. Pure functions are unit-tested with `unittest`; CLI behaviour is tested by a shell suite against throwaway git repos with `HOME` and the Claude env vars pointed at temp dirs. The skill ships through the existing `claude/skills` whole-dir symlink; nothing else in the installer changes.
 
-**Tech Stack:** Python 3.9+ stdlib (`sqlite3` with FTS5, `argparse`, `hashlib`, `glob`), bash test suite in the repo's PASS/FAIL style, `ruff`.
+**Tech Stack:** Python 3.9+ stdlib (`sqlite3` with FTS5, `argparse`, `hashlib`, `os.walk`, `fnmatch`), bash test suite in the repo's PASS/FAIL style, `ruff`.
 
 **Spec:** `docs/specs/2026-09-01-repo-recall-skill.md`
 
@@ -83,6 +83,10 @@ SPEC.loader.exec_module(recall)
 class SlugAndRepoId(unittest.TestCase):
     def test_slug_replaces_every_non_alnum_with_dash(self):
         self.assertEqual(recall.slug("/Users/t/Git/x.y/a+b"), "-Users-t-Git-x-y-a-b")
+
+    def test_slug_is_byte_wise_for_non_ascii(self):
+        # e-acute is two UTF-8 bytes, so it becomes two dashes, as Claude Code does.
+        self.assertEqual(recall.slug("/tmp/caf\u00e9"), "-tmp-caf--")
 
     def test_repo_id_is_bounded_and_distinct_for_colliding_slugs(self):
         a = recall.repo_id(Path("/tmp/x.y"))
@@ -194,6 +198,7 @@ recall() {
 # repo_id <repo> / mem_dir <config_dir> <repo>: paths derived by the script itself.
 repo_id() { python3 "$RECALL" --repo-id "$1"; }
 mem_dir() { printf '%s/projects/%s/memory' "$1" "$(python3 "$RECALL" --slug "$2")"; }
+file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
 
 echo "== unit tests"
 python3 "$HERE/test_recall_units.py" -q 2>&1 | tail -3
@@ -225,6 +230,8 @@ test_routing_work_creates_dir() {
   recall "$r" status
   assert_contains "work tree routes to work config dir" "$OUT" "$HOME/.claude-work"
   assert_file "work config dir created" "$HOME/.claude-work/recall"
+  assert_eq "work config dir mode 700" "$(file_mode "$HOME/.claude-work")" 700
+  assert_eq "recall dir mode 700" "$(file_mode "$HOME/.claude-work/recall")" 700
   assert_no_file "work never touches personal recall dir" "$HOME/.claude/recall"
 }
 test_routing_override() {
@@ -237,12 +244,21 @@ test_index_inside_repo_exits_6() {
   CLAUDE_CONFIG_DIR="$r/.claude" recall "$r" status
   assert_eq "index inside repo exits 6" "$RC" 6
 }
+test_usage_and_help() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r")
+  recall "$r" --help
+  assert_eq "help exits 0" "$RC" 0
+  recall "$r" bogus
+  assert_eq "unknown command exits 64" "$RC" 64
+  assert_eq "usage error is one line" "$(printf '%s\n' "$ERR" | wc -l | tr -d ' ')" 1
+}
 test_outside_git_exits_3
 test_no_fts5_exits_5
 test_routing_personal
 test_routing_work_creates_dir
 test_routing_override
 test_index_inside_repo_exits_6
+test_usage_and_help
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
@@ -268,7 +284,7 @@ auto-memory into a SQLite FTS5 index stored under the active Claude config
 dir, and answers ranked queries. See SKILL.md for the contract.
 """
 import argparse
-import glob
+import fnmatch
 import hashlib
 import json
 import os
@@ -309,11 +325,15 @@ KIND_EXT = {
     "todos": {".md"},
     "docs": {".md"},
 }
-IN_TREE_GLOBS = [
-    ("findings", ["docs/findings/**/*", ".claude/findings/**/*"]),
-    ("handoffs", [".claude/handoffs/*.md"]),
-    ("todos", [".todos/pending/*.md", ".todos/completed/*.md"]),
-    ("docs", ["docs/**/*.md", "*.md"]),
+# (kind, directory relative to the top level, recursive). "" = top level itself.
+IN_TREE_RULES = [
+    ("findings", "docs/findings", True),
+    ("findings", ".claude/findings", True),
+    ("handoffs", ".claude/handoffs", False),
+    ("todos", ".todos/pending", False),
+    ("todos", ".todos/completed", False),
+    ("docs", "docs", True),
+    ("docs", "", False),
 ]
 EXCLUDED_DIRS = {".git", ".worktrees", "node_modules"}
 ALLOWED_HIDDEN_DIRS = {".todos", ".claude"}
@@ -329,6 +349,10 @@ class LockedError(Exception):
     """Index locked past the busy timeout, or missing when required (exit 7)."""
 
 
+class UsageError(Exception):
+    """Bad command line (exit 64)."""
+
+
 def warn(msg, quiet=False):
     if not quiet:
         print(f"recall: {msg}", file=sys.stderr)
@@ -339,15 +363,25 @@ def _fail(code, msg):
     return code
 
 
+def classify_sqlite_error(exc):
+    """Exit code for a non-corruption SQLite failure: locks are 7, storage,
+    permission and I/O problems are 6."""
+    msg = str(exc).lower()
+    if "locked" in msg or "busy" in msg:
+        return EXIT_LOCKED
+    return EXIT_CONFIG
+
+
 # --- routing ---------------------------------------------------------------
 
 def slug(path):
-    """Claude Code's project slug: every non-alphanumeric byte becomes '-'."""
-    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+    """Claude Code's project slug: every non-alphanumeric BYTE becomes '-'."""
+    raw = os.fsencode(str(path))
+    return re.sub(rb"[^A-Za-z0-9]", b"-", raw).decode("ascii")
 
 
 def repo_id(toplevel):
-    digest = hashlib.sha256(str(toplevel).encode()).hexdigest()[:12]
+    digest = hashlib.sha256(os.fsencode(str(toplevel))).hexdigest()[:12]
     return f"{slug(toplevel)[:80]}-{digest}"
 
 
@@ -410,14 +444,20 @@ def index_path(config_dir, toplevel, canonical):
 
 
 def ensure_index_dir(path):
-    parent = Path(path).parent
+    """Create <config_dir>/recall/<repo-id>/ with every level 0700 and an
+    empty 0600 index file, so neither mkdir defaults nor SQLite choose modes."""
+    path = Path(path)
+    repo_dir = path.parent
     try:
-        parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        parent.mkdir(mode=0o700, exist_ok=True)
+        for d in (repo_dir.parent.parent, repo_dir.parent, repo_dir):
+            if not d.exists():
+                d.mkdir(mode=0o700)
+        if not path.exists():
+            os.close(os.open(str(path), os.O_CREAT | os.O_WRONLY, 0o600))
     except OSError as exc:
-        raise ConfigError(f"cannot create {parent}: {exc}") from exc
-    if not os.access(parent, os.W_OK):
-        raise ConfigError(f"config dir not writable: {parent}")
+        raise ConfigError(f"cannot create {repo_dir}: {exc}") from exc
+    if not os.access(repo_dir, os.W_OK):
+        raise ConfigError(f"config dir not writable: {repo_dir}")
 
 
 def fts5_available():
@@ -445,9 +485,17 @@ class Context:
 
 # --- CLI -------------------------------------------------------------------
 
+class Parser(argparse.ArgumentParser):
+    """argparse that reports usage errors on one line via UsageError (exit 64)
+    while leaving --help on its normal exit-0 path."""
+
+    def error(self, message):
+        raise UsageError(message)
+
+
 def build_parser():
-    p = argparse.ArgumentParser(prog="recall.py")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p = Parser(prog="recall.py")
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=Parser)
     ix = sub.add_parser("index")
     ix.add_argument("--full", action="store_true")
     ix.add_argument("--quiet", action="store_true")
@@ -486,18 +534,22 @@ def main(argv=None):
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
-    except SystemExit:
-        return EXIT_USAGE
+    except UsageError as exc:
+        return _fail(EXIT_USAGE, f"usage: {exc}")
     if not fts5_available():
         return _fail(EXIT_NO_FTS5, "this python3's sqlite3 lacks FTS5; use a python3 whose "
                      "sqlite3 has FTS5 (e.g. Homebrew python) and retry")
     handler = COMMANDS[args.cmd]
     try:
         return handler(args)
+    except UsageError as exc:
+        return _fail(EXIT_USAGE, f"usage: {exc}")
     except ConfigError as exc:
         return _fail(EXIT_CONFIG, str(exc))
     except LockedError as exc:
         return _fail(EXIT_LOCKED, str(exc))
+    except sqlite3.OperationalError as exc:
+        return _fail(classify_sqlite_error(exc), f"sqlite: {exc}")
 
 
 def cmd_status(args):
@@ -531,12 +583,12 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-`glob`, `json`, `time`, `namedtuple` are used from Task 2 onward. Ruff flags them as unused in this task: add `# noqa: F401` to those four import lines now and remove each marker in the task that first uses it.
+`fnmatch`, `json`, `time`, `namedtuple` are used from Task 2 onward. Ruff flags them as unused in this task: add `# noqa: F401` to those four import lines now and remove each marker in the task that first uses it. `--help` propagates argparse's `SystemExit(0)` through `main`, which is the intended exit 0.
 
 - [ ] **Step 5: Run the suite; expect Task 1 cases to pass**
 
 Run: `bash claude/skills/repo-recall/scripts/tests/recall_test.sh`
-Expected: unit tests pass; all six Task 1 CLI cases pass; `N passed, 0 failed`.
+Expected: unit tests pass; all seven Task 1 CLI cases pass; `N passed, 0 failed`.
 
 Run: `ruff check claude/skills/repo-recall/scripts/`
 Expected: no findings.
@@ -645,9 +697,19 @@ class Sources(unittest.TestCase):
     def test_oversized_and_symlink_excluded(self):
         self.write("docs/big.md", "x" * (recall.MAX_FILE_BYTES + 1))
         os.symlink(self.top / "docs/specs/s.md", self.top / "docs/link.md")
+        os.symlink(self.top / "docs/specs", self.top / "docs/linkdir")
         got = self.kinds()
         self.assertNotIn("docs/big.md", got)
         self.assertNotIn("docs/link.md", got)
+        self.assertFalse(any(d.startswith("docs/linkdir/") for d in got))
+
+    def test_extra_glob_double_star_matches_nested_and_direct(self):
+        self.write("notes/a.txt", "a")
+        self.write("notes/deep/b.txt", "b")
+        env = dict(self.env, RECALL_EXTRA_GLOBS="notes/**/*.txt")
+        got = self.kinds(env)
+        self.assertEqual(got["notes/a.txt"], "extra")
+        self.assertEqual(got["notes/deep/b.txt"], "extra")
 
     def test_canonical_root_memory_included_for_worktree(self):
         canonical = self.tmp / "main"
@@ -704,15 +766,53 @@ def _has_symlink_component(path, root):
     return False
 
 
-def _excluded_dir(rel_parts):
-    for i, part in enumerate(rel_parts[:-1]):
+def _excluded_dir(dir_parts):
+    """True when any directory component is excluded: .git, worktree dirs,
+    node_modules, or a dot-directory other than .todos / .claude."""
+    for i, part in enumerate(dir_parts):
         if part in EXCLUDED_DIRS:
             return True
         if part.startswith(".") and part not in ALLOWED_HIDDEN_DIRS:
             return True
-        if part == "worktrees" and i > 0 and rel_parts[i - 1] == ".claude":
+        if part == "worktrees" and i > 0 and dir_parts[i - 1] == ".claude":
             return True
     return False
+
+
+def _tree_files(toplevel):
+    """Relative POSIX paths of every regular file under toplevel. Symlinked
+    and excluded directories are pruned before descent, so they are never
+    walked (spec: symlinked directories are not descended)."""
+    toplevel = Path(toplevel)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(toplevel, followlinks=False):
+        rel_dir = Path(dirpath).relative_to(toplevel)
+        keep = []
+        for d in sorted(dirnames):
+            if (Path(dirpath) / d).is_symlink():
+                continue
+            if _excluded_dir(tuple(rel_dir.parts) + (d,)):
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        for f in filenames:
+            out.append((rel_dir / f).as_posix() if rel_dir.parts else f)
+    return sorted(out)
+
+
+def _rule_matches(rel, base, recursive):
+    parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    if base == "":
+        return parent == ""
+    if parent == base:
+        return True
+    return recursive and parent.startswith(base + "/")
+
+
+def _glob_matches(rel, pattern):
+    """fnmatch with `**` folded to `*` (fnmatch's `*` already crosses `/`),
+    so `notes/**/*.txt` matches both notes/a.txt and notes/deep/b.txt."""
+    return fnmatch.fnmatchcase(rel, pattern.replace("**/", "*").replace("**", "*"))
 
 
 def eligible(path, root, kind):
@@ -729,7 +829,7 @@ def eligible(path, root, kind):
         return False
     if resolved != root and root not in resolved.parents:
         return False
-    if _has_symlink_component(path, root) or _excluded_dir(rel.parts):
+    if _has_symlink_component(path, root) or _excluded_dir(rel.parts[:-1]):
         return False
     if (kind, path.name) in SKIP_BASENAMES:
         return False
@@ -751,32 +851,36 @@ def _extra_globs(env, quiet):
 
 
 def collect_sources(toplevel, canonical, config_dir, env=None, quiet=False):
-    """Every eligible file, each once, tagged by first-matching kind."""
+    """Every eligible file, each once, tagged by first-matching kind
+    (memory > extra > findings > handoffs > todos > docs)."""
     env = os.environ if env is None else env
     home = _home(env)
     toplevel = Path(toplevel)
+    tree = _tree_files(toplevel)
+    extra = _extra_globs(env, quiet)
     seen = {}
-    plan = [("memory", None), ("extra", _extra_globs(env, quiet))] + IN_TREE_GLOBS
-    for kind, patterns in plan:
-        candidates = []
-        if kind == "memory":
-            for d in memory_dirs(config_dir, toplevel, canonical):
-                candidates += [(p, d) for p in sorted(d.glob("*.md"))]
-        else:
-            for pattern in patterns:
-                hits = glob.glob(str(toplevel / pattern), recursive=True)
-                candidates += [(Path(h), toplevel) for h in sorted(hits)]
-        for path, root in candidates:
-            if not eligible(path, Path(root), kind):
-                continue
-            key = path.resolve()
-            if key in seen:
-                continue
+
+    def consider(path, root, kind):
+        if not eligible(path, Path(root), kind):
+            return
+        key = path.resolve()
+        if key not in seen:
             seen[key] = Source(key, display_path(key, toplevel, home), kind)
+
+    for d in memory_dirs(config_dir, toplevel, canonical):
+        for p in sorted(d.glob("*.md")):
+            consider(p, d, "memory")
+    for rel in tree:
+        if any(_glob_matches(rel, g) for g in extra):
+            consider(toplevel / rel, toplevel, "extra")
+    for kind, base, recursive in IN_TREE_RULES:
+        for rel in tree:
+            if _rule_matches(rel, base, recursive):
+                consider(toplevel / rel, toplevel, kind)
     return sorted(seen.values(), key=lambda s: (KIND_ORDER.index(s.kind), s.display))
 ```
 
-For memory sources the `root` passed to `eligible` is the memory dir, so containment is checked against it. Remove the `# noqa` from the `glob` and `namedtuple` imports.
+For memory sources the `root` passed to `eligible` is the memory dir, so containment is checked against it. The tree is walked once with `os.walk(followlinks=False)` and symlinked or excluded directories are pruned from `dirnames` before descent. Remove the `# noqa` from the `fnmatch` and `namedtuple` imports.
 
 - [ ] **Step 4: Run the unit tests and ruff; expect pass**
 
@@ -834,6 +938,12 @@ class Chunking(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertIn("# not a heading", chunks[0].body)
 
+    def test_fence_closes_only_with_matching_marker(self):
+        # A ``` inside a ~~~ block does not close it; a longer ```` closes ```.
+        text = "# A\n~~~\n```\n# still fenced\n~~~\n````\n# also fenced\n`````\n## B\nb\n"
+        chunks = recall.chunk_markdown(text, "f.md")
+        self.assertEqual([c.heading for c in chunks], ["A", "B"])
+
     def test_plain_is_one_chunk(self):
         self.assertEqual(recall.chunk_plain("x\ny", "f.txt"), [recall.Chunk("f.txt", 1, "x\ny")])
         self.assertEqual(recall.chunk_plain("  \n", "f.txt"), [])
@@ -855,6 +965,7 @@ class CorruptionClassification(unittest.TestCase):
         self.assertFalse(recall.is_corruption(sqlite3.OperationalError("database is locked")))
         self.assertFalse(recall.is_corruption(sqlite3.OperationalError("fts5: syntax error near ...")))
         self.assertFalse(recall.is_corruption(sqlite3.OperationalError("attempt to write a readonly database")))
+        self.assertFalse(recall.is_corruption(sqlite3.DatabaseError("note: file is not a database")))
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -871,17 +982,31 @@ Insert after the sources section:
 
 Chunk = namedtuple("Chunk", "heading line body")
 HEADING_RE = re.compile(r"^(#{1,3})\s+(.*?)\s*#*\s*$")
-FENCE_RE = re.compile(r"^\s*(```|~~~)")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def _fence_state(line, opener):
+    """Open-fence marker after this line (None = not inside a fence). A fence
+    closes only on the same character with at least the opener's length."""
+    m = FENCE_RE.match(line)
+    if not m:
+        return opener
+    marker = m.group(1)
+    if opener is None:
+        return marker
+    if marker[0] == opener[0] and len(marker) >= len(opener):
+        return None
+    return opener
 
 
 def _first_h1(lines):
-    in_fence = False
+    opener = None
     for line in lines:
         if FENCE_RE.match(line):
-            in_fence = not in_fence
+            opener = _fence_state(line, opener)
             continue
         m = HEADING_RE.match(line)
-        if m and not in_fence and m.group(1) == "#":
+        if m and opener is None and m.group(1) == "#":
             return m.group(2).strip()
     return None
 
@@ -889,14 +1014,14 @@ def _first_h1(lines):
 def chunk_markdown(text, filename):
     lines = text.splitlines()
     heading = _first_h1(lines) or filename
-    start, body, out, in_fence = 1, [], [], False
+    start, body, out, opener = 1, [], [], None
     for number, line in enumerate(lines, 1):
         if FENCE_RE.match(line):
-            in_fence = not in_fence
+            opener = _fence_state(line, opener)
             body.append(line)
             continue
         m = HEADING_RE.match(line)
-        if m and not in_fence:
+        if m and opener is None:
             out.append(Chunk(heading, start, "\n".join(body)))
             heading, start, body = m.group(2).strip(), number, []
         else:
@@ -928,8 +1053,8 @@ CORRUPTION_MARKERS = ("file is not a database", "database disk image is malforme
 
 
 def is_corruption(exc):
-    msg = str(exc).lower()
-    return isinstance(exc, sqlite3.DatabaseError) and any(m in msg for m in CORRUPTION_MARKERS)
+    msg = str(exc).lower().strip()
+    return isinstance(exc, sqlite3.DatabaseError) and msg.startswith(CORRUPTION_MARKERS)
 ```
 
 - [ ] **Step 4: Run unit tests and ruff; expect pass**
@@ -974,7 +1099,6 @@ seed_repo() {
   printf 'index\n' > "$mem/MEMORY.md"
 }
 db_path() { printf '%s/recall/%s/index.db' "$1" "$(repo_id "$2")"; }
-file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
 hold_lock() { # hold_lock <db> <seconds>: background writer holding BEGIN IMMEDIATE
   python3 - "$1" "$2" <<'PY' &
 import sqlite3, sys, time
@@ -1008,6 +1132,10 @@ test_index_incremental() {
   printf '\xff\xfe not utf8\n' > "$r/docs/bad.md"
   recall "$r" index
   assert_contains "non-utf8 skipped with warning" "$ERR" "skipping docs/bad.md"
+  RECALL_EXTRA_GLOBS="docs/specs/*.md" recall "$r" index
+  assert_contains "kind change re-indexes the file" "$OUT" "(+0 ~1 -0)"
+  RECALL_EXTRA_GLOBS="docs/specs/*.md" recall "$r" search --json --no-refresh frobnicates
+  assert_contains "kind change lands in the index" "$OUT" '"kind": "extra"'
   recall "$r" index --full
   assert_contains "full rebuild reindexes all" "$OUT" "(+4 ~0 -0)"
 }
@@ -1017,8 +1145,10 @@ test_index_no_sources_and_git_clean() {
   recall "$r" index
   assert_eq "index with no sources exits 0" "$RC" 0
   assert_contains "index with no sources says so" "$OUT" "indexed 0 files"
+  recall "$r" status
+  recall "$r" search anything
   local after; after=$(cd "$r" && git status --porcelain)
-  assert_eq "index leaves git status unchanged" "$after" "$before"
+  assert_eq "index, status and search leave git status unchanged" "$after" "$before"
 }
 test_index_corrupt_quarantined() {
   setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
@@ -1113,15 +1243,17 @@ def _meta(conn, key):
 
 
 def open_index(ctx, quiet=False):
-    """Open (creating if needed) this tree's index; quarantine on corruption,
-    rebuild on schema mismatch. Returns a connection with schema present."""
+    """Open this tree's index. The schema is written only for a fresh
+    (empty) file or after a quarantine / schema rebuild, so opening an
+    existing index takes no write lock and works while another process
+    holds one. Quarantines on the documented corruption markers only."""
     ensure_index_dir(ctx.index_file)
     path = ctx.index_file
-    existed = path.exists()
+    fresh = path.stat().st_size == 0
     for attempt in range(2):
         try:
             conn = _connect(path)
-            if existed:
+            if not fresh:
                 check = conn.execute("PRAGMA quick_check").fetchone()[0]
                 if check != "ok":
                     raise sqlite3.DatabaseError("database disk image is malformed")
@@ -1131,14 +1263,17 @@ def open_index(ctx, quiet=False):
                     conn.close()
                     path.unlink()
                     warn("index schema outdated; rebuilding", quiet)
+                    ensure_index_dir(path)
                     conn = _connect(path)
-            _create_schema(conn, ctx)
-            os.chmod(path, 0o600)
+                    fresh = True
+            if fresh:
+                _create_schema(conn, ctx)
             return conn
         except sqlite3.DatabaseError as exc:
             if attempt == 0 and is_corruption(exc):
                 _quarantine(path, quiet)
-                existed = False
+                ensure_index_dir(path)
+                fresh = True
                 continue
             raise
     raise ConfigError(f"cannot open index at {path}")
@@ -1224,7 +1359,7 @@ def cmd_index(args):
     return EXIT_OK
 ```
 
-Register `"index": cmd_index` in `COMMANDS` (keep `COMMANDS` at the bottom of the file, after every handler). Remove the `# noqa` from `time`. Note on `--full`: rows are deleted inside the same transaction, so `known` is empty and every file counts as added, matching `(+4 ~0 -0)`. Note on the corrupt case: a garbage file makes `_connect` succeed but `PRAGMA quick_check` raise `file is not a database`, which `is_corruption` accepts. A file that becomes ineligible (oversized) is simply absent from `sources`, so the removal loop drops it.
+Register `"index": cmd_index` in `COMMANDS` (keep `COMMANDS` at the bottom of the file, after every handler). Remove the `# noqa` from `time`. Note on `--full`: rows are deleted inside the same transaction, so `known` is empty and every file counts as added, matching `(+4 ~0 -0)`. Note on the corrupt case: a garbage file makes `_connect` succeed but `PRAGMA quick_check` raise `file is not a database`, which `is_corruption` accepts; `_quarantine` renames it and `ensure_index_dir` recreates an empty 0600 file. Note on locks: `PRAGMA quick_check` and the meta read are plain reads, allowed while another connection holds `BEGIN IMMEDIATE`, so the only write is `refresh`'s own transaction; a lock error anywhere else reaches `main`'s `sqlite3.OperationalError` handler and maps to exit 7. A file that becomes ineligible (oversized) is simply absent from `sources`, so the removal loop drops it. A kind change (same path, different kind) fails the `row[2] == src.kind` checks and is re-indexed as modified.
 
 - [ ] **Step 4: Run the suite and ruff; expect Task 1 and Task 4 cases to pass**
 
@@ -1267,6 +1402,12 @@ test_search_hits_and_ranking() {
   local first; first=$(printf '%s\n' "$OUT" | head -1)
   assert_contains "heading match ranks first" "$first" '"line": 5'
   assert_contains "json carries display path" "$first" '"path": "docs/specs/widget.md"'
+  assert_contains "heading-only match is highlighted in snippet" "$first" '>>Decision<<'
+  recall "$r" search "gizmo mangler"
+  assert_eq "quoted multi-word query is split into AND terms" "$RC" 0
+  printf '# Same\n\nzebra text\n' > "$r/docs/tie-b.md"; printf '# Same\n\nzebra text\n' > "$r/docs/tie-a.md"
+  recall "$r" search --json zebra
+  assert_contains "ties order by display path" "$(printf '%s\n' "$OUT" | head -1)" '"path": "docs/tie-a.md"'
   recall "$r" search mangler --kind todos
   assert_contains "kind filter keeps todos" "$OUT" ".todos/pending/2026-01-01-fix-mangler.md"
   assert_not_contains "kind filter drops findings" "$OUT" "leak.txt"
@@ -1370,7 +1511,7 @@ Insert after the index I/O section:
 Hit = namedtuple("Hit", "rank score path line kind heading snippet")
 SEARCH_SQL = """
 SELECT display, kind, line, heading,
-       snippet(chunks, 4, '>>', '<<', '...', 24) AS snip,
+       snippet(chunks, -1, '>>', '<<', '...', 24) AS snip,
        bm25(chunks, 0, 0, 0, 3.0, 1.0) AS score
 FROM chunks WHERE chunks MATCH ? {kind_filter}
 ORDER BY score, display, line LIMIT ?
@@ -1422,8 +1563,10 @@ NO_SOURCES_MESSAGE = (
 
 
 def cmd_search(args):
-    terms = [t for t in args.query if t.strip()]
-    if not terms:
+    # Default mode splits on whitespace so `search "foo bar"` means foo AND bar;
+    # --raw keeps the joined input verbatim for FTS5 syntax.
+    terms = args.query if args.raw else " ".join(args.query).split()
+    if not " ".join(terms).strip():
         return _fail(EXIT_USAGE, "query must not be blank")
     if not 1 <= args.limit <= MAX_LIMIT:
         return _fail(EXIT_USAGE, f"--limit must be between 1 and {MAX_LIMIT}")
@@ -1443,14 +1586,16 @@ def cmd_search(args):
     try:
         hits = run_search(conn, query, args.kind, args.limit)
     except sqlite3.OperationalError as exc:
-        return _fail(EXIT_QUERY, f"query error: {exc}")
+        if args.raw and "fts5" in str(exc).lower():
+            return _fail(EXIT_QUERY, f"query error: {exc}")
+        return _fail(classify_sqlite_error(exc), f"sqlite: {exc}")
     if not hits:
         return EXIT_NO_HITS
     (print_hits_json if args.json else print_hits_text)(hits)
     return EXIT_OK
 ```
 
-Register `"search": cmd_search`. Remove the `# noqa` from `json`. The refresh summary goes through `warn` to stderr, so `--json` stdout stays pure.
+Register `"search": cmd_search`. Remove the `# noqa` from `json`. The refresh summary goes through `warn` to stderr, so `--json` stdout stays pure. `snippet(chunks, -1, ...)` lets FTS5 pick the best-matching column, so a heading-only match highlights the heading instead of returning an unmarked body excerpt.
 
 - [ ] **Step 4: Run suite and ruff; expect all cases so far to pass**
 
@@ -1593,11 +1738,12 @@ test_eval_metrics_and_grouping() {
   cat > "$r/docs/recall-eval.jsonl" <<'EOF'
 {"q": "frobnicator decision", "expect": ["docs/specs/widget.md#Decision"], "note": "hit", "added": "2026-01-02"}
 {"q": "why does the mangler leak", "expect": ["docs/nonexistent.md"], "note": "missing-source", "added": "2026-01-02"}
+{"q": "widget frobnicates gizmos", "expect": ["docs/specs/widget.md"], "note": "missing-source", "added": "2026-01-02"}
 EOF
   recall "$r" eval
   assert_eq "eval exits 0" "$RC" 0
   assert_contains "eval header has version" "$OUT" "version 1"
-  assert_contains "eval recall@5 is 0.50" "$OUT" "recall@5 0.50"
+  assert_contains "eval recall@5 is 0.33 (missing-source always misses)" "$OUT" "recall@5 0.33"
   assert_contains "eval MRR line" "$OUT" "MRR "
   assert_contains "eval groups miss by note" "$OUT" "misses [missing-source]"
 }
@@ -1613,6 +1759,13 @@ test_eval_rejects_invalid() {
   recall "$r" eval
   assert_eq "unknown note exits 8" "$RC" 8
   assert_not_contains "invalid run prints no metrics" "$OUT" "recall@5"
+  printf '{"q": "a", "expect": null, "note": "hit", "added": "2026-01-02"}\n' > "$r/docs/recall-eval.jsonl"
+  recall "$r" eval
+  assert_eq "null expect exits 8 without traceback" "$RC" 8
+  assert_not_contains "null expect gives no traceback" "$ERR" "Traceback"
+  printf '{"q": "a", "expect": ["docs/specs/widget.md"], "note": "hit", "added": "yesterday"}\n' > "$r/docs/recall-eval.jsonl"
+  recall "$r" eval
+  assert_eq "bad added date exits 8" "$RC" 8
 }
 test_eval_add() {
   setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
@@ -1649,13 +1802,22 @@ def _normalise_heading(text):
     return " ".join(text.split()).lower()
 
 
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def load_golden(path):
     """Parse the golden file; returns (entries, errors). Any error => exit 8."""
-    entries, errors, seen = [], [], set()
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         return [], [f"cannot read {path}: {exc}"]
+    return load_golden_lines(lines)
+
+
+def load_golden_lines(lines):
+    """Validate golden lines. Only structurally valid entries are returned,
+    so later phases never see bad shapes."""
+    entries, errors, seen = [], [], set()
     for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
@@ -1670,18 +1832,23 @@ def load_golden(path):
         q = obj.get("q")
         expect = obj.get("expect")
         note = obj.get("note", "hit")
+        added = obj.get("added")
+        line_errors = []
         if not isinstance(q, str) or not q.strip():
-            errors.append(f"line {number}: q must be a non-empty string")
+            line_errors.append("q must be a non-empty string")
         elif q in seen:
-            errors.append(f"line {number}: duplicate q {q!r}")
+            line_errors.append(f"duplicate q {q!r}")
         else:
             seen.add(q)
         if not isinstance(expect, list) or not expect or not all(isinstance(e, str) for e in expect):
-            errors.append(f"line {number}: expect must be a non-empty list of paths")
+            line_errors.append("expect must be a non-empty list of paths")
         if note not in EVAL_NOTES:
-            errors.append(f"line {number}: note must be one of {sorted(EVAL_NOTES)}")
-        if not isinstance(obj.get("added", ""), str):
-            errors.append(f"line {number}: added must be a string date")
+            line_errors.append(f"note must be one of {sorted(EVAL_NOTES)}")
+        if not isinstance(added, str) or not DATE_RE.match(added):
+            line_errors.append("added must be a YYYY-MM-DD date")
+        if line_errors:
+            errors += [f"line {number}: {e}" for e in line_errors]
+            continue
         entries.append(dict(obj, note=note, line=number))
     return entries, errors
 
@@ -1731,8 +1898,11 @@ def cmd_eval(args):
           f"index={_meta(conn, 'last_index_at')}")
     hits_at_k, rr_sum, misses = 0, 0.0, {}
     for e in entries:
-        results = run_search(conn, build_query(e["q"].split(), raw=False), [], args.k)
-        rank = next((h.rank for h in results if any(heading_matches(x, h) for x in e["expect"])), None)
+        if e["note"] == "missing-source":
+            rank = None  # spec: a missing-source entry counts as a miss until its note changes
+        else:
+            results = run_search(conn, build_query(e["q"].split(), raw=False), [], args.k)
+            rank = next((h.rank for h in results if any(heading_matches(x, h) for x in e["expect"])), None)
         if rank:
             hits_at_k += 1
             rr_sum += 1.0 / rank
@@ -1769,6 +1939,10 @@ def cmd_eval_add(args):
     errors = _check_expected_paths([dict(entry, line=len(entries) + 1)], _indexed_displays(conn))
     if errors:
         return _report_errors(errors)
+    # Same validator as eval, so a line eval add writes is always a line eval accepts.
+    _, shape_errors = load_golden_lines([json.dumps(entry)])
+    if shape_errors:
+        return _report_errors(shape_errors)
     golden.parent.mkdir(parents=True, exist_ok=True)
     line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
     fd = os.open(golden, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
@@ -1905,6 +2079,10 @@ locked or missing, 8 bad eval input, 64 usage.
 4. Never create files in the repo on the tool's behalf. `eval add` runs
    only when the user asks to record a query, and never with queries that
    contain secrets or customer data.
+5. Golden queries are stored verbatim and never edited, with one exception:
+   an entry found to contain sensitive data is deleted or redacted at once
+   (the user decides which). A redacted query is re-added as a new entry
+   with today's `added` date so longitudinal comparisons exclude it.
 
 ## Known limits
 
@@ -1963,6 +2141,22 @@ git commit -m "skills: Ship repo-recall skill and register its test suite"
 2. `ruff check claude/skills/repo-recall/scripts/` clean.
 3. Acceptance smoke output from Task 8 Step 4 pasted into the PR description.
 4. `co-review` on the branch diff (Claude + Codex) per the standing pipeline.
+
+## Codex plan review, round 1 (2026-09-01)
+
+Fifteen findings (one critical), verdict needs-rework. All folded in:
+schema written only for fresh or rebuilt databases so an open never takes a
+write lock (critical); lock / permission / I/O errors mapped to exits 7 and 6
+in `main` and `search`; every directory level created 0700 and the index
+file pre-created 0600; whitespace splitting of joined query terms; golden
+validation completes before path checks, `added` must be `YYYY-MM-DD`, and
+`eval add` reuses the validator; `missing-source` entries always miss;
+`os.walk` traversal that prunes symlinked and excluded directories;
+`SKILL.md` privacy exception; only raw-mode FTS5 parse errors map to exit 4;
+corruption markers matched with `startswith`; fence tracking by marker
+character and length; kind-change, tie-order and git-status tests added;
+byte-wise slug; one-line usage errors with `--help` exiting 0; auto-column
+snippets. Round 2 result is recorded below.
 
 ## Self-review against the spec
 
