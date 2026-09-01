@@ -6,7 +6,7 @@ auto-memory into a SQLite FTS5 index stored under the active Claude config
 dir, and answers ranked queries. See SKILL.md for the contract.
 """
 import argparse
-import fnmatch  # noqa: F401
+import fnmatch
 import hashlib
 import json  # noqa: F401
 import os
@@ -15,7 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time  # noqa: F401
-from collections import namedtuple  # noqa: F401
+from collections import namedtuple
 from pathlib import Path
 
 RECALL_VERSION = "1"
@@ -190,6 +190,155 @@ def fts5_available():
         return True
     except sqlite3.OperationalError:
         return False
+
+
+# --- sources ---------------------------------------------------------------
+
+Source = namedtuple("Source", "path display kind")
+
+
+def display_path(path, toplevel, home):
+    path = Path(path)
+    try:
+        return str(path.relative_to(toplevel))
+    except ValueError:
+        pass
+    try:
+        return "~/" + str(path.relative_to(home))
+    except ValueError:
+        return str(path)
+
+
+def memory_dirs(config_dir, toplevel, canonical):
+    dirs = []
+    for root in (toplevel, canonical):
+        d = Path(config_dir) / "projects" / slug(root) / "memory"
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _has_symlink_component(path, root):
+    cur = Path(root)
+    for part in Path(path).relative_to(root).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return True
+    return False
+
+
+def _excluded_dir(dir_parts):
+    """True when any directory component is excluded: .git, worktree dirs,
+    node_modules, or a dot-directory other than .todos / .claude."""
+    for i, part in enumerate(dir_parts):
+        if part in EXCLUDED_DIRS:
+            return True
+        if part.startswith(".") and part not in ALLOWED_HIDDEN_DIRS:
+            return True
+        if part == "worktrees" and i > 0 and dir_parts[i - 1] == ".claude":
+            return True
+    return False
+
+
+def _tree_files(toplevel):
+    """Relative POSIX paths of every regular file under toplevel. Symlinked
+    and excluded directories are pruned before descent, so they are never
+    walked (spec: symlinked directories are not descended)."""
+    toplevel = Path(toplevel)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(toplevel, followlinks=False):
+        rel_dir = Path(dirpath).relative_to(toplevel)
+        keep = []
+        for d in sorted(dirnames):
+            if (Path(dirpath) / d).is_symlink():
+                continue
+            if _excluded_dir(tuple(rel_dir.parts) + (d,)):
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        for f in filenames:
+            out.append((rel_dir / f).as_posix() if rel_dir.parts else f)
+    return sorted(out)
+
+
+def _rule_matches(rel, base, recursive):
+    parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    if base == "":
+        return parent == ""
+    if parent == base:
+        return True
+    return recursive and parent.startswith(base + "/")
+
+
+def _glob_matches(rel, pattern):
+    """fnmatch with `**` folded to `*` (fnmatch's `*` already crosses `/`),
+    so `notes/**/*.txt` matches both notes/a.txt and notes/deep/b.txt."""
+    return fnmatch.fnmatchcase(rel, pattern.replace("**/", "*").replace("**", "*"))
+
+
+def eligible(path, root, kind):
+    """Regular, non-symlinked, inside root, allowed extension, <= 1 MiB."""
+    path = Path(path)
+    if path.suffix.lower() not in KIND_EXT[kind]:
+        return False
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        resolved = path.resolve()
+        rel = path.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    if resolved != root and root not in resolved.parents:
+        return False
+    if _has_symlink_component(path, root) or _excluded_dir(rel.parts[:-1]):
+        return False
+    if (kind, path.name) in SKIP_BASENAMES:
+        return False
+    try:
+        return path.stat().st_size <= MAX_FILE_BYTES
+    except OSError:
+        return False
+
+
+def _extra_globs(env, quiet):
+    raw = env.get("RECALL_EXTRA_GLOBS", "")
+    out = []
+    for pattern in filter(None, raw.split(":")):
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            warn(f"RECALL_EXTRA_GLOBS: rejected {pattern!r} (must stay inside the repo)", quiet)
+            continue
+        out.append(pattern)
+    return out
+
+
+def collect_sources(toplevel, canonical, config_dir, env=None, quiet=False):
+    """Every eligible file, each once, tagged by first-matching kind
+    (memory > extra > findings > handoffs > todos > docs)."""
+    env = os.environ if env is None else env
+    home = _home(env)
+    toplevel = Path(toplevel)
+    tree = _tree_files(toplevel)
+    extra = _extra_globs(env, quiet)
+    seen = {}
+
+    def consider(path, root, kind):
+        if not eligible(path, Path(root), kind):
+            return
+        key = path.resolve()
+        if key not in seen:
+            seen[key] = Source(key, display_path(key, toplevel, home), kind)
+
+    for d in memory_dirs(config_dir, toplevel, canonical):
+        for p in sorted(d.glob("*.md")):
+            consider(p, d, "memory")
+    for rel in tree:
+        if any(_glob_matches(rel, g) for g in extra):
+            consider(toplevel / rel, toplevel, "extra")
+    for kind, base, recursive in IN_TREE_RULES:
+        for rel in tree:
+            if _rule_matches(rel, base, recursive):
+                consider(toplevel / rel, toplevel, kind)
+    return sorted(seen.values(), key=lambda s: (KIND_ORDER.index(s.kind), s.display))
 
 
 class Context:
