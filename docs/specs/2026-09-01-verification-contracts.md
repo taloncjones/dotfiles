@@ -19,15 +19,21 @@ file listing commands that must exit 0. The contract is produced at plan time,
 pinned by hash into the fenced task record at implement dispatch, and enforced
 at three points:
 
-1. **Worker gate.** The implement worker may only `emit-done --outcome
-   completed` after `verify-contract` exits 0 in its worktree.
-2. **Pre-review gate.** The orchestrator re-runs `verify-contract` in the
-   task worktree as a co-requirement of the `completed` transition, before
-   dispatching review.
-3. **Post-rebase merge gate.** Before surfacing merge-ready, the orchestrator
-   speculatively rebases the branch tip onto latest `origin/main` in a
-   detached temp worktree and re-runs the contract there -- a one-worker
-   speculative merge queue. The task branch itself never moves.
+1. **Worker gate (advisory).** The implement worker may only `emit-done
+   --outcome completed` after `verify-contract` exits 0 in its worktree.
+   This is a briefed instruction, not machine-enforced -- `emit-done` stays
+   unfenced and unchanged; the orchestrator never trusts it (gate 2 is the
+   enforcement).
+2. **Pre-review gate (enforced).** The orchestrator re-runs `verify-contract`
+   in the task worktree as a co-requirement of the `completed` transition,
+   before dispatching review.
+3. **Post-rebase merge gate (enforced, advisory as a queue).** Before
+   surfacing merge-ready, the orchestrator speculatively rebases the branch
+   tip onto latest `origin/main` in a detached temp worktree and re-runs the
+   contract there. The task branch itself never moves. This is an advisory
+   compatibility check, not a serializing merge queue: the human merge
+   remains the serialization point, and the staleness rule below forces a
+   re-check whenever `origin/main` or the branch advances after surfacing.
 
 The contract check **augments** the existing `confirm-completion` /
 `confirm-review` gates; it never replaces them.
@@ -70,11 +76,15 @@ Validation (fail closed on any violation):
 
 - `v` must be the integer 1 (not `true`).
 - `task_id` must equal the task being verified.
-- `commands` must be a non-empty list of objects; each must carry a non-empty
-  string `name` (unique within the file) and non-empty string `run`;
-  `timeout_secs` optional, positive int, default 600.
+- `commands` must be a non-empty list of at most 32 objects; each must carry
+  a non-empty, non-whitespace string `name` (unique within the file) and
+  non-empty string `run`; `timeout_secs` optional, int in [1, 3600]
+  (`isinstance(int) and not isinstance(bool)`, matching the existing `v`
+  guard), default 600.
 - Unknown top-level or per-command keys are rejected (schema drift surfaces
-  instead of silently passing).
+  instead of silently passing). Duplicate JSON keys follow Python's
+  last-wins parse (accepted limitation; the schema check runs on the parsed
+  object).
 
 ### Authoring rules (plan phase)
 
@@ -90,6 +100,17 @@ The plan worker authors the contract alongside the plan. Commands must be:
   codex-plan-review pass that reviews the contract with the plan.
 - **Deterministic**: no reliance on prior runs, ambient services, or wall
   clock.
+- **Secret-safe**: commands inherit the caller's environment (the runner does
+  not scrub it); a contract must never echo env vars or read credential
+  files.
+
+The plan must include an acceptance-criteria mapping: a short table pairing
+each acceptance criterion with the contract command that checks it, or with
+an explicit "human-verify" entry for a criterion that cannot be verified
+repo-locally (hardware, deployment, external services). The contract covers
+what is machine-checkable; codex-plan-review reviews the mapping for
+falsifiability -- an always-passing command mapped to a criterion is a plan
+defect.
 
 A task whose work is docs-only still gets a contract (e.g. a shellcheck or
 test-suite invariant run); the plan phase decides the commands, the schema
@@ -114,29 +135,38 @@ Behavior (pinned mode, the default):
    missing pin fields -> exit 5 ("no contract pinned"). `--contract`, when
    given alongside a pin, must equal `contract_path` or the verb exits 2.
 3. Resolve the contract file inside the worktree; reject a path that escapes
-   the worktree (reuse `contained`). Missing file -> exit 3.
-4. sha256 the file bytes; mismatch with the pinned hash -> exit 4 (tamper or
-   drift -- never run mismatched commands).
+   the worktree (reuse `contained`, which resolves symlinks) or is not a
+   regular file. Missing file -> exit 3.
+4. sha256 the file's worktree bytes; mismatch with the pinned hash -> exit 4
+   (tamper or drift -- never run mismatched commands). The gates below only
+   invoke pinned mode on a clean worktree, where worktree bytes equal the
+   committed blob the pin was taken from.
 5. Parse and validate the schema; invalid -> exit 2.
 6. Run each command in order via `sh -c <run>` with `cwd=<worktree>`,
-   inheriting env, enforcing `timeout_secs` per command
-   (`subprocess.run(timeout=...)`). Print each command's name and exit
-   status; on the first failure or timeout print `FAIL <name> exit=<n|timeout>`
-   and exit 1. All pass -> print `PASS <n> commands` and exit 0.
+   inheriting env, streaming output to stdout. Each command runs in its own
+   process group (`start_new_session=True`); on `timeout_secs` expiry the
+   whole group is killed (`killpg`, best-effort -- a double-forked daemon can
+   escape; accepted limitation). Print each command's name and exit status;
+   on the first failure or timeout print `FAIL <name> exit=<n|timeout>` and
+   exit 1. All pass -> print `PASS <n> commands` and exit 0. Aggregate
+   runtime is bounded by the sum of per-command timeouts (schema caps: 32
+   commands x 3600s).
 
 Read-only with respect to STATE_ROOT: the verb reads the task record and
-never writes any state. Exit codes: 0 pass, 1 command failed/timeout, 2
-usage/validation, 3 contract file missing, 4 hash mismatch, 5 no pin.
+never writes any state.
 
-### Unpinned and validate-only modes
+### Modes and exit codes
 
-- `--allow-unpinned` (requires `--contract <relpath>`): skip steps 2 and 4
-  (no record pin); otherwise identical. Used ONLY by the plan worker to prove
-  its authored contract is well-formed and runnable. The orchestrator never
-  uses it.
-- `--validate-only`: perform steps up to schema validation, print the file's
-  sha256, run nothing. Exit 0 valid, 2 invalid, 3 missing. Combined with
-  `--allow-unpinned` this is the pin source at dispatch time.
+| Mode | Pin required | Runs commands | Exits |
+| --- | --- | --- | --- |
+| pinned (default) | yes | yes | 0 pass, 1 cmd fail/timeout, 2 usage/schema, 3 file missing, 4 hash mismatch, 5 no pin |
+| `--allow-unpinned` (requires `--contract`) | no | yes | 0, 1, 2, 3 |
+| `--validate-only` (pinned) | yes | no | 0 valid (prints sha256), 2, 3, 4, 5 |
+| `--allow-unpinned --validate-only` | no | no | 0 valid (prints sha256), 2, 3 |
+
+`--allow-unpinned` is used ONLY by the plan worker to prove its authored
+contract is well-formed and runnable; the orchestrator never passes it except
+combined with `--validate-only` as the pin source at dispatch time.
 
 A contract may legitimately FAIL pre-implementation (it tests the new
 behavior); the plan worker's obligation is schema validity
@@ -148,11 +178,14 @@ can already run.
 At phase advancement to implement (SKILL.md section 2a), after verifying spec
 + plan landed, the orchestrator additionally:
 
-1. Verifies the contract is tracked at the branch HEAD:
+1. Requires the task worktree clean (`git status --porcelain` empty) --
+   guaranteeing the worktree file IS the committed blob -- and the contract
+   tracked at the branch HEAD:
    `git cat-file -e HEAD:docs/plans/<task_id>-contract.json`.
 2. Runs `verify-contract --allow-unpinned --validate-only --contract
    docs/plans/<task_id>-contract.json --worktree <path>`; captures the
-   printed sha256.
+   printed sha256. With the clean-worktree precondition this hash is the
+   committed blob's hash, never an uncommitted edit's.
 3. Writes `contract_path` and `contract_sha256` into the task record via the
    existing fenced `write-task` (no new fenced verb).
 
@@ -161,6 +194,19 @@ plan: the plan phase is not complete. For a **plan-ready** kickoff (spec+plan
 already committed, no plan phase), the same three steps run during kickoff
 before the implement worker launches; a plan-ready item without a contract is
 treated as raw (dispatch a plan worker to author one).
+
+**Re-pin protocol.** The pin is written once, at implement dispatch. Any
+later hash mismatch (exit 4) is an integrity halt surfaced to the human --
+the orchestrator never re-pins on its own. On an explicit human instruction
+(after a deliberate contract change committed with a plan update), the
+orchestrator re-runs the three pinning steps; the new pin invalidates nothing
+retroactively because every gate re-runs against live state anyway.
+
+**Grandfathering.** A task record predating this feature (no `contract_path`
+field) skips gates 2 and 3 with a surfaced `[WARNING] no contract pinned
+(pre-contract task)` -- existing in-flight tasks are not failed closed. A
+record WITH a pin always enforces. New kickoffs/advancements always pin, so
+the grandfather path ages out.
 
 Task record additions (`references/state-layout.md`):
 
@@ -204,8 +250,11 @@ gate 2 is the enforcement.
 
 SKILL.md section 4 completion correlation gains a sixth fact:
 
-6. **Contract gate:** `verify-contract` (pinned mode) exits 0 in the task's
-   worktree.
+6. **Contract gate:** the task worktree is clean (`git status --porcelain`
+   empty), `verify-contract` (pinned mode) exits 0 in it, and
+   `git rev-parse HEAD` after the run still equals the correlated HEAD (a
+   HEAD advance during the run discards the result -- re-correlate next
+   check-in).
 
 Only when all facts hold does the task transition to `completed`. On a
 contract failure with an otherwise-correlated `done.json`: the task stays
@@ -253,6 +302,25 @@ passes and the vibe-audit gate clears):
    resulting new HEAD flows through the existing stale-review reset into a
    fresh completed -> review cycle).
 
+**Failure taxonomy.** Only two outcomes are recorded as `merge_check`
+results from the check itself: `fail` (verify-contract exit 1 -- a genuine
+contract failure on the rebased tree) and `conflict` (rebase stopped;
+aborted). Everything else is **indeterminate infrastructure or integrity
+trouble** and is never recorded as `fail`: fetch failure, `worktree add`
+failure, a non-conflict rebase error, verify-contract exits 2/3/5 (schema /
+missing file / no pin), or cleanup failure. For those, write no
+`merge_check`, surface the error, and retry at the next check-in. Exit 4
+(hash mismatch) is the integrity halt from gate 2, surfaced identically --
+never recorded, never re-pinned silently. A failed `worktree remove` is
+surfaced for manual cleanup but does not invalidate a recorded result.
+
+**Certified tree.** The check certifies the rebased BRANCH tree, which still
+carries the branch-only spec/plan/contract commits that the human squash
+merge later drops. The delta between certified and merged tree is exactly
+those gitignored `docs/` files; by the authoring rules they cannot alter
+command outcomes, so the certificate transfers. Accepted limitation, noted
+here rather than simulated.
+
 Staleness rule: any recorded `merge_check` whose `branch_head_sha` != live
 HEAD or whose `base_main_sha` != current `origin/<default>` is ignored
 (re-run). `merge_check` is reset to `null` whenever `review_head_sha` is
@@ -288,9 +356,14 @@ Extend the existing suites (`claude/hooks/herdr-orch.test.sh` unit-level,
 - Walkthrough: plan worker authors + validates contract; orchestrator pins
   via write-task; impl-phase verify passes; a tampered contract file flips to
   exit 4; a merge_check record round-trips through write-task.
-- The speculative-rebase step is skill-side (git orchestration, not core) --
-  covered by the walkthrough only at the record level (merge_check write),
-  with the git mechanics documented in SKILL.md, not simulated.
+- Speculative-rebase mechanics: a temp-git-repo test (real `git init`, two
+  commits diverging from a "main") exercising the documented sequence --
+  detached `worktree add`, clean rebase + verify-contract pass, a
+  conflicting rebase -> abort, and temp-worktree cleanup. Lives in the
+  walkthrough suite; the orchestration remains skill-side, but the git
+  sequence itself is proven runnable.
+- Grandfather rule: a task record without pin fields makes pinned
+  verify-contract exit 5 (the skill-side warning path builds on that exit).
 
 ## Out of scope
 
