@@ -793,5 +793,12 @@ python3 claude/hooks/herdr_orch_core.py watch --repo-slug "$S" \
 [ "$(cat "$out")" = "signal" ]
 SH
 
+check "SKILL.md pins the non-available probe-sample capture bullet" <<'SH'
+SKILL="claude/skills/herdr-orchestration/SKILL.md"
+rg -q -F 'probe-samples.jsonl' "$SKILL"
+rg -q -F 'If `CLS` is not `available`' "$SKILL"
+rg -q -F '|| true`' "$SKILL"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
