@@ -25,6 +25,10 @@ each names the conceptual transition the orchestrator makes to `status` via
 append them as real log records is a documented future option, out of scope
 here.
 
+The `$CORE watch` subcommand (orchestrator wake, SKILL.md section 1 step 6)
+is a READER of `events.jsonl` and the `tasks/` sidecars: it emits only the
+closed stdout vocabulary `signal` / `heartbeat` and never appends events.
+
 ## Record shape (`v: 1`)
 
 Each line of `<workspace>.events.jsonl` is one JSON object:

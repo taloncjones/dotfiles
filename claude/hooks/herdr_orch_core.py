@@ -7,6 +7,7 @@ Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -347,6 +348,129 @@ def fold_status(events):
     return {"authoritative": authoritative, "last_hint": last_hint}
 
 
+WATCH_DIRS = {
+    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id)),
+    "workspaces": ((".events.jsonl", valid_workspace_id),),
+}
+ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
+
+
+def watch_scan(rd, prev):
+    """Snapshot {path: (mtime_ns, size)} of the watched completion/hint files.
+
+    Read-only. A missing subdir is an empty set. A subdir whose listing
+    fails (OSError other than absence) is reported in `failed` and its
+    entries are carried over from `prev`; a per-file stat() failure likewise
+    retains the prior entry -- so transient errors and recovery can never
+    signal-storm.
+    """
+    snap, failed = {}, set()
+    for sub, suffixes in WATCH_DIRS.items():
+        d = Path(rd) / sub
+        try:
+            names = sorted(os.listdir(d))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            failed.add(sub)
+            prefix = str(d) + os.sep
+            for k, v in prev.items():
+                if k.startswith(prefix):
+                    snap[k] = v
+            continue
+        for name in names:
+            for suffix, valid in suffixes:
+                if name.endswith(suffix) and valid(name[: -len(suffix)]):
+                    key = str(d / name)
+                    try:
+                        st = (d / name).stat()
+                    except OSError:
+                        if key in prev:
+                            snap[key] = prev[key]
+                        break
+                    snap[key] = (st.st_mtime_ns, st.st_size)
+                    break
+    return snap, failed
+
+
+def watch_changed(prev, snap) -> bool:
+    """True iff snap has a new or modified entry. Deletions never signal."""
+    return any(prev.get(k) != v for k, v in snap.items())
+
+
+def heartbeat_active(rd) -> bool:
+    """True iff any validated primary tasks/<task_id>.json record has an
+    active status. Sidecars and foreign filenames never count."""
+    d = Path(rd) / "tasks"
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return False
+    for name in names:
+        if not name.endswith(".json") or name.endswith(
+            (".done.json", ".review.json")
+        ):
+            continue
+        if not valid_task_id(name[: -len(".json")]):
+            continue
+        try:
+            rec = json.loads((d / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("status") in ACTIVE_STATUSES:
+            return True
+    return False
+
+
+def watch_tick(st, changed, active, now, heartbeat_secs, debounce_secs):
+    """One poll-pass decision (pure; clock injected via `now`).
+
+    st: {"pending": bool, "suppress_until": float, "last_emit": float},
+    mutated in place. Returns "signal", "heartbeat", or None. At most one
+    line per pass; signal takes precedence; any emit resets the heartbeat
+    timer.
+    """
+    if changed:
+        st["pending"] = True
+    if st["pending"] and now >= st["suppress_until"]:
+        st["pending"] = False
+        st["suppress_until"] = now + debounce_secs
+        st["last_emit"] = now
+        return "signal"
+    if now - st["last_emit"] >= heartbeat_secs and active:
+        st["last_emit"] = now
+        return "heartbeat"
+    return None
+
+
+def _watch_loop(rd, interval, heartbeat_secs, debounce_secs, exit_on_signal,
+                since_epoch):
+    """Poll the watched set; print watch_tick's decisions (closed vocabulary,
+    at most one line per pass). Runs until killed, unless exit_on_signal,
+    which returns 0 after the first emitted line. since_epoch (optional)
+    seeds the baseline: files newer than it count as already-changed."""
+    prev, _failed = watch_scan(rd, {})
+    st = {"pending": False, "suppress_until": 0.0,
+          "last_emit": time.monotonic()}
+    if since_epoch is not None:
+        since_ns = int(since_epoch * 1e9)
+        st["pending"] = any(m > since_ns for m, _s in prev.values())
+    while True:
+        time.sleep(interval)
+        snap, _failed = watch_scan(rd, prev)
+        changed = watch_changed(prev, snap)
+        prev = snap
+        now = time.monotonic()
+        due = now - st["last_emit"] >= heartbeat_secs
+        active = due and heartbeat_active(rd)
+        line = watch_tick(st, changed, active, now, heartbeat_secs,
+                          debounce_secs)
+        if line:
+            print(line, flush=True)
+            if exit_on_signal:
+                return 0
+
+
 def _owner_path(rd) -> Path:
     return Path(rd) / "owner.json"
 
@@ -559,6 +683,13 @@ def main(argv=None) -> int:
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
+    w = add("watch")
+    w.add_argument("--interval", type=int, default=15)
+    w.add_argument("--heartbeat-secs", type=int, default=1800)
+    w.add_argument("--debounce-secs", type=int, default=60)
+    w.add_argument("--exit-on-signal", action="store_true")
+    w.add_argument("--once", action="store_true")
+    w.add_argument("--since-epoch", type=float, default=None)
     ns = ap.parse_args(argv)
 
     if ns.cmd == "claim-owner":
@@ -776,6 +907,31 @@ def main(argv=None) -> int:
         except (OSError, ValueError):
             done = None
         return 0 if is_reviewed(task, done, ns.head_sha, ns.workspace) else 1
+    if ns.cmd == "watch":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(ns.interval >= 1, "interval must be >= 1")
+        _require(ns.heartbeat_secs >= 1, "heartbeat-secs must be >= 1")
+        _require(ns.debounce_secs >= 1, "debounce-secs must be >= 1")
+        _require(not (ns.once and ns.exit_on_signal), "once excludes exit-on-signal")
+        _require(not ns.once or ns.since_epoch is not None, "once requires since-epoch")
+        if ns.since_epoch is not None:
+            _require(
+                math.isfinite(ns.since_epoch) and ns.since_epoch >= 0,
+                "since-epoch must be a finite float >= 0",
+            )
+        rd = repo_dir(ns.repo_slug)
+        if ns.once:
+            snap, _failed = watch_scan(rd, {})
+            since_ns = int(ns.since_epoch * 1e9)
+            if any(mtime_ns > since_ns for mtime_ns, _size in snap.values()):
+                print("signal", flush=True)
+            if heartbeat_active(rd):
+                print("heartbeat", flush=True)
+            return 0
+        return _watch_loop(
+            rd, ns.interval, ns.heartbeat_secs, ns.debounce_secs,
+            ns.exit_on_signal, ns.since_epoch,
+        )
     return 2
 
 

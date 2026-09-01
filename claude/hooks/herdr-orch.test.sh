@@ -561,5 +561,237 @@ out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":false,
 test "$out" = "available"
 SH
 
+check "watch_scan snapshots only validated watched files" <<PY
+$LOAD
+import pathlib
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True); (rd/"workspaces").mkdir(parents=True)
+(rd/"tasks"/"PROJ-1.done.json").write_text("{}")
+(rd/"tasks"/"PROJ-1.review.json").write_text("{}")
+(rd/"workspaces"/"w1.events.jsonl").write_text("")
+(rd/"tasks"/"PROJ-1.json").write_text("{}")             # primary record: not watched
+(rd/"tasks"/"a b.done.json").write_text("{}")           # invalid stem: ignored
+(rd/"tasks"/"notes.txt").write_text("")                 # outside globs: ignored
+snap,failed=c.watch_scan(rd,{})
+names=sorted(pathlib.Path(k).name for k in snap)
+assert names==["PROJ-1.done.json","PROJ-1.review.json","w1.events.jsonl"],names
+assert failed==set()
+for v in snap.values():
+    assert isinstance(v,tuple) and len(v)==2
+sys.exit(0)
+PY
+
+check "watch_scan missing dirs empty; watch_changed semantics" <<PY
+$LOAD
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")   # nothing created
+snap,failed=c.watch_scan(rd,{})
+assert snap=={} and failed==set()
+assert not c.watch_changed({},{})
+assert c.watch_changed({},{"a":(1,1)})          # new file
+assert c.watch_changed({"a":(1,1)},{"a":(2,1)}) # mtime bump
+assert not c.watch_changed({"a":(1,1)},{})      # deletion is silent
+assert not c.watch_changed({"a":(1,1)},{"a":(1,1)})
+sys.exit(0)
+PY
+
+check "watch_scan retains prev entries under an unreadable dir" <<PY
+$LOAD
+if hasattr(os,"geteuid") and os.geteuid()==0:
+    sys.exit(0)  # chmod 0 is not a barrier for root; skip
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True)
+p=rd/"tasks"/"PROJ-1.done.json"; p.write_text("{}")
+snap,_=c.watch_scan(rd,{})
+os.chmod(rd/"tasks",0)
+try:
+    snap2,failed=c.watch_scan(rd,snap)
+finally:
+    os.chmod(rd/"tasks",0o700)
+assert "tasks" in failed
+assert str(p) in snap2 and snap2[str(p)]==snap[str(p)]
+assert not c.watch_changed(snap,snap2)
+sys.exit(0)
+PY
+
+check "heartbeat_active gates on validated primary record status" <<PY
+$LOAD
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True)
+assert not c.heartbeat_active(rd)                       # empty
+(rd/"tasks"/"PROJ-1.json").write_text(json.dumps({"status":"merged"}))
+assert not c.heartbeat_active(rd)                       # terminal only
+(rd/"tasks"/"PROJ-2.json").write_text("not json")
+assert not c.heartbeat_active(rd)                       # malformed = inactive
+(rd/"tasks"/"PROJ-3.done.json").write_text(json.dumps({"status":"in-progress"}))
+assert not c.heartbeat_active(rd)                       # sidecar never counts
+(rd/"tasks"/"a b.json").write_text(json.dumps({"status":"in-progress"}))
+assert not c.heartbeat_active(rd)                       # invalid stem never counts
+for s in ("in-progress","blocked","review-dispatched"):
+    (rd/"tasks"/"PROJ-4.json").write_text(json.dumps({"status":s}))
+    assert c.heartbeat_active(rd), s
+sys.exit(0)
+PY
+
+check "watch_tick debounce, precedence, heartbeat reset" <<PY
+$LOAD
+st={"pending":False,"suppress_until":0.0,"last_emit":0.0}
+assert c.watch_tick(st,True,False,10.0,1800,60)=="signal"
+assert c.watch_tick(st,True,False,20.0,1800,60) is None      # debounced
+assert c.watch_tick(st,False,False,71.0,1800,60)=="signal"   # coalesced after window
+assert c.watch_tick(st,False,True,100.0,1800,60) is None     # heartbeat not due
+assert c.watch_tick(st,True,True,2000.0,1800,60)=="signal"   # signal precedence
+assert c.watch_tick(st,False,True,4000.0,1800,60)=="heartbeat"
+assert c.watch_tick(st,False,True,4001.0,1800,60) is None    # reset by emit
+assert c.watch_tick(st,False,False,9000.0,1800,60) is None   # inactive: silent
+sys.exit(0)
+PY
+
+check "watch --once emits one signal for new files, none when quiet" <<PY
+$LOAD
+import io,contextlib,time
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True); (rd/"workspaces").mkdir(parents=True)
+def run(argv):
+    buf=io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code=c.main(argv)
+    except SystemExit as e:
+        code=e.code
+    return code,buf.getvalue()
+base=["watch","--repo-slug","github-com-org-repo-deadbeef","--once","--since-epoch"]
+past=str(time.time()-3600); future=str(time.time()+3600)
+(rd/"tasks"/"PROJ-1.done.json").write_text("{}")
+(rd/"tasks"/"PROJ-1.review.json").write_text("{}")
+(rd/"workspaces"/"w1.events.jsonl").write_text("")
+(rd/"tasks"/"junk.txt").write_text("")
+code,out=run(base+[past])
+assert code==0 and out=="signal\n",(code,out)      # many changes, ONE line
+code,out=run(base+[future])
+assert code==0 and out=="",(code,out)              # nothing newer
+sys.exit(0)
+PY
+
+check "watch --once heartbeat gating and vocabulary" <<PY
+$LOAD
+import io,contextlib,time
+import re as rx
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True)
+def run(argv):
+    buf=io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code=c.main(argv)
+    except SystemExit as e:
+        code=e.code
+    return code,buf.getvalue()
+base=["watch","--repo-slug","github-com-org-repo-deadbeef","--once","--since-epoch"]
+past=str(time.time()-3600)
+(rd/"tasks"/"PROJ-1.json").write_text(json.dumps({"status":"in-progress"}))
+(rd/"tasks"/"PROJ-1.done.json").write_text("{}")
+code,out=run(base+[past])
+assert code==0 and out=="signal\nheartbeat\n",(code,out)
+for ln in out.splitlines():
+    assert rx.fullmatch(r"signal|heartbeat",ln),ln
+(rd/"tasks"/"PROJ-1.json").write_text(json.dumps({"status":"merged"}))
+code,out=run(base+[str(time.time()+3600)])
+assert code==0 and out=="",(code,out)              # terminal: silent
+sys.exit(0)
+PY
+
+check "watch invalid args exit 2; missing state root exits 0 silent" <<PY
+$LOAD
+import io,contextlib
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+def run(argv):
+    buf=io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            code=c.main(argv)
+    except SystemExit as e:
+        code=e.code
+    return code,buf.getvalue()
+S="github-com-org-repo-deadbeef"
+for argv in (
+    ["watch","--repo-slug","..","--once","--since-epoch","0"],
+    ["watch","--repo-slug",S,"--interval","0"],
+    ["watch","--repo-slug",S,"--heartbeat-secs","-5"],
+    ["watch","--repo-slug",S,"--debounce-secs","0"],
+    ["watch","--repo-slug",S,"--once"],                       # missing since-epoch
+    ["watch","--repo-slug",S,"--once","--since-epoch","inf"],
+    ["watch","--repo-slug",S,"--once","--since-epoch","-1"],
+    ["watch","--repo-slug",S,"--once","--since-epoch","0","--exit-on-signal"],
+):
+    code,out=run(argv)
+    assert code==2 and out=="",(argv,code,out)
+code,out=run(["watch","--repo-slug",S,"--once","--since-epoch","0"])
+assert code==0 and out=="",(code,out)              # repo dir absent: empty, quiet
+sys.exit(0)
+PY
+
+check "watch read-only: full state tree unchanged after a run" <<PY
+$LOAD
+import subprocess,hashlib
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("github-com-org-repo-deadbeef")
+(rd/"tasks").mkdir(parents=True); (rd/"workspaces").mkdir(parents=True)
+(rd/"tasks"/"PROJ-1.done.json").write_text("{}")
+(rd/"tasks"/"PROJ-1.json").write_text(json.dumps({"status":"in-progress"}))
+def tree():
+    out={}
+    for dp,_,fns in os.walk(root):
+        for fn in fns:
+            p=os.path.join(dp,fn); st=os.stat(p)
+            with open(p,"rb") as f:
+                h=hashlib.sha256(f.read()).hexdigest()
+            out[p]=(st.st_size,st.st_mtime_ns,h)
+    return out
+before=tree()
+r=subprocess.run([sys.executable,"claude/hooks/herdr_orch_core.py","watch",
+    "--repo-slug","github-com-org-repo-deadbeef","--once","--since-epoch","0"],
+    capture_output=True,env=dict(os.environ))
+assert r.returncode==0,r
+assert tree()==before
+sys.exit(0)
+PY
+
+check "watch loop smoke: baseline silent, touch emits one signal" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+S=github-com-org-repo-deadbeef
+mkdir -p "$root/herdr-orch/$S/tasks" "$root/herdr-orch/$S/workspaces"
+echo '{}' > "$root/herdr-orch/$S/tasks/PROJ-1.done.json"
+out="$root/watch.out"
+python3 claude/hooks/herdr_orch_core.py watch --repo-slug "$S" \
+  --interval 1 --debounce-secs 1 > "$out" &
+wpid=$!
+trap 'kill $wpid 2>/dev/null || true' EXIT
+sleep 2
+[ ! -s "$out" ]                                    # pre-existing file: no signal
+echo '{"x":1}' > "$root/herdr-orch/$S/tasks/PROJ-1.done.json"
+echo junk > "$root/herdr-orch/$S/tasks/notes.txt"  # foreign: never signals
+n=0
+while [ ! -s "$out" ] && [ "$n" -lt 10 ]; do sleep 1; n=$((n+1)); done
+kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+[ "$(cat "$out")" = "signal" ]
+SH
+
+check "watch loop --since-epoch seeds baseline; --exit-on-signal exits" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+S=github-com-org-repo-deadbeef
+mkdir -p "$root/herdr-orch/$S/tasks"
+echo '{}' > "$root/herdr-orch/$S/tasks/PROJ-1.done.json"
+out="$root/watch.out"
+python3 claude/hooks/herdr_orch_core.py watch --repo-slug "$S" \
+  --interval 1 --debounce-secs 1 --exit-on-signal --since-epoch 0 > "$out"
+[ "$(cat "$out")" = "signal" ]
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
