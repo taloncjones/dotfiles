@@ -204,5 +204,118 @@ test_index_corrupt_quarantined
 test_index_schema_mismatch_rebuilds
 test_index_locked_exits_7
 
+echo "== task 5: search"
+test_search_hits_and_ranking() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" search frobnicator
+  assert_eq "search hit exits 0" "$RC" 0
+  assert_contains "search prints anchor" "$OUT" "docs/specs/widget.md:"
+  assert_contains "search prints kind" "$OUT" "[docs]"
+  assert_contains "refresh summary on stderr" "$ERR" "indexed 5 files"
+  assert_not_contains "refresh summary not on stdout" "$OUT" "indexed"
+  recall "$r" search --json decision
+  local first; first=$(printf '%s\n' "$OUT" | head -1)
+  assert_contains "heading match outranks the body-only match in the handoff" "$first" '"line": 5'
+  assert_contains "body-only match is still returned" "$OUT" '.claude/handoffs/latest.md'
+  assert_contains "json carries display path" "$first" '"path": "docs/specs/widget.md"'
+  assert_contains "heading-only match is highlighted in snippet" "$first" '>>Decision<<'
+  recall "$r" search "gizmo mangler"
+  assert_eq "quoted multi-word query is split into AND terms" "$RC" 0
+  RECALL_EXTRA_GLOBS="docs/specs/*.md" recall "$r" search --json frobnicates
+  assert_contains "kind change is visible through search" "$OUT" '"kind": "extra"'
+  printf '# Same\n\nzebra text\n' > "$r/docs/tie-b.md"; printf '# Same\n\nzebra text\n' > "$r/docs/tie-a.md"
+  recall "$r" search --json zebra
+  assert_contains "ties order by display path" "$(printf '%s\n' "$OUT" | head -1)" '"path": "docs/tie-a.md"'
+  recall "$r" search mangler --kind todos
+  assert_contains "kind filter keeps todos" "$OUT" ".todos/pending/2026-01-01-fix-mangler.md"
+  assert_not_contains "kind filter drops findings" "$OUT" "leak.txt"
+  recall "$r" search naming
+  assert_contains "memory hit shows tilde path" "$OUT" "~/.claude/projects/"
+  recall "$r" search zzzznotthere
+  assert_eq "no hits exits 1" "$RC" 1
+}
+test_search_no_sources_exits_2() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/empty")
+  recall "$r" search anything
+  assert_eq "no sources exits 2" "$RC" 2
+  assert_contains "no sources names locations" "$ERR" "docs/"
+}
+test_search_query_contract() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" search 'widget"' '(spec' 'fro*'
+  if [ "$RC" = 0 ] || [ "$RC" = 1 ]; then ok "default mode never errors on syntax"; else bad "default mode never errors on syntax" "exit $RC"; fi
+  recall "$r" search --raw 'widget OR ('
+  assert_eq "raw parse error exits 4" "$RC" 4
+  recall "$r" search --raw '"unterminated'
+  assert_eq "raw unterminated string exits 4" "$RC" 4
+  recall "$r" search --raw 'nosuchcol:widget'
+  assert_eq "raw unknown column exits 4" "$RC" 4
+  recall "$r" search --raw 'frob* OR mangler'
+  assert_eq "raw operators work" "$RC" 0
+  recall "$r" search --limit 0 widget
+  assert_eq "limit 0 exits 64" "$RC" 64
+  recall "$r" search --kind bogus widget
+  assert_eq "unknown kind exits 64" "$RC" 64
+  recall "$r" search '   '
+  assert_eq "blank query exits 64" "$RC" 64
+}
+test_search_refresh_and_no_refresh() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" search --no-refresh widget
+  assert_eq "no-refresh without index exits 7" "$RC" 7
+  recall "$r" index
+  printf '# Later\n\nquux appears now\n' > "$r/docs/later.md"
+  recall "$r" search --no-refresh quux
+  assert_eq "no-refresh does not see new file" "$RC" 1
+  recall "$r" search quux
+  assert_eq "search refreshes and finds new file" "$RC" 0
+}
+test_search_json_pure_stdout() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  printf '# Extra\n\nwidget again\n' > "$r/docs/extra.md"
+  recall "$r" search --json widget
+  if printf '%s\n' "$OUT" | python3 -c 'import json,sys; [json.loads(l) for l in sys.stdin if l.strip()]'; then
+    ok "json stdout is pure JSONL after refresh"; else bad "json stdout is pure JSONL after refresh" "$OUT"; fi
+}
+test_search_isolation_sentinels() {
+  setup_env
+  local p; p=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$p" "$HOME/.claude"
+  local w; w=$(mk_repo "$HOME/Git/work/r"); seed_repo "$w" "$HOME/.claude-work"
+  printf '# P\n\npersonalsentinel\n' > "$(mem_dir "$HOME/.claude" "$p")/p.md"
+  printf '# W\n\nworksentinel\n' > "$(mem_dir "$HOME/.claude-work" "$w")/w.md"
+  recall "$w" search personalsentinel
+  assert_eq "work search never sees personal memory" "$RC" 1
+  recall "$p" search worksentinel
+  assert_eq "personal search never sees work memory" "$RC" 1
+  recall "$w" search worksentinel
+  assert_eq "work search sees work memory" "$RC" 0
+  assert_no_file "personal recall dir untouched by work" "$HOME/.claude/recall/$(repo_id "$w")"
+}
+test_search_worktree_sees_main_memory() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  ( cd "$r" && git add -A && git commit -qm init && git worktree add -q "$SANDBOX/wt" -b wt )
+  local wt; wt=$(/usr/bin/env realpath "$SANDBOX/wt")
+  recall "$wt" search naming
+  assert_eq "worktree finds main checkout memory" "$RC" 0
+  assert_file "worktree has its own index" "$(db_path "$HOME/.claude" "$wt")"
+}
+test_search_locked_degrades() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  hold_lock "$(db_path "$HOME/.claude" "$r")" 6
+  RECALL_BUSY_TIMEOUT_MS=500 recall "$r" search widget
+  assert_eq "locked search still answers" "$RC" 0
+  assert_contains "locked search warns" "$ERR" "locked"
+  wait "$LOCK_PID"
+}
+test_search_hits_and_ranking
+test_search_no_sources_exits_2
+test_search_query_contract
+test_search_refresh_and_no_refresh
+test_search_json_pure_stdout
+test_search_isolation_sentinels
+test_search_worktree_sees_main_memory
+test_search_locked_degrades
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

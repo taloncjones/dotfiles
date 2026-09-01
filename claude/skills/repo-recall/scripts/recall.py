@@ -8,7 +8,7 @@ dir, and answers ranked queries. See SKILL.md for the contract.
 import argparse
 import fnmatch
 import hashlib
-import json  # noqa: F401
+import json
 import os
 import re
 import sqlite3
@@ -203,8 +203,15 @@ def display_path(path, toplevel, home):
         return str(path.relative_to(toplevel))
     except ValueError:
         pass
+    # home may carry an unresolved symlink component (e.g. macOS
+    # /var -> /private/var); resolve it too so the comparison matches the
+    # already-resolved path built in collect_sources().
     try:
-        return "~/" + str(path.relative_to(home))
+        home_resolved = home.resolve()
+    except OSError:
+        home_resolved = home
+    try:
+        return "~/" + str(path.relative_to(home_resolved))
     except ValueError:
         return str(path)
 
@@ -605,6 +612,105 @@ def cmd_index(args):
     return EXIT_OK
 
 
+# --- search ----------------------------------------------------------------
+
+Hit = namedtuple("Hit", "rank score path line kind heading snippet")
+SEARCH_SQL = """
+SELECT display, kind, line, heading,
+       snippet(chunks, -1, '>>', '<<', '...', 24) AS snip,
+       bm25(chunks, 0, 0, 0, 3.0, 1.0) AS score
+FROM chunks WHERE chunks MATCH ? {kind_filter}
+ORDER BY score, display, line LIMIT ?
+"""
+
+
+def run_search(conn, query, kinds, limit):
+    kind_filter = ""
+    params = [query]
+    if kinds:
+        kind_filter = "AND kind IN ({})".format(",".join("?" * len(kinds)))
+        params += kinds
+    params.append(limit)
+    rows = conn.execute(SEARCH_SQL.format(kind_filter=kind_filter), params).fetchall()
+    hits = []
+    for rank, (display, kind, line, heading, snip, score) in enumerate(rows, 1):
+        snippet = " ".join(snip.split())[:SNIPPET_CHARS]
+        hits.append(Hit(rank, round(-score, 3), display, int(line), kind, heading, snippet))
+    return hits
+
+
+def print_hits_text(hits):
+    for h in hits:
+        print(f"{h.rank}. {h.path}:{h.line}  [{h.kind}]  {h.heading}")
+        print(f"   {h.snippet}")
+
+
+def print_hits_json(hits):
+    for h in hits:
+        print(json.dumps(h._asdict(), ensure_ascii=False))
+
+
+def refresh_or_degrade(conn, ctx, quiet):
+    """Refresh; on lock, keep the prior index. Returns True when refreshed."""
+    try:
+        warn(format_stats(refresh(conn, ctx, quiet=quiet)), quiet)
+        return True
+    except LockedError:
+        if not has_index(conn):
+            raise
+        warn("index is locked; answering from the previous index", quiet)
+        return False
+
+
+STORAGE_MARKERS = ("locked", "busy", "readonly", "disk i/o", "unable to open")
+
+
+def _storage_error(exc):
+    msg = str(exc).lower()
+    return any(m in msg for m in STORAGE_MARKERS)
+
+
+NO_SOURCES_MESSAGE = (
+    "no eligible sources in this repo; looked for docs/**/*.md, *.md, "
+    ".claude/handoffs/*.md, .todos/{pending,completed}/*.md, docs/findings/, "
+    ".claude/findings/, and Claude memory for this path")
+
+
+def cmd_search(args):
+    # Default mode splits on whitespace so `search "foo bar"` means foo AND bar;
+    # --raw keeps the joined input verbatim for FTS5 syntax.
+    terms = args.query if args.raw else " ".join(args.query).split()
+    if not " ".join(terms).strip():
+        return _fail(EXIT_USAGE, "query must not be blank")
+    if not 1 <= args.limit <= MAX_LIMIT:
+        return _fail(EXIT_USAGE, f"--limit must be between 1 and {MAX_LIMIT}")
+    for k in args.kind:
+        if k not in KIND_ORDER:
+            return _fail(EXIT_USAGE, f"unknown --kind {k!r}; choose from {', '.join(KIND_ORDER)}")
+    ctx = Context()
+    conn = open_index(ctx)
+    if args.no_refresh:
+        if not has_index(conn):
+            raise LockedError("no index yet; run without --no-refresh or run `index` first")
+    else:
+        refresh_or_degrade(conn, ctx, quiet=False)
+    if conn.execute("SELECT count(*) FROM files").fetchone()[0] == 0:
+        return _fail(EXIT_NO_SOURCES, NO_SOURCES_MESSAGE)
+    query = build_query(terms, args.raw)
+    try:
+        hits = run_search(conn, query, args.kind, args.limit)
+    except sqlite3.OperationalError as exc:
+        # In raw mode any non-storage error is the user's query (unterminated
+        # string, unknown special query, no such column, fts5 syntax error).
+        if args.raw and not _storage_error(exc):
+            return _fail(EXIT_QUERY, f"query error: {exc}")
+        return _fail(classify_sqlite_error(exc), f"sqlite: {exc}")
+    if not hits:
+        return EXIT_NO_HITS
+    (print_hits_json if args.json else print_hits_text)(hits)
+    return EXIT_OK
+
+
 # --- CLI -------------------------------------------------------------------
 
 class Parser(argparse.ArgumentParser):
@@ -696,7 +802,7 @@ def cmd_not_implemented(args):
 
 COMMANDS = {
     "index": cmd_index,
-    "search": cmd_not_implemented,
+    "search": cmd_search,
     "status": cmd_status,
     "eval": cmd_not_implemented,
     "eval-add": cmd_not_implemented,
