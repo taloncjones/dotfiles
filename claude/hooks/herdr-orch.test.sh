@@ -800,5 +800,90 @@ rg -q -F 'If `CLS` is not `available`' "$SKILL"
 rg -q -F '|| true`' "$SKILL"
 SH
 
+check "validate_messaging_socket: canonical dirs, pid basename, /private alias, rejects" <<PY
+$LOAD
+ok=c.validate_messaging_socket("/tmp/cc-socks/12345.sock")
+assert ok==("/tmp/cc-socks/12345.sock",12345,"ok"),ok
+assert c.validate_messaging_socket("/private/tmp/cc-socks/12345.sock")==("/tmp/cc-socks/12345.sock",12345,"ok")
+assert c.validate_messaging_socket("/tmp/cc-socks-501/7.sock")[2]=="ok"
+assert c.validate_messaging_socket("/run/user/1000/cc-socks/7.sock")[2]=="ok"
+assert c.validate_messaging_socket("/data/data/com.termux/files/usr/tmp/cc-socks/7.sock")[2]=="ok"
+assert c.validate_messaging_socket("/tmp/cc-socks/12345.sock",expect_pid=12345)[2]=="ok"
+assert c.validate_messaging_socket("/tmp/cc-socks/12345.sock",expect_pid=1)[2]=="pid-mismatch"
+assert c.validate_messaging_socket("")[2]=="empty"
+assert c.validate_messaging_socket("cc-socks/1.sock")[2]=="not-absolute"
+assert c.validate_messaging_socket("/tmp/other/1.sock")[2]=="dir-not-canonical"
+assert c.validate_messaging_socket("/tmp/cc-socks/../cc-socks/1.sock")[2]=="dir-not-canonical"
+assert c.validate_messaging_socket("/tmp/cc-socks/12345-0123abcd.sock")[2]=="basename-not-pid-sock"
+assert c.validate_messaging_socket("/tmp/cc-socks/abcdef.sock")[2]=="basename-not-pid-sock"
+assert c.validate_messaging_socket("/tmp/cc-socks/1.sock/")[2]=="dir-not-canonical"
+sys.exit(0)
+PY
+
+check "claim-owner stores a valid messaging_socket and takes pid from its basename" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+err=$(mktemp)
+F=$($CLI claim-owner --repo-slug slug-ms --session S --host h --pid 999 --messaging-socket /private/tmp/cc-socks/4242.sock 2>"$err")
+[ "$F" = 1 ]
+grep -q '^\[WARNING\]' "$err"            # --pid 999 differs from basename 4242: one warning
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 - <<PY
+import json;o=json.load(open("$root/herdr-orch/slug-ms/owner.json"))
+assert o["messaging_socket"]=="/tmp/cc-socks/4242.sock",o
+assert o["pid"]==4242,o
+PY
+SH
+
+check "claim-owner: matching --pid warns nothing; empty value stores null silently; invalid stores null with one warning" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+err=$(mktemp)
+$CLI claim-owner --repo-slug slug-a --session S --host h --pid 4242 --messaging-socket /tmp/cc-socks/4242.sock 2>"$err" >/dev/null
+[ ! -s "$err" ]
+$CLI claim-owner --repo-slug slug-b --session S --host h --pid 5 --messaging-socket "" 2>"$err" >/dev/null
+[ ! -s "$err" ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-b/owner.json'));assert o['messaging_socket'] is None and o['pid']==5,o"
+$CLI claim-owner --repo-slug slug-c --session S --host h --pid 5 --messaging-socket /tmp/cc-socks/5-0123abcd.sock 2>"$err" >/dev/null
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-c/owner.json'));assert o['messaging_socket'] is None and o['pid']==5,o"
+$CLI claim-owner --repo-slug slug-d --session S --host h --pid 5 --messaging-socket /tmp/other/5.sock 2>"$err" >/dev/null
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-d/owner.json'));assert o['messaging_socket'] is None,o"
+$CLI claim-owner --repo-slug slug-e --session S --host h --pid 5 2>"$err" >/dev/null   # flag omitted
+[ ! -s "$err" ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-e/owner.json'));assert o['messaging_socket'] is None and o['pid']==5,o"
+SH
+
+check "refresh-owner: omitted flag keeps socket; empty clears; pid mismatch nulls and warns" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+err=$(mktemp)
+F=$($CLI claim-owner --repo-slug slug-r --session S --host h --pid 4242 --messaging-socket /tmp/cc-socks/4242.sock)
+O="$root/herdr-orch/slug-r/owner.json"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F"
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket']=='/tmp/cc-socks/4242.sock',o"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F" --messaging-socket /tmp/cc-socks/9.sock 2>"$err"
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket'] is None and o['pid']==4242,o"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F" --messaging-socket /tmp/cc-socks/4242.sock 2>"$err"
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket']=='/tmp/cc-socks/4242.sock',o"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F" --messaging-socket ""
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket'] is None,o"
+rc=0; $CLI refresh-owner --repo-slug slug-r --session S --fence 99 --messaging-socket /tmp/cc-socks/4242.sock || rc=$?
+[ "$rc" = 1 ]        # stale fence still refuses, unchanged
+SH
+
+check "legacy owner.json with string pid: refresh migrates it to int; --pid rejects non-integers" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+mkdir -p "$root/herdr-orch/slug-l"
+python3 -c "import json,time;json.dump({'session_id':'S','host':'h','pid':'4242','heartbeat_ts':time.time(),'fence':1},open('$root/herdr-orch/slug-l/owner.json','w'))"
+$CLI refresh-owner --repo-slug slug-l --session S --fence 1 --messaging-socket /tmp/cc-socks/4242.sock
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-l/owner.json'));assert o['pid']==4242 and o['messaging_socket']=='/tmp/cc-socks/4242.sock',o"
+rc=0; $CLI claim-owner --repo-slug slug-m --session S --host h --pid abc >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ]        # argparse type=int rejects cleanly (exit 2), no traceback
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
