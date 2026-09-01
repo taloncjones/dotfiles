@@ -403,6 +403,22 @@ one down here does not starve it.
    fixed) as you go — step 5's carry-forward relies on this record, not on
    re-deriving it later.
 
+   **Lessons (optional, one line each).** While presenting the list, tag
+   any finding that is an agent-process failure rather than a code bug and
+   is preventable by a standing rule or hook:
+
+   `LESSON: <one-line candidate rule> [hookable]`
+
+   `[hookable]` is a non-binding hint that a PreToolUse hook could detect
+   the mistake deterministically from tool-call input alone. These lines
+   are harvested later by /post-merge's lessons step (see
+   claude/rules/personal/agent-lessons.md for the admission contract);
+   emitting them here is best-effort — post-merge asks its own fallback
+   question regardless. Lessons persist independently of finding
+   disposition: carry them in every report shape — report-only output,
+   clean results, and (PR mode) the step 6 comment, including re-posts
+   after fixes — so a resolved finding never drops its lesson.
+
 5. **Re-review the fix commit (bounded).** Applying fixes can introduce new
    bugs the first pass never saw — a swallowed error, a changed return type a
    caller missed, a lifecycle leak in code you just added. When step 4 produced
