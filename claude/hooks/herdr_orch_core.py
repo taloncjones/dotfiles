@@ -57,6 +57,56 @@ def valid_capabilities(rec, session_id) -> bool:
     return all(isinstance(avail[k], bool) for k in CAP_MODELS)
 
 
+CONTRACT_MAX_COMMANDS = 32
+CONTRACT_MAX_TIMEOUT = 3600
+CONTRACT_DEFAULT_TIMEOUT = 600
+
+
+def _nonempty_str(v) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def validate_contract(rec, task_id):
+    """Error message for an invalid contract, None when valid. Fail closed:
+    unknown keys, bool-typed ints, blank strings, dup names all reject."""
+    if not isinstance(rec, dict):
+        return "contract must be a JSON object"
+    if set(rec.keys()) != {"v", "task_id", "commands"}:
+        return "contract keys must be exactly v, task_id, commands"
+    v = rec.get("v")
+    if not isinstance(v, int) or isinstance(v, bool) or v != 1:
+        return "v must be the integer 1"
+    if rec.get("task_id") != task_id:
+        return "contract task_id does not match the task"
+    cmds = rec.get("commands")
+    if not isinstance(cmds, list) or not cmds:
+        return "commands must be a non-empty list"
+    if len(cmds) > CONTRACT_MAX_COMMANDS:
+        return f"commands exceeds max {CONTRACT_MAX_COMMANDS}"
+    names = set()
+    for cmd in cmds:
+        if not isinstance(cmd, dict):
+            return "each command must be an object"
+        if not set(cmd.keys()) <= {"name", "run", "timeout_secs"}:
+            return "command keys must be within name, run, timeout_secs"
+        if not _nonempty_str(cmd.get("name")) or not _nonempty_str(cmd.get("run")):
+            return "command name and run must be non-empty strings"
+        if cmd["name"] in names:
+            return f"duplicate command name: {cmd['name']}"
+        names.add(cmd["name"])
+        t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
+        if not isinstance(t, int) or isinstance(t, bool) or not (
+            1 <= t <= CONTRACT_MAX_TIMEOUT
+        ):
+            return f"timeout_secs must be an int in [1, {CONTRACT_MAX_TIMEOUT}]"
+    return None
+
+
+def contract_sha256(path) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def role_preference(role, config):
     """Ordered alias preference for a role, or None (-> exit 5) if the role is
     unknown or the config 'models' block is malformed: not a dict, a key outside

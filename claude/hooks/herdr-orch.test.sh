@@ -1097,5 +1097,37 @@ finally:
 sys.exit(0)
 PY
 
+check "validate_contract accepts v1 and rejects each violation" <<PY
+$LOAD
+ok={"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}
+assert c.validate_contract(ok,"PROJ-1") is None
+assert c.validate_contract(ok,"PROJ-2") is not None          # task_id mismatch
+assert c.validate_contract({**ok,"v":True},"PROJ-1") is not None   # bool v
+assert c.validate_contract({**ok,"v":2},"PROJ-1") is not None
+assert c.validate_contract({**ok,"extra":1},"PROJ-1") is not None  # unknown key
+assert c.validate_contract({**ok,"commands":[]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","x":1}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":" ","run":"true"}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":""}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true"},{"name":"t","run":"true"}]},"PROJ-1") is not None  # dup name
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":True}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":0}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":3601}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":3600}]},"PROJ-1") is None
+big=[{"name":"t%d"%i,"run":"true"} for i in range(33)]
+assert c.validate_contract({**ok,"commands":big},"PROJ-1") is not None  # >32
+assert c.validate_contract([],"PROJ-1") is not None          # non-dict
+sys.exit(0)
+PY
+
+check "contract_sha256 hashes file bytes" <<PY
+$LOAD
+import hashlib
+root=tempfile.mkdtemp()
+p=os.path.join(root,"c.json");open(p,"w").write("{}")
+assert c.contract_sha256(p)==hashlib.sha256(b"{}").hexdigest()
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
