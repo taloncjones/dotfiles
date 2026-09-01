@@ -224,7 +224,10 @@ phase-appropriate brief (references/brief-template.md) and model.
 7. **Publish state only after the worker is launched** -- so a failed launch
    leaves no stale task/index to unwind (no rollback verb needed). Write
    through the core CLI, not by hand:
-   - `python3 "$CORE" write-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id> --json '<task record, status "in-progress">'`
+   - `python3 "$CORE" write-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id> --json '<task record, status "in-progress">'` --
+     for an `implement` dispatch, include `contract_path`/`contract_sha256`
+     in this JSON from the pre-launch pin computed under "Contract pinning"
+     below (a `plan` kickoff has no contract yet and carries neither field).
    - `python3 "$CORE" write-index --repo-slug <slug> --session <id> --fence <fence> --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "impl"}'`
      The task record's `status` field is the authoritative kickoff record;
      `events.jsonl` is hook-owned (worker lifecycle hints only, see
@@ -247,19 +250,26 @@ phase-appropriate brief (references/brief-template.md) and model.
 
 **Contract pinning (implement dispatch, both paths).** Before launching any
 `implement` worker (plan-ready kickoff here, or phase advancement in section
-2a), pin the task's verification contract into the fenced task record:
-require the task worktree clean (`git status --porcelain` empty) and the
-contract tracked at HEAD (`git cat-file -e
+2a), compute the pin: require the task worktree clean (`git status
+--porcelain` empty) and the contract tracked at HEAD (`git cat-file -e
 HEAD:docs/plans/<task_id>-contract.json`); then run
 `python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
 --worktree <path> --contract docs/plans/<task_id>-contract.json
---allow-unpinned --validate-only` -- it prints the sha256 -- and `write-task`
-the record with `contract_path` and `contract_sha256` set. A missing or
-invalid contract blocks the dispatch exactly like a missing plan. The pin is
-written once; the orchestrator never re-pins on its own -- a later hash
-mismatch is an integrity halt surfaced to the human, and only an explicit
-human instruction (after a deliberate committed contract change) re-runs
-these pinning steps.
+--allow-unpinned --validate-only` -- it prints the sha256. A missing or
+invalid contract blocks the dispatch exactly like a missing plan.
+
+Where the pin gets _written_ differs by path, to preserve "publish only
+after launch" (step 7): on a **plan-ready kickoff**, no task record exists
+yet at this point, so there is nothing to `write-task` into -- carry
+`contract_path`/`contract_sha256` as fields on step 7's first `write-task`
+call (the initial `in-progress` record) instead of writing a separate
+pre-launch record just to hold the pin. On **phase advancement** (section
+2a), a task record already exists, so `write-task` it with the pin set
+before the implement launch, same as before. Either way the pin is written
+once; the orchestrator never re-pins on its own -- a later hash mismatch is
+an integrity halt surfaced to the human, and only an explicit human
+instruction (after a deliberate committed contract change) re-runs these
+pinning steps.
 
 ## 2a. Phase advancement (plan -> implement) -- raw items only
 
