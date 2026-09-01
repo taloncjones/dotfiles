@@ -10,6 +10,9 @@ import json
 import math
 import os
 import re
+import secrets
+import socket
+import stat
 import sys
 import time
 from pathlib import Path
@@ -353,6 +356,104 @@ def append_event(rd, ws, event, **fields) -> bool:
     finally:
         os.close(fd)
     return True
+
+
+WAKE_EVENTS = frozenset({"stopped", "blocked", "review-stopped"})
+WAKE_BUDGET_SECS = 2.0       # one monotonic deadline across connect + send
+WAKE_CONNECT_TIMEOUT = 1.0
+WAKE_HEARTBEAT_STALE_SECS = 900
+WAKE_HEARTBEAT_SKEW_SECS = 300
+_lstat = os.lstat      # test seams (monkeypatched by the suite)
+_geteuid = os.geteuid
+
+
+def wake_line(repo_slug, ws, event, ts=None, nonce=None) -> str:
+    """One newline-terminated stream-json user message: the closed-vocabulary
+    wake the hook pushes to the orchestrator's inbox. nonce keeps two wakes
+    in one second from being byte-identical (receiver dedupes repeats)."""
+    if ts is None:
+        ts = int(time.time())
+    if nonce is None:
+        nonce = secrets.token_hex(4)
+    content = (f"herdr-wake v=1 repo={repo_slug} workspace={ws} event={event} "
+               f"ts={ts} nonce={nonce}")
+    msg = {"type": "user", "message": {"role": "user", "content": content}}
+    return json.dumps(msg, separators=(",", ":")) + "\n"
+
+
+def post_wake(rd, ws, event, own_socket="", now=None) -> str:
+    """Push one wake line to the owning orchestrator's inbox socket named in
+    owner.json. Every guard returns a distinct reason and sends nothing; only
+    "sent" means a line left this process. Never raises; 2s wall budget."""
+    if event not in WAKE_EVENTS:
+        return "bad-event"
+    repo_slug = os.path.basename(str(rd))
+    if not valid_repo_slug(repo_slug) or not valid_workspace_id(ws):
+        return "bad-id"   # keeps the wire content inside the \S+ grammar
+    deadline = time.monotonic() + WAKE_BUDGET_SECS
+    try:
+        owner = json.loads(_owner_path(rd).read_text())
+    except (FileNotFoundError, NotADirectoryError):
+        return "no-owner"
+    except (OSError, ValueError):
+        return "bad-owner"
+    if not isinstance(owner, dict):
+        return "bad-owner"
+    sock_path = owner.get("messaging_socket")
+    if not isinstance(sock_path, str) or not sock_path:
+        return "no-socket"
+    hb = owner.get("heartbeat_ts")
+    if isinstance(hb, bool) or not isinstance(hb, (int, float)) or not math.isfinite(hb):
+        return "bad-heartbeat"
+    now = time.time() if now is None else now
+    if now - hb > WAKE_HEARTBEAT_STALE_SECS:
+        return "stale-heartbeat"
+    if hb - now > WAKE_HEARTBEAT_SKEW_SECS:
+        return "future-heartbeat"
+    pid = owner.get("pid")
+    if isinstance(pid, str) and pid.isdigit():
+        pid = int(pid)   # legacy records written by the pre-flag CLI
+    if isinstance(pid, bool) or not isinstance(pid, int):
+        return "bad-pid"
+    norm, _pid, reason = validate_messaging_socket(sock_path, expect_pid=pid)
+    if reason != "ok":
+        return "bad-path"
+    if own_socket and normalize_socket_path(own_socket) == norm:
+        return "own-socket"
+    try:
+        st_sock = _lstat(norm)
+        st_dir = _lstat(norm.rpartition("/")[0])
+    except OSError:
+        return "not-a-socket"
+    if not stat.S_ISSOCK(st_sock.st_mode):
+        return "not-a-socket"
+    uid = _geteuid()
+    if st_sock.st_uid != uid or st_dir.st_uid != uid:
+        return "bad-owner-uid"
+    if stat.S_IMODE(st_dir.st_mode) & 0o077:
+        return "bad-dir-mode"
+    line = wake_line(repo_slug, ws, event).encode()
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return "connect-failed"
+    try:
+        s.settimeout(min(WAKE_CONNECT_TIMEOUT, max(0.05, deadline - time.monotonic())))
+        try:
+            s.connect(norm)
+        except OSError:
+            return "connect-failed"
+        s.settimeout(max(0.05, deadline - time.monotonic()))
+        try:
+            s.sendall(line)
+        except OSError:
+            return "send-failed"
+        return "sent"
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 def parse_events(lines):

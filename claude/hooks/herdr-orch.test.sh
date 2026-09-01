@@ -885,5 +885,137 @@ rc=0; $CLI claim-owner --repo-slug slug-m --session S --host h --pid abc >/dev/n
 [ "$rc" = 2 ]        # argparse type=int rejects cleanly (exit 2), no traceback
 SH
 
+check "wake_line shape, nonce uniqueness within one second" <<PY
+$LOAD
+import json as J
+l=c.wake_line("github-com-org-repo-deadbeef","w1","stopped")
+assert l.endswith("\n") and l.count("\n")==1
+o=J.loads(l)
+assert o["type"]=="user" and o["message"]["role"]=="user"
+assert re.fullmatch(r"herdr-wake v=1 repo=github-com-org-repo-deadbeef workspace=w1 event=stopped ts=\d+ nonce=[0-9a-f]{8}",o["message"]["content"]),o
+l2=c.wake_line("github-com-org-repo-deadbeef","w1","stopped")
+assert l!=l2
+assert J.loads(c.wake_line("s","w","blocked",ts=5,nonce="deadbeef"))["message"]["content"]=="herdr-wake v=1 repo=s workspace=w event=blocked ts=5 nonce=deadbeef"
+sys.exit(0)
+PY
+
+check "post_wake sends exactly one wire line to a fake inbox and returns sent" <<PY
+$LOAD
+import socket,threading,random,shutil,time,json as J
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1)
+    got=[]
+    def acc():
+        conn,_=srv.accept(); buf=b""
+        while not buf.endswith(b"\n"):
+            d=conn.recv(4096)
+            if not d: break
+            buf+=d
+        got.append(buf); conn.close()
+    t=threading.Thread(target=acc,daemon=True); t.start()
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd); ws="w1"   # basename must be a valid repo slug
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
+    r=c.post_wake(rd,ws,"stopped",own_socket=f"{sockdir}/1.sock")
+    assert r=="sent",r
+    t.join(2); assert got,"server got nothing"
+    o=J.loads(got[0]); cnt=o["message"]["content"]
+    assert cnt.startswith(f"herdr-wake v=1 repo={os.path.basename(rd)} workspace=w1 event=stopped ts="),cnt
+    assert got[0].count(b"\n")==1
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
+check "post_wake guards: each bad owner/state returns its reason and sends nothing" <<PY
+$LOAD
+import socket,random,shutil,time,math
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1); srv.settimeout(0.2)
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd); of=os.path.join(rd,"owner.json")
+    def owner(**kw):
+        o={"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path}; o.update(kw)
+        open(of,"w").write(json.dumps(o))
+    def nothing():
+        try: srv.accept(); return False
+        except socket.timeout: return True
+    assert c.post_wake(rd,"w1","stopped")=="no-owner"
+    open(of,"w").write("{not json"); assert c.post_wake(rd,"w1","stopped")=="bad-owner"
+    owner(messaging_socket=None); assert c.post_wake(rd,"w1","stopped")=="no-socket"
+    owner(messaging_socket=""); assert c.post_wake(rd,"w1","stopped")=="no-socket"
+    owner(messaging_socket=7); assert c.post_wake(rd,"w1","stopped")=="no-socket"
+    for hb in (None,"x",float("nan"),float("inf")):
+        owner(heartbeat_ts=hb); assert c.post_wake(rd,"w1","stopped")=="bad-heartbeat",hb
+    owner(heartbeat_ts=time.time()-901); assert c.post_wake(rd,"w1","stopped")=="stale-heartbeat"
+    owner(heartbeat_ts=time.time()+301); assert c.post_wake(rd,"w1","stopped")=="future-heartbeat"
+    owner(heartbeat_ts=time.time()+200); assert c.post_wake(rd,"w1","stopped")=="sent"   # skew allowance
+    srv.accept()[0].close()
+    owner(pid=None); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid="abc"); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid=True); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid="4242"); assert c.post_wake(rd,"w1","stopped")=="sent"       # legacy digit-string pid tolerated
+    srv.accept()[0].close()
+    owner(pid=1); assert c.post_wake(rd,"w1","stopped")=="bad-path"          # pid-mismatch -> bad-path
+    owner(messaging_socket="/tmp/other/4242.sock"); assert c.post_wake(rd,"w1","stopped")=="bad-path"
+    owner(); assert c.post_wake(rd,"w1","stopped",own_socket=path)=="own-socket"
+    assert c.post_wake(rd,"w1","stopped",own_socket="/private"+path)=="own-socket"
+    owner(); assert c.post_wake(rd,"w1","bogus")=="bad-event"
+    assert c.post_wake(rd,"../w1","stopped")=="bad-id"
+    assert c.post_wake(os.path.join(tempfile.mkdtemp(),"bad slug"),"w1","stopped")=="bad-id"
+    owner(messaging_socket=f"{sockdir}/4245.sock",pid=4245); assert c.post_wake(rd,"w1","stopped")=="not-a-socket"   # path absent
+    assert nothing()
+    # not a socket: regular file, and a symlink to the real socket
+    reg=f"{sockdir}/4243.sock"; open(reg,"w").close(); owner(pid=4243,messaging_socket=reg)
+    assert c.post_wake(rd,"w1","stopped")=="not-a-socket"
+    ln=f"{sockdir}/4244.sock"; os.symlink(path,ln); owner(pid=4244,messaging_socket=ln)
+    assert c.post_wake(rd,"w1","stopped")=="not-a-socket"
+    # ownership seams
+    owner(); real=c._lstat
+    class St:  # minimal stat_result stand-in
+        def __init__(s,base,**kw): s.st_mode=base.st_mode; s.st_uid=base.st_uid; s.__dict__.update(kw)
+    c._lstat=lambda p: St(real(p),st_uid=real(p).st_uid+1) if p==path else real(p)
+    assert c.post_wake(rd,"w1","stopped")=="bad-owner-uid"
+    c._lstat=lambda p: St(real(p),st_uid=real(p).st_uid+1) if p==sockdir else real(p)
+    assert c.post_wake(rd,"w1","stopped")=="bad-owner-uid"
+    c._lstat=lambda p: St(real(p),st_mode=real(p).st_mode|0o077) if p==sockdir else real(p)
+    assert c.post_wake(rd,"w1","stopped")=="bad-dir-mode"
+    c._lstat=real
+    assert nothing()
+    # connect refused: socket file with no listener
+    srv.close()
+    owner(); assert c.post_wake(rd,"w1","stopped")=="connect-failed"
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
+check "post_wake returns within 2.5s against a listener that never accepts" <<PY
+$LOAD
+import socket,random,shutil,time
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1)   # never accept()s
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd)
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
+    t0=time.monotonic(); r=c.post_wake(rd,"w1","stopped"); dt=time.monotonic()-t0
+    assert r in ("sent","send-failed","connect-failed"),r     # AF_UNIX queues the connect and a short send; this is a budget smoke test, not a blocked-send simulation
+    assert dt<2.5,dt
+    # socket creation failure is caught, not raised
+    real_socket=c.socket.socket
+    def nosock(*a,**k): raise OSError("emfile")
+    c.socket.socket=nosock
+    try:
+        assert c.post_wake(rd,"w1","stopped")=="connect-failed"
+    finally:
+        c.socket.socket=real_socket
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
