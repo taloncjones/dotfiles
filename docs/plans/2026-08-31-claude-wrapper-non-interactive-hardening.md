@@ -62,7 +62,9 @@ pass() { printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
 fail() { printf 'FAIL  %s\n' "$1" >&2; FAIL=$((FAIL + 1)); }
 
 # --- static assertions (always run) ---
-if grep -A40 '^function claude()' "$ACCT" | grep -q '_claude_config_dir'; then
+# Extract the claude() body, strip comments (the implementation comments
+# reference the helper by name), then look for a real invocation.
+if awk '/^function claude\(\)/,/^}/' "$ACCT" | sed 's/#.*//' | grep -q '_claude_config_dir'; then
     fail "wrapper is self-contained (no helper call in claude())"
 else
     pass "wrapper is self-contained (no helper call in claude())"
@@ -83,21 +85,28 @@ fi
 REPO="$(pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/claude-account-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+# Canonicalize: the wrapper normalizes with :A, so expectations must be
+# symlink-free paths (macOS mktemp returns /var/..., which :A rewrites
+# to /private/var/...).
+TMP="$(cd "$TMP" && pwd -P)"
 SBHOME="$TMP/home"
 mkdir -p "$SBHOME/Git/work/proj" "$SBHOME/elsewhere" "$TMP/bin"
 
-# Stub claude: records the env value (or UNSET) and argv, exits 0.
+# Stub claude: records the env value (or UNSET) and each argv element on
+# its own line (boundary-preserving), exits 0.
 cat >"$TMP/bin/claude" <<'EOF'
 #!/bin/sh
 {
     printf 'cfg=%s\n' "${CLAUDE_CONFIG_DIR-UNSET}"
-    printf 'argv=%s\n' "$*"
+    for a in "$@"; do printf 'arg=%s\n' "$a"; done
 } > "$RECORD"
 exit 0
 EOF
 chmod +x "$TMP/bin/claude"
 
 # run_case <label> <cwd> <zsh-body> <expected-cfg> [expected-argv]
+# expected-argv is the space-joined argv (our expectations contain no
+# spaces inside a single argument; per-arg lines remain in $RECORD).
 # Sources claude-account.zsh directly (Task 2 adds .zshenv-driven modes).
 run_case() {
     label="$1" cwd="$2" body="$3" want_cfg="$4" want_argv="${5-}"
@@ -106,7 +115,8 @@ run_case() {
     RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
         zsh -c "cd '$cwd' && source '$REPO/$ACCT' && $body" >/dev/null 2>&1
     got_cfg="$(sed -n 's/^cfg=//p' "$rec")"
-    got_argv="$(sed -n 's/^argv=//p' "$rec")"
+    got_argv="$(sed -n 's/^arg=//p' "$rec" | tr '\n' ' ')"
+    got_argv="${got_argv% }"
     if [ "$got_cfg" = "$want_cfg" ] && { [ -z "$want_argv" ] || [ "$got_argv" = "$want_argv" ]; }; then
         pass "$label"
     else
@@ -122,17 +132,21 @@ run_case "personal cwd routes to ~/.claude (always-inject)" \
 run_case "work cwd routes to ~/.claude-work" \
     "$SBHOME/Git/work/proj" "claude" "$SBHOME/.claude-work"
 
-# 3. Symlinked work cwd: :A resolution still routes to work.
-mkdir -p "$SBHOME/real-checkout"
-ln -s "$SBHOME/real-checkout" "$SBHOME/Git/work/linked"
+# 3. Symlinked path INTO the work tree: cwd is a symlink outside the tree
+# whose target is inside it; ${PWD:A} resolves to the real work-tree
+# location, so it routes to work.
+mkdir -p "$SBHOME/Git/work/real-proj"
+ln -s "$SBHOME/Git/work/real-proj" "$SBHOME/work-shortcut"
 run_case "symlinked path into work tree routes to work" \
-    "$SBHOME/Git/work/linked" "claude" "$SBHOME/.claude-work"
+    "$SBHOME/work-shortcut" "claude" "$SBHOME/.claude-work"
 
 # 4. Non-empty env wins over cwd, from both cwds.
 run_case "non-empty env wins from personal cwd" \
     "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
 run_case "non-empty env wins from work cwd" \
     "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
+run_case "relative env value is normalized to absolute" \
+    "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR=relcfg claude" "$SBHOME/elsewhere/relcfg"
 
 # 5. Exported-empty env is consumed, never propagated.
 run_case "exported-empty env treated as unset (personal cwd)" \
@@ -290,8 +304,12 @@ function claude() {    # claude() will launch Claude Code with the work account 
         fi
     fi
     # Hard floor: never launch with an empty config dir (an empty
-    # CLAUDE_CONFIG_DIR makes claude treat the cwd as its config root).
+    # CLAUDE_CONFIG_DIR makes claude treat the cwd as its config root),
+    # and always hand the child an absolute path (:A also anchors a
+    # relative inherited value to the current cwd instead of letting
+    # claude re-anchor it to whatever cwd it sees).
     cfg="${cfg:-$HOME/.claude}"
+    cfg="${cfg:A}"
     CLAUDE_CONFIG_DIR="$cfg" command claude "${forwarded[@]}"
 }
 ```
@@ -325,6 +343,8 @@ git commit -m "zsh: Add self-contained account routing file with tests"
 **Files:**
 - Create: `zsh/.zshenv`
 - Modify: `zsh/claude-account.test.sh` (append shell-mode cases before the final summary lines)
+- Modify: `zsh/functions.zsh:225-281` (delete the "Claude Code Accounts" section -- in this task, not later: once `.zshenv` provides the hardened definitions, leaving the old block in `.zshrc`'s chain would re-define the vulnerable wrapper in every interactive shell, since `.zshrc` sources after `.zshenv`)
+- Modify: `.github/workflows/tests.yml` (zsh syntax-check file list)
 
 **Interfaces:**
 - Consumes: `zsh/claude-account.zsh` (Task 1), sourced by sibling path.
@@ -342,13 +362,13 @@ ZDIR="$TMP/zdot"
 mkdir -p "$ZDIR"
 ln -s "$REPO/zsh/.zshenv" "$ZDIR/.zshenv"
 
-# run_mode <label> <zsh-flags> <cwd> <env-prefix> <expected-cfg>
+# run_mode <label> <zsh-flags> <cwd> <zsh-body> <expected-cfg>
 run_mode() {
-    label="$1" flags="$2" cwd="$3" envp="$4" want_cfg="$5"
+    label="$1" flags="$2" cwd="$3" body="$4" want_cfg="$5"
     rec="$TMP/rec"
     : > "$rec"
     RECORD="$rec" HOME="$SBHOME" ZDOTDIR="$ZDIR" PATH="$TMP/bin:$PATH" \
-        zsh "$flags" "cd '$cwd' && $envp claude" >/dev/null 2>&1
+        zsh "$flags" "cd '$cwd' && $body" >/dev/null 2>&1
     got_cfg="$(sed -n 's/^cfg=//p' "$rec")"
     if [ "$got_cfg" = "$want_cfg" ]; then
         pass "$label"
@@ -357,15 +377,24 @@ run_mode() {
     fi
 }
 
+# The full precedence ladder per startup mode (spec: matrix rows apply to
+# every shell mode). Reuses the sandbox dirs and work-shortcut symlink
+# created by the Task 1 cases.
 for mode in "-lc" "-c" "-ic"; do
     run_mode "zsh $mode: personal cwd routes to ~/.claude" \
-        "$mode" "$SBHOME/elsewhere" "" "$SBHOME/.claude"
+        "$mode" "$SBHOME/elsewhere" "claude" "$SBHOME/.claude"
     run_mode "zsh $mode: work cwd routes to ~/.claude-work" \
-        "$mode" "$SBHOME/Git/work/proj" "" "$SBHOME/.claude-work"
+        "$mode" "$SBHOME/Git/work/proj" "claude" "$SBHOME/.claude-work"
+    run_mode "zsh $mode: symlinked work path routes to work" \
+        "$mode" "$SBHOME/work-shortcut" "claude" "$SBHOME/.claude-work"
     run_mode "zsh $mode: non-empty env wins" \
-        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom" "$SBHOME/custom"
-    run_mode "zsh $mode: exported-empty env consumed" \
-        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=" "$SBHOME/.claude-work"
+        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
+    run_mode "zsh $mode: exported-empty env consumed (work cwd)" \
+        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR= claude" "$SBHOME/.claude-work"
+    run_mode "zsh $mode: exported-empty env consumed (personal cwd)" \
+        "$mode" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR= claude" "$SBHOME/.claude"
+    run_mode "zsh $mode: --personal beats custom env" \
+        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude --personal" "$SBHOME/.claude"
 done
 
 # .zshenv contract: silent on success, no external commands.
@@ -381,7 +410,7 @@ else
     pass ".zshenv runs no external commands (no command substitution)"
 fi
 
-# Degraded state: missing target file is a silent no-op (bare binary runs).
+# Degraded state 1: dangling ~/.zshenv symlink is a silent no-op.
 ZBROKEN="$TMP/zdot-broken"
 mkdir -p "$ZBROKEN"
 ln -s "$TMP/nonexistent/.zshenv" "$ZBROKEN/.zshenv"
@@ -390,6 +419,37 @@ if [ -z "$out" ]; then
     pass "broken .zshenv link degrades to silent no-op"
 else
     fail "broken .zshenv link degrades to silent no-op (got: $out)"
+fi
+
+# Degraded state 2: the tracked .zshenv runs but its sibling
+# claude-account.zsh is missing -> silent, and claude falls through to
+# the bare binary (stub sees no injected value).
+ZDEG="$TMP/zdot-degraded"
+mkdir -p "$ZDEG/zsh-copy"
+cp "$REPO/zsh/.zshenv" "$ZDEG/zsh-copy/.zshenv"
+ln -s "$ZDEG/zsh-copy/.zshenv" "$ZDEG/.zshenv"
+: > "$TMP/rec"
+out="$(RECORD="$TMP/rec" HOME="$SBHOME" ZDOTDIR="$ZDEG" PATH="$TMP/bin:$PATH" \
+    zsh -c "cd '$SBHOME/Git/work/proj' && claude" 2>&1)"
+got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+if [ -z "$out" ] && [ "$got_cfg" = "UNSET" ]; then
+    pass "missing sibling: silent no-op, bare binary runs"
+else
+    fail "missing sibling: silent no-op, bare binary runs (out='$out' cfg='$got_cfg')"
+fi
+
+# Degraded state 3: unreadable sibling -> same silent no-op (-r guard).
+cp "$REPO/zsh/claude-account.zsh" "$ZDEG/zsh-copy/claude-account.zsh"
+chmod 000 "$ZDEG/zsh-copy/claude-account.zsh"
+: > "$TMP/rec"
+out="$(RECORD="$TMP/rec" HOME="$SBHOME" ZDOTDIR="$ZDEG" PATH="$TMP/bin:$PATH" \
+    zsh -c "cd '$SBHOME/Git/work/proj' && claude" 2>&1)"
+got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+chmod 644 "$ZDEG/zsh-copy/claude-account.zsh"
+if [ -z "$out" ] && [ "$got_cfg" = "UNSET" ]; then
+    pass "unreadable sibling: silent no-op, bare binary runs"
+else
+    fail "unreadable sibling: silent no-op, bare binary runs (out='$out' cfg='$got_cfg')"
 fi
 
 # ~/.zshenv.local is sourced when present.
@@ -423,15 +483,17 @@ Expected: the `zsh -lc/-c/-ic` and `.zshenv` cases FAIL (file absent); Task 1 ca
 
 # Machine-local additions. The installer migrates a pre-existing
 # hand-managed ~/.zshenv here (install/common/zshenv-migrate.sh).
-[[ -f "$HOME/.zshenv.local" ]] && source "$HOME/.zshenv.local"
+[[ -f "$HOME/.zshenv.local" && -r "$HOME/.zshenv.local" ]] && \
+    source "$HOME/.zshenv.local"
 
 # Claude account routing must exist in all shell modes: zsh -lc / zsh -c
 # never read .zshrc, and headless probes and orchestrator dispatches run
 # there (unrouted launches have hit login screens and dumped config trees
 # into the cwd). Resolve the repo through this file's own symlink; a
-# missing target degrades to a silent no-op (symlink-audit.sh flags it).
+# missing or unreadable target degrades to a silent no-op
+# (symlink-audit.sh flags it).
 _dotfiles_zshenv="${${(%):-%N}:A}"
-[[ -f "${_dotfiles_zshenv:h}/claude-account.zsh" ]] && \
+[[ -f "${_dotfiles_zshenv:h}/claude-account.zsh" && -r "${_dotfiles_zshenv:h}/claude-account.zsh" ]] && \
     source "${_dotfiles_zshenv:h}/claude-account.zsh"
 unset _dotfiles_zshenv
 ```
@@ -441,10 +503,44 @@ unset _dotfiles_zshenv
 Run: `sh zsh/claude-account.test.sh`
 Expected: all PASS, `0 failed`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Delete the accounts block from `zsh/functions.zsh`**
+
+Remove lines 225-281: the `###### Claude Code Accounts` header comment
+block, the `CLAUDE_WORK_CONFIG_DIR`/`CLAUDE_WORK_TREE` assignments,
+`_claude_config_dir()`, `claude-account()`, and `claude()` -- everything
+up to (not including) the `##############################` header of
+`###### Claude Code Plugins`. Leave a one-line pointer in their place:
+
+```zsh
+# Claude account routing (claude(), claude-account) lives in
+# zsh/claude-account.zsh, sourced from zsh/.zshenv so it exists in
+# non-interactive shells too.
+```
+
+Verify:
+
+Run: `grep -c "^function claude()" zsh/functions.zsh zsh/claude-account.zsh`
+Expected: `0` in functions.zsh, `1` in claude-account.zsh.
+
+Run: `sh zsh/functions.test.sh`
+Expected: `0 failed` (its assertions only touch the plugin helpers).
+
+- [ ] **Step 6: Add the new files to the CI zsh syntax gate**
+
+In `.github/workflows/tests.yml`, the "zsh syntax check" step iterates a
+hard-coded list. Add the two new files:
+
+```yaml
+          for f in zsh/.zshenv zsh/.zshrc zsh/.zprofile zsh/aliases.zsh zsh/claude-account.zsh zsh/functions.zsh zsh/theme.zsh zsh/scripts/*.zsh; do
+```
+
+Run locally: `zsh -n zsh/.zshenv && zsh -n zsh/claude-account.zsh && echo OK`
+Expected: `OK`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add zsh/.zshenv zsh/claude-account.test.sh
+git add zsh/.zshenv zsh/claude-account.test.sh zsh/functions.zsh .github/workflows/tests.yml
 git commit -m "zsh: Define account routing via .zshenv for all shell modes"
 ```
 
@@ -565,6 +661,49 @@ else
     fail "directory: skip link, error, untouched (rc=$RC)"
 fi
 
+# Row 5b: dangling .zshenv.local symlink counts as occupied (never
+# overwritten): old file goes to a backup instead.
+H="$(fresh_home)"
+echo 'old zshenv' > "$H/.zshenv"
+ln -s "$H/nonexistent" "$H/.zshenv.local"
+run_migrate "$H"
+bak="$(ls "$H"/.zshenv.dotfiles-bak.* 2>/dev/null | head -1)"
+if [ "$RC" = 0 ] && [ -n "$bak" ] && [ -L "$H/.zshenv.local" ]; then
+    pass "dangling local symlink: preserved, backup used"
+else
+    fail "dangling local symlink: preserved, backup used (rc=$RC)"
+fi
+
+# Backup collision: a second migration in the same epoch second must not
+# overwrite the first backup (collision-free suffix loop).
+H="$(fresh_home)"
+echo 'first' > "$H/.zshenv"
+echo 'local' > "$H/.zshenv.local"
+run_migrate "$H"
+echo 'second' > "$H/.zshenv"
+run_migrate "$H"
+count="$(ls "$H"/.zshenv.dotfiles-bak.* 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$RC" = 0 ] && [ "$count" = 2 ]; then
+    pass "backup collision: both backups kept"
+else
+    fail "backup collision: both backups kept (rc=$RC count=$count)"
+fi
+
+# Foreign symlink to a DIRECTORY + the link.sh replacement command:
+# ln -sfn must replace the symlink itself, not plant a link inside the
+# directory it points to.
+H="$(fresh_home)"
+mkdir -p "$H/somedir"
+ln -s "$H/somedir" "$H/.zshenv"
+run_migrate "$H"
+ln -sfn "$REPO_ZSHENV" "$H/.zshenv"
+if [ "$RC" = 0 ] && [ "$(readlink "$H/.zshenv")" = "$REPO_ZSHENV" ] \
+    && [ ! -e "$H/somedir/.zshenv" ]; then
+    pass "symlink-to-directory: replaced in place, target dir untouched"
+else
+    fail "symlink-to-directory: replaced in place, target dir untouched (rc=$RC)"
+fi
+
 # Idempotence: migrate, link, migrate again -> silent no-op.
 H="$(fresh_home)"
 echo 'once' > "$H/.zshenv"
@@ -622,11 +761,17 @@ migrate_home_zshenv() {
     return 0
   fi
   if [ -f "$target" ]; then
-    if [ ! -e "$home/.zshenv.local" ]; then
+    # -e misses a dangling ~/.zshenv.local symlink; treat any existing
+    # entry (including broken links) as occupied -- never overwrite.
+    if [ ! -e "$home/.zshenv.local" ] && [ ! -L "$home/.zshenv.local" ]; then
       mv "$target" "$home/.zshenv.local"
       echo "NOTICE: moved machine-local ~/.zshenv to ~/.zshenv.local (sourced by the tracked .zshenv)"
     else
-      local bak="$home/.zshenv.dotfiles-bak.$(date +%s)"
+      local bak="$home/.zshenv.dotfiles-bak.$(date +%s)" n=0
+      while [ -e "$bak" ] || [ -L "$bak" ]; do
+        n=$((n + 1))
+        bak="$home/.zshenv.dotfiles-bak.$(date +%s).$n"
+      done
       mv "$target" "$bak"
       echo "NOTICE: ~/.zshenv.local already exists; moved old ~/.zshenv to $bak -- its content no longer executes, merge it into ~/.zshenv.local manually"
     fi
@@ -644,9 +789,11 @@ In the ZSH section, after `ln -sf "$DOTFILEDIR"/zsh/.zshrc "$HOME"/.zshrc`, add:
 ```bash
 # ~/.zshenv is tracked (account routing must exist in non-interactive
 # shells); a pre-existing machine-local file is migrated to ~/.zshenv.local.
+# ln -sfn, not -sf: a foreign symlink pointing at a directory would
+# otherwise be followed, planting the new link INSIDE that directory.
 source "$DOTFILEDIR"/install/common/zshenv-migrate.sh
 if migrate_home_zshenv "$HOME" "$DOTFILEDIR/zsh/.zshenv"; then
-  ln -sf "$DOTFILEDIR"/zsh/.zshenv "$HOME"/.zshenv
+  ln -sfn "$DOTFILEDIR"/zsh/.zshenv "$HOME"/.zshenv
 fi
 ```
 
@@ -680,35 +827,16 @@ git commit -m "install: Link tracked .zshenv with non-destructive migration"
 
 ---
 
-### Task 4: Remove the old block, update docs, full-suite verification
+### Task 4: Docs + full-suite verification
 
 **Files:**
-- Modify: `zsh/functions.zsh:225-281` (delete the "Claude Code Accounts" section)
 - Modify: `CLAUDE.md` (symlink-targets bullet for `zsh/`, and the `claude/` bullet's wrapper reference)
 - Modify: `README.md:150` and `README.md:239`
 
 **Interfaces:**
-- Consumes: `zsh/claude-account.zsh` + `zsh/.zshenv` (Tasks 1-2) now provide all definitions; interactive shells read `.zshenv` before `.zshrc`, so nothing else changes.
+- Consumes: `zsh/claude-account.zsh` + `zsh/.zshenv` (Tasks 1-2) provide all definitions; interactive shells read `.zshenv` before `.zshrc`, so nothing else changes.
 
-- [ ] **Step 1: Delete the accounts block from `zsh/functions.zsh`**
-
-Remove lines 225-281: the `###### Claude Code Accounts` header comment block, `CLAUDE_WORK_CONFIG_DIR`/`CLAUDE_WORK_TREE` assignments, `_claude_config_dir()`, `claude-account()`, and `claude()` -- everything up to (not including) the `##############################` header of `###### Claude Code Plugins`. Leave a one-line pointer in their place:
-
-```zsh
-# Claude account routing (claude(), claude-account) lives in
-# zsh/claude-account.zsh, sourced from zsh/.zshenv so it exists in
-# non-interactive shells too.
-```
-
-- [ ] **Step 2: Verify no duplicate definitions and suites still pass**
-
-Run: `grep -c "^function claude()" zsh/functions.zsh zsh/claude-account.zsh`
-Expected: `0` in functions.zsh, `1` in claude-account.zsh.
-
-Run: `sh zsh/functions.test.sh && sh zsh/claude-account.test.sh`
-Expected: both `0 failed`.
-
-- [ ] **Step 3: Update docs**
+- [ ] **Step 1: Update docs**
 
 `README.md:150`: change
 
@@ -737,7 +865,7 @@ to
 
 and in the `claude/` bullet replace `the claude() wrapper in zsh/functions.zsh` with `the claude() wrapper in zsh/claude-account.zsh`.
 
-- [ ] **Step 4: Full suite + live smoke check**
+- [ ] **Step 2: Full suite + live smoke check**
 
 Run: `bin/dotfiles-tests`
 Expected: every suite green (record the pass/fail counts and compare with the pre-Task-1 baseline run).
@@ -750,18 +878,34 @@ ZD="$(mktemp -d)" && ln -s "$PWD/zsh/.zshenv" "$ZD/.zshenv" && ZDOTDIR="$ZD" zsh
 
 Expected output: `claude: function`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add zsh/functions.zsh CLAUDE.md README.md
-git commit -m "zsh: Move account routing out of interactive-only functions file"
+git add CLAUDE.md README.md
+git commit -m "docs: Point account-wrapper references at the .zshenv layout"
 ```
 
 ---
 
 ## Self-review notes
 
-- Spec coverage: matrix rows -> Task 1 cases 1-8 and Task 2 mode loop; migration table -> Task 3 rows 1-6 + idempotence; docs -> Task 4; audit entry -> Task 3 step 5; compatibility contract -> Task 1 cases (labels, filtering, precedence, exit status).
-- Intentional behavior changes (spec) are all encoded as test expectations: always-inject (case 1), empty-consumed (case 5), `--personal` beats custom env (case 6), `CLAUDE_WORK_*` survive (case 7).
-- Baseline discipline: run `bin/dotfiles-tests` once before Task 1 and record counts; Task 4 step 4 compares against it.
+- Spec coverage: matrix rows -> Task 1 cases 1-8 and Task 2 full per-mode loop (-lc/-c/-ic); migration table -> Task 3 rows 1-6 plus dangling-local, backup-collision, symlink-to-directory, and idempotence; docs -> Task 4; audit entry -> Task 3 step 5; compatibility contract -> Task 1 cases (labels, filtering, precedence, exit status).
+- Intentional behavior changes (spec) are all encoded as test expectations: always-inject (case 1), empty-consumed (case 5), `--personal` beats custom env (case 6), `CLAUDE_WORK_*` survive (case 7), relative env normalized (case 4b).
+- Baseline discipline: run `bin/dotfiles-tests` once before Task 1 and record counts; Task 4 step 2 compares against it.
 - Out of scope honored: no herdr changes, no bash shim, no cloud changes.
+
+## Review notes
+
+Codex plan review (2026-08-31, verdict needs-rework) produced 11
+findings. Folded in: comment-safe static assert; corrected
+symlink-into-work-tree test direction; `:A` normalization for the
+absolute-path invariant; full precedence ladder per shell mode;
+`-f && -r` guards plus missing/unreadable-sibling degraded tests;
+`ln -sfn` with a symlink-to-directory case; collision-free timestamped
+backups and dangling-`.zshenv.local` handling; the `functions.zsh`
+block removal moved into Task 2 so no interactive window runs the old
+wrapper; per-arg stub recording; CI zsh syntax list gains both new
+files. Declined as disproportionate to a two-file shell change:
+exhaustive argv quoting/stream pass-through matrices, and runtime
+instrumentation proving "no external commands" (the silent-startup
+behavioral case plus the substitution grep cover the practical risk).

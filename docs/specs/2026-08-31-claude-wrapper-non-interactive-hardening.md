@@ -161,10 +161,12 @@ Contains everything currently in the "Claude Code Accounts" section of
   correctly even if the surrounding variables were never set. A
   comment states why the duplication with `_claude_config_dir` is
   deliberate (snapshot contexts strip the underscore helper).
-- Hard floor before exec: `cfg` is guaranteed non-empty and absolute
-  (`cfg="${cfg:-$HOME/.claude}"`). Empty exported `CLAUDE_CONFIG_DIR`
-  is treated as unset (existing `-n` check already does this; keep
-  it).
+- Hard floor before exec: `cfg` is guaranteed non-empty
+  (`cfg="${cfg:-$HOME/.claude}"`) and then normalized to an absolute
+  symlink-free path (`cfg="${cfg:A}"` -- a relative inherited value
+  would otherwise re-anchor the config tree to whatever cwd claude
+  sees). Empty exported `CLAUDE_CONFIG_DIR` is treated as unset
+  (existing `-n` check already does this; keep it).
 - **Always inject**: every branch launches
   `CLAUDE_CONFIG_DIR="$cfg" command claude ...`. The current
   "personal = run unwrapped" branch is removed -- it let an inherited
