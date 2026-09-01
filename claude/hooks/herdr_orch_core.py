@@ -928,6 +928,10 @@ def main(argv=None) -> int:
     w.add_argument("--exit-on-signal", action="store_true")
     w.add_argument("--once", action="store_true")
     w.add_argument("--since-epoch", type=float, default=None)
+    vc = add("verify-contract", "--task-id", "--worktree")
+    vc.add_argument("--contract", default=None)
+    vc.add_argument("--allow-unpinned", action="store_true")
+    vc.add_argument("--validate-only", action="store_true")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "claim-owner":
@@ -1172,6 +1176,73 @@ def main(argv=None) -> int:
             rd, ns.interval, ns.heartbeat_secs, ns.debounce_secs,
             ns.exit_on_signal, ns.since_epoch,
         )
+    if ns.cmd == "verify-contract":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        wt = Path(ns.worktree)
+        _require(wt.is_dir(), "worktree must be an existing directory")
+        _require(
+            not ns.allow_unpinned or ns.contract,
+            "--allow-unpinned requires --contract",
+        )
+        rel = ns.contract
+        expected_sha = None
+        if not ns.allow_unpinned:
+            tf = repo_dir(ns.repo_slug) / "tasks" / f"{ns.task_id}.json"
+            _require(contained(tf, state_root()), "escapes state root")
+            # A missing or corrupt task record is an integrity error (exit 2
+            # via _require), never exit 5 -- exit 5 is reserved for a VALID
+            # record that simply lacks pin fields, so the skill's grandfather
+            # rule can never be satisfied by corruption.
+            try:
+                task = json.loads(tf.read_text())
+            except (OSError, ValueError):
+                task = None
+            _require(
+                isinstance(task, dict), "task record missing or unreadable"
+            )
+            pin_path = task.get("contract_path")
+            expected_sha = task.get("contract_sha256")
+            if not isinstance(pin_path, str) or not isinstance(expected_sha, str):
+                sys.stderr.write("[X] no contract pinned for task\n")
+                return 5
+            _require(
+                rel is None or rel == pin_path,
+                "--contract does not match the pinned contract_path",
+            )
+            rel = pin_path
+        cf = wt / rel
+        # contained() resolves symlinks, so an in-tree symlink to an outside
+        # file already fails containment; the explicit is_symlink() rejection
+        # also covers a symlink to another file INSIDE the worktree.
+        _require(
+            contained(cf, wt) and not cf.is_symlink(),
+            "contract path escapes the worktree or is a symlink",
+        )
+        if not cf.is_file():
+            sys.stderr.write("[X] contract file missing\n")
+            return 3
+        # Single read: hash and parse the SAME bytes, so a concurrent
+        # replacement between hash and execution cannot run unhashed commands.
+        try:
+            data = cf.read_bytes()
+        except OSError:
+            sys.stderr.write("[X] contract file missing\n")
+            return 3
+        actual_sha = hashlib.sha256(data).hexdigest()
+        if expected_sha is not None and actual_sha != expected_sha:
+            sys.stderr.write("[X] contract hash mismatch (tamper or drift)\n")
+            return 4
+        try:
+            rec = json.loads(data)
+        except ValueError:
+            rec = None
+        err = validate_contract(rec, ns.task_id)
+        _require(err is None, f"invalid contract: {err}")
+        if ns.validate_only:
+            print(actual_sha)
+            return 0
+        return run_contract_commands(rec["commands"], str(wt))
     return 2
 
 
