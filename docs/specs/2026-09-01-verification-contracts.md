@@ -130,18 +130,23 @@ Behavior (pinned mode, the default):
 
 1. Validate `repo_slug`/`task_id` (existing validators); require `--worktree`
    to be an existing directory.
-2. Read the task record `tasks/<task_id>.json`; require `contract_path`
-   (worktree-relative) and `contract_sha256` fields. Missing record or
-   missing pin fields -> exit 5 ("no contract pinned"). `--contract`, when
-   given alongside a pin, must equal `contract_path` or the verb exits 2.
+2. Read the task record `tasks/<task_id>.json`. A missing or corrupt record
+   is an integrity error (exit 2) -- never exit 5, so corruption can never
+   look grandfathered. A valid record lacking `contract_path`
+   (worktree-relative) or `contract_sha256` -> exit 5 ("no contract
+   pinned"). `--contract`, when given alongside a pin, must equal
+   `contract_path` or the verb exits 2.
 3. Resolve the contract file inside the worktree; reject a path that escapes
-   the worktree (reuse `contained`, which resolves symlinks) or is not a
-   regular file. Missing file -> exit 3.
-4. sha256 the file's worktree bytes; mismatch with the pinned hash -> exit 4
-   (tamper or drift -- never run mismatched commands). The gates below only
-   invoke pinned mode on a clean worktree, where worktree bytes equal the
-   committed blob the pin was taken from.
-5. Parse and validate the schema; invalid -> exit 2.
+   the worktree (reuse `contained`, which resolves symlinks) or is ANY
+   symlink, even one resolving inside the worktree (exit 2 -- stricter than
+   containment alone, deliberately). Not a regular file / missing -> exit 3.
+4. Read the file's bytes ONCE; hash and later parse that same buffer (a
+   concurrent replacement between hash and execution can never run unhashed
+   commands). sha256 mismatch with the pinned hash -> exit 4 (tamper or
+   drift -- never run mismatched commands). The gates below only invoke
+   pinned mode on a clean worktree, where worktree bytes equal the committed
+   blob the pin was taken from.
+5. Validate the schema on the parsed buffer; invalid -> exit 2.
 6. Run each command in order via `sh -c <run>` with `cwd=<worktree>`,
    inheriting env, streaming output to stdout. Each command runs in its own
    process group (`start_new_session=True`); on `timeout_secs` expiry the
@@ -260,10 +265,11 @@ Only when all facts hold does the task transition to `completed`. On a
 contract failure with an otherwise-correlated `done.json`: the task stays
 `in-progress`, the orchestrator surfaces the failing command output, and the
 recommended next action is resuming/re-briefing the implement worker with the
-failure. No new status. Exit 4 (hash mismatch) or 5 (no pin) is surfaced as a
-distinct integrity problem, not a test failure -- the orchestrator halts
-advancement for that task and reports it; it never re-pins to make a
-mismatch go away.
+failure. No new status. Exit 2 (schema/path/corrupt record), 3 (contract
+missing), or 4 (hash mismatch) is surfaced as a distinct integrity problem,
+not a test failure -- the orchestrator halts advancement for that task and
+reports it; it never re-pins to make a mismatch go away. Exit 5 (valid
+record, no pin fields) is the grandfather path (see Pinning).
 
 Section 5 review dispatch relies on the `completed` status it already guards
 on, so review can no longer be dispatched for a contract-failing revision.
@@ -307,12 +313,15 @@ results from the check itself: `fail` (verify-contract exit 1 -- a genuine
 contract failure on the rebased tree) and `conflict` (rebase stopped;
 aborted). Everything else is **indeterminate infrastructure or integrity
 trouble** and is never recorded as `fail`: fetch failure, `worktree add`
-failure, a non-conflict rebase error, verify-contract exits 2/3/5 (schema /
-missing file / no pin), or cleanup failure. For those, write no
-`merge_check`, surface the error, and retry at the next check-in. Exit 4
-(hash mismatch) is the integrity halt from gate 2, surfaced identically --
-never recorded, never re-pinned silently. A failed `worktree remove` is
-surfaced for manual cleanup but does not invalidate a recorded result.
+failure, a non-conflict rebase error, or verify-contract exits 2/3/5
+(schema / missing file / no pin). For those, write no `merge_check`, surface
+the error, and retry at the next check-in. Exit 4 (hash mismatch) is the
+integrity halt from gate 2, surfaced identically -- never recorded, never
+re-pinned silently. Cleanup (`worktree remove --force` then `worktree
+prune`) always runs; a failed removal is surfaced for manual cleanup but
+does not invalidate a recorded result. Before recording or surfacing,
+recapture live HEAD and `origin/<default>`: if either moved during the
+check, discard the result (record nothing) and re-run at the next check-in.
 
 **Certified tree.** The check certifies the rebased BRANCH tree, which still
 carries the branch-only spec/plan/contract commits that the human squash

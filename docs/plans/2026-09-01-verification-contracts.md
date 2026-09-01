@@ -15,7 +15,7 @@
 - Stdlib only in `herdr_orch_core.py`; fail safe/closed as documented per exit code.
 - No emojis anywhere; `[OK]`/`[X]`/`[WARNING]` text markers only.
 - `verify-contract` is read-only with respect to STATE_ROOT -- it never writes state.
-- Docs edits to SKILL.md / brief-template.md / state-layout.md must be additive (new numbered facts, new subsections, new close steps) -- do not renumber or rewrite unrelated text; the sibling budget-tier task edits the same files next.
+- Docs edits to SKILL.md / state-layout.md must be additive (new numbered facts, new subsections) -- do not renumber or rewrite unrelated text; the sibling budget-tier task edits the same files next. Exception: brief-template.md close steps are a short template block -- inserting a step there renumbers the following steps of that block only.
 - Commit format `<scope>: <summary>` (<75 chars, imperative); no AI attribution.
 - Test suites must stay green: `sh claude/hooks/herdr-orch.test.sh` and `sh claude/hooks/herdr-orch-contract.test.sh` (baseline: both fully PASS at branch base 53c3760).
 
@@ -214,7 +214,7 @@ def run_contract_commands(commands, worktree) -> int:
         if rc != 0:
             print(f"FAIL {cmd['name']} exit={rc}", flush=True)
             return 1
-        print(f"ok {cmd['name']}", flush=True)
+        print(f"ok {cmd['name']} exit=0", flush=True)
     print(f"PASS {len(commands)} commands", flush=True)
     return 0
 ```
@@ -292,6 +292,25 @@ $CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" 2>/dev
 exit 0
 SH
 
+check "verify-contract: pinned validate-only prints hash, runs nothing; corrupt record exits 2" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d)
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"touch vo-ran"}]}' > "$WT/c.json"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+SHA=$(python3 -c "import hashlib;print(hashlib.sha256(open('$WT/c.json','rb').read()).hexdigest())")
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","contract_path":"c.json","contract_sha256":"'"$SHA"'"}'
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --validate-only | grep -qE '^[0-9a-f]{64}$'
+[ ! -f "$WT/vo-ran" ]                                       # validate-only never executed
+printf 'not-json' > "$ROOT/herdr-orch/slug-x/tasks/PROJ-1.json"
+set +e
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" 2>/dev/null
+[ $? -eq 2 ] || exit 1                                      # corrupt record: integrity, not grandfather
+exit 0
+SH
+
 check "verify-contract: rejects escape paths and symlinked contracts" <<'SH'
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
 CLI="python3 claude/hooks/herdr_orch_core.py"
@@ -312,7 +331,7 @@ SH
 - [ ] **Step 2: Run to verify failure**
 
 Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | grep -cE 'FAIL.*verify-contract'`
-Expected: `3` (argparse: invalid choice 'verify-contract').
+Expected: `4` (argparse: invalid choice 'verify-contract').
 
 - [ ] **Step 3: Implement** -- in `main()`. Subparser (with the other `add(...)` calls):
 
@@ -340,10 +359,17 @@ Handler (with the other read-only verbs, before the final `return 2`):
         if not ns.allow_unpinned:
             tf = repo_dir(ns.repo_slug) / "tasks" / f"{ns.task_id}.json"
             _require(contained(tf, state_root()), "escapes state root")
+            # A missing or corrupt task record is an integrity error (exit 2
+            # via _require), never exit 5 -- exit 5 is reserved for a VALID
+            # record that simply lacks pin fields, so the skill's grandfather
+            # rule can never be satisfied by corruption.
             try:
                 task = json.loads(tf.read_text())
             except (OSError, ValueError):
-                task = {}
+                task = None
+            _require(
+                isinstance(task, dict), "task record missing or unreadable"
+            )
             pin_path = task.get("contract_path")
             expected_sha = task.get("contract_sha256")
             if not isinstance(pin_path, str) or not isinstance(expected_sha, str):
@@ -365,12 +391,19 @@ Handler (with the other read-only verbs, before the final `return 2`):
         if not cf.is_file():
             sys.stderr.write("[X] contract file missing\n")
             return 3
-        actual_sha = contract_sha256(cf)
+        # Single read: hash and parse the SAME bytes, so a concurrent
+        # replacement between hash and execution cannot run unhashed commands.
+        try:
+            data = cf.read_bytes()
+        except OSError:
+            sys.stderr.write("[X] contract file missing\n")
+            return 3
+        actual_sha = hashlib.sha256(data).hexdigest()
         if expected_sha is not None and actual_sha != expected_sha:
             sys.stderr.write("[X] contract hash mismatch (tamper or drift)\n")
             return 4
         try:
-            rec = json.loads(cf.read_text())
+            rec = json.loads(data)
         except ValueError:
             rec = None
         err = validate_contract(rec, ns.task_id)
@@ -421,6 +454,8 @@ $CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","base_sha":"b0","status":"reviewed","contract_path":"contract.json","contract_sha256":"'"$SHA"'","merge_check":{"base_main_sha":"m1","branch_head_sha":"h1","result":"pass","ts":"t"}}'
 ok "merge_check round-trips through write-task" \
   "python3 -c \"import json,sys;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json'));sys.exit(0 if d['merge_check']['result']=='pass' else 1)\""
+ok "pin fields survive a status-transition rewrite" \
+  "python3 -c \"import json,sys;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json'));sys.exit(0 if d['contract_path']=='contract.json' and len(d['contract_sha256'])==64 else 1)\""
 ```
 
 - [ ] **Step 2: Append the speculative-rebase temp-repo test** (real git; proves the documented gate-3 sequence runnable):
@@ -439,13 +474,15 @@ git -C "$GR" checkout -q main
 echo m > "$GR/main.txt"; git -C "$GR" add main.txt
 git -C "$GR" -c user.email=t@t -c user.name=t commit -q -m main-advance
 BR=$(git -C "$GR" rev-parse task); MAIN=$(git -C "$GR" rev-parse main)
+# Pin from the PRE-rebase task branch blob (as the orchestrator would at
+# implement dispatch) -- the assertion below proves the pin survives rebase.
+F2=$($CLI claim-owner --repo-slug slug-rebase --session S --host h --pid 1)
+SHA9=$(git -C "$GR" show task:contract.json | python3 -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())")
+$CLI write-task --repo-slug slug-rebase --task-id PROJ-9 --session S --fence "$F2" \
+  --json '{"task_id":"PROJ-9","contract_path":"contract.json","contract_sha256":"'"$SHA9"'"}'
 TMP="$GR-spec"
 git -C "$GR" worktree add --detach -q "$TMP" "$BR"
 git -C "$TMP" -c user.email=t@t -c user.name=t rebase -q "$MAIN"
-F2=$($CLI claim-owner --repo-slug slug-rebase --session S --host h --pid 1)
-SHA9=$(python3 -c "import hashlib;print(hashlib.sha256(open('$TMP/contract.json','rb').read()).hexdigest())")
-$CLI write-task --repo-slug slug-rebase --task-id PROJ-9 --session S --fence "$F2" \
-  --json '{"task_id":"PROJ-9","contract_path":"contract.json","contract_sha256":"'"$SHA9"'"}'
 ok "verify-contract passes on the rebased detached tree" \
   "$CLI verify-contract --repo-slug slug-rebase --task-id PROJ-9 --worktree '$TMP' >/dev/null"
 git -C "$GR" worktree remove --force "$TMP"
@@ -598,13 +635,16 @@ these pinning steps.
    still equals the correlated HEAD (an advance during the run discards the
    result; re-correlate next check-in). On exit 1 the task stays
    `in-progress`: surface the failing command output and recommend
-   resuming/re-briefing the implement worker -- never dispatch review. Exit 4
-   (hash mismatch) or exit 5 on a record CARRYING a pin is an integrity
-   halt: surface it and stop advancing this task; never re-pin to clear it.
-   Exit 5 on a record with NO `contract_path` field is the grandfather path
-   (task predates contracts): warn `[WARNING] no contract pinned
-   (pre-contract task)` and treat this gate as passed. This gate augments
-   facts 1-5; it never replaces them.
+   resuming/re-briefing the implement worker -- never dispatch review. Exit 2
+   (invalid schema/path or corrupt task record), 3 (contract file missing),
+   or 4 (hash mismatch) is an integrity halt: surface it and stop advancing
+   this task; never dispatch review, never re-pin to clear it. Exit 5 fires
+   only on a valid record lacking pin fields -- the grandfather path (task
+   predates contracts): warn `[WARNING] no contract pinned (pre-contract
+   task)` and treat this gate as passed. This gate augments facts 1-5; it
+   never replaces them. Every `write-task` in sections 4-6 rewrites the FULL
+   record -- always carry `contract_path`, `contract_sha256`, and
+   `merge_check` forward from the prior record on every status transition.
 ```
 
 - [ ] **Step 4: Section 6 (surface for merge).** After the vibe-audit paragraph and before the final "Surface:" paragraph, insert:
@@ -620,12 +660,16 @@ worktree: `git worktree add --detach <tmp> <head>`; `git -C <tmp> rebase
 `result: "conflict"`. On a clean rebase:
 `python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
 --worktree <tmp>` and record `result: "pass"` (exit 0) or `"fail"` (exit 1).
-Always `git worktree remove --force <tmp>` (a failed removal is surfaced for
-manual cleanup but does not invalidate the result). Write the `merge_check`
-object (`base_main_sha`, `branch_head_sha`, `result`, `ts`) via `write-task`.
-Fetch/worktree/rebase infrastructure errors and verify exits 2/3 record
-NOTHING -- surface and retry next check-in; exit 4 (or 5 on a pinned record)
-is the integrity halt of section 4. Surface merge-ready ONLY on a matching
+Always `git worktree remove --force <tmp>` then `git worktree prune` (a
+failed removal is surfaced for manual cleanup but does not invalidate the
+result). Before recording or surfacing, recapture live HEAD and
+`origin/<default>`: if either moved during the check, discard the result
+(record nothing) and re-run next check-in. Write the `merge_check` object
+(`base_main_sha`, `branch_head_sha`, `result`, `ts`) via `write-task`,
+carrying all other record fields forward. Fetch/worktree/rebase
+infrastructure errors and verify exits 2/3 record NOTHING -- surface and
+retry next check-in; exit 4 (or an exit 5 despite a pinned record) is the
+integrity halt of section 4. Surface merge-ready ONLY on a matching
 `result: "pass"`; on `fail`/`conflict` the task stays `reviewed` unsurfaced,
 with the cause and the recommended fix path reported (rebase/fix -> new HEAD
 -> stale-review reset -> fresh cycle). This is an advisory compatibility
@@ -657,11 +701,11 @@ git commit -m "herdr: Wire contract gates into kickoff, completion, and merge su
 ```markdown
 2. Run
    `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`.
-   You may use `--outcome completed` in the next step ONLY if it exits 0. If
-   you cannot make the contract pass, emit `failed` or `paused` instead --
-   never `completed`. (Exit 5 means no contract is pinned for this task --
-   note that in your close and proceed; the orchestrator applies its
-   grandfather rule.)
+   You may use `--outcome completed` in the next step ONLY if it exits 0, or
+   if it exits 5 (no contract pinned -- note "exit 5, no pin" in your close;
+   the orchestrator decides whether its grandfather rule applies). On ANY
+   other nonzero exit, emit `failed` or `paused` instead -- never
+   `completed`.
 ```
 
 - [ ] **Step 2: Plan-phase brief.** In the plan-phase variant's task section, after the pipeline sentence ending "codex-plan-review.", append:
