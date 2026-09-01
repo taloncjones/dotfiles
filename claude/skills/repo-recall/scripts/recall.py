@@ -780,18 +780,54 @@ def main(argv=None):
         return _fail(classify_sqlite_error(exc), f"sqlite: {exc}")
 
 
+# --- status ----------------------------------------------------------------
+
 def cmd_status(args):
     if args.all:
         return status_all()
     ctx = Context()
-    ensure_index_dir(ctx.index_file)
+    conn = open_index(ctx)
+    if not has_index(conn):
+        # Never indexed, or just rebuilt after a schema mismatch / quarantine:
+        # complete the rebuild so the counts below describe the tree, not an
+        # empty schema.
+        refresh_or_degrade(conn, ctx, quiet=False)
     print(f"config dir: {ctx.config_dir}")
     print(f"index: {ctx.index_file}")
+    print(f"schema: {_meta(conn, 'schema_version')}")
+    print(f"version: {RECALL_VERSION}")
     print(f"fts5: {'yes' if fts5_available() else 'no'}")
+    print(f"last index: {_meta(conn, 'last_index_at') or 'never'}")
+    counts = {k: [0, 0] for k in KIND_ORDER}
+    for kind, n in conn.execute("SELECT kind, count(*) FROM files GROUP BY kind"):
+        counts[kind][0] = n
+    for kind, n in conn.execute("SELECT kind, count(*) FROM chunks GROUP BY kind"):
+        counts[kind][1] = n
+    for kind in KIND_ORDER:
+        print(f"{kind}: {counts[kind][0]} files, {counts[kind][1]} chunks")
     return EXIT_OK
 
 
 def status_all():
+    config_dir = resolve_config_dir(Path(os.getcwd()).resolve())
+    root = config_dir / "recall"
+    print(f"config dir: {config_dir}")
+    if not root.is_dir():
+        print("no indexes")
+        return EXIT_OK
+    for db in sorted(root.glob("*/index.db")):
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            top = _meta(conn, "toplevel") or "?"
+            last = _meta(conn, "last_index_at") or "never"
+            conn.close()
+        except sqlite3.DatabaseError:
+            print(f"{db.parent.name}: corrupt")
+            continue
+        state = "present" if Path(top).is_dir() else "missing"
+        print(f"{db.parent.name}: {top} ({state}, last index {last})")
     return EXIT_OK
 
 

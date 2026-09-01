@@ -317,5 +317,36 @@ test_search_isolation_sentinels
 test_search_worktree_sees_main_memory
 test_search_locked_degrades
 
+echo "== task 6: status"
+test_status_reports_counts() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  recall "$r" status
+  assert_eq "status exits 0" "$RC" 0
+  assert_contains "status shows schema version" "$OUT" "schema: 1"
+  assert_contains "status shows script version" "$OUT" "version: 1"
+  assert_contains "status shows docs count" "$OUT" "docs: 1 files"
+  assert_contains "status shows memory count" "$OUT" "memory: 1 files"
+  assert_contains "status shows last index" "$OUT" "last index: 20"
+  python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE meta SET value='0' WHERE key='schema_version'\"); c.commit()" "$(db_path "$HOME/.claude" "$r")"
+  recall "$r" status
+  assert_contains "status after schema mismatch rebuilds first" "$OUT" "docs: 1 files"
+  assert_contains "status after schema mismatch warns" "$ERR" "schema"
+}
+test_status_all_outside_git_and_corrupt() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" index
+  mkdir -p "$HOME/.claude/recall/bogus-000000000000"; printf 'junk' > "$HOME/.claude/recall/bogus-000000000000/index.db"
+  mkdir -p "$SANDBOX/plain"
+  recall "$SANDBOX/plain" status --all
+  assert_eq "status --all works outside git" "$RC" 0
+  assert_contains "status --all lists live index" "$OUT" "$r"
+  assert_contains "status --all flags corrupt" "$OUT" "corrupt"
+  assert_file "status --all never quarantines" "$HOME/.claude/recall/bogus-000000000000/index.db"
+  assert_no_file "status --all never rebuilds" "$HOME/.claude/recall/bogus-000000000000/index.db.corrupt"
+}
+test_status_reports_counts
+test_status_all_outside_git_and_corrupt
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
