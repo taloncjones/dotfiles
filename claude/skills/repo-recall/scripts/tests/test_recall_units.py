@@ -183,5 +183,65 @@ class Sources(unittest.TestCase):
                          ["c.md", "m.md"])
 
 
+class Chunking(unittest.TestCase):
+    def test_preamble_uses_first_h1_and_line_1(self):
+        text = "---\ntitle: T\n---\nintro\n\n# Main\nbody\n## Sub ##\nsub body\n#### deep\ndeep body\n"
+        chunks = recall.chunk_markdown(text, "f.md")
+        self.assertEqual([c.heading for c in chunks], ["Main", "Main", "Sub"])
+        self.assertEqual([c.line for c in chunks], [1, 6, 8])
+        self.assertIn("title: T", chunks[0].body)
+        self.assertIn("deep body", chunks[2].body)
+        self.assertNotIn("# Main", chunks[1].body)
+
+    def test_file_starting_with_heading_has_no_empty_preamble(self):
+        chunks = recall.chunk_markdown("# Only\nbody\n", "f.md")
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].line, 1)
+
+    def test_headingless_file_is_one_chunk_named_by_file(self):
+        chunks = recall.chunk_markdown("just text\nmore\n", "notes.md")
+        self.assertEqual(chunks, [recall.Chunk("notes.md", 1, "just text\nmore")])
+
+    def test_empty_body_chunks_dropped(self):
+        chunks = recall.chunk_markdown("# A\n\n# B\nb body\n", "f.md")
+        self.assertEqual([c.heading for c in chunks], ["B"])
+
+    def test_headings_inside_code_fences_ignored(self):
+        text = "# A\n```sh\n# not a heading\n```\nafter\n"
+        chunks = recall.chunk_markdown(text, "f.md")
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("# not a heading", chunks[0].body)
+
+    def test_fence_closes_only_with_matching_marker(self):
+        # A ``` inside a ~~~ block does not close it; a longer ```` closes ```.
+        text = "# A\n~~~\n```\n# still fenced\n~~~\n````\n# also fenced\n`````\n## B\nb\n"
+        chunks = recall.chunk_markdown(text, "f.md")
+        self.assertEqual([c.heading for c in chunks], ["A", "B"])
+
+    def test_plain_is_one_chunk(self):
+        self.assertEqual(recall.chunk_plain("x\ny", "f.txt"), [recall.Chunk("f.txt", 1, "x\ny")])
+        self.assertEqual(recall.chunk_plain("  \n", "f.txt"), [])
+
+
+class QueryBuilding(unittest.TestCase):
+    def test_default_mode_quotes_and_ands(self):
+        self.assertEqual(recall.build_query(['a"b', "c*", "(d"], raw=False),
+                         '"a""b" AND "c*" AND "(d"')
+
+    def test_raw_passthrough(self):
+        self.assertEqual(recall.build_query(["a", "OR", "b*"], raw=True), "a OR b*")
+
+
+class CorruptionClassification(unittest.TestCase):
+    def test_only_specific_messages_count(self):
+        import sqlite3
+        self.assertTrue(recall.is_corruption(sqlite3.DatabaseError("file is not a database")))
+        self.assertTrue(recall.is_corruption(sqlite3.DatabaseError("database disk image is malformed")))
+        self.assertFalse(recall.is_corruption(sqlite3.OperationalError("database is locked")))
+        self.assertFalse(recall.is_corruption(sqlite3.OperationalError("fts5: syntax error near ...")))
+        self.assertFalse(recall.is_corruption(sqlite3.OperationalError("attempt to write a readonly database")))
+        self.assertFalse(recall.is_corruption(sqlite3.DatabaseError("note: file is not a database")))
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())

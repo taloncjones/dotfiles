@@ -354,6 +354,85 @@ class Context:
         self.index_file = index_path(self.config_dir, self.toplevel, self.canonical)
 
 
+# --- chunking ---------------------------------------------------------------
+
+Chunk = namedtuple("Chunk", "heading line body")
+HEADING_RE = re.compile(r"^(#{1,3})\s+(.*?)\s*#*\s*$")
+FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def _fence_state(line, opener):
+    """Open-fence marker after this line (None = not inside a fence). A fence
+    closes only on the same character with at least the opener's length."""
+    m = FENCE_RE.match(line)
+    if not m:
+        return opener
+    marker = m.group(1)
+    if opener is None:
+        return marker
+    if marker[0] == opener[0] and len(marker) >= len(opener):
+        return None
+    return opener
+
+
+def _first_h1(lines):
+    opener = None
+    for line in lines:
+        if FENCE_RE.match(line):
+            opener = _fence_state(line, opener)
+            continue
+        m = HEADING_RE.match(line)
+        if m and opener is None and m.group(1) == "#":
+            return m.group(2).strip()
+    return None
+
+
+def chunk_markdown(text, filename):
+    lines = text.splitlines()
+    heading = _first_h1(lines) or filename
+    start, body, out, opener = 1, [], [], None
+    for number, line in enumerate(lines, 1):
+        if FENCE_RE.match(line):
+            opener = _fence_state(line, opener)
+            body.append(line)
+            continue
+        m = HEADING_RE.match(line)
+        if m and opener is None:
+            out.append(Chunk(heading, start, "\n".join(body)))
+            heading, start, body = m.group(2).strip(), number, []
+        else:
+            body.append(line)
+    out.append(Chunk(heading, start, "\n".join(body)))
+    return [Chunk(c.heading, c.line, c.body.strip("\n")) for c in out if c.body.strip()]
+
+
+def chunk_plain(text, filename):
+    body = text.strip("\n")
+    return [Chunk(filename, 1, body)] if body.strip() else []
+
+
+def chunk_file(path, text):
+    if Path(path).suffix.lower() == ".md":
+        return chunk_markdown(text, Path(path).name)
+    return chunk_plain(text, Path(path).name)
+
+
+# --- query -----------------------------------------------------------------
+
+def build_query(terms, raw):
+    if raw:
+        return " ".join(terms)
+    return " AND ".join('"' + t.replace('"', '""') + '"' for t in terms)
+
+
+CORRUPTION_MARKERS = ("file is not a database", "database disk image is malformed")
+
+
+def is_corruption(exc):
+    msg = str(exc).lower().strip()
+    return isinstance(exc, sqlite3.DatabaseError) and msg.startswith(CORRUPTION_MARKERS)
+
+
 # --- CLI -------------------------------------------------------------------
 
 class Parser(argparse.ArgumentParser):
