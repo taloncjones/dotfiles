@@ -1,8 +1,10 @@
 # Repo Recall: per-repo full-text recall for docs, findings, todos, memory
 
-Status: draft for codex-spec-review
+Status: revised after codex-spec-review round 1 (2026-09-01)
 Date: 2026-09-01
 Todo: `.todos/pending/2026-09-01-ship-per-repo-full-text-recall-skill-for-docs-and.md`
+(this spec supersedes the todo's Solution section where they differ, notably
+"rebuilt by a hook": v1 refreshes at query time and ships no hook)
 
 ## Problem
 
@@ -15,29 +17,31 @@ of scope here.
 
 ## Goal
 
-A dotfiles-shipped skill plus one script that gives any session (human or
-worker agent) a ranked full-text search over a repo's prose artifacts, with
-zero per-repo setup, no committed index, and correct account isolation for
-work repos.
+A dotfiles-shipped skill plus one script that gives a Claude Code session
+(interactive or worker agent) or a direct shell caller a ranked full-text
+search over a repo's prose artifacts, with zero per-repo setup, no committed
+index, and correct account isolation for work repos.
 
 First release is FTS-only (SQLite FTS5, BM25). Embeddings are explicitly
 deferred behind a falsifiable evaluation defined in this spec.
 
 ## Non-goals (v1)
 
-- Vector / embedding search (sqlite-vec). See "Embeddings decision" below.
+- Vector / embedding search (sqlite-vec). See "Embeddings decision".
 - Indexing source code. LSP plugins and codemaps own that.
 - Cross-repo search. One index per working tree.
 - A daemon, file watcher, or background hook. Freshness is enforced at query
   time (see "Freshness").
 - A per-repo config file. Sources are convention-based with one env override.
+- A Codex-side skill mirror. Codex skills are managed independently in this
+  repo; Codex sessions can call the script directly by path.
 
 ## Deliverables
 
 | Path | What |
 | --- | --- |
 | `claude/skills/repo-recall/SKILL.md` | Skill: when to use, commands, how workers call it, degradation behaviour |
-| `claude/skills/repo-recall/scripts/recall.py` | Single stdlib-only Python 3 script: `index`, `search`, `status`, `eval` |
+| `claude/skills/repo-recall/scripts/recall.py` | Single stdlib-only Python 3 script: `index`, `search`, `status`, `eval`, `eval add` |
 | `claude/skills/repo-recall/scripts/tests/recall_test.sh` | Shell test suite in the repo's PASS/FAIL style |
 | `claude/skills/.gitignore` | Add `!/repo-recall/` to the whitelist |
 | `bin/dotfiles-tests` | Register the new suite in `SUITES` |
@@ -47,122 +51,190 @@ No changes to `settings.json.tmpl`, hooks, or the installer: `claude/skills`
 is already symlinked whole-dir into both config dirs, so the skill ships on
 the next `update` / link run.
 
-Runtime dependencies: `python3` with a `sqlite3` module compiled with FTS5.
-Confirmed on this machine (Python's bundled SQLite 3.53.4, FTS5 present).
-`sqlite3` CLI is not required.
+Runtime: `python3` >= 3.9 whose `sqlite3` module has FTS5. Supported
+platforms are the ones the dotfiles support: macOS (system or Homebrew
+python3) and Linux (apt or Linuxbrew python3). Confirmed present on this
+macOS machine (Python's bundled SQLite 3.53.4). The script probes FTS5 at
+startup by creating an in-memory FTS5 table; the plan includes a live check
+on a Linux container. No `uv` project, no third-party packages; `ruff`
+clean under the repo's Python rules.
 
 ## Sources (what gets indexed)
 
-All paths are relative to the **working tree top level** (`git rev-parse
---show-toplevel`). Every source is optional; a missing source is silently
-skipped. Files are indexed only if they match `*.md` (plus `*.txt` and
-`*.jsonl` for findings), are under 1 MiB, and decode as UTF-8.
+All in-repo paths are relative to the **working tree top level** (`git
+rev-parse --show-toplevel`, symlinks resolved). Every source is optional; a
+missing source is silently skipped.
 
-| Kind | Globs | Notes |
-| --- | --- | --- |
-| `docs` | `docs/**/*.md`, `*.md` at repo root | Specs, plans, superpowers docs, README, CLAUDE.md, AGENTS.md |
-| `handoffs` | `.claude/handoffs/*.md` | Session handoff briefs |
-| `todos` | `.todos/pending/*.md`, `.todos/completed/*.md` | The todos skill's backlog. `TODO.md` index is skipped (derived) |
-| `findings` | `docs/findings/**/*`, `.claude/findings/**/*` | Reserved location. Nothing writes here today; co-review reports live in chat. The sibling todo "distill recurring agent findings into standing rules" may adopt it. Indexed if present so it works the day something lands |
-| `memory` | `<config_dir>/projects/<slug>/memory/*.md` | Claude Code auto-memory. `<slug>` = absolute path with every non-alphanumeric byte replaced by `-`. Two slugs are checked: the working tree top level and the canonical repo root (`--git-common-dir` parent), so a worktree session sees the main checkout's memory. `MEMORY.md` (the index) is skipped |
+Eligibility (applies to every kind, including `extra`): regular file, not a
+symlink, resolved path inside the top level (memory: inside its memory dir),
+extension in the kind's allowed set, size <= 1 MiB, decodes as UTF-8.
 
-Excluded everywhere: `.git/`, `.worktrees/`, `.claude/worktrees/`,
-`node_modules/`, any directory starting with `.` other than `.todos` and
-`.claude`. Symlinks are not followed.
+| Kind | Globs | Extensions | Notes |
+| --- | --- | --- | --- |
+| `memory` | `<config_dir>/projects/<slug>/memory/*.md` | md | Claude Code auto-memory for two project slugs: the top level and the canonical repo root (`--git-common-dir` parent), deduplicated when equal. `MEMORY.md` (the index) skipped. Slug = absolute path with every non-alphanumeric byte replaced by `-`, exactly as Claude Code names `~/.claude/projects/` entries |
+| `extra` | `RECALL_EXTRA_GLOBS` (colon-separated, top-level-relative) | md, txt, jsonl | The only configuration knob. Globs containing `..` or resolving outside the top level are rejected with a warning |
+| `findings` | `docs/findings/**/*`, `.claude/findings/**/*` | md, txt, jsonl | Reserved location. Nothing writes here today; co-review reports live in chat. The sibling todo "distill recurring agent findings into standing rules" may adopt it |
+| `handoffs` | `.claude/handoffs/*.md` | md | Session handoff briefs |
+| `todos` | `.todos/pending/*.md`, `.todos/completed/*.md` | md | The todos skill backlog. `TODO.md` skipped (derived) |
+| `docs` | `docs/**/*.md`, `*.md` at top level | md | Specs, plans, superpowers docs, README, CLAUDE.md, AGENTS.md |
 
-Override: `RECALL_EXTRA_GLOBS` (colon-separated globs relative to the top
-level) adds sources of kind `extra`. This is the only configuration knob.
+Kind precedence and deduplication: each resolved path is indexed exactly
+once. When a file matches several kinds it takes the first kind in the table
+order above (`memory` > `extra` > `findings` > `handoffs` > `todos` > `docs`),
+so `docs/findings/x.md` is `findings`, not `docs`.
+
+Excluded directories everywhere: `.git/`, `.worktrees/`, `.claude/worktrees/`,
+`node_modules/`, and any directory starting with `.` other than `.todos` and
+`.claude`. Symlinked directories are not descended.
 
 ## Index location and account isolation
 
-The index never lives inside the repo, so it can never be committed and needs
-no `info/exclude` entry.
+The index lives under the active Claude config dir, never inside the repo,
+so it cannot be committed and needs no `info/exclude` entry.
 
 ```
-<config_dir>/recall/<slug-of-toplevel>/index.db
+<config_dir>/recall/<repo-id>/index.db
+<repo-id> = <slug truncated to 80 bytes>-<first 12 hex of sha256(resolved top level)>
 ```
 
-`<config_dir>` resolves in this order:
+The hash suffix makes the id collision-free and bounded even though the slug
+is lossy.
 
-1. `$CLAUDE_CONFIG_DIR` if set (the same rule the `claude()` zsh wrapper and
-   `account_guard.py` honour).
-2. Else, if the top level is under `$CLAUDE_WORK_TREE` (default
-   `~/Git/work`) and `~/.claude-work` exists: `~/.claude-work`.
+`<config_dir>` resolves with the same rule as `_claude_config_dir()` in
+`zsh/functions.zsh` and `account_guard.py`:
+
+1. `$CLAUDE_CONFIG_DIR` if set.
+2. Else, if the resolved top level is under `$CLAUDE_WORK_TREE` (default
+   `~/Git/work`, symlinks resolved on both sides): `$CLAUDE_WORK_CONFIG_DIR`
+   (default `~/.claude-work`), created if absent (mode 0700), matching the
+   wrapper, which also routes there before the dir exists.
 3. Else `~/.claude`.
 
-Consequence: a work repo's index and its memory source both resolve under
-the work account's config dir. A personal repo never reads or writes
-`~/.claude-work`. `recall.py status` prints the resolved config dir, index
-path, and source counts so the routing is auditable.
+Guarantees:
+
+- The resolved index path must not be inside the working tree or the
+  canonical repo root (symlink-resolved). If it is, exit 6 with the path.
+- A work-tree search opens only paths under the work config dir; a personal
+  search opens only paths under the personal config dir. Tested with
+  sentinel memory files in each dir that must never appear in the other's
+  results.
+- Index dir and file are created with mode 0700 / 0600.
+- `recall.py status` prints the resolved config dir, index path, and
+  per-kind counts so the routing is auditable.
+- Stale indexes (top level deleted) are not auto-purged; `status --all`
+  lists every index under the config dir with its recorded top level and
+  whether it still exists, so a human can `rm` them. Corrupt-index backups:
+  at most one `index.db.corrupt` is kept (newer replaces older).
 
 Each working tree (main checkout or linked worktree) gets its own index
 because their `docs/` and `.todos/` contents differ per branch.
 
 ## Data model
 
-SQLite file, WAL off (single writer, tiny corpus), two tables:
+SQLite file, default journal, `busy_timeout = 5000`, three tables:
 
 ```sql
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+  -- schema_version, toplevel, last_index_at (ISO-8601 UTC), last_index_ok
 CREATE TABLE files (
-  path      TEXT PRIMARY KEY,   -- absolute path
-  kind      TEXT NOT NULL,      -- docs|handoffs|todos|findings|memory|extra
+  path      TEXT PRIMARY KEY,   -- absolute, resolved
+  display   TEXT NOT NULL,      -- see "Display paths"
+  kind      TEXT NOT NULL,
   mtime_ns  INTEGER NOT NULL,
-  size      INTEGER NOT NULL
+  size      INTEGER NOT NULL,
+  sha256    TEXT NOT NULL
 );
 CREATE VIRTUAL TABLE chunks USING fts5(
-  path UNINDEXED, kind UNINDEXED, line UNINDEXED,
+  display UNINDEXED, kind UNINDEXED, line UNINDEXED,
   heading, body,
   tokenize = 'porter unicode61'
 );
 ```
 
-Chunking: a markdown file is split at every heading line (`#` through
-`###`); the text before the first heading is one chunk with the file's title
-(first H1 or filename) as its heading. YAML front matter is kept in the first
-chunk's body so `title:`/`area:` fields are searchable. Non-markdown findings
-files are one chunk per file. `line` is the 1-based line of the chunk's
-heading, giving `path:line` anchors in output.
+`schema_version` mismatch on open triggers a full rebuild (no migration
+code in v1).
 
-Ranking: `bm25(chunks, 0, 0, 0, 3.0, 1.0)` (heading weight 3, body weight 1).
+Chunking (markdown): split at every ATX heading line `#`, `##`, `###`
+(deeper headings stay in their parent's body). Heading text is the line with
+leading `#`s, trailing `#`s and surrounding whitespace stripped. The heading
+line itself is not part of the body. Text before the first heading is the
+preamble chunk: heading = first H1 text if the file has one, else the file
+name; `line` = 1. A chunk whose body is blank after stripping is dropped.
+YAML front matter stays in the preamble body so `title:`/`area:` fields are
+searchable. A file with no headings is one chunk (heading = file name, line
+1). Non-markdown files (txt, jsonl) are one chunk per file. `line` is the
+1-based line of the chunk's heading.
+
+Ranking: `bm25(chunks, 0, 0, 0, 3.0, 1.0)` (heading weight 3, body 1). Ties
+break by `display`, then `line`, ascending, so output is deterministic.
+
+## Display paths
+
+- In-repo files: path relative to the top level (`docs/specs/x.md`).
+- Memory files: tilde-abbreviated absolute path
+  (`~/.claude/projects/<slug>/memory/x.md`), never the raw home directory.
+
+Display paths are what `search` prints, what `--json` carries, and what
+`eval` matches against.
 
 ## Commands
 
 Called by absolute path: `~/.claude/skills/repo-recall/scripts/recall.py`.
+All commands: usage errors (unknown option, empty or whitespace-only query,
+`--limit` outside 1..100, unknown `--kind`) exit 64 with a one-line usage
+message on stderr. Warnings always go to stderr.
 
 ### `recall.py index [--full] [--quiet]`
 
-Incremental by default: walks the sources, compares `(mtime_ns, size)` with
-the `files` table, re-chunks changed/new files, deletes rows for vanished
-files. `--full` drops and rebuilds. Prints a one-line summary
-(`indexed N files (+a ~m -d), K chunks`). Exit 0.
+Incremental by default. For each eligible file, compares `(mtime_ns, size)`
+with `files`; on any difference recomputes `sha256`, and re-chunks only when
+the hash changed. Files that vanished or became ineligible (oversized,
+unreadable, non-UTF-8, excluded, symlinked) are removed. A file whose kind
+changed is re-indexed under the new kind. `--full` drops and rebuilds. The
+whole refresh is one transaction: readers see the old index or the new one,
+never a partial one; an interrupted refresh leaves the old index intact.
+Prints `indexed N files (+a ~m -d), K chunks` on stdout. Exit 0; exit 7 if
+the index is locked for longer than the busy timeout.
+
+Known limit, documented in `SKILL.md`: an edit that preserves both mtime
+and size is not detected until `--full`. Git checkouts and editors update
+mtime, so this does not occur in normal use.
 
 ### `recall.py search <query...> [--limit N] [--kind K]... [--json] [--no-refresh] [--raw]`
 
-1. Runs the incremental `index` first unless `--no-refresh` (see Freshness).
+1. Runs the incremental refresh first unless `--no-refresh`. Its summary and
+   any warnings go to stderr, so stdout carries results only. If the index
+   is locked: with a usable prior index, search it and warn; with no prior
+   index, exit 7. `--no-refresh` with no index exits 7.
 2. Builds the FTS query. Default mode: each whitespace-separated term is
-   quoted and the terms are joined with implicit AND, so user input can
-   never break FTS5 syntax. `--raw` passes the query through verbatim for
-   FTS5 operators (`OR`, `NEAR`, `prefix*`, column filters); a parse error in
-   raw mode exits 4 with SQLite's message.
-3. Prints up to `--limit` (default 8) hits, best first:
+   double-quoted (embedded `"` doubled) and terms are joined with implicit
+   AND, so user input cannot break FTS5 syntax. `--raw` passes the query
+   through verbatim for FTS5 operators; a parse error exits 4 with SQLite's
+   message.
+3. Prints up to `--limit` (default 8, max 100) hits, best first:
 
 ```
-1. docs/specs/2026-08-30-codex-hook-cleanup.md:42  [docs]  ## Decision
+1. docs/specs/2026-08-30-codex-hook-cleanup.md:42  [docs]  Decision
    ...snippet with >>matched<< terms, one line, <= 200 chars...
 ```
 
-`--json` emits one object per line: `{rank, score, path, line, kind,
-heading, snippet}`. `--kind` is repeatable and filters by source kind.
+`--json` emits one object per line on stdout and nothing else:
+`{rank, score, path, line, kind, heading, snippet}` where `path` is the
+display path. `--kind` is repeatable and filters by source kind.
 
-Exit codes: 0 hits; 1 no hits; 2 no sources found in this repo (message
-names the conventional locations it looked for); 3 not inside a git working
-tree; 4 query error; 5 SQLite lacks FTS5 (message names the fix:
-a Python whose sqlite3 has FTS5, e.g. Homebrew python).
+Exit codes: 0 hits; 1 no hits; 2 no eligible sources in this repo (message
+lists the conventional locations searched); 3 not inside a git working
+tree; 4 raw query parse error; 5 SQLite lacks FTS5 (message names the fix:
+a python3 whose sqlite3 has FTS5, e.g. Homebrew python); 6 config dir not
+writable or index path resolves inside the repo; 7 index locked / missing;
+64 usage.
 
-### `recall.py status`
+### `recall.py status [--all]`
 
-Prints config dir, index path, per-kind file/chunk counts, last index time,
-and whether FTS5 is available. Never exits non-zero for missing sources.
+Prints config dir, index path, schema version, per-kind file/chunk counts,
+`last_index_at`, and whether FTS5 is available. `--all` lists every index
+under the config dir with its recorded top level and existence. Never exits
+non-zero for missing sources; exits 3 outside a git tree (without `--all`).
 
 ### `recall.py eval [<file>] [--k 5]`
 
@@ -170,22 +242,36 @@ Reads golden queries (default `docs/recall-eval.jsonl` under the top
 level), one JSON object per line:
 
 ```json
-{"q": "why did we drop the codex hook", "expect": ["docs/specs/2026-08-30-codex-hook-cleanup.md"], "note": "paraphrase"}
+{"q": "why did we drop the codex hook", "expect": ["docs/specs/2026-08-30-codex-hook-cleanup.md"], "note": "paraphrase", "added": "2026-09-01"}
 ```
 
-`expect` entries are top-level-relative paths, optionally `path#heading
-text`. A query is a hit at k if any expected entry appears in the top k
-results. Prints per-query hit/miss with the rank achieved, then
-`recall@k`, `MRR`, and the miss list grouped by `note`. Exit 0 always
-(reporting tool, not a gate).
+Schema: `q` non-empty string; `expect` non-empty list of display paths,
+each optionally suffixed `#<heading text>` (compared case-insensitively
+after the same normalization as chunk headings); `note` one of `hit`,
+`paraphrase`, `synonym`, `tokenization`, `missing-source`; `added` ISO date.
+Validation failures (malformed JSON, wrong types, unknown note, duplicate
+`q`, expected path not currently indexed) are listed and the command exits
+8 without printing metrics. A query hits at k if any expected entry appears
+in the top k results (path match, plus heading match when a heading suffix
+is given). Output: per-query hit/miss with rank achieved, then `recall@k`
+and `MRR` to two decimals with `n`, then misses grouped by `note`. Exit 0 on
+a valid run regardless of scores (reporting tool, not a gate).
+
+### `recall.py eval add "<q>" --expect <display-path>[#heading]... [--note N]`
+
+Appends one validated line to `docs/recall-eval.jsonl` (single
+`O_APPEND` write, so concurrent appends do not interleave), refusing
+duplicates of `q`. Default note is `hit`. This is the only way the skill
+writes into a repo, and only when a human asks for it (see Skill behaviour).
 
 ## Freshness
 
 `search` refreshes incrementally before querying. Cost is one `stat` per
-candidate file plus re-chunking of changed files; for the corpora in scope
-(hundreds of markdown files) this is well under a second, so results are
-always current without a hook. `--no-refresh` exists for tight loops and
-tests. A SessionStart hook is deliberately not added: it would touch the
+candidate file plus hashing and re-chunking of changed files; for the corpora
+in scope (hundreds of markdown files) this is well under a second, so results
+reflect the working tree as of the query, subject to the documented
+mtime+size limit. `--no-refresh` exists for tight loops and tests. A
+SessionStart hook is deliberately not added: it would touch the
 template-owned `hooks` key, the drift test, and both config dirs for no
 correctness gain.
 
@@ -194,94 +280,117 @@ correctness gain.
 - Trigger phrases: "didn't we decide", "what did the review say", "find the
   spec/plan/todo about", "search our docs/notes/memory", any question about
   prior decisions that is not a code-symbol lookup.
-- Workers call `search` by absolute path and read the `path:line` anchors
-  before answering; the skill instructs them to open the file at the anchor
-  rather than trusting the snippet.
-- When exit is 2 the skill says so in one line and falls back to `grep`/`rg`.
-  It does not create any files in the repo.
-- Recording a miss: when a human or worker notes that recall failed to find
-  something that exists, append a line to `docs/recall-eval.jsonl` with the
-  paraphrased query, the expected path, and a `note` classifying the miss
-  (`paraphrase`, `synonym`, `tokenization`, `missing-source`). This is the
-  input to the embeddings decision.
+- Workers call `search` by absolute path and open the file at the
+  `path:line` anchor before answering; the snippet is a pointer, not
+  evidence.
+- Exit 2 or 5: say so in one line and fall back to `rg`. The skill never
+  creates files in the repo on its own.
+- Golden-set capture is opt-in and human-driven: when the user says to
+  record a query ("add that to the recall eval"), run `eval add` with the
+  query verbatim, the expected path, and a `note`. Workers never append on
+  their own. Queries that contain secrets or customer data are not recorded
+  (the file may be committed).
 
 ## Embeddings decision (falsifiable)
 
-Add a sqlite-vec column only if all of the following hold, measured with
-`recall.py eval` on a repo's golden set:
+The golden set is prospective, not miss-only: it records real questions as
+they are asked, hits and misses alike, so `recall@k` estimates real recall
+rather than the miss rate. Queries are stored verbatim and never edited.
 
-1. The golden set has at least 30 queries collected from real misses or real
-   questions (not synthetic), across at least 2 source kinds.
-2. `recall@5 < 0.80` after the cheap fixes are applied: adding `synonym`
-   terms to the query, prefix matching, and closing `missing-source` gaps.
-3. At least half of the remaining misses are tagged `paraphrase` (the asker
-   used different words for the same concept), which is the failure class
-   embeddings address. `tokenization` and `synonym` misses are FTS
-   configuration problems and do not count toward the threshold.
+Add a sqlite-vec column only if all of the following hold, measured with
+`recall.py eval`:
+
+1. The set has at least 30 queries from real use (not synthetic), spanning
+   at least 2 source kinds, collected over at least 4 weeks.
+2. After product-level fixes shipped in `recall.py` (tokenizer settings, a
+   synonym table applied to queries, prefix matching, closing
+   `missing-source` gaps), a re-run of the unchanged golden file gives
+   `recall@5 < 0.80`. Fixes are versioned in the script; eval output prints
+   the script version so runs are comparable.
+3. At least half of the remaining misses are noted `paraphrase` (different
+   words for the same concept), the failure class embeddings address.
+   `tokenization` and `synonym` misses are FTS configuration problems and
+   do not count.
 
 If 1-3 hold, the follow-up is a second column populated by a local embedding
-model, hybrid-scored with BM25, evaluated against the same golden set with
-the pass bar `recall@5 >= 0.90`. If they do not hold within the first two
-months of use, embeddings stay out and the todo is closed.
+model, hybrid-scored with BM25. Its pass bar is `recall@5 >= 0.90` on a
+held-out slice: queries added after the embedding work started, never used
+for tuning. If 1-3 do not hold within two months of daily use, embeddings
+stay out and the todo is closed.
 
 ## Error handling
 
-- Not a git repo: exit 3, message, no files written.
-- Unreadable or non-UTF-8 file: skipped with a warning to stderr unless
-  `--quiet`; never aborts the index.
-- Index file corrupt (SQLite `DatabaseError` on open): rename to
-  `index.db.corrupt-<ts>`, rebuild full, warn on stderr.
-- Concurrent writers (two sessions in the same tree): SQLite's default lock
-  with a 5 s busy timeout; a `search` that loses the lock proceeds with
-  `--no-refresh` semantics and warns.
-- Config dir not writable: exit 2 with the path in the message.
+- Not a git repo: exit 3, message, nothing written.
+- Unreadable or non-UTF-8 file: skipped with a stderr warning unless
+  `--quiet`; removed from the index if previously indexed; never aborts.
+- Index file corrupt (`sqlite3.DatabaseError` on open or query): rename to
+  `index.db.corrupt` (replacing any older one), full rebuild, stderr
+  warning.
+- Concurrent writers: SQLite locking with a 5 s busy timeout; behaviour per
+  command as specified above (search degrades to the prior index, index
+  exits 7).
+- Config dir not writable, or index path inside the repo: exit 6 with the
+  path.
 
 ## Testing
 
-`recall_test.sh` builds throwaway git repos in `mktemp -d`, sets
-`CLAUDE_CONFIG_DIR` (and `HOME`, `CLAUDE_WORK_TREE`) to temp paths so nothing
-touches the real config dirs, and covers:
+Test-first per the superpowers TDD workflow: each numbered case below is
+written as a failing test before the code that makes it pass.
+`recall_test.sh` builds throwaway git repos in `mktemp -d` and sets `HOME`,
+`CLAUDE_CONFIG_DIR`, `CLAUDE_WORK_TREE`, `CLAUDE_WORK_CONFIG_DIR` to temp
+paths so nothing touches the real config dirs. Cases:
 
 1. Repo with no sources: `search` exits 2 with the conventional-locations
-   message; `status` exits 0.
-2. Index + search hit: heading-weighted ranking (a heading match outranks a
-   body match), `path:line` anchor matches the heading's line.
+   message; `status` exits 0; outside a git tree exits 3.
+2. Index + search hit: heading match outranks body match; `path:line`
+   anchor equals the heading's line; preamble anchor is line 1; empty
+   chunks dropped; headingless file is one chunk.
 3. Kinds: `docs`, `todos`, `handoffs`, `memory` (both slugs), `findings`,
-   `extra` via `RECALL_EXTRA_GLOBS`; `--kind` filter.
-4. Incremental refresh: modify a file, delete a file, add a file; `search`
-   reflects each without `--full`; `--no-refresh` does not.
-5. Account routing: a tree under `$CLAUDE_WORK_TREE` with `~/.claude-work`
-   present writes under `~/.claude-work/recall/`; the same tree with
-   `CLAUDE_CONFIG_DIR` set honours the override; a personal tree never
-   creates `~/.claude-work`.
-6. Worktree: a linked worktree gets its own index and sees the main
+   `extra`; precedence (`docs/findings/x.md` is `findings`); `--kind`
+   filter; extra glob with `..` rejected.
+4. Incremental refresh: modify, delete, add, make oversized, change kind;
+   `search` reflects each without `--full`; `--no-refresh` does not.
+5. Account routing: tree under `$CLAUDE_WORK_TREE` with the work config dir
+   absent creates it and writes there; `CLAUDE_CONFIG_DIR` overrides; a
+   personal tree never creates the work dir; sentinel memory files never
+   cross accounts; `CLAUDE_CONFIG_DIR` inside the repo exits 6.
+6. Repo id: two top levels whose slugs collide get distinct index dirs.
+7. Worktree: a linked worktree gets its own index and sees the main
    checkout's memory slug.
-7. `--json` shape, `--raw` parse error exit 4, default-mode quoting survives
-   `"`, `*`, `(`.
-8. `eval`: golden file with one hit and one miss reports `recall@5 = 0.5`
-   and the miss grouped under its note.
-9. Corrupt index file is quarantined and rebuilt.
-10. `RECALL_FORCE_NO_FTS5=1` (test-only env) exercises the exit-5 path.
+8. Output contract: `--json` stdout is pure JSONL even when the refresh
+   changed files; `--raw` parse error exits 4; default mode survives `"`,
+   `*`, `(`; ties order deterministically; `--limit 0` exits 64.
+9. `eval`: one hit and one miss gives `recall@5 0.50`, miss grouped under
+   its note; malformed line exits 8; `eval add` refuses a duplicate `q`.
+10. Corrupt index is quarantined and rebuilt; schema version mismatch
+    rebuilds.
+11. `RECALL_FORCE_NO_FTS5=1` (test-only env) exercises exit 5.
+12. Locked index: with a prior index `search` still answers and warns;
+    `index` exits 7.
 
-The suite is registered in `bin/dotfiles-tests` and runs in CI with the
-others. Baseline before the change: `dotfiles-tests` reports 16 suites.
+The suite is registered in `bin/dotfiles-tests`. Baseline before the change
+is recorded in the plan; the change adds exactly one suite and every suite
+passes.
 
 ## Acceptance criteria
 
-- In this dotfiles worktree, `recall.py search codex hook cleanup` returns
-  the codex-hook-cleanup handoff or spec as the top hit in under 1 s on a
-  cold index.
+- The fixture suite above passes locally via `dotfiles-tests`.
+- Manual smoke in this dotfiles worktree: with no index present,
+  `recall.py search budget capped cheap model tier` lists the todo
+  `.todos/pending/2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical.md`
+  in its top 3 and the whole command, including the cold index build,
+  finishes in under 1 s wall clock on this machine.
 - `recall.py status` in a repo with no docs/todos/memory reports zero
   sources and exits 0; `search` there exits 2 with a one-line explanation.
-- `git status` in any indexed repo shows no new files.
-- A repo under `~/Git/work` produces `~/.claude-work/recall/...` and nothing
-  under `~/.claude/recall/`.
-- `dotfiles-tests` passes with 17 suites.
+- A before/after `git status --porcelain` snapshot of a fixture repo is
+  identical after `index`, `search`, and `status`.
+- A fixture tree under `$CLAUDE_WORK_TREE` produces an index under the work
+  config dir and nothing under the personal one, and vice versa.
 - `SKILL.md` frontmatter follows the existing personal skills (name,
-  description with trigger phrases) and the skill is whitelisted in
-  `claude/skills/.gitignore`.
+  description with trigger phrases); the skill is whitelisted in
+  `claude/skills/.gitignore`; `ruff check` passes on `recall.py`.
 
-## Open questions resolved in this spec
+## Decisions recorded
 
 - Hook vs on-demand: on-demand with refresh-on-search. No hook in v1.
 - Index in repo vs config dir: config dir. Satisfies "never committed" and
@@ -290,3 +399,24 @@ others. Baseline before the change: `dotfiles-tests` reports 16 suites.
   the worktree slug and the canonical root slug.
 - Findings location: reserved `docs/findings/` and `.claude/findings/`;
   nothing produces them yet.
+- Change detection: mtime+size gate, sha256 confirm; same-mtime same-size
+  edits need `--full` (documented limit, not worth a content scan per query).
+
+## Codex spec review, round 1 (2026-09-01)
+
+Verdict was needs-rework with 25 findings. Folded in: routing contract
+aligned with the wrapper (work dir created if absent, `CLAUDE_WORK_CONFIG_DIR`
+honoured), index-inside-repo rejection, hashed repo id, kind precedence and
+dedup, extra-glob containment, isolation guarantees and sentinel tests,
+sha256 change detection and ineligibility removal, transactional refresh
+and lock semantics, chunk edge cases, display paths for external files,
+distinct exit codes, JSONL stdout purity, prospective golden set with
+verbatim queries and held-out slice, eval schema validation, opt-in `eval
+add`, fixture-based acceptance, TDD/ruff requirements, `meta` table with
+schema version, command validation, Claude-only scope, platform floor,
+non-brittle suite count, todo supersession note.
+
+Declined: 80% coverage target and `uv` project (the repo's Python rules do
+not require them for a stdlib script; the fixture suite covers every
+command path); automatic stale-index purge (`status --all` plus manual
+`rm` is enough for two repos).
