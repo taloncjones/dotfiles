@@ -251,6 +251,9 @@ test_usage_and_help() {
   recall "$r" bogus
   assert_eq "unknown command exits 64" "$RC" 64
   assert_eq "usage error is one line" "$(printf '%s\n' "$ERR" | wc -l | tr -d ' ')" 1
+  local direct; direct=$("$RECALL" --slug /tmp/x 2>/dev/null); local drc=$?
+  assert_eq "script is directly executable" "$drc" 0
+  assert_eq "direct invocation works" "$direct" "-tmp-x"
 }
 test_outside_git_exits_3
 test_no_fts5_exits_5
@@ -584,6 +587,8 @@ if __name__ == "__main__":
 ```
 
 `fnmatch`, `json`, `time`, `namedtuple` are used from Task 2 onward. Ruff flags them as unused in this task: add `# noqa: F401` to those four import lines now and remove each marker in the task that first uses it. `--help` propagates argparse's `SystemExit(0)` through `main`, which is the intended exit 0.
+
+Then make the script directly invocable, as `SKILL.md` documents: `chmod +x claude/skills/repo-recall/scripts/recall.py` (git records mode 100755; verify with `git ls-files -s claude/skills/repo-recall/scripts/recall.py` after the commit).
 
 - [ ] **Step 5: Run the suite; expect Task 1 cases to pass**
 
@@ -1092,7 +1097,7 @@ seed_repo() {
   mkdir -p "$r/docs/specs" "$r/docs/findings" "$r/.claude/handoffs" "$r/.todos/pending"
   printf '# Widget spec\n\nThe widget frobnicates gizmos.\n\n## Decision\n\nWe chose the frobnicator over the gizmo mangler.\n' > "$r/docs/specs/widget.md"
   printf -- '---\ntitle: Fix the mangler\npriority: high\n---\n\n## Problem\n\nMangler leaks memory.\n' > "$r/.todos/pending/2026-01-01-fix-mangler.md"
-  printf '# Handoff\n\nNext slice: wire the frobnicator to the widget bus.\n' > "$r/.claude/handoffs/latest.md"
+  printf '# Handoff\n\nNext slice: wire the frobnicator to the widget bus. The decision is pending.\n' > "$r/.claude/handoffs/latest.md"
   printf 'finding: mangler leak reproduced under load\n' > "$r/docs/findings/leak.txt"
   local mem; mem=$(mem_dir "$cfg" "$r")
   mkdir -p "$mem"; printf '# Memory\n\nUser prefers the frobnicator naming.\n' > "$mem/naming.md"
@@ -1134,8 +1139,8 @@ test_index_incremental() {
   assert_contains "non-utf8 skipped with warning" "$ERR" "skipping docs/bad.md"
   RECALL_EXTRA_GLOBS="docs/specs/*.md" recall "$r" index
   assert_contains "kind change re-indexes the file" "$OUT" "(+0 ~1 -0)"
-  RECALL_EXTRA_GLOBS="docs/specs/*.md" recall "$r" search --json --no-refresh frobnicates
-  assert_contains "kind change lands in the index" "$OUT" '"kind": "extra"'
+  local kind; kind=$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"SELECT kind FROM files WHERE display='docs/specs/widget.md'\").fetchone()[0])" "$(db_path "$HOME/.claude" "$r")")
+  assert_eq "kind change lands in the index" "$kind" extra
   recall "$r" index --full
   assert_contains "full rebuild reindexes all" "$OUT" "(+4 ~0 -0)"
 }
@@ -1309,15 +1314,20 @@ def refresh(conn, ctx, full=False, quiet=False):
         for src in sources:
             try:
                 st = src.path.stat()
+            except OSError as exc:
+                warn(f"skipping {src.display}: {exc}", quiet)
+                continue
+            row = known.get(str(src.path))
+            if row and row[3] == st.st_mtime_ns and row[4] == st.st_size and row[2] == src.kind:
+                current.add(str(src.path))  # unchanged: stat only, no read
+                continue
+            try:
                 data = src.path.read_bytes()
                 text = data.decode("utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 warn(f"skipping {src.display}: {exc}", quiet)
                 continue
             current.add(str(src.path))
-            row = known.get(str(src.path))
-            if row and row[3] == st.st_mtime_ns and row[4] == st.st_size and row[2] == src.kind:
-                continue
             digest = hashlib.sha256(data).hexdigest()
             if row and row[5] == digest and row[2] == src.kind:
                 conn.execute("UPDATE files SET mtime_ns=?, size=? WHERE path=?",
@@ -1400,11 +1410,14 @@ test_search_hits_and_ranking() {
   assert_not_contains "refresh summary not on stdout" "$OUT" "indexed"
   recall "$r" search --json decision
   local first; first=$(printf '%s\n' "$OUT" | head -1)
-  assert_contains "heading match ranks first" "$first" '"line": 5'
+  assert_contains "heading match outranks the body-only match in the handoff" "$first" '"line": 5'
+  assert_contains "body-only match is still returned" "$OUT" '.claude/handoffs/latest.md'
   assert_contains "json carries display path" "$first" '"path": "docs/specs/widget.md"'
   assert_contains "heading-only match is highlighted in snippet" "$first" '>>Decision<<'
   recall "$r" search "gizmo mangler"
   assert_eq "quoted multi-word query is split into AND terms" "$RC" 0
+  RECALL_EXTRA_GLOBS="docs/specs/*.md" recall "$r" search --json frobnicates
+  assert_contains "kind change is visible through search" "$OUT" '"kind": "extra"'
   printf '# Same\n\nzebra text\n' > "$r/docs/tie-b.md"; printf '# Same\n\nzebra text\n' > "$r/docs/tie-a.md"
   recall "$r" search --json zebra
   assert_contains "ties order by display path" "$(printf '%s\n' "$OUT" | head -1)" '"path": "docs/tie-a.md"'
@@ -1428,6 +1441,10 @@ test_search_query_contract() {
   if [ "$RC" = 0 ] || [ "$RC" = 1 ]; then ok "default mode never errors on syntax"; else bad "default mode never errors on syntax" "exit $RC"; fi
   recall "$r" search --raw 'widget OR ('
   assert_eq "raw parse error exits 4" "$RC" 4
+  recall "$r" search --raw '"unterminated'
+  assert_eq "raw unterminated string exits 4" "$RC" 4
+  recall "$r" search --raw 'nosuchcol:widget'
+  assert_eq "raw unknown column exits 4" "$RC" 4
   recall "$r" search --raw 'frob* OR mangler'
   assert_eq "raw operators work" "$RC" 0
   recall "$r" search --limit 0 widget
@@ -1556,6 +1573,14 @@ def refresh_or_degrade(conn, ctx, quiet):
         return False
 
 
+STORAGE_MARKERS = ("locked", "busy", "readonly", "disk i/o", "unable to open")
+
+
+def _storage_error(exc):
+    msg = str(exc).lower()
+    return any(m in msg for m in STORAGE_MARKERS)
+
+
 NO_SOURCES_MESSAGE = (
     "no eligible sources in this repo; looked for docs/**/*.md, *.md, "
     ".claude/handoffs/*.md, .todos/{pending,completed}/*.md, docs/findings/, "
@@ -1586,7 +1611,9 @@ def cmd_search(args):
     try:
         hits = run_search(conn, query, args.kind, args.limit)
     except sqlite3.OperationalError as exc:
-        if args.raw and "fts5" in str(exc).lower():
+        # In raw mode any non-storage error is the user's query (unterminated
+        # string, unknown special query, no such column, fts5 syntax error).
+        if args.raw and not _storage_error(exc):
             return _fail(EXIT_QUERY, f"query error: {exc}")
         return _fail(classify_sqlite_error(exc), f"sqlite: {exc}")
     if not hits:
@@ -1617,7 +1644,7 @@ git commit -m "skills: Add repo-recall search command with ranked output"
 - Modify: `claude/skills/repo-recall/scripts/tests/recall_test.sh`
 
 **Interfaces:**
-- Consumes: `open_index`, `_meta`, `resolve_config_dir`.
+- Consumes: `open_index`, `_meta`, `resolve_config_dir`, `has_index`, `refresh_or_degrade` (Task 5).
 - Produces: full `cmd_status(args)`; `status_all() -> int` (read-only listing).
 
 - [ ] **Step 1: Write the failing shell cases**
@@ -1636,6 +1663,10 @@ test_status_reports_counts() {
   assert_contains "status shows docs count" "$OUT" "docs: 1 files"
   assert_contains "status shows memory count" "$OUT" "memory: 1 files"
   assert_contains "status shows last index" "$OUT" "last index: 20"
+  python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE meta SET value='0' WHERE key='schema_version'\"); c.commit()" "$(db_path "$HOME/.claude" "$r")"
+  recall "$r" status
+  assert_contains "status after schema mismatch rebuilds first" "$OUT" "docs: 1 files"
+  assert_contains "status after schema mismatch warns" "$ERR" "schema"
 }
 test_status_all_outside_git_and_corrupt() {
   setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
@@ -1667,6 +1698,11 @@ def cmd_status(args):
         return status_all()
     ctx = Context()
     conn = open_index(ctx)
+    if not has_index(conn):
+        # Never indexed, or just rebuilt after a schema mismatch / quarantine:
+        # complete the rebuild so the counts below describe the tree, not an
+        # empty schema.
+        refresh_or_degrade(conn, ctx, quiet=False)
     print(f"config dir: {ctx.config_dir}")
     print(f"index: {ctx.index_file}")
     print(f"schema: {_meta(conn, 'schema_version')}")
@@ -2156,7 +2192,16 @@ validation completes before path checks, `added` must be `YYYY-MM-DD`, and
 corruption markers matched with `startswith`; fence tracking by marker
 character and length; kind-change, tie-order and git-status tests added;
 byte-wise slug; one-line usage errors with `--help` exiting 0; auto-column
-snippets. Round 2 result is recorded below.
+snippets.
+
+Round 2: six high findings, no critical, verdict needs-rework on the round-1
+text. All folded in: Task 4 inspects SQLite directly instead of calling
+`search` (which Task 5 adds); `recall.py` gets mode 100755 and a direct
+invocation test; `status` completes a refresh when the index was never
+built or was just rebuilt; raw-mode non-storage errors map to exit 4;
+`refresh` stats before reading and hashes only changed files; the
+heading-rank test has a body-only competitor. Per the codex-plan-review
+skill the loop stops at two rounds; status: ready-to-execute on judgment.
 
 ## Self-review against the spec
 
