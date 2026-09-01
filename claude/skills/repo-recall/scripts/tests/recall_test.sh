@@ -348,5 +348,57 @@ test_status_all_outside_git_and_corrupt() {
 test_status_reports_counts
 test_status_all_outside_git_and_corrupt
 
+echo "== task 7: eval"
+test_eval_metrics_and_grouping() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  cat > "$r/docs/recall-eval.jsonl" <<'EOF'
+{"q": "frobnicator decision", "expect": ["docs/specs/widget.md#Decision"], "note": "hit", "added": "2026-01-02"}
+{"q": "why does the mangler leak", "expect": ["docs/nonexistent.md"], "note": "missing-source", "added": "2026-01-02"}
+{"q": "widget frobnicates gizmos", "expect": ["docs/specs/widget.md"], "note": "missing-source", "added": "2026-01-02"}
+EOF
+  recall "$r" eval
+  assert_eq "eval exits 0" "$RC" 0
+  assert_contains "eval header has version" "$OUT" "version 1"
+  assert_contains "eval recall@5 is 0.33 (missing-source always misses)" "$OUT" "recall@5 0.33"
+  assert_contains "eval MRR line" "$OUT" "MRR "
+  assert_contains "eval groups miss by note" "$OUT" "misses [missing-source]"
+}
+test_eval_rejects_invalid() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  printf '{"q": "a", "expect": ["docs/nope.md"], "note": "hit", "added": "2026-01-02"}\n' > "$r/docs/recall-eval.jsonl"
+  recall "$r" eval
+  assert_eq "unindexed expected path exits 8" "$RC" 8
+  printf 'not json\n' > "$r/docs/recall-eval.jsonl"
+  recall "$r" eval
+  assert_eq "malformed line exits 8" "$RC" 8
+  printf '{"q": "a", "expect": ["docs/specs/widget.md"], "note": "weird", "added": "2026-01-02"}\n' > "$r/docs/recall-eval.jsonl"
+  recall "$r" eval
+  assert_eq "unknown note exits 8" "$RC" 8
+  assert_not_contains "invalid run prints no metrics" "$OUT" "recall@5"
+  printf '{"q": "a", "expect": null, "note": "hit", "added": "2026-01-02"}\n' > "$r/docs/recall-eval.jsonl"
+  recall "$r" eval
+  assert_eq "null expect exits 8 without traceback" "$RC" 8
+  assert_not_contains "null expect gives no traceback" "$ERR" "Traceback"
+  printf '{"q": "a", "expect": ["docs/specs/widget.md"], "note": "hit", "added": "yesterday"}\n' > "$r/docs/recall-eval.jsonl"
+  recall "$r" eval
+  assert_eq "bad added date exits 8" "$RC" 8
+}
+test_eval_add() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  recall "$r" eval add "frobnicator naming" --expect "docs/specs/widget.md" --note paraphrase
+  assert_eq "eval add exits 0" "$RC" 0
+  assert_contains "eval add wrote the query" "$(cat "$r/docs/recall-eval.jsonl")" '"q": "frobnicator naming"'
+  recall "$r" eval add "frobnicator naming" --expect "docs/specs/widget.md"
+  assert_eq "eval add refuses duplicate q" "$RC" 8
+  assert_eq "duplicate not appended" "$(wc -l < "$r/docs/recall-eval.jsonl" | tr -d ' ')" 1
+  recall "$r" eval add "gone" --expect "docs/nope.md"
+  assert_eq "eval add refuses unindexed path" "$RC" 8
+  recall "$r" eval add "gone" --expect "docs/nope.md" --note missing-source
+  assert_eq "eval add allows missing-source" "$RC" 0
+}
+test_eval_metrics_and_grouping
+test_eval_rejects_invalid
+test_eval_add
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

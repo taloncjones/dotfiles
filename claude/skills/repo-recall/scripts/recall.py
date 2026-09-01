@@ -831,17 +831,174 @@ def status_all():
     return EXIT_OK
 
 
-def cmd_not_implemented(args):
-    Context()  # Check git first
-    return _fail(EXIT_USAGE, f"{args.cmd}: not implemented")
+# --- eval ------------------------------------------------------------------
+
+def _golden_path(ctx, override):
+    return Path(override) if override else ctx.toplevel / "docs" / "recall-eval.jsonl"
+
+
+def _normalise_heading(text):
+    return " ".join(text.split()).lower()
+
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def load_golden(path):
+    """Parse the golden file; returns (entries, errors). Any error => exit 8."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return [], [f"cannot read {path}: {exc}"]
+    return load_golden_lines(lines)
+
+
+def load_golden_lines(lines):
+    """Validate golden lines. Only structurally valid entries are returned,
+    so later phases never see bad shapes."""
+    entries, errors, seen = [], [], set()
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"line {number}: not JSON ({exc.msg})")
+            continue
+        if not isinstance(obj, dict):
+            errors.append(f"line {number}: not a JSON object")
+            continue
+        q = obj.get("q")
+        expect = obj.get("expect")
+        note = obj.get("note", "hit")
+        added = obj.get("added")
+        line_errors = []
+        if not isinstance(q, str) or not q.strip():
+            line_errors.append("q must be a non-empty string")
+        elif q in seen:
+            line_errors.append(f"duplicate q {q!r}")
+        else:
+            seen.add(q)
+        if not isinstance(expect, list) or not expect or not all(isinstance(e, str) for e in expect):
+            line_errors.append("expect must be a non-empty list of paths")
+        if note not in EVAL_NOTES:
+            line_errors.append(f"note must be one of {sorted(EVAL_NOTES)}")
+        if not isinstance(added, str) or not DATE_RE.match(added):
+            line_errors.append("added must be a YYYY-MM-DD date")
+        if line_errors:
+            errors += [f"line {number}: {e}" for e in line_errors]
+            continue
+        entries.append(dict(obj, note=note, line=number))
+    return entries, errors
+
+
+def _indexed_displays(conn):
+    return {row[0] for row in conn.execute("SELECT display FROM files")}
+
+
+def _check_expected_paths(entries, indexed):
+    errors = []
+    for e in entries:
+        if e["note"] == "missing-source":
+            continue
+        for exp in e["expect"]:
+            if exp.split("#", 1)[0] not in indexed:
+                errors.append(f"line {e['line']}: expected path not indexed: {exp}")
+    return errors
+
+
+def _report_errors(errors):
+    for err in errors:
+        print(f"recall: eval: {err}", file=sys.stderr)
+    return EXIT_EVAL
+
+
+def heading_matches(expected, hit):
+    path, _, heading = expected.partition("#")
+    if path != hit.path:
+        return False
+    return not heading or _normalise_heading(heading) == _normalise_heading(hit.heading)
+
+
+def cmd_eval(args):
+    if args.k < 1:
+        return _fail(EXIT_USAGE, "--k must be >= 1")
+    ctx = Context()
+    golden = _golden_path(ctx, args.file)
+    conn = open_index(ctx)
+    refresh_or_degrade(conn, ctx, quiet=False)
+    entries, errors = load_golden(golden)
+    errors += _check_expected_paths(entries, _indexed_displays(conn))
+    if errors:
+        return _report_errors(errors)
+    if not entries:
+        return _fail(EXIT_EVAL, f"no queries in {golden}")
+    print(f"recall eval version {RECALL_VERSION} k={args.k} n={len(entries)} "
+          f"index={_meta(conn, 'last_index_at')}")
+    hits_at_k, rr_sum, misses = 0, 0.0, {}
+    for e in entries:
+        if e["note"] == "missing-source":
+            rank = None  # spec: a missing-source entry counts as a miss until its note changes
+        else:
+            results = run_search(conn, build_query(e["q"].split(), raw=False), [], args.k)
+            rank = next((h.rank for h in results if any(heading_matches(x, h) for x in e["expect"])), None)
+        if rank:
+            hits_at_k += 1
+            rr_sum += 1.0 / rank
+            print(f"hit  @{rank}  {e['q']}")
+        else:
+            misses.setdefault(e["note"], []).append(e["q"])
+            print(f"miss      {e['q']}")
+    n = len(entries)
+    print(f"recall@{args.k} {hits_at_k / n:.2f}")
+    print(f"MRR {rr_sum / n:.2f}")
+    for note in sorted(misses):
+        print(f"misses [{note}]:")
+        for q in misses[note]:
+            print(f"  {q}")
+    return EXIT_OK
+
+
+def cmd_eval_add(args):
+    if args.note not in EVAL_NOTES:
+        return _fail(EXIT_USAGE, f"--note must be one of {sorted(EVAL_NOTES)}")
+    if not args.q.strip():
+        return _fail(EXIT_USAGE, "query must not be blank")
+    ctx = Context()
+    golden = _golden_path(ctx, None)
+    conn = open_index(ctx)
+    refresh_or_degrade(conn, ctx, quiet=False)
+    entries, errors = load_golden(golden) if golden.exists() else ([], [])
+    if errors:
+        return _report_errors(errors)
+    if any(e["q"] == args.q for e in entries):
+        return _fail(EXIT_EVAL, f"duplicate query already recorded: {args.q!r}")
+    entry = {"q": args.q, "expect": args.expect, "note": args.note,
+             "added": time.strftime("%Y-%m-%d")}
+    errors = _check_expected_paths([dict(entry, line=len(entries) + 1)], _indexed_displays(conn))
+    if errors:
+        return _report_errors(errors)
+    # Same validator as eval, so a line eval add writes is always a line eval accepts.
+    _, shape_errors = load_golden_lines([json.dumps(entry)])
+    if shape_errors:
+        return _report_errors(shape_errors)
+    golden.parent.mkdir(parents=True, exist_ok=True)
+    line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+    fd = os.open(golden, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+    print(f"recorded: {golden}")
+    return EXIT_OK
 
 
 COMMANDS = {
     "index": cmd_index,
     "search": cmd_search,
     "status": cmd_status,
-    "eval": cmd_not_implemented,
-    "eval-add": cmd_not_implemented,
+    "eval": cmd_eval,
+    "eval-add": cmd_eval_add,
 }
 
 if __name__ == "__main__":
