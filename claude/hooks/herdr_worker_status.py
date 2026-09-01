@@ -4,7 +4,9 @@
 No-ops unless HERDR_ENV=1, a basename-safe HERDR_WORKSPACE_ID, and a workspace
 index the orchestrator placed under STATE_ROOT. Derives all paths from the fixed
 state root; never trusts a payload path. Notifications map to `blocked` only for
-permission/input-needed types. Fails OPEN (always exit 0).
+permission/input-needed types. Fails OPEN (always exit 0). After appending,
+pushes one wake line to the owning orchestrator's inbox socket
+(core.post_wake) when owner.json names one.
 """
 
 import json
@@ -51,7 +53,18 @@ def main() -> int:
             event = "review-stopped"
         else:
             event = "stopped"
-        core.append_event(rd, ws, event, task_id=index.get("task_id"), role=role)
+        # Audit line first, wake second, each independently fail-open: a wake
+        # without its audit line is harmless (check-in finds nothing new); a
+        # lost wake is not.
+        try:
+            core.append_event(rd, ws, event, task_id=index.get("task_id"), role=role)
+        except Exception:  # noqa: BLE001 -- never block the worker
+            pass
+        try:
+            core.post_wake(rd, ws, event,
+                           own_socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""))
+        except Exception:  # noqa: BLE001
+            pass
         break
     return 0
 

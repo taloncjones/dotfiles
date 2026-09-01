@@ -1017,5 +1017,85 @@ finally:
 sys.exit(0)
 PY
 
+check "hook end to end: Stop appends stopped AND posts one wake; no socket -> append only" <<PY
+$LOAD
+import socket,threading,random,shutil,time,io,json as J
+hs=importlib.util.spec_from_file_location("hook","claude/hooks/herdr_worker_status.py")
+h=importlib.util.module_from_spec(hs); hs.loader.exec_module(h)
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+os.environ["HERDR_ENV"]="1"; os.environ["HERDR_WORKSPACE_ID"]="w1"; os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET",None)
+slug="github-com-org-repo-deadbeef"; rd=os.path.join(root,"herdr-orch",slug)
+os.makedirs(os.path.join(rd,"workspaces")); os.makedirs(os.path.join(rd,"tasks"))
+json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"impl"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(4); srv.settimeout(2)
+    got=[]
+    def acc():
+        while True:
+            try: conn,_=srv.accept()
+            except (socket.timeout,OSError): return
+            buf=b""
+            while not buf.endswith(b"\n"):
+                d=conn.recv(4096)
+                if not d: break
+                buf+=d
+            got.append(buf); conn.close()
+    threading.Thread(target=acc,daemon=True).start()
+    def run(payload):
+        sys.stdin=io.StringIO(json.dumps(payload)); return h.main()
+    def wait_got(n,secs=2.0):   # bounded poll instead of fixed sleeps
+        end=time.monotonic()+secs
+        while len(got)<n and time.monotonic()<end: time.sleep(0.02)
+        time.sleep(0.1)          # settle: catch an unexpected extra message
+        return len(got)
+    ev=os.path.join(rd,"workspaces","w1.events.jsonl")
+    def events(): return open(ev).read().count("\n")
+    # 1. no messaging_socket in owner: append only, exit 0
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":None},open(os.path.join(rd,"owner.json"),"w"))
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(1,0.3)==0 and events()==1
+    # 2. socket registered: append + one post
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(1)==1,got
+    assert "event=stopped" in J.loads(got[0])["message"]["content"]
+    assert events()==2
+    # 3. own socket equals target: append, no post
+    os.environ["CLAUDE_CODE_MESSAGING_SOCKET"]=path
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(2,0.3)==1 and events()==3
+    os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET")
+    # 4. blocking notification posts blocked; non-blocking posts nothing and appends nothing
+    assert run({"hook_event_name":"Notification","notification_type":"permission_prompt"})==0
+    assert wait_got(2)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
+    assert run({"hook_event_name":"Notification","notification_type":"idle_prompt"})==0
+    assert wait_got(3,0.3)==2 and events()==4
+    # 5. review role posts review-stopped
+    json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"review"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(3)==3 and "event=review-stopped" in J.loads(got[2])["message"]["content"]
+    # 6. append_event raising still posts
+    core=h.core; real_append=core.append_event
+    def boom(*a,**k): raise RuntimeError("disk")
+    core.append_event=boom
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(4)==4,got
+    core.append_event=real_append
+    # 6b. post_wake raising still appends exactly one event and exits 0
+    real_post=core.post_wake; core.post_wake=boom
+    before=events()
+    assert run({"hook_event_name":"Stop"})==0
+    assert events()==before+1 and wait_got(5,0.3)==4
+    core.post_wake=real_post
+    # 7. server gone: exit 0 within 2.5s
+    srv.close(); os.unlink(path)
+    t0=time.monotonic(); assert run({"hook_event_name":"Stop"})==0; assert time.monotonic()-t0<2.5
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
