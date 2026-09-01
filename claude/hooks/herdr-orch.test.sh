@@ -1129,5 +1129,24 @@ assert c.contract_sha256(p)==hashlib.sha256(b"{}").hexdigest()
 sys.exit(0)
 PY
 
+check "run_contract_commands: pass, first-failure stop, timeout killpg" <<PY
+$LOAD
+import time
+root=tempfile.mkdtemp()
+cmds=[{"name":"a","run":"true"},{"name":"b","run":"true"}]
+assert c.run_contract_commands(cmds,root)==0
+marker=os.path.join(root,"ran")
+cmds=[{"name":"a","run":"false"},{"name":"b","run":"touch "+marker}]
+assert c.run_contract_commands(cmds,root)==1
+assert not os.path.exists(marker)                 # stopped at first failure
+cmds=[{"name":"slow","run":"sleep 30","timeout_secs":1}]
+t0=time.time()
+assert c.run_contract_commands(cmds,root)==1
+assert time.time()-t0 < 10                        # killed, not waited out
+cmds=[{"name":"cwd","run":"touch ran"}]
+assert c.run_contract_commands(cmds,root)==0 and os.path.exists(marker)  # cwd=worktree
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

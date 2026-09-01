@@ -11,8 +11,10 @@ import math
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -105,6 +107,34 @@ def validate_contract(rec, task_id):
 def contract_sha256(path) -> str:
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
+
+
+def run_contract_commands(commands, worktree) -> int:
+    """Run each contract command via sh -c in the worktree, streaming output.
+    Own process group per command; on timeout the whole group is SIGKILLed
+    (best-effort -- a double-forked daemon can escape). First failure stops
+    the run. Returns 0 iff every command exited 0."""
+    for cmd in commands:
+        t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
+        proc = subprocess.Popen(
+            ["sh", "-c", cmd["run"]], cwd=worktree, start_new_session=True
+        )
+        try:
+            rc = proc.wait(timeout=t)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            print(f"FAIL {cmd['name']} exit=timeout", flush=True)
+            return 1
+        if rc != 0:
+            print(f"FAIL {cmd['name']} exit={rc}", flush=True)
+            return 1
+        print(f"ok {cmd['name']} exit=0", flush=True)
+    print(f"PASS {len(commands)} commands", flush=True)
+    return 0
 
 
 def role_preference(role, config):
