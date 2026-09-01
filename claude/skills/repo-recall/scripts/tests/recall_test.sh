@@ -400,5 +400,20 @@ test_eval_metrics_and_grouping
 test_eval_rejects_invalid
 test_eval_add
 
+echo "== task 8: kinds through the cli"
+test_cli_kinds_extra_and_findings() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r"); seed_repo "$r" "$HOME/.claude"
+  mkdir -p "$r/notes"; printf 'extra glob content xyzzy\n' > "$r/notes/n.txt"
+  RECALL_EXTRA_GLOBS="notes/*.txt" recall "$r" search --json xyzzy
+  assert_contains "extra glob indexed as extra" "$OUT" '"kind": "extra"'
+  recall "$r" search --json reproduced
+  assert_contains "findings txt indexed as findings" "$OUT" '"kind": "findings"'
+  recall "$r" search --json "widget bus"
+  assert_contains "handoffs indexed" "$OUT" '"kind": "handoffs"'
+  RECALL_EXTRA_GLOBS="../outside/*.md" recall "$r" search widget
+  assert_contains "escaping extra glob rejected with warning" "$ERR" "rejected"
+}
+test_cli_kinds_extra_and_findings
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
