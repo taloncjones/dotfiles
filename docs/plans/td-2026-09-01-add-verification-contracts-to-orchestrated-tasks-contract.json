@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-01-add-verification-contracts-to-orchestrated-tasks",
+  "commands": [
+    {
+      "name": "core-unit-suite",
+      "run": "sh claude/hooks/herdr-orch.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "orchestration-walkthrough-suite",
+      "run": "sh claude/hooks/herdr-orch-contract.test.sh",
+      "timeout_secs": 600
+    }
+  ]
+}
