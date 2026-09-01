@@ -46,6 +46,30 @@ assert "Claude co-review reserves xhigh for high-risk changes" \
     sh -c "rg -q 'Escalate Codex to .*xhigh.* only for' claude/skills/co-review/SKILL.md && rg -U -q '(?s)high-risk changes involving auth/security.*concurrency/lifecycle.*migrations.*hardware safety' claude/skills/co-review/SKILL.md"
 assert "Claude co-review reports the selected Codex effort" \
     rg -q '<codex-effort> effort' claude/skills/co-review/SKILL.md
+
+# Pinning assertions -- guarantees already merged in PR #69; no negative test.
+assert "Claude co-review invokes Codex exactly once" \
+    sh -c "[ \"\$(rg -c -F '( cd \"\$WT\" && codex exec review --base' claude/skills/co-review/SKILL.md | tr -d ' ')\" -eq 1 ]"
+assert "Claude co-review forbids subagent Codex invocations" \
+    sh -c "[ \"\$(rg -c -F 'does not exempt this subagent' claude/skills/co-review/SKILL.md | tr -d ' ')\" -eq 2 ]"
+assert "Claude co-review tears down the worktree unconditionally" \
+    sh -c "rg -q 'unconditional finalization' claude/skills/co-review/SKILL.md && rg -q -F 'git worktree remove --force \"\$WT\"' claude/skills/co-review/SKILL.md"
+
+# Slice assertions -- new guarantees from this branch; each MUST fail against
+# the pre-slice SKILL.md (verified when first added, before the skill edits).
+assert "Claude co-review pins the PR base to a merge-base SHA" \
+    sh -c "rg -q -F 'merge-base FETCH_HEAD \"\$PR_HEAD\"' claude/skills/co-review/SKILL.md && rg -q -F 'fetch origin \"\$BASE_REF\"' claude/skills/co-review/SKILL.md"
+assert "Claude co-review pins the branch-mode base against the pinned head" \
+    sh -c "rg -q -F 'git merge-base <branch-the-work-forked-from> \"\$SNAP_HEAD\"' claude/skills/co-review/SKILL.md"
+assert "Claude co-review guards the empty diff in every mode" \
+    sh -c "rg -q -F 'diff --quiet \"\$SNAP_BASE\" \"\$SNAP_HEAD\"' claude/skills/co-review/SKILL.md"
+assert "Claude co-review checks out the PR detached" \
+    sh -c "rg -q -F 'gh pr checkout <n> --detach' claude/skills/co-review/SKILL.md"
+assert "Claude co-review re-runs teardown in the re-review pass" \
+    sh -c "rg -q 'Steps 1-3\.6 run again' claude/skills/co-review/SKILL.md"
+assert "Claude co-review forbids generic Codex invocations" \
+    rg -q -F 'NEVER invoke Codex' claude/skills/co-review/SKILL.md
+
 assert "installer links repo-managed codex skills" \
     rg -q 'codex/skills' install/common/link.sh
 assert "installer keeps ~/.codex/skills as a real directory" \
