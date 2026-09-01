@@ -57,6 +57,7 @@ assert ok==("/tmp/cc-socks/12345.sock",12345,"ok"),ok
 assert c.validate_messaging_socket("/private/tmp/cc-socks/12345.sock")==("/tmp/cc-socks/12345.sock",12345,"ok")
 assert c.validate_messaging_socket("/tmp/cc-socks-501/7.sock")[2]=="ok"
 assert c.validate_messaging_socket("/run/user/1000/cc-socks/7.sock")[2]=="ok"
+assert c.validate_messaging_socket("/data/data/com.termux/files/usr/tmp/cc-socks/7.sock")[2]=="ok"
 assert c.validate_messaging_socket("/tmp/cc-socks/12345.sock",expect_pid=12345)[2]=="ok"
 assert c.validate_messaging_socket("/tmp/cc-socks/12345.sock",expect_pid=1)[2]=="pid-mismatch"
 assert c.validate_messaging_socket("")[2]=="empty"
@@ -122,12 +123,23 @@ python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket'] is 
 rc=0; $CLI refresh-owner --repo-slug slug-r --session S --fence 99 --messaging-socket /tmp/cc-socks/4242.sock || rc=$?
 [ "$rc" = 1 ]        # stale fence still refuses, unchanged
 SH
+
+check "legacy owner.json with string pid: refresh migrates it to int; --pid rejects non-integers" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+mkdir -p "$root/herdr-orch/slug-l"
+python3 -c "import json,time;json.dump({'session_id':'S','host':'h','pid':'4242','heartbeat_ts':time.time(),'fence':1},open('$root/herdr-orch/slug-l/owner.json','w'))"
+$CLI refresh-owner --repo-slug slug-l --session S --fence 1 --messaging-socket /tmp/cc-socks/4242.sock
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-l/owner.json'));assert o['pid']==4242 and o['messaging_socket']=='/tmp/cc-socks/4242.sock',o"
+rc=0; $CLI claim-owner --repo-slug slug-m --session S --host h --pid abc >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ]        # argparse type=int rejects cleanly (exit 2), no traceback
+SH
 ```
 
 - [ ] **Step 2: Run the suite to verify the new checks fail**
 
 Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | tail -8`
-Expected: the four new labels print `FAIL` (AttributeError on `validate_messaging_socket`; `unrecognized arguments: --messaging-socket`); the pre-existing 53 still `PASS`.
+Expected: the five new labels print `FAIL` (AttributeError on `validate_messaging_socket`; `unrecognized arguments: --messaging-socket`); the pre-existing 53 still `PASS`.
 
 - [ ] **Step 3: Add the helpers** to `claude/hooks/herdr_orch_core.py` directly after `valid_workspace_id`:
 
@@ -205,6 +217,8 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
         return False
     cur = json.loads(_owner_path(rd).read_text())
     cur["heartbeat_ts"] = time.time()
+    if isinstance(cur.get("pid"), str) and cur["pid"].isdigit():
+        cur["pid"] = int(cur["pid"])  # migrate records written by the pre-flag CLI
     if messaging_socket is not None:  # None = flag omitted: leave untouched
         sock, _pid, reason = validate_messaging_socket(
             messaging_socket, expect_pid=cur.get("pid")
@@ -217,21 +231,24 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
     return True
 ```
 
-- [ ] **Step 5: Wire the CLI flag.** In `main()`, after `co.add_argument("--stale-secs", ...)`:
+- [ ] **Step 5: Wire the CLI flag.** In `main()`, replace the `claim-owner`/`refresh-owner` parser lines with:
 
 ```python
+    co = add("claim-owner", "--session", "--host")
+    co.add_argument("--pid", type=int, required=True)   # was a positional-style required str
+    co.add_argument("--stale-secs", type=int, default=None)  # test/override hook
     co.add_argument("--messaging-socket", default=None)
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
 ```
 
-(delete the existing bare `add("refresh-owner", "--session", "--fence")` line so the parser is added once). In the dispatch:
+(the old `co = add("claim-owner", "--session", "--host", "--pid")` and bare `add("refresh-owner", ...)` lines go away; `add()` still adds `--repo-slug`). `type=int` makes a non-integer `--pid` an argparse error (exit 2, usage message), never a traceback. In the dispatch:
 
 ```python
     if ns.cmd == "claim-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         kw = {} if ns.stale_secs is None else {"stale_secs": ns.stale_secs}
-        fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, int(ns.pid),
+        fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
                             messaging_socket=ns.messaging_socket, **kw)
 ```
 
@@ -246,12 +263,14 @@ and
         )
 ```
 
-`--pid` was previously stored as the raw string; `int(ns.pid)` is needed for the comparison. Check the existing ownership tests still pass (they compare fences, not pid types).
+`--pid` was previously stored as the raw string; live `owner.json` files on this machine carry `"pid": "1"`-style values, which is why `refresh_owner` migrates digit strings (Step 4) and `post_wake` (Task 2) also tolerates them. The existing ownership tests compare fences, not pid types, and still pass.
+
+Known, pre-existing, out of scope: `refresh_owner` is check-fence / read / write without a lock, so a takeover landing between its read and write can be overwritten by the old owner's heartbeat write. That race predates this plan (the heartbeat write had the same shape) and is not widened by the socket field; it is noted here so the implementer does not "fix" it in passing. A follow-up may move the refresh under the `owner.json.lock` used by `claim_owner`.
 
 - [ ] **Step 6: Run the suite**
 
 Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | tail -8`
-Expected: `57 passed, 0 failed`.
+Expected: `58 passed, 0 failed`.
 
 - [ ] **Step 7: Commit**
 
@@ -270,7 +289,7 @@ git -c commit.gpgsign=false commit -m "herdr: Record orchestrator inbox socket i
 
 **Interfaces:**
 - Consumes: `validate_messaging_socket`, `normalize_socket_path` (Task 1); `_owner_path(rd)`.
-- Produces: `WAKE_EVENTS = frozenset({"stopped", "blocked", "review-stopped"})`; `wake_line(repo_slug, ws, event, ts=None, nonce=None) -> str` (the newline-terminated JSON line); `post_wake(rd, ws, event, own_socket="", now=None) -> str` returning `"sent"` or a reason from: `"no-owner"`, `"bad-owner"`, `"no-socket"`, `"bad-heartbeat"`, `"stale-heartbeat"`, `"future-heartbeat"`, `"bad-pid"`, `"bad-path"`, `"own-socket"`, `"not-a-socket"`, `"bad-owner-uid"`, `"bad-dir-mode"`, `"connect-failed"`, `"send-failed"`, `"bad-event"`. Module-level seams for tests: `_lstat = os.lstat`, `_geteuid = os.geteuid`.
+- Produces: `WAKE_EVENTS = frozenset({"stopped", "blocked", "review-stopped"})`; `wake_line(repo_slug, ws, event, ts=None, nonce=None) -> str` (the newline-terminated JSON line); `post_wake(rd, ws, event, own_socket="", now=None) -> str` returning `"sent"` or a reason from: `"bad-event"`, `"bad-id"`, `"no-owner"`, `"bad-owner"`, `"no-socket"`, `"bad-heartbeat"`, `"stale-heartbeat"`, `"future-heartbeat"`, `"bad-pid"`, `"bad-path"`, `"own-socket"`, `"not-a-socket"`, `"bad-owner-uid"`, `"bad-dir-mode"`, `"connect-failed"`, `"send-failed"`. Module-level seams for tests: `_lstat = os.lstat`, `_geteuid = os.geteuid`. One monotonic deadline (`WAKE_BUDGET_SECS = 2.0`) bounds connect plus send.
 
 - [ ] **Step 1: Write the failing tests** (append before the summary `printf`; the socket-dir setup is repeated in each check on purpose, tests read top to bottom):
 
@@ -305,7 +324,7 @@ try:
             buf+=d
         got.append(buf); conn.close()
     t=threading.Thread(target=acc,daemon=True); t.start()
-    rd=tempfile.mkdtemp(); ws="w1"
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd); ws="w1"   # basename must be a valid repo slug
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
     r=c.post_wake(rd,ws,"stopped",own_socket=f"{sockdir}/1.sock")
     assert r=="sent",r
@@ -325,7 +344,7 @@ sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
 try:
     path=f"{sockdir}/4242.sock"
     srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1); srv.settimeout(0.2)
-    rd=tempfile.mkdtemp(); of=os.path.join(rd,"owner.json")
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd); of=os.path.join(rd,"owner.json")
     def owner(**kw):
         o={"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path}; o.update(kw)
         open(of,"w").write(json.dumps(o))
@@ -344,12 +363,18 @@ try:
     owner(heartbeat_ts=time.time()+200); assert c.post_wake(rd,"w1","stopped")=="sent"   # skew allowance
     srv.accept()[0].close()
     owner(pid=None); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
-    owner(pid="4242"); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid="abc"); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid=True); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid="4242"); assert c.post_wake(rd,"w1","stopped")=="sent"       # legacy digit-string pid tolerated
+    srv.accept()[0].close()
     owner(pid=1); assert c.post_wake(rd,"w1","stopped")=="bad-path"          # pid-mismatch -> bad-path
     owner(messaging_socket="/tmp/other/4242.sock"); assert c.post_wake(rd,"w1","stopped")=="bad-path"
     owner(); assert c.post_wake(rd,"w1","stopped",own_socket=path)=="own-socket"
     assert c.post_wake(rd,"w1","stopped",own_socket="/private"+path)=="own-socket"
     owner(); assert c.post_wake(rd,"w1","bogus")=="bad-event"
+    assert c.post_wake(rd,"../w1","stopped")=="bad-id"
+    assert c.post_wake(os.path.join(tempfile.mkdtemp(),"bad slug"),"w1","stopped")=="bad-id"
+    owner(messaging_socket=f"{sockdir}/4245.sock",pid=4245); assert c.post_wake(rd,"w1","stopped")=="not-a-socket"   # path absent
     assert nothing()
     # not a socket: regular file, and a symlink to the real socket
     reg=f"{sockdir}/4243.sock"; open(reg,"w").close(); owner(pid=4243,messaging_socket=reg)
@@ -383,11 +408,19 @@ sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
 try:
     path=f"{sockdir}/4242.sock"
     srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1)   # never accept()s
-    rd=tempfile.mkdtemp()
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd)
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
     t0=time.monotonic(); r=c.post_wake(rd,"w1","stopped"); dt=time.monotonic()-t0
-    assert r in ("sent","send-failed","connect-failed"),r     # a queued connect may "succeed"
+    assert r in ("sent","send-failed","connect-failed"),r     # AF_UNIX queues the connect and a short send; this is a budget smoke test, not a blocked-send simulation
     assert dt<2.5,dt
+    # socket creation failure is caught, not raised
+    real_socket=c.socket.socket
+    def nosock(*a,**k): raise OSError("emfile")
+    c.socket.socket=nosock
+    try:
+        assert c.post_wake(rd,"w1","stopped")=="connect-failed"
+    finally:
+        c.socket.socket=real_socket
 finally:
     shutil.rmtree(sockdir,ignore_errors=True)
 sys.exit(0)
@@ -397,14 +430,14 @@ PY
 - [ ] **Step 2: Run the suite to verify the new checks fail**
 
 Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | grep -E "FAIL|passed"`
-Expected: the four `post_wake`/`wake_line` labels `FAIL` with AttributeError; `57 passed, 4 failed`.
+Expected: the four `post_wake`/`wake_line` labels `FAIL` with AttributeError; `58 passed, 4 failed`.
 
 - [ ] **Step 3: Implement.** Add `import secrets`, `import socket`, `import stat` to the import block (alphabetical), then after `append_event`:
 
 ```python
 WAKE_EVENTS = frozenset({"stopped", "blocked", "review-stopped"})
+WAKE_BUDGET_SECS = 2.0       # one monotonic deadline across connect + send
 WAKE_CONNECT_TIMEOUT = 1.0
-WAKE_SEND_TIMEOUT = 1.0
 WAKE_HEARTBEAT_STALE_SECS = 900
 WAKE_HEARTBEAT_SKEW_SECS = 300
 _lstat = os.lstat      # test seams (monkeypatched by the suite)
@@ -431,6 +464,10 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
     "sent" means a line left this process. Never raises; 2s wall budget."""
     if event not in WAKE_EVENTS:
         return "bad-event"
+    repo_slug = os.path.basename(str(rd))
+    if not valid_repo_slug(repo_slug) or not valid_workspace_id(ws):
+        return "bad-id"   # keeps the wire content inside the \S+ grammar
+    deadline = time.monotonic() + WAKE_BUDGET_SECS
     try:
         owner = json.loads(_owner_path(rd).read_text())
     except (FileNotFoundError, NotADirectoryError):
@@ -451,6 +488,8 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
     if hb - now > WAKE_HEARTBEAT_SKEW_SECS:
         return "future-heartbeat"
     pid = owner.get("pid")
+    if isinstance(pid, str) and pid.isdigit():
+        pid = int(pid)   # legacy records written by the pre-flag CLI
     if isinstance(pid, bool) or not isinstance(pid, int):
         return "bad-pid"
     norm, _pid, reason = validate_messaging_socket(sock_path, expect_pid=pid)
@@ -470,15 +509,18 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
         return "bad-owner-uid"
     if stat.S_IMODE(st_dir.st_mode) & 0o077:
         return "bad-dir-mode"
-    line = wake_line(os.path.basename(str(rd)), ws, event).encode()
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    line = wake_line(repo_slug, ws, event).encode()
     try:
-        s.settimeout(WAKE_CONNECT_TIMEOUT)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return "connect-failed"
+    try:
+        s.settimeout(min(WAKE_CONNECT_TIMEOUT, max(0.05, deadline - time.monotonic())))
         try:
             s.connect(norm)
         except OSError:
             return "connect-failed"
-        s.settimeout(WAKE_SEND_TIMEOUT)
+        s.settimeout(max(0.05, deadline - time.monotonic()))
         try:
             s.sendall(line)
         except OSError:
@@ -491,12 +533,12 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
             pass
 ```
 
-`repo_slug` is the basename of `rd` (`repo_dir(slug)` is `STATE_ROOT/<slug>`), which is how the hook's `rd` already resolves.
+`repo_slug` is the basename of `rd` (`repo_dir(slug)` is `STATE_ROOT/<slug>`), which is how the hook's `rd` already resolves. The single `deadline` bounds connect plus send to `WAKE_BUDGET_SECS`; the `lstat`/read steps before it are local filesystem calls and are not timed.
 
 - [ ] **Step 4: Run the suite**
 
 Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | tail -6`
-Expected: `61 passed, 0 failed`.
+Expected: `62 passed, 0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -548,37 +590,50 @@ try:
     threading.Thread(target=acc,daemon=True).start()
     def run(payload):
         sys.stdin=io.StringIO(json.dumps(payload)); return h.main()
+    def wait_got(n,secs=2.0):   # bounded poll instead of fixed sleeps
+        end=time.monotonic()+secs
+        while len(got)<n and time.monotonic()<end: time.sleep(0.02)
+        time.sleep(0.1)          # settle: catch an unexpected extra message
+        return len(got)
     ev=os.path.join(rd,"workspaces","w1.events.jsonl")
+    def events(): return open(ev).read().count("\n")
     # 1. no messaging_socket in owner: append only, exit 0
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":None},open(os.path.join(rd,"owner.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
-    time.sleep(0.2); assert got==[] and open(ev).read().count("\n")==1
+    assert wait_got(1,0.3)==0 and events()==1
     # 2. socket registered: append + one post
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
-    time.sleep(0.3); assert len(got)==1,got
+    assert wait_got(1)==1,got
     assert "event=stopped" in J.loads(got[0])["message"]["content"]
-    assert open(ev).read().count("\n")==2
+    assert events()==2
     # 3. own socket equals target: append, no post
     os.environ["CLAUDE_CODE_MESSAGING_SOCKET"]=path
     assert run({"hook_event_name":"Stop"})==0
-    time.sleep(0.3); assert len(got)==1 and open(ev).read().count("\n")==3
+    assert wait_got(2,0.3)==1 and events()==3
     os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET")
     # 4. blocking notification posts blocked; non-blocking posts nothing and appends nothing
     assert run({"hook_event_name":"Notification","notification_type":"permission_prompt"})==0
-    time.sleep(0.3); assert len(got)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
+    assert wait_got(2)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
     assert run({"hook_event_name":"Notification","notification_type":"idle_prompt"})==0
-    time.sleep(0.3); assert len(got)==2 and open(ev).read().count("\n")==4
+    assert wait_got(3,0.3)==2 and events()==4
     # 5. review role posts review-stopped
     json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"review"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
-    time.sleep(0.3); assert len(got)==3 and "event=review-stopped" in J.loads(got[2])["message"]["content"]
+    assert wait_got(3)==3 and "event=review-stopped" in J.loads(got[2])["message"]["content"]
     # 6. append_event raising still posts
-    core=h.core
+    core=h.core; real_append=core.append_event
     def boom(*a,**k): raise RuntimeError("disk")
     core.append_event=boom
     assert run({"hook_event_name":"Stop"})==0
-    time.sleep(0.3); assert len(got)==4,got
+    assert wait_got(4)==4,got
+    core.append_event=real_append
+    # 6b. post_wake raising still appends exactly one event and exits 0
+    real_post=core.post_wake; core.post_wake=boom
+    before=events()
+    assert run({"hook_event_name":"Stop"})==0
+    assert events()==before+1 and wait_got(5,0.3)==4
+    core.post_wake=real_post
     # 7. server gone: exit 0 within 2.5s
     srv.close(); os.unlink(path)
     t0=time.monotonic(); assert run({"hook_event_name":"Stop"})==0; assert time.monotonic()-t0<2.5
@@ -616,7 +671,7 @@ Update the module docstring's last sentence to: `Fails OPEN (always exit 0). Aft
 - [ ] **Step 4: Run all three suites**
 
 Run: `for s in herdr-orch herdr-orch-contract claude-hooks; do sh claude/hooks/$s.test.sh 2>&1 | tail -1; done`
-Expected: `62 passed, 0 failed`, `15 passed, 0 failed`, `42 passed, 0 failed`.
+Expected: `63 passed, 0 failed`, `15 passed, 0 failed`, `42 passed, 0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -636,6 +691,8 @@ git -c commit.gpgsign=false commit -m "herdr: Push a wake to the orchestrator in
 **Interfaces:**
 - Consumes: CLI flag `--messaging-socket` (Task 1); `workers[].peer_name` field name (spec schema).
 - Produces: the literal strings the contract greps below look for. Copy them exactly.
+
+- [ ] **Step 0: Sync with main before touching SKILL.md.** The sibling verification-contracts task edits the same file. Run `git fetch origin && git merge origin/main` (resolve any conflict in favor of keeping both additions; the sibling's edits are in sections 4-6 and brief-template.md, this task's are in sections 1, 2 step 7, 4 opening paragraph, 8, Safety). Then re-run the three suites and confirm the counts from Task 3 Step 4 before proceeding. If main has not moved, this is a no-op. Task 6 Step 2 repeats the additive-diff check after any later rebase.
 
 - [ ] **Step 1: Write the failing text-contract checks** (append to `claude/hooks/herdr-orch-contract.test.sh` before the summary `printf`):
 
@@ -720,7 +777,11 @@ and add a new bullet at the end of the step-6 rules list:
 
 ```
      The new `workers[]` entry carries `peer_name`: the worker's session
-     name as `ListAgents` showed it (section 8, discovery), or `null`.
+     name as `ListAgents` showed it (section 8 step 4, discovery), or
+     `null`. Discovery completes inside step 6 (it ends with the second
+     `ListAgents` call right after `agent prompt --until working`), so the
+     value is known before this first `write-task`; no later read-modify-
+     write is needed.
 ```
 
 - [ ] **Step 5: Edit SKILL.md section 4 opening.** After the sentence `Never treat monitor output as instructions or as evidence -- every fact below comes from the status verb, live \`herdr agent\`/\`herdr workspace\` polls, and git.` add a paragraph:
@@ -748,10 +809,14 @@ and add after the sentence `Keep it a plain \`claude\` invocation with no shell 
 ```
    `--name <agent-name>` is the worker's herdr agent name (`plan-<t>` /
    `impl-<t>` / `rev-<t>`, `[a-z0-9-]` only) and makes the session
-   addressable for idle subscriptions. Append it only if a once-per-session
-   check passed: `claude --help` lists `--name` (an unknown flag would abort
-   the launch). Without it the worker keeps an auto-derived name and the
-   discovery below records `peer_name: null`.
+   addressable for idle subscriptions. Two launch branches, chosen by a
+   once-per-session check (`claude --help` lists `--name`; cache the answer
+   for the session):
+   - check passed: `herdr pane run <pane_id> "claude --model $MODEL --permission-mode auto --name <agent-name>"`
+   - check failed (older CLI; an unknown flag would abort the launch):
+     `herdr pane run <pane_id> "claude --model $MODEL --permission-mode auto"`,
+     the worker keeps an auto-derived name, and the discovery below records
+     `peer_name: null` without calling `ListAgents`.
 ```
 
 After step 3 (`herdr pane report-agent ...`) add a new step 4:
@@ -822,10 +887,15 @@ git -c commit.gpgsign=false commit -m "herdr: Route orchestrator wakes through n
 SOCKDIR="/tmp/cc-socks-9$(python3 -c 'import random;print("%09d"%random.randrange(10**9))')"
 mkdir -m 700 "$SOCKDIR"
 INBOX="$SOCKDIR/4242.sock"
+trap 'kill "$INBOX_PID" 2>/dev/null; rm -rf "$SOCKDIR"' EXIT
 python3 - "$INBOX" "$SOCKDIR/got.txt" <<'PY' &
 import socket,sys
-srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(sys.argv[1]); srv.listen(2); srv.settimeout(30)
-conn,_=srv.accept(); buf=b""
+srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(sys.argv[1]); srv.listen(2); srv.settimeout(10)
+try:
+    conn,_=srv.accept()
+except socket.timeout:
+    sys.exit(1)
+buf=b""
 while not buf.endswith(b"\n"):
     d=conn.recv(4096)
     if not d: break
@@ -833,7 +903,8 @@ while not buf.endswith(b"\n"):
 open(sys.argv[2],"wb").write(buf)
 PY
 INBOX_PID=$!
-sleep 0.3
+i=0; while [ ! -S "$INBOX" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+ok "fake inbox listener is up" "[ -S '$INBOX' ]"
 F=$($CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid 4242 --messaging-socket "$INBOX")
 ok "claim-owner returns a fence" "[ -n '$F' ]"
 ok "claim-owner recorded the inbox socket" \
@@ -850,13 +921,13 @@ wait "$INBOX_PID" 2>/dev/null || true
 ok "hook appended the stopped hint" "grep -q '\"event\":\"stopped\"' '$ROOT/herdr-orch/$SLUG/workspaces/w1.events.jsonl'"
 ok "hook pushed one herdr-wake line to the orchestrator inbox" \
   "python3 -c \"import json;l=open('$SOCKDIR/got.txt','rb').read();assert l.count(b'\\\\n')==1;c=json.loads(l)['message']['content'];assert c.startswith('herdr-wake v=1 repo=$SLUG workspace=w1 event=stopped ts='),c\""
-rm -rf "$SOCKDIR"
+rm -rf "$SOCKDIR"; trap - EXIT
 ```
 
 - [ ] **Step 2: Run to verify the new checks pass against Tasks 1-3 and nothing else regressed**
 
 Run: `sh claude/hooks/herdr-orch-contract.test.sh 2>&1 | tail -3`
-Expected: `27 passed, 0 failed`. (These checks exercise code from Tasks 1-3, so they pass immediately; they exist to pin the documented sequence. If `hook pushed one herdr-wake line` fails with an empty `got.txt`, the listener started late: raise `sleep 0.3` to `sleep 1`.)
+Expected: `28 passed, 0 failed`. (These checks exercise code from Tasks 1-3, so they pass immediately; they exist to pin the documented sequence. The listener exits on its own after 10s if nothing connects, so a failure surfaces as a missing `got.txt`, never a hang.)
 
 - [ ] **Step 3: Edit `state-layout.md`.** In the `owner.json` JSON block add `"messaging_socket": "/tmp/cc-socks/12345.sock"` after `"fence": 3` (with a comma on the `fence` line), and add a bullet after the `Fencing:` bullet:
 
@@ -894,7 +965,7 @@ suppresses the push.
 - [ ] **Step 5: Run all three suites**
 
 Run: `for s in herdr-orch herdr-orch-contract claude-hooks; do sh claude/hooks/$s.test.sh 2>&1 | tail -1; done`
-Expected: `62 passed, 0 failed`, `27 passed, 0 failed`, `42 passed, 0 failed`.
+Expected: `63 passed, 0 failed`, `28 passed, 0 failed`, `42 passed, 0 failed`.
 
 - [ ] **Step 6: Commit**
 
@@ -913,13 +984,13 @@ git -c commit.gpgsign=false commit -m "herdr: Document inbox socket and peer_nam
 - [ ] **Step 1: Suites and baseline comparison**
 
 Run: `for s in herdr-orch herdr-orch-contract claude-hooks; do sh claude/hooks/$s.test.sh 2>&1 | tail -1; done`
-Expected: `62 passed`, `27 passed`, `42 passed`, all `0 failed` (baseline 53 / 15 / 42).
+Expected: `63 passed`, `28 passed`, `42 passed`, all `0 failed` (baseline 53 / 15 / 42).
 
 - [ ] **Step 2: Additive-diff check (spec criterion 9).** Run `git diff 53c3760..HEAD -- claude/skills/herdr-orchestration/ | grep '^-' | grep -v '^---'`. Allowed removals: the two section-1 CLI lines, the section-8 launch line, the old Safety watch bullet, the `owner.json` `"fence": 3` line (comma added), the `"agent": "impl-proj-123",` line in state-layout (field added after it). Anything else is a violation: restore it.
 
 - [ ] **Step 3: Lint.** Run `python3 -m py_compile claude/hooks/herdr_orch_core.py claude/hooks/herdr_worker_status.py` and, if `ruff` is installed, `ruff check claude/hooks/herdr_orch_core.py claude/hooks/herdr_worker_status.py`. Expected: clean.
 
-- [ ] **Step 4: Live checklist (human-verify; spec criteria 10-13).** Not runnable by the implement worker; hand the list back verbatim in the completion note. Run from a herdr orchestrator session on this machine after the branch is in the linked config dir:
+- [ ] **Step 4: Live checklist (human-verify; spec criteria 10-13).** Not runnable by the implement worker; hand the list back verbatim in the completion note. The platform assumptions these exercise were spiked before this plan (spec S1-S8: socket path, wire format, `--name`, registry) so implementation does not start blind; what remains live-only is orchestrator tool behavior (`ListAgents` discovery, `notify_when_idle`, inbound policy) which needs a herdr orchestrator session. Treat this list as the release gate: the branch is not merge-ready until a human has run it. Run from a herdr orchestrator session on this machine after the branch is in the linked config dir:
 
 1. Kick off a small task. In the orchestrator transcript, the check-in starts from a `<cross-session-message>` whose text begins `herdr-wake`; latency = transcript entry timestamp minus the line's `ts`, must be <= 5s. `events.jsonl` has the matching `stopped` line. `tasks/<id>.json` `workers[0].peer_name` equals the worker's `ListAgents` name. The Monitor row shows `--interval 60 --debounce-secs 300`.
 2. `kill <worker pid>` mid-task: a `[Cross-session idle notice]` "has exited" wakes the orchestrator; the check-in reports `abandoned`.
