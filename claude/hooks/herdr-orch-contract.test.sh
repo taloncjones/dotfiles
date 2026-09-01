@@ -145,5 +145,25 @@ echo '{}' > "$ROOT/herdr-orch/$WSLUG/tasks/PROJ-9.done.json"
 WOUT=$($CLI watch --repo-slug "$WSLUG" --once --since-epoch 0)
 ok "watch --once emits signal for recorded task state" "[ '$WOUT' = 'signal' ]"
 
+SKILL="claude/skills/herdr-orchestration/SKILL.md"
+ok "skill: claim/refresh pass the orchestrator inbox socket" \
+  "grep -Fq -- '--messaging-socket \"\$CLAUDE_CODE_MESSAGING_SOCKET\"' $SKILL"
+ok "skill: worker launch names the session" \
+  "grep -Fq -- 'claude --model \$MODEL --permission-mode auto --name <agent-name>' $SKILL"
+ok "skill: --name gated on a once-per-session capability check" \
+  "grep -Fq -- 'claude --help' $SKILL && grep -Fq -- 'lists \`--name\`' $SKILL"
+ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
+  "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $SKILL"
+ok "skill: watch armed at relaxed cadence when messaging is live, default otherwise" \
+  "grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
+ok "skill: re-subscription eligible only for working/blocked workers" \
+  "grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
+ok "skill: no-lost-wake rule, capped at three passes" \
+  "grep -Fq 'capped at three passes per turn' $SKILL"
+ok "skill: discovery fails closed on zero or several candidates" \
+  "grep -Fq 'Zero or more than one candidate' $SKILL && grep -Fq 'peer_name' $SKILL"
+ok "skill: safety names cross-session messages as wake-only" \
+  "grep -Fq 'Every inbound cross-session message' $SKILL"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
