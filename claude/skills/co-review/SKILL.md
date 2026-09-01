@@ -371,7 +371,7 @@ pass is reviewing.
 3.6. **Tear down step 0's frozen worktree — unconditional finalization.** `$WT`
 (and `$LOG`) must be removed on **every** exit path, not only when step 3.5
 ran: the clean / empty-merge case where step 3.5 is skipped, the step-0
-empty-diff early stop, and any error or abort anywhere in steps 0-3.5 (e.g.
+empty-diff early stop, the step-0 empty-diff-guard error abort (exit >1), and any error or abort anywhere in steps 0-3.5 (e.g.
 step 0's PR-checkout guard exiting non-zero). `$WT` is a registered detached
 worktree at a unique `mktemp -u` path, so a leaked one is **not** reaped by a
 later run's `git worktree prune` (its directory still exists) — it lingers in
@@ -380,11 +380,11 @@ not a normal-path step: whichever exit path you reach, run the teardown once
 before finishing.
 
 ```bash
-git worktree remove --force "$WT"; git worktree prune; rm -f "$LOG"
+git worktree remove --force "$WT"; git worktree prune; rm -f "$LOG" "$WT.idx" "$WT.paths"
 ```
 
 The commands are safe to run even if a resource is already gone (`$LOG` may
-never have been created if step 2 didn't run). Order still holds: `$WT` must
+never have been created if step 2 didn't run; `$WT.idx`/`$WT.paths` exist only in local-uncommitted mode and are normally already removed inline). Order still holds: `$WT` must
 outlive the Codex finder (step 2), the attacker (step 2.5), and all skeptics
 (step 3.5), which all read it — so on the normal path run this only after
 step 3.5 has finished or been skipped, never before. Step 5's re-review re-runs
@@ -420,7 +420,7 @@ one down here does not starve it.
    - Re-run step 0 (freeze + gate detection) against the fix-commit diff
      independently — a fix that touches gate-like paths gets step 2.5 and
      3.5's escalation rule again even if the original diff didn't, and vice
-     versa. Steps 1-3.5 run again against just this fix diff.
+     versa. Steps 1-3.6 run again against just this fix diff.
    - **Carry forward pass 1's unresolved state.** Pass 2's own merge (step 3)
      only covers the fix-commit diff — it does not automatically re-surface
      pass 1's findings that were survived-but-not-fixed or refuted-but-not-fixed.
@@ -494,7 +494,7 @@ one down here does not starve it.
   report. Loop **at most once** — the bounded re-review in step 5 — then
   stop. Hard cap of 2 review passes total; default to a single pass unless the
   fix carried real risk.
-- If the diff is empty, say so and stop.
+- If the diff is empty, say so and stop -- step 0's mode-independent `diff --quiet` guard is where that is decided, before anything is dispatched.
 - Adversarial-verify and the threat-model probe both run entirely on the
   Claude side (`Agent`-tool subagents), never via a custom-prompt `codex exec`
   call — see step 2's recursion note. `codex exec review --base` (step 2) is
