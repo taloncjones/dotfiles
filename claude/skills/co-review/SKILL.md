@@ -48,43 +48,81 @@ verify.
      git worktree add --detach "$WT" HEAD \
        || { git worktree prune && git worktree add --detach "$WT" HEAD; }
 
-     # PR mode: check the PR head out INTO $WT (this also keeps the shared tree
-     # free for the parallel Claude half). Pin base + head so the finders and
-     # skeptics all read the same commit even if the PR is pushed to mid-review.
-     # gh pr checkout can FAIL (network/auth, or the PR branch is already checked
-     # out in another worktree) and leave $WT at the shared HEAD -- then Codex
-     # would silently review the reviewer's own branch, not the PR. So resolve
-     # the PR head SHA up front and refuse to proceed unless $WT is actually at
-     # it (fail loudly, before any reviewer is dispatched).
-     SNAP_BASE=$(gh pr view <n> --json baseRefName -q .baseRefName)
+     # PR mode: check the PR head out INTO $WT, detached -- no local PR branch is
+     # ever created, so there is nothing extra to tear down in step 3.6 (and the
+     # shared tree stays free for the parallel Claude half). Pin base + head so
+     # the finders and skeptics all read the same commit even if the PR is pushed
+     # to mid-review. gh pr checkout can FAIL (network/auth, or the PR ref is
+     # unavailable) and leave $WT at the shared HEAD -- then Codex would silently
+     # review the reviewer's own branch, not the PR. So resolve the PR head SHA
+     # up front and refuse to proceed unless $WT is actually at it (fail loudly,
+     # before any reviewer is dispatched).
+     BASE_REF=$(gh pr view <n> --json baseRefName -q .baseRefName)
      PR_HEAD=$(gh pr view <n> --json headRefOid -q .headRefOid)
-     ( cd "$WT" && gh pr checkout <n> ) \
-       || { echo "co-review: 'gh pr checkout <n>' failed -- aborting, would review the wrong commit" >&2; exit 1; }
+     ( cd "$WT" && gh pr checkout <n> --detach ) \
+       || { echo "co-review: 'gh pr checkout <n> --detach' failed -- aborting, would review the wrong commit" >&2; exit 1; }
      SNAP_HEAD=$(git -C "$WT" rev-parse HEAD)
      [ "$SNAP_HEAD" = "$PR_HEAD" ] \
        || { echo "co-review: \$WT is at $SNAP_HEAD, not PR head $PR_HEAD -- aborting" >&2; exit 1; }
+     # Pin the base to the merge-base SHA. A bare ref name ("main") may not
+     # resolve inside $WT (codex would error -> read as "no findings" = silent
+     # false-clean) or may have advanced past the fork point (wrong scope). The
+     # fetch is guarded: on failure FETCH_HEAD can be stale (gh pr checkout
+     # writes it), which would silently pin SNAP_BASE to the PR head and produce
+     # a false-empty diff. Assumes `origin` is the PR's base repository (the
+     # own-repo case this skill serves); a checkout whose origin is a fork of
+     # the base repo is unsupported -- a same-named branch there could resolve
+     # from the wrong repo.
+     git -C "$WT" fetch origin "$BASE_REF" \
+       || { echo "co-review: fetch of base '$BASE_REF' failed -- aborting" >&2; exit 1; }
+     SNAP_BASE=$(git -C "$WT" merge-base FETCH_HEAD "$PR_HEAD") \
+       && git -C "$WT" rev-parse --verify --quiet "$SNAP_BASE^{commit}" >/dev/null \
+       || { echo "co-review: could not pin SNAP_BASE to a commit -- aborting" >&2; exit 1; }
 
      # branch mode (committed work, no PR): head is already committed.
      # checkout --detach can still fail (e.g. an untracked file already in $WT
      # collides with a tracked path at $SNAP_HEAD) and leave $WT at whatever
      # it was provisioned at -- verify it landed before dispatching anything.
-     SNAP_BASE=<branch-the-work-forked-from>; SNAP_HEAD=$(git rev-parse HEAD)
+     SNAP_HEAD=$(git rev-parse HEAD)
      git -C "$WT" checkout --detach "$SNAP_HEAD" \
        || { echo "co-review: checkout of $SNAP_HEAD into \$WT failed -- aborting, would review the wrong commit" >&2; exit 1; }
      [ "$(git -C "$WT" rev-parse HEAD)" = "$SNAP_HEAD" ] \
        || { echo "co-review: \$WT is at $(git -C "$WT" rev-parse HEAD), not $SNAP_HEAD -- aborting" >&2; exit 1; }
+     # Pin the base to the merge-base SHA, computed against the pinned $SNAP_HEAD
+     # -- never the shared tree's mutable HEAD, which another session can move
+     # between commands.
+     SNAP_BASE=$(git merge-base <branch-the-work-forked-from> "$SNAP_HEAD") \
+       && git rev-parse --verify --quiet "$SNAP_BASE^{commit}" >/dev/null \
+       || { echo "co-review: could not pin SNAP_BASE to a commit -- aborting" >&2; exit 1; }
 
      # local-uncommitted mode: the change is committed NOWHERE, so a plain
      # `worktree add --detach HEAD` gives a CLEAN checkout that omits it and
      # `review --base` then diffs empty (silent false-clean -- the bug this
-     # fixes). Capture the full working state (tracked edits AND new untracked
-     # files, minus gitignored) into a snapshot commit WITHOUT touching the
-     # shared HEAD or index, via a throwaway index:
+     # fixes). Capture exactly the file set the Claude half reviews -- the paths
+     # in `git diff HEAD` (staged + unstaged tracked changes, incl. staged new
+     # files and deletions) -- into a snapshot commit WITHOUT touching the
+     # shared HEAD or index, via a throwaway index. Untracked files are seen by
+     # NEITHER half (see the warning below the block); this keeps [both] and
+     # single-source attribution honest, and keeps machine-local untracked state
+     # (e.g. hook-hydrated symlinks like .todos) out of the snapshot, where it
+     # would abort the checkout below in every linked worktree.
      SNAP_BASE=$(git rev-parse HEAD)
-     GIT_INDEX_FILE="$WT.idx" git read-tree HEAD
-     GIT_INDEX_FILE="$WT.idx" git add -A
-     SNAP_TREE=$(GIT_INDEX_FILE="$WT.idx" git write-tree); rm -f "$WT.idx"
-     SNAP_HEAD=$(git commit-tree "$SNAP_TREE" -p "$SNAP_BASE" -m "co-review snapshot")
+     GIT_INDEX_FILE="$WT.idx" git read-tree HEAD \
+       || { echo "co-review: read-tree failed -- aborting" >&2; exit 1; }
+     # Enumerate into a guarded temp file -- not a blind pipe (a failed git diff
+     # would degrade to an empty path list = false-clean) and not $(...)
+     # (command substitution drops the NUL separators). Every plumbing step is
+     # guarded: a partial xargs/write-tree failure would otherwise produce a
+     # valid-looking but INCOMPLETE snapshot -- worse than a loud abort.
+     git diff HEAD --name-only -z > "$WT.paths" \
+       || { echo "co-review: diff enumeration failed -- aborting" >&2; exit 1; }
+     GIT_INDEX_FILE="$WT.idx" xargs -0 -r git add -A -- < "$WT.paths" \
+       || { echo "co-review: snapshot staging failed -- aborting" >&2; exit 1; }
+     SNAP_TREE=$(GIT_INDEX_FILE="$WT.idx" git write-tree) \
+       || { echo "co-review: write-tree failed -- aborting" >&2; exit 1; }
+     rm -f "$WT.idx" "$WT.paths"
+     SNAP_HEAD=$(git commit-tree "$SNAP_TREE" -p "$SNAP_BASE" -m "co-review snapshot") \
+       || { echo "co-review: commit-tree failed -- aborting" >&2; exit 1; }
      # Same checkout-success guard as the other two modes: an untracked file
      # already sitting in $WT (e.g. an ignored symlink) can make this abort
      # and leave $WT at the pre-snapshot commit -- silently reviewing an
@@ -96,10 +134,22 @@ verify.
      ```
 
      `codex exec review --base "$SNAP_BASE"` run inside `$WT` (step 2) now sees
-     the real change in every mode. If the local-uncommitted capture yields
-     `$SNAP_HEAD`'s tree equal to `$SNAP_BASE`'s (nothing to review), the diff
-     is empty: tear down `$WT` per step 3.6 (already provisioned above), say so,
-     and stop (per Notes). Every subagent dispatched below
+     the real change in every mode.
+     In local-uncommitted mode, first check
+     `git ls-files --others --exclude-standard`: when non-empty, warn that
+     those untracked files are reviewed by NEITHER half -- name the count and
+     tell the user to stage them to include them. This warning comes BEFORE the
+     empty-diff guard so an untracked-only change still surfaces it instead of
+     silently stopping. (A staged edit fully undone in the working tree nets to
+     no change and is legitimately absent from the snapshot; the snapshot is
+     the net worktree-vs-HEAD change.) Then run the mode-independent empty-diff
+     guard before dispatching anything:
+     `git -C "$WT" diff --quiet "$SNAP_BASE" "$SNAP_HEAD"`. Exit 0 = empty diff:
+     tear down `$WT` per step 3.6, say so, and stop -- dispatch nothing (PR at
+     its base, branch at its fork point, or nothing tracked changed locally).
+     Exit 1 = a real diff: continue. Exit >1 = git error: tear down per step
+     3.6 and abort loudly -- never treat an error as "different" or "empty".
+     Every subagent dispatched below
      (step 2.5's attacker, step 3.5's skeptics) gets `$SNAP_BASE`/`$SNAP_HEAD`
      stated explicitly and is pointed at `$WT` with explicit read-only
      instructions — never "figure out the diff yourself," which risks a
@@ -321,7 +371,7 @@ pass is reviewing.
 3.6. **Tear down step 0's frozen worktree — unconditional finalization.** `$WT`
 (and `$LOG`) must be removed on **every** exit path, not only when step 3.5
 ran: the clean / empty-merge case where step 3.5 is skipped, the step-0
-empty-diff early stop, and any error or abort anywhere in steps 0-3.5 (e.g.
+empty-diff early stop, the step-0 empty-diff-guard error abort (exit >1), and any error or abort anywhere in steps 0-3.5 (e.g.
 step 0's PR-checkout guard exiting non-zero). `$WT` is a registered detached
 worktree at a unique `mktemp -u` path, so a leaked one is **not** reaped by a
 later run's `git worktree prune` (its directory still exists) — it lingers in
@@ -330,11 +380,11 @@ not a normal-path step: whichever exit path you reach, run the teardown once
 before finishing.
 
 ```bash
-git worktree remove --force "$WT"; git worktree prune; rm -f "$LOG"
+git worktree remove --force "$WT"; git worktree prune; rm -f "$LOG" "$WT.idx" "$WT.paths"
 ```
 
 The commands are safe to run even if a resource is already gone (`$LOG` may
-never have been created if step 2 didn't run). Order still holds: `$WT` must
+never have been created if step 2 didn't run; `$WT.idx`/`$WT.paths` exist only in local-uncommitted mode and are normally already removed inline). Order still holds: `$WT` must
 outlive the Codex finder (step 2), the attacker (step 2.5), and all skeptics
 (step 3.5), which all read it — so on the normal path run this only after
 step 3.5 has finished or been skipped, never before. Step 5's re-review re-runs
@@ -370,7 +420,7 @@ one down here does not starve it.
    - Re-run step 0 (freeze + gate detection) against the fix-commit diff
      independently — a fix that touches gate-like paths gets step 2.5 and
      3.5's escalation rule again even if the original diff didn't, and vice
-     versa. Steps 1-3.5 run again against just this fix diff.
+     versa. Steps 1-3.6 run again against just this fix diff.
    - **Carry forward pass 1's unresolved state.** Pass 2's own merge (step 3)
      only covers the fix-commit diff — it does not automatically re-surface
      pass 1's findings that were survived-but-not-fixed or refuted-but-not-fixed.
@@ -444,7 +494,7 @@ one down here does not starve it.
   report. Loop **at most once** — the bounded re-review in step 5 — then
   stop. Hard cap of 2 review passes total; default to a single pass unless the
   fix carried real risk.
-- If the diff is empty, say so and stop.
+- If the diff is empty, say so and stop -- step 0's mode-independent `diff --quiet` guard is where that is decided, before anything is dispatched.
 - Adversarial-verify and the threat-model probe both run entirely on the
   Claude side (`Agent`-tool subagents), never via a custom-prompt `codex exec`
   call — see step 2's recursion note. `codex exec review --base` (step 2) is

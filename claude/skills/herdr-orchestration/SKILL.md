@@ -69,6 +69,14 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
    the strong model headlessly and record the result:
    - `PROBE_JSON="$(claude --model fable -p 'Reply with the single word: ok' --output-format json </dev/null)"`
    - `CLS="$(python3 "$CORE" classify-probe --repo-slug <slug> --model fable --json "$PROBE_JSON")"`
+   - If `CLS` is not `available`, first append a diagnostic sample
+     (best-effort -- a persistence failure never blocks classification
+     handling) so the next real 429 exhaustion response lands on disk for
+     `_usage_exhausted` field-coverage validation:
+     `jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cls "$CLS" --argjson probe "$PROBE_JSON" '{ts:$ts,cls:$cls,probe:$probe}' >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch/<slug>/probe-samples.jsonl" 2>/dev/null || jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cls "$CLS" --arg raw "$PROBE_JSON" '{ts:$ts,cls:$cls,raw:$raw}' >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch/<slug>/probe-samples.jsonl" 2>/dev/null || true`
+     The file is diagnostic-only (never read by orchestrator logic; the
+     probe step is already owner-only), machine-local, and deletable once
+     a real exhaustion sample has validated the regex.
    - `available`/`unavailable` -> write the map (opus/sonnet default true):
      `python3 "$CORE" write-capabilities --repo-slug <slug> --session <id> --fence <fence> --json '{"v":1,"session_id":"<id>","available":{"fable":<true|false>,"opus":true,"sonnet":true}}'`
    - `indeterminate` (no `claude`, network error, transient 429 rate limit,

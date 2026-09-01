@@ -19,6 +19,7 @@ STATE_ROOT/
   <repo_slug>/
     owner.json                        # single-writer ownership claim
     config.json                       # machine-local config
+    probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append from the section-1 probe step; safe to delete
     tasks/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record
