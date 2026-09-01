@@ -1,6 +1,6 @@
 # Repo Recall: per-repo full-text recall for docs, findings, todos, memory
 
-Status: revised after codex-spec-review round 1 (2026-09-01)
+Status: reviewed (codex-spec-review rounds 1-2, 2026-09-01); ready-to-plan
 Date: 2026-09-01
 Todo: `.todos/pending/2026-09-01-ship-per-repo-full-text-recall-skill-for-docs-and.md`
 (this spec supersedes the todo's Solution section where they differ, notably
@@ -114,16 +114,21 @@ Guarantees:
 
 - The resolved index path must not be inside the working tree or the
   canonical repo root (symlink-resolved). If it is, exit 6 with the path.
-- A work-tree search opens only paths under the work config dir; a personal
-  search opens only paths under the personal config dir. Tested with
-  sentinel memory files in each dir that must never appear in the other's
-  results.
+- Account boundary: the resolved config dir is the active account. Index
+  state and the external `memory` source are read and written only under
+  that one config dir (repo files are, of course, read from the tree). A
+  deliberate `CLAUDE_CONFIG_DIR` override moves the boundary, exactly as it
+  moves the Claude login. Tested with sentinel memory files in each config
+  dir that must never appear in the other account's results.
 - Index dir and file are created with mode 0700 / 0600.
 - `recall.py status` prints the resolved config dir, index path, and
   per-kind counts so the routing is auditable.
 - Stale indexes (top level deleted) are not auto-purged; `status --all`
   lists every index under the config dir with its recorded top level and
-  whether it still exists, so a human can `rm` them. Corrupt-index backups:
+  whether it still exists, so a human can `rm` them. `--all` routes
+  without git: `$CLAUDE_CONFIG_DIR` if set, else the resolved current
+  directory classified against `$CLAUDE_WORK_TREE`. It only reads; an
+  unreadable or corrupt index is listed as `corrupt` and left untouched. Corrupt-index backups:
   at most one `index.db.corrupt` is kept (newer replaces older).
 
 Each working tree (main checkout or linked worktree) gets its own index
@@ -231,10 +236,12 @@ writable or index path resolves inside the repo; 7 index locked / missing;
 
 ### `recall.py status [--all]`
 
-Prints config dir, index path, schema version, per-kind file/chunk counts,
-`last_index_at`, and whether FTS5 is available. `--all` lists every index
-under the config dir with its recorded top level and existence. Never exits
-non-zero for missing sources; exits 3 outside a git tree (without `--all`).
+Prints config dir, index path, schema version, script version, per-kind
+file/chunk counts, `last_index_at`, and whether FTS5 is available. `--all`
+lists every index under the config dir (routing per "Index location") with
+its recorded top level, existence, and `corrupt` where the file cannot be
+opened; it never rebuilds or quarantines. Never exits non-zero for missing
+sources; exits 3 outside a git tree (without `--all`).
 
 ### `recall.py eval [<file>] [--k 5]`
 
@@ -249,12 +256,20 @@ Schema: `q` non-empty string; `expect` non-empty list of display paths,
 each optionally suffixed `#<heading text>` (compared case-insensitively
 after the same normalization as chunk headings); `note` one of `hit`,
 `paraphrase`, `synonym`, `tokenization`, `missing-source`; `added` ISO date.
-Validation failures (malformed JSON, wrong types, unknown note, duplicate
-`q`, expected path not currently indexed) are listed and the command exits
-8 without printing metrics. A query hits at k if any expected entry appears
+The command runs one incremental refresh, then evaluates every query
+against that single snapshot (`--no-refresh` semantics for the rest of the
+run). Validation failures (malformed JSON, wrong types, unknown note,
+duplicate `q`, expected path not currently indexed unless `note` is
+`missing-source`) are listed and the command exits 8 without printing
+metrics. `missing-source` entries with an absent expected path are legal,
+always count as misses, and stay in the file until the source gap is
+closed and the note is changed. A query hits at k if any expected entry appears
 in the top k results (path match, plus heading match when a heading suffix
-is given). Output: per-query hit/miss with rank achieved, then `recall@k`
-and `MRR` to two decimals with `n`, then misses grouped by `note`. Exit 0 on
+is given). Output: a header line with the script version (`RECALL_VERSION`, a
+constant bumped whenever ranking, tokenization, chunking, or the synonym
+table changes), `k`, `n`, and `last_index_at`; then per-query hit/miss
+with rank achieved; then `recall@k` and `MRR` to two decimals; then misses
+grouped by `note`. Exit 0 on
 a valid run regardless of scores (reporting tool, not a gate).
 
 ### `recall.py eval add "<q>" --expect <display-path>[#heading]... [--note N]`
@@ -289,7 +304,10 @@ correctness gain.
   record a query ("add that to the recall eval"), run `eval add` with the
   query verbatim, the expected path, and a `note`. Workers never append on
   their own. Queries that contain secrets or customer data are not recorded
-  (the file may be committed).
+  (the file may be committed). Privacy exception to "never edited": an
+  entry found to hold sensitive data is deleted or redacted immediately
+  (the human decides which), and a redacted entry is re-added as a new
+  entry with today's `added` date so longitudinal comparisons exclude it.
 
 ## Embeddings decision (falsifiable)
 
@@ -323,9 +341,14 @@ stay out and the todo is closed.
 - Not a git repo: exit 3, message, nothing written.
 - Unreadable or non-UTF-8 file: skipped with a stderr warning unless
   `--quiet`; removed from the index if previously indexed; never aborts.
-- Index file corrupt (`sqlite3.DatabaseError` on open or query): rename to
-  `index.db.corrupt` (replacing any older one), full rebuild, stderr
-  warning.
+- Index file corrupt: detected narrowly, by `PRAGMA quick_check` not
+  returning `ok` on open, or by `sqlite3.DatabaseError` whose message
+  starts with `file is not a database` or `database disk image is
+  malformed`. Only then: rename to `index.db.corrupt` (replacing any older
+  one), full rebuild, stderr warning. Lock errors (`database is locked`),
+  FTS parse errors (`fts5: syntax error`), permission and I/O errors are
+  never treated as corruption and map to exits 7, 4, and 6 respectively.
+  Automatic rebuild happens only for the current tree's index.
 - Concurrent writers: SQLite locking with a 5 s busy timeout; behaviour per
   command as specified above (search degrades to the prior index, index
   exits 7).
@@ -401,6 +424,18 @@ passes.
   nothing produces them yet.
 - Change detection: mtime+size gate, sha256 confirm; same-mtime same-size
   edits need `--full` (documented limit, not worth a content scan per query).
+
+## Codex spec review, round 2 (2026-09-01)
+
+Seven high findings, no critical. All folded in: account boundary
+restated as index-plus-memory under one config dir with the override
+moving it; `missing-source` eval entries allowed; corruption detected
+narrowly (quick_check / specific messages) and never triggered by lock,
+parse, or permission errors; `status --all` routes without git and never
+rebuilds; `eval` uses one snapshot and prints `RECALL_VERSION`; privacy
+redaction exception for the golden set. Verdict stayed needs-rework on
+the round-2 text; per the codex-spec-review skill the loop stops at two
+rounds and proceeds on judgment. Status: ready-to-plan.
 
 ## Codex spec review, round 1 (2026-09-01)
 
