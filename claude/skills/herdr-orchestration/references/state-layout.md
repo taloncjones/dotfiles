@@ -186,6 +186,9 @@ Written only by the owning orchestrator, via `$CORE write-task`.
   ],
   "review_head_sha": null,
   "review_outcome": null,
+  "contract_path": "claude/contracts/PROJ-123-contract.json",
+  "contract_sha256": "<64hex>",
+  "merge_check": null,
   "status": "kickoff|in-progress|blocked|completed|review-dispatched|changes-requested|reviewed|failed|abandoned|merged",
   "created": "...",
   "updated": "..."
@@ -198,6 +201,27 @@ review) appends a new entry rather than overwriting.
 `peer_name` is the worker's Claude Code session name as `ListAgents` showed
 it after launch (the target of `notify_when_idle` subscriptions), or `null`
 when discovery found zero or several candidates.
+
+`contract_path` (worktree-relative) and `contract_sha256` are the
+verification-contract pin, written by the orchestrator at implement dispatch
+(the sha256 of the committed contract blob; see the contract section below).
+Records predating the feature lack both fields -- `verify-contract` then
+exits 5 and the skill's grandfather rule applies. `merge_check` records the
+latest post-rebase speculative merge check:
+
+```json
+{
+  "base_main_sha": "<40hex>",
+  "branch_head_sha": "<40hex>",
+  "result": "pass|fail|conflict",
+  "ts": "..."
+}
+```
+
+Only `pass`/`fail`/`conflict` are ever recorded; infrastructure or integrity
+trouble writes nothing (retried next check-in). Any `merge_check` whose SHAs
+do not match live HEAD and current `origin/<default>` is stale -- ignored and
+re-run; it is nulled whenever `review_head_sha` is cleared.
 
 ### `tasks/<task_id>.done.json` -- worker-emitted completion record
 
@@ -275,3 +299,33 @@ Append-only, **per-workspace**, written only by that workspace's hook
 (single writer per file, so no cross-writer interleaving). The
 orchestrator merges across files on read (`$CORE status`). See
 `event-schema.md` for the event vocabulary and fold rule.
+
+### `claude/contracts/<task_id>-contract.json` -- verification contract (branch-committed)
+
+The only per-task artifact NOT under `STATE_ROOT`: committed normally on the
+task branch (no `git add -f` needed -- `claude/` is tracked), authored by the
+plan worker, pinned by hash into the task record at implement dispatch, and
+executed by the `verify-contract` verb (worker gate, pre-review gate,
+post-rebase merge gate -- SKILL.md sections 2, 4, and 6).
+
+```json
+{
+  "v": 1,
+  "task_id": "PROJ-123",
+  "commands": [
+    {
+      "name": "core-tests",
+      "run": "sh claude/hooks/herdr-orch.test.sh",
+      "timeout_secs": 600
+    }
+  ]
+}
+```
+
+Validation is fail-closed: `v` must be integer 1; `task_id` must match; 1-32
+commands, each `{name, run[, timeout_secs 1-3600]}` with unique non-blank
+names and no unknown keys. Commands run via `sh -c` from the worktree root
+and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
+writes, no machine-state mutation, no network, no secret echo. Full
+requirements: `docs/specs/2026-09-01-verification-contracts.md` (branch-only)
+and the authoring rules echoed in `brief-template.md`.

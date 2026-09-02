@@ -1097,5 +1097,139 @@ finally:
 sys.exit(0)
 PY
 
+check "validate_contract accepts v1 and rejects each violation" <<PY
+$LOAD
+ok={"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}
+assert c.validate_contract(ok,"PROJ-1") is None
+assert c.validate_contract(ok,"PROJ-2") is not None          # task_id mismatch
+assert c.validate_contract({**ok,"v":True},"PROJ-1") is not None   # bool v
+assert c.validate_contract({**ok,"v":2},"PROJ-1") is not None
+assert c.validate_contract({**ok,"extra":1},"PROJ-1") is not None  # unknown key
+assert c.validate_contract({**ok,"commands":[]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","x":1}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":" ","run":"true"}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":""}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true"},{"name":"t","run":"true"}]},"PROJ-1") is not None  # dup name
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":True}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":0}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":3601}]},"PROJ-1") is not None
+assert c.validate_contract({**ok,"commands":[{"name":"t","run":"true","timeout_secs":3600}]},"PROJ-1") is None
+big=[{"name":"t%d"%i,"run":"true"} for i in range(33)]
+assert c.validate_contract({**ok,"commands":big},"PROJ-1") is not None  # >32
+assert c.validate_contract([],"PROJ-1") is not None          # non-dict
+sys.exit(0)
+PY
+
+check "contract_sha256 hashes file bytes" <<PY
+$LOAD
+import hashlib
+root=tempfile.mkdtemp()
+p=os.path.join(root,"c.json");open(p,"w").write("{}")
+assert c.contract_sha256(p)==hashlib.sha256(b"{}").hexdigest()
+sys.exit(0)
+PY
+
+check "run_contract_commands: pass, first-failure stop, timeout killpg" <<PY
+$LOAD
+import time
+root=tempfile.mkdtemp()
+cmds=[{"name":"a","run":"true"},{"name":"b","run":"true"}]
+assert c.run_contract_commands(cmds,root)==0
+marker=os.path.join(root,"ran")
+cmds=[{"name":"a","run":"false"},{"name":"b","run":"touch "+marker}]
+assert c.run_contract_commands(cmds,root)==1
+assert not os.path.exists(marker)                 # stopped at first failure
+cmds=[{"name":"slow","run":"sleep 30","timeout_secs":1}]
+t0=time.time()
+assert c.run_contract_commands(cmds,root)==1
+assert time.time()-t0 < 10                        # killed, not waited out
+cmds=[{"name":"cwd","run":"touch ran"}]
+assert c.run_contract_commands(cmds,root)==0 and os.path.exists(marker)  # cwd=worktree
+sys.exit(0)
+PY
+
+check "verify-contract: unpinned validate/run/missing/schema exits" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d)
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}' > "$WT/c.json"
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract c.json --allow-unpinned --validate-only | grep -qE '^[0-9a-f]{64}$'
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract c.json --allow-unpinned
+set +e
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract missing.json --allow-unpinned 2>/dev/null; [ $? -eq 3 ] || exit 1
+printf '{"v":1,"task_id":"WRONG","commands":[{"name":"t","run":"true"}]}' > "$WT/bad.json"
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract bad.json --allow-unpinned 2>/dev/null; [ $? -eq 2 ] || exit 1
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"false"}]}' > "$WT/f.json"
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract f.json --allow-unpinned 2>/dev/null; [ $? -eq 1 ] || exit 1
+exit 0
+SH
+
+check "verify-contract: pinned mode enforces pin, hash, path match" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d)
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}' > "$WT/c.json"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"in-progress"}'
+set +e
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" 2>/dev/null
+[ $? -eq 5 ] || exit 1                                                              # no pin
+set -e
+SHA=$(python3 -c "import hashlib;print(hashlib.sha256(open('$WT/c.json','rb').read()).hexdigest())")
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"in-progress","contract_path":"c.json","contract_sha256":"'"$SHA"'"}'
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT"           # pass
+set +e
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract other.json 2>/dev/null; [ $? -eq 2 ] || exit 1                         # path mismatch
+MARKER="$WT/tampered-ran"
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"touch tampered-ran"}]}' > "$WT/c.json"
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" 2>/dev/null
+[ $? -eq 4 ] || exit 1                                                              # tamper
+[ ! -f "$MARKER" ] || exit 1                                                        # never ran
+exit 0
+SH
+
+check "verify-contract: pinned validate-only prints hash, runs nothing; corrupt record exits 2" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d)
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"touch vo-ran"}]}' > "$WT/c.json"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+SHA=$(python3 -c "import hashlib;print(hashlib.sha256(open('$WT/c.json','rb').read()).hexdigest())")
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","contract_path":"c.json","contract_sha256":"'"$SHA"'"}'
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --validate-only | grep -qE '^[0-9a-f]{64}$'
+[ ! -f "$WT/vo-ran" ]                                       # validate-only never executed
+printf 'not-json' > "$ROOT/herdr-orch/slug-x/tasks/PROJ-1.json"
+set +e
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" 2>/dev/null
+[ $? -eq 2 ] || exit 1                                      # corrupt record: integrity, not grandfather
+exit 0
+SH
+
+check "verify-contract: rejects escape paths and symlinked contracts" <<'SH'
+ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); OUT=$(mktemp -d)
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}' > "$OUT/c.json"
+ln -s "$OUT/c.json" "$WT/link.json"
+set +e
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract ../escape.json --allow-unpinned 2>/dev/null; [ $? -eq 2 ] || exit 1
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --contract link.json --allow-unpinned 2>/dev/null; [ $? -eq 2 ] || exit 1
+$CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
+  --allow-unpinned 2>/dev/null; [ $? -eq 2 ] || exit 1   # --allow-unpinned needs --contract
+exit 0
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

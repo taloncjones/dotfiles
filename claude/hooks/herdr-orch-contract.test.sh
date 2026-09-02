@@ -197,5 +197,65 @@ ok "skill: discovery fails closed on zero or several candidates" \
 ok "skill: safety names cross-session messages as wake-only" \
   "grep -Fq 'Every inbound cross-session message' $SKILL"
 
+# 8. verification contract: author -> pin -> verify -> tamper -> merge_check
+# Section 6 stole ownership of $SLUG from session S to session T (stale-fence
+# test above), so S's fence $F is no longer valid; reclaim as T (the current
+# owner) before writing.
+F3=$($CLI claim-owner --repo-slug "$SLUG" --session T --host h --pid 2)
+WT=$(mktemp -d)
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}' > "$WT/contract.json"
+SHA=$($CLI verify-contract --repo-slug "$SLUG" --task-id PROJ-1 --worktree "$WT" \
+  --contract contract.json --allow-unpinned --validate-only)
+ok "plan-phase validate-only prints the pin hash" "printf '%s' '$SHA' | grep -qE '^[0-9a-f]{64}$'"
+$CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session T --fence "$F3" \
+  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress","contract_path":"contract.json","contract_sha256":"'"$SHA"'"}'
+ok "pinned verify passes for the impl phase" \
+  "$CLI verify-contract --repo-slug '$SLUG' --task-id PROJ-1 --worktree '$WT' >/dev/null"
+printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"},{"name":"x","run":"true"}]}' > "$WT/contract.json"
+ok "tampered contract is exit 4" \
+  "$CLI verify-contract --repo-slug '$SLUG' --task-id PROJ-1 --worktree '$WT' 2>/dev/null; [ \$? -eq 4 ]"
+$CLI write-task --repo-slug "$SLUG" --task-id PROJ-1 --session T --fence "$F3" \
+  --json '{"task_id":"PROJ-1","base_sha":"b0","status":"reviewed","contract_path":"contract.json","contract_sha256":"'"$SHA"'","merge_check":{"base_main_sha":"m1","branch_head_sha":"h1","result":"pass","ts":"t"}}'
+ok "merge_check round-trips through write-task" \
+  "python3 -c \"import json,sys;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json'));sys.exit(0 if d['merge_check']['result']=='pass' else 1)\""
+ok "pin fields survive a status-transition rewrite" \
+  "python3 -c \"import json,sys;d=json.load(open('$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json'));sys.exit(0 if d['contract_path']=='contract.json' and len(d['contract_sha256'])==64 else 1)\""
+
+# 9. speculative merge check: detached worktree rebase + verify, conflict abort
+GR=$(mktemp -d)
+git -C "$GR" init -q -b main
+git -C "$GR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+git -C "$GR" checkout -q -b task
+printf '{"v":1,"task_id":"PROJ-9","commands":[{"name":"t","run":"test -f feature.txt"}]}' > "$GR/contract.json"
+echo f > "$GR/feature.txt"
+git -C "$GR" add contract.json feature.txt
+git -C "$GR" -c user.email=t@t -c user.name=t commit -q -m task-work
+git -C "$GR" checkout -q main
+echo m > "$GR/main.txt"; git -C "$GR" add main.txt
+git -C "$GR" -c user.email=t@t -c user.name=t commit -q -m main-advance
+BR=$(git -C "$GR" rev-parse task); MAIN=$(git -C "$GR" rev-parse main)
+# Pin from the PRE-rebase task branch blob (as the orchestrator would at
+# implement dispatch) -- the assertion below proves the pin survives rebase.
+F2=$($CLI claim-owner --repo-slug slug-rebase --session S --host h --pid 1)
+SHA9=$(git -C "$GR" show task:contract.json | python3 -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())")
+$CLI write-task --repo-slug slug-rebase --task-id PROJ-9 --session S --fence "$F2" \
+  --json '{"task_id":"PROJ-9","contract_path":"contract.json","contract_sha256":"'"$SHA9"'"}'
+TMP="$GR-spec"
+git -C "$GR" worktree add --detach -q "$TMP" "$BR"
+git -C "$TMP" -c user.email=t@t -c user.name=t rebase -q "$MAIN"
+ok "verify-contract passes on the rebased detached tree" \
+  "$CLI verify-contract --repo-slug slug-rebase --task-id PROJ-9 --worktree '$TMP' >/dev/null"
+git -C "$GR" worktree remove --force "$TMP"
+ok "temp worktree cleaned up" "[ ! -d '$TMP' ]"
+git -C "$GR" checkout -q main
+echo conflict > "$GR/feature.txt"; git -C "$GR" add feature.txt
+git -C "$GR" -c user.email=t@t -c user.name=t commit -q -m conflicting
+MAIN2=$(git -C "$GR" rev-parse main)
+git -C "$GR" worktree add --detach -q "$TMP" "$BR"
+if git -C "$TMP" -c user.email=t@t -c user.name=t rebase -q "$MAIN2" >/dev/null 2>&1; then RB=0; else RB=1; fi
+ok "conflicting rebase reports failure for conflict result" "[ $RB -eq 1 ]"
+git -C "$TMP" rebase --abort 2>/dev/null || true
+git -C "$GR" worktree remove --force "$TMP"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

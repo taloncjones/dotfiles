@@ -11,8 +11,10 @@ import math
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -55,6 +57,84 @@ def valid_capabilities(rec, session_id) -> bool:
     if not isinstance(avail, dict) or set(avail.keys()) != set(CAP_MODELS):
         return False
     return all(isinstance(avail[k], bool) for k in CAP_MODELS)
+
+
+CONTRACT_MAX_COMMANDS = 32
+CONTRACT_MAX_TIMEOUT = 3600
+CONTRACT_DEFAULT_TIMEOUT = 600
+
+
+def _nonempty_str(v) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def validate_contract(rec, task_id):
+    """Error message for an invalid contract, None when valid. Fail closed:
+    unknown keys, bool-typed ints, blank strings, dup names all reject."""
+    if not isinstance(rec, dict):
+        return "contract must be a JSON object"
+    if set(rec.keys()) != {"v", "task_id", "commands"}:
+        return "contract keys must be exactly v, task_id, commands"
+    v = rec.get("v")
+    if not isinstance(v, int) or isinstance(v, bool) or v != 1:
+        return "v must be the integer 1"
+    if rec.get("task_id") != task_id:
+        return "contract task_id does not match the task"
+    cmds = rec.get("commands")
+    if not isinstance(cmds, list) or not cmds:
+        return "commands must be a non-empty list"
+    if len(cmds) > CONTRACT_MAX_COMMANDS:
+        return f"commands exceeds max {CONTRACT_MAX_COMMANDS}"
+    names = set()
+    for cmd in cmds:
+        if not isinstance(cmd, dict):
+            return "each command must be an object"
+        if not set(cmd.keys()) <= {"name", "run", "timeout_secs"}:
+            return "command keys must be within name, run, timeout_secs"
+        if not _nonempty_str(cmd.get("name")) or not _nonempty_str(cmd.get("run")):
+            return "command name and run must be non-empty strings"
+        if cmd["name"] in names:
+            return f"duplicate command name: {cmd['name']}"
+        names.add(cmd["name"])
+        t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
+        if not isinstance(t, int) or isinstance(t, bool) or not (
+            1 <= t <= CONTRACT_MAX_TIMEOUT
+        ):
+            return f"timeout_secs must be an int in [1, {CONTRACT_MAX_TIMEOUT}]"
+    return None
+
+
+def contract_sha256(path) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def run_contract_commands(commands, worktree) -> int:
+    """Run each contract command via sh -c in the worktree, streaming output.
+    Own process group per command; on timeout the whole group is SIGKILLed
+    (best-effort -- a double-forked daemon can escape). First failure stops
+    the run. Returns 0 iff every command exited 0."""
+    for cmd in commands:
+        t = cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT)
+        proc = subprocess.Popen(
+            ["sh", "-c", cmd["run"]], cwd=worktree, start_new_session=True
+        )
+        try:
+            rc = proc.wait(timeout=t)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            print(f"FAIL {cmd['name']} exit=timeout", flush=True)
+            return 1
+        if rc != 0:
+            print(f"FAIL {cmd['name']} exit={rc}", flush=True)
+            return 1
+        print(f"ok {cmd['name']} exit=0", flush=True)
+    print(f"PASS {len(commands)} commands", flush=True)
+    return 0
 
 
 def role_preference(role, config):
@@ -848,6 +928,10 @@ def main(argv=None) -> int:
     w.add_argument("--exit-on-signal", action="store_true")
     w.add_argument("--once", action="store_true")
     w.add_argument("--since-epoch", type=float, default=None)
+    vc = add("verify-contract", "--task-id", "--worktree")
+    vc.add_argument("--contract", default=None)
+    vc.add_argument("--allow-unpinned", action="store_true")
+    vc.add_argument("--validate-only", action="store_true")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "claim-owner":
@@ -1092,6 +1176,73 @@ def main(argv=None) -> int:
             rd, ns.interval, ns.heartbeat_secs, ns.debounce_secs,
             ns.exit_on_signal, ns.since_epoch,
         )
+    if ns.cmd == "verify-contract":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        wt = Path(ns.worktree)
+        _require(wt.is_dir(), "worktree must be an existing directory")
+        _require(
+            not ns.allow_unpinned or ns.contract,
+            "--allow-unpinned requires --contract",
+        )
+        rel = ns.contract
+        expected_sha = None
+        if not ns.allow_unpinned:
+            tf = repo_dir(ns.repo_slug) / "tasks" / f"{ns.task_id}.json"
+            _require(contained(tf, state_root()), "escapes state root")
+            # A missing or corrupt task record is an integrity error (exit 2
+            # via _require), never exit 5 -- exit 5 is reserved for a VALID
+            # record that simply lacks pin fields, so the skill's grandfather
+            # rule can never be satisfied by corruption.
+            try:
+                task = json.loads(tf.read_text())
+            except (OSError, ValueError):
+                task = None
+            _require(
+                isinstance(task, dict), "task record missing or unreadable"
+            )
+            pin_path = task.get("contract_path")
+            expected_sha = task.get("contract_sha256")
+            if not isinstance(pin_path, str) or not isinstance(expected_sha, str):
+                sys.stderr.write("[X] no contract pinned for task\n")
+                return 5
+            _require(
+                rel is None or rel == pin_path,
+                "--contract does not match the pinned contract_path",
+            )
+            rel = pin_path
+        cf = wt / rel
+        # contained() resolves symlinks, so an in-tree symlink to an outside
+        # file already fails containment; the explicit is_symlink() rejection
+        # also covers a symlink to another file INSIDE the worktree.
+        _require(
+            contained(cf, wt) and not cf.is_symlink(),
+            "contract path escapes the worktree or is a symlink",
+        )
+        if not cf.is_file():
+            sys.stderr.write("[X] contract file missing\n")
+            return 3
+        # Single read: hash and parse the SAME bytes, so a concurrent
+        # replacement between hash and execution cannot run unhashed commands.
+        try:
+            data = cf.read_bytes()
+        except OSError:
+            sys.stderr.write("[X] contract file missing\n")
+            return 3
+        actual_sha = hashlib.sha256(data).hexdigest()
+        if expected_sha is not None and actual_sha != expected_sha:
+            sys.stderr.write("[X] contract hash mismatch (tamper or drift)\n")
+            return 4
+        try:
+            rec = json.loads(data)
+        except ValueError:
+            rec = None
+        err = validate_contract(rec, ns.task_id)
+        _require(err is None, f"invalid contract: {err}")
+        if ns.validate_only:
+            print(actual_sha)
+            return 0
+        return run_contract_commands(rec["commands"], str(wt))
     return 2
 
 
