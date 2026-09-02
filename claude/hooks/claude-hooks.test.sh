@@ -217,6 +217,12 @@ assert_blocks "hwg: blocks path-qualified herdr create" \
 assert_blocks "hwg: blocks env-assignment-prefixed create" \
     "$HWG" \
     '{"tool_name":"Bash","tool_input":{"command":"HERDR_ENV=1 herdr worktree create"}}'
+assert_blocks "hwg: blocks create when a mid-token # precedes it (real bash does not treat this as a comment)" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"FOO=a#b herdr worktree create --branch x"}}'
+assert_allows "hwg: allows create with --cwd when a flag value contains a mid-token #" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --label abc#def --cwd /repo"}}'
 assert_blocks "hwg: blocks env-wrapped create" \
     "$HWG" \
     '{"tool_name":"Bash","tool_input":{"command":"env HERDR_ENV=1 herdr worktree create"}}'

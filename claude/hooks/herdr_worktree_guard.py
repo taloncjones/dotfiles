@@ -45,12 +45,50 @@ def is_env_assignment(tok: str) -> bool:
     return "=" in tok and not tok.startswith("-") and "/" not in tok.split("=")[0]
 
 
+def strip_line_comment(line: str) -> str:
+    """Truncate `line` at a word-initial, unquoted `#` (preceded by
+    whitespace or at start of line), matching bash's comment rule.
+
+    shlex's own `commenters` handling triggers on ANY unquoted `#`, even
+    mid-token (e.g. `FOO=a#b`), which would silently drop the rest of the
+    line -- including a real `herdr worktree create` that bash itself still
+    executes verbatim, since bash only starts a comment on a word-initial
+    `#`. Stripping comments ourselves, then disabling shlex's commenters,
+    keeps tokenize() bash-faithful.
+    """
+    quote = None
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if quote:
+            if quote == '"' and c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+        i += 1
+    return line
+
+
 def tokenize(line: str) -> list[str]:
     """Shell-faithful tokens: quotes honored, operators split out, and a
     word-initial `#` starts a comment that is dropped."""
+    line = strip_line_comment(line)
     lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
-    lexer.commenters = "#"
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError:
