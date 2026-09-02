@@ -653,8 +653,88 @@ def fold_status(events):
     return {"authoritative": authoritative, "last_hint": last_hint}
 
 
+SPEND_KEYS = ("usd", "turns", "launches", "unknown_cost_launches", "skipped_lines")
+
+
+def spend_path(rd, task_id) -> Path:
+    return Path(rd) / "tasks" / f"{task_id}.spend.jsonl"
+
+
+def append_spend(rd, task_id, rec) -> None:
+    """Append one ledger line. Raises OSError on failure (caller maps it)."""
+    p = spend_path(rd, task_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
+
+
+def _finite_nonneg(x, integer=False) -> bool:
+    """None passes (absent/unknown); bools never; ints/floats must be finite
+    and >= 0; integer=True additionally requires an int."""
+    if x is None:
+        return True
+    if isinstance(x, bool):
+        return False
+    if integer:
+        return isinstance(x, int) and x >= 0
+    return isinstance(x, (int, float)) and math.isfinite(x) and x >= 0
+
+
+def valid_spend_line(rec, task_id) -> bool:
+    if not isinstance(rec, dict):
+        return False
+    v = rec.get("v")
+    if not isinstance(v, int) or isinstance(v, bool) or v != 1:
+        return False
+    if rec.get("kind") not in ("start", "end"):
+        return False
+    if rec.get("task_id") != task_id or not _nonempty_str(rec.get("launch_id")):
+        return False
+    if rec["kind"] == "end":
+        if "num_turns" not in rec or "total_cost_usd" not in rec:
+            return False
+        if not _finite_nonneg(rec.get("num_turns"), integer=True):
+            return False
+        if not _finite_nonneg(rec.get("total_cost_usd")):
+            return False
+    return True
+
+
+def fold_spend(lines, task_id):
+    """Sum a task's ledger. Malformed/foreign lines are skipped and counted,
+    never fatal -- same posture as parse_events."""
+    out = {k: 0 for k in SPEND_KEYS}
+    out["usd"] = 0.0
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            out["skipped_lines"] += 1
+            continue
+        if not valid_spend_line(rec, task_id):
+            out["skipped_lines"] += 1
+            continue
+        if rec["kind"] == "start":
+            out["launches"] += 1
+            continue
+        cost = rec.get("total_cost_usd")
+        if cost is None:
+            out["unknown_cost_launches"] += 1
+        else:
+            out["usd"] += cost
+        if rec.get("num_turns") is not None:
+            out["turns"] += rec["num_turns"]
+    out["usd"] = round(out["usd"], 4)
+    return out
+
+
 WATCH_DIRS = {
-    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id)),
+    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
+              (".spend.jsonl", valid_task_id)),
     "workspaces": ((".events.jsonl", valid_workspace_id),),
 }
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
@@ -1188,20 +1268,49 @@ def main(argv=None) -> int:
         for tid in by_task:
             by_task[tid].sort(key=lambda r: (r.get("ts", ""), r.get("event", "")))
         result = {}
+        totals = {k: 0 for k in SPEND_KEYS}
+        totals["usd"] = 0.0
+        untracked = 0
+        primary = set()
         for tf in sorted((rd / "tasks").glob("*.json")):
-            # Only the primary <task_id>.json record; the .done.json/.review.json
-            # sidecars sort after it and would otherwise overwrite the entry.
             if tf.name.endswith((".done.json", ".review.json")):
                 continue
             try:
                 task = json.loads(tf.read_text())
             except ValueError:
                 continue
+            if not isinstance(task, dict):
+                continue
             tid = task.get("task_id")
+            primary.add(tf.name[: -len(".json")])
+            sp = spend_path(rd, tid) if isinstance(tid, str) else None
+            try:
+                lines = sp.read_text().splitlines() if sp and sp.is_file() else []
+            except OSError:
+                lines = []
+            spend = fold_spend(lines, tid)
+            for k in SPEND_KEYS:
+                totals[k] += spend[k]
+            workers = task.get("workers")
+            if isinstance(workers, list):
+                untracked += sum(
+                    1 for w in workers if isinstance(w, dict) and w.get("role") != "mech"
+                )
             result[tid] = {
                 "status": task.get("status"),
                 "fold": fold_status(by_task.get(tid, [])),
+                "spend": spend,
             }
+        totals["usd"] = round(totals["usd"], 4)
+        totals["untracked_launches"] = untracked
+        orphans = set()
+        for suffix in (".spend.jsonl", ".done.json"):
+            for f in (rd / "tasks").glob(f"*{suffix}"):
+                tid = f.name[: -len(suffix)]
+                if valid_task_id(tid) and tid not in primary:
+                    orphans.add(tid)
+        result["_totals"] = totals
+        result["_orphans"] = sorted(orphans)
         print(json.dumps(result))
         return 0
     if ns.cmd == "should-dispatch-review":

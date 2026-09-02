@@ -363,7 +363,7 @@ $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome approved
 # the sidecar sorts after PROJ-1.json; status must still report the real status
-$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1'] and s['PROJ-1']['status']=='reviewed',s"
+$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1','_totals','_orphans'] and s['PROJ-1']['status']=='reviewed',s"
 SH
 
 check "CLI should-dispatch-review: once per HEAD, re-review on new HEAD" <<'SH'
@@ -1335,6 +1335,51 @@ assert c.agent_name("mech","TD-1",existing={"mech-td-1"})=="mech-td-1-2"
 assert c.MECH_REASONS==("max_turns","max_budget","timeout","no_emit","error","needs_design","blocked_on_human","other")
 sys.exit(0)
 PY
+
+check "fold_spend: exact AC6 fixture" <<PY
+$LOAD
+L=[
+ '{"v":1,"kind":"start","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L1","ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L1","num_turns":17,"total_cost_usd":0.42,"ts":"t"}',
+ '{"v":1,"kind":"start","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L2","ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L2","num_turns":3,"total_cost_usd":null,"ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","launch_id":"L3","num_tur',
+ '{"v":1,"kind":"end","task_id":"td-other","launch_id":"L4","num_turns":1,"total_cost_usd":9.0,"ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","launch_id":"L5","num_turns":1,"total_cost_usd":true,"ts":"t"}',
+]
+assert c.fold_spend(L,"td-x")=={"usd":0.42,"turns":20,"launches":2,"unknown_cost_launches":1,"skipped_lines":3}
+assert c.fold_spend([],"td-x")=={"usd":0.0,"turns":0,"launches":0,"unknown_cost_launches":0,"skipped_lines":0}
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":-1},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","total_cost_usd":float("nan")},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":2.5},"td-x")
+assert not c.valid_spend_line({"v":True,"kind":"end","task_id":"td-x","launch_id":"L"},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"mid","task_id":"td-x","launch_id":"L"},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":1},"td-x")   # total_cost_usd key required
+assert c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":None,"total_cost_usd":None,"subtype":"weird"},"td-x")
+assert (".spend.jsonl", c.valid_task_id) in c.WATCH_DIRS["tasks"]
+sys.exit(0)
+PY
+
+check "status: per-task spend, _totals with untracked_launches, _orphans" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-s"; mkdir -p "$RD/tasks" "$RD/workspaces"
+F=$($CLI claim-owner --repo-slug slug-s --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-s --task-id td-a --session S --fence "$F" \
+  --json '{"task_id":"td-a","status":"in-progress","workers":[{"role":"mech","launch_id":"L1"},{"role":"impl"}]}'
+$CLI write-task --repo-slug slug-s --task-id td-b --session S --fence "$F" \
+  --json '{"task_id":"td-b","status":"in-progress","workers":[{"role":"review"}]}'
+printf '%s\n' '{"v":1,"kind":"start","task_id":"td-a","launch_id":"L1","ts":"t"}' \
+  '{"v":1,"kind":"end","task_id":"td-a","launch_id":"L1","num_turns":17,"total_cost_usd":0.42,"ts":"t"}' > "$RD/tasks/td-a.spend.jsonl"
+printf '{"v":1,"kind":"start","task_id":"td-z","launch_id":"L9","ts":"t"}\n' > "$RD/tasks/td-z.spend.jsonl"
+$CLI status --repo-slug slug-s | python3 -c '
+import json,sys; s=json.load(sys.stdin)
+assert s["td-a"]["spend"]=={"usd":0.42,"turns":17,"launches":1,"unknown_cost_launches":0,"skipped_lines":0},s
+assert s["td-b"]["spend"]["launches"]==0 and s["td-b"]["spend"]["usd"]==0.0
+assert s["_totals"]=={"usd":0.42,"turns":17,"launches":1,"unknown_cost_launches":0,"skipped_lines":0,"untracked_launches":2},s
+assert s["_orphans"]==["td-z"],s
+'
+SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
