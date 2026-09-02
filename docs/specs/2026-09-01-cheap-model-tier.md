@@ -2,7 +2,8 @@
 
 Task: `td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical`
 Base: origin/main @ 8a377cc (verification contracts merged, #78)
-Status: spec (branch-only; dropped before merge per repo convention)
+Status: spec, revision 2 after Codex spec review (branch-only; dropped
+before merge per repo convention)
 
 ## Problem
 
@@ -16,7 +17,8 @@ and the human.
 
 1. A `mech` worker role that resolves haiku-first through the existing
    deterministic resolver (`resolve-model` + `capabilities.json`).
-2. Mech workers launch with hard turn and dollar caps.
+2. Mech workers launch with turn and dollar caps enforced by the Claude
+   Code CLI between turns (see "Cap semantics").
 3. Per-task spend is recorded machine-locally and cumulative spend is
    surfaced by `status`.
 4. Every existing gate (contract pin, contract gate, review, post-rebase
@@ -30,10 +32,12 @@ and the human.
   surfaces the cap hit and the spend; the human decides.
 - Spend tracking for interactive (non-mech) workers. Interactive `claude`
   sessions expose no structured cost record; their spend stays untracked
-  and is reported as such.
-- Repo-wide or daily spend ceilings. Per-launch caps plus visible
-  cumulative spend are the guardrail; a global ceiling is a later slice.
+  and `status` counts them as untracked launches.
+- Repo-wide or daily spend ceilings, and ledger retention/rotation.
+  Per-launch caps plus visible cumulative spend are the guardrail.
 - Effort tuning (`--effort`) for mech workers.
+- Cheap models for the `plan`/`impl`/`review` roles. `haiku` is a
+  mech-only alias (section 1).
 
 ## Verified facts the design rests on
 
@@ -45,19 +49,29 @@ Confirmed live on this machine (Claude Code 2.1.258, herdr 0.8.2,
 - `claude -p --output-format json` returns one result object carrying
   `subtype` (`success`, `error_max_turns`, `error_max_budget_usd`,
   `error_during_execution`), `is_error`, `num_turns`, `total_cost_usd`,
-  `duration_ms`, `session_id`, and `errors[]`. A budget hit on the first
+  `duration_ms`, `session_id`, `errors[]`, and `modelUsage` (an object
+  keyed by the full model id actually used). A budget hit on the first
   turn returned `subtype: error_max_budget_usd`, `num_turns: 1`,
-  `total_cost_usd: 0.058`.
+  `total_cost_usd: 0.058` -- the cap is checked after a turn completes,
+  so overshoot is bounded by one turn.
 - `herdr agent list`/`agent get` carry no model field and (per SKILL.md
   section 8) registration is pane-based. Whether herdr registers a
   print-mode `claude` as an agent is NOT verified; the design does not
-  depend on it (see Liveness).
+  depend on it (section 5).
 
-Assumed, to be verified during implementation (listed in the plan as a
-live check, not a unit test): Stop hooks fire in print mode with the pane's
-inherited `HERDR_ENV`/`HERDR_WORKSPACE_ID`, so the worker-status hook still
-appends `stopped` and pushes a wake. If they do not, the spend-ledger
-append (which the watch also observes) is the wake, so nothing is lost.
+Assumed, to be verified during implementation as a live check (AC10),
+not a unit test: Stop and Notification hooks fire in print mode with the
+pane's inherited `HERDR_ENV`/`HERDR_WORKSPACE_ID`. Nothing below depends
+on them: the ledger writes (section 6) are watched and are the wake.
+
+### Cap semantics
+
+"Capped" means: the CLI stops starting new turns once `num_turns` reaches
+`max_turns` or its cost estimate reaches `max_budget_usd`, and reports the
+hit as a result `subtype`. Overshoot is at most the cost of the turn in
+flight. `total_cost_usd` is the CLI's own estimate, used for budgeting and
+reporting, never for billing. The wrapper's wall-clock `timeout_secs` is
+the third, outer bound.
 
 ## Design
 
@@ -69,21 +83,33 @@ append (which the watch also observes) is the wake, so nothing is lost.
   A three-alias map written by an older session fails validation, which
   `resolve-model` already reports as exit 3 (absent/stale) and the
   section-1 preflight re-probes. No migration.
+- Per-role allowed aliases: `plan`/`impl`/`review` overrides may name only
+  `fable`/`opus`/`sonnet`; `mech` may name any of the four. `haiku` in a
+  non-mech override makes `role_preference` return None (exit 5), the
+  same fail-closed rule as an unknown token.
 - The section-1 probe writes `haiku: true` by default alongside
-  `opus`/`sonnet` (the strong-model probe stays fable-only). A failed mech
-  launch attributable to the model flips `haiku` off via the existing
-  `disable-model` (which accepts the new alias).
-- `config.json` `models.mech` may override the list under the same
-  validation rules as the other roles (list of known aliases, non-empty).
+  `opus`/`sonnet` (the strong-model probe stays fable-only).
+  `disable-model` accepts the new alias.
 - The SKILL.md section-8 routing table gains a row:
   `Mechanical worker (mech) | haiku -> sonnet | default | human-designated
   mechanical work, headless, turn+budget capped`.
+- Agent name: `agent_name("mech", task_id)` -- the canonical constraints
+  (`mech-<t>`, `[a-z0-9-]`, whole name <= 32 chars, `-2`/`-3` on
+  collision). Display label `mech:<task_id>`.
 
-### 2. Designation and maturity
+### 2. Designation, caps input, and maturity
 
-A kickoff is a mech kickoff only when the human says so ("kick off X as
-mech", optionally with caps) or the todo's frontmatter carries
-`tier: mech`. Jira-kind tasks are designated only by kickoff instruction.
+Designation forms, fail-closed (anything else is not a mech kickoff):
+
+- Kickoff instruction: `kick off <item> as mech` optionally followed by
+  `max-turns <int>` and/or `budget <number>` (e.g. `... as mech max-turns
+  60 budget 3`). Applies to todo and Jira items.
+- Todo frontmatter: `tier: mech`, optionally `mech_max_turns: <int>` and
+  `mech_max_budget_usd: <number>`.
+
+Precedence: instruction values override frontmatter values, field by
+field. An override that fails `mech-caps` validation (section 3) refuses
+the kickoff with the verb's message; the orchestrator never clamps.
 
 A mech item is never treated as raw: it skips the plan phase (the human's
 designation IS the judgment that no design is needed) and dispatches
@@ -93,16 +119,27 @@ section-2 "Contract pinning" steps unchanged.
 
 Contract source for a mech item, in order:
 
-1. Already committed on the base or branch: use it.
-2. Else, if `config.json` carries `mech.contract_commands` (1-32 entries in
-   the contract command shape), the orchestrator writes
-   `claude/contracts/<task_id>-contract.json` with `v: 1`, the task id,
-   and those commands verbatim, and commits it on the fresh task branch
-   (`<task_id>: Add mech contract`) BEFORE the pin/launch steps. This is
-   the only commit the orchestrator ever authors; it happens inside the
-   section-2 step 3-6 window so step 9's failure cleanup covers it.
-3. Else refuse with a concrete message: "mech kickoff needs a committed
-   contract or `mech.contract_commands` in config; kick off as raw instead".
+1. Committed at the branch HEAD (or the base, for a fresh branch): use it.
+   An invalid committed contract refuses the kickoff (existing rule).
+2. Else, if `config.json` carries `mech.contract_commands`, the
+   orchestrator writes `claude/contracts/<task_id>-contract.json` with
+   `v: 1`, the task id, and those commands verbatim, and commits it on
+   the task branch as `<task_id>: Add mech contract`. Generation is
+   allowed only when the worktree is clean AND either the branch was
+   created by this kickoff or the adopted branch's HEAD equals `base_sha`;
+   a dirty or already-diverged adopted branch refuses instead (nothing is
+   written). This is the only commit the orchestrator ever authors; it
+   happens inside the section-2 step 3-6 window so step 9's failure
+   cleanup covers it.
+3. Else refuse: "mech kickoff needs a committed contract or
+   `mech.contract_commands` in config; kick off as raw instead".
+
+**Launch base.** After any generated-contract commit, the task record's
+`base_sha` is set to the post-commit HEAD (the launch base), not the
+original `origin/<default>` SHA. `base_ref` still names the ref. Every
+existing "ahead of base" check (`confirm-completion`, the section-4 git
+ancestry check, `emit-done --base-sha`) therefore requires real worker
+commits beyond the contract; a contract-only branch can never complete.
 
 ### 3. Caps and config
 
@@ -120,22 +157,19 @@ Contract source for a mech item, in order:
 ```
 
 Defaults when absent: `max_turns 40`, `max_budget_usd 2.0`,
-`timeout_secs 1800`, no `contract_commands`. Validation (read by
-`mech-caps`, below): `max_turns` integer 1-500; `max_budget_usd` number
-> 0 and <= 50; `timeout_secs` integer 60-14400; `contract_commands`, when
-present, validates with the same rules as a contract's `commands` array.
-A malformed `mech` block refuses mech kickoff (exit 5 from `mech-caps`)
-rather than silently reverting to defaults, matching the `models` rule.
-
-A kickoff instruction may override `max_turns`/`max_budget_usd` for that
-launch within the same bounds. The effective caps are recorded on the
-launch (ledger line) and in the `workers[]` entry.
+`timeout_secs 1800`, no `contract_commands`. Validation: `max_turns`
+integer 1-500; `max_budget_usd` finite number > 0 and <= 50;
+`timeout_secs` integer 60-14400; `contract_commands`, when present,
+validates with the contract `commands` rules (1-32, unique names, no
+unknown keys). Booleans are not numbers. A malformed `mech` block or an
+unknown key refuses mech kickoff (exit 5 from `mech-caps`) rather than
+silently reverting to defaults, matching the `models` rule.
 
 New read-only verb `python3 "$CORE" mech-caps --repo-slug <slug>
 [--max-turns N] [--max-budget-usd X]` prints the effective caps as one
-JSON object `{max_turns, max_budget_usd, timeout_secs}` (config merged
-with overrides) or exits 5 on invalid config/override. The skill never
-computes caps by hand.
+JSON object `{"max_turns", "max_budget_usd", "timeout_secs"}` (config
+merged with overrides, overrides validated against the same bounds) or
+exits 5 with a concrete message. The skill never computes caps by hand.
 
 ### 4. Launch: headless, wrapped by the core
 
@@ -144,122 +178,198 @@ orchestrator does not launch `claude` directly; it launches a core wrapper
 in the workspace's own root pane (same pane rule as section 8):
 
 ```
-herdr pane run <pane_id> "python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent mech-<t> --model $MODEL --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"
+herdr pane run <pane_id> "python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL --worktree <worktree_path> --base-sha <base_sha> --brief-file <brief_path> --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"
 ```
 
-A plain invocation, no shell metacharacters. `$MODEL` comes from
-`resolve-model --role mech` with the same nonzero-exit rules as every
-other role. The brief file is written by the orchestrator under
-`STATE_ROOT/<slug>/tasks/` (machine-local prose, not state JSON; never in
-the worktree) and must be contained in `STATE_ROOT`.
+**Shell-safety contract.** Every interpolated value must match
+`[A-Za-z0-9_./+:@-]+` (no whitespace, no shell metacharacters). The
+orchestrator checks this before `pane run` and refuses the launch with
+the offending value named; `run-mech` re-validates its own args and
+exits 2 on a violation. Worktree paths already use the `+` encoding;
+`STATE_ROOT` paths are under the config dir.
 
-`run-mech`:
+`launch_id` is minted by the orchestrator as `<agent>-<YYYYMMDDTHHMMSSZ>`
+(UTC start time) and is the per-launch provenance key: it appears in the
+`workers[]` entry, in both ledger lines, in a wrapper-written completion
+record, and in the brief (so a worker-written `emit-done --launch-id`
+carries it too). `$MODEL` comes from `resolve-model --role mech` with the
+same nonzero-exit rules as every other role. The brief file is written by
+the orchestrator to `STATE_ROOT/<slug>/tasks/<task_id>.brief.md`
+(machine-local prose, not state JSON; never in the worktree).
 
-1. Validates args (`--agent` matches `mech-[a-z0-9-]*`, caps within bounds,
-   brief file readable and contained in `STATE_ROOT`, `--worktree` an
-   existing directory, `--base-sha` 40 hex).
-2. Runs `claude --model <M> --permission-mode auto --name <agent> -p
+`run-mech`, in order:
+
+1. Validate args: repo slug, task id, workspace id, `--agent` equal to a
+   canonical `agent_name("mech", ...)` form (`mech-` plus 1-27 chars of
+   `[a-z0-9-]`, optionally `-2`..`-9`), `--launch-id` prefixed by the
+   agent name, caps within section-3 bounds, `--brief-file` a readable
+   regular file contained in `STATE_ROOT`, `--worktree` an existing
+   directory that `git rev-parse --git-dir` accepts, `--base-sha` 40 hex,
+   shell-safety on every value. Any failure: exit 2, nothing written.
+2. Append the `start` ledger line (section 6). Failure: exit 2.
+3. Run `claude --model <M> --permission-mode auto --name <agent> -p
    --output-format json --max-turns <N> --max-budget-usd <X>` with the
-   brief on stdin, cwd = `--worktree` (must be an existing directory;
-   the pane cwd is not trusted), environment inherited, wall-clock limit `--timeout-secs` (kill on expiry).
-3. Parses the single result object from stdout. Appends ONE line to
-   `tasks/<task_id>.spend.jsonl` (schema in section 6). Unparseable or
-   missing output yields a line with `subtype: "unparseable"` (or
-   `"timeout"`), `total_cost_usd: null`, `num_turns: null`.
-4. Guarantees a completion record. If `tasks/<task_id>.done.json` is
-   absent, or its `agent`/`workspace_id` do not equal this launch's, the
-   worker did not emit its own record; the wrapper writes one with the
-   same shape `emit-done` produces, `phase: implement`, `head_sha` =
-   `git rev-parse HEAD` in the worktree, `base_sha` from `--base-sha`,
-   plus a new optional field `reason`:
-   - `error_max_turns` -> `outcome: paused`, `reason: max_turns`
-   - `error_max_budget_usd` -> `outcome: paused`, `reason: max_budget`
-   - `success` with no record -> `outcome: paused`, `reason: no_emit`
-   - `timeout` -> `outcome: paused`, `reason: timeout`
-   - `error_during_execution`, `unparseable`, nonzero exit with no result
-     -> `outcome: failed`, `reason: error`
-   A worker-written record is never overwritten.
-5. Exits 0 whenever the ledger line was written, regardless of worker
-   outcome; nonzero only for wrapper-level failures (bad args, `claude`
-   not found, ledger unwritable).
+   brief on stdin, cwd `--worktree`, environment inherited, in its own
+   process group; on `--timeout-secs` expiry kill the group and treat the
+   result as `timeout`.
+4. Parse the last JSON object on stdout with `type == "result"`. Missing
+   or unparseable -> `subtype: "unparseable"`; killed -> `"timeout"`.
+   `models_used` = keys of `modelUsage` (empty when absent). `downgrade`
+   = true when `models_used` is non-empty and none of its ids contains
+   the requested alias as a substring (the alias-to-family rule; the
+   fable/opus/sonnet/haiku aliases are each substrings of their family's
+   model ids).
+5. Determine the completion record. A worker-written
+   `tasks/<task_id>.done.json` counts as this launch's when its
+   `workspace_id`, `agent` match and either its `launch_id` equals this
+   launch or (no `launch_id`) its `ts` >= this launch's start `ts`. Such a
+   record is never overwritten, even when the CLI result reports a cap
+   hit (the record plus the contract gate govern; the ledger still shows
+   the cap). Otherwise the wrapper writes one with the `emit-done` shape,
+   `phase: implement`, `launch_id`, `head_sha` = `git rev-parse HEAD` in
+   the worktree, `base_sha` from `--base-sha`, `dirty` = whether
+   `git status --porcelain` is non-empty, and `reason`:
+   - `error_max_turns` -> `paused`, `max_turns`
+   - `error_max_budget_usd` -> `paused`, `max_budget`
+   - `timeout` -> `paused`, `timeout`
+   - `success` with no record -> `paused`, `no_emit`
+   - `error_during_execution`, `unparseable`, nonzero exit without a
+     result -> `paused`, `error` when the branch is usable (HEAD !=
+     `base_sha` and not dirty); else `failed`, `error`.
+   Write failure (git unavailable, unwritable file): exit 3 after still
+   attempting step 6.
+6. Append the `end` ledger line. Failure: exit 3.
+7. Exit 0 only when steps 2, 5, and 6 all succeeded. The exit code is
+   informational for the pane; the orchestrator reads state, not the
+   exit code.
+
+`emit-done` gains two optional flags: `--launch-id <id>` and `--reason
+<token>`, `reason` in `max_turns|max_budget|timeout|no_emit|error|
+needs_design|blocked_on_human|other`. `done.json` may carry `launch_id`,
+`reason`, and `dirty` as optional fields; readers ignore unknown fields.
+
+**Within-role fallback.** After `run-mech` returns, the orchestrator reads
+the `end` ledger line. `downgrade: true`, or `subtype: error_during_execution`
+whose `errors[]` text mentions the requested model alias or "model", is a
+model-attributable failure: `disable-model --model <requested alias>`,
+re-run `resolve-model --role mech`, and relaunch once with a fresh
+`launch_id` on the survivor (a new `workers[]` entry; the failed launch's
+ledger lines stay for accounting, its completion record is superseded by
+the fresh launch's provenance). Cap: 2 attempts per dispatch, then
+surface, exactly as section 8. There is no banner read in print mode;
+`models_used` is the structural model signal.
 
 The brief is the new mech variant in `brief-template.md`: implement-brief
 framing plus "you are a budget-capped mechanical worker: N turns, $X;
 do only the mechanical task described; do not brainstorm, spec, or plan;
-if the task turns out to need design, commit what is safe, emit `paused`,
-and say why". Its close is the implement close (verify-contract, then
-`emit-done --phase implement`).
+if the task turns out to need design, commit what is safe, emit `paused
+--reason needs_design`". Its close is the implement close (verify-contract,
+then `emit-done --phase implement --launch-id <launch_id>`).
 
 State publication follows section 2 step 7 unchanged: the `workers[]`
-entry carries `role: "mech"`, `phase: "implement"`, `model`,
+entry carries `role: "mech"`, `phase: "implement"`, `model`, `launch_id`,
 `peer_name: null` (a print-mode session is not subscribable; no
-`ListAgents` discovery), `created_by_this_orch`, `started`, and the
-effective `caps: {max_turns, max_budget_usd, timeout_secs}`. The reverse
-index role stays `impl` (the hook classes a mech Stop as `stopped`,
-exactly like a plan worker).
+`ListAgents` discovery), `created_by_this_orch`, `started`, and
+`caps: {max_turns, max_budget_usd, timeout_secs}`. The reverse index role
+stays `impl` (the hook classes a mech Stop as `stopped`, exactly like a
+plan worker).
 
-### 5. Liveness and check-in
+### 5. Liveness, correlation, and relaunch
 
-Section 4's live-state table gets a mech rule that replaces the
-`herdr agent` poll for `role: mech` workers, because herdr registration
-of a print-mode process is unverified:
+For `role: mech` workers the section-4 `herdr agent` poll is replaced by
+the ledger (the live launch = the latest `workers[]` entry's `launch_id`):
 
-| Ledger state for the live launch (matching `workspace_id` + `agent`, `ts` >= `started`) | Action |
+| Ledger state for the live `launch_id` | Action |
 | --- | --- |
-| no ledger line yet, wrapper pane alive | in-progress |
-| no ledger line, wrapper pane gone | `abandoned` if never completed (same as the absent row) |
-| ledger line present | run the completion correlation; `done.json` is guaranteed |
+| no `start` line | launch never began: report; if the task record predates the launch by more than a minute, treat as a failed launch (relaunch is the human's call) |
+| `start` without `end`, start age <= `timeout_secs` + 120s | in-progress (or `blocked` on a hook `blocked` hint) |
+| `start` without `end`, older than that | wrapper lost: report `paused: wrapper_lost`; status stays `in-progress`; no auto-relaunch |
+| `end` present | correlate the completion record (below) |
 
-Correlation is the existing one: `confirm-completion` (with the same
-`--workspace` provenance check), the git-ahead check, the phase gate, and
-the contract gate. A `paused` record with a `reason` is reported as
-"paused: <reason>, spent $X over N turns" with two recommended next
-actions, in order: re-kickoff as mech with raised caps, or resume on the
-`impl` role. `failed` is handled by the section-9 table unchanged.
+The existing `abandoned` rule (workspace AND worktree gone, never
+completed) is unchanged and still applies to mech tasks.
 
-`WATCH_DIRS["tasks"]` gains `.spend.jsonl`, so a ledger append wakes the
-watch even if the Stop hook never fires in print mode.
+Correlation on `end`: read `done.json`; it must carry this task id, the
+live workspace, the live agent, and the live `launch_id` (or, lacking one,
+a `ts` >= the start line). Then by outcome:
+
+- `completed` -> `confirm-completion`, the git-ahead check against the
+  (launch) `base_sha`, the phase gate, and the contract gate, unchanged.
+- `paused` -> status stays `in-progress` (the existing paused row);
+  report "paused: <reason or none>, spent $X over N turns of cap N/$Y"
+  with two recommended actions in order: relaunch as mech with raised
+  caps, or resume on the `impl` role.
+- `failed` -> status `failed` (terminal, existing row). The wrapper only
+  writes `failed` when the branch is not usable; a worker-written
+  `failed` is taken as-is.
+
+No transition here depends on a Stop hint.
+
+**Mech relaunch** is the existing "record exists + worker gone -> resume"
+path: allowed only when the live launch has an `end` line (or is wrapper
+lost) and status is `in-progress`/`blocked`. It mints a new `launch_id`,
+appends a `workers[]` entry (caps from the new instruction/frontmatter
+through `mech-caps`), and launches `run-mech` again in the same workspace
+with `base_sha` unchanged. Earlier ledger lines remain and keep counting
+toward the task's spend; the earlier completion record is superseded by
+provenance. Kickoff idempotency (refuse when a live worker exists) is
+unchanged: a `start` without `end` inside the timeout window is "live".
+
+**Orphans.** A `start`/`end` line or completion record whose task has no
+primary `tasks/<task_id>.json` (a crash in the launch-to-publish gap) is
+listed by `status` under `_orphans: [<task_id>, ...]` for human cleanup;
+never auto-adopted, never auto-relaunched.
+
+**Blocked headless worker.** A Notification hook `blocked` hint sets
+status `blocked` as today. A print-mode worker cannot be unblocked
+interactively; the wall-clock timeout ends it (`paused: timeout`), and
+the report recommends relaunching with a brief that pre-answers the
+prompt or on the `impl` role.
 
 ### 6. Spend ledger and status
 
 `tasks/<task_id>.spend.jsonl` is the per-task spend record: append-only,
-one line per mech launch, written only by `run-mech` (one writer per
-launch; launches for one task are sequential because the task has one
-workspace). It is the authoritative spend source, the way `done.json` is
-the authoritative completion source; the task record does NOT duplicate
-spend (no orchestrator read-modify-write, no carry-forward rule).
+written only by `run-mech` (one writer per launch; a task's launches are
+sequential because it has one workspace). It is the authoritative spend
+source, the way `done.json` is the authoritative completion source; the
+task record does NOT duplicate spend (no orchestrator read-modify-write).
+`WATCH_DIRS["tasks"]` gains `.spend.jsonl` so every append wakes the
+watch.
+
+Two line kinds, both `v: 1`:
 
 ```json
-{
-  "v": 1,
-  "task_id": "td-x",
-  "workspace_id": "w1",
-  "agent": "mech-td-x",
-  "role": "mech",
-  "model": "haiku",
-  "subtype": "success",
-  "is_error": false,
-  "num_turns": 17,
-  "total_cost_usd": 0.42,
-  "duration_ms": 184000,
-  "max_turns": 40,
-  "max_budget_usd": 2.0,
-  "timeout_secs": 1800,
-  "session_id": "<uuid>",
-  "ts": "2026-09-01T20:00:00Z"
-}
+{"v":1,"kind":"start","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"mech-td-x-20260901T200000Z","role":"mech","model":"haiku","max_turns":40,"max_budget_usd":2.0,"timeout_secs":1800,"ts":"2026-09-01T20:00:00Z"}
+{"v":1,"kind":"end","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"mech-td-x-20260901T200000Z","subtype":"success","is_error":false,"num_turns":17,"total_cost_usd":0.42,"duration_ms":184000,"models_used":["claude-haiku-4-5-20251001"],"downgrade":false,"record_written_by":"worker","exit_code":0,"session_id":"<uuid>","ts":"2026-09-01T20:03:04Z"}
 ```
 
-`status` output per task gains
-`"spend": {"usd": <sum>, "turns": <sum>, "launches": <count>}` (zeros
-when no ledger exists) and the top-level object gains
-`"_totals": {"usd", "turns", "launches", "untracked_workers": <count of
-workers[] entries whose role is not mech>}`. `_totals` cannot collide
-with a task id (task ids start alphanumeric). Malformed ledger lines and
-lines with `total_cost_usd: null` are skipped for the sums but counted
-in `launches`, mirroring the events fold. The skill's section-4 report
-line includes the per-task spend and the section-1 status summary
-includes `_totals`.
+Accepted-line rules for the `status` fold: a JSON object with `v == 1`
+(int, not bool), `kind` in `start|end`, `task_id` equal to the file's
+task id, non-blank `launch_id`; `end` lines additionally need `num_turns`
+a non-negative finite int or null and `total_cost_usd` a non-negative
+finite number or null (booleans rejected). Anything else (truncated line,
+wrong task, unknown kind, negative or NaN numbers) is skipped and counted
+in `skipped_lines`. Unknown `subtype` values are accepted verbatim.
+
+`status` per task gains:
+
+```json
+"spend": {"usd": 0.42, "turns": 17, "launches": 1, "unknown_cost_launches": 0, "skipped_lines": 0}
+```
+
+`launches` = count of accepted `start` lines; `usd` = sum of
+`total_cost_usd` over accepted `end` lines where it is non-null, rounded
+to 4 decimals; `turns` = sum of non-null `num_turns`;
+`unknown_cost_launches` = accepted `end` lines with null cost. A task with
+no ledger reports all zeros. The top-level object gains `_totals` (same
+five fields summed over every task record under `tasks/`, all statuses,
+no retention window) plus `untracked_launches` = the count of `workers[]`
+entries across all task records whose `role` is not `mech` (interactive
+launches with no cost data), and `_orphans` (section 5). `_totals` and
+`_orphans` cannot collide with a task id (task ids start alphanumeric).
+
+The section-4 report line includes the per-task `spend` and the status
+summary includes `_totals`.
 
 ### 7. Review, merge, Jira
 
@@ -271,43 +381,63 @@ writeback rules apply by task kind, not by role.
 
 AC1. `resolve-model --role mech` prints `haiku` when the map has
 `haiku: true`, `sonnet` when only sonnet survives, exit 4 when neither,
-exit 5 on a malformed `models.mech`.
-AC2. `write-capabilities` rejects a map missing `haiku`; `disable-model
---model haiku` flips it.
-AC3. `mech-caps` prints defaults with no config block, merges a valid
-config block, applies in-bounds overrides, exits 5 on any out-of-bounds or
-malformed value.
-AC4. `run-mech` with a fake `claude` on PATH: success + worker-written
-`done.json` -> ledger line, record untouched; `error_max_turns` and
-`error_max_budget_usd` without a record -> ledger line + `paused` record
-with the matching `reason`; `success` without a record -> `paused`/
-`no_emit`; `error_during_execution` -> `failed`/`error`; unparseable
-stdout -> `subtype: unparseable`, null cost, `failed`; timeout ->
-`subtype: timeout`, `paused`/`timeout`; a stale `done.json` from another
-agent is replaced, a matching one is never overwritten.
-AC5. `run-mech` refuses a brief path outside `STATE_ROOT`, a non-`mech-`
-agent name, out-of-bounds caps, and a non-40-hex base sha.
-AC6. `status` sums a ledger with valid, malformed, and null-cost lines
-into `spend` and `_totals` as specified; a task with no ledger reports
-zeros; `untracked_workers` counts non-mech workers.
+exit 5 on a malformed `models.mech`; `haiku` inside `models.plan`,
+`models.impl`, or `models.review` -> exit 5.
+AC2. `write-capabilities` rejects a map missing `haiku` or carrying only
+three aliases; `disable-model --model haiku` flips it.
+AC3. `mech-caps` prints the documented defaults with no `mech` block,
+merges a valid block, applies in-bounds overrides, and exits 5 on each of:
+out-of-bounds value, boolean-as-number, unknown key, malformed
+`contract_commands`, out-of-bounds override.
+AC4. `run-mech` against a fake `claude` on PATH that records its argv,
+stdin, and cwd to a file and emits canned JSON: (a) success + fresh
+worker-written record -> `start`+`end` lines, record untouched,
+`record_written_by: worker`, exit 0; the fake saw exactly the documented
+argv (model, permission mode, name, `-p`, output format, both caps), the
+brief on stdin, and cwd == worktree; (b) `error_max_turns` and
+`error_max_budget_usd` with no record -> `paused` records with reasons
+`max_turns`/`max_budget`; (c) `success` without a record -> `paused`/
+`no_emit`; (d) `error_during_execution` with HEAD ahead and clean ->
+`paused`/`error`, with HEAD == base -> `failed`/`error`, with a dirty
+tree -> `failed`/`error`; (e) unparseable stdout -> `subtype:
+unparseable`, null cost, `failed` (HEAD == base); (f) a fake that sleeps
+past `--timeout-secs` -> `subtype: timeout`, `paused`/`timeout`, and the
+fake's process is gone afterwards (its pid no longer exists); (g) a stale
+record from a different `launch_id` is replaced, a record with the live
+`launch_id` is kept even when the result is a cap hit; (h) `modelUsage`
+keyed by a sonnet id under `--model haiku` -> `downgrade: true`; (i) an
+unwritable `done.json` target -> exit 3 with the `end` line still
+appended.
+AC5. `run-mech` exits 2 and writes nothing for: a brief outside
+`STATE_ROOT`, a non-canonical agent name (`mech-`, 33+ chars, uppercase),
+a `launch_id` not prefixed by the agent, out-of-bounds caps, a non-40-hex
+base sha, a non-git worktree, and any arg containing whitespace or a
+shell metacharacter.
+AC6. `status` over a fixture ledger of: one valid start+end pair
+(0.42 usd, 17 turns), one start+end with null cost and 3 turns, one
+truncated line, one end line for a different task id, one `end` with a
+boolean cost -> `spend: {usd: 0.42, turns: 20, launches: 2,
+unknown_cost_launches: 1, skipped_lines: 3}`; a task with no ledger
+reports zeros; `_totals` sums two such tasks; `untracked_launches` counts
+non-mech `workers[]` entries across records; a ledger with no primary
+record appears in `_orphans`.
 AC7. `watch_scan` includes `.spend.jsonl` under `tasks/`.
-AC8. `validate_contract` accepts a contract generated from
-`mech.contract_commands`; the walkthrough suite drives a mech kickoff
-(contract generated + committed on a fresh branch, pin computed,
-`run-mech` invoked through the fake herdr `pane run`, ledger + record
-land, `status` reports spend).
-AC9. SKILL.md (sections 1, 2, 4, 8, 9), `state-layout.md`,
+AC8. `emit-done --launch-id --reason` round-trips into `done.json`;
+`--reason` outside the token set is rejected; `agent_name("mech", ...)`
+obeys the canonical constraints.
+AC9. The walkthrough suite drives a mech kickoff end to end with the fake
+herdr and fake claude: contract generated from config and committed on a
+fresh branch, `base_sha` == post-contract HEAD, pin computed, shell-safety
+check applied, `run-mech` invoked through `pane run`, ledger + record
+land, `status` reports spend; then a second (relaunch) sequence appends a
+second `workers[]` entry and doubles `launches`; then a contract-only
+branch (no worker commit) with a `completed` record fails
+`confirm-completion`.
+AC10. SKILL.md (sections 1, 2, 4, 8, 9), `state-layout.md`,
 `brief-template.md`, and `event-schema.md` describe the mech role,
-ledger, caps, and liveness rule; the existing docs drift checks pass.
-AC10 (human-verify, live): a real mech launch through herdr on this repo
-produces a Stop-hook `stopped` event or, failing that, a ledger-driven
-wake; the section-4 check-in reaches `completed` or `paused` without
-manual intervention.
-
-## Open risks
-
-- Print-mode `claude` under `--permission-mode auto` may still block on a
-  permission prompt; the worker-status hook's `blocked` event covers it,
-  and `--timeout-secs` bounds the wait.
-- The `total_cost_usd` figure is Claude Code's own estimate; treat it as
-  advisory for budgeting, not billing.
+designation forms, ledger, caps, liveness rule, and relaunch; the existing
+docs drift checks pass.
+AC11 (human-verify, live): a real mech launch through herdr on this repo
+reaches `completed` or `paused` at the next check-in without manual
+intervention, and the transcript shows whether the Stop hook fired in
+print mode (recorded in the plan's close as confirmed or not).
