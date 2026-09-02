@@ -19,7 +19,8 @@
 - `run-mech` exit codes: 0 all writes ok; 2 validation failure (nothing written); 3 a write after the start line failed (spec s4).
 - Reason tokens: `max_turns|max_budget|timeout|no_emit|error|needs_design|blocked_on_human|other` (spec s4).
 - No emojis, no AI attribution, ASCII only, commit format `<scope>: <summary>`.
-- Run the test suites from the worktree root: `sh claude/hooks/herdr-orch.test.sh` and `sh claude/hooks/herdr-orch-contract.test.sh`. Record the baseline PASS counts on origin/main @ 8a377cc in the first commit message body before changing anything.
+- Run the test suites from the worktree root: `sh claude/hooks/herdr-orch.test.sh` and `sh claude/hooks/herdr-orch-contract.test.sh`.
+- Tests are `check`/`ok` snippets. `check` pipes each body into a fresh `sh -e -` (or `python3 -`), so shell FUNCTIONS defined at suite scope are NOT visible inside a snippet; only exported VARIABLES are. Fixtures that snippets need (the fake `claude`) are built once at suite scope and reached through exported paths.
 
 ## File map
 
@@ -33,6 +34,19 @@
 | `claude/skills/herdr-orchestration/references/brief-template.md` | mech brief variant |
 | `claude/skills/herdr-orchestration/references/event-schema.md` | note that the ledger is watched and is not an event |
 | `claude/contracts/td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical-contract.json` | this task's verification contract (committed with this plan) |
+
+---
+
+### Task 0: Baseline
+
+- [ ] **Step 1: Record the baseline.** On the clean branch (HEAD == origin/main @ 8a377cc plus the branch-only docs), run both suites and note the counts:
+
+```bash
+sh claude/hooks/herdr-orch.test.sh 2>&1 | tail -1      # "<N> passed, 0 failed"
+sh claude/hooks/herdr-orch-contract.test.sh 2>&1 | tail -1
+```
+
+Both must report 0 failed; otherwise stop and report. Carry the two PASS counts into Task 1's commit body.
 
 ---
 
@@ -125,16 +139,21 @@ In `role_preference`, change the inner loop's membership test:
 
 `valid_capabilities` needs no code change (it compares against `CAP_MODELS`). Update the `write-capabilities` `_require` message to `available:{fable,opus,sonnet,haiku all bool}` and the `disable-model`/`classify-probe` messages to `fable/opus/sonnet/haiku`.
 
-- [ ] **Step 4: Run the whole unit suite**
+- [ ] **Step 4: Update every three-alias fixture, then run BOTH suites**
 
-Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | tail -3`
-Expected: 0 FAIL. If an existing check hard-codes the 3-alias map (grep `"sonnet":true}` in the test file), update that fixture to include `"haiku":true` -- that is the intended behavior change, not a regression.
+The existing fixtures hard-code the three-alias map and now fail validation by design. Inventory them with
+`grep -n '"sonnet":true}\|"sonnet":false}\|"sonnet":True}\|"sonnet":False}' claude/hooks/herdr-orch.test.sh claude/hooks/herdr-orch-contract.test.sh`
+(at plan time: unit suite lines 431-437, 448-454, 496-499, 512, 517, 523; contract suite lines 152, 162) and add `"haiku":true` / `"haiku":True` to each map, including the expected-value asserts (`d["available"]==...`). The `"gpt":True` rejection case stays a rejection (five keys). Then:
 
-- [ ] **Step 5: Commit**
+Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | tail -1; sh claude/hooks/herdr-orch-contract.test.sh 2>&1 | tail -1`
+Expected: both `0 failed`.
+
+- [ ] **Step 5: Commit** (body carries the Task 0 baseline)
 
 ```bash
-git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
-git commit -m "herdr: Add mech role and haiku alias to model resolution"
+git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh claude/hooks/herdr-orch-contract.test.sh
+git commit -m "herdr: Add mech role and haiku alias to model resolution" \
+  -m "Baseline on 8a377cc: unit suite <N> passed, contract suite <M> passed."
 ```
 
 ---
@@ -146,7 +165,7 @@ git commit -m "herdr: Add mech role and haiku alias to model resolution"
 - Test: `claude/hooks/herdr-orch.test.sh`
 
 **Interfaces:**
-- Produces: `MECH_DEFAULTS`, `MECH_BOUNDS`, `MECH_KEYS`, `_cap_error(key, value) -> str|None`, `mech_caps(config, max_turns=None, max_budget_usd=None) -> (dict|None, str|None)`, `mech_contract(config, task_id) -> dict|None`; CLI `mech-caps --repo-slug S [--max-turns N] [--max-budget-usd X]` (prints JSON, exit 5 on error) and `mech-contract --repo-slug S --task-id T --worktree W` (writes `claude/contracts/<T>-contract.json`, prints the relative path; exit 5 when config has no `contract_commands` or is malformed; exit 2 when the file already exists or the worktree is invalid).
+- Produces: `MECH_DEFAULTS`, `MECH_BOUNDS`, `MECH_KEYS`, `_cap_error(key, value) -> str|None`, `_git(worktree, *args) -> str|None`, `mech_caps(config, max_turns=None, max_budget_usd=None) -> (dict|None, str|None)`, `mech_contract(config, task_id) -> dict|None`; CLI `mech-caps --repo-slug S [--max-turns N] [--max-budget-usd X]` (prints JSON, exit 5 on error) and `mech-contract --repo-slug S --task-id T --worktree W --base-sha B` (writes `claude/contracts/<T>-contract.json`, prints the relative path; exit 5 when config has no `contract_commands` or is malformed; exit 2, nothing written, when the file already exists, the worktree is not a git checkout, the worktree is dirty, or HEAD != B -- the spec s2 "clean and not diverged" preflight is enforced by the verb, not by prose).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -184,13 +203,21 @@ printf '{"v":1,"user":"u","default_base":"origin/main","mech":{"max_turns":60,"c
 out=$($CLI mech-caps --repo-slug slug-c --max-budget-usd 1.5)
 [ "$out" = '{"max_turns": 60, "max_budget_usd": 1.5, "timeout_secs": 1800}' ]
 rc=0; $CLI mech-caps --repo-slug slug-c --max-turns 999 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
-WT=$(mktemp -d); git -C "$WT" init -q
-rel=$($CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT")
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+B=$(git -C "$WT" rev-parse HEAD)
+touch "$WT/dirty"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B" 2>/dev/null || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$WT/claude/contracts/td-x-contract.json" ]                                             # dirty -> nothing written
+rm "$WT/dirty"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$(printf %040d 1)" 2>/dev/null || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$WT/claude/contracts/td-x-contract.json" ]                                             # diverged -> nothing written
+rel=$($CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B")
 [ "$rel" = claude/contracts/td-x-contract.json ]
 python3 -c "import json;d=json.load(open('$WT/$rel'));assert d=={'v':1,'task_id':'td-x','commands':[{'name':'t','run':'true'}]},d"
-rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]   # exists
+git -C "$WT" add "$rel"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m c; B2=$(git -C "$WT" rev-parse HEAD)
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]   # exists
 printf '{"v":1,"user":"u","default_base":"origin/main"}' > "$RD/config.json"
-rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-y --worktree "$WT" 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]   # no template
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-y --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]   # no template
 SH
 ```
 
@@ -262,6 +289,16 @@ def mech_contract(config, task_id):
     if not cmds:
         return None
     return {"v": 1, "task_id": task_id, "commands": json.loads(json.dumps(cmds))}
+
+
+def _git(worktree, *args):
+    """stdout of a git command in the worktree, or None on any failure."""
+    try:
+        cp = subprocess.run(["git", "-C", worktree, *args], capture_output=True,
+                            text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return cp.stdout.strip() if cp.returncode == 0 else None
 ```
 
 In `main`, parsers:
@@ -270,7 +307,7 @@ In `main`, parsers:
     mc = add("mech-caps")
     mc.add_argument("--max-turns", type=int, default=None)
     mc.add_argument("--max-budget-usd", type=float, default=None)
-    add("mech-contract", "--task-id", "--worktree")
+    add("mech-contract", "--task-id", "--worktree", "--base-sha")
 ```
 
 Handlers (before the final `return 2`):
@@ -290,6 +327,10 @@ Handlers (before the final `return 2`):
         _require(valid_task_id(ns.task_id), "invalid task-id")
         wt = Path(ns.worktree)
         _require(wt.is_dir(), "worktree must be an existing directory")
+        head = _git(str(wt), "rev-parse", "HEAD")
+        _require(head is not None, "worktree must be a git checkout")
+        _require(head == ns.base_sha, "worktree HEAD != --base-sha (adopted branch diverged)")
+        _require(_git(str(wt), "status", "--porcelain") == "", "worktree must be clean")
         cfg = read_config(repo_dir(ns.repo_slug))
         _, err = mech_caps(cfg)
         if err:
@@ -429,7 +470,8 @@ assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"
 assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":2.5},"td-x")
 assert not c.valid_spend_line({"v":True,"kind":"end","task_id":"td-x","launch_id":"L"},"td-x")
 assert not c.valid_spend_line({"v":1,"kind":"mid","task_id":"td-x","launch_id":"L"},"td-x")
-assert c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","subtype":"weird"},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":1},"td-x")   # total_cost_usd key required
+assert c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":None,"total_cost_usd":None,"subtype":"weird"},"td-x")
 assert (".spend.jsonl", c.valid_task_id) in c.WATCH_DIRS["tasks"]
 sys.exit(0)
 PY
@@ -502,6 +544,8 @@ def valid_spend_line(rec, task_id) -> bool:
     if rec.get("task_id") != task_id or not _nonempty_str(rec.get("launch_id")):
         return False
     if rec["kind"] == "end":
+        if "num_turns" not in rec or "total_cost_usd" not in rec:
+            return False
         if not _finite_nonneg(rec.get("num_turns"), integer=True):
             return False
         if not _finite_nonneg(rec.get("total_cost_usd")):
@@ -609,164 +653,65 @@ git commit -m "herdr: Fold mech spend ledger into status and watch"
 
 ---
 
-### Task 5: `run-mech` wrapper
+### Task 5a: `run-mech` pure helpers (result parsing, provenance, outcome mapping, validation regexes)
 
 **Files:**
-- Modify: `claude/hooks/herdr_orch_core.py` (new `run_mech` + helpers after `append_spend`; CLI parser + handler)
-- Test: `claude/hooks/herdr-orch.test.sh` (fake `claude` fixture + AC4/AC5 checks)
+
+- Modify: `claude/hooks/herdr_orch_core.py` (constants next to `MECH_REASONS`; helpers after `append_spend`)
+- Test: `claude/hooks/herdr-orch.test.sh`
 
 **Interfaces:**
-- Consumes: `_cap_error`, `append_spend`, `_finite_nonneg`, `MECH_REASONS`, `now_iso`, `write_json_atomic`, `contained`, `state_root`, `_nonempty_str`.
-- Produces: `SHELL_SAFE_RE`, `MECH_AGENT_RE`, `SHA40_RE`, `_CAP_SUBTYPES`, `parse_claude_result(stdout) -> dict|None`, `models_used(result) -> list`, `is_downgrade(models, alias) -> bool`, `own_launch_record(done, workspace, agent, launch_id, start_ts) -> bool`, `wrapper_outcome(subtype, head_sha, base_sha, dirty) -> (outcome, reason)`, `_git(worktree, *args) -> str|None`, `run_mech(rd, a, timeout_secs) -> int` where `a` is the parsed argparse namespace; CLI verb `run-mech`.
 
-- [ ] **Step 1: Write the fake `claude` fixture and failing tests**
+- Consumes: `agent_name`, `_finite_nonneg`.
+- Produces: `SHELL_SAFE_RE`, `SHA40_RE`, `_CAP_SUBTYPES`, `valid_mech_agent(agent, task_id) -> bool`, `parse_claude_result(stdout) -> dict|None`, `models_used(result) -> list`, `is_downgrade(models, alias) -> bool`, `result_errors(result) -> list[str]`, `model_attributable(subtype, downgrade, errors, alias) -> bool`, `own_launch_record(done, workspace, agent, launch_id, start_ts) -> bool`, `wrapper_outcome(subtype, head_sha, base_sha, dirty) -> (outcome, reason)`.
 
-Add near the top of `herdr-orch.test.sh` (after `LOAD`) a helper that builds a fake `claude` on PATH:
-
-```sh
-# fake claude for run-mech tests: records argv/cwd/stdin/pid, runs
-# $FAKE_CLAUDE_HOOK (a shell snippet, e.g. a simulated worker emit-done),
-# sleeps $FAKE_CLAUDE_SLEEP secs, prints the JSON file $FAKE_CLAUDE_JSON,
-# exits $FAKE_CLAUDE_RC (default 0).
-make_fake_claude() {
-    dir=$(mktemp -d)
-    cat > "$dir/claude" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$@" > "$FAKE_CLAUDE_LOG.argv"
-pwd > "$FAKE_CLAUDE_LOG.cwd"
-cat > "$FAKE_CLAUDE_LOG.stdin"
-echo $$ > "$FAKE_CLAUDE_LOG.pid"
-[ -n "$FAKE_CLAUDE_HOOK" ] && sh -c "$FAKE_CLAUDE_HOOK"
-sleep "${FAKE_CLAUDE_SLEEP:-0}"
-[ -n "$FAKE_CLAUDE_JSON" ] && cat "$FAKE_CLAUDE_JSON"
-exit "${FAKE_CLAUDE_RC:-0}"
-EOF
-    chmod +x "$dir/claude"; printf '%s' "$dir"
-}
-```
-
-Then the checks (place after the Task-4 checks):
+- [ ] **Step 1: Write the failing tests**
 
 ```sh
-check "run-mech: success with fresh worker record; argv/stdin/cwd exact; ledger start+end" <<'SH'
-export CLAUDE_CONFIG_DIR=$(mktemp -d); FAKE=$(make_fake_claude); PATH="$FAKE:$PATH"
-CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
-WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
-BASE=$(git -C "$WT" rev-parse HEAD)
-printf 'do the thing\n' > "$RD/tasks/td-r.brief.md"
-export FAKE_CLAUDE_LOG="$FAKE/log"; export FAKE_CLAUDE_JSON="$FAKE/res.json"
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":0.11,"duration_ms":10,"session_id":"sid","modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
-export FAKE_CLAUDE_HOOK="git -C $WT -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; $CLI emit-done --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --phase implement --outcome completed --head-sha \$(git -C $WT rev-parse HEAD) --base-sha $BASE --launch-id mech-td-r-20260901T000000Z"
-$CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id mech-td-r-20260901T000000Z \
-  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/td-r.brief.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60
-[ "$(cat $FAKE_CLAUDE_LOG.argv | tr '\n' ' ')" = "--model haiku --permission-mode auto --name mech-td-r -p --output-format json --max-turns 7 --max-budget-usd 0.5 " ]
-[ "$(cat $FAKE_CLAUDE_LOG.stdin)" = "do the thing" ]
-[ "$(cd "$WT" && pwd -P)" = "$(cd "$(cat $FAKE_CLAUDE_LOG.cwd)" && pwd -P)" ]
-python3 - <<PY
-import json
-L=[json.loads(l) for l in open("$RD/tasks/td-r.spend.jsonl")]
-assert [l["kind"] for l in L]==["start","end"],L
-assert L[0]["max_turns"]==7 and L[0]["max_budget_usd"]==0.5 and L[0]["model"]=="haiku" and L[0]["launch_id"]=="mech-td-r-20260901T000000Z"
-e=L[1]; assert e["subtype"]=="success" and e["total_cost_usd"]==0.11 and e["num_turns"]==5 and e["downgrade"] is False and e["record_written_by"]=="worker" and e["models_used"]==["claude-haiku-4-5-20251001"],e
-d=json.load(open("$RD/tasks/td-r.done.json")); assert d["outcome"]=="completed" and "reason" not in d,d
-PY
-SH
-
-check "run-mech: cap hits, no_emit, errors, dirty, unparseable, downgrade -> wrapper records" <<'SH'
-export CLAUDE_CONFIG_DIR=$(mktemp -d); FAKE=$(make_fake_claude); PATH="$FAKE:$PATH"
-CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
-WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
-BASE=$(git -C "$WT" rev-parse HEAD); : > "$RD/tasks/b.md"
-export FAKE_CLAUDE_LOG="$FAKE/log"; export FAKE_CLAUDE_JSON="$FAKE/res.json"
-run() { $CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id "mech-td-r-$1" \
-  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/b.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60; }
-expect() { python3 -c "import json;d=json.load(open('$RD/tasks/td-r.done.json'));assert (d['outcome'],d['reason'],d['launch_id'])==('$1','$2','mech-td-r-$3'),d"; }
-printf '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":7,"total_cost_usd":0.2}' > "$FAKE_CLAUDE_JSON"; run 1; expect paused max_turns 1
-printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":0.5}' > "$FAKE_CLAUDE_JSON"; run 2; expect paused max_budget 2
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01}' > "$FAKE_CLAUDE_JSON"; run 3; expect paused no_emit 3
-printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01}' > "$FAKE_CLAUDE_JSON"; run 4; expect failed error 4   # HEAD == base
-git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; run 5; expect paused error 5              # ahead + clean
-touch "$WT/dirty"; run 6; expect failed error 6                                                                            # ahead + dirty
-rm "$WT/dirty"; git -C "$WT" checkout -q "$BASE"; git -C "$WT" checkout -q -B main
-printf 'not json' > "$FAKE_CLAUDE_JSON"; run 7; expect failed error 7
-python3 -c "import json;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];e=[l for l in L if l['kind']=='end'][-1];assert e['subtype']=='unparseable' and e['total_cost_usd'] is None and e['num_turns'] is None,e"
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"modelUsage":{"claude-sonnet-5":{}}}' > "$FAKE_CLAUDE_JSON"; run 8
-python3 -c "import json;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];e=L[-1];assert e['downgrade'] is True and e['models_used']==['claude-sonnet-5'],e"
-# stale record from another launch is replaced; a live-launch record survives a cap hit
-export FAKE_CLAUDE_HOOK="$CLI emit-done --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --phase implement --outcome completed --head-sha $BASE --base-sha $BASE --launch-id mech-td-r-9"
-printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":2,"total_cost_usd":0.5}' > "$FAKE_CLAUDE_JSON"; run 9
-python3 -c "import json;d=json.load(open('$RD/tasks/td-r.done.json'));assert d['outcome']=='completed' and d['launch_id']=='mech-td-r-9',d"
-unset FAKE_CLAUDE_HOOK; run 10; expect paused max_budget 10
-python3 -c "import json;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];assert len([l for l in L if l['kind']=='start'])==10 and L[-1]['record_written_by']=='wrapper',len(L)"
-SH
-
-check "run-mech: timeout kills the child; unwritable ledger exits 2 before any write" <<'SH'
-export CLAUDE_CONFIG_DIR=$(mktemp -d); FAKE=$(make_fake_claude); PATH="$FAKE:$PATH"
-CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
-WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
-BASE=$(git -C "$WT" rev-parse HEAD); : > "$RD/tasks/b.md"
-export FAKE_CLAUDE_LOG="$FAKE/log"; export FAKE_CLAUDE_JSON="$FAKE/res.json"; export FAKE_CLAUDE_SLEEP=30
-printf '{"type":"result","subtype":"success"}' > "$FAKE_CLAUDE_JSON"
-$CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id mech-td-r-1 \
-  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/b.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60 --timeout-secs-override-for-test 2
-python3 -c "import json;d=json.load(open('$RD/tasks/td-r.done.json'));assert (d['outcome'],d['reason'])==('paused','timeout'),d"
-python3 -c "import json;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];assert L[-1]['subtype']=='timeout',L"
-! kill -0 "$(cat $FAKE_CLAUDE_LOG.pid)" 2>/dev/null
-unset FAKE_CLAUDE_SLEEP
-chmod 500 "$RD/tasks"
-rc=0; $CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id mech-td-r-2 \
-  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/b.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60 2>/dev/null || rc=$?
-chmod 700 "$RD/tasks"
-[ "$rc" -eq 2 ]   # start line itself unwritable -> exit 2, nothing written for launch 2
-python3 -c "import json;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];assert not any(l['launch_id']=='mech-td-r-2' for l in L)"
-SH
-
-check "run-mech: unwritable done target exits 3 with the end line still appended" <<PY
+check "run-mech helpers: agent validity, result parsing, downgrade, errors, provenance, outcome" <<PY
 $LOAD
-import types, subprocess as sp
-root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-r"); (rd/"tasks").mkdir(parents=True)
-wt=tempfile.mkdtemp(); sp.run(["git","-C",wt,"init","-q"],check=True)
-sp.run(["git","-C",wt,"-c","user.name=t","-c","user.email=t@x","commit","-q","--allow-empty","-m","b"],check=True)
-base=sp.run(["git","-C",wt,"rev-parse","HEAD"],capture_output=True,text=True,check=True).stdout.strip()
-brief=rd/"tasks"/"b.md"; brief.write_text("x")
-fake=tempfile.mkdtemp(); open(f"{fake}/claude","w").write('#!/bin/sh\ncat >/dev/null\nprintf \'{"type":"result","subtype":"success"}\'\n'); os.chmod(f"{fake}/claude",0o755)
-os.environ["PATH"]=fake+":"+os.environ["PATH"]
-(rd/"tasks"/"td-r.done.json").mkdir()   # a directory where the record must go -> write fails
-a=types.SimpleNamespace(repo_slug="slug-r",task_id="td-r",workspace="w1",agent="mech-td-r",launch_id="mech-td-r-1",
-  model="haiku",worktree=wt,base_sha=base,brief_file=str(brief),max_turns=7,max_budget_usd=0.5,timeout_secs=60)
-assert c.run_mech(rd,a,60)==3
-L=[json.loads(l) for l in open(rd/"tasks"/"td-r.spend.jsonl")]
-assert [l["kind"] for l in L]==["start","end"] and L[-1]["record_written_by"]=="none",L
+t="td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical"
+base=c.agent_name("mech",t)
+assert c.valid_mech_agent(base,t) and c.valid_mech_agent(c.agent_name("mech",t,existing={base}),t)
+assert c.valid_mech_agent("mech-td-r-9","td-r") and not c.valid_mech_agent("mech-td-r-10","td-r")
+assert not c.valid_mech_agent("mech-other","td-r") and not c.valid_mech_agent("mech-","td-r") and not c.valid_mech_agent("mech-Td-r","td-r")
+assert not c.valid_mech_agent("impl-td-r","td-r")
+r=c.parse_claude_result('noise\n{"type":"result","subtype":"success","num_turns":2}\n')
+assert r and r["num_turns"]==2
+assert c.parse_claude_result("not json") is None and c.parse_claude_result('{"type":"other"}') is None
+assert c.models_used({"modelUsage":{"claude-haiku-4-5-20251001":{},"claude-sonnet-5":{}}})==["claude-haiku-4-5-20251001","claude-sonnet-5"]
+assert c.models_used({}) == [] and c.models_used(None) == []
+assert c.is_downgrade(["claude-sonnet-5"],"haiku") and not c.is_downgrade(["claude-haiku-4-5-20251001"],"haiku") and not c.is_downgrade([],"haiku")
+assert c.result_errors({"errors":["a","b"*1000,3]})==["a","b"*500]
+assert c.result_errors({}) == [] and c.result_errors({"errors":"x"}) == []
+assert c.model_attributable("success",True,[],"haiku")
+assert c.model_attributable("error_during_execution",False,["haiku is not available"],"haiku")
+assert c.model_attributable("error_during_execution",False,["Unknown model"],"haiku")
+assert not c.model_attributable("error_during_execution",False,["network timeout"],"haiku")
+assert not c.model_attributable("error_max_turns",False,["model x"],"haiku")
+d={"workspace_id":"w1","agent":"mech-td-r","launch_id":"L1","ts":"2026-09-01T00:00:01Z"}
+assert c.own_launch_record(d,"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(d,"w1","mech-td-r","L2","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(dict(d,agent="impl-td-r"),"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+old={"workspace_id":"w1","agent":"mech-td-r","ts":"2026-08-01T00:00:00Z"}
+assert not c.own_launch_record(old,"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert c.own_launch_record(dict(old,ts="2026-09-01T00:00:00Z"),"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(None,"w1","mech-td-r","L1","t")
+assert c.wrapper_outcome("error_max_turns","h","b",False)==("paused","max_turns")
+assert c.wrapper_outcome("error_max_budget_usd","h","b",False)==("paused","max_budget")
+assert c.wrapper_outcome("timeout","h","b",False)==("paused","timeout")
+assert c.wrapper_outcome("success","h","b",False)==("paused","no_emit")
+assert c.wrapper_outcome("error_during_execution","h","b",False)==("paused","error")
+assert c.wrapper_outcome("error_during_execution","b","b",False)==("failed","error")
+assert c.wrapper_outcome("error_during_execution","h","b",True)==("failed","error")
+assert c.wrapper_outcome("unparseable",None,"b",True)==("failed","error")
+assert c.SHELL_SAFE_RE.match("a/b+c:d@e.f_g-1") and not c.SHELL_SAFE_RE.match("a b") and not c.SHELL_SAFE_RE.match("a;b") and not c.SHELL_SAFE_RE.match("")
+assert c.SHA40_RE.match("0"*40) and not c.SHA40_RE.match("abc") and not c.SHA40_RE.match("A"*40)
 sys.exit(0)
 PY
-
-check "run-mech: validation exits 2 and writes nothing" <<'SH'
-export CLAUDE_CONFIG_DIR=$(mktemp -d); FAKE=$(make_fake_claude); PATH="$FAKE:$PATH"
-CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
-WT=$(mktemp -d); git -C "$WT" init -q; : > "$RD/tasks/b.md"; OUT=$(mktemp -d); : > "$OUT/b.md"
-B="$(printf %040d 0)"
-base="--repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree $WT --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60"
-try() { rc=0; $CLI run-mech "$@" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ] || { echo "expected 2 got $rc: $*" >&2; return 1; }; }
-try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$B" --brief-file "$OUT/b.md"            # brief outside STATE_ROOT
-try $base --agent mech- --launch-id mech--1 --base-sha "$B" --brief-file "$RD/tasks/b.md"               # empty suffix
-try $base --agent mech-Td-r --launch-id mech-Td-r-1 --base-sha "$B" --brief-file "$RD/tasks/b.md"       # uppercase
-try $base --agent mech-abcdefghijklmnopqrstuvwxyz0123 --launch-id x --base-sha "$B" --brief-file "$RD/tasks/b.md"  # 33 chars
-try $base --agent mech-td-r --launch-id other-1 --base-sha "$B" --brief-file "$RD/tasks/b.md"           # launch id not prefixed
-try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha abc --brief-file "$RD/tasks/b.md"        # bad sha
-try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$(mktemp -d)" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60 \
-    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$B" --brief-file "$RD/tasks/b.md"            # non-git worktree
-try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$WT" --max-turns 0 --max-budget-usd 0.5 --timeout-secs 60 \
-    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$B" --brief-file "$RD/tasks/b.md"            # cap out of bounds
-try $base --agent mech-td-r --launch-id 'mech-td-r-1;rm' --base-sha "$B" --brief-file "$RD/tasks/b.md" # metachar
-try $base --agent mech-td-r --launch-id 'mech-td-r 1' --base-sha "$B" --brief-file "$RD/tasks/b.md"    # whitespace
-[ ! -e "$RD/tasks/td-r.spend.jsonl" ] && [ ! -e "$RD/tasks/td-r.done.json" ]
-SH
 ```
 
-Note on the timeout check: `--timeout-secs` is bounded to >= 60 by spec, so the test uses a hidden `--timeout-secs-override-for-test` flag (an `argparse.SUPPRESS` option; the skill never passes it). Keep it explicit and documented in the parser comment.
-
-- [ ] **Step 2: Run to verify they fail** (unknown verb `run-mech`).
+- [ ] **Step 2: Run to verify it fails** (`AttributeError` on the first missing name).
 
 - [ ] **Step 3: Implement**
 
@@ -774,14 +719,27 @@ Constants (next to `MECH_REASONS`):
 
 ```python
 SHELL_SAFE_RE = re.compile(r"[A-Za-z0-9_./+:@-]+\Z")
-MECH_AGENT_RE = re.compile(r"mech-[a-z0-9-]{1,27}\Z")
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 _CAP_SUBTYPES = {"error_max_turns": "max_turns", "error_max_budget_usd": "max_budget"}
+_ERRORS_MAX, _ERROR_LEN = 5, 500
 ```
 
 Helpers (after `append_spend`):
 
 ```python
+def valid_mech_agent(agent, task_id) -> bool:
+    """agent is the canonical agent_name("mech", task_id) or one of its
+    collision variants -2..-9 (same truncation rule as agent_name)."""
+    base = agent_name("mech", task_id)
+    if agent == base:
+        return True
+    for n in range(2, 10):
+        suffix = f"-{n}"
+        if agent == base[: 32 - len(suffix)] + suffix:
+            return True
+    return False
+
+
 def parse_claude_result(stdout: str):
     """The single result object from `claude -p --output-format json`, or
     None. Tolerates leading noise by scanning lines from the end."""
@@ -806,6 +764,27 @@ def is_downgrade(models: list, alias: str) -> bool:
     return bool(models) and not any(alias in m for m in models)
 
 
+def result_errors(result) -> list:
+    """The result's errors[] as a bounded list of strings (non-strings dropped,
+    each clipped, at most _ERRORS_MAX) -- persisted so the orchestrator can
+    judge model-attributability without the transcript."""
+    errs = (result or {}).get("errors")
+    if not isinstance(errs, list):
+        return []
+    return [e[:_ERROR_LEN] for e in errs if isinstance(e, str)][:_ERRORS_MAX]
+
+
+def model_attributable(subtype, downgrade, errors, alias) -> bool:
+    """Spec s4 within-role fallback trigger: a downgrade, or an execution
+    error whose text names the alias or 'model'."""
+    if downgrade:
+        return True
+    if subtype != "error_during_execution":
+        return False
+    text = " ".join(errors).lower()
+    return alias in text or "model" in text
+
+
 def own_launch_record(done, workspace, agent, launch_id, start_ts) -> bool:
     if not isinstance(done, dict):
         return False
@@ -827,21 +806,229 @@ def wrapper_outcome(subtype, head_sha, base_sha, dirty):
         return "paused", "no_emit"
     usable = head_sha is not None and head_sha != base_sha and not dirty
     return ("paused" if usable else "failed"), "error"
+```
 
+- [ ] **Step 4: Run the unit suite** -- 0 FAIL.
 
-def _git(worktree, *args):
-    try:
-        cp = subprocess.run(["git", "-C", worktree, *args], capture_output=True,
-                            text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return cp.stdout.strip() if cp.returncode == 0 else None
+- [ ] **Step 5: Commit**
 
+```bash
+git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
+git commit -m "herdr: Add run-mech result and provenance helpers"
+```
 
-def run_mech(rd, a, timeout_secs) -> int:
+---
+
+### Task 5b: `run_mech` and the `run-mech` verb
+
+**Files:**
+
+- Modify: `claude/hooks/herdr_orch_core.py` (`run_mech` after `wrapper_outcome`; CLI parser + handler)
+- Test: `claude/hooks/herdr-orch.test.sh` (suite-scope fake `claude` + AC4/AC5 checks)
+
+**Interfaces:**
+
+- Consumes: everything Task 5a produces, plus `_cap_error`, `_git`, `append_spend`, `_finite_nonneg`, `now_iso`, `write_json_atomic`, `contained`, `state_root`, `CAP_MODELS`.
+- Produces: `run_mech(rd, a, brief, timeout_secs) -> int` (`a` = parsed argparse namespace or any object with the same attributes); CLI verb `run-mech` (no test-only flags).
+
+- [ ] **Step 1: Build the fake `claude` at SUITE scope**
+
+Add after `LOAD` in `herdr-orch.test.sh` (top level, not inside a `check`; exported variables are what snippets can see):
+
+```sh
+# Fake claude for run-mech checks, built once and reached via exported
+# FAKE_CLAUDE_DIR (shell functions do not survive into `sh -e -` snippets).
+# It records argv/cwd/stdin/pid under $FAKE_CLAUDE_LOG.*, runs the shell
+# snippet in $FAKE_CLAUDE_HOOK (e.g. a simulated worker emit-done), sleeps
+# $FAKE_CLAUDE_SLEEP secs, prints the JSON file $FAKE_CLAUDE_JSON, exits
+# $FAKE_CLAUDE_RC (default 0).
+FAKE_CLAUDE_DIR=$(mktemp -d); export FAKE_CLAUDE_DIR
+cat > "$FAKE_CLAUDE_DIR/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_CLAUDE_LOG.argv"
+pwd > "$FAKE_CLAUDE_LOG.cwd"
+cat > "$FAKE_CLAUDE_LOG.stdin"
+echo $$ > "$FAKE_CLAUDE_LOG.pid"
+[ -n "$FAKE_CLAUDE_HOOK" ] && sh -c "$FAKE_CLAUDE_HOOK"
+sleep "${FAKE_CLAUDE_SLEEP:-0}"
+[ -n "$FAKE_CLAUDE_JSON" ] && cat "$FAKE_CLAUDE_JSON"
+exit "${FAKE_CLAUDE_RC:-0}"
+EOF
+chmod +x "$FAKE_CLAUDE_DIR/claude"
+```
+
+Every shell check below starts with the same four setup lines (repeated on purpose; snippets share nothing):
+
+```sh
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```sh
+check "run-mech: success with fresh worker record; argv/stdin/cwd exact; ledger start+end" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+printf 'do the thing\n' > "$RD/tasks/td-r.brief.md"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":0.11,"duration_ms":10,"session_id":"sid","modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
+export FAKE_CLAUDE_HOOK="git -C $WT -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; $CLI emit-done --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --phase implement --outcome completed --head-sha \$(git -C $WT rev-parse HEAD) --base-sha $BASE --launch-id mech-td-r-20260901T000000Z"
+$CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id mech-td-r-20260901T000000Z \
+  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/td-r.brief.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60
+[ "$(tr '\n' ' ' < $FAKE_CLAUDE_LOG.argv)" = "--model haiku --permission-mode auto --name mech-td-r -p --output-format json --max-turns 7 --max-budget-usd 0.5 " ]
+[ "$(cat $FAKE_CLAUDE_LOG.stdin)" = "do the thing" ]
+[ "$(cd "$WT" && pwd -P)" = "$(cd "$(cat $FAKE_CLAUDE_LOG.cwd)" && pwd -P)" ]
+python3 - <<PY
+import json
+L=[json.loads(l) for l in open("$RD/tasks/td-r.spend.jsonl")]
+assert [l["kind"] for l in L]==["start","end"],L
+assert L[0]["max_turns"]==7 and L[0]["max_budget_usd"]==0.5 and L[0]["model"]=="haiku" and L[0]["launch_id"]=="mech-td-r-20260901T000000Z"
+e=L[1]; assert e["subtype"]=="success" and e["total_cost_usd"]==0.11 and e["num_turns"]==5 and e["downgrade"] is False and e["record_written_by"]=="worker" and e["models_used"]==["claude-haiku-4-5-20251001"] and e["errors"]==[] and e["model_attributable"] is False,e
+d=json.load(open("$RD/tasks/td-r.done.json")); assert d["outcome"]=="completed" and "reason" not in d,d
+PY
+SH
+
+check "run-mech: cap hits, no_emit, errors, dirty, unparseable, downgrade, errors persisted -> wrapper records" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+: > "$RD/tasks/b.md"
+run() { $CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id "mech-td-r-$1" \
+  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/b.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60; }
+expect() { python3 -c "import json;d=json.load(open('$RD/tasks/td-r.done.json'));assert (d['outcome'],d['reason'],d['launch_id'])==('$1','$2','mech-td-r-$3'),d"; }
+last() { python3 -c "import json,sys;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];e=L[-1];assert e['kind']=='end';$1"; }
+printf '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":7,"total_cost_usd":0.2}' > "$FAKE_CLAUDE_JSON"; run 1; expect paused max_turns 1
+printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":0.5}' > "$FAKE_CLAUDE_JSON"; run 2; expect paused max_budget 2
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01}' > "$FAKE_CLAUDE_JSON"; run 3; expect paused no_emit 3
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"errors":["network timeout"]}' > "$FAKE_CLAUDE_JSON"; run 4; expect failed error 4   # HEAD == base
+last "assert e['errors']==['network timeout'] and e['model_attributable'] is False,e"
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"errors":["Unknown model: haiku"]}' > "$FAKE_CLAUDE_JSON"; run 5
+last "assert e['model_attributable'] is True,e"
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; run 6; expect paused error 6              # ahead + clean
+touch "$WT/dirty"; run 7; expect failed error 7                                                                            # ahead + dirty
+rm "$WT/dirty"; git -C "$WT" checkout -q --detach "$BASE"; git -C "$WT" checkout -q -B main
+printf 'not json' > "$FAKE_CLAUDE_JSON"; run 8; expect failed error 8
+last "assert e['subtype']=='unparseable' and e['total_cost_usd'] is None and e['num_turns'] is None,e"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"modelUsage":{"claude-sonnet-5":{}}}' > "$FAKE_CLAUDE_JSON"; run 9
+last "assert e['downgrade'] is True and e['models_used']==['claude-sonnet-5'] and e['model_attributable'] is True,e"
+# stale record from another launch is replaced; a live-launch record survives a cap hit
+export FAKE_CLAUDE_HOOK="$CLI emit-done --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --phase implement --outcome completed --head-sha $BASE --base-sha $BASE --launch-id mech-td-r-10"
+printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":2,"total_cost_usd":0.5}' > "$FAKE_CLAUDE_JSON"; run 10
+python3 -c "import json;d=json.load(open('$RD/tasks/td-r.done.json'));assert d['outcome']=='completed' and d['launch_id']=='mech-td-r-10',d"
+unset FAKE_CLAUDE_HOOK; run 11; expect paused max_budget 11
+python3 -c "import json;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];assert len([l for l in L if l['kind']=='start'])==11 and L[-1]['record_written_by']=='wrapper',len(L)"
+SH
+
+check "run-mech: timeout kills the child process (import seam, 2s wall clock)" <<PY
+$LOAD
+import types, subprocess as sp, time
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-r"); (rd/"tasks").mkdir(parents=True)
+wt=tempfile.mkdtemp(); sp.run(["git","-C",wt,"init","-q","-b","main"],check=True)
+sp.run(["git","-C",wt,"-c","user.name=t","-c","user.email=t@x","commit","-q","--allow-empty","-m","b"],check=True)
+base=sp.run(["git","-C",wt,"rev-parse","HEAD"],capture_output=True,text=True,check=True).stdout.strip()
+log=tempfile.mkdtemp()+"/log"; res=tempfile.mkdtemp()+"/res.json"; open(res,"w").write('{"type":"result","subtype":"success"}')
+os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=res,FAKE_CLAUDE_SLEEP="30"); os.environ.pop("FAKE_CLAUDE_HOOK",None)
+os.environ["PATH"]=os.environ["FAKE_CLAUDE_DIR"]+":"+os.environ["PATH"]
+a=types.SimpleNamespace(repo_slug="slug-r",task_id="td-r",workspace="w1",agent="mech-td-r",launch_id="mech-td-r-1",
+  model="haiku",worktree=wt,base_sha=base,brief_file="unused",max_turns=7,max_budget_usd=0.5,timeout_secs=60)
+t0=time.time(); rc=c.run_mech(rd,a,"brief text",2); assert rc==0 and time.time()-t0<10
+d=json.load(open(rd/"tasks"/"td-r.done.json")); assert (d["outcome"],d["reason"])==("paused","timeout"),d
+L=[json.loads(l) for l in open(rd/"tasks"/"td-r.spend.jsonl")]; assert L[-1]["subtype"]=="timeout",L
+pid=int(open(log+".pid").read())
+try:
+    os.kill(pid,0); alive=True
+except ProcessLookupError:
+    alive=False
+assert not alive, "fake claude survived the kill"
+sys.exit(0)
+PY
+
+check "run-mech: git failure after start and unwritable done target both exit 3 with the end line appended" <<PY
+$LOAD
+import types, subprocess as sp
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-r"); (rd/"tasks").mkdir(parents=True)
+wt=tempfile.mkdtemp(); sp.run(["git","-C",wt,"init","-q","-b","main"],check=True)
+sp.run(["git","-C",wt,"-c","user.name=t","-c","user.email=t@x","commit","-q","--allow-empty","-m","b"],check=True)
+base=sp.run(["git","-C",wt,"rev-parse","HEAD"],capture_output=True,text=True,check=True).stdout.strip()
+log=tempfile.mkdtemp()+"/log"; res=tempfile.mkdtemp()+"/res.json"; open(res,"w").write('{"type":"result","subtype":"success"}')
+os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=res); os.environ.pop("FAKE_CLAUDE_HOOK",None); os.environ.pop("FAKE_CLAUDE_SLEEP",None)
+os.environ["PATH"]=os.environ["FAKE_CLAUDE_DIR"]+":"+os.environ["PATH"]
+mk=lambda lid: types.SimpleNamespace(repo_slug="slug-r",task_id="td-r",workspace="w1",agent="mech-td-r",launch_id=lid,
+  model="haiku",worktree=wt,base_sha=base,brief_file="unused",max_turns=7,max_budget_usd=0.5,timeout_secs=60)
+# (1) unwritable completion record: a directory sits where the file must go
+(rd/"tasks"/"td-r.done.json").mkdir()
+assert c.run_mech(rd,mk("mech-td-r-1"),"x",60)==3
+L=[json.loads(l) for l in open(rd/"tasks"/"td-r.spend.jsonl")]
+assert [l["kind"] for l in L]==["start","end"] and L[-1]["record_written_by"]=="none",L
+os.rmdir(rd/"tasks"/"td-r.done.json")
+# (2) git unavailable after start: the worktree's git dir is moved away during the run
+os.environ["FAKE_CLAUDE_HOOK"]=f"mv {wt}/.git {wt}/.git-gone"
+assert c.run_mech(rd,mk("mech-td-r-2"),"x",60)==3
+L=[json.loads(l) for l in open(rd/"tasks"/"td-r.spend.jsonl")]
+assert [l["kind"] for l in L]==["start","end","start","end"] and L[-1]["record_written_by"]=="none" and L[-1]["git_ok"] is False,L
+assert not (rd/"tasks"/"td-r.done.json").exists()
+sys.exit(0)
+PY
+
+check "run-mech: unwritable ledger dir exits 2 before any write (fresh task id)" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+: > "$RD/tasks/b.md"; printf '{"type":"result","subtype":"success"}' > "$FAKE_CLAUDE_JSON"
+chmod 500 "$RD/tasks"
+rc=0; $CLI run-mech --repo-slug slug-r --task-id td-new --workspace w1 --agent mech-td-new --launch-id mech-td-new-1 \
+  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/b.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60 2>/dev/null || rc=$?
+chmod 700 "$RD/tasks"
+[ "$rc" -eq 2 ] && [ ! -e "$RD/tasks/td-new.spend.jsonl" ] && [ ! -e "$RD/tasks/td-new.done.json" ] && [ ! -e "$FAKE_CLAUDE_LOG.argv" ]
+SH
+
+check "run-mech: validation exits 2 and writes nothing" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+: > "$RD/tasks/b.md"; OUT=$(mktemp -d); : > "$OUT/b.md"; : > "$RD/tasks/noread.md"; chmod 000 "$RD/tasks/noread.md"
+base="--repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree $WT --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60"
+try() { rc=0; $CLI run-mech "$@" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ] || { echo "expected 2 got $rc: $*" >&2; return 1; }; }
+try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$OUT/b.md"             # brief outside STATE_ROOT
+try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/noread.md"   # brief unreadable
+try $base --agent mech- --launch-id mech--1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"                # empty suffix
+try $base --agent mech-Td-r --launch-id mech-Td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"        # uppercase
+try $base --agent mech-other --launch-id mech-other-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"      # not this task's agent
+try $base --agent mech-td-r-10 --launch-id mech-td-r-10-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"  # collision suffix > 9
+try $base --agent mech-td-r --launch-id other-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"            # launch id not prefixed
+try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha abc --brief-file "$RD/tasks/b.md"            # bad sha
+try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$(mktemp -d)" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60 \
+    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"             # non-git worktree
+try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$WT" --max-turns 0 --max-budget-usd 0.5 --timeout-secs 60 \
+    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"             # cap out of bounds
+try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$WT" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 59 \
+    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"             # timeout below floor
+try $base --agent mech-td-r --launch-id 'mech-td-r-1;rm' --base-sha "$BASE" --brief-file "$RD/tasks/b.md"  # metachar
+try $base --agent mech-td-r --launch-id 'mech-td-r 1' --base-sha "$BASE" --brief-file "$RD/tasks/b.md"     # whitespace
+[ ! -e "$RD/tasks/td-r.spend.jsonl" ] && [ ! -e "$RD/tasks/td-r.done.json" ] && [ ! -e "$FAKE_CLAUDE_LOG.argv" ]
+SH
+```
+
+- [ ] **Step 3: Run to verify they fail** (unknown verb `run-mech`; `run_mech` missing).
+
+- [ ] **Step 4: Implement**
+
+`run_mech` (after `wrapper_outcome`). The brief text is passed in already read, so an unreadable brief can never fail after the start line:
+
+```python
+def run_mech(rd, a, brief, timeout_secs) -> int:
     """Launch a headless capped worker; write start/end ledger lines and a
     guaranteed completion record. Exit 0 all writes ok; 2 nothing written;
-    3 a post-start write failed."""
+    3 a post-start step failed (git lookup, record write, or end line)."""
     start_ts = now_iso()
     caps = {"max_turns": a.max_turns, "max_budget_usd": a.max_budget_usd,
             "timeout_secs": a.timeout_secs}
@@ -853,7 +1040,6 @@ def run_mech(rd, a, timeout_secs) -> int:
     except OSError:
         sys.stderr.write("[X] cannot append the spend ledger\n")
         return 2
-    brief = Path(a.brief_file).read_text()
     argv = ["claude", "--model", a.model, "--permission-mode", "auto",
             "--name", a.agent, "-p", "--output-format", "json",
             "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
@@ -880,9 +1066,12 @@ def run_mech(rd, a, timeout_secs) -> int:
         if result is not None:
             subtype = str(result.get("subtype") or "unparseable")
     used = models_used(result)
+    errors = result_errors(result)
+    downgrade = is_downgrade(used, a.model)
     head = _git(a.worktree, "rev-parse", "HEAD")
     porcelain = _git(a.worktree, "status", "--porcelain")
-    dirty = porcelain is None or porcelain != ""
+    git_ok = head is not None and porcelain is not None
+    dirty = not git_ok or porcelain != ""
     done_path = rd / "tasks" / f"{a.task_id}.done.json"
     try:
         existing = json.loads(done_path.read_text())
@@ -891,18 +1080,23 @@ def run_mech(rd, a, timeout_secs) -> int:
     rc = 0
     written_by = "worker"
     if not own_launch_record(existing, a.workspace, a.agent, a.launch_id, start_ts):
-        outcome, reason = wrapper_outcome(subtype, head, a.base_sha, dirty)
-        done = {"v": 1, "task_id": a.task_id, "workspace_id": a.workspace,
-                "agent": a.agent, "phase": "implement", "outcome": outcome,
-                "head_sha": head or a.base_sha, "base_sha": a.base_sha,
-                "launch_id": a.launch_id, "reason": reason, "dirty": dirty,
-                "ts": now_iso()}
-        try:
-            write_json_atomic(done_path, done)
-            written_by = "wrapper"
-        except OSError:
-            sys.stderr.write("[X] cannot write the completion record\n")
+        if not git_ok:
+            # No trustworthy HEAD: never fabricate a completion record.
+            sys.stderr.write("[X] git unavailable in the worktree; no completion record\n")
             written_by, rc = "none", 3
+        else:
+            outcome, reason = wrapper_outcome(subtype, head, a.base_sha, dirty)
+            done = {"v": 1, "task_id": a.task_id, "workspace_id": a.workspace,
+                    "agent": a.agent, "phase": "implement", "outcome": outcome,
+                    "head_sha": head, "base_sha": a.base_sha,
+                    "launch_id": a.launch_id, "reason": reason, "dirty": dirty,
+                    "ts": now_iso()}
+            try:
+                write_json_atomic(done_path, done)
+                written_by = "wrapper"
+            except OSError:
+                sys.stderr.write("[X] cannot write the completion record\n")
+                written_by, rc = "none", 3
 
     def _num(k, integer=False):
         v = (result or {}).get(k)
@@ -912,9 +1106,10 @@ def run_mech(rd, a, timeout_secs) -> int:
                is_error=bool((result or {}).get("is_error", subtype != "success")),
                num_turns=_num("num_turns", True), total_cost_usd=_num("total_cost_usd"),
                duration_ms=_num("duration_ms", True), models_used=used,
-               downgrade=is_downgrade(used, a.model), record_written_by=written_by,
-               exit_code=exit_code, session_id=(result or {}).get("session_id"),
-               ts=now_iso())
+               downgrade=downgrade, errors=errors,
+               model_attributable=model_attributable(subtype, downgrade, errors, a.model),
+               record_written_by=written_by, git_ok=git_ok, exit_code=exit_code,
+               session_id=(result or {}).get("session_id"), ts=now_iso())
     try:
         append_spend(rd, a.task_id, end)
     except OSError:
@@ -923,7 +1118,7 @@ def run_mech(rd, a, timeout_secs) -> int:
     return rc
 ```
 
-Parser:
+Parser (no hidden flags):
 
 ```python
     rm = add("run-mech", "--task-id", "--workspace", "--agent", "--launch-id",
@@ -931,13 +1126,9 @@ Parser:
     rm.add_argument("--max-turns", type=int, required=True)
     rm.add_argument("--max-budget-usd", type=float, required=True)
     rm.add_argument("--timeout-secs", type=int, required=True)
-    # Test-only: the documented bound is >= 60s; the unit suite needs a
-    # 2s wall clock to prove the kill path without a 60s sleep.
-    rm.add_argument("--timeout-secs-override-for-test", type=int,
-                    default=None, help=argparse.SUPPRESS)
 ```
 
-Handler (validation only; all writes happen inside `run_mech`):
+Handler (all validation, including reading the brief, before any write):
 
 ```python
     if ns.cmd == "run-mech":
@@ -948,7 +1139,8 @@ Handler (validation only; all writes happen inside `run_mech`):
                      "model", "worktree", "base_sha", "brief_file"):
             _require(SHELL_SAFE_RE.match(str(getattr(ns, name))),
                      f"--{name.replace('_', '-')} contains whitespace or a shell metacharacter")
-        _require(MECH_AGENT_RE.match(ns.agent), "agent must be mech-<1..27 of [a-z0-9-]>")
+        _require(valid_mech_agent(ns.agent, ns.task_id),
+                 "agent must be agent_name('mech', task_id) or a -2..-9 collision variant")
         _require(ns.launch_id.startswith(ns.agent + "-"), "launch-id must be prefixed by the agent name")
         _require(ns.model in CAP_MODELS, "model must be a known alias")
         _require(SHA40_RE.match(ns.base_sha), "base-sha must be 40 hex")
@@ -958,20 +1150,27 @@ Handler (validation only; all writes happen inside `run_mech`):
         bf = Path(ns.brief_file)
         _require(bf.is_file() and not bf.is_symlink() and contained(bf, state_root()),
                  "brief-file must be a regular file under STATE_ROOT")
+        try:
+            brief = bf.read_text()
+        except (OSError, UnicodeDecodeError):
+            brief = None
+        _require(brief is not None, "brief-file is not readable as text")
         wt = Path(ns.worktree)
         _require(wt.is_dir() and _git(str(wt), "rev-parse", "--git-dir") is not None,
                  "worktree must be an existing git checkout")
         rd = repo_dir(ns.repo_slug)
-        (rd / "tasks").mkdir(parents=True, exist_ok=True)
-        timeout = ns.timeout_secs_override_for_test or ns.timeout_secs
-        return run_mech(rd, ns, timeout)
+        try:
+            (rd / "tasks").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # run_mech's first append reports the unwritable ledger as exit 2
+        return run_mech(rd, ns, brief, ns.timeout_secs)
 ```
 
-`_require` already exits 2. `subprocess`, `signal`, `os`, `math` are already imported at the top (used by `run_contract_commands` and the watch).
+`_require` already exits 2. `subprocess`, `signal`, `os`, `math` are already imported at the top.
 
-- [ ] **Step 4: Run both suites** -- 0 FAIL. The timeout check adds about 2 s to the unit suite.
+- [ ] **Step 5: Run both suites** -- 0 FAIL. The timeout check adds about 2 s.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
@@ -979,14 +1178,13 @@ git commit -m "herdr: Add run-mech headless capped worker wrapper"
 ```
 
 ---
-
 ### Task 6: Mech kickoff walkthrough in the contract suite (AC9)
 
 **Files:**
 - Modify: `claude/hooks/herdr-orch-contract.test.sh` (append a section 8 before the summary)
 
 **Interfaces:**
-- Consumes: `mech-caps`, `mech-contract`, `verify-contract --validate-only`, `run-mech`, `confirm-completion`, `status`, fake `herdr` (already defined in the file), fake `claude` (copy the `make_fake_claude` helper from Task 5 verbatim into this file -- suites do not share helpers).
+- Consumes: `mech-caps`, `mech-contract`, `verify-contract --validate-only`, `run-mech`, `confirm-completion`, `status`, fake `herdr` (already defined in the file), fake `claude` (the same script as Task 5b, built at this suite's top level -- suites do not share files; this section runs at top level, not inside a snippet, so plain variables work).
 
 - [ ] **Step 1: Write the failing walkthrough**
 
@@ -994,9 +1192,8 @@ git commit -m "herdr: Add run-mech headless capped worker wrapper"
 # 8. mech kickoff: config-generated contract committed on a fresh branch,
 # base_sha = post-contract HEAD, pin computed, shell-safety, run-mech through
 # pane run, ledger + record, status spend; relaunch; contract-only cannot complete.
-make_fake_claude() {  # (same fixture as herdr-orch.test.sh)
-    dir=$(mktemp -d)
-    cat > "$dir/claude" <<'EOF'
+FAKE=$(mktemp -d)   # same fake claude as herdr-orch.test.sh
+cat > "$FAKE/claude" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$@" > "$FAKE_CLAUDE_LOG.argv"
 pwd > "$FAKE_CLAUDE_LOG.cwd"
@@ -1007,9 +1204,7 @@ sleep "${FAKE_CLAUDE_SLEEP:-0}"
 [ -n "$FAKE_CLAUDE_JSON" ] && cat "$FAKE_CLAUDE_JSON"
 exit "${FAKE_CLAUDE_RC:-0}"
 EOF
-    chmod +x "$dir/claude"; printf '%s' "$dir"
-}
-FAKE=$(make_fake_claude); PATH="$FAKE:$PATH"
+chmod +x "$FAKE/claude"; PATH="$FAKE:$PATH"
 export FAKE_CLAUDE_LOG="$FAKE/log"; export FAKE_CLAUDE_JSON="$FAKE/res.json"
 F=$($CLI claim-owner --repo-slug "$SLUG" --session M --host h --pid 7 --stale-secs 0)
 RD="$ROOT/herdr-orch/$SLUG"
@@ -1022,7 +1217,7 @@ ok "mech-caps merges config and override" "[ '$CAPS' = '{\"max_turns\": 9, \"max
 # fresh task branch in a scratch repo standing in for the worktree
 WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
 ORIG=$(git -C "$WT" rev-parse HEAD); git -C "$WT" checkout -q -b talon/td-m/x
-REL=$($CLI mech-contract --repo-slug "$SLUG" --task-id td-m --worktree "$WT")
+REL=$($CLI mech-contract --repo-slug "$SLUG" --task-id td-m --worktree "$WT" --base-sha "$ORIG")
 git -C "$WT" add "$REL"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m "td-m: Add mech contract"
 BASE=$(git -C "$WT" rev-parse HEAD)
 ok "launch base is the post-contract HEAD, not origin" "[ '$BASE' != '$ORIG' ]"
@@ -1043,6 +1238,8 @@ export FAKE_CLAUDE_HOOK="$CLI emit-done --repo-slug $SLUG --task-id td-m --works
 $CMD
 $CLI write-task --repo-slug "$SLUG" --task-id td-m --session M --fence "$F" \
   --json "{\"task_id\":\"td-m\",\"base_sha\":\"$BASE\",\"status\":\"in-progress\",\"contract_path\":\"$REL\",\"contract_sha256\":\"$SHA\",\"workers\":[{\"role\":\"mech\",\"phase\":\"implement\",\"workspace_id\":\"w1\",\"agent\":\"mech-td-m\",\"launch_id\":\"$LID\",\"model\":\"haiku\",\"peer_name\":null,\"caps\":$CAPS,\"created_by_this_orch\":true,\"started\":\"t\"}]}"
+ok "the fake saw the brief on stdin and the worktree as cwd" \
+  "[ \"\$(cat $FAKE_CLAUDE_LOG.stdin)\" = 'lint sweep' ] && [ \"\$(cd '$WT' && pwd -P)\" = \"\$(cd \"\$(cat $FAKE_CLAUDE_LOG.cwd)\" && pwd -P)\" ]"
 ok "ledger has start+end and status reports spend" \
   "$CLI status --repo-slug '$SLUG' | python3 -c \"import json,sys;s=json.load(sys.stdin);assert s['td-m']['spend']['usd']==0.3 and s['td-m']['spend']['launches']==1,s\""
 ok "contract-only branch with a completed record cannot complete (HEAD == launch base)" \
@@ -1051,9 +1248,13 @@ ok "contract-only branch with a completed record cannot complete (HEAD == launch
 unset FAKE_CLAUDE_HOOK
 printf '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":9,"total_cost_usd":0.7}' > "$FAKE_CLAUDE_JSON"
 LID2="mech-td-m-20260901T001000Z"
-$CLI run-mech --repo-slug "$SLUG" --task-id td-m --workspace w1 --agent mech-td-m --launch-id "$LID2" --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$BRIEF" --max-turns 9 --max-budget-usd 1.0 --timeout-secs 1800
-ok "relaunch supersedes the record by launch id and doubles launches" \
-  "python3 -c \"import json;d=json.load(open('$RD/tasks/td-m.done.json'));assert d['launch_id']=='$LID2' and d['reason']=='max_turns',d\" && $CLI status --repo-slug '$SLUG' | python3 -c \"import json,sys;s=json.load(sys.stdin);assert s['td-m']['spend']=={'usd':1.0,'turns':13,'launches':2,'unknown_cost_launches':0,'skipped_lines':0},s\""
+CAPS2=$($CLI mech-caps --repo-slug "$SLUG" --max-turns 20 --max-budget-usd 2)
+$CLI run-mech --repo-slug "$SLUG" --task-id td-m --workspace w1 --agent mech-td-m --launch-id "$LID2" --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$BRIEF" --max-turns 20 --max-budget-usd 2.0 --timeout-secs 1800
+# the orchestrator appends a second workers[] entry (same workspace, new launch_id, raised caps); status unchanged
+$CLI write-task --repo-slug "$SLUG" --task-id td-m --session M --fence "$F" \
+  --json "{\"task_id\":\"td-m\",\"base_sha\":\"$BASE\",\"status\":\"in-progress\",\"contract_path\":\"$REL\",\"contract_sha256\":\"$SHA\",\"workers\":[{\"role\":\"mech\",\"phase\":\"implement\",\"workspace_id\":\"w1\",\"agent\":\"mech-td-m\",\"launch_id\":\"$LID\",\"model\":\"haiku\",\"peer_name\":null,\"caps\":$CAPS,\"created_by_this_orch\":true,\"started\":\"t\"},{\"role\":\"mech\",\"phase\":\"implement\",\"workspace_id\":\"w1\",\"agent\":\"mech-td-m\",\"launch_id\":\"$LID2\",\"model\":\"haiku\",\"peer_name\":null,\"caps\":$CAPS2,\"created_by_this_orch\":true,\"started\":\"t2\"}]}"
+ok "relaunch: second workers[] entry with a distinct launch id and raised caps; record superseded by launch id; launches doubles" \
+  "python3 -c \"import json;t=json.load(open('$RD/tasks/td-m.json'));w=t['workers'];assert len(w)==2 and w[0]['launch_id']!=w[1]['launch_id'] and w[1]['caps']['max_turns']==20,t;d=json.load(open('$RD/tasks/td-m.done.json'));assert d['launch_id']=='$LID2' and d['reason']=='max_turns',d\" && $CLI status --repo-slug '$SLUG' | python3 -c \"import json,sys;s=json.load(sys.stdin);assert s['td-m']['spend']=={'usd':1.0,'turns':13,'launches':2,'unknown_cost_launches':0,'skipped_lines':0},s\""
 ```
 
 Note: this section runs AFTER section 6 took ownership with session `T`; `claim-owner --session M --stale-secs 0` takes over again, which is why every fenced write here uses `M`/`$F`.
@@ -1163,8 +1364,9 @@ with next actions in order: relaunch as mech with raised caps, or resume on
 The `abandoned` rule (workspace AND worktree gone) is unchanged.
 
 **Within-role fallback (right after `run-mech` returns).** An `end` line
-with `downgrade: true`, or `subtype: error_during_execution` whose `errors`
-text names the requested alias or "model", is model-attributable:
+with `model_attributable: true` (computed by the wrapper: `downgrade`, or
+`subtype: error_during_execution` whose `errors` text names the requested
+alias or "model") is model-attributable:
 `disable-model --model <requested alias>`, re-run `resolve-model --role
 mech`, relaunch once with a fresh `launch_id` (new `workers[]` entry; the
 old launch's ledger lines stay). Cap 2 attempts per dispatch, then surface.
@@ -1244,6 +1446,8 @@ emit `paused --reason needs_design`. Commit as you go.
 4. Stop. Never push, merge, open a PR, or run /handoff.
 ```
 
+In the ledger section of state-layout.md, the `end` example line also carries `"errors": [], "model_attributable": false, "git_ok": true` (the fallback trigger and the wrapper's git health).
+
 **event-schema.md**: one paragraph after the watch paragraph: "`tasks/<task_id>.spend.jsonl` (the mech spend ledger, written by `$CORE run-mech`) is watched like the completion sidecars so an append wakes the orchestrator; its lines are ledger records, not events, and are folded only by `status`."
 
 - [ ] **Step 4: Run both suites** -- 0 FAIL (the new doc-pin check passes; existing doc pins untouched).
@@ -1267,7 +1471,10 @@ git commit -m "herdr: Document the mech tier, run-mech launch, and spend ledger"
 Run: `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug git-personal-taloncjones-dotfiles-6c3f6099 --task-id td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical --worktree "$PWD" --contract claude/contracts/td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical-contract.json --allow-unpinned`
 Expected: `PASS 2 commands`.
 
-- [ ] **Step 2: AC11 live check (human-verify; do not block on it).** If a real `claude` is available: write a one-line brief to `STATE_ROOT/<slug>/tasks/td-live.brief.md` ("Reply with the word ok, then run `git status`; do not commit"), and run `run-mech` directly (not through herdr) with `--max-turns 2 --max-budget-usd 0.25 --timeout-secs 120` against a scratch worktree of this repo, with `HERDR_ENV=1 HERDR_WORKSPACE_ID=<a workspace id that has an index under STATE_ROOT>` exported so the worker-status hook can fire. Confirm: an `end` line lands with `models_used` naming a haiku id, a `paused`/`no_emit` record is written, and whether `workspaces/<ws>.events.jsonl` gained a `stopped` line (that answers the print-mode Stop-hook question). Record the answer in the plan close as "Stop hook in print mode: confirmed fired / confirmed did not fire / not run". Cost: under $0.30.
+- [ ] **Step 2: AC11 live check (human-verify; recorded, never faked).** Use an isolated state root (`export CLAUDE_CONFIG_DIR=$(mktemp -d)` with the repo's `claude/hooks` copied into `$CLAUDE_CONFIG_DIR/hooks`, so the worker-status hook and core resolve there) and a scratch worktree of this repo (`git worktree add --detach <tmp> HEAD`). Write a one-line brief to `$CLAUDE_CONFIG_DIR/herdr-orch/<slug>/tasks/td-live.brief.md` ("Reply with the word ok, then run `git status`; do not commit"). Then, in order of preference:
+  1. **Through herdr** (when this session runs under `HERDR_ENV=1`): `herdr worktree open --cwd <repo_root>` on the scratch tree, publish a `role: impl` index for the returned workspace id under the isolated root, run the section-8 launch line (`herdr pane run <pane_id> "python3 $CORE run-mech ... --max-turns 2 --max-budget-usd 0.25 --timeout-secs 120"`), wait for the `end` line, then perform one section-4 check-in by hand: read the ledger and record and confirm the check-in lands on `paused: no_emit` (or `completed` if the worker emitted). Check `workspaces/<ws>.events.jsonl` for a `stopped` line.
+  2. **Direct** (no herdr session): run the same `run-mech` line from a shell with `HERDR_ENV=1 HERDR_WORKSPACE_ID=<the published index's id>` exported; same checks.
+  Confirm in either path: the `end` line has `models_used` naming a haiku id and `downgrade: false`; a completion record with the live `launch_id` exists. Record in the plan close, verbatim: "AC11: <through herdr | direct | not run>; Stop hook in print mode: <confirmed fired | confirmed did not fire | not run>". Cost: under $0.30. Clean up: `herdr workspace close` (herdr path) and `git worktree remove --force <tmp>`; the isolated state root is under mktemp.
 
 - [ ] **Step 3: Commit the close note** (branch-only file; `git add -f`).
 
@@ -1280,17 +1487,17 @@ Contract: `claude/contracts/td-2026-09-01-add-budget-capped-cheap-model-tier-for
 | AC1 mech role resolution, haiku mech-only | Task 1 checks | core-unit-suite |
 | AC2 four-alias capabilities, disable haiku | Task 1 CLI check | core-unit-suite |
 | AC3 mech-caps validation | Task 2 checks | core-unit-suite |
-| AC4 run-mech outcomes (a)-(i) | Task 5 checks 1-4 | core-unit-suite |
-| AC5 run-mech validation exits 2 | Task 5 check 5 | core-unit-suite |
+| AC4 run-mech outcomes (a)-(i) | Task 5a helper check; Task 5b checks 1-4 | core-unit-suite |
+| AC5 run-mech validation exits 2 | Task 5b checks 5-6 | core-unit-suite |
 | AC6 spend fold fixture, _totals, _orphans | Task 4 checks | core-unit-suite |
 | AC7 watch includes .spend.jsonl | Task 4 check 1 | core-unit-suite |
 | AC8 emit-done launch_id/reason, mech agent name | Task 3 checks | core-unit-suite |
-| AC9 mech kickoff walkthrough, launch base, relaunch, contract-only cannot complete | Task 6 | orchestration-walkthrough-suite |
+| AC9 mech kickoff walkthrough, launch base, brief/cwd through the launch line, relaunch with two workers entries, contract-only cannot complete | Task 6 | orchestration-walkthrough-suite |
 | AC10 docs describe the tier | Task 7 doc-pin check | core-unit-suite |
 | AC11 live mech launch, Stop hook in print mode | Task 8 step 2 | human-verify |
 
 ## Self-review notes
 
-- Spec coverage: s1 -> Task 1; s2 -> Tasks 2, 6, 7; s3 -> Task 2; s4 -> Tasks 3, 5, 7; s5 -> Tasks 6, 7; s6 -> Tasks 4, 7; s7 unchanged; AC11 -> Task 8.
-- Names used across tasks: `mech_caps`, `mech_contract`, `_cap_error`, `MECH_REASONS`, `append_spend`, `spend_path`, `fold_spend`, `valid_spend_line`, `_finite_nonneg`, `run_mech`, `parse_claude_result`, `models_used`, `is_downgrade`, `own_launch_record`, `wrapper_outcome`, `_git`, `SHELL_SAFE_RE`, `MECH_AGENT_RE`, `SHA40_RE` -- defined once each, in the task that first needs them.
-- The `run-mech` handler validates before `run_mech` writes anything, so exit 2 never leaves a partial ledger (AC5); the start line is the first write and its failure is also exit 2 (Task 5 check 3).
+- Spec coverage: s1 -> Task 1; s2 -> Tasks 2, 6, 7; s3 -> Task 2; s4 -> Tasks 3, 5a, 5b, 7; s5 -> Tasks 6, 7; s6 -> Tasks 4, 7; s7 unchanged; AC11 -> Task 8. Baseline -> Task 0.
+- Names used across tasks: `mech_caps`, `mech_contract`, `_cap_error`, `_git` (Task 2), `MECH_REASONS` (Task 3), `append_spend`, `spend_path`, `fold_spend`, `valid_spend_line`, `_finite_nonneg` (Task 4), `valid_mech_agent`, `parse_claude_result`, `models_used`, `is_downgrade`, `result_errors`, `model_attributable`, `own_launch_record`, `wrapper_outcome`, `SHELL_SAFE_RE`, `SHA40_RE` (Task 5a), `run_mech` (Task 5b) -- defined once each, in the task that first needs them.
+- The `run-mech` handler validates (including reading the brief) before `run_mech` writes anything, so exit 2 never leaves a partial ledger (AC5); the start line is the first write and its failure is also exit 2 (Task 5b check 5). Git failure after the start line, or an unwritable record, is exit 3 with the `end` line still appended and `git_ok`/`record_written_by` telling the orchestrator which (Task 5b check 4). The `end` line persists `errors` and `model_attributable`, so the skill's within-role fallback needs no transcript.
