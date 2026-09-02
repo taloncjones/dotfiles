@@ -301,6 +301,32 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# Static registration: the template's PreToolUse Bash group must list the
+# guards in this exact order (the new guard last, after push_guard).
+# Independent of live machine state; the live drift check below is derived
+# from the template and covers reconciled machines.
+if python3 - <<'PY'
+import json
+import sys
+
+tmpl = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
+cmds = [h["command"] for e in tmpl if e.get("matcher") == "Bash" for h in e["hooks"]]
+want = [
+    "~/.claude/hooks/commit_guard.py",
+    "~/.claude/hooks/no_ai_attribution_bash.py",
+    "~/.claude/hooks/push_guard.py",
+    "~/.claude/hooks/herdr_worktree_guard.py",
+]
+sys.exit(0 if cmds == want else 1)
+PY
+then
+    printf 'PASS  hwg: template lists the Bash guards in order, worktree guard last\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  hwg: template lists the Bash guards in order, worktree guard last\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
 GUARD_FIX=$(mktemp -d)
