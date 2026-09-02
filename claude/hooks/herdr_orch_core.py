@@ -199,6 +199,9 @@ MECH_DEFAULTS = {"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
 MECH_BOUNDS = {"max_turns": (1, 500), "max_budget_usd": (0, 50), "timeout_secs": (60, 14400)}
 MECH_KEYS = frozenset(MECH_DEFAULTS) | {"contract_commands"}
 
+MECH_REASONS = ("max_turns", "max_budget", "timeout", "no_emit", "error",
+                "needs_design", "blocked_on_human", "other")
+
 
 def _cap_error(key, value):
     """Error message when a cap value is out of bounds or mistyped, else None."""
@@ -986,7 +989,7 @@ def main(argv=None) -> int:
     mc.add_argument("--max-budget-usd", type=float, default=None)
     add("mech-contract", "--task-id", "--worktree", "--base-sha")
     add("classify-probe", "--model", "--json")
-    add(
+    ed = add(
         "emit-done",
         "--task-id",
         "--workspace",
@@ -996,6 +999,8 @@ def main(argv=None) -> int:
         "--head-sha",
         "--base-sha",
     )
+    ed.add_argument("--launch-id", default=None)
+    ed.add_argument("--reason", default=None)
     er = add(
         "emit-review",
         "--task-id",
@@ -1138,6 +1143,12 @@ def main(argv=None) -> int:
                 "base_sha": ns.base_sha,
                 "ts": now_iso(),
             }
+            if ns.launch_id:
+                done["launch_id"] = ns.launch_id
+            if ns.reason is not None:
+                _require(ns.reason in MECH_REASONS,
+                         f"reason must be one of {'|'.join(MECH_REASONS)}")
+                done["reason"] = ns.reason
             out = rd / "tasks" / f"{ns.task_id}.done.json"
         else:
             done = {
