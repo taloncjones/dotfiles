@@ -77,15 +77,15 @@ PRODUCE (do NOT implement yet) the repo's spec + plan for this task, following
 its own pipeline: superpowers:brainstorming -> write spec to `docs/specs/` ->
 codex-spec-review -> superpowers:writing-plans (plan to `docs/plans/`) ->
 codex-plan-review. Author the task's verification contract at
-`docs/plans/<task_id>-contract.json` alongside the plan: 1-32 commands, each
+`claude/contracts/<task_id>-contract.json` alongside the plan: 1-32 commands, each
 `{"name", "run"[, "timeout_secs" 1-3600]}`, that are falsifiable (a broken
 implementation must fail at least one), repo-local, deterministic, and
 worktree-safe (no STATE_ROOT writes, no machine-state mutation, no network,
 no secret echo). Include in the plan a mapping table pairing each acceptance
 criterion with its contract command (or an explicit "human-verify" entry).
 Validate it --
-`python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path> --contract docs/plans/<task_id>-contract.json --allow-unpinned --validate-only`
-must exit 0 -- and commit it with the plan (`git add -f`). Fold review findings back into the spec/plan, then commit
+`python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path> --contract claude/contracts/<task_id>-contract.json --allow-unpinned --validate-only`
+must exit 0 -- and commit it with the plan. Fold review findings back into the spec/plan, then commit
 the spec + plan. Do NOT write implementation code -- a separate implement
 worker picks up from your committed plan next.
 

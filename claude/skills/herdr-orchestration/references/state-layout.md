@@ -186,7 +186,7 @@ Written only by the owning orchestrator, via `$CORE write-task`.
   ],
   "review_head_sha": null,
   "review_outcome": null,
-  "contract_path": "docs/plans/PROJ-123-contract.json",
+  "contract_path": "claude/contracts/PROJ-123-contract.json",
   "contract_sha256": "<64hex>",
   "merge_check": null,
   "status": "kickoff|in-progress|blocked|completed|review-dispatched|changes-requested|reviewed|failed|abandoned|merged",
@@ -300,13 +300,13 @@ Append-only, **per-workspace**, written only by that workspace's hook
 orchestrator merges across files on read (`$CORE status`). See
 `event-schema.md` for the event vocabulary and fold rule.
 
-### `docs/plans/<task_id>-contract.json` -- verification contract (branch-committed)
+### `claude/contracts/<task_id>-contract.json` -- verification contract (branch-committed)
 
-The only per-task artifact NOT under `STATE_ROOT`: committed on the task
-branch (`git add -f`; docs/ is gitignored) under the branch-only convention,
-authored by the plan worker, pinned by hash into the task record at
-implement dispatch, and executed by the `verify-contract` verb (worker gate,
-pre-review gate, post-rebase merge gate -- SKILL.md sections 2, 4, and 6).
+The only per-task artifact NOT under `STATE_ROOT`: committed normally on the
+task branch (no `git add -f` needed -- `claude/` is tracked), authored by the
+plan worker, pinned by hash into the task record at implement dispatch, and
+executed by the `verify-contract` verb (worker gate, pre-review gate,
+post-rebase merge gate -- SKILL.md sections 2, 4, and 6).
 
 ```json
 {

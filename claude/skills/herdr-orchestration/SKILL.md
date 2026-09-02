@@ -252,9 +252,9 @@ phase-appropriate brief (references/brief-template.md) and model.
 `implement` worker (plan-ready kickoff here, or phase advancement in section
 2a), compute the pin: require the task worktree clean (`git status
 --porcelain` empty) and the contract tracked at HEAD (`git cat-file -e
-HEAD:docs/plans/<task_id>-contract.json`); then run
+HEAD:claude/contracts/<task_id>-contract.json`); then run
 `python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
---worktree <path> --contract docs/plans/<task_id>-contract.json
+--worktree <path> --contract claude/contracts/<task_id>-contract.json
 --allow-unpinned --validate-only` -- it prints the sha256. A missing or
 invalid contract blocks the dispatch exactly like a missing plan.
 
@@ -284,7 +284,7 @@ phase; it never marks the task `completed` and never dispatches review.
    the task record's latest `workers[]` entry; the `done.json.phase` must match
    it.
 2. **Verify the plan landed:** spec + plan committed on the branch (HEAD ahead
-   of `base_sha`), worktree clean, including `docs/plans/<task_id>-contract.json`
+   of `base_sha`), worktree clean, including `claude/contracts/<task_id>-contract.json`
    -- then run the section-2 contract pinning steps now, before the implement
    launch in step 3.
 3. **Advance in place.** Reuse the same worktree/branch (the committed spec+plan
