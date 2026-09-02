@@ -149,7 +149,7 @@ MF=$($CLI claim-owner --repo-slug "$MSLUG" --session M --host h --pid 2)
 ok "resolve-model fails closed (exit 3) with no capability map" \
   'rc=0; $CLI resolve-model --repo-slug "$MSLUG" --role plan --session M >/dev/null 2>&1 || rc=$?; [ "$rc" = 3 ]'
 $CLI write-capabilities --repo-slug "$MSLUG" --session M --fence "$MF" \
-  --json '{"v":1,"session_id":"M","available":{"fable":false,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"M","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
 ok "resolve-model falls back to opus when fable unavailable" \
   '[ "$($CLI resolve-model --repo-slug "$MSLUG" --role plan --session M)" = opus ]'
 $CLI disable-model --repo-slug "$MSLUG" --session M --fence "$MF" --model sonnet
@@ -159,7 +159,7 @@ ok "disable-model left fable/opus untouched (downward-only, single alias)" \
   'python3 - <<PY
 import json
 d=json.load(open("$ROOT/herdr-orch/$MSLUG/capabilities.json"))
-assert d["available"]=={"fable":False,"opus":True,"sonnet":False}, d
+assert d["available"]=={"fable":False,"opus":True,"sonnet":False,"haiku":True}, d
 PY'
 ok "resolve-model rejects a malformed models override (exit 5)" \
   'python3 - <<PY

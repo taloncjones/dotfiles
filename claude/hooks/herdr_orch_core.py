@@ -24,12 +24,23 @@ AGENT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 REPO_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 TASK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
-CAP_MODELS = ("fable", "opus", "sonnet")
+CAP_MODELS = ("fable", "opus", "sonnet", "haiku")
 
 ROLE_DEFAULTS = {
     "plan": ("fable", "opus"),
     "impl": ("sonnet", "opus"),
     "review": ("opus", "sonnet"),
+    "mech": ("haiku", "sonnet"),
+}
+
+# Aliases a role's config override may name. haiku is mech-only: the cheap
+# tier is human-designated per task, never a silent option for design,
+# implementation, or review.
+ROLE_ALIASES = {
+    "plan": ("fable", "opus", "sonnet"),
+    "impl": ("fable", "opus", "sonnet"),
+    "review": ("fable", "opus", "sonnet"),
+    "mech": CAP_MODELS,
 }
 
 # A 429 whose message names usage/credit exhaustion is reliable "this model is
@@ -159,9 +170,10 @@ def role_preference(role, config):
             # (which would mislabel it as an availability failure, exit 4).
             if not isinstance(override, list) or not override:
                 return None
+            allowed = ROLE_ALIASES[role]
             seen = []
             for m in override:
-                if m not in CAP_MODELS:
+                if m not in allowed:
                     return None
                 if m not in seen:
                     seen.append(m)
@@ -993,7 +1005,7 @@ def main(argv=None) -> int:
         _require(
             valid_capabilities(rec, ns.session),
             "capabilities json must be {v:1, session_id==--session, "
-            "available:{fable,opus,sonnet all bool}}",
+            "available:{fable,opus,sonnet,haiku all bool}}",
         )
         Path(rd).mkdir(parents=True, exist_ok=True)
         write_json_atomic(rd / "capabilities.json", rec)
@@ -1016,7 +1028,7 @@ def main(argv=None) -> int:
         return 0
     if ns.cmd == "disable-model":
         rd = _fenced(ns)
-        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet")
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
         available = read_capabilities(rd, ns.session)
         _require(available is not None, "capabilities map absent or stale")
         rec = {"v": 1, "session_id": ns.session, "available": dict(available)}
@@ -1024,7 +1036,7 @@ def main(argv=None) -> int:
         write_json_atomic(rd / "capabilities.json", rec)
         return 0
     if ns.cmd == "classify-probe":
-        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet")
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
         try:
             result = json.loads(ns.json)
         except ValueError:

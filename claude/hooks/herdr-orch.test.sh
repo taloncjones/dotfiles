@@ -428,13 +428,13 @@ hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"
 
 check "valid_capabilities strict: exact keys, int-not-bool v, session match" <<PY
 $LOAD
-ok={"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True}}
+ok={"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"haiku":True}}
 assert c.valid_capabilities(ok,"S")
 assert not c.valid_capabilities(ok,"OTHER")
-assert not c.valid_capabilities({"v":True,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True}},"S")
-assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"opus":True,"sonnet":True}},"S")
-assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"gpt":True}},"S")
-assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":0,"opus":True,"sonnet":True}},"S")
+assert not c.valid_capabilities({"v":True,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"haiku":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"opus":True,"sonnet":True,"haiku":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"haiku":True,"gpt":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":0,"opus":True,"sonnet":True,"haiku":True}},"S")
 assert not c.valid_capabilities({"v":1,"session_id":"S","available":[]},"S")
 assert not c.valid_capabilities([],"S")
 sys.exit(0)
@@ -445,13 +445,13 @@ CLI="python3 claude/hooks/herdr_orch_core.py"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
 test -f "$CLAUDE_CONFIG_DIR/herdr-orch/slug-x/capabilities.json"
 rc=0; $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"T","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null || rc=$?
+  --json '{"v":1,"session_id":"T","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}' 2>/dev/null || rc=$?
 test "$rc" != "0"
 rc=0; $CLI write-capabilities --repo-slug slug-x --session S --fence 999 \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null || rc=$?
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}' 2>/dev/null || rc=$?
 test "$rc" != "0"
 SH
 
@@ -493,10 +493,10 @@ F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 rc=0; out=$($CLI resolve-model --repo-slug slug-x --role plan --session S 2>/dev/null) || rc=$?
 test "$rc" = "3"; test -z "$out"
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
 m=$($CLI resolve-model --repo-slug slug-x --role plan --session S); test "$m" = "opus"
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":false,"sonnet":false}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":false,"sonnet":false,"haiku":false}}'
 rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session S >/dev/null 2>&1 || rc=$?; test "$rc" = "4"
 rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session OTHER >/dev/null 2>&1 || rc=$?; test "$rc" = "3"
 rc=0; $CLI resolve-model --repo-slug slug-x --role nope --session S >/dev/null 2>&1 || rc=$?; test "$rc" = "5"
@@ -509,18 +509,18 @@ CLI="python3 claude/hooks/herdr_orch_core.py"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":true,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":true,"opus":true,"sonnet":true,"haiku":true}}'
 $CLI disable-model --repo-slug slug-x --session S --fence "$F" --model fable
 python3 - <<PY
 import json,os
 d=json.load(open(os.environ["CLAUDE_CONFIG_DIR"]+"/herdr-orch/slug-x/capabilities.json"))
-assert d["available"]=={"fable":False,"opus":True,"sonnet":True}, d
+assert d["available"]=={"fable":False,"opus":True,"sonnet":True,"haiku":True}, d
 PY
 $CLI disable-model --repo-slug slug-x --session S --fence "$F" --model sonnet
 python3 - <<PY
 import json,os
 d=json.load(open(os.environ["CLAUDE_CONFIG_DIR"]+"/herdr-orch/slug-x/capabilities.json"))
-assert d["available"]=={"fable":False,"opus":True,"sonnet":False}, d
+assert d["available"]=={"fable":False,"opus":True,"sonnet":False,"haiku":True}, d
 PY
 rc=0; $CLI disable-model --repo-slug slug-x --session S --fence "$F" --model gpt 2>/dev/null || rc=$?; test "$rc" != "0"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
@@ -1229,6 +1229,39 @@ $CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
 $CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
   --allow-unpinned 2>/dev/null; [ $? -eq 2 ] || exit 1   # --allow-unpinned needs --contract
 exit 0
+SH
+
+check "mech role: haiku-first defaults, haiku only legal in mech, 4-alias capabilities" <<PY
+$LOAD
+assert c.CAP_MODELS==("fable","opus","sonnet","haiku")
+assert c.role_preference("mech",{})==("haiku","sonnet")
+assert c.role_preference("mech",{"models":{"mech":["sonnet","haiku"]}})==("sonnet","haiku")
+for r in ("plan","impl","review"):
+    assert c.role_preference(r,{"models":{r:["haiku"]}}) is None, r
+assert c.role_preference("plan",{"models":{"mech":["haiku"]}})==("fable","opus")  # sibling override does not taint
+ok3={"v":1,"session_id":"S","available":{"fable":True,"opus":True,"sonnet":True}}
+assert not c.valid_capabilities(ok3,"S")                      # old 3-alias map is stale
+ok4=dict(ok3,available=dict(ok3["available"],haiku=True))
+assert c.valid_capabilities(ok4,"S")
+assert c.resolve_model("mech",{"fable":False,"opus":True,"sonnet":True,"haiku":True},{})==("haiku",None)
+assert c.resolve_model("mech",{"fable":False,"opus":True,"sonnet":True,"haiku":False},{})==("sonnet",None)
+assert c.resolve_model("mech",{"fable":False,"opus":True,"sonnet":False,"haiku":False},{})==(None,4)
+assert c.resolve_model("mech",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{"models":{"mech":["gpt"]}})==(None,5)
+sys.exit(0)
+PY
+
+check "resolve-model/disable-model CLI accept the mech role and haiku alias" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-m --session S --host h --pid 1)
+! $CLI write-capabilities --repo-slug slug-m --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null
+$CLI write-capabilities --repo-slug slug-m --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
+[ "$($CLI resolve-model --repo-slug slug-m --role mech --session S)" = haiku ]
+$CLI disable-model --repo-slug slug-m --session S --fence "$F" --model haiku
+[ "$($CLI resolve-model --repo-slug slug-m --role mech --session S)" = sonnet ]
+[ "$($CLI resolve-model --repo-slug slug-m --role plan --session S)" = opus ]   # other roles unaffected
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
