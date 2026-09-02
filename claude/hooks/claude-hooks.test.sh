@@ -223,6 +223,18 @@ assert_blocks "hwg: blocks create when a mid-token # precedes it (real bash does
 assert_allows "hwg: allows create with --cwd when a flag value contains a mid-token #" \
     "$HWG" \
     '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --label abc#def --cwd /repo"}}'
+assert_blocks "hwg: blocks create after --remote-keybindings global option" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr --remote-keybindings local worktree create --branch x"}}'
+assert_blocks "hwg: blocks create wrapped in env -u VAR" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"env -u HERDR_CONFIG_PATH herdr worktree create --branch x"}}'
+assert_allows "hwg: allows create wrapped in env -u VAR with --cwd" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"env -u HERDR_CONFIG_PATH herdr worktree create --branch x --cwd /repo"}}'
+assert_allows "hwg: allows worktree create --help without --cwd" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --help"}}'
 assert_blocks "hwg: blocks env-wrapped create" \
     "$HWG" \
     '{"tool_name":"Bash","tool_input":{"command":"env HERDR_ENV=1 herdr worktree create"}}'

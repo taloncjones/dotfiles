@@ -12,12 +12,19 @@ is deliberately NOT guarded (it re-attaches to an existing workspace).
 Supported grammar (guaranteed caught): a create that heads a shell
 segment on any physical line -- bare or path-qualified binary, after
 leading NAME=VALUE assignments, prefix wrappers (env, exec, command,
-nohup, time, xargs) or herdr global options (--session, --remote) -- or
-that appears verbatim inside a quoted argument of sh/bash/zsh/dash/eval.
+nohup, time, xargs; env's -u/--unset/-C/--chdir option arguments are
+consumed too) or herdr global options (--session, --remote,
+--remote-keybindings) -- or that appears verbatim inside a quoted
+argument of sh/bash/zsh/dash/eval. `worktree create --help`/`-h` is
+exempt (it only prints usage).
 
 Accepted holes: aliases/functions/scripts, $(...) and heredoc bodies,
-quoted newlines inside an argument, `--cwd ""` (herdr rejects it), and a
-wrapper argument that assembles the command from pieces.
+quoted newlines inside an argument, `--cwd ""` (herdr rejects it), a
+wrapper argument that assembles the command from pieces, other prefix
+wrappers' value-taking options (xargs -I, GNU time -f, ...), and shell
+control-flow/grouping keywords (`if ... then`, `( ... )`, `{ ... }`) --
+a create at the head of a segment inside one of these is not detected,
+since segments() splits only on `;`/`&`/`|`.
 
 Runs before Bash tool calls. Fails open on any exception.
 """
@@ -28,8 +35,9 @@ import shlex
 import sys
 
 PREFIX_WRAPPERS = ("env", "exec", "command", "nohup", "time", "xargs")
+WRAPPER_OPTS_WITH_ARG = {"env": ("-u", "--unset", "-C", "--chdir")}
 STRING_WRAPPERS = ("sh", "bash", "zsh", "dash", "eval")
-HERDR_GLOBAL_OPTS_WITH_ARG = ("--session", "--remote")
+HERDR_GLOBAL_OPTS_WITH_ARG = ("--session", "--remote", "--remote-keybindings")
 CREATE_TEXT = "herdr worktree create"
 MAX_DEPTH = 3
 
@@ -114,9 +122,13 @@ def strip_prefixes(tokens: list[str]) -> list[str]:
         if is_env_assignment(tok):
             i += 1
         elif basename(tok) in PREFIX_WRAPPERS:
+            value_opts = WRAPPER_OPTS_WITH_ARG.get(basename(tok), ())
             i += 1
             while i < len(tokens) and tokens[i].startswith("-"):
-                i += 1  # wrapper's own options (env -i, nohup -p ...)
+                opt = tokens[i]
+                i += 1
+                if opt in value_opts and "=" not in opt:
+                    i += 1  # the option's separate-argument value (env -u VAR)
         else:
             break
     return tokens[i:]
@@ -134,7 +146,7 @@ def create_lacks_cwd(tokens: list[str]) -> bool:
     if tokens[i:i + 2] != ["worktree", "create"]:
         return False
     for tok in tokens[i + 2:]:
-        if tok == "--cwd" or tok.startswith("--cwd="):
+        if tok == "--cwd" or tok.startswith("--cwd=") or tok in ("--help", "-h"):
             return False
     return True
 
