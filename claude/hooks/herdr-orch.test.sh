@@ -1264,5 +1264,55 @@ $CLI disable-model --repo-slug slug-m --session S --fence "$F" --model haiku
 [ "$($CLI resolve-model --repo-slug slug-m --role plan --session S)" = opus ]   # other roles unaffected
 SH
 
+check "mech_caps: defaults, config merge, overrides, fail-closed validation" <<PY
+$LOAD
+caps,err=c.mech_caps({})
+assert err is None and caps=={"max_turns":40,"max_budget_usd":2.0,"timeout_secs":1800},caps
+caps,err=c.mech_caps({"mech":{"max_turns":60,"max_budget_usd":3}})
+assert err is None and caps["max_turns"]==60 and caps["max_budget_usd"]==3 and caps["timeout_secs"]==1800
+caps,err=c.mech_caps({"mech":{"max_turns":60}},max_turns=10,max_budget_usd=0.5)
+assert err is None and caps["max_turns"]==10 and caps["max_budget_usd"]==0.5
+bad=[{"mech":{"max_turns":0}},{"mech":{"max_turns":501}},{"mech":{"max_budget_usd":0}},
+     {"mech":{"max_budget_usd":50.01}},{"mech":{"timeout_secs":59}},{"mech":{"max_turns":True}},
+     {"mech":{"bogus":1}},{"mech":[]},{"mech":{"max_budget_usd":float("inf")}},
+     {"mech":{"contract_commands":[]}},{"mech":{"contract_commands":[{"name":"a","run":"true","x":1}]}}]
+for b in bad:
+    caps,err=c.mech_caps(b); assert caps is None and err, b
+caps,err=c.mech_caps({},max_turns=0); assert caps is None
+caps,err=c.mech_caps({},max_budget_usd=51); assert caps is None
+good={"mech":{"contract_commands":[{"name":"t","run":"true","timeout_secs":5}]}}
+assert c.mech_caps(good)[1] is None
+assert c.mech_contract(good,"td-x")=={"v":1,"task_id":"td-x","commands":[{"name":"t","run":"true","timeout_secs":5}]}
+assert c.mech_contract({},"td-x") is None
+sys.exit(0)
+PY
+
+check "mech-caps / mech-contract CLI" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-c"; mkdir -p "$RD"
+out=$($CLI mech-caps --repo-slug slug-c)
+[ "$out" = '{"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}' ]
+printf '{"v":1,"user":"u","default_base":"origin/main","mech":{"max_turns":60,"contract_commands":[{"name":"t","run":"true"}]}}' > "$RD/config.json"
+out=$($CLI mech-caps --repo-slug slug-c --max-budget-usd 1.5)
+[ "$out" = '{"max_turns": 60, "max_budget_usd": 1.5, "timeout_secs": 1800}' ]
+rc=0; $CLI mech-caps --repo-slug slug-c --max-turns 999 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+B=$(git -C "$WT" rev-parse HEAD)
+touch "$WT/dirty"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B" 2>/dev/null || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$WT/claude/contracts/td-x-contract.json" ]                                             # dirty -> nothing written
+rm "$WT/dirty"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$(printf %040d 1)" 2>/dev/null || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$WT/claude/contracts/td-x-contract.json" ]                                             # diverged -> nothing written
+rel=$($CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B")
+[ "$rel" = claude/contracts/td-x-contract.json ]
+python3 -c "import json;d=json.load(open('$WT/$rel'));assert d=={'v':1,'task_id':'td-x','commands':[{'name':'t','run':'true'}]},d"
+git -C "$WT" add "$rel"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m c; B2=$(git -C "$WT" rev-parse HEAD)
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]   # exists
+printf '{"v":1,"user":"u","default_base":"origin/main"}' > "$RD/config.json"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-y --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]   # no template
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

@@ -195,6 +195,79 @@ def resolve_model(role, available, config):
     return (survivors[0], None)
 
 
+MECH_DEFAULTS = {"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
+MECH_BOUNDS = {"max_turns": (1, 500), "max_budget_usd": (0, 50), "timeout_secs": (60, 14400)}
+MECH_KEYS = frozenset(MECH_DEFAULTS) | {"contract_commands"}
+
+
+def _cap_error(key, value):
+    """Error message when a cap value is out of bounds or mistyped, else None."""
+    lo, hi = MECH_BOUNDS[key]
+    if isinstance(value, bool):
+        return f"{key} must be a number, not a boolean"
+    if key == "max_budget_usd":
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            return f"{key} must be a finite number"
+        if not (lo < value <= hi):
+            return f"{key} must be > {lo} and <= {hi}"
+        return None
+    if not isinstance(value, int) or not (lo <= value <= hi):
+        return f"{key} must be an int in [{lo}, {hi}]"
+    return None
+
+
+def mech_caps(config, max_turns=None, max_budget_usd=None):
+    """Effective mech caps: defaults <- config.mech <- per-launch overrides.
+    (caps, None) or (None, message). Fail closed on any malformed value or
+    unknown key, matching the `models` rule -- never silently default."""
+    block = (config or {}).get("mech")
+    caps = dict(MECH_DEFAULTS)
+    if block is not None:
+        if not isinstance(block, dict):
+            return None, "mech must be a JSON object"
+        unknown = set(block) - MECH_KEYS
+        if unknown:
+            return None, f"mech has unknown keys: {sorted(unknown)}"
+        for k in MECH_BOUNDS:
+            if k in block:
+                caps[k] = block[k]
+        if "contract_commands" in block:
+            err = validate_contract(
+                {"v": 1, "task_id": "x", "commands": block["contract_commands"]}, "x"
+            )
+            if err:
+                return None, f"mech.contract_commands: {err}"
+    if max_turns is not None:
+        caps["max_turns"] = max_turns
+    if max_budget_usd is not None:
+        caps["max_budget_usd"] = max_budget_usd
+    for k in MECH_BOUNDS:
+        err = _cap_error(k, caps[k])
+        if err:
+            return None, err
+    return caps, None
+
+
+def mech_contract(config, task_id):
+    """Contract dict generated from config.mech.contract_commands, or None
+    when the template is absent. Caller validates config via mech_caps first."""
+    block = (config or {}).get("mech") or {}
+    cmds = block.get("contract_commands") if isinstance(block, dict) else None
+    if not cmds:
+        return None
+    return {"v": 1, "task_id": task_id, "commands": json.loads(json.dumps(cmds))}
+
+
+def _git(worktree, *args):
+    """stdout of a git command in the worktree, or None on any failure."""
+    try:
+        cp = subprocess.run(["git", "-C", worktree, *args], capture_output=True,
+                            text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return cp.stdout.strip() if cp.returncode == 0 else None
+
+
 def _usage_exhausted(result) -> bool:
     """True when the probe's result/error text names usage/credit exhaustion.
     Scans the string-ish fields a `claude -p` error can carry (`result`,
@@ -908,6 +981,10 @@ def main(argv=None) -> int:
     add("write-capabilities", "--json", fenced=True)
     add("resolve-model", "--role", "--session")
     add("disable-model", "--model", fenced=True)
+    mc = add("mech-caps")
+    mc.add_argument("--max-turns", type=int, default=None)
+    mc.add_argument("--max-budget-usd", type=float, default=None)
+    add("mech-contract", "--task-id", "--worktree", "--base-sha")
     add("classify-probe", "--model", "--json")
     add(
         "emit-done",
@@ -1255,6 +1332,41 @@ def main(argv=None) -> int:
             print(actual_sha)
             return 0
         return run_contract_commands(rec["commands"], str(wt))
+    if ns.cmd == "mech-caps":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        caps, err = mech_caps(read_config(repo_dir(ns.repo_slug)),
+                              ns.max_turns, ns.max_budget_usd)
+        if err:
+            sys.stderr.write(f"[X] {err}\n")
+            return 5
+        print(json.dumps(caps))
+        return 0
+    if ns.cmd == "mech-contract":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        wt = Path(ns.worktree)
+        _require(wt.is_dir(), "worktree must be an existing directory")
+        head = _git(str(wt), "rev-parse", "HEAD")
+        _require(head is not None, "worktree must be a git checkout")
+        _require(head == ns.base_sha, "worktree HEAD != --base-sha (adopted branch diverged)")
+        _require(_git(str(wt), "status", "--porcelain") == "", "worktree must be clean")
+        cfg = read_config(repo_dir(ns.repo_slug))
+        _, err = mech_caps(cfg)
+        if err:
+            sys.stderr.write(f"[X] {err}\n")
+            return 5
+        rec = mech_contract(cfg, ns.task_id)
+        if rec is None:
+            sys.stderr.write("[X] config has no mech.contract_commands\n")
+            return 5
+        rel = f"claude/contracts/{ns.task_id}-contract.json"
+        out = wt / rel
+        _require(contained(out, wt), "contract path escapes the worktree")
+        _require(not out.exists(), "contract already exists; use it or remove it deliberately")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rec, indent=2) + "\n")
+        print(rel)
+        return 0
     return 2
 
 
