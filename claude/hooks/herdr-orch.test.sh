@@ -1381,5 +1381,47 @@ assert s["_orphans"]==["td-z"],s
 '
 SH
 
+check "run-mech helpers: agent validity, result parsing, downgrade, errors, provenance, outcome" <<PY
+$LOAD
+t="td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical"
+base=c.agent_name("mech",t)
+assert c.valid_mech_agent(base,t) and c.valid_mech_agent(c.agent_name("mech",t,existing={base}),t)
+assert c.valid_mech_agent("mech-td-r-9","td-r") and not c.valid_mech_agent("mech-td-r-10","td-r")
+assert not c.valid_mech_agent("mech-other","td-r") and not c.valid_mech_agent("mech-","td-r") and not c.valid_mech_agent("mech-Td-r","td-r")
+assert not c.valid_mech_agent("impl-td-r","td-r")
+r=c.parse_claude_result('noise\n{"type":"result","subtype":"success","num_turns":2}\n')
+assert r and r["num_turns"]==2
+assert c.parse_claude_result("not json") is None and c.parse_claude_result('{"type":"other"}') is None
+assert c.models_used({"modelUsage":{"claude-haiku-4-5-20251001":{},"claude-sonnet-5":{}}})==["claude-haiku-4-5-20251001","claude-sonnet-5"]
+assert c.models_used({}) == [] and c.models_used(None) == []
+assert c.is_downgrade(["claude-sonnet-5"],"haiku") and not c.is_downgrade(["claude-haiku-4-5-20251001"],"haiku") and not c.is_downgrade([],"haiku")
+assert c.result_errors({"errors":["a","b"*1000,3]})==["a","b"*500]
+assert c.result_errors({}) == [] and c.result_errors({"errors":"x"}) == []
+assert c.model_attributable("success",True,[],"haiku")
+assert c.model_attributable("error_during_execution",False,["haiku is not available"],"haiku")
+assert c.model_attributable("error_during_execution",False,["Unknown model"],"haiku")
+assert not c.model_attributable("error_during_execution",False,["network timeout"],"haiku")
+assert not c.model_attributable("error_max_turns",False,["model x"],"haiku")
+d={"workspace_id":"w1","agent":"mech-td-r","launch_id":"L1","ts":"2026-09-01T00:00:01Z"}
+assert c.own_launch_record(d,"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(d,"w1","mech-td-r","L2","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(dict(d,agent="impl-td-r"),"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+old={"workspace_id":"w1","agent":"mech-td-r","ts":"2026-08-01T00:00:00Z"}
+assert not c.own_launch_record(old,"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert c.own_launch_record(dict(old,ts="2026-09-01T00:00:00Z"),"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(None,"w1","mech-td-r","L1","t")
+assert c.wrapper_outcome("error_max_turns","h","b",False)==("paused","max_turns")
+assert c.wrapper_outcome("error_max_budget_usd","h","b",False)==("paused","max_budget")
+assert c.wrapper_outcome("timeout","h","b",False)==("paused","timeout")
+assert c.wrapper_outcome("success","h","b",False)==("paused","no_emit")
+assert c.wrapper_outcome("error_during_execution","h","b",False)==("paused","error")
+assert c.wrapper_outcome("error_during_execution","b","b",False)==("failed","error")
+assert c.wrapper_outcome("error_during_execution","h","b",True)==("failed","error")
+assert c.wrapper_outcome("unparseable",None,"b",True)==("failed","error")
+assert c.SHELL_SAFE_RE.match("a/b+c:d@e.f_g-1") and not c.SHELL_SAFE_RE.match("a b") and not c.SHELL_SAFE_RE.match("a;b") and not c.SHELL_SAFE_RE.match("")
+assert c.SHA40_RE.match("0"*40) and not c.SHA40_RE.match("abc") and not c.SHA40_RE.match("A"*40)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

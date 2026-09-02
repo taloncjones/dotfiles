@@ -202,6 +202,11 @@ MECH_KEYS = frozenset(MECH_DEFAULTS) | {"contract_commands"}
 MECH_REASONS = ("max_turns", "max_budget", "timeout", "no_emit", "error",
                 "needs_design", "blocked_on_human", "other")
 
+SHELL_SAFE_RE = re.compile(r"[A-Za-z0-9_./+:@-]+\Z")
+SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
+_CAP_SUBTYPES = {"error_max_turns": "max_turns", "error_max_budget_usd": "max_budget"}
+_ERRORS_MAX, _ERROR_LEN = 5, 500
+
 
 def _cap_error(key, value):
     """Error message when a cap value is out of bounds or mistyped, else None."""
@@ -667,6 +672,87 @@ def append_spend(rd, task_id, rec) -> None:
     with open(p, "a") as f:
         f.write(json.dumps(rec) + "\n")
         f.flush()
+
+
+def valid_mech_agent(agent, task_id) -> bool:
+    """agent is the canonical agent_name("mech", task_id) or one of its
+    collision variants -2..-9 (same truncation rule as agent_name)."""
+    base = agent_name("mech", task_id)
+    if agent == base:
+        return True
+    for n in range(2, 10):
+        suffix = f"-{n}"
+        if agent == base[: 32 - len(suffix)] + suffix:
+            return True
+    return False
+
+
+def parse_claude_result(stdout: str):
+    """The single result object from `claude -p --output-format json`, or
+    None. Tolerates leading noise by scanning lines from the end."""
+    for candidate in [stdout] + list(reversed(stdout.splitlines())):
+        try:
+            obj = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            return obj
+    return None
+
+
+def models_used(result) -> list:
+    mu = (result or {}).get("modelUsage")
+    return sorted(mu.keys()) if isinstance(mu, dict) else []
+
+
+def is_downgrade(models: list, alias: str) -> bool:
+    """True when the CLI reports models and none belong to the requested
+    alias family (alias is a substring of every model id in its family)."""
+    return bool(models) and not any(alias in m for m in models)
+
+
+def result_errors(result) -> list:
+    """The result's errors[] as a bounded list of strings (non-strings dropped,
+    each clipped, at most _ERRORS_MAX) -- persisted so the orchestrator can
+    judge model-attributability without the transcript."""
+    errs = (result or {}).get("errors")
+    if not isinstance(errs, list):
+        return []
+    return [e[:_ERROR_LEN] for e in errs if isinstance(e, str)][:_ERRORS_MAX]
+
+
+def model_attributable(subtype, downgrade, errors, alias) -> bool:
+    """Spec s4 within-role fallback trigger: a downgrade, or an execution
+    error whose text names the alias or 'model'."""
+    if downgrade:
+        return True
+    if subtype != "error_during_execution":
+        return False
+    text = " ".join(errors).lower()
+    return alias in text or "model" in text
+
+
+def own_launch_record(done, workspace, agent, launch_id, start_ts) -> bool:
+    if not isinstance(done, dict):
+        return False
+    if done.get("workspace_id") != workspace or done.get("agent") != agent:
+        return False
+    if "launch_id" in done:
+        return done.get("launch_id") == launch_id
+    ts = done.get("ts")
+    return isinstance(ts, str) and ts >= start_ts
+
+
+def wrapper_outcome(subtype, head_sha, base_sha, dirty):
+    """(outcome, reason) for a launch whose worker left no record."""
+    if subtype in _CAP_SUBTYPES:
+        return "paused", _CAP_SUBTYPES[subtype]
+    if subtype == "timeout":
+        return "paused", "timeout"
+    if subtype == "success":
+        return "paused", "no_emit"
+    usable = head_sha is not None and head_sha != base_sha and not dirty
+    return ("paused" if usable else "failed"), "error"
 
 
 def _finite_nonneg(x, integer=False) -> bool:
