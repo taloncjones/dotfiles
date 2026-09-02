@@ -227,25 +227,31 @@ the new hook once `update` has reconciled a machine.
 
 File: `claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json`
 
-```json
-{
-  "v": 1,
-  "task_id": "td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo",
-  "commands": [
-    {
-      "name": "claude-hooks-suite-sandboxed",
-      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh",
-      "timeout_secs": 300
-    }
-  ]
-}
-```
+Committed in the PLAN phase: the orchestrator pins the contract before
+dispatching the implementer, so it cannot be authored during
+implementation. Five commands, in order:
 
-The sandbox `HOME` makes the suite's live-settings drift section SKIP
-(no live `settings.json` exists there), so the contract exercises the
-hook assertions, the focused exit-2 assertion, and the static template
-assertion, independent of whether this machine has run `update`. The
-`account_guard` cases already pin their own fixture HOMEs.
+1. `hook-denies-bare-create-exit-2`: pipe a bare-create payload into
+   the hook; require exit status exactly 2.
+2. `hook-allows-create-with-cwd`: pipe a create with `--cwd /repo`;
+   require exit 0 (a missing hook file fails this with 127).
+3. `hook-allows-worktree-open-without-cwd`: pipe `worktree open
+   --workspace ws1`; require exit 0 (scope guard).
+4. `template-registers-hook-after-push-guard`: the template's
+   `PreToolUse` Bash group ends with `push_guard.py` then
+   `herdr_worktree_guard.py`.
+5. `claude-hooks-suite-sandboxed`:
+   `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh`.
+
+Commands 1-4 make the contract falsifiable on its own: they fail
+against the unmodified base even if the implementer never adds the
+suite cases. The sandbox `HOME` in command 5 makes the suite's
+live-settings drift section SKIP (no live `settings.json` exists
+there), so it exercises the hook assertions, the focused exit-2
+assertion, and the static template assertion independent of whether
+this machine has run `update`. The `account_guard` cases already pin
+their own fixture HOMEs. Nothing in the contract touches the network,
+STATE_ROOT, or live settings.
 
 ## Machine-state note (why the contract sandboxes HOME)
 
@@ -272,8 +278,14 @@ missing live), unrelated to this task and cleared by the same `update`.
 4. `claude/settings.json.tmpl` parses as JSON and lists the hook in the
    `PreToolUse` `Bash` group.
 5. `git diff` against `origin/main` touches only: the new hook, the
-   test suite, the template, the two doc edits, and the contract file
-   (plus this spec and its plan, which are branch-only and dropped
-   before merge). No live machine state is modified.
+   test suite, the template, the two doc edits, and the contract file.
+   This spec and its plan are branch-only (force-added under the
+   gitignored `docs/`) and are removed in the implementer's final
+   task, because `git/hooks/public-safety.test.sh` rejects tracked
+   `docs/specs/**` and `docs/plans/**`. No live machine state is
+   modified by implementation.
 6. Commit messages avoid the word "claude" outside the scope prefix
    (commit_guard blocks it); use `hooks:` as scope.
+7. The pinned contract passes end to end:
+   `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract ...`
+   (without `--validate-only`) exits 0 in the task worktree.

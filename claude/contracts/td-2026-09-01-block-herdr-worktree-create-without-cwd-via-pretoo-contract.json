@@ -1,0 +1,31 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo",
+  "commands": [
+    {
+      "name": "hook-denies-bare-create-exit-2",
+      "run": "printf '%s' '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"herdr worktree create --branch x\"}}' | claude/hooks/herdr_worktree_guard.py 2>/dev/null; test $? -eq 2",
+      "timeout_secs": 60
+    },
+    {
+      "name": "hook-allows-create-with-cwd",
+      "run": "printf '%s' '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"herdr worktree create --cwd /repo --branch x\"}}' | claude/hooks/herdr_worktree_guard.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "hook-allows-worktree-open-without-cwd",
+      "run": "printf '%s' '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"herdr worktree open --workspace ws1\"}}' | claude/hooks/herdr_worktree_guard.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "template-registers-hook-after-push-guard",
+      "run": "python3 -c \"import json,sys; g=[e for e in json.load(open('claude/settings.json.tmpl'))['hooks']['PreToolUse'] if e.get('matcher')=='Bash']; c=[h['command'] for e in g for h in e['hooks']]; sys.exit(0 if c[-2:]==['~/.claude/hooks/push_guard.py','~/.claude/hooks/herdr_worktree_guard.py'] else 1)\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "claude-hooks-suite-sandboxed",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 300
+    }
+  ]
+}

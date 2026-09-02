@@ -2,17 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a PreToolUse Bash hook that denies `herdr worktree create` invocations lacking `--cwd`, registered in the settings template, covered by the hook test suite, with a verification contract.
+**Goal:** Add a PreToolUse Bash hook that denies `herdr worktree create` invocations lacking `--cwd`, registered in the settings template and covered by the hook test suite, so the already-committed verification contract passes.
 
-**Architecture:** One new stdlib-only Python guard (`claude/hooks/herdr_worktree_guard.py`) shaped like `push_guard.py`: shell-faithful tokenizing via `shlex` with `punctuation_chars`, per-segment detection of a `worktree create` head (after env assignments, prefix wrappers, and herdr global options), recursion into `sh -c '...'` string arguments, exit 2 with a two-line fix message on a miss, fail open on exceptions. Registration is one template entry; tests are appended to the existing POSIX-sh suite; the contract runs that suite under a sandbox HOME.
+**Architecture:** One new stdlib-only Python guard (`claude/hooks/herdr_worktree_guard.py`) shaped like `push_guard.py`: shell-faithful tokenizing via `shlex` with `punctuation_chars`, per-segment detection of a `worktree create` head (after env assignments, prefix wrappers, and herdr global options), recursion into `sh -c '...'` string arguments, exit 2 with a two-line fix message on a miss, fail open on exceptions. Registration is one template entry; tests are appended to the existing POSIX-sh suite. The verification contract already exists on the branch and is pinned by the orchestrator before this plan runs.
 
-**Tech Stack:** Python 3 stdlib (`json`, `re`, `shlex`), POSIX sh test script (`PASS/FAIL ... N passed, N failed` convention), JSON template and contract.
+**Tech Stack:** Python 3 stdlib (`json`, `re`, `shlex`), POSIX sh test script (`PASS/FAIL ... N passed, N failed` convention), JSON template.
 
 **Spec:** `docs/specs/2026-09-01-herdr-worktree-create-cwd-guard.md`
 
 ## Global Constraints
 
-- Run every command from the worktree root `/Users/talon/Git/personal/dotfiles/.claude/worktrees/talon+td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo+cwd-guard-hook`; verify with `git rev-parse --show-toplevel` before each commit.
+- Run every command from the task worktree root. Before every commit, `git rev-parse --show-toplevel` must print a path ending in `+cwd-guard-hook` and `git branch --show-current` must print `talon/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo/cwd-guard-hook`.
+- Pre-implementation gate (before Task 1): `git status --porcelain` is empty (the `.todos` symlink the orchestrator plants is covered by a machine-local `.todos` line in the shared `.git/info/exclude`; if it shows as `??`, add that exclude line rather than deleting the symlink). Record `shasum -a 256 ~/.claude/settings.json ~/.claude-work/settings.json` for the final check.
 - Guard scope is `worktree create` only; `worktree open` is never denied.
 - Hook exit codes: 2 = deny (two stderr lines, first starts `Blocked: herdr worktree create without --cwd`), 0 = allow silently, 0 on any exception (fail open).
 - Hook file is executable, `#!/usr/bin/env python3`, stdlib only, no emojis, no AI attribution.
@@ -21,7 +22,22 @@
 - Commit messages: `hooks: <summary>` (imperative, <75 chars) and must not contain the word "claude" outside the scope prefix (commit_guard blocks it). Say "settings template", "hook suite".
 - The repo's `push_guard.py` text fallback can false-positive on a Bash heredoc whose body mentions `git`, `push`, and a long force flag on one line. Write files with the Write/Edit tools, not Bash heredocs, when the content is prose about hooks.
 - Test-suite additions use the existing `assert_blocks` / `assert_allows` helpers (any nonzero = block) plus one explicit exit-2/stderr check.
-- Baseline before any change (recorded 2026-09-01): unsandboxed suite 41 passed, 1 failed (live permissions drift); sandboxed suite must show 0 failed after Task 1.
+- Baseline before any change (recorded 2026-09-01): unsandboxed suite 41 passed, 1 failed (live permissions drift); sandboxed suite 38 passed, 0 failed. The contract run against this base fails at its first command (expected until Task 1 lands).
+
+## Acceptance criteria to contract mapping
+
+Contract: `claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json` (already committed; do not edit it).
+
+| Spec acceptance criterion | Contract command | Notes |
+|---|---|---|
+| 1. Sandboxed suite 0 failed with every listed case | `claude-hooks-suite-sandboxed` | Cases land in Task 1 and Task 2 |
+| 2. Bare create -> exit 2 with fix-naming line; `--cwd /repo` -> exit 0 silent | `hook-denies-bare-create-exit-2`, `hook-allows-create-with-cwd` | The stderr text and silence are asserted inside the suite (criterion 1) |
+| 3. `py_compile` passes; file executable | `hook-allows-create-with-cwd` (a non-executable or syntax-broken hook exits nonzero) | Also run explicitly in Task 1 step 5 |
+| 4. Template parses and lists the hook in the Bash group | `template-registers-hook-after-push-guard` | Exact adjacency after `push_guard.py` |
+| Scope: `worktree open` never denied | `hook-allows-worktree-open-without-cwd` | |
+| 5. Diff touches only the named files; no live machine state modified | human-verify | Final check below (`git diff --stat`, settings hashes) |
+| 6. Commit message discipline | human-verify | commit_guard enforces the "claude" word rule mechanically |
+| 7. Pinned contract passes end to end | all five commands | Task 3 |
 
 ---
 
@@ -33,7 +49,7 @@
 
 **Interfaces:**
 - Consumes: the suite's `assert_blocks LABEL HOOK PAYLOAD` and `assert_allows LABEL HOOK PAYLOAD` helpers (defined at the top of `claude-hooks.test.sh`; `run_hook` pipes the payload into the hook and returns its exit status; `PASS`/`FAIL` counters).
-- Produces: `claude/hooks/herdr_worktree_guard.py` exposing `command_lacks_cwd(command: str, depth: int = 0) -> bool` (importable for future tests) and a `main()` that reads the PreToolUse JSON on stdin. Task 2 registers this exact path in the template; Task 3's contract runs this suite.
+- Produces: `claude/hooks/herdr_worktree_guard.py` exposing `command_lacks_cwd(command: str, depth: int = 0) -> bool` (importable for future tests) and a `main()` that reads the PreToolUse JSON on stdin. Task 2 registers this exact path in the template; the contract's first three commands pipe payloads into it.
 
 - [ ] **Step 1: Write the failing test block**
 
@@ -161,14 +177,23 @@ fi
 
 Note on the JSON payloads: the suite passes each payload through `printf '%s\n'` untouched, so `\\\n` inside single-quoted sh strings reaches the hook as the JSON escape for a backslash followed by a newline, which `json.load` turns into a real backslash-newline continuation. The `sh -c` and `--label 'a;b'` cases use double-quoted sh strings so the inner single quotes survive.
 
-- [ ] **Step 2: Run the suite to verify the new cases fail**
+- [ ] **Step 2: Create an allow-all stub so the RED run is meaningful**
 
-Run: `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh 2>&1 | grep -c 'hwg'`
-Expected: `31` lines mention `hwg`, and `grep -c '^FAIL  hwg'` is at least `14` (every `blocks` case passes vacuously against a missing hook because `run_hook` returns 127, so it is the `allows` cases and the exact-contract checks that fail). `0` here means the block was not inserted.
+A missing hook file exits 127, which `assert_blocks` would count as a pass. Install a stub that allows everything so the deny cases genuinely fail:
 
-- [ ] **Step 3: Write the hook**
+```bash
+printf '#!/bin/sh\nexit 0\n' > claude/hooks/herdr_worktree_guard.py
+chmod +x claude/hooks/herdr_worktree_guard.py
+```
 
-Create `claude/hooks/herdr_worktree_guard.py` with exactly this content:
+- [ ] **Step 3: Run the suite to verify the deny cases fail**
+
+Run: `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh 2>&1 | grep -c '^FAIL  hwg'`
+Expected: `14` (13 `blocks` cases plus the exit-2 message check). `... | grep -c '^PASS  hwg'` -> `17` (16 allows plus the silent-allow check). The suite's final line reports `14 failed`.
+
+- [ ] **Step 4: Write the hook**
+
+Replace the stub: create `claude/hooks/herdr_worktree_guard.py` with exactly this content:
 
 ```python
 #!/usr/bin/env python3
@@ -327,18 +352,18 @@ Then: `chmod +x claude/hooks/herdr_worktree_guard.py`
 
 This code was executed against every block/allow case above during planning (0 mismatches); the deny path printed the two lines and exited 2, and a payload with no `tool_input` exited 0.
 
-- [ ] **Step 4: Run the suite to verify it passes**
+- [ ] **Step 5: Run the suite to verify it passes**
 
 Run: `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh 2>&1 | tail -1`
-Expected: `N passed, 0 failed`. Also `... | grep -c '^PASS  hwg'` -> `31` (13 blocks, 16 allows, 2 exact-contract checks).
+Expected: `69 passed, 0 failed` (38 baseline plus 31 hwg lines: 13 blocks, 16 allows, 2 exact-contract checks). Also `... | grep -c '^PASS  hwg'` -> `31`.
 
 Also run: `python3 -m py_compile claude/hooks/herdr_worktree_guard.py && test -x claude/hooks/herdr_worktree_guard.py && echo ok`
 Expected: `ok`
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git rev-parse --show-toplevel   # must print the worktree path from Global Constraints
+git rev-parse --show-toplevel   # must end in +cwd-guard-hook
 git add claude/hooks/herdr_worktree_guard.py claude/hooks/claude-hooks.test.sh
 git commit -m "hooks: Deny herdr worktree create without --cwd"
 ```
@@ -355,37 +380,44 @@ git commit -m "hooks: Deny herdr worktree create without --cwd"
 
 **Interfaces:**
 - Consumes: the hook path `~/.claude/hooks/herdr_worktree_guard.py` from Task 1 (the `~/.claude/hooks` symlink serves both config dirs).
-- Produces: a template `PreToolUse` Bash group listing four commands in order: `commit_guard.py`, `no_ai_attribution_bash.py`, `push_guard.py`, `herdr_worktree_guard.py`. The suite's existing live drift check derives its expectations from this template.
+- Produces: a template `PreToolUse` Bash group whose command list is exactly, in order: `~/.claude/hooks/commit_guard.py`, `~/.claude/hooks/no_ai_attribution_bash.py`, `~/.claude/hooks/push_guard.py`, `~/.claude/hooks/herdr_worktree_guard.py`. The suite's existing live drift check derives its expectations from this template; the contract's fourth command checks the last two entries.
 
 - [ ] **Step 1: Write the failing static registration assertion**
 
 Append to `claude/hooks/claude-hooks.test.sh` directly after the Task 1 `hwg` block (still before the `# account_guard.py account-aware routing` comment):
 
 ```sh
-# Static registration: the template must list the guard in the PreToolUse
-# Bash group. Independent of live machine state (the live drift check below
-# is derived from the template and covers reconciled machines).
+# Static registration: the template's PreToolUse Bash group must list the
+# guards in this exact order (the new guard last, after push_guard).
+# Independent of live machine state; the live drift check below is derived
+# from the template and covers reconciled machines.
 if python3 - <<'PY'
 import json
 import sys
 
 tmpl = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
 cmds = [h["command"] for e in tmpl if e.get("matcher") == "Bash" for h in e["hooks"]]
-sys.exit(0 if "~/.claude/hooks/herdr_worktree_guard.py" in cmds else 1)
+want = [
+    "~/.claude/hooks/commit_guard.py",
+    "~/.claude/hooks/no_ai_attribution_bash.py",
+    "~/.claude/hooks/push_guard.py",
+    "~/.claude/hooks/herdr_worktree_guard.py",
+]
+sys.exit(0 if cmds == want else 1)
 PY
 then
-    printf 'PASS  hwg: template registers the guard in the PreToolUse Bash group\n'
+    printf 'PASS  hwg: template lists the Bash guards in order, worktree guard last\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  hwg: template registers the guard in the PreToolUse Bash group\n' >&2
+    printf 'FAIL  hwg: template lists the Bash guards in order, worktree guard last\n' >&2
     FAIL=$((FAIL + 1))
 fi
 ```
 
 - [ ] **Step 2: Run the suite to verify the new assertion fails**
 
-Run: `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh 2>&1 | grep 'template registers the guard'`
-Expected: `FAIL  hwg: template registers the guard in the PreToolUse Bash group`
+Run: `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh 2>&1 | grep 'template lists the Bash guards'`
+Expected: `FAIL  hwg: template lists the Bash guards in order, worktree guard last`
 
 - [ ] **Step 3: Register the hook in the template**
 
@@ -417,7 +449,7 @@ Expected: `json ok`
 - [ ] **Step 4: Run the suite to verify it passes**
 
 Run: `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh 2>&1 | tail -1`
-Expected: `N passed, 0 failed` (N is Task 1's count plus 1).
+Expected: `70 passed, 0 failed`.
 
 Run the unsandboxed suite once for information only: `sh claude/hooks/claude-hooks.test.sh 2>&1 | grep -E '^FAIL|missing hook'`
 Expected: the pre-existing `permissions drifted` FAIL for `~/.claude`, plus `missing hook: PreToolUse: ~/.claude/hooks/herdr_worktree_guard.py` FAILs for both live config dirs. This is expected on the branch (see Global Constraints: do NOT reconcile live settings); it clears when `update` runs after merge. Do not "fix" it.
@@ -454,68 +486,74 @@ In `CLAUDE.md`, directly after line 77 (the `account_guard.py` bullet), add:
 - [ ] **Step 6: Commit**
 
 ```bash
-git rev-parse --show-toplevel   # must print the worktree path
+git rev-parse --show-toplevel   # must end in +cwd-guard-hook
 git add claude/settings.json.tmpl claude/hooks/claude-hooks.test.sh claude/skills/herdr-orchestration/SKILL.md CLAUDE.md
 git commit -m "hooks: Register worktree cwd guard in settings template and docs"
 ```
 
 ---
 
-### Task 3: Verification contract
+### Task 3: Run the pinned contract end to end
 
 **Files:**
-- Create: `claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json`
+- Read only: `claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json` (do not edit; the orchestrator pinned its sha256 before dispatch and a hash mismatch is an integrity halt)
 
 **Interfaces:**
-- Consumes: the sandboxed suite invocation from Tasks 1-2.
-- Produces: the contract the orchestrator pins before the implement dispatch and runs at review (`herdr_orch_core.py verify-contract`; commands run via `sh -c` in the worktree, so `$(mktemp -d)` expands there).
+- Consumes: the hook from Task 1, the template from Task 2.
+- Produces: evidence for acceptance criterion 7.
 
-- [ ] **Step 1: Write the contract**
+- [ ] **Step 1: Run the contract**
 
-Create `claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json`:
-
-```json
-{
-  "v": 1,
-  "task_id": "td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo",
-  "commands": [
-    {
-      "name": "claude-hooks-suite-sandboxed",
-      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh",
-      "timeout_secs": 300
-    }
-  ]
-}
-```
-
-- [ ] **Step 2: Validate the contract shape and run it**
-
-Run:
 ```bash
 python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py" verify-contract \
   --repo-slug git-personal-taloncjones-dotfiles-6c3f6099 \
   --task-id td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo \
   --worktree "$(git rev-parse --show-toplevel)" \
   --contract claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json \
-  --allow-unpinned --validate-only
+  --allow-unpinned
 ```
-Expected: prints a sha256 (validation passed).
+Expected: five `ok <name> exit=0` lines then `PASS 5 commands`, exit 0. If `hook-denies-bare-create-exit-2` fails, Task 1 is incomplete; if `template-registers-hook-after-push-guard` fails, Task 2 step 3 is incomplete. Nothing to commit in this task.
 
-Then run the command itself: `sh -c 'HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh' | tail -1`
-Expected: `N passed, 0 failed`.
+---
 
-- [ ] **Step 3: Commit**
+### Task 4: Drop the branch-only spec and plan before review
+
+**Files:**
+- Delete: `docs/specs/2026-09-01-herdr-worktree-create-cwd-guard.md`
+- Delete: `docs/plans/2026-09-01-herdr-worktree-create-cwd-guard.md`
+
+**Interfaces:**
+- Consumes: nothing from other tasks.
+- Produces: a branch whose tracked tree passes `git/hooks/public-safety.test.sh` ("no tracked planning artifacts" rejects tracked `docs/specs/**` and `docs/plans/**`; "no hardcoded local user paths" rejects `/Users/talon`). The reviewer reads the spec and plan from history: `git show <sha>:docs/specs/...` where `<sha>` is any commit before this task's.
+
+- [ ] **Step 1: Confirm the public-safety suite currently fails on the tracked docs**
+
+Run: `sh git/hooks/public-safety.test.sh 2>&1 | grep -E 'planning artifacts|local user paths'`
+Expected: `FAIL  no tracked planning artifacts` (and possibly `FAIL  no hardcoded local user paths` from the same files).
+
+- [ ] **Step 2: Remove the two files from the branch**
 
 ```bash
-git rev-parse --show-toplevel   # must print the worktree path
-git add claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json
-git commit -m "hooks: Add verification contract for worktree cwd guard"
+git rm -q docs/specs/2026-09-01-herdr-worktree-create-cwd-guard.md docs/plans/2026-09-01-herdr-worktree-create-cwd-guard.md
+```
+
+- [ ] **Step 3: Verify the public-safety suite passes**
+
+Run: `sh git/hooks/public-safety.test.sh 2>&1 | tail -1`
+Expected: `N passed, 0 failed`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git rev-parse --show-toplevel   # must end in +cwd-guard-hook
+git commit -m "docs: Drop branch-only cwd guard spec and plan before review"
 ```
 
 ---
 
-### Final check (after Task 3)
+### Final check (after Task 4)
 
-- `git diff --stat origin/main` lists only: `claude/hooks/herdr_worktree_guard.py`, `claude/hooks/claude-hooks.test.sh`, `claude/settings.json.tmpl`, `claude/skills/herdr-orchestration/SKILL.md`, `CLAUDE.md`, the contract file, and the branch-only `docs/specs/...` and `docs/plans/...` files.
+- `git diff --stat origin/main` lists exactly: `CLAUDE.md`, `claude/contracts/td-2026-09-01-block-herdr-worktree-create-without-cwd-via-pretoo-contract.json`, `claude/hooks/claude-hooks.test.sh`, `claude/hooks/herdr_worktree_guard.py`, `claude/settings.json.tmpl`, `claude/skills/herdr-orchestration/SKILL.md`.
 - `git status --porcelain` is empty.
-- Live `~/.claude/settings.json` and `~/.claude-work/settings.json` are unchanged: record `shasum -a 256` of both before Task 1 and compare after Task 3.
+- `shasum -a 256 ~/.claude/settings.json ~/.claude-work/settings.json` matches the hashes recorded at the pre-implementation gate (live settings untouched).
+- `bin/dotfiles-tests` runs the full registry; the only acceptable failures are the live-settings drift lines in `claude-hooks.test.sh` described in Task 2 step 4.
