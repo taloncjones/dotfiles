@@ -184,6 +184,123 @@ assert_allows "allows override prefix after user confirmation" \
     claude/hooks/push_guard.py \
     '{"tool_name":"Bash","tool_input":{"command":"DOTFILES_ALLOW_FORCE_PUSH=1 git push --force-with-lease"}}'
 
+# herdr_worktree_guard.py: exit 2 (block) on `herdr worktree create` lacking
+# --cwd, 0 otherwise. `worktree open` is out of scope and never blocked.
+HWG=claude/hooks/herdr_worktree_guard.py
+assert_blocks "hwg: blocks bare worktree create" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create"}}'
+assert_blocks "hwg: blocks create with other flags but no --cwd" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --branch x --label y"}}'
+assert_blocks "hwg: blocks backslash-continued create with no --cwd" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create \\\n  --branch x \\\n  --label y"}}'
+assert_blocks "hwg: blocks create whose --cwd is only in a comment" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --branch x # --cwd /repo"}}'
+assert_blocks "hwg: blocks create in compound command" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"cd /r && herdr worktree create --branch x"}}'
+assert_blocks "hwg: blocks create when --cwd is in a different segment" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --branch x; echo --cwd /r"}}'
+assert_blocks "hwg: blocks create when --cwd is on a different line" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --branch x\necho --cwd /r"}}'
+assert_blocks "hwg: blocks create wrapped in sh -c" \
+    "$HWG" \
+    "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'herdr worktree create --branch x'\"}}"
+assert_blocks "hwg: blocks path-qualified herdr create" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"/opt/homebrew/bin/herdr worktree create"}}'
+assert_blocks "hwg: blocks env-assignment-prefixed create" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"HERDR_ENV=1 herdr worktree create"}}'
+assert_blocks "hwg: blocks env-wrapped create" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"env HERDR_ENV=1 herdr worktree create"}}'
+assert_blocks "hwg: blocks command-wrapped create" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"command herdr worktree create"}}'
+assert_blocks "hwg: blocks create after herdr global option" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr --session main worktree create --branch x"}}'
+assert_allows "hwg: allows create with --cwd first" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --cwd /repo --branch x"}}'
+assert_allows "hwg: allows create with --cwd=value" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --cwd=/repo"}}'
+assert_allows "hwg: allows create with --cwd last" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --branch x --cwd /repo"}}'
+assert_allows "hwg: allows quoted substitution as --cwd value" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --cwd \"$(git rev-parse --show-toplevel)\""}}'
+assert_allows "hwg: allows quoted separator inside an argument" \
+    "$HWG" \
+    "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"herdr worktree create --label 'a;b' --cwd /repo\"}}"
+assert_allows "hwg: allows global option plus --cwd" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr --session main worktree create --cwd /repo"}}'
+assert_allows "hwg: allows backslash-continued create with --cwd on line 2" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create \\\n  --cwd /repo"}}'
+assert_allows "hwg: allows redirection and pipe after a valid create" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --cwd /repo 2>&1 | tee log"}}'
+assert_allows "hwg: allows worktree open without --cwd (out of scope)" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree open --workspace ws1"}}'
+assert_allows "hwg: allows worktree list" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree list"}}'
+assert_allows "hwg: allows worktree remove" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree remove --workspace ws1"}}'
+assert_allows "hwg: allows mention in commit message" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"docs: mention herdr worktree create\""}}'
+assert_allows "hwg: allows mention in grep pattern" \
+    "$HWG" \
+    '{"tool_name":"Bash","tool_input":{"command":"grep -rn \"herdr worktree create\" claude/"}}'
+assert_allows "hwg: allows mention behind a prefix wrapper" \
+    "$HWG" \
+    "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"env echo 'herdr worktree create'\"}}"
+assert_allows "hwg: allows non-Bash tool" \
+    "$HWG" \
+    '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}'
+assert_allows "hwg: allows payload with no tool_input (fail open)" \
+    "$HWG" \
+    '{"tool_name":"Bash"}'
+
+# Exact contract: deny is exit 2 with the fix-naming first line; allow is
+# exit 0 and silent. (assert_blocks accepts any nonzero status.)
+if printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --branch x"}}' \
+        | "$HWG" >/dev/null 2>/tmp/claude-hook-test.err; then
+    hwg_rc=0
+else
+    hwg_rc=$?
+fi
+if [ "$hwg_rc" = 2 ] && head -n 1 /tmp/claude-hook-test.err \
+        | grep -q '^Blocked: herdr worktree create without --cwd'; then
+    printf 'PASS  hwg: deny is exit 2 with fix-naming message\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  hwg: deny is exit 2 with fix-naming message (rc=%s)\n' "$hwg_rc" >&2
+    FAIL=$((FAIL + 1))
+fi
+if printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create --branch x --cwd /repo"}}' \
+        | "$HWG" >/dev/null 2>/tmp/claude-hook-test.err \
+        && [ ! -s /tmp/claude-hook-test.err ]; then
+    printf 'PASS  hwg: allow is exit 0 and silent\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  hwg: allow is exit 0 and silent\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
 GUARD_FIX=$(mktemp -d)
