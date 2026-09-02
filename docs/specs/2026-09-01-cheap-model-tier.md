@@ -123,7 +123,9 @@ Contract source for a mech item, in order:
    An invalid committed contract refuses the kickoff (existing rule).
 2. Else, if `config.json` carries `mech.contract_commands`, the
    orchestrator writes `claude/contracts/<task_id>-contract.json` with
-   `v: 1`, the task id, and those commands verbatim, and commits it on
+   `v: 1`, the task id, and those commands verbatim (through a core verb,
+   `mech-contract --base-sha <sha>`, which itself refuses unless the
+   worktree is clean and HEAD equals the given base), and commits it on
    the task branch as `<task_id>: Add mech contract`. Generation is
    allowed only when the worktree is clean AND either the branch was
    created by this kickoff or the adopted branch's HEAD equals `base_sha`;
@@ -199,11 +201,11 @@ the orchestrator to `STATE_ROOT/<slug>/tasks/<task_id>.brief.md`
 
 `run-mech`, in order:
 
-1. Validate args: repo slug, task id, workspace id, `--agent` equal to a
-   canonical `agent_name("mech", ...)` form (`mech-` plus 1-27 chars of
-   `[a-z0-9-]`, optionally `-2`..`-9`), `--launch-id` prefixed by the
-   agent name, caps within section-3 bounds, `--brief-file` a readable
-   regular file contained in `STATE_ROOT`, `--worktree` an existing
+1. Validate args: repo slug, task id, workspace id, `--agent` equal to
+   `agent_name("mech", task_id)` or one of its `-2`..`-9` collision
+   variants, `--launch-id` prefixed by the agent name, caps within
+   section-3 bounds, `--brief-file` a regular file contained in
+   `STATE_ROOT` that is read in full here, `--worktree` an existing
    directory that `git rev-parse --git-dir` accepts, `--base-sha` 40 hex,
    shell-safety on every value. Any failure: exit 2, nothing written.
 2. Append the `start` ledger line (section 6). Failure: exit 2.
@@ -236,8 +238,10 @@ the orchestrator to `STATE_ROOT/<slug>/tasks/<task_id>.brief.md`
    - `error_during_execution`, `unparseable`, nonzero exit without a
      result -> `paused`, `error` when the branch is usable (HEAD !=
      `base_sha` and not dirty); else `failed`, `error`.
-   Write failure (git unavailable, unwritable file): exit 3 after still
-   attempting step 6.
+   If git cannot report HEAD or status in the worktree, no record is
+   fabricated (`record_written_by: none`, `git_ok: false` on the `end`
+   line). Any such failure, or an unwritable record file: exit 3 after
+   still attempting step 6.
 6. Append the `end` ledger line. Failure: exit 3.
 7. Exit 0 only when steps 2, 5, and 6 all succeeded. The exit code is
    informational for the pane; the orchestrator reads state, not the
@@ -249,9 +253,10 @@ needs_design|blocked_on_human|other`. `done.json` may carry `launch_id`,
 `reason`, and `dirty` as optional fields; readers ignore unknown fields.
 
 **Within-role fallback.** After `run-mech` returns, the orchestrator reads
-the `end` ledger line. `downgrade: true`, or `subtype: error_during_execution`
-whose `errors[]` text mentions the requested model alias or "model", is a
-model-attributable failure: `disable-model --model <requested alias>`,
+the `end` ledger line. Its `model_attributable` flag (computed by the
+wrapper: `downgrade: true`, or `subtype: error_during_execution` whose
+persisted `errors[]` text mentions the requested model alias or "model")
+marks a model-attributable failure: `disable-model --model <requested alias>`,
 re-run `resolve-model --role mech`, and relaunch once with a fresh
 `launch_id` on the survivor (a new `workers[]` entry; the failed launch's
 ledger lines stay for accounting, its completion record is superseded by
@@ -340,14 +345,14 @@ Two line kinds, both `v: 1`:
 
 ```json
 {"v":1,"kind":"start","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"mech-td-x-20260901T200000Z","role":"mech","model":"haiku","max_turns":40,"max_budget_usd":2.0,"timeout_secs":1800,"ts":"2026-09-01T20:00:00Z"}
-{"v":1,"kind":"end","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"mech-td-x-20260901T200000Z","subtype":"success","is_error":false,"num_turns":17,"total_cost_usd":0.42,"duration_ms":184000,"models_used":["claude-haiku-4-5-20251001"],"downgrade":false,"record_written_by":"worker","exit_code":0,"session_id":"<uuid>","ts":"2026-09-01T20:03:04Z"}
+{"v":1,"kind":"end","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"mech-td-x-20260901T200000Z","subtype":"success","is_error":false,"num_turns":17,"total_cost_usd":0.42,"duration_ms":184000,"models_used":["claude-haiku-4-5-20251001"],"downgrade":false,"errors":[],"model_attributable":false,"record_written_by":"worker","git_ok":true,"exit_code":0,"session_id":"<uuid>","ts":"2026-09-01T20:03:04Z"}
 ```
 
 Accepted-line rules for the `status` fold: a JSON object with `v == 1`
 (int, not bool), `kind` in `start|end`, `task_id` equal to the file's
-task id, non-blank `launch_id`; `end` lines additionally need `num_turns`
-a non-negative finite int or null and `total_cost_usd` a non-negative
-finite number or null (booleans rejected). Anything else (truncated line,
+task id, non-blank `launch_id`; `end` lines additionally need both keys `num_turns`
+(a non-negative finite int or null) and `total_cost_usd` (a non-negative
+finite number or null) present (booleans rejected). Anything else (truncated line,
 wrong task, unknown kind, negative or NaN numbers) is skipped and counted
 in `skipped_lines`. Unknown `subtype` values are accepted verbatim.
 
