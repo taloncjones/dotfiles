@@ -10,6 +10,9 @@ import json
 import math
 import os
 import re
+import secrets
+import socket
+import stat
 import sys
 import time
 from pathlib import Path
@@ -205,6 +208,42 @@ def valid_workspace_id(ws) -> bool:
     return bool(ws) and bool(WORKSPACE_ID_RE.match(ws))
 
 
+MESSAGING_SOCKET_DIRS = (
+    re.compile(r"^/tmp/cc-socks(-\d+)?$"),
+    re.compile(r"^/run/user/\d+/cc-socks$"),
+    re.compile(r"^/data/data/com\.termux/files/usr/tmp/cc-socks(-\d+)?$"),
+)
+_SOCKET_BASENAME = re.compile(r"^(\d+)\.sock$")
+
+
+def normalize_socket_path(path: str) -> str:
+    """Lexical normalization only: collapse the macOS /private/tmp alias.
+    Never resolves symlinks (a socket path is used exactly as published)."""
+    if path.startswith("/private/tmp/"):
+        return path[len("/private"):]
+    return path
+
+
+def validate_messaging_socket(path, expect_pid=None):
+    """Shape-check an inbox socket path. Returns (normalized, pid, reason);
+    reason == "ok" iff valid. Pure: touches no filesystem."""
+    if not isinstance(path, str) or path == "":
+        return None, None, "empty"
+    if not path.startswith("/"):
+        return None, None, "not-absolute"
+    norm = normalize_socket_path(path)
+    d, _, base = norm.rpartition("/")
+    if not any(p.match(d) for p in MESSAGING_SOCKET_DIRS):
+        return None, None, "dir-not-canonical"
+    m = _SOCKET_BASENAME.match(base)
+    if not m:
+        return None, None, "basename-not-pid-sock"
+    pid = int(m.group(1))
+    if expect_pid is not None and pid != int(expect_pid):
+        return None, None, "pid-mismatch"
+    return norm, pid, "ok"
+
+
 def valid_repo_slug(slug) -> bool:
     return bool(slug) and ".." not in slug and bool(REPO_SLUG_RE.match(slug))
 
@@ -317,6 +356,104 @@ def append_event(rd, ws, event, **fields) -> bool:
     finally:
         os.close(fd)
     return True
+
+
+WAKE_EVENTS = frozenset({"stopped", "blocked", "review-stopped"})
+WAKE_BUDGET_SECS = 2.0       # one monotonic deadline across connect + send
+WAKE_CONNECT_TIMEOUT = 1.0
+WAKE_HEARTBEAT_STALE_SECS = 900
+WAKE_HEARTBEAT_SKEW_SECS = 300
+_lstat = os.lstat      # test seams (monkeypatched by the suite)
+_geteuid = os.geteuid
+
+
+def wake_line(repo_slug, ws, event, ts=None, nonce=None) -> str:
+    """One newline-terminated stream-json user message: the closed-vocabulary
+    wake the hook pushes to the orchestrator's inbox. nonce keeps two wakes
+    in one second from being byte-identical (receiver dedupes repeats)."""
+    if ts is None:
+        ts = int(time.time())
+    if nonce is None:
+        nonce = secrets.token_hex(4)
+    content = (f"herdr-wake v=1 repo={repo_slug} workspace={ws} event={event} "
+               f"ts={ts} nonce={nonce}")
+    msg = {"type": "user", "message": {"role": "user", "content": content}}
+    return json.dumps(msg, separators=(",", ":")) + "\n"
+
+
+def post_wake(rd, ws, event, own_socket="", now=None) -> str:
+    """Push one wake line to the owning orchestrator's inbox socket named in
+    owner.json. Every guard returns a distinct reason and sends nothing; only
+    "sent" means a line left this process. Never raises; 2s wall budget."""
+    if event not in WAKE_EVENTS:
+        return "bad-event"
+    repo_slug = os.path.basename(str(rd))
+    if not valid_repo_slug(repo_slug) or not valid_workspace_id(ws):
+        return "bad-id"   # keeps the wire content inside the \S+ grammar
+    deadline = time.monotonic() + WAKE_BUDGET_SECS
+    try:
+        owner = json.loads(_owner_path(rd).read_text())
+    except (FileNotFoundError, NotADirectoryError):
+        return "no-owner"
+    except (OSError, ValueError):
+        return "bad-owner"
+    if not isinstance(owner, dict):
+        return "bad-owner"
+    sock_path = owner.get("messaging_socket")
+    if not isinstance(sock_path, str) or not sock_path:
+        return "no-socket"
+    hb = owner.get("heartbeat_ts")
+    if isinstance(hb, bool) or not isinstance(hb, (int, float)) or not math.isfinite(hb):
+        return "bad-heartbeat"
+    now = time.time() if now is None else now
+    if now - hb > WAKE_HEARTBEAT_STALE_SECS:
+        return "stale-heartbeat"
+    if hb - now > WAKE_HEARTBEAT_SKEW_SECS:
+        return "future-heartbeat"
+    pid = owner.get("pid")
+    if isinstance(pid, str) and pid.isdigit():
+        pid = int(pid)   # legacy records written by the pre-flag CLI
+    if isinstance(pid, bool) or not isinstance(pid, int):
+        return "bad-pid"
+    norm, _pid, reason = validate_messaging_socket(sock_path, expect_pid=pid)
+    if reason != "ok":
+        return "bad-path"
+    if own_socket and normalize_socket_path(own_socket) == norm:
+        return "own-socket"
+    try:
+        st_sock = _lstat(norm)
+        st_dir = _lstat(norm.rpartition("/")[0])
+    except OSError:
+        return "not-a-socket"
+    if not stat.S_ISSOCK(st_sock.st_mode):
+        return "not-a-socket"
+    uid = _geteuid()
+    if st_sock.st_uid != uid or st_dir.st_uid != uid:
+        return "bad-owner-uid"
+    if stat.S_IMODE(st_dir.st_mode) & 0o077:
+        return "bad-dir-mode"
+    line = wake_line(repo_slug, ws, event).encode()
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return "connect-failed"
+    try:
+        s.settimeout(min(WAKE_CONNECT_TIMEOUT, max(0.05, deadline - time.monotonic())))
+        try:
+            s.connect(norm)
+        except OSError:
+            return "connect-failed"
+        s.settimeout(max(0.05, deadline - time.monotonic()))
+        try:
+            s.sendall(line)
+        except OSError:
+            return "send-failed"
+        return "sent"
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
 
 
 def parse_events(lines):
@@ -475,15 +612,23 @@ def _owner_path(rd) -> Path:
     return Path(rd) / "owner.json"
 
 
-def claim_owner(rd, session_id, host, pid, stale_secs=900):
+def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None):
     Path(rd).mkdir(parents=True, exist_ok=True)
     p = _owner_path(rd)
+    sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
+    if reason == "ok" and int(pid) != sock_pid:
+        print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; "
+              f"using {sock_pid}", file=sys.stderr)
+    elif reason not in ("ok", "empty"):
+        print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}",
+              file=sys.stderr)
     rec = {
         "session_id": session_id,
         "host": host,
-        "pid": pid,
+        "pid": sock_pid if reason == "ok" else pid,
         "heartbeat_ts": time.time(),
         "fence": 1,
+        "messaging_socket": sock,
     }
     excl = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     tmp = Path(f"{p}.new.{os.getpid()}")
@@ -555,11 +700,21 @@ def check_fence(rd, session_id, fence) -> bool:
     )
 
 
-def refresh_owner(rd, session_id, fence) -> bool:
+def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
     if not check_fence(rd, session_id, fence):
         return False
     cur = json.loads(_owner_path(rd).read_text())
     cur["heartbeat_ts"] = time.time()
+    if isinstance(cur.get("pid"), str) and cur["pid"].isdigit():
+        cur["pid"] = int(cur["pid"])  # migrate records written by the pre-flag CLI
+    if messaging_socket is not None:  # None = flag omitted: leave untouched
+        sock, _pid, reason = validate_messaging_socket(
+            messaging_socket, expect_pid=cur.get("pid")
+        )
+        if reason not in ("ok", "empty"):
+            print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}",
+                  file=sys.stderr)
+        cur["messaging_socket"] = sock
     write_json_atomic(_owner_path(rd), cur)
     return True
 
@@ -649,9 +804,12 @@ def main(argv=None) -> int:
             p.add_argument(a, required=True)
         return p
 
-    co = add("claim-owner", "--session", "--host", "--pid")
+    co = add("claim-owner", "--session", "--host")
+    co.add_argument("--pid", type=int, required=True)   # was a positional-style required str
     co.add_argument("--stale-secs", type=int, default=None)  # test/override hook
-    add("refresh-owner", "--session", "--fence")
+    co.add_argument("--messaging-socket", default=None)
+    ro = add("refresh-owner", "--session", "--fence")
+    ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
     add("write-task", "--task-id", "--json", fenced=True)
     add("write-index", "--workspace", "--json", fenced=True)
@@ -695,7 +853,8 @@ def main(argv=None) -> int:
     if ns.cmd == "claim-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         kw = {} if ns.stale_secs is None else {"stale_secs": ns.stale_secs}
-        fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid, **kw)
+        fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
+                            messaging_socket=ns.messaging_socket, **kw)
         if fence is None:
             print("BUSY")
             return 1
@@ -709,7 +868,8 @@ def main(argv=None) -> int:
     if ns.cmd == "refresh-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         return (
-            0 if refresh_owner(repo_dir(ns.repo_slug), ns.session, int(ns.fence)) else 1
+            0 if refresh_owner(repo_dir(ns.repo_slug), ns.session, int(ns.fence),
+                               messaging_socket=ns.messaging_socket) else 1
         )
     if ns.cmd == "write-task":
         rd = _fenced(ns)

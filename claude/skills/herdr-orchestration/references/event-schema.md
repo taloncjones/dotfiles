@@ -29,6 +29,16 @@ The `$CORE watch` subcommand (orchestrator wake, SKILL.md section 1 step 6)
 is a READER of `events.jsonl` and the `tasks/` sidecars: it emits only the
 closed stdout vocabulary `signal` / `heartbeat` and never appends events.
 
+After appending, the hook also pushes one wake line to the owning
+orchestrator's inbox socket (`$CORE post_wake`, path from
+`owner.json.messaging_socket`). The wake is not an event: it is written to no
+herdr file, carries no authority, and the orchestrator treats it as a wake
+trigger only. Claude Code persists the delivered line in the orchestrator's
+own session transcript like any message; it holds only non-secret
+operational metadata (`repo_slug`, workspace id, event name, timestamp,
+nonce). The two steps fail independently: an `append_event` failure never
+suppresses the push.
+
 ## Record shape (`v: 1`)
 
 Each line of `<workspace>.events.jsonl` is one JSON object:

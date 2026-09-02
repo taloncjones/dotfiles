@@ -800,5 +800,302 @@ rg -q -F 'If `CLS` is not `available`' "$SKILL"
 rg -q -F '|| true`' "$SKILL"
 SH
 
+check "validate_messaging_socket: canonical dirs, pid basename, /private alias, rejects" <<PY
+$LOAD
+ok=c.validate_messaging_socket("/tmp/cc-socks/12345.sock")
+assert ok==("/tmp/cc-socks/12345.sock",12345,"ok"),ok
+assert c.validate_messaging_socket("/private/tmp/cc-socks/12345.sock")==("/tmp/cc-socks/12345.sock",12345,"ok")
+assert c.validate_messaging_socket("/tmp/cc-socks-501/7.sock")[2]=="ok"
+assert c.validate_messaging_socket("/run/user/1000/cc-socks/7.sock")[2]=="ok"
+assert c.validate_messaging_socket("/data/data/com.termux/files/usr/tmp/cc-socks/7.sock")[2]=="ok"
+assert c.validate_messaging_socket("/tmp/cc-socks/12345.sock",expect_pid=12345)[2]=="ok"
+assert c.validate_messaging_socket("/tmp/cc-socks/12345.sock",expect_pid=1)[2]=="pid-mismatch"
+assert c.validate_messaging_socket("")[2]=="empty"
+assert c.validate_messaging_socket("cc-socks/1.sock")[2]=="not-absolute"
+assert c.validate_messaging_socket("/tmp/other/1.sock")[2]=="dir-not-canonical"
+assert c.validate_messaging_socket("/tmp/cc-socks/../cc-socks/1.sock")[2]=="dir-not-canonical"
+assert c.validate_messaging_socket("/tmp/cc-socks/12345-0123abcd.sock")[2]=="basename-not-pid-sock"
+assert c.validate_messaging_socket("/tmp/cc-socks/abcdef.sock")[2]=="basename-not-pid-sock"
+assert c.validate_messaging_socket("/tmp/cc-socks/1.sock/")[2]=="dir-not-canonical"
+sys.exit(0)
+PY
+
+check "claim-owner stores a valid messaging_socket and takes pid from its basename" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+err=$(mktemp)
+F=$($CLI claim-owner --repo-slug slug-ms --session S --host h --pid 999 --messaging-socket /private/tmp/cc-socks/4242.sock 2>"$err")
+[ "$F" = 1 ]
+grep -q '^\[WARNING\]' "$err"            # --pid 999 differs from basename 4242: one warning
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 - <<PY
+import json;o=json.load(open("$root/herdr-orch/slug-ms/owner.json"))
+assert o["messaging_socket"]=="/tmp/cc-socks/4242.sock",o
+assert o["pid"]==4242,o
+PY
+SH
+
+check "claim-owner: matching --pid warns nothing; empty value stores null silently; invalid stores null with one warning" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+err=$(mktemp)
+$CLI claim-owner --repo-slug slug-a --session S --host h --pid 4242 --messaging-socket /tmp/cc-socks/4242.sock 2>"$err" >/dev/null
+[ ! -s "$err" ]
+$CLI claim-owner --repo-slug slug-b --session S --host h --pid 5 --messaging-socket "" 2>"$err" >/dev/null
+[ ! -s "$err" ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-b/owner.json'));assert o['messaging_socket'] is None and o['pid']==5,o"
+$CLI claim-owner --repo-slug slug-c --session S --host h --pid 5 --messaging-socket /tmp/cc-socks/5-0123abcd.sock 2>"$err" >/dev/null
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-c/owner.json'));assert o['messaging_socket'] is None and o['pid']==5,o"
+$CLI claim-owner --repo-slug slug-d --session S --host h --pid 5 --messaging-socket /tmp/other/5.sock 2>"$err" >/dev/null
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-d/owner.json'));assert o['messaging_socket'] is None,o"
+$CLI claim-owner --repo-slug slug-e --session S --host h --pid 5 2>"$err" >/dev/null   # flag omitted
+[ ! -s "$err" ]
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-e/owner.json'));assert o['messaging_socket'] is None and o['pid']==5,o"
+SH
+
+check "refresh-owner: omitted flag keeps socket; empty clears; pid mismatch nulls and warns" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+err=$(mktemp)
+F=$($CLI claim-owner --repo-slug slug-r --session S --host h --pid 4242 --messaging-socket /tmp/cc-socks/4242.sock)
+O="$root/herdr-orch/slug-r/owner.json"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F"
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket']=='/tmp/cc-socks/4242.sock',o"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F" --messaging-socket /tmp/cc-socks/9.sock 2>"$err"
+[ "$(grep -c '^\[WARNING\]' "$err")" = 1 ]
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket'] is None and o['pid']==4242,o"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F" --messaging-socket /tmp/cc-socks/4242.sock 2>"$err"
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket']=='/tmp/cc-socks/4242.sock',o"
+$CLI refresh-owner --repo-slug slug-r --session S --fence "$F" --messaging-socket ""
+python3 -c "import json;o=json.load(open('$O'));assert o['messaging_socket'] is None,o"
+rc=0; $CLI refresh-owner --repo-slug slug-r --session S --fence 99 --messaging-socket /tmp/cc-socks/4242.sock || rc=$?
+[ "$rc" = 1 ]        # stale fence still refuses, unchanged
+SH
+
+check "legacy owner.json with string pid: refresh migrates it to int; --pid rejects non-integers" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_orch_core.py"
+mkdir -p "$root/herdr-orch/slug-l"
+python3 -c "import json,time;json.dump({'session_id':'S','host':'h','pid':'4242','heartbeat_ts':time.time(),'fence':1},open('$root/herdr-orch/slug-l/owner.json','w'))"
+$CLI refresh-owner --repo-slug slug-l --session S --fence 1 --messaging-socket /tmp/cc-socks/4242.sock
+python3 -c "import json;o=json.load(open('$root/herdr-orch/slug-l/owner.json'));assert o['pid']==4242 and o['messaging_socket']=='/tmp/cc-socks/4242.sock',o"
+rc=0; $CLI claim-owner --repo-slug slug-m --session S --host h --pid abc >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ]        # argparse type=int rejects cleanly (exit 2), no traceback
+SH
+
+check "wake_line shape, nonce uniqueness within one second" <<PY
+$LOAD
+import json as J
+l=c.wake_line("github-com-org-repo-deadbeef","w1","stopped")
+assert l.endswith("\n") and l.count("\n")==1
+o=J.loads(l)
+assert o["type"]=="user" and o["message"]["role"]=="user"
+assert re.fullmatch(r"herdr-wake v=1 repo=github-com-org-repo-deadbeef workspace=w1 event=stopped ts=\d+ nonce=[0-9a-f]{8}",o["message"]["content"]),o
+l2=c.wake_line("github-com-org-repo-deadbeef","w1","stopped")
+assert l!=l2
+assert J.loads(c.wake_line("s","w","blocked",ts=5,nonce="deadbeef"))["message"]["content"]=="herdr-wake v=1 repo=s workspace=w event=blocked ts=5 nonce=deadbeef"
+sys.exit(0)
+PY
+
+check "post_wake sends exactly one wire line to a fake inbox and returns sent" <<PY
+$LOAD
+import socket,threading,random,shutil,time,json as J
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1)
+    got=[]
+    def acc():
+        conn,_=srv.accept(); buf=b""
+        while not buf.endswith(b"\n"):
+            d=conn.recv(4096)
+            if not d: break
+            buf+=d
+        got.append(buf); conn.close()
+    t=threading.Thread(target=acc,daemon=True); t.start()
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd); ws="w1"   # basename must be a valid repo slug
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
+    r=c.post_wake(rd,ws,"stopped",own_socket=f"{sockdir}/1.sock")
+    assert r=="sent",r
+    t.join(2); assert got,"server got nothing"
+    o=J.loads(got[0]); cnt=o["message"]["content"]
+    assert cnt.startswith(f"herdr-wake v=1 repo={os.path.basename(rd)} workspace=w1 event=stopped ts="),cnt
+    assert got[0].count(b"\n")==1
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
+check "post_wake guards: each bad owner/state returns its reason and sends nothing" <<PY
+$LOAD
+import socket,random,shutil,time,math
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1); srv.settimeout(0.2)
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd); of=os.path.join(rd,"owner.json")
+    def owner(**kw):
+        o={"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path}; o.update(kw)
+        open(of,"w").write(json.dumps(o))
+    def nothing():
+        try: srv.accept(); return False
+        except socket.timeout: return True
+    assert c.post_wake(rd,"w1","stopped")=="no-owner"
+    open(of,"w").write("{not json"); assert c.post_wake(rd,"w1","stopped")=="bad-owner"
+    owner(messaging_socket=None); assert c.post_wake(rd,"w1","stopped")=="no-socket"
+    owner(messaging_socket=""); assert c.post_wake(rd,"w1","stopped")=="no-socket"
+    owner(messaging_socket=7); assert c.post_wake(rd,"w1","stopped")=="no-socket"
+    for hb in (None,"x",float("nan"),float("inf")):
+        owner(heartbeat_ts=hb); assert c.post_wake(rd,"w1","stopped")=="bad-heartbeat",hb
+    owner(heartbeat_ts=time.time()-901); assert c.post_wake(rd,"w1","stopped")=="stale-heartbeat"
+    owner(heartbeat_ts=time.time()+301); assert c.post_wake(rd,"w1","stopped")=="future-heartbeat"
+    owner(heartbeat_ts=time.time()+200); assert c.post_wake(rd,"w1","stopped")=="sent"   # skew allowance
+    srv.accept()[0].close()
+    owner(pid=None); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid="abc"); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid=True); assert c.post_wake(rd,"w1","stopped")=="bad-pid"
+    owner(pid="4242"); assert c.post_wake(rd,"w1","stopped")=="sent"       # legacy digit-string pid tolerated
+    srv.accept()[0].close()
+    owner(pid=1); assert c.post_wake(rd,"w1","stopped")=="bad-path"          # pid-mismatch -> bad-path
+    owner(messaging_socket="/tmp/other/4242.sock"); assert c.post_wake(rd,"w1","stopped")=="bad-path"
+    owner(); assert c.post_wake(rd,"w1","stopped",own_socket=path)=="own-socket"
+    assert c.post_wake(rd,"w1","stopped",own_socket="/private"+path)=="own-socket"
+    owner(); assert c.post_wake(rd,"w1","bogus")=="bad-event"
+    assert c.post_wake(rd,"../w1","stopped")=="bad-id"
+    assert c.post_wake(os.path.join(tempfile.mkdtemp(),"bad slug"),"w1","stopped")=="bad-id"
+    owner(messaging_socket=f"{sockdir}/4245.sock",pid=4245); assert c.post_wake(rd,"w1","stopped")=="not-a-socket"   # path absent
+    assert nothing()
+    # not a socket: regular file, and a symlink to the real socket
+    reg=f"{sockdir}/4243.sock"; open(reg,"w").close(); owner(pid=4243,messaging_socket=reg)
+    assert c.post_wake(rd,"w1","stopped")=="not-a-socket"
+    ln=f"{sockdir}/4244.sock"; os.symlink(path,ln); owner(pid=4244,messaging_socket=ln)
+    assert c.post_wake(rd,"w1","stopped")=="not-a-socket"
+    # ownership seams
+    owner(); real=c._lstat
+    class St:  # minimal stat_result stand-in
+        def __init__(s,base,**kw): s.st_mode=base.st_mode; s.st_uid=base.st_uid; s.__dict__.update(kw)
+    c._lstat=lambda p: St(real(p),st_uid=real(p).st_uid+1) if p==path else real(p)
+    assert c.post_wake(rd,"w1","stopped")=="bad-owner-uid"
+    c._lstat=lambda p: St(real(p),st_uid=real(p).st_uid+1) if p==sockdir else real(p)
+    assert c.post_wake(rd,"w1","stopped")=="bad-owner-uid"
+    c._lstat=lambda p: St(real(p),st_mode=real(p).st_mode|0o077) if p==sockdir else real(p)
+    assert c.post_wake(rd,"w1","stopped")=="bad-dir-mode"
+    c._lstat=real
+    assert nothing()
+    # connect refused: socket file with no listener
+    srv.close()
+    owner(); assert c.post_wake(rd,"w1","stopped")=="connect-failed"
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
+check "post_wake returns within 2.5s against a listener that never accepts" <<PY
+$LOAD
+import socket,random,shutil,time
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(1)   # never accept()s
+    rd=os.path.join(tempfile.mkdtemp(),"github-com-org-repo-deadbeef"); os.mkdir(rd)
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
+    t0=time.monotonic(); r=c.post_wake(rd,"w1","stopped"); dt=time.monotonic()-t0
+    assert r in ("sent","send-failed","connect-failed"),r     # AF_UNIX queues the connect and a short send; this is a budget smoke test, not a blocked-send simulation
+    assert dt<2.5,dt
+    # socket creation failure is caught, not raised
+    real_socket=c.socket.socket
+    def nosock(*a,**k): raise OSError("emfile")
+    c.socket.socket=nosock
+    try:
+        assert c.post_wake(rd,"w1","stopped")=="connect-failed"
+    finally:
+        c.socket.socket=real_socket
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
+check "hook end to end: Stop appends stopped AND posts one wake; no socket -> append only" <<PY
+$LOAD
+import socket,threading,random,shutil,time,io,json as J
+hs=importlib.util.spec_from_file_location("hook","claude/hooks/herdr_worker_status.py")
+h=importlib.util.module_from_spec(hs); hs.loader.exec_module(h)
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+os.environ["HERDR_ENV"]="1"; os.environ["HERDR_WORKSPACE_ID"]="w1"; os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET",None)
+slug="github-com-org-repo-deadbeef"; rd=os.path.join(root,"herdr-orch",slug)
+os.makedirs(os.path.join(rd,"workspaces")); os.makedirs(os.path.join(rd,"tasks"))
+json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"impl"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
+sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+try:
+    path=f"{sockdir}/4242.sock"
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(4); srv.settimeout(2)
+    got=[]
+    def acc():
+        while True:
+            try: conn,_=srv.accept()
+            except (socket.timeout,OSError): return
+            buf=b""
+            while not buf.endswith(b"\n"):
+                d=conn.recv(4096)
+                if not d: break
+                buf+=d
+            got.append(buf); conn.close()
+    threading.Thread(target=acc,daemon=True).start()
+    def run(payload):
+        sys.stdin=io.StringIO(json.dumps(payload)); return h.main()
+    def wait_got(n,secs=2.0):   # bounded poll instead of fixed sleeps
+        end=time.monotonic()+secs
+        while len(got)<n and time.monotonic()<end: time.sleep(0.02)
+        time.sleep(0.1)          # settle: catch an unexpected extra message
+        return len(got)
+    ev=os.path.join(rd,"workspaces","w1.events.jsonl")
+    def events(): return open(ev).read().count("\n")
+    # 1. no messaging_socket in owner: append only, exit 0
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":None},open(os.path.join(rd,"owner.json"),"w"))
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(1,0.3)==0 and events()==1
+    # 2. socket registered: append + one post
+    json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(1)==1,got
+    assert "event=stopped" in J.loads(got[0])["message"]["content"]
+    assert events()==2
+    # 3. own socket equals target: append, no post
+    os.environ["CLAUDE_CODE_MESSAGING_SOCKET"]=path
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(2,0.3)==1 and events()==3
+    os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET")
+    # 4. blocking notification posts blocked; non-blocking posts nothing and appends nothing
+    assert run({"hook_event_name":"Notification","notification_type":"permission_prompt"})==0
+    assert wait_got(2)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
+    assert run({"hook_event_name":"Notification","notification_type":"idle_prompt"})==0
+    assert wait_got(3,0.3)==2 and events()==4
+    # 5. review role posts review-stopped
+    json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"review"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(3)==3 and "event=review-stopped" in J.loads(got[2])["message"]["content"]
+    # 6. append_event raising still posts
+    core=h.core; real_append=core.append_event
+    def boom(*a,**k): raise RuntimeError("disk")
+    core.append_event=boom
+    assert run({"hook_event_name":"Stop"})==0
+    assert wait_got(4)==4,got
+    core.append_event=real_append
+    # 6b. post_wake raising still appends exactly one event and exits 0
+    real_post=core.post_wake; core.post_wake=boom
+    before=events()
+    assert run({"hook_event_name":"Stop"})==0
+    assert events()==before+1 and wait_got(5,0.3)==4
+    core.post_wake=real_post
+    # 7. server gone: exit 0 within 2.5s
+    srv.close(); os.unlink(path)
+    t0=time.monotonic(); assert run({"hook_event_name":"Stop"})==0; assert time.monotonic()-t0<2.5
+finally:
+    shutil.rmtree(sockdir,ignore_errors=True)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
