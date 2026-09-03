@@ -1466,17 +1466,41 @@ git commit -m "herdr: Document the mech tier, run-mech launch, and spend ledger"
 **Files:**
 - Modify: `docs/plans/2026-09-01-cheap-model-tier.md` close section only (branch-only)
 
-- [ ] **Step 1: Run the task's own contract**
+- [x] **Step 1: Run the task's own contract**
 
 Run: `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug git-personal-taloncjones-dotfiles-6c3f6099 --task-id td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical --worktree "$PWD" --contract claude/contracts/td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical-contract.json --allow-unpinned`
 Expected: `PASS 2 commands`.
 
-- [ ] **Step 2: AC11 live check (human-verify; recorded, never faked).** Use an isolated state root (`export CLAUDE_CONFIG_DIR=$(mktemp -d)` with the repo's `claude/hooks` copied into `$CLAUDE_CONFIG_DIR/hooks`, so the worker-status hook and core resolve there) and a scratch worktree of this repo (`git worktree add --detach <tmp> HEAD`). Write a one-line brief to `$CLAUDE_CONFIG_DIR/herdr-orch/<slug>/tasks/td-live.brief.md` ("Reply with the word ok, then run `git status`; do not commit"). Then, in order of preference:
+- [x] **Step 2: AC11 live check (human-verify; recorded, never faked).** Use an isolated state root (`export CLAUDE_CONFIG_DIR=$(mktemp -d)` with the repo's `claude/hooks` copied into `$CLAUDE_CONFIG_DIR/hooks`, so the worker-status hook and core resolve there) and a scratch worktree of this repo (`git worktree add --detach <tmp> HEAD`). Write a one-line brief to `$CLAUDE_CONFIG_DIR/herdr-orch/<slug>/tasks/td-live.brief.md` ("Reply with the word ok, then run `git status`; do not commit"). Then, in order of preference:
   1. **Through herdr** (when this session runs under `HERDR_ENV=1`): `herdr worktree open --cwd <repo_root>` on the scratch tree, publish a `role: impl` index for the returned workspace id under the isolated root, run the section-8 launch line (`herdr pane run <pane_id> "python3 $CORE run-mech ... --max-turns 2 --max-budget-usd 0.25 --timeout-secs 120"`), wait for the `end` line, then perform one section-4 check-in by hand: read the ledger and record and confirm the check-in lands on `paused: no_emit` (or `completed` if the worker emitted). Check `workspaces/<ws>.events.jsonl` for a `stopped` line.
   2. **Direct** (no herdr session): run the same `run-mech` line from a shell with `HERDR_ENV=1 HERDR_WORKSPACE_ID=<the published index's id>` exported; same checks.
   Confirm in either path: the `end` line has `models_used` naming a haiku id and `downgrade: false`; a completion record with the live `launch_id` exists. Record in the plan close, verbatim: "AC11: <through herdr | direct | not run>; Stop hook in print mode: <confirmed fired | confirmed did not fire | not run>". Cost: under $0.30. Clean up: `herdr workspace close` (herdr path) and `git worktree remove --force <tmp>`; the isolated state root is under mktemp.
 
-- [ ] **Step 3: Commit the close note** (branch-only file; `git add -f`).
+- [x] **Step 3: Commit the close note** (branch-only file; `git add -f`).
+
+## Close
+
+**Step 1 (contract):** Ran `verify-contract --allow-unpinned` on
+`claude/contracts/td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical-contract.json`
+against this worktree on 2026-09-03. Result: `PASS 2 commands` (core-unit-suite
+87 passed 0 failed; orchestration-walkthrough-suite 46 passed 0 failed).
+
+**Step 2 (AC11):** AC11: not run; Stop hook in print mode: not run.
+
+Rationale: the live check spends real API cost and launches a real `claude -p`
+subprocess through a scratch worktree and (when `HERDR_ENV=1`, which this
+session's environment carries) an isolated-but-live interaction with the
+`herdr` binary -- a side effect outside this task's own worktree. Per this
+session's operating principles, a side effect outside the worktree that norms
+say to ask about first is one of the standing stop conditions for autonomous
+execution, and the plan's own AC11 wording explicitly anticipates and permits
+recording "not run" rather than fabricating a result. Tasks 1-7's test suites
+(unit + contract-walkthrough, both green, see Step 1) already exercise every
+other acceptance criterion, including a full simulated mech kickoff, relaunch,
+and spend fold against a fake `claude`/`herdr`; AC11 is the one criterion that
+requires a real Claude Code subprocess and is explicitly scoped as
+human-verify. A human operator can run Task 8 Step 2 verbatim from this plan
+after merge to close AC11.
 
 ## Acceptance criteria -> verification contract mapping
 
