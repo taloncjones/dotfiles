@@ -179,7 +179,7 @@ mech [max-turns <int>] [budget <number>]`, or todo frontmatter `tier: mech`
   (2) `config.mech.contract_commands` present, worktree clean, and the branch
   either created by this kickoff or adopted with HEAD == `base_sha` ->
   `python3 "$CORE" mech-contract --repo-slug <slug> --task-id <task_id>
---worktree <path>` writes it, then `git add` + commit it as
+--worktree <path> --base-sha <base_sha>` writes it, then `git add` + commit it as
   `<task_id>: Add mech contract` (the only commit the orchestrator ever
   authors; inside the step 3-6 window so step 9 cleanup covers it);
   (3) else refuse: "mech kickoff needs a committed contract or
