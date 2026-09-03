@@ -24,6 +24,8 @@ STATE_ROOT/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record
       <task_id>.review.json           # review worker verdict (separate file)
+      <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
+      <task_id>.brief.md              # mech kickoff brief file (--brief-file)
     workspaces/
       <HERDR_WORKSPACE_ID>.json               # reverse index (task/repo/role)
       <HERDR_WORKSPACE_ID>.events.jsonl       # per-workspace hint log
@@ -121,7 +123,20 @@ STATE_ROOT/
   "models": {
     "plan": ["fable", "opus"],
     "impl": ["sonnet", "opus"],
-    "review": ["opus", "sonnet"]
+    "review": ["opus", "sonnet"],
+    "mech": ["haiku", "sonnet"]
+  },
+  "mech": {
+    "max_turns": 40,
+    "max_budget_usd": 2.0,
+    "timeout_secs": 1800,
+    "contract_commands": [
+      {
+        "name": "core-tests",
+        "run": "sh claude/hooks/herdr-orch.test.sh",
+        "timeout_secs": 600
+      }
+    ]
   }
 }
 ```
@@ -129,13 +144,24 @@ STATE_ROOT/
 Validation: required `user`, `default_base`; `epics` a (possibly empty)
 list; `soft_cap` a positive int (default 3); `models` optional (falls back
 to the built-in preferences). `models`, when present, must be an object keyed
-by the canonical resolver roles `plan`/`impl`/`review` (no `orchestrator` --
-its model is fixed at session launch), each value a list of the aliases
-`fable`/`opus`/`sonnet`. A malformed `models` block (non-object, a non-list
-override, or a token outside the alias set) makes `resolve-model` exit 5.
-Missing/invalid config -> mutating actions refuse with a concrete message. This
-file holds the only employer/user identifiers; the shipped skill and fixtures
-never contain them.
+by the canonical resolver roles `plan`/`impl`/`review`/`mech` (no
+`orchestrator` -- its model is fixed at session launch), each value a list of
+the aliases `fable`/`opus`/`sonnet`/`haiku`; `haiku` is legal only in
+`models.mech`. A malformed `models` block (non-object, a non-list override,
+a token outside the alias set, or `haiku` under a non-`mech` role) makes
+`resolve-model` exit 5.
+
+`mech` is optional and fails closed: absent -> `mech_caps` falls back to the
+built-in defaults above (`max_turns` 40, `max_budget_usd` 2.0, `timeout_secs`
+1800, no `contract_commands` template); present, it must be a JSON object
+with only the keys `max_turns` (int, 1-500), `max_budget_usd` (number, 0-50),
+`timeout_secs` (int, 60-14400), and `contract_commands` (a `commands` array
+in the same shape as the contract schema below); an unknown key, an
+out-of-bounds value, or an invalid `contract_commands` entry makes
+`mech-caps`/`mech-contract` exit 5 with a concrete message -- never silently
+clamped or defaulted. Missing/invalid config -> mutating actions refuse with
+a concrete message. This file holds the only employer/user identifiers; the
+shipped skill and fixtures never contain them.
 
 ### `capabilities.json` -- session-stamped strong-model availability
 
@@ -147,16 +173,17 @@ verify-after-launch). Never committed.
 {
   "v": 1,
   "session_id": "<orchestrator session id>",
-  "available": { "fable": false, "opus": true, "sonnet": true }
+  "available": { "fable": false, "opus": true, "sonnet": true, "haiku": true }
 }
 ```
 
-`v` must be the integer 1 (not `true`); `available` must carry exactly the three
-aliases, each a boolean. `resolve-model` treats the map as stale (exit 3) when
-`session_id` != the live orchestrator session, so a restart / `/clear` triggers
-a fresh probe. `resolve-model` filters each role's preference list by this map
-and prints the first available alias, or exits 3 (stale/absent), 4 (no
-survivor), or 5 (invalid role / malformed `models`).
+`v` must be the integer 1 (not `true`); `available` must carry exactly the four
+aliases, each a boolean; `haiku` is legal only in `models.mech`. `resolve-model`
+treats the map as stale (exit 3) when `session_id` != the live orchestrator
+session, so a restart / `/clear` triggers a fresh probe. `resolve-model` filters
+each role's preference list by this map and prints the first available alias,
+or exits 3 (stale/absent), 4 (no survivor), or 5 (invalid role / malformed
+`models`).
 
 ### `tasks/<task_id>.json` -- durable task record
 
@@ -182,6 +209,18 @@ Written only by the owning orchestrator, via `$CORE write-task`.
       "model": "sonnet",
       "created_by_this_orch": true,
       "started": "..."
+    },
+    {
+      "role": "mech",
+      "phase": "implement",
+      "workspace_id": "w1",
+      "agent": "mech-proj-123",
+      "peer_name": null,
+      "model": "haiku",
+      "launch_id": "mech-proj-123-20260901T200000Z",
+      "caps": { "max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800 },
+      "created_by_this_orch": true,
+      "started": "..."
     }
   ],
   "review_head_sha": null,
@@ -200,7 +239,13 @@ review) appends a new entry rather than overwriting.
 
 `peer_name` is the worker's Claude Code session name as `ListAgents` showed
 it after launch (the target of `notify_when_idle` subscriptions), or `null`
-when discovery found zero or several candidates.
+when discovery found zero or several candidates. The second `workers[]`
+entry above shows a `mech` dispatch: `peer_name` is always `null` (no
+`ListAgents` discovery for a headless worker; see SKILL.md section 8, Mech
+launch), and `launch_id`/`caps` are mech-only fields -- `launch_id` names
+the live headless run (`<agent>-<YYYYMMDDTHHMMSSZ>`, also correlated in the
+spend ledger below) and `caps` is the resolved `mech-caps` output for that
+launch (`max_turns`/`max_budget_usd`/`timeout_secs`).
 
 `contract_path` (worktree-relative) and `contract_sha256` are the
 verification-contract pin, written by the orchestrator at implement dispatch
@@ -242,6 +287,15 @@ worker via `$CORE emit-done` at end of a phase.
 }
 ```
 
+Optional fields, both `emit-done`-accepted and mech-specific: `launch_id`
+(correlates this record to a specific `workers[]` entry/spend-ledger launch;
+omitted by a non-mech worker) and `reason` (one of `max_turns`/`max_budget`/
+`timeout`/`no_emit`/`error`/`needs_design`/`blocked_on_human`/`other`; an
+unrecognized token is rejected). `dirty` (bool) is written only by the
+`run-mech` wrapper itself on a cap-hit/timeout/error record it emits on the
+worker's behalf (never by `emit-done`'s CLI): `true` when the worktree had
+uncommitted changes at the moment the wrapper wrote the record.
+
 ### `tasks/<task_id>.review.json` -- review worker verdict
 
 A **review** worker writes its verdict to a **separate** file via
@@ -274,6 +328,37 @@ current HEAD are all equal. `changes-requested`, any blocking finding, a
 provenance mismatch, or a dispatched/reviewed/HEAD mismatch is never
 merge-ready. `$CORE confirm-completion` takes the same `--workspace` provenance
 check for the impl `.done.json`.
+
+### `tasks/<task_id>.spend.jsonl` -- mech spend ledger
+
+Append-only, per-task, written only by `$CORE run-mech` (single writer, one
+`start` line before the headless launch and one `end` line after it returns
+or times out -- never by `emit-done` or the orchestrator). Read and folded
+only by `$CORE status`.
+
+```json
+{"v": 1, "task_id": "PROJ-123", "workspace_id": "w1", "agent": "mech-proj-123", "launch_id": "mech-proj-123-20260901T200000Z", "kind": "start", "role": "mech", "model": "haiku", "ts": "2026-09-01T20:00:00Z", "max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
+{"v": 1, "task_id": "PROJ-123", "workspace_id": "w1", "agent": "mech-proj-123", "launch_id": "mech-proj-123-20260901T200000Z", "kind": "end", "subtype": "success", "is_error": false, "num_turns": 12, "total_cost_usd": 0.83, "duration_ms": 45000, "models_used": ["haiku"], "downgrade": false, "errors": [], "model_attributable": false, "record_written_by": "worker", "git_ok": true, "exit_code": 0, "session_id": "<id>", "ts": "2026-09-01T20:05:00Z"}
+```
+
+Accepted-line rules (`valid_spend_line`; anything else is skipped, counted in
+`skipped_lines`, never fatal): `v` must be the integer 1; `kind` must be
+`start`/`end`; `task_id` must match the file's own task and `launch_id` must
+be a non-empty string; an `end` line additionally requires `num_turns` (a
+finite non-negative int) and `total_cost_usd` (a finite non-negative
+number) to both be present. The `end` line also carries `errors` (list),
+`model_attributable` (bool -- the within-role-fallback trigger, SKILL.md
+section 4), and `git_ok` (bool -- whether the wrapper could read a trustworthy
+HEAD/porcelain in the worktree at completion).
+
+`$CORE status` folds each task's lines (`fold_spend`) into a `spend` object
+(`usd`, `turns`, `launches`, `unknown_cost_launches`, `skipped_lines`) and
+adds two summary keys alongside the per-task results: `_totals` (the same
+keys summed across every task, plus `untracked_launches` -- non-`mech`
+`workers[]` entries, which carry no ledger) and `_orphans` (a sorted list of
+task ids with a `.spend.jsonl`/`.done.json` sidecar but no primary
+`tasks/<task_id>.json` -- surfaced for human cleanup, never auto-adopted or
+relaunched).
 
 ### `workspaces/<HERDR_WORKSPACE_ID>.json` -- reverse index
 

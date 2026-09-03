@@ -1591,5 +1591,25 @@ try $base --agent mech-td-r --launch-id 'mech-td-r 1' --base-sha "$BASE" --brief
 [ ! -e "$RD/tasks/td-r.spend.jsonl" ] && [ ! -e "$RD/tasks/td-r.done.json" ] && [ ! -e "$FAKE_CLAUDE_LOG.argv" ]
 SH
 
+check "docs pin the mech tier: role row, run-mech launch, liveness table, ledger schema, brief variant" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+grep -q '| Mechanical worker (`mech`)' "$S"
+grep -q 'resolve-model --role mech' "$S"
+grep -q 'run-mech --repo-slug' "$S"
+grep -q '"haiku":true' "$S"                                  # probe writes the fourth alias
+grep -q 'mech-caps --repo-slug' "$S"
+grep -q 'mech-contract --repo-slug' "$S"
+grep -q 'Launch base' "$S"                                   # base_sha = post-contract HEAD
+grep -q 'wrapper lost' "$S"                                  # mech liveness table
+grep -q '_totals' "$S"
+grep -q '"mech": {' "$R/state-layout.md"
+grep -q '\.spend\.jsonl' "$R/state-layout.md"
+grep -q '"haiku": true' "$R/state-layout.md"
+grep -q 'launch_id' "$R/state-layout.md"
+grep -q 'Mech brief variant' "$R/brief-template.md"
+grep -q -- '--launch-id <launch_id>' "$R/brief-template.md"
+grep -q 'spend.jsonl' "$R/event-schema.md"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

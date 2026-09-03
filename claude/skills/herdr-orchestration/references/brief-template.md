@@ -104,6 +104,48 @@ Do not report completion any other way. The orchestrator advances to the
 implement phase only on this `phase: plan` record.
 ```
 
+## Mech brief variant (`mech-<t>`)
+
+Written to the `--brief-file` path and piped to `claude -p` as stdin by
+`run-mech` itself (SKILL.md section 8, Mech launch) -- never sent via
+`agent prompt`, since the worker runs headless. Fill every `<...>`
+placeholder the same as the other variants, plus `<launch_id>` (the mech
+dispatch's `launch_id`, also passed to `run-mech --launch-id`):
+
+```
+You are `<agent-name>` (launch `<launch_id>`) doing mechanical task `<task_id>` in repo `<repo_slug>`.
+
+## Task
+<task_id>: <title>
+
+<body>
+
+You are a budget-capped mechanical worker: at most <max_turns> turns and
+$<max_budget_usd>. Do only the mechanical task described. Do not brainstorm,
+spec, or plan. If the task turns out to need design, commit what is safe and
+emit `paused --reason needs_design`. Commit as you go.
+
+## Workspace
+- Branch: <branch>
+- Worktree: <worktree_path>
+- Base: <base_ref> @ <base_sha>   (launch base; your commits must land past it)
+- Phase: implement
+
+## Close
+1. Commit all work.
+2. Run `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`;
+   `--outcome completed` only on exit 0 (or exit 5, noting "exit 5, no pin").
+3. Run `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> [--reason needs_design|blocked_on_human|other]`
+4. Stop. Never push, merge, open a PR, or run /handoff.
+```
+
+If the worker never runs `emit-done` (a genuinely stuck/hung headless
+process, or a crash) -- or the wrapper's own subprocess call fails or times
+out before the CLI can be invoked at all -- `run-mech` writes a guaranteed
+completion record itself (`written_by: wrapper`) from the wrapper-observed
+result (`reason: no_emit`/`timeout`/`error`/`max_turns`/`max_budget`), so
+`done.json` always exists after a mech launch, worker-emitted or not.
+
 ## Reviewer brief variant (`rev-<t>`)
 
 Sent instead of the above when dispatching review (section 5 of SKILL.md).

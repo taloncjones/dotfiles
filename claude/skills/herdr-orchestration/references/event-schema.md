@@ -29,6 +29,11 @@ The `$CORE watch` subcommand (orchestrator wake, SKILL.md section 1 step 6)
 is a READER of `events.jsonl` and the `tasks/` sidecars: it emits only the
 closed stdout vocabulary `signal` / `heartbeat` and never appends events.
 
+`tasks/<task_id>.spend.jsonl` (the mech spend ledger, written by `$CORE
+run-mech`) is watched like the completion sidecars so an append wakes the
+orchestrator; its lines are ledger records, not events, and are folded only
+by `status`.
+
 After appending, the hook also pushes one wake line to the owning
 orchestrator's inbox socket (`$CORE post_wake`, path from
 `owner.json.messaging_socket`). The wake is not an event: it is written to no
