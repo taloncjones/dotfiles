@@ -755,6 +755,99 @@ def wrapper_outcome(subtype, head_sha, base_sha, dirty):
     return ("paused" if usable else "failed"), "error"
 
 
+def run_mech(rd, a, brief, timeout_secs) -> int:
+    """Launch a headless capped worker; write start/end ledger lines and a
+    guaranteed completion record. Exit 0 all writes ok; 2 nothing written;
+    3 a post-start step failed (git lookup, record write, or end line)."""
+    start_ts = now_iso()
+    caps = {"max_turns": a.max_turns, "max_budget_usd": a.max_budget_usd,
+            "timeout_secs": a.timeout_secs}
+    base = {"v": 1, "task_id": a.task_id, "workspace_id": a.workspace,
+            "agent": a.agent, "launch_id": a.launch_id}
+    try:
+        append_spend(rd, a.task_id, dict(base, kind="start", role="mech",
+                                         model=a.model, ts=start_ts, **caps))
+    except OSError:
+        sys.stderr.write("[X] cannot append the spend ledger\n")
+        return 2
+    argv = ["claude", "--model", a.model, "--permission-mode", "auto",
+            "--name", a.agent, "-p", "--output-format", "json",
+            "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
+    subtype, result, exit_code, stdout = "unparseable", None, None, ""
+    try:
+        proc = subprocess.Popen(argv, cwd=a.worktree, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+    except OSError as e:
+        sys.stderr.write(f"[X] cannot launch claude: {e}\n")
+    else:
+        try:
+            stdout, _err = proc.communicate(brief, timeout=timeout_secs)
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            subtype, exit_code = "timeout", proc.returncode
+    if subtype != "timeout":
+        result = parse_claude_result(stdout)
+        if result is not None:
+            subtype = str(result.get("subtype") or "unparseable")
+    used = models_used(result)
+    errors = result_errors(result)
+    downgrade = is_downgrade(used, a.model)
+    head = _git(a.worktree, "rev-parse", "HEAD")
+    porcelain = _git(a.worktree, "status", "--porcelain")
+    git_ok = head is not None and porcelain is not None
+    dirty = not git_ok or porcelain != ""
+    done_path = rd / "tasks" / f"{a.task_id}.done.json"
+    try:
+        existing = json.loads(done_path.read_text())
+    except (OSError, ValueError):
+        existing = None
+    rc = 0
+    written_by = "worker"
+    if not own_launch_record(existing, a.workspace, a.agent, a.launch_id, start_ts):
+        if not git_ok:
+            # No trustworthy HEAD: never fabricate a completion record.
+            sys.stderr.write("[X] git unavailable in the worktree; no completion record\n")
+            written_by, rc = "none", 3
+        else:
+            outcome, reason = wrapper_outcome(subtype, head, a.base_sha, dirty)
+            done = {"v": 1, "task_id": a.task_id, "workspace_id": a.workspace,
+                    "agent": a.agent, "phase": "implement", "outcome": outcome,
+                    "head_sha": head, "base_sha": a.base_sha,
+                    "launch_id": a.launch_id, "reason": reason, "dirty": dirty,
+                    "ts": now_iso()}
+            try:
+                write_json_atomic(done_path, done)
+                written_by = "wrapper"
+            except OSError:
+                sys.stderr.write("[X] cannot write the completion record\n")
+                written_by, rc = "none", 3
+
+    def _num(k, integer=False):
+        v = (result or {}).get(k)
+        return v if _finite_nonneg(v, integer) else None
+
+    end = dict(base, kind="end", subtype=subtype,
+               is_error=bool((result or {}).get("is_error", subtype != "success")),
+               num_turns=_num("num_turns", True), total_cost_usd=_num("total_cost_usd"),
+               duration_ms=_num("duration_ms", True), models_used=used,
+               downgrade=downgrade, errors=errors,
+               model_attributable=model_attributable(subtype, downgrade, errors, a.model),
+               record_written_by=written_by, git_ok=git_ok, exit_code=exit_code,
+               session_id=(result or {}).get("session_id"), ts=now_iso())
+    try:
+        append_spend(rd, a.task_id, end)
+    except OSError:
+        sys.stderr.write("[X] cannot append the spend ledger end line\n")
+        rc = 3
+    return rc
+
+
 def _finite_nonneg(x, integer=False) -> bool:
     """None passes (absent/unknown); bools never; ints/floats must be finite
     and >= 0; integer=True additionally requires an int."""
@@ -1154,6 +1247,11 @@ def main(argv=None) -> int:
     mc.add_argument("--max-turns", type=int, default=None)
     mc.add_argument("--max-budget-usd", type=float, default=None)
     add("mech-contract", "--task-id", "--worktree", "--base-sha")
+    rm = add("run-mech", "--task-id", "--workspace", "--agent", "--launch-id",
+             "--model", "--worktree", "--base-sha", "--brief-file")
+    rm.add_argument("--max-turns", type=int, required=True)
+    rm.add_argument("--max-budget-usd", type=float, required=True)
+    rm.add_argument("--timeout-secs", type=int, required=True)
     add("classify-probe", "--model", "--json")
     ed = add(
         "emit-done",
@@ -1573,6 +1671,39 @@ def main(argv=None) -> int:
         out.write_text(json.dumps(rec, indent=2) + "\n")
         print(rel)
         return 0
+    if ns.cmd == "run-mech":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(valid_workspace_id(ns.workspace), "invalid workspace")
+        for name in ("repo_slug", "task_id", "workspace", "agent", "launch_id",
+                     "model", "worktree", "base_sha", "brief_file"):
+            _require(SHELL_SAFE_RE.match(str(getattr(ns, name))),
+                     f"--{name.replace('_', '-')} contains whitespace or a shell metacharacter")
+        _require(valid_mech_agent(ns.agent, ns.task_id),
+                 "agent must be agent_name('mech', task_id) or a -2..-9 collision variant")
+        _require(ns.launch_id.startswith(ns.agent + "-"), "launch-id must be prefixed by the agent name")
+        _require(ns.model in CAP_MODELS, "model must be a known alias")
+        _require(SHA40_RE.match(ns.base_sha), "base-sha must be 40 hex")
+        for k in ("max_turns", "max_budget_usd", "timeout_secs"):
+            err = _cap_error(k, getattr(ns, k))
+            _require(err is None, err or "")
+        bf = Path(ns.brief_file)
+        _require(bf.is_file() and not bf.is_symlink() and contained(bf, state_root()),
+                 "brief-file must be a regular file under STATE_ROOT")
+        try:
+            brief = bf.read_text()
+        except (OSError, UnicodeDecodeError):
+            brief = None
+        _require(brief is not None, "brief-file is not readable as text")
+        wt = Path(ns.worktree)
+        _require(wt.is_dir() and _git(str(wt), "rev-parse", "--git-dir") is not None,
+                 "worktree must be an existing git checkout")
+        rd = repo_dir(ns.repo_slug)
+        try:
+            (rd / "tasks").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # run_mech's first append reports the unwritable ledger as exit 2
+        return run_mech(rd, ns, brief, ns.timeout_secs)
     return 2
 
 
