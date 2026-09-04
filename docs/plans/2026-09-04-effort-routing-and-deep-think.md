@@ -48,8 +48,11 @@
 | AC5 | 4 | core-unit-suite |
 | AC8 | 5 | core-unit-suite |
 | AC6c (validator), AC7 (ids) | 6 | core-unit-suite |
-| (refactor, existing checks) | 7 | core-unit-suite |
-| AC6, AC7 | 8 | core-unit-suite |
+| (refactor, characterization checks) | 7 | core-unit-suite |
+| AC9 (scan), AC7 (validators) | 8a | core-unit-suite |
+| (persistence, lock) | 8b | core-unit-suite |
+| AC6 | 8c | core-unit-suite |
+| AC7 | 8d | core-unit-suite |
 | AC9, AC10 | 9 | core-unit-suite |
 | AC13 | 10 | core-unit-suite |
 | AC11 | 11 | orchestration-walkthrough-suite |
@@ -94,7 +97,7 @@ assert c.role_effort("impl",{"effort":{"impl":"low"}})==("low",None)
 assert c.role_effort("plan",{"effort":{"plan":None}})==(None,None)
 assert c.role_effort("think",{"effort":{"think":"xhigh"}})==("xhigh",None)
 assert c.role_effort("review",{"effort":{"plan":"low"}})==("high",None)   # sibling override untouched
-bad=[{"effort":[]},{"effort":{"bogus":"high"}},{"effort":{"plan":"turbo"}},{"effort":{"plan":True}},
+bad=[{"effort":[]},{"effort":None},{"effort":{"bogus":"high"}},{"effort":{"plan":"turbo"}},{"effort":{"plan":True}},
      {"effort":{"plan":3}},{"effort":{"think":None}},{"effort":{"think":"low"}},{"effort":{"think":"medium"}}]
 for b in bad:
     assert c.role_effort("plan",b)==(None,5), b
@@ -154,9 +157,10 @@ def role_effort(role, config):
     models block."""
     if role not in ROLE_EFFORT_DEFAULTS:
         return (None, 5)
-    block = (config or {}).get("effort")
-    if block is None:
+    cfg = config or {}
+    if "effort" not in cfg:
         return (ROLE_EFFORT_DEFAULTS[role], None)
+    block = cfg["effort"]                      # an explicit null is a malformed block
     if not isinstance(block, dict) or any(k not in ROLE_EFFORT_DEFAULTS for k in block):
         return (None, 5)
     for k, v in block.items():
@@ -342,6 +346,10 @@ assert c.strip_ansi("\x1b]0;title\x07x\x1b[2Ky")=="xy"
 # adversarial: first banner wins; unknown family is unreadable, never downgrade
 two="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n> tell me about Claude Code v9.9.9\n Opus 9\n"
 assert c.classify_banner(c.parse_banner(two),"sonnet","inherit")=="ok"
+quoted="> the banner said Claude Code v2.1.260 earlier\n Opus 9\nClaude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"
+assert c.parse_banner(quoted)["model"]=="Sonnet 5"                       # unanchored mention is not a banner line
+far="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"+"\n".join("line %d"%i for i in range(20))+"\n "+B+" xhigh "+D+" /effort\n"
+assert c.parse_banner(far)["effort"] is None                              # indicator beyond the banner region is ignored
 for bad in ("", "no banner here", "Claude Code v2.1.260\n", "Claude Code v2.1.260\n  Loading... "+D+" x\n", "Claude Code vX\n Sonnet 5\n"):
     assert c.parse_banner(bad) is None, bad
     assert c.classify_banner(None,"fable","high")=="unreadable"
@@ -375,7 +383,8 @@ _ANSI_RE = re.compile(
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
     r"|\x1b[@-Z\\-_]"                     # single-char escapes
 )
-_BANNER_VERSION_RE = re.compile(r"Claude Code v\d+\.\d+\.\d+")
+_BANNER_VERSION_RE = re.compile(r"^[^A-Za-z]*Claude Code v\d+\.\d+\.\d+")   # anchored: glyphs, then the banner
+_BANNER_SCAN_LINES = 12                                                        # indicator lives within the banner region
 _BANNER_MODEL_RE = re.compile(
     r"^(?P<model>(?:Fable|Opus|Sonnet|Haiku)\b[^\u00b7]*?)"
     r"(?: with (?P<effort>low|medium|high|xhigh|max) effort)?"
@@ -406,7 +415,7 @@ def parse_banner(text):
             return None
         effort = m.group("effort")
         if effort is None:
-            for later in rest[1:]:
+            for later in rest[1:_BANNER_SCAN_LINES]:
                 e = _BANNER_EFFORT_LINE_RE.search(later)
                 if e:
                     effort = e.group(1)
@@ -802,10 +811,35 @@ git commit -m "herdr: Add think id rules, answer schema, and validator"
 - Produces: `run_headless(argv, cwd, stdin_text, timeout_secs) -> (subtype, result, exit_code)`; `subtype` is `"timeout"`, `"unparseable"`, or the result's own `subtype`; `result` is the parsed result dict or None; `exit_code` int or None (launch failed).
 - `run_mech` behaviour is byte-for-byte unchanged (existing checks are the test).
 
-- [ ] **Step 1: Confirm the existing coverage that guards this refactor**
+- [ ] **Step 1: Write characterization tests BEFORE extracting** (they pin `run_mech`'s observable behaviour for every headless outcome and must pass both before and after Step 2)
 
-Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | grep -c 'PASS  run-mech'`
-Expected: at least 3 (success, cap-hit, timeout checks exist on the mech branch).
+```sh
+check "run-mech characterization: popen failure, unparseable stdout, nonzero exit, timeout return" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-ch"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+BASE=$(git -C "$WT" rev-parse HEAD); printf 'brief\n' > "$RD/tasks/td-ch.brief.md"
+export FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+base="$CLI run-mech --repo-slug slug-ch --task-id td-ch --workspace w1 --agent mech-td-ch --model haiku --worktree $WT --base-sha $BASE --brief-file $RD/tasks/td-ch.brief.md --max-turns 5 --max-budget-usd 0.5 --timeout-secs 60"
+end() { python3 -c "import json,sys;l=[json.loads(x) for x in open('$RD/tasks/td-ch.spend.jsonl')];e=[x for x in l if x['kind']=='end'][-1];print(json.dumps(e))"; }
+done_() { python3 -c "import json;print(json.dumps(json.load(open('$RD/tasks/td-ch.done.json'))))"; }
+# 1. no claude on PATH: exit_code null, subtype unparseable, failed/error (HEAD == base)
+PATH="$(mktemp -d)" $base --launch-id mech-td-ch-1 || true
+end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='unparseable' and e['exit_code'] is None and e['num_turns'] is None,e"
+done_ | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['outcome']=='failed' and d['reason']=='error',d"
+# 2. unparseable stdout from a running fake
+export PATH="$FAKE_CLAUDE_DIR:$PATH"; printf 'garbage\n' > "$FAKE_CLAUDE_JSON"
+$base --launch-id mech-td-ch-2; end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='unparseable' and e['exit_code']==0 and e['total_cost_usd'] is None,e"
+# 3. nonzero exit with a parseable error result
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"errors":["boom"]}' > "$FAKE_CLAUDE_JSON"
+FAKE_CLAUDE_RC=7 $base --launch-id mech-td-ch-3; end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='error_during_execution' and e['exit_code']==7 and e['errors']==['boom'] and e['model_attributable'] is False,e"
+# 4. timeout: subtype timeout, negative exit code (killed), num_turns null
+FAKE_CLAUDE_SLEEP=70 $base --launch-id mech-td-ch-4 --max-turns 5 2>/dev/null || true
+SH
+```
+
+The timeout sub-case needs a sleep longer than the 60 s floor; keep it only if the suite budget allows (it adds ~60 s), else drop line 4 and rely on the existing mech timeout check plus Task 8c's `run_think` timeout case, which exercises the same `run_headless` path. Run: `sh claude/hooks/herdr-orch.test.sh 2>&1 | grep characterization` -> PASS before the extraction.
 
 - [ ] **Step 2: Implement the extraction**
 
@@ -844,194 +878,89 @@ In `run_mech`, replace the block from `subtype, result, exit_code, stdout = ...`
     subtype, result, exit_code = run_headless(argv, a.worktree, brief, timeout_secs)
 ```
 
-- [ ] **Step 3: Run both suites** -- `0 failed`, same PASS counts as Task 6's run.
+- [ ] **Step 3: Run both suites** -- `0 failed`; the characterization check still passes unchanged after the extraction.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add claude/hooks/herdr_orch_core.py
+git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
 git commit -m "herdr: Extract run_headless from run_mech"
 ```
 
 ---
 
-### Task 8: `run-think` verb
+### Task 8a: Think record validators, scan, and accounting
 
 **Files:**
-- Modify: `claude/hooks/herdr_orch_core.py` (new functions after `run_mech`; parser + handler)
+- Modify: `claude/hooks/herdr_orch_core.py` (new functions after `valid_think_answer`)
 - Test: `claude/hooks/herdr-orch.test.sh`
 
 **Interfaces:**
-- Consumes: `run_headless`, `valid_think_id`, `think_kind`, `THINK_SCHEMA`, `valid_think_answer`, `think_caps` bounds via `_cap_error`, `models_used`, `is_downgrade`, `result_errors`, `model_attributable`, `write_json_atomic`, `repo_slug`, `_git`, `contained`, `state_root`, `SHELL_SAFE_RE`.
-- Produces: `think_dir(rd) -> Path`; `think_scan(rd, now_ts) -> {"launches": [...records], "answers": {think_id: record}, "live": [...], "lost": [...], "skipped_files": n}`; `think_usd_today(scan, today_prefix) -> float` (reservation semantics: numeric answer cost, else the launch's `caps.max_budget_usd`); `write_launch_record(path, rec) -> bool` (create-exclusive); `think_lock(rd)` context manager (`fcntl.flock` on `think/.lock`); `run_think(rd, a, question, caps, add_dirs, attempt, parent, budget) -> int`; CLI `run-think` (fenced: `--session`/`--fence`) per spec 4.7.
+- Consumes: `valid_think_id`, `think_kind`, `_finite_nonneg`, `_cap_error`, `MECH_BOUNDS`.
+- Produces: `think_dir(rd) -> Path`; `valid_launch_record(rec, tid) -> bool`; `valid_answer_record(rec, tid) -> bool`; `think_scan(rd, now_ts) -> {"launches": [...], "answers": {tid: rec}, "live": [...], "lost": [...], "skipped_files": n, "corrupt": [tid, ...]}`; `think_usd_today(scan, today_prefix) -> float` (numeric answer cost, else the launch's `caps.max_budget_usd`).
 
-- [ ] **Step 1: Write the failing tests** (one Python check for the pure helpers, one shell check for the verb)
+Validation rules (fail closed; an invalid file is skipped and counted, and a launch whose only answer is invalid stays live/lost):
+
+- launch record: `v == 1` (int), `think_id == tid`, `kind == think_kind(tid)`, `task_id` None or a valid task id, `model` in `ROLE_ALIASES["think"]`, `effort` in `THINK_EFFORTS`, `caps` an object whose `max_turns`/`max_budget_usd`/`timeout_secs` each pass `_cap_error`, `attempt` in (1, 2) and equal to 2 iff `tid` ends in `-2`, `parent` None iff `attempt == 1` else `tid[:-2]`, `started` parseable as `%Y-%m-%dT%H:%M:%SZ`.
+- answer record: `v == 1`, `think_id == tid`, `status` in (`answered`, `unanswered`), `total_cost_usd` None or finite non-negative, `num_turns` None or finite non-negative int, `started` parseable; `answered` requires `answer` to pass `valid_think_answer`; `unanswered` requires `reason` in `THINK_REASONS` and `answer` None.
+- A malformed launch record is listed under `corrupt` (the `run-think` handler refuses with exit 4 while any exists: liveness cannot be judged); a malformed answer file is skipped only.
+
+- [ ] **Step 1: Write the failing test**
 
 ```sh
-check "think_scan/think_usd_today: live vs lost by each record's own timeout; today sum" <<PY
+check "think validators + scan: invalid records fail closed; live/lost per record timeout; reservation accounting" <<PY
 $LOAD
 rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
 def w(name,rec): open(os.path.join(td,name),"w").write(json.dumps(rec))
-L=lambda tid,started,to=900:{"v":1,"think_id":tid,"kind":c.think_kind(tid),"task_id":None,"repo_slug":"s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":to},"attempt":1,"parent":None,"started":started,"pid":1}
+L=lambda tid,started,to=900,**kw:dict({"v":1,"think_id":tid,"kind":c.think_kind(tid),"task_id":None,"repo_slug":"s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":to},"attempt":2 if tid.endswith("-2") else 1,"parent":tid[:-2] if tid.endswith("-2") else None,"started":started,"pid":1},**kw)
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+ANS={"recommendation":"r","rationale":"w","options":[opt(1),opt(2)],"confidence":"high"}
+A=lambda tid,status,cost,turns,started,**kw:dict({"v":1,"think_id":tid,"status":status,"reason":None if status=="answered" else "error","answer":ANS if status=="answered" else None,"total_cost_usd":cost,"num_turns":turns,"started":started},**kw)
+assert c.valid_launch_record(L("think-triage-20260904100000","2026-09-04T10:00:00Z"),"think-triage-20260904100000")
+assert c.valid_launch_record(L("think-triage-20260904100000-2","2026-09-04T10:00:00Z"),"think-triage-20260904100000-2")
+for bad in (L("think-triage-20260904100000","2026-09-04T10:00:00Z",caps={}), L("think-triage-20260904100000","nope"),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",model="sonnet"), L("think-triage-20260904100000","2026-09-04T10:00:00Z",effort="low"),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",attempt=2), L("think-triage-20260904100000-2","2026-09-04T10:00:00Z",parent=None),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",kind="other"), dict(L("think-triage-20260904100000","2026-09-04T10:00:00Z"),v=True), {}):
+    assert not c.valid_launch_record(bad,"think-triage-20260904100000"), bad
+assert c.valid_answer_record(A("t","answered",1.0,2,"2026-09-04T10:00:00Z"),"t")
+assert c.valid_answer_record(A("t","unanswered",None,None,"2026-09-04T10:00:00Z"),"t")
+for bad in (A("t","answered",1.0,2,"2026-09-04T10:00:00Z",answer={"recommendation":"r"}), A("t","done",1.0,2,"2026-09-04T10:00:00Z"),
+            A("t","answered",-1,2,"2026-09-04T10:00:00Z"), A("t","answered",1.0,True,"2026-09-04T10:00:00Z"),
+            A("t","unanswered",None,None,"2026-09-04T10:00:00Z",reason="bogus"), A("t","unanswered",None,None,"2026-09-04T10:00:00Z",answer=ANS), {"v":1,"think_id":"t"}):
+    assert not c.valid_answer_record(bad,"t"), bad
 w("think-triage-20260904100000.launch.json",L("think-triage-20260904100000","2026-09-04T10:00:00Z"))
-w("think-triage-20260904100000.answer.json",{"v":1,"think_id":"think-triage-20260904100000","status":"answered","total_cost_usd":1.12,"num_turns":6,"started":"2026-09-04T10:00:00Z"})
+w("think-triage-20260904100000.answer.json",A("think-triage-20260904100000","answered",1.12,6,"2026-09-04T10:00:00Z"))
 w("think-other-20260904110000.launch.json",L("think-other-20260904110000","2026-09-04T11:00:00Z"))
-w("think-other-20260904110000.answer.json",{"v":1,"think_id":"think-other-20260904110000","status":"answered","total_cost_usd":0.40,"num_turns":3,"started":"2026-09-04T11:00:00Z"})
+w("think-other-20260904110000.answer.json",A("think-other-20260904110000","answered",0.40,3,"2026-09-04T11:00:00Z"))
 w("think-incident-20260904120000.launch.json",L("think-incident-20260904120000","2026-09-04T12:00:00Z"))
-w("think-incident-20260904120000.answer.json",{"v":1,"think_id":"think-incident-20260904120000","status":"unanswered","total_cost_usd":None,"num_turns":None,"started":"2026-09-04T12:00:00Z"})
+w("think-incident-20260904120000.answer.json",A("think-incident-20260904120000","unanswered",None,None,"2026-09-04T12:00:00Z"))
 w("think-decompose-20260904125900.launch.json",L("think-decompose-20260904125900","2026-09-04T12:59:00Z"))      # live: 1 min old
 w("think-incident-20260903120000.launch.json",L("think-incident-20260903120000","2026-09-03T12:00:00Z",600))  # lost
+w("think-other-20260904124000.launch.json",L("think-other-20260904124000","2026-09-04T12:40:00Z"))            # invalid answer -> still live
+w("think-other-20260904124000.answer.json",{"v":1,"think_id":"think-other-20260904124000","status":"answered"})
 open(os.path.join(td,"think-other-20260904130000.answer.json"),"w").write('{"v":1,"trunc')
-w("think-other-20260904140000.answer.json",{"v":2,"think_id":"x"})
+w("think-other-20260904140000.answer.json",{"v":2,"think_id":"think-other-20260904140000"})
+w("think-other-20260904150000.answer.json",A("think-other-20260904150000","answered",0.5,1,"2026-09-04T15:00:00Z"))   # orphan answer: no launch -> skipped
+w("think-triage-20260904160000.launch.json",{"v":1,"think_id":"think-triage-20260904160000"})                          # corrupt launch
 s=c.think_scan(rd,"2026-09-04T13:00:00Z")
-assert len(s["launches"])==5 and set(s["answers"])=={"think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000"},s
-assert s["live"]==["think-decompose-20260904125900"] and s["lost"]==["think-incident-20260903120000"] and s["skipped_files"]==2,s
-# reservation: answered 1.12 + 0.40, unanswered null cost counts its 3.0 cap, live decompose counts its 3.0 cap
-assert c.think_usd_today(s,"2026-09-04")==7.52, c.think_usd_today(s,"2026-09-04")
+assert [l["think_id"] for l in s["launches"]]==sorted(["think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000","think-decompose-20260904125900","think-incident-20260903120000","think-other-20260904124000"]),s["launches"]
+assert set(s["answers"])=={"think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000"},s["answers"].keys()
+assert s["live"]==["think-decompose-20260904125900","think-other-20260904124000"] and s["lost"]==["think-incident-20260903120000"],s
+assert s["skipped_files"]==4 and s["corrupt"]==["think-triage-20260904160000"],s
+# reservation: 1.12 + 0.40 + 3.0 (null-cost unanswered) + 3.0 (live decompose) + 3.0 (live with invalid answer) = 10.52
+assert c.think_usd_today(s,"2026-09-04")==10.52, c.think_usd_today(s,"2026-09-04")
 assert c.think_usd_today(s,"2026-09-03")==3.0                                   # lost launch counts its cap
-assert c.run_headless(["sh","-c","sleep 5"], ".", "", 1)[0]=="timeout"
-e=c.think_scan(tempfile.mkdtemp(),"2026-09-04T13:00:00Z"); assert e["launches"]==[] and e["live"]==[] and e["skipped_files"]==0
+e=c.think_scan(tempfile.mkdtemp(),"2026-09-04T13:00:00Z"); assert e=={"launches":[],"answers":{},"live":[],"lost":[],"skipped_files":0,"corrupt":[]},e
 sys.exit(0)
 PY
-
-check "run-think: argv, launch record, answered/unanswered, limits, exit codes" <<'SH'
-export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
-SLUG="github-com-org-repo-cafef00d"
-RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think" "$RD/tasks"
-WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
-git -C "$WT" remote add origin https://github.com/org/repo.git
-SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo.git'))")
-RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think" "$RD/tasks"
-export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
-FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
-ID=think-triage-20260904170000
-printf 'Which item first?\n' > "$RD/think/$ID.question.md"
-GOOD='{"recommendation":"do A","rationale":"because","options":[{"label":"A","summary":"s","tradeoffs":"t","risk":"low"},{"label":"B","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}'
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.9,"duration_ms":1000,"session_id":"sid","permission_denials":[{"tool":"Read"}],"modelUsage":{"claude-fable-5-1":{}},"structured_output":%s}' "$GOOD" > "$FAKE_CLAUDE_JSON"
-base="$CLI run-think --repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
-rc=0; $CLI run-think --repo-slug $SLUG --session S --fence 999 --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID >/dev/null 2>&1 || rc=$?
-[ "$rc" -ne 0 ] && [ ! -e "$RD/think/$ID.launch.json" ]                 # stale fence refused, nothing written
-$base --think-id $ID --add-dir tasks
-python3 - "$RD" "$ID" "$WT" "$FAKE_CLAUDE_LOG" <<'PY'
-import json,sys,os
-rd,tid,wt,log=sys.argv[1:]
-l=json.load(open(f"{rd}/think/{tid}.launch.json")); a=json.load(open(f"{rd}/think/{tid}.answer.json"))
-assert l["think_id"]==tid and l["caps"]["timeout_secs"]==60 and l["attempt"]==1 and l["parent"] is None and l["effort"]=="high",l
-assert a["status"]=="answered" and a["answer"]["recommendation"]=="do A" and a["total_cost_usd"]==0.9 and a["num_turns"]==4
-assert a["permission_denials"]==1 and a["models_used"]==["claude-fable-5-1"] and a["downgrade"] is False and a["attempt"]==1,a
-argv=open(log+".argv").read().splitlines()
-schema=json.load(open(os.devnull)) if False else None
-exp=["claude","--model","fable","--effort","high","--permission-mode","dontAsk","--name",tid,"-p","--output-format","json","--json-schema"]
-assert argv[:len(exp)]==exp,argv
-i=argv.index("--json-schema"); import importlib.util
-s=importlib.util.spec_from_file_location("c","claude/hooks/herdr_orch_core.py");c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
-assert json.loads(argv[i+1])==c.THINK_SCHEMA
-tail=argv[i+2:]
-assert tail==["--max-turns","15","--max-budget-usd","3.0","--restricted","--strict-mcp-config","--tools","Read,Glob,Grep","--add-dir",f"{rd}/tasks"],tail
-assert open(log+".stdin").read()=="Which item first?\n"
-assert os.path.realpath(open(log+".cwd").read().strip())==os.path.realpath(wt)
-PY
-# limits: second launch while the first is live -> exit 4, nothing written
-ID2=think-other-20260904170100; printf 'q\n' > "$RD/think/$ID2.question.md"
-rm "$RD/think/$ID.answer.json"                                # make the first launch look live again
-rc=0; $base --think-id $ID2 2>/dev/null || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/$ID2.launch.json" ]
-# lost sibling is ignored: backdate the first launch beyond 60+120s
-python3 -c "import json;p='$RD/think/$ID.launch.json';d=json.load(open(p));d['started']='2020-01-01T00:00:00Z';json.dump(d,open(p,'w'))"
-printf '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":15,"total_cost_usd":2.0}' > "$FAKE_CLAUDE_JSON"
-$base --think-id $ID2
-python3 -c "import json;a=json.load(open('$RD/think/$ID2.answer.json'));assert a['status']=='unanswered' and a['reason']=='max_turns' and a['answer'] is None,a"
-# no_answer: success without a valid object; boundary variants
-ID3=think-other-20260904170200; printf 'q\n' > "$RD/think/$ID3.question.md"
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.2,"structured_output":{"recommendation":"r","rationale":"w","options":[{"label":"a","summary":"s","tradeoffs":"t","risk":"low"}],"confidence":"high"}}' > "$FAKE_CLAUDE_JSON"
-$base --think-id $ID3
-python3 -c "import json;a=json.load(open('$RD/think/$ID3.answer.json'));assert a['reason']=='no_answer' and 'fewer than 2' in a['errors'][0],a"
-# timeout: fake sleeps past --timeout-secs; pid gone afterwards
-ID4=think-incident-20260904170300; printf 'q\n' > "$RD/think/$ID4.question.md"
-# concurrency: two distinct ids racing -> exactly one launch record and one exit 4
-IDA=think-other-20260904170400; IDB=think-other-20260904170500
-printf 'q\n' > "$RD/think/$IDA.question.md"; printf 'q\n' > "$RD/think/$IDB.question.md"
-python3 -c "import json;p='$RD/think/$ID2.launch.json';d=json.load(open(p));d['started']='2020-01-01T00:00:00Z';json.dump(d,open(p,'w'))"
-for X in $ID3 $ID4; do [ -e "$RD/think/$X.launch.json" ] && python3 -c "import json;p='$RD/think/$X.launch.json';d=json.load(open(p));d['started']='2020-01-01T00:00:00Z';json.dump(d,open(p,'w'))"; done
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.1}' > "$FAKE_CLAUDE_JSON"
-FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logA" $base --think-id $IDA >/dev/null 2>&1 & PA=$!
-FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logB" $base --think-id $IDB >/dev/null 2>&1 & PB=$!
-ra=0; wait $PA || ra=$?; rb=0; wait $PB || rb=$?
-[ $((ra + rb)) -eq 4 ] && [ "$(ls "$RD/think/" | grep -c -E "($IDA|$IDB)\.launch\.json")" -eq 1 ]
-SH
 ```
 
-Note: the timeout sub-case needs `--timeout-secs` below the fake's sleep, but the floor is 60 s. Keep it as a separate check using a 61 s sleep only if the suite budget allows; otherwise assert the timeout path through the Python API directly (`c.run_headless(["sh","-c","sleep 5"], ".", "", 1)` -> `("timeout", None, -9)`), which is what the mech suite already does for its own timeout check. Add that one-liner to the Python check above.
-
-Add a third check for the remaining exit-2 and exit-4 cases:
-
-```sh
-check "run-think exit 2 validation cases write nothing; daily ceiling and retry math exit 4" <<'SH'
-export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
-WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
-git -C "$WT" remote add origin https://github.com/org/repo2.git
-SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo2.git'))")
-RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think"
-ID=think-triage-20260904180000; printf 'q\n' > "$RD/think/$ID.question.md"
-export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"; : > "$FAKE_CLAUDE_JSON"
-FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
-ok="--repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
-try() { rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 2 ] || { echo "expected 2 got $rc for: $*" >&2; exit 1; }; }
-try $ok --think-id think-triage-2026090418000                              # 13-digit stamp
-try $ok --think-id think-triage-20260904180000-3
-try $ok --think-id think-Triage-20260904180000
-try $ok --think-id think-other-20260904180000                              # kind disagrees with --kind triage
-F2="--repo-slug $SLUG --session S --fence $FE --kind triage"
-try $F2 --model sonnet --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID
-try $F2 --model fable --effort inherit --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID
-try $F2 --model fable --effort medium --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID
-try $F2 --model fable --effort high --cwd $WT --max-turns 0 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID
-try $ok --think-id think-triage-20260904180000-2                              # -2 without --parent
-try $ok --think-id $ID --parent think-triage-20260904170000                    # --parent with a non -2 id
-try $ok --think-id $ID --add-dir owner
-try $ok --think-id $ID --add-dir "$RD"
-try $F2 --model fable --effort high --cwd "$(mktemp -d)" --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID   # non-git cwd
-OTHER=$(mktemp -d); git -C "$OTHER" init -q; git -C "$OTHER" -c user.name=t -c user.email=t@x commit -q --allow-empty -m b; git -C "$OTHER" remote add origin https://github.com/org/elsewhere.git
-try $F2 --model fable --effort high --cwd $OTHER --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID          # foreign repo
-rm "$RD/think/$ID.question.md"; try $ok --think-id $ID; printf 'q\n' > "$RD/think/$ID.real.md"; ln -s "$RD/think/$ID.real.md" "$RD/think/$ID.question.md"; try $ok --think-id $ID
-rm "$RD/think/$ID.question.md"; printf 'q\n' > "$RD/think/$ID.question.md"
-: > "$RD/think/$ID.launch.json"; try $ok --think-id $ID; rm "$RD/think/$ID.launch.json"
-[ ! -e "$FAKE_CLAUDE_LOG.argv" ]                                            # never launched
-# daily ceiling: two answered launches today at 3.0 each plus one null-cost launch reserved at its 3.0 cap = 9.0 of 10.0; a 3.0 cap must refuse with 4
-TODAY=$(date -u +%Y-%m-%d)
-for n in 1 2 3; do printf '{"v":1,"think_id":"think-other-2026090410000%s","kind":"other","task_id":null,"repo_slug":"%s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":null,"started":"%sT10:00:0%sZ","pid":1}' "$n" "$SLUG" "$TODAY" "$n" > "$RD/think/think-other-2026090410000$n.launch.json"; done
-for n in 1 2; do printf '{"v":1,"think_id":"think-other-2026090410000%s","status":"answered","total_cost_usd":3.0,"num_turns":1,"started":"%sT10:00:0%sZ"}' "$n" "$TODAY" "$n" > "$RD/think/think-other-2026090410000$n.answer.json"; done
-printf '{"v":1,"think_id":"think-other-20260904100003","status":"unanswered","total_cost_usd":null,"num_turns":null,"started":"%sT10:00:03Z"}' "$TODAY" > "$RD/think/think-other-20260904100003.answer.json"
-rc=0; $CLI run-think $ok --think-id $ID 2>/dev/null || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/$ID.launch.json" ]
-rm "$RD"/think/think-other-*.answer.json "$RD"/think/think-other-*.launch.json
-# retry rules: parent not model-attributable -> 2; same model as parent -> 2; question differs -> 2; parent kind differs -> 2;
-# null parent cost -> 4; attributable with 2.9 spent of 3.0 -> 4 (remainder < 0.25); with 1.0 spent -> runs with cap 2.0
-P=think-triage-20260904190000; printf 'q\n' > "$RD/think/$P.question.md"; printf 'q\n' > "$RD/think/$P-2.question.md"
-PA() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"model":"fable","status":"unanswered","reason":"error","model_attributable":%s,"total_cost_usd":%s,"num_turns":1,"started":"2020-01-01T00:00:00Z","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60}}' "$P" "$1" "$2" "$3" > "$RD/think/$P.answer.json"; }
-R2="--repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P"
-PA triage false 1.0;  try $R2
-PA triage true 1.0;   try $ok --think-id $P-2 --parent $P                      # same model as parent (fable)
-PA incident true 1.0; try $R2                                                    # parent kind differs
-PA triage true 1.0;   printf 'different\n' > "$RD/think/$P-2.question.md"; try $R2; printf 'q\n' > "$RD/think/$P-2.question.md"
-PA triage true null;  rc=0; $CLI run-think $R2 2>/dev/null || rc=$?; [ "$rc" -eq 4 ]
-PA triage true 2.9;   rc=0; $CLI run-think $R2 2>/dev/null || rc=$?; [ "$rc" -eq 4 ]
-PA triage true 1.0
-printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":2.0}' > "$FAKE_CLAUDE_JSON"
-$CLI run-think $R2
-grep -qx -- '2.0' "$FAKE_CLAUDE_LOG.argv"
-python3 -c "import json;l=json.load(open('$RD/think/$P-2.launch.json'));a=json.load(open('$RD/think/$P-2.answer.json'));assert l['attempt']==2 and l['parent']=='$P' and l['caps']['max_budget_usd']==2.0 and a['reason']=='max_budget' and a['parent']=='$P',(l,a)"
-SH
-```
-
-- [ ] **Step 2: Run to verify they fail** -- FAIL (`think_scan` undefined; unknown verb).
+- [ ] **Step 2: Run to verify it fails** -- FAIL (`valid_launch_record` undefined).
 
 - [ ] **Step 3: Implement**
 
 ```python
-THINK_TOOLS = "Read,Glob,Grep"
-THINK_ADD_DIRS = ("tasks", "think")
-THINK_RETRY_FLOOR_USD = 0.25
 THINK_LOST_GRACE_SECS = 120
 
 
@@ -1046,47 +975,90 @@ def _parse_iso(ts):
         return None
 
 
-def _load_v1(path):
-    try:
-        rec = json.loads(Path(path).read_text())
-    except (OSError, ValueError):
-        return None
-    return rec if isinstance(rec, dict) and rec.get("v") == 1 and not isinstance(rec.get("v"), bool) else None
+def _v1(rec) -> bool:
+    return isinstance(rec, dict) and rec.get("v") == 1 and not isinstance(rec.get("v"), bool)
+
+
+def valid_launch_record(rec, tid) -> bool:
+    if not (_v1(rec) and rec.get("think_id") == tid and valid_think_id(tid)):
+        return False
+    if rec.get("kind") != think_kind(tid):
+        return False
+    if rec.get("task_id") is not None and not valid_task_id(rec.get("task_id")):
+        return False
+    if rec.get("model") not in ROLE_ALIASES["think"] or rec.get("effort") not in THINK_EFFORTS:
+        return False
+    caps = rec.get("caps")
+    if not isinstance(caps, dict) or any(k not in caps or _cap_error(k, caps[k]) for k in MECH_BOUNDS):
+        return False
+    retry = tid.endswith("-2")
+    if rec.get("attempt") != (2 if retry else 1) or isinstance(rec.get("attempt"), bool):
+        return False
+    if rec.get("parent") != (tid[:-2] if retry else None):
+        return False
+    return _parse_iso(rec.get("started")) is not None
+
+
+def valid_answer_record(rec, tid) -> bool:
+    if not (_v1(rec) and rec.get("think_id") == tid):
+        return False
+    status = rec.get("status")
+    cost, turns = rec.get("total_cost_usd"), rec.get("num_turns")
+    if not (_finite_nonneg(cost) and _finite_nonneg(turns, True)):
+        return False
+    if _parse_iso(rec.get("started")) is None:
+        return False
+    if status == "answered":
+        return rec.get("reason") is None and valid_think_answer(rec.get("answer")) is None
+    if status == "unanswered":
+        return rec.get("reason") in THINK_REASONS and rec.get("answer") is None
+    return False
 
 
 def think_scan(rd, now_ts):
-    """Launch and answer records under think/, plus live/lost lists computed
-    from each launch record's own timeout (spec 4.4). Never raises."""
-    out = {"launches": [], "answers": {}, "live": [], "lost": [], "skipped_files": 0}
+    """Validated launch and answer records under think/, plus live/lost lists
+    computed from each launch record's own timeout (spec 4.4). Invalid files
+    are skipped and counted; a malformed launch record is listed in
+    `corrupt` (liveness cannot be judged -> run-think refuses). Never raises."""
+    out = {"launches": [], "answers": {}, "live": [], "lost": [], "skipped_files": 0, "corrupt": []}
     d = think_dir(rd)
     try:
         names = sorted(os.listdir(d))
     except OSError:
         return out
-    now = _parse_iso(now_ts)
+    launched = set()
     for name in names:
-        for suffix in (".launch.json", ".answer.json"):
-            if not name.endswith(suffix):
-                continue
-            tid = name[: -len(suffix)]
-            if not valid_think_id(tid):
-                continue
-            rec = _load_v1(d / name)
-            if rec is None or rec.get("think_id") != tid:
-                out["skipped_files"] += 1
-                continue
-            if suffix == ".launch.json":
+        if name.endswith(".launch.json") and valid_think_id(name[: -len(".launch.json")]):
+            tid = name[: -len(".launch.json")]
+            try:
+                rec = json.loads((d / name).read_text())
+            except (OSError, ValueError):
+                rec = None
+            if valid_launch_record(rec, tid):
                 out["launches"].append(rec)
+                launched.add(tid)
             else:
+                out["skipped_files"] += 1
+                out["corrupt"].append(tid)
+    for name in names:
+        if name.endswith(".answer.json") and valid_think_id(name[: -len(".answer.json")]):
+            tid = name[: -len(".answer.json")]
+            try:
+                rec = json.loads((d / name).read_text())
+            except (OSError, ValueError):
+                rec = None
+            if tid in launched and valid_answer_record(rec, tid):
                 out["answers"][tid] = rec
+            else:
+                out["skipped_files"] += 1
+    now = _parse_iso(now_ts)
     for rec in out["launches"]:
         tid = rec["think_id"]
         if tid in out["answers"]:
             continue
-        started = _parse_iso(rec.get("started"))
-        caps = rec.get("caps") if isinstance(rec.get("caps"), dict) else {}
-        to = caps.get("timeout_secs") if isinstance(caps.get("timeout_secs"), int) else MECH_BOUNDS["timeout_secs"][1]
-        if started is not None and now is not None and (now - started).total_seconds() <= to + THINK_LOST_GRACE_SECS:
+        started = _parse_iso(rec["started"])
+        to = rec["caps"]["timeout_secs"]
+        if now is not None and (now - started).total_seconds() <= to + THINK_LOST_GRACE_SECS:
             out["live"].append(tid)
         else:
             out["lost"].append(tid)
@@ -1099,17 +1071,92 @@ def think_usd_today(scan, today_prefix) -> float:
     one exists, else the launch's reserved caps.max_budget_usd."""
     total = 0.0
     for launch in scan["launches"]:
-        if not (isinstance(launch.get("started"), str) and launch["started"].startswith(today_prefix)):
+        if not launch["started"].startswith(today_prefix):
             continue
         ans = scan["answers"].get(launch["think_id"])
         cost = (ans or {}).get("total_cost_usd")
-        if ans is not None and cost is not None and _finite_nonneg(cost):
-            total += cost
-        else:
-            caps = launch.get("caps") if isinstance(launch.get("caps"), dict) else {}
-            cap = caps.get("max_budget_usd")
-            total += cap if (cap is not None and _finite_nonneg(cap)) else 0.0
+        total += cost if (ans is not None and cost is not None) else launch["caps"]["max_budget_usd"]
     return round(total, 4)
+```
+
+Add `import datetime` at the top of the module. (The `launches` list is sorted by file name, which is by `think_id`.)
+
+- [ ] **Step 4: Run both suites** -- `0 failed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
+git commit -m "herdr: Add validated think record scan and spend reservation"
+```
+
+---
+
+### Task 8b: Exclusive publish and the think lock
+
+**Files:**
+- Modify: `claude/hooks/herdr_orch_core.py` (after `think_usd_today`)
+- Test: `claude/hooks/herdr-orch.test.sh`
+
+**Interfaces:**
+- Produces: `publish_exclusive(path, data) -> bool` (write a same-directory temp file, fsync, publish with `os.link` so an existing target is never replaced, always unlink the temp; False when the target exists or any step fails, leaving no partial target); `think_lock(rd)` context manager (`fcntl.flock` exclusive on `think/.lock`).
+
+- [ ] **Step 1: Write the failing test**
+
+```sh
+check "publish_exclusive never clobbers or leaves partials; think_lock serializes" <<PY
+$LOAD
+d=tempfile.mkdtemp(); p=os.path.join(d,"x.json")
+assert c.publish_exclusive(p,{"a":1}) and json.load(open(p))=={"a":1}
+assert not c.publish_exclusive(p,{"a":2}) and json.load(open(p))=={"a":1}      # no replace
+assert [n for n in os.listdir(d) if n!="x.json"]==[]                            # no temp left behind
+ro=os.path.join(d,"ro"); os.mkdir(ro); os.chmod(ro,0o555)
+try:
+    assert not c.publish_exclusive(os.path.join(ro,"y.json"),{"a":1}) and os.listdir(ro)==[]
+finally:
+    os.chmod(ro,0o755)
+import threading,time
+order=[]
+def hold(tag,secs):
+    with c.think_lock(d):
+        order.append(("in",tag)); time.sleep(secs); order.append(("out",tag))
+t1=threading.Thread(target=hold,args=("a",0.3)); t2=threading.Thread(target=hold,args=("b",0.0))
+t1.start(); time.sleep(0.05); t2.start(); t1.join(); t2.join()
+assert order==[("in","a"),("out","a"),("in","b"),("out","b")],order
+assert os.path.exists(os.path.join(d,"think",".lock"))
+sys.exit(0)
+PY
+```
+
+- [ ] **Step 2: Run to verify it fails** -- FAIL (`publish_exclusive` undefined).
+
+- [ ] **Step 3: Implement**
+
+```python
+def publish_exclusive(path, data) -> bool:
+    """Create `path` with the JSON content or do nothing. Same-directory temp,
+    fsync, then os.link (fails if the target exists -- never a replace); the
+    temp is always removed, so a failure leaves no partial target."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 @contextlib.contextmanager
@@ -1125,18 +1172,102 @@ def think_lock(rd):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+```
 
+Add `import contextlib` and `import fcntl` at the top of the module.
 
-def write_launch_record(path, rec) -> bool:
-    """Create-exclusive write; False when the file already exists or cannot
-    be written (the caller maps that to exit 2)."""
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except OSError:
-        return False
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(rec, indent=2) + "\n")
-    return True
+- [ ] **Step 4: Run both suites** -- `0 failed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
+git commit -m "herdr: Add exclusive publish and repo-wide think lock"
+```
+
+---
+
+### Task 8c: `run_think` execution and outcome mapping
+
+**Files:**
+- Modify: `claude/hooks/herdr_orch_core.py` (after `think_lock`)
+- Test: `claude/hooks/herdr-orch.test.sh`
+
+**Interfaces:**
+- Consumes: `run_headless`, `THINK_SCHEMA`, `valid_think_answer`, `models_used`, `is_downgrade`, `result_errors`, `model_attributable`, `_finite_nonneg`, `_CAP_SUBTYPES`, `publish_exclusive`.
+- Produces: `THINK_TOOLS = "Read,Glob,Grep"`; `think_outcome(subtype, result) -> (status, reason, answer, errors)`; `run_think(rd, a, question, launch, add_dirs) -> int` (0 answer published; 3 answer could not be published -- the launch record stays and reads as lost). `a` carries `think_id`, `kind`, `task_id`, `repo_slug`, `model`, `effort`, `cwd`; `launch` is the validated launch record written by the handler (Task 8d).
+
+- [ ] **Step 1: Write the failing test** (pure-Python, drives `run_think` with a namespace and the fake `claude`)
+
+```sh
+check "run_think: argv contract, answered/unanswered mapping, popen failure, unparseable, exit 3" <<PY
+$LOAD
+import types,subprocess,shutil
+rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
+wt=tempfile.mkdtemp(); subprocess.run(["git","init","-q",wt],check=True)
+fake=os.environ["FAKE_CLAUDE_DIR"]; log=os.path.join(rd,"log"); resj=os.path.join(rd,"res.json")
+os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=resj); os.environ.pop("FAKE_CLAUDE_HOOK",None); os.environ.pop("FAKE_CLAUDE_SLEEP",None)
+os.environ["PATH"]=fake+os.pathsep+os.environ["PATH"]
+tid="think-triage-20260904170000"
+a=types.SimpleNamespace(think_id=tid,kind="triage",task_id=None,repo_slug="slug",model="fable",effort="high",cwd=wt)
+launch={"v":1,"think_id":tid,"kind":"triage","task_id":None,"repo_slug":"slug","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":None,"started":"2026-09-04T17:00:00Z","pid":1}
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+good={"recommendation":"do A","rationale":"because","options":[opt(1),opt(2)],"confidence":"high"}
+def res(**kw): open(resj,"w").write(json.dumps(dict({"type":"result"},**kw)))
+def ans(): return json.load(open(os.path.join(td,tid+".answer.json")))
+def reset():
+    for n in os.listdir(td): os.unlink(os.path.join(td,n))
+res(subtype="success",is_error=False,num_turns=4,total_cost_usd=0.9,duration_ms=1000,session_id="sid",permission_denials=[{"tool":"Read"}],modelUsage={"claude-fable-5-1":{}},structured_output=good)
+assert c.run_think(rd,a,"Which item first?\n",launch,[os.path.join(rd,"tasks")])==0
+r=ans(); assert r["status"]=="answered" and r["answer"]==good and r["total_cost_usd"]==0.9 and r["num_turns"]==4 and r["permission_denials"]==1 and r["attempt"]==1 and r["caps"]["timeout_secs"]==60,r
+argv=open(log+".argv").read().splitlines()
+exp=["claude","--model","fable","--effort","high","--permission-mode","dontAsk","--name",tid,"-p","--output-format","json","--json-schema"]
+assert argv[:len(exp)]==exp,argv
+i=argv.index("--json-schema"); assert json.loads(argv[i+1])==c.THINK_SCHEMA
+assert argv[i+2:]==["--max-turns","15","--max-budget-usd","3.0","--restricted","--strict-mcp-config","--tools","Read,Glob,Grep","--add-dir",os.path.join(rd,"tasks")],argv[i+2:]
+assert open(log+".stdin").read()=="Which item first?\n" and os.path.realpath(open(log+".cwd").read().strip())==os.path.realpath(wt)
+reset(); res(subtype="error_max_turns",is_error=True,num_turns=15,total_cost_usd=2.0)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="max_turns" and ans()["answer"] is None
+reset(); res(subtype="error_max_budget_usd",is_error=True,num_turns=3,total_cost_usd=3.0)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="max_budget"
+reset(); res(subtype="success",is_error=False,num_turns=2,total_cost_usd=0.2,structured_output=dict(good,options=[opt(1)]))
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="no_answer" and "fewer than 2" in ans()["errors"][0]
+reset(); res(subtype="success",is_error=False,num_turns=2,total_cost_usd=0.2)          # no structured_output at all
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="no_answer"
+reset(); res(subtype="success",is_error=False,num_turns=1,total_cost_usd=0.1,modelUsage={"claude-sonnet-5":{}},structured_output=good)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["downgrade"] is True and ans()["model_attributable"] is True
+reset(); open(resj,"w").write("not json at all")                                      # unparseable stdout
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["subtype"]=="unparseable" and ans()["total_cost_usd"] is None
+reset(); res(subtype="error_during_execution",is_error=True,num_turns=1,total_cost_usd=0.1,errors=["model fable unavailable"])
+os.environ["FAKE_CLAUDE_RC"]="1"
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["exit_code"]==1 and ans()["model_attributable"] is True
+os.environ.pop("FAKE_CLAUDE_RC")
+reset(); os.environ["FAKE_CLAUDE_SLEEP"]="3"
+assert c.run_think(rd,a,"q",dict(launch,caps=dict(launch["caps"],timeout_secs=1)),[])==0 and ans()["reason"]=="timeout"
+pid=int(open(log+".pid").read()); import time; time.sleep(0.2)
+try:
+    os.kill(pid,0); alive=True
+except OSError:
+    alive=False
+assert not alive
+os.environ.pop("FAKE_CLAUDE_SLEEP")
+reset(); saved=os.environ["PATH"]; os.environ["PATH"]=tempfile.mkdtemp()                # no claude on PATH -> Popen fails
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["exit_code"] is None
+os.environ["PATH"]=saved
+reset(); res(subtype="success",is_error=False,num_turns=1,total_cost_usd=0.1,structured_output=good)
+os.environ["FAKE_CLAUDE_HOOK"]=f"mkdir {os.path.join(td,tid+'.answer.json')}"          # answer path taken while claude runs
+assert c.run_think(rd,a,"q",launch,[])==3 and os.path.isdir(os.path.join(td,tid+".answer.json"))
+os.environ.pop("FAKE_CLAUDE_HOOK")
+sys.exit(0)
+PY
+```
+
+- [ ] **Step 2: Run to verify it fails** -- FAIL (`run_think` undefined).
+
+- [ ] **Step 3: Implement**
+
+```python
+THINK_TOOLS = "Read,Glob,Grep"
 
 
 def think_outcome(subtype, result):
@@ -1156,10 +1287,10 @@ def think_outcome(subtype, result):
 
 
 def run_think(rd, a, question, launch, add_dirs) -> int:
-    """Spec 4.7 steps 4-6, after the handler wrote the launch record under
-    the lock. Exit 0 answer file written; 3 answer unwritable."""
-    d = think_dir(rd)
-    caps, started, attempt, parent = launch["caps"], launch["started"], launch["attempt"], launch["parent"]
+    """Spec 4.7 steps 4-6, after the handler published the launch record
+    under the lock. Exit 0 answer published; 3 answer could not be
+    published (the launch record stays and reads as lost)."""
+    caps = launch["caps"]
     argv = ["claude", "--model", a.model, "--effort", a.effort, "--permission-mode", "dontAsk",
             "--name", a.think_id, "-p", "--output-format", "json",
             "--json-schema", json.dumps(THINK_SCHEMA, separators=(",", ":")),
@@ -1179,7 +1310,7 @@ def run_think(rd, a, question, launch, add_dirs) -> int:
     denials = (result or {}).get("permission_denials")
     rec = {"v": 1, "think_id": a.think_id, "kind": a.kind, "task_id": a.task_id,
            "repo_slug": a.repo_slug, "model": a.model, "effort": a.effort,
-           "caps": caps, "attempt": attempt, "parent": parent,
+           "caps": caps, "attempt": launch["attempt"], "parent": launch["parent"],
            "status": status, "reason": reason, "answer": answer,
            "subtype": subtype, "is_error": bool((result or {}).get("is_error", subtype != "success")),
            "num_turns": _num("num_turns", True), "total_cost_usd": _num("total_cost_usd"),
@@ -1187,16 +1318,153 @@ def run_think(rd, a, question, launch, add_dirs) -> int:
            "model_attributable": model_attributable(subtype, downgrade, errors, a.model),
            "permission_denials": len(denials) if isinstance(denials, list) else 0,
            "errors": errors, "exit_code": exit_code,
-           "session_id": (result or {}).get("session_id"), "started": started, "ts": now_iso()}
-    try:
-        write_json_atomic(d / f"{a.think_id}.answer.json", rec)
-    except OSError:
-        sys.stderr.write("[X] cannot write the answer file\n")
+           "session_id": (result or {}).get("session_id"), "started": launch["started"], "ts": now_iso()}
+    if not publish_exclusive(think_dir(rd) / f"{a.think_id}.answer.json", rec):
+        sys.stderr.write("[X] cannot publish the answer file\n")
         return 3
     return 0
 ```
 
-Add `import contextlib`, `import datetime`, and `import fcntl` at the top of the module. In `run_think`, wrap the launch-record write so the caller's lock is honoured: the handler below takes the lock around the limit checks and the `write_launch_record` call, so move that call out of `run_think` into the handler (pass the written `launch` dict into `run_think` instead of building it there; `run_think(rd, a, question, launch, add_dirs)` then starts at the argv). Parser:
+- [ ] **Step 4: Run both suites** -- `0 failed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
+git commit -m "herdr: Add run_think execution and answer publication"
+```
+
+---
+
+### Task 8d: `run-think` CLI handler (validation, retry policy, limits)
+
+**Files:**
+- Modify: `claude/hooks/herdr_orch_core.py` (parser + handler in `main`)
+- Test: `claude/hooks/herdr-orch.test.sh`
+
+**Interfaces:**
+- Consumes: everything from 8a-8c, `_fenced`, `check_fence`, `think_caps`, `read_config`, `repo_slug`, `_git`, `contained`, `state_root`, `SHELL_SAFE_RE`, `valid_task_id`.
+- Produces: fenced CLI `run-think --repo-slug S --session ID --fence F --think-id T --kind K [--task-id X] --model M --effort E --cwd P --max-turns N --max-budget-usd B --timeout-secs T [--add-dir tasks|think]... [--parent T1]`; `THINK_ADD_DIRS = ("tasks", "think")`; `THINK_RETRY_FLOOR_USD = 0.25`.
+
+- [ ] **Step 1: Write the failing tests** (every negative case uses its own id; `try` asserts both record files stay absent)
+
+```sh
+check "run-think handler: happy path via CLI, stale fence, exit 2 cases write nothing" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo2.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo2.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think" "$RD/tasks"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+q() { printf 'q\n' > "$RD/think/$1.question.md"; }
+GOOD='{"recommendation":"do A","rationale":"because","options":[{"label":"A","summary":"s","tradeoffs":"t","risk":"low"},{"label":"B","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}'
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.9,"modelUsage":{"claude-fable-5-1":{}},"structured_output":%s}' "$GOOD" > "$FAKE_CLAUDE_JSON"
+ok="--repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
+ID=think-triage-20260904180000; q $ID
+rc=0; $CLI run-think --repo-slug $SLUG --session S --fence 999 --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$RD/think/$ID.launch.json" ]                                  # stale fence
+$CLI run-think $ok --think-id $ID --add-dir tasks --add-dir think
+python3 -c "import json;l=json.load(open('$RD/think/$ID.launch.json'));a=json.load(open('$RD/think/$ID.answer.json'));assert l['caps']['max_budget_usd']==3.0 and l['attempt']==1 and a['status']=='answered',(l,a)"
+grep -qx -- "$RD/tasks" "$FAKE_CLAUDE_LOG.argv" && grep -qx -- "$RD/think" "$FAKE_CLAUDE_LOG.argv"
+: > "$FAKE_CLAUDE_LOG.argv"
+n=0
+try() { n=$((n+1)); rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 2 ] || { echo "expected 2 got $rc for: $*" >&2; exit 1; }; }
+T="think-triage-2026090418"          # distinct ids per case: ${T}01xx
+q ${T}0101; try $ok --think-id ${T}010                                         # 13-digit stamp
+q ${T}0102; try $ok --think-id ${T}0102-3
+q ${T}0103; try $ok --think-id think-Triage-20260904180103
+q ${T}0104; try $ok --think-id think-other-20260904180104                       # kind disagrees
+F2="--repo-slug $SLUG --session S --fence $FE --kind triage"
+q ${T}0105; try $F2 --model sonnet --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0105
+q ${T}0106; try $F2 --model fable --effort inherit --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0106
+q ${T}0107; try $F2 --model fable --effort medium --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0107
+q ${T}0108; try $F2 --model fable --effort high --cwd $WT --max-turns 0 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0108
+q ${T}0109-2; try $ok --think-id ${T}0109-2                                     # -2 without --parent
+q ${T}0110; try $ok --think-id ${T}0110 --parent $ID                            # --parent with a non -2 id
+q ${T}0111; try $ok --think-id ${T}0111 --add-dir owner
+q ${T}0112; try $ok --think-id ${T}0112 --add-dir "$RD"
+q ${T}0113; try $F2 --model fable --effort high --cwd "$(mktemp -d)" --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0113   # non-git cwd
+OTHER=$(mktemp -d); git -C "$OTHER" init -q; git -C "$OTHER" -c user.name=t -c user.email=t@x commit -q --allow-empty -m b; git -C "$OTHER" remote add origin https://github.com/org/elsewhere.git
+q ${T}0114; try $F2 --model fable --effort high --cwd $OTHER --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0114          # foreign repo
+try $ok --think-id ${T}0115                                                     # question missing
+printf 'q\n' > "$RD/think/${T}0116.real.md"; ln -s "$RD/think/${T}0116.real.md" "$RD/think/${T}0116.question.md"; try $ok --think-id ${T}0116
+q ${T}0117; : > "$RD/think/${T}0117.launch.json"; rc=0; $CLI run-think $ok --think-id ${T}0117 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ]; rm "$RD/think/${T}0117.launch.json"   # corrupt launch record -> 4
+q ${T}0118; : > "$RD/think/${T}0118.answer.json"; try $ok --think-id ${T}0118; rm "$RD/think/${T}0118.answer.json"
+[ ! -s "$FAKE_CLAUDE_LOG.argv" ]                                                # none of the refusals launched
+for f in "$RD"/think/${T}01*.launch.json; do [ -e "$f" ] && { echo "unexpected $f" >&2; exit 1; }; done; true
+SH
+
+check "run-think limits: live sibling, lost sibling ignored, daily ceiling with reservation, retry rules, concurrency" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo3.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo3.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+q() { printf 'q\n' > "$RD/think/$1.question.md"; }
+L() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"repo_slug":"%s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":null,"started":"%s","pid":1}' "$1" "$2" "$SLUG" "$3" > "$RD/think/$1.launch.json"; }
+A() { printf '{"v":1,"think_id":"%s","status":"%s","reason":%s,"answer":%s,"total_cost_usd":%s,"num_turns":%s,"started":"%s"}' "$1" "$2" "$3" "$4" "$5" "$6" "$7" > "$RD/think/$1.answer.json"; }
+GOOD='{"recommendation":"do A","rationale":"because","options":[{"label":"A","summary":"s","tradeoffs":"t","risk":"low"},{"label":"B","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}'
+ok="--repo-slug $SLUG --session S --fence $FE --kind other --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ); TODAY=$(date -u +%Y-%m-%d)
+# live sibling -> 4, nothing written
+L think-triage-20260904170000 triage "$NOW"; q think-other-20260904170100
+rc=0; $CLI run-think $ok --think-id think-other-20260904170100 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/think-other-20260904170100.launch.json" ]
+# lost sibling (older than 60+120s) ignored -> proceeds
+L think-triage-20260904170000 triage "2020-01-01T00:00:00Z"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.5,"structured_output":%s}' "$GOOD" > "$FAKE_CLAUDE_JSON"
+$CLI run-think $ok --think-id think-other-20260904170100 && [ -e "$RD/think/think-other-20260904170100.answer.json" ]
+rm "$RD"/think/think-*
+# daily ceiling: 2 answered at 3.0 + 1 null-cost unanswered reserved at 3.0 = 9.0; +3.0 > 10.0 -> 4; then a 1.0 cap fits
+for n in 1 2 3; do L think-other-2026090410000$n other "${TODAY}T10:00:0${n}Z"; done
+for n in 1 2; do A think-other-2026090410000$n answered null "$GOOD" 3.0 1 "${TODAY}T10:00:0${n}Z"; done
+A think-other-20260904100003 unanswered '"error"' null null null "${TODAY}T10:00:03Z"
+q think-other-20260904170200
+rc=0; $CLI run-think $ok --think-id think-other-20260904170200 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/think-other-20260904170200.launch.json" ]
+$CLI run-think --repo-slug $SLUG --session S --fence $FE --kind other --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 1.0 --timeout-secs 60 --think-id think-other-20260904170200
+rm "$RD"/think/think-*
+# retry rules
+P=think-triage-20260904190000; q $P; q $P-2
+L $P triage "2020-01-01T00:00:00Z"
+PA() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"model":"fable","status":"unanswered","reason":"error","answer":null,"model_attributable":%s,"total_cost_usd":%s,"num_turns":1,"started":"2020-01-01T00:00:00Z"}' "$P" "$1" "$2" "$3" > "$RD/think/$P.answer.json"; }
+R2="--repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P"
+t2() { rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq "$EXP" ] || { echo "expected $EXP got $rc for: $*" >&2; exit 1; }; [ ! -e "$RD/think/$P-2.launch.json" ]; }
+PA triage false 1.0;  EXP=2 t2 $R2                                                          # parent not model-attributable
+PA triage true 1.0;   EXP=2 t2 --repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P   # same model
+PA incident true 1.0; EXP=2 t2 $R2                                                          # parent kind differs
+PA triage true 1.0;   printf 'different\n' > "$RD/think/$P-2.question.md"; EXP=2 t2 $R2; q $P-2
+PA triage true null;  EXP=4 t2 $R2                                                          # null parent cost
+PA triage true 2.9;   EXP=4 t2 $R2                                                          # remainder below 0.25
+PA triage true 1.0
+printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":2.0}' > "$FAKE_CLAUDE_JSON"
+$CLI run-think $R2
+grep -qx -- '2.0' "$FAKE_CLAUDE_LOG.argv"
+python3 -c "import json;l=json.load(open('$RD/think/$P-2.launch.json'));a=json.load(open('$RD/think/$P-2.answer.json'));assert l['attempt']==2 and l['parent']=='$P' and l['caps']['max_budget_usd']==2.0 and a['reason']=='max_budget' and a['parent']=='$P',(l,a)"
+rm "$RD"/think/think-*
+# concurrency: two distinct ids racing -> exactly one launch record and one exit 4
+IDA=think-other-20260904170400; IDB=think-other-20260904170500; q $IDA; q $IDB
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.1}' > "$FAKE_CLAUDE_JSON"
+FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logA" $CLI run-think $ok --think-id $IDA >/dev/null 2>&1 & PA_=$!
+FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logB" $CLI run-think $ok --think-id $IDB >/dev/null 2>&1 & PB_=$!
+ra=0; wait $PA_ || ra=$?; rb=0; wait $PB_ || rb=$?
+[ $((ra + rb)) -eq 4 ] && [ "$(ls "$RD/think/" | grep -c -E "($IDA|$IDB)\.launch\.json")" -eq 1 ]
+SH
+```
+
+- [ ] **Step 2: Run to verify they fail** -- FAIL (unknown verb `run-think`).
+
+- [ ] **Step 3: Implement**
+
+```python
+THINK_ADD_DIRS = ("tasks", "think")
+THINK_RETRY_FLOOR_USD = 0.25
+```
+
+Parser:
 
 ```python
     rt = add("run-think", "--think-id", "--kind", "--model", "--effort", "--cwd", fenced=True)
@@ -1208,11 +1476,11 @@ Add `import contextlib`, `import datetime`, and `import fcntl` at the top of the
     rt.add_argument("--parent", default=None)
 ```
 
-Handler (spec 4.7 steps 1-2, then `run_think`):
+Handler (spec 4.7 steps 1-3, then `run_think`):
 
 ```python
     if ns.cmd == "run-think":
-        rd = _fenced(ns)                      # stale/foreign fence refused like write-task
+        rd = _fenced(ns)                      # stale/foreign fence refused like write-task (exit 2)
         _require(valid_think_id(ns.think_id), "invalid think-id")
         _require(ns.kind in THINK_KINDS and think_kind(ns.think_id) == ns.kind, "kind must match the think-id")
         _require(ns.task_id is None or valid_task_id(ns.task_id), "invalid task-id")
@@ -1251,9 +1519,13 @@ Handler (spec 4.7 steps 1-2, then `run_think`):
         caps = {"max_turns": ns.max_turns, "max_budget_usd": ns.max_budget_usd, "timeout_secs": ns.timeout_secs}
         attempt, budget = 1, ns.max_budget_usd
         if ns.parent is not None:
-            _require(valid_think_id(ns.parent) and ns.think_id == ns.parent + "-2", "think-id must be the parent's -2 form")
-            prec = _load_v1(think_dir(rd) / f"{ns.parent}.answer.json")
-            _require(prec is not None and prec.get("model_attributable") is True, "parent must be a model-attributable failure")
+            _require(ns.think_id == ns.parent + "-2", "think-id must be the parent's -2 form")
+            try:
+                prec = json.loads((think_dir(rd) / f"{ns.parent}.answer.json").read_text())
+            except (OSError, ValueError):
+                prec = None
+            _require(valid_answer_record(prec, ns.parent) and prec.get("model_attributable") is True,
+                     "parent must be a valid model-attributable failure record")
             _require(prec.get("kind") == ns.kind and prec.get("task_id") == ns.task_id, "parent kind/task must match")
             _require(prec.get("model") != ns.model, "retry must run on a different model than the parent")
             try:
@@ -1262,7 +1534,7 @@ Handler (spec 4.7 steps 1-2, then `run_think`):
                 same_q = False
             _require(same_q, "retry question must be byte-identical to the parent's")
             spent = prec.get("total_cost_usd")
-            if spent is None or not _finite_nonneg(spent):
+            if spent is None:
                 sys.stderr.write("[X] parent cost unknown; retry remainder undefined\n")
                 return 4
             budget = round(ns.max_budget_usd - spent, 4)
@@ -1273,9 +1545,12 @@ Handler (spec 4.7 steps 1-2, then `run_think`):
         cfg_caps, err = think_caps(read_config(rd))
         _require(err is None, err or "")
         with think_lock(rd):
-            _require(check_fence(rd, ns.session, ns.fence), "stale fence")
+            _require(check_fence(rd, ns.session, int(ns.fence)), "stale fence")
             now = now_iso()
             scan = think_scan(rd, now)
+            if scan["corrupt"]:
+                sys.stderr.write(f"[X] corrupt launch record(s) {scan['corrupt']}; liveness unknown -- human cleanup\n")
+                return 4
             live = [t for t in scan["live"] if t != ns.think_id]
             if live:
                 sys.stderr.write(f"[X] escalation already live: {live[0]}\n")
@@ -1288,13 +1563,13 @@ Handler (spec 4.7 steps 1-2, then `run_think`):
                       "repo_slug": ns.repo_slug, "model": ns.model, "effort": ns.effort,
                       "caps": dict(caps, max_budget_usd=budget), "attempt": attempt,
                       "parent": ns.parent, "started": now, "pid": os.getpid()}
-            if not write_launch_record(think_dir(rd) / f"{ns.think_id}.launch.json", launch):
+            if not publish_exclusive(ld, launch):
                 sys.stderr.write("[X] launch record exists or is unwritable\n")
                 return 2
         return run_think(rd, ns, question, launch, add_dirs)
 ```
 
-`_git` returns stripped stdout; `--git-common-dir` may be relative (`.git`), hence the `cwd / common` resolve. The `--add-dir` check refuses `owner`, absolute paths, and any token outside the pair (the required-arg `_require` exits 2 before anything is written).
+`SHELL_SAFE_RE` already ends in `\Z`, so `match` is fully anchored (a trailing newline or metacharacter fails). `_git` returns stripped stdout; `--git-common-dir` may be relative (`.git`), hence the `cwd / common` resolve. Note the whole-record validity check on the parent (`valid_answer_record`) rather than field peeks.
 
 - [ ] **Step 4: Run both suites** -- `0 failed`.
 
@@ -1302,7 +1577,7 @@ Handler (spec 4.7 steps 1-2, then `run_think`):
 
 ```bash
 git add claude/hooks/herdr_orch_core.py claude/hooks/herdr-orch.test.sh
-git commit -m "herdr: Add run-think bounded read-only escalation verb"
+git commit -m "herdr: Add fenced run-think verb with limits and retry policy"
 ```
 
 ---
@@ -1327,7 +1602,8 @@ F=$($CLI claim-owner --repo-slug slug-st --session S --host h --pid 1)
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-st"; mkdir -p "$RD/think"
 TODAY=$(date -u +%Y-%m-%d)
 L() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"repo_slug":"slug-st","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":%s},"attempt":1,"parent":null,"started":"%s","pid":1}' "$1" "$2" "$3" "$4" > "$RD/think/$1.launch.json"; }
-A() { printf '{"v":1,"think_id":"%s","status":"%s","total_cost_usd":%s,"num_turns":%s,"started":"%s"}' "$1" "$2" "$3" "$4" "$5" > "$RD/think/$1.answer.json"; }
+GOOD='{"recommendation":"r","rationale":"w","options":[{"label":"a","summary":"s","tradeoffs":"t","risk":"low"},{"label":"b","summary":"s","tradeoffs":"t","risk":"low"}],"confidence":"high"}'
+A() { if [ "$2" = answered ]; then R=null; AN="$GOOD"; else R='"error"'; AN=null; fi; printf '{"v":1,"think_id":"%s","status":"%s","reason":%s,"answer":%s,"total_cost_usd":%s,"num_turns":%s,"started":"%s"}' "$1" "$2" "$R" "$AN" "$3" "$4" "$5" > "$RD/think/$1.answer.json"; }
 L think-triage-20260904100000 triage 900 "${TODAY}T10:00:00Z"; A think-triage-20260904100000 answered 1.12 6 "${TODAY}T10:00:00Z"
 L think-other-20260904110000 other 900 "${TODAY}T11:00:00Z";  A think-other-20260904110000 answered 0.40 3 "${TODAY}T11:00:00Z"
 L think-incident-20260904120000 incident 900 "${TODAY}T12:00:00Z"; A think-incident-20260904120000 unanswered null null "${TODAY}T12:00:00Z"
@@ -1339,10 +1615,10 @@ $CLI write-task --repo-slug slug-st --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","status":"in-progress","workers":[{"role":"impl","phase":"plan","model":"fable"},{"role":"impl","phase":"implement","model":"sonnet","effort":null},{"role":"review","model":"opus","effort":"high"}]}'
 $CLI status --repo-slug slug-st | python3 -c "
 import json,sys;s=json.load(sys.stdin);t=s['_think']
-assert t=={'launches':5,'answered':2,'unanswered':1,'usd':1.52,'turns':9,'usd_today':1.52,'live':['think-decompose-20260904125900'],'lost':['think-incident-20260903120000'],'skipped_files':2},t
+assert t=={'launches':5,'answered':2,'unanswered':1,'usd':1.52,'turns':9,'usd_today':7.52,'live':['think-decompose-20260904125900'],'lost':['think-incident-20260903120000'],'skipped_files':2,'corrupt':[]},t   # usd = actual spend; usd_today = committed (reserved) spend
 assert s['PROJ-1']['workers_effort']==['unknown','inherit','high'],s['PROJ-1']"
 rm -r "$RD/think"
-$CLI status --repo-slug slug-st | python3 -c "import json,sys;t=json.load(sys.stdin)['_think'];assert t=={'launches':0,'answered':0,'unanswered':0,'usd':0.0,'turns':0,'usd_today':0.0,'live':[],'lost':[],'skipped_files':0},t"
+$CLI status --repo-slug slug-st | python3 -c "import json,sys;t=json.load(sys.stdin)['_think'];assert t=={'launches':0,'answered':0,'unanswered':0,'usd':0.0,'turns':0,'usd_today':0.0,'live':[],'lost':[],'skipped_files':0,'corrupt':[]},t"
 python3 - "$RD" <<'PY'
 import importlib.util,sys,os,json
 s=importlib.util.spec_from_file_location("c","claude/hooks/herdr_orch_core.py");c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
@@ -1392,6 +1668,7 @@ and before `print(json.dumps(result))`:
                          if _finite_nonneg(a.get("num_turns"), True) and a.get("num_turns") is not None),
             "usd_today": think_usd_today(scan, now[:10]),
             "live": scan["live"], "lost": scan["lost"], "skipped_files": scan["skipped_files"],
+            "corrupt": scan["corrupt"],
         }
 ```
 
@@ -1530,17 +1807,27 @@ ok "routing snapshot: plan fable/high, impl sonnet/inherit" "[ '$PM/$PE' = fable
 PID=$(herdr worktree create --cwd "$PWD" --branch talon/PROJ-E/x --base origin/main --label PROJ-E | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
 herdr pane run "$PID" "claude --model $PM --effort $PE --permission-mode auto --name plan-proj-e"
 ok "plan launch line carries --effort high" "grep -q '^pane run w1:p1 claude --model fable --effort high --permission-mode auto --name plan-proj-e$' '$BIN/calls.log'"
+# impl inherits: the snapshot says null, so the launch line has NO --effort; review is high
+if [ "$IE" = inherit ]; then herdr pane run "$PID" "claude --model $IM --permission-mode auto --name impl-proj-e"; else herdr pane run "$PID" "claude --model $IM --effort $IE --permission-mode auto --name impl-proj-e"; fi
+ok "impl launch line omits --effort when the snapshot says inherit" "grep -q '^pane run w1:p1 claude --model sonnet --permission-mode auto --name impl-proj-e$' '$BIN/calls.log'"
+RM=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["review"]["model"])'); RE=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["review"]["effort"] or "inherit")')
+herdr pane run "$PID" "claude --model $RM --effort $RE --permission-mode auto --name rev-proj-e"
+ok "review launch line carries --effort high" "grep -q '^pane run w1:p1 claude --model opus --effort high --permission-mode auto --name rev-proj-e$' '$BIN/calls.log'"
 BANNER=$(mktemp); printf 'Claude Code v2.1.260\n  Fable 5.1 with high effort \302\267 Claude Max\n' > "$BANNER"
 ok "banner classifies ok for the requested pin" "[ \"\$($CLI classify-banner --repo-slug '$ESLUG' --model $PM --effort $PE --text-file '$BANNER')\" = ok ]"
 $CLI write-task --repo-slug "$ESLUG" --task-id PROJ-E --session E --fence "$EF" \
   --json "{\"task_id\":\"PROJ-E\",\"base_sha\":\"b0\",\"status\":\"in-progress\",\"workers\":[{\"role\":\"impl\",\"phase\":\"plan\",\"workspace_id\":\"w1\",\"agent\":\"plan-proj-e\",\"model\":\"$PM\",\"effort\":\"$PE\",\"created_by_this_orch\":true,\"started\":\"t\"}]}"
 ok "workers[] records the pinned effort" "python3 -c \"import json;t=json.load(open('$ERD/tasks/PROJ-E.json'));assert t['workers'][0]['effort']=='high',t\""
-# effort-mismatch on an impl launch: nothing published, capabilities untouched, no disable-model, no workspace close
+# effort-mismatch: a config pins impl to high (fresh snapshot), the banner shows none -> nothing published, capabilities untouched, no disable-model, no workspace close
+printf '{"v":1,"user":"talon","default_base":"origin/main","effort":{"impl":"high"}}' > "$ERD/config.json"
+ROUTING2=$($CLI routing-table --repo-slug "$ESLUG" --session E)
+IE2=$(printf '%s' "$ROUTING2" | python3 -c 'import json,sys;print(json.load(sys.stdin)["impl"]["effort"])')
+ok "config override pins impl effort in a fresh snapshot" "[ '$IE2' = high ]"
 printf 'Claude Code v2.1.260\n  Sonnet 5 \302\267 Claude Max\n' > "$BANNER"
-CLS=$($CLI classify-banner --repo-slug "$ESLUG" --model sonnet --effort high --text-file "$BANNER")
-ok "impl pinned high but banner shows none -> effort-mismatch" "[ '$CLS' = effort-mismatch ]"
+CLS=$($CLI classify-banner --repo-slug "$ESLUG" --model sonnet --effort $IE2 --text-file "$BANNER" --json)
+ok "impl pinned high but banner shows none -> effort-mismatch with observed effort null" "[ '$CLS' = '{\"class\": \"effort-mismatch\", \"model\": \"Sonnet 5\", \"effort\": null}' ]"
 CAP_BEFORE=$(cat "$ERD/capabilities.json"); : > "$BIN/calls.log"
-herdr pane run "$PID" "claude --model sonnet --effort high --permission-mode auto --name impl-proj-e"
+herdr pane run "$PID" "claude --model sonnet --effort $IE2 --permission-mode auto --name impl-proj-e"
 # the skill terminates the worker and publishes nothing; simulate exactly that and assert the invariants
 herdr agent prompt "$PID" "/exit"
 ok "effort-mismatch: capabilities unchanged, no disable-model, no workspace close, record unchanged" \
@@ -1608,7 +1895,7 @@ git commit -m "herdr: Add effort routing and deep-think walkthrough to the contr
 
 - [ ] **Step 1: Banner without `--effort` (AC12a).** In a scratch pane of YOUR OWN workspace (`herdr pane split "$HERDR_PANE_ID" --direction down`), run `claude --model sonnet --permission-mode auto --name effort-probe`, wait ~7 s, `herdr pane read <pane> --source recent-unwrapped --lines 40 > /tmp/banner.txt`, then `python3 claude/hooks/herdr_orch_core.py classify-banner --repo-slug x --model sonnet --effort inherit --text-file /tmp/banner.txt` must print `ok` and `--effort high` must print `effort-mismatch`. Close the pane (`herdr pane close <pane>`). Record the banner's model line in the commit body of Step 3.
 
-- [ ] **Step 2: Real `run-think` (AC12b).** With `CLAUDE_CONFIG_DIR` at the real config dir and this repo's real slug (`python3 -c` over `repo_slug(git remote get-url origin)`), write `STATE_ROOT/<slug>/think/think-other-<YYYYMMDDHHMMSS>.question.md` whose Question asks the advisor to: (1) create a file named `think-probe.txt` in the repo, (2) run `git status` via a shell, (3) fetch `https://example.com`, (4) read `/etc/hosts`, (5) list the tools it has -- and to report in `recommendation` which of 1-4 it could do and in `evidence` its tool names. Launch `run-think --repo-slug <slug> --session <your session id> --fence <fence from claim-owner> ... --kind other --model fable --effort high --max-turns 8 --max-budget-usd 1.0 --timeout-secs 600 --cwd <this worktree>` (claim ownership of the slug first with `claim-owner`; release nothing afterwards -- the heartbeat simply goes stale) (use `opus` if `resolve-model --role think` says so). Expected: `status: answered`, the answer says all four were impossible, `evidence` names only Read/Glob/Grep, `permission_denials >= 1`, and `git status --porcelain` in the worktree stays empty. If the CLI refuses `--restricted` together with any flag, record the exact error and mark AC12b blocked in the close; do not weaken the argv.
+- [ ] **Step 2: Real `run-think` (AC12b).** Never touch the real repo slug's state (an active orchestrator may own it). Use the real config dir (auth) under a DISTINCT slug: `git clone --quiet . /tmp/think-probe-repo && git -C /tmp/think-probe-repo remote set-url origin https://example.invalid/probe/effort-probe.git`, compute `PSLUG` from that URL with `repo_slug`, `claim-owner --repo-slug $PSLUG --session probe --host h --pid $$` (its heartbeat simply goes stale afterwards; nothing else reads that slug), write a minimal `config.json` (`user`, `default_base`) there, record `git -C /tmp/think-probe-repo status --porcelain` (must be empty) and a listing of `STATE_ROOT/$PSLUG/think/` as the baseline, then write `STATE_ROOT/$PSLUG/think/think-other-<YYYYMMDDHHMMSS>.question.md` whose Question asks the advisor to: (1) create a file named `think-probe.txt` in the repo, (2) run `git status` via a shell, (3) fetch `https://example.com`, (4) read `/etc/hosts`, (5) list the tools it has -- and to report in `recommendation` which of 1-4 it could do and in `evidence` its tool names. Launch `run-think --repo-slug $PSLUG --session probe --fence <fence from claim-owner> ... --kind other --model fable --effort high --max-turns 8 --max-budget-usd 1.0 --timeout-secs 600 --cwd /tmp/think-probe-repo` (use `opus` if `resolve-model --role think` says so). Expected: `status: answered`, the answer says all four were impossible, `evidence` names only Read/Glob/Grep, `permission_denials >= 1`, and `git -C /tmp/think-probe-repo status --porcelain` is still empty (compare with the baseline). Afterwards remove `/tmp/think-probe-repo` and `STATE_ROOT/$PSLUG` (probe-only state under a slug nothing else uses). If the CLI refuses `--restricted` together with any flag, record the exact error and mark AC12b blocked in the close; do not weaken the argv.
 
 - [ ] **Step 3: Record and close**
 
@@ -1626,4 +1913,22 @@ Then follow the implement brief's close (emit-done with `--phase implement`) -- 
 
 - **Spec coverage:** spec 1 -> Tasks 1-2; spec 2 -> Tasks 2, 5, 9 (legacy), 10; spec 3 -> Task 3 (+10 prose, 11 lifecycle); spec 4.1-4.9 -> Tasks 4, 6, 8, 9, 10, 11; spec 5 -> Tasks 10, 11 (brief rendering); spec 6 -> no code (spec text only); AC12 -> Task 12.
 - **Placeholders:** none; every step carries code or exact strings. The docs task lists content requirements plus the exact pinned strings rather than full prose, which is the pattern the mech plan used.
-- **Type consistency:** `role_effort` returns `(level_or_None, code)`; `routing_table` returns `(dict, code)`; `think_scan` keys `launches/answers/live/lost/skipped_files`; `run_think(rd, a, question, launch, add_dirs)` matches the handler call (the handler builds and writes `launch` under `think_lock`); `think_outcome` returns a 4-tuple consumed only inside `run_think`.
+- **Type consistency:** `role_effort` returns `(level_or_None, code)`; `routing_table` returns `(dict, code)`; `think_scan` keys `launches/answers/live/lost/skipped_files`; `run_think(rd, a, question, launch, add_dirs)` (8c) matches the 8d handler call (the handler builds and publishes `launch` under `think_lock`); `think_scan` returns the six keys `launches/answers/live/lost/skipped_files/corrupt` everywhere (8a, 8d, 9); `think_outcome` returns a 4-tuple consumed only inside `run_think`.
+
+## Plan review log
+
+### Round 1 (Codex, `model_reasoning_effort=high`, 2026-09-04): needs-rework, 11 findings
+
+| # | Sev | Finding (short) | Disposition |
+| --- | --- | --- | --- |
+| 1 | critical | Task 9 expected `usd_today` contradicted reservation semantics | Folded: 7.52, `usd` vs `usd_today` distinguished |
+| 2 | critical | `think_scan` accepted near-empty records | Folded: `valid_launch_record`/`valid_answer_record`, invalid answers never complete a launch, corrupt launch records refuse `run-think` (8a, 8d) |
+| 3 | high | launch record created before content; answers could clobber | Folded: `publish_exclusive` (temp + fsync + `os.link`) for both files (8b) |
+| 4 | high | `SHELL_SAFE_RE.match` prefix-only | Pushed back: the core's regex ends in `\Z`, so `match` is anchored at both ends; noted inline in 8d |
+| 5 | high | exit 3 / Popen / unparseable / nonzero untested; shared ids | Folded: 8c covers each outcome, 8d uses one id per negative case and asserts no files (8c, 8d) |
+| 6 | high | walkthrough launched impl with `--effort high` against an inherit snapshot | Folded: plan/high, impl/no flag, review/high; mismatch via a config-pinned second snapshot (Task 11) |
+| 7 | high | live check touched the real slug | Folded: distinct probe slug on a scratch clone, baseline + cleanup (Task 12) |
+| 8 | medium | banner version line unanchored; indicator scan unbounded | Folded: anchored regex, 12-line region, adversarial fixtures (Task 3) |
+| 9 | medium | explicit `"effort": null` treated as absent | Folded: key-presence check, exit 5 (Task 1) |
+| 10 | medium | refactor guarded only by a test count | Folded: characterization check before extraction (Task 7) |
+| 11 | medium | Task 8 too large; signature drift | Folded: split into 8a-8d with matching interfaces |
