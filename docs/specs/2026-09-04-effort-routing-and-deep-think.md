@@ -537,12 +537,16 @@ In order:
    `.launch.json` and `.answer.json` must not already exist. Retry
    identity is an iff: a `-2` id requires `--parent` and `--parent`
    requires a `-2` id; `--parent` must equal this id minus `-2`; the
-   parent's `.answer.json` must exist with `model_attributable: true`,
-   the same `kind` and `task_id`, and a numeric `total_cost_usd` (a null
+   parent's attempt-1 `.launch.json` and its `unanswered` `.answer.json`
+   must both exist and validate, agree on `kind`/`task_id`/`model`, carry
+   `model_attributable: true`, and a numeric `total_cost_usd` (a null
    parent cost refuses the retry, exit 4, since the remainder is
-   undefined); this launch's `--model` must differ from the parent's
-   (the survivor after `disable-model`); `<think_id>.question.md` must be
-   byte-identical to the parent's question.
+   undefined); this launch's `--max-budget-usd` must equal the parent
+   launch's cap (the escalation budget; the remainder is computed from
+   the parent launch, never from the retry request); this launch's
+   `--model` must differ from the parent's (the survivor after
+   `disable-model`); `<think_id>.question.md` must be byte-identical to
+   the parent's question.
 2. Under `think/.lock` (4.4), re-check the fence, then enforce the limits
    (exit 4, nothing written): another `.launch.json` in `think/` is live
    (4.4); or the daily ceiling (4.1, reservation semantics) would be
@@ -938,8 +942,9 @@ drift checks pass and new ones pin each of those strings.
 
 ### Plan review round 1 feedback that touched the spec (2026-09-04)
 
-Folded from the Codex plan review: create-exclusive publication and whole-
-record validation for think files with a `corrupt` list (4.4, 4.9, AC7,
-AC9); `usd_today` under reservation semantics in the AC9 fixture; explicit
+Folded from the Codex plan review (rounds 1 and 2): create-exclusive
+publication and whole-record validation for think files with a `corrupt`
+list (4.4, 4.9, AC7, AC9); retry authorization from the parent launch
+record with the remainder taken from its cap (4.7); `usd_today` under reservation semantics in the AC9 fixture; explicit
 `"effort": null` rejected (AC1); anchored banner version line and bounded
 indicator scan (3).
