@@ -824,8 +824,9 @@ export FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
 base="$CLI run-mech --repo-slug slug-ch --task-id td-ch --workspace w1 --agent mech-td-ch --model haiku --worktree $WT --base-sha $BASE --brief-file $RD/tasks/td-ch.brief.md --max-turns 5 --max-budget-usd 0.5 --timeout-secs 60"
 end() { python3 -c "import json,sys;l=[json.loads(x) for x in open('$RD/tasks/td-ch.spend.jsonl')];e=[x for x in l if x['kind']=='end'][-1];print(json.dumps(e))"; }
 done_() { python3 -c "import json;print(json.dumps(json.load(open('$RD/tasks/td-ch.done.json'))))"; }
-# 1. no claude on PATH: exit_code null, subtype unparseable, failed/error (HEAD == base)
-PATH="$(mktemp -d)" $base --launch-id mech-td-ch-1 || true
+# 1. no claude on PATH (but python3/git/sh present): exit_code null, subtype unparseable, failed/error (HEAD == base)
+NOCL=$(mktemp -d); for b in python3 git sh; do ln -s "$(command -v $b)" "$NOCL/$b"; done
+PATH="$NOCL" $base --launch-id mech-td-ch-1 || true
 end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='unparseable' and e['exit_code'] is None and e['num_turns'] is None,e"
 done_ | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['outcome']=='failed' and d['reason']=='error',d"
 # 2. unparseable stdout from a running fake
@@ -903,7 +904,7 @@ Validation rules (fail closed; an invalid file is skipped and counted, and a lau
 
 - launch record: `v == 1` (int), `think_id == tid`, `kind == think_kind(tid)`, `task_id` None or a valid task id, `model` in `ROLE_ALIASES["think"]`, `effort` in `THINK_EFFORTS`, `caps` an object whose `max_turns`/`max_budget_usd`/`timeout_secs` each pass `_cap_error`, `attempt` in (1, 2) and equal to 2 iff `tid` ends in `-2`, `parent` None iff `attempt == 1` else `tid[:-2]`, `started` parseable as `%Y-%m-%dT%H:%M:%SZ`.
 - answer record: `v == 1`, `think_id == tid`, `status` in (`answered`, `unanswered`), `total_cost_usd` None or finite non-negative, `num_turns` None or finite non-negative int, `started` parseable; `answered` requires `answer` to pass `valid_think_answer`; `unanswered` requires `reason` in `THINK_REASONS` and `answer` None.
-- A malformed launch record is listed under `corrupt` only (not in `skipped_files`; the `run-think` handler refuses with exit 4 while any exists: liveness cannot be judged); a malformed, orphan (no launch), truncated, or wrong-`v` answer file is skipped and counted.
+- A malformed launch record is listed under `corrupt` only (not in `skipped_files`; the `run-think` handler refuses with exit 4 while any exists: liveness cannot be judged); a malformed, orphan (no launch), truncated, or wrong-`v` answer file is skipped and counted. A `.launch.json` or `.answer.json` whose stem is not a valid think id is never silently ignored: an invalid launch stem is listed in `corrupt`, an invalid answer stem is counted in `skipped_files`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -943,11 +944,13 @@ open(os.path.join(td,"think-other-20260904130000.answer.json"),"w").write('{"v":
 w("think-other-20260904140000.answer.json",{"v":2,"think_id":"think-other-20260904140000"})
 w("think-other-20260904150000.answer.json",A("think-other-20260904150000","answered",0.5,1,"2026-09-04T15:00:00Z"))   # orphan answer: no launch -> skipped
 w("think-triage-20260904160000.launch.json",{"v":1,"think_id":"think-triage-20260904160000"})                          # corrupt launch
+w("bogus-stem.launch.json",{"v":1})                                                                                       # invalid launch stem -> corrupt
+w("bogus-stem.answer.json",{"v":1})                                                                                       # invalid answer stem -> skipped
 s=c.think_scan(rd,"2026-09-04T13:00:00Z")
 assert [l["think_id"] for l in s["launches"]]==sorted(["think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000","think-decompose-20260904125900","think-incident-20260903120000","think-other-20260904124000"]),s["launches"]
 assert set(s["answers"])=={"think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000"},s["answers"].keys()
 assert s["live"]==["think-decompose-20260904125900","think-other-20260904124000"] and s["lost"]==["think-incident-20260903120000"],s
-assert s["skipped_files"]==4 and s["corrupt"]==["think-triage-20260904160000"],s
+assert s["skipped_files"]==5 and s["corrupt"]==["bogus-stem","think-triage-20260904160000"],s
 # reservation: 1.12 + 0.40 + 3.0 (null-cost unanswered) + 3.0 (live decompose) + 3.0 (live with invalid answer) = 10.52
 assert c.think_usd_today(s,"2026-09-04")==10.52, c.think_usd_today(s,"2026-09-04")
 assert c.think_usd_today(s,"2026-09-03")==3.0                                   # lost launch counts its cap
@@ -1028,8 +1031,11 @@ def think_scan(rd, now_ts):
         return out
     launched = set()
     for name in names:
-        if name.endswith(".launch.json") and valid_think_id(name[: -len(".launch.json")]):
+        if name.endswith(".launch.json"):
             tid = name[: -len(".launch.json")]
+            if not valid_think_id(tid):
+                out["corrupt"].append(tid)          # unknown stem: liveness cannot be judged
+                continue
             try:
                 rec = json.loads((d / name).read_text())
             except (OSError, ValueError):
@@ -1040,8 +1046,11 @@ def think_scan(rd, now_ts):
             else:
                 out["corrupt"].append(tid)          # listed, not counted as skipped
     for name in names:
-        if name.endswith(".answer.json") and valid_think_id(name[: -len(".answer.json")]):
+        if name.endswith(".answer.json"):
             tid = name[: -len(".answer.json")]
+            if not valid_think_id(tid):
+                out["skipped_files"] += 1
+                continue
             try:
                 rec = json.loads((d / name).read_text())
             except (OSError, ValueError):
@@ -1429,10 +1438,13 @@ rm "$RD"/think/think-*
 # retry rules
 P=think-triage-20260904190000; q $P; q $P-2
 L $P triage "2020-01-01T00:00:00Z"
-PA() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"model":"fable","status":"unanswered","reason":"error","answer":null,"model_attributable":%s,"total_cost_usd":%s,"num_turns":1,"started":"2020-01-01T00:00:00Z"}' "$P" "$1" "$2" "$3" > "$RD/think/$P.answer.json"; }
+PA() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"model":"fable","status":"%s","reason":%s,"answer":%s,"model_attributable":%s,"total_cost_usd":%s,"num_turns":1,"started":"2020-01-01T00:00:00Z"}' "$P" "$1" "${5:-unanswered}" "${6:-\"error\"}" "${7:-null}" "$2" "$3" > "$RD/think/$P.answer.json"; }
 R2="--repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P"
 t2() { rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq "$EXP" ] || { echo "expected $EXP got $rc for: $*" >&2; exit 1; }; [ ! -e "$RD/think/$P-2.launch.json" ]; }
 PA triage false 1.0;  EXP=2 t2 $R2                                                          # parent not model-attributable
+PA triage true 1.0 x answered null "$GOOD"; EXP=2 t2 $R2                                    # answered parent cannot be retried
+PA triage true 1.0;   mv "$RD/think/$P.launch.json" "$RD/think/$P.launch.bak"; EXP=2 t2 $R2; mv "$RD/think/$P.launch.bak" "$RD/think/$P.launch.json"   # orphan parent answer (no launch)
+PA triage true 1.0;   EXP=2 t2 --repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 9.0 --timeout-secs 60 --think-id $P-2 --parent $P   # inflated retry cap
 PA triage true 1.0;   EXP=2 t2 --repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P   # same model
 PA incident true 1.0; EXP=2 t2 $R2                                                          # parent kind differs
 PA triage true 1.0;   printf 'different\n' > "$RD/think/$P-2.question.md"; EXP=2 t2 $R2; q $P-2
@@ -1519,14 +1531,24 @@ Handler (spec 4.7 steps 1-3, then `run_think`):
         attempt, budget = 1, ns.max_budget_usd
         if ns.parent is not None:
             _require(ns.think_id == ns.parent + "-2", "think-id must be the parent's -2 form")
-            try:
-                prec = json.loads((think_dir(rd) / f"{ns.parent}.answer.json").read_text())
-            except (OSError, ValueError):
-                prec = None
-            _require(valid_answer_record(prec, ns.parent) and prec.get("model_attributable") is True,
-                     "parent must be a valid model-attributable failure record")
-            _require(prec.get("kind") == ns.kind and prec.get("task_id") == ns.task_id, "parent kind/task must match")
-            _require(prec.get("model") != ns.model, "retry must run on a different model than the parent")
+
+            def _load(name):
+                try:
+                    return json.loads((think_dir(rd) / name).read_text())
+                except (OSError, ValueError):
+                    return None
+            plaunch, prec = _load(f"{ns.parent}.launch.json"), _load(f"{ns.parent}.answer.json")
+            _require(valid_launch_record(plaunch, ns.parent) and plaunch["attempt"] == 1,
+                     "parent must have a valid attempt-1 launch record")
+            _require(valid_answer_record(prec, ns.parent) and prec.get("status") == "unanswered"
+                     and prec.get("model_attributable") is True,
+                     "parent must be a valid unanswered model-attributable record")
+            for k in ("kind", "task_id", "model"):
+                _require(prec.get(k) == plaunch[k], f"parent answer/launch disagree on {k}")
+            _require(plaunch["kind"] == ns.kind and plaunch["task_id"] == ns.task_id, "parent kind/task must match")
+            _require(plaunch["model"] != ns.model, "retry must run on a different model than the parent")
+            _require(ns.max_budget_usd == plaunch["caps"]["max_budget_usd"],
+                     "retry --max-budget-usd must equal the parent launch's cap (the escalation budget)")
             try:
                 same_q = (think_dir(rd) / f"{ns.parent}.question.md").read_bytes() == qf.read_bytes()
             except OSError:
@@ -1536,7 +1558,7 @@ Handler (spec 4.7 steps 1-3, then `run_think`):
             if spent is None:
                 sys.stderr.write("[X] parent cost unknown; retry remainder undefined\n")
                 return 4
-            budget = round(ns.max_budget_usd - spent, 4)
+            budget = round(plaunch["caps"]["max_budget_usd"] - spent, 4)   # remainder of the ESCALATION budget
             attempt = 2
             if budget < THINK_RETRY_FLOOR_USD:
                 sys.stderr.write(f"[X] retry budget {budget} below the {THINK_RETRY_FLOOR_USD} floor\n")
@@ -1931,3 +1953,12 @@ Then follow the implement brief's close (emit-done with `--phase implement`) -- 
 | 9 | medium | explicit `"effort": null` treated as absent | Folded: key-presence check, exit 5 (Task 1) |
 | 10 | medium | refactor guarded only by a test count | Folded: characterization check before extraction (Task 7) |
 | 11 | medium | Task 8 too large; signature drift | Folded: split into 8a-8d with matching interfaces |
+
+### Round 2 (Codex, `model_reasoning_effort=high`, 2026-09-04): needs-rework, 4 findings -- last round per the review skill's cap; proceeding to implementation
+
+| # | Sev | Finding (short) | Disposition |
+| --- | --- | --- | --- |
+| 1 | high | Task 7 empty PATH also drops python3/git | Folded: temp PATH with interpreter symlinks and no claude |
+| 2 | high | 8a `skipped_files` off by one | Already folded at 0fde818 (corrupt not counted); prose and fixture agree |
+| 3 | high | retry authorized from the answer alone; remainder from the request | Folded: parent launch + unanswered answer cross-checked; remainder and required cap from the parent launch; orphan/answered/inflated negatives (8d) |
+| 4 | medium | invalid stems silently ignored | Folded: invalid launch stems -> `corrupt`, invalid answer stems counted (8a) |
