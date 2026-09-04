@@ -5,8 +5,8 @@ Base: origin/main @ 8a377cc (verification contracts merged, #78), designed
 against the mech-tier branch
 `talon/td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical/cheap-model-tier`
 (unmerged at spec time; this work lands after it and reuses its machinery).
-Status: spec, revision 1 (branch-only; dropped before merge per repo
-convention).
+Status: spec, revision 2 after Codex spec review round 1 (branch-only;
+dropped before merge per repo convention). Review log at the end.
 
 ## Problem
 
@@ -50,6 +50,11 @@ convention).
   own judgment. The thinker never acts.
 - Effort tuning for the orchestrator itself. Its effort is fixed at session
   launch (advisory row only, as with its model).
+- An interactive (pane) escalation mode. A human who wants to think
+  alongside the strong model launches their own `claude --effort xhigh`
+  session; there is nothing for the orchestrator to own, cap, or record,
+  so it is not a substrate of this skill. Revisit only if a machine
+  contract for it emerges.
 - Verifying effort structurally for headless launches. The print-mode result
   JSON carries no effort field (verified, see below); headless effort is
   recorded as requested, labelled as such, and re-checked if a future CLI
@@ -115,8 +120,15 @@ ROLE_EFFORT_DEFAULTS = {
 takes the CLI default for its model. It prints as the literal `inherit`.
 
 A new `think` role joins `ROLE_DEFAULTS` (`("fable", "opus")`) and
-`ROLE_ALIASES` (`("fable", "opus", "sonnet")`; no `haiku`). `models.think`
+`ROLE_ALIASES` (`("fable", "opus")` -- the strong tier only; `sonnet` or
+`haiku` under `models.think` is a config error, exit 5). `models.think`
 becomes a legal config override under the existing rules.
+
+`think` effort is likewise constrained: `THINK_EFFORTS = ("high", "xhigh",
+"max")`. `effort.think` must be one of those (never `null`, `low`, or
+`medium`); `resolve-effort --role think` therefore never prints `inherit`.
+"Deep think" means the strong tier at high effort or above, by
+construction, in config, resolver, wrapper validation, and tests alike.
 
 `config.json` gains an optional `effort` block:
 
@@ -127,8 +139,9 @@ becomes a legal config override under the existing rules.
 Validation mirrors `models` and fails closed: when present it must be an
 object whose keys are a subset of the canonical roles
 (`plan`/`impl`/`review`/`mech`/`think`) and whose values are a string in
-`EFFORT_LEVELS` or `null`. A non-object, an unknown key, or a value outside
-the set makes every effort-resolving verb exit 5 with a concrete message.
+`EFFORT_LEVELS` or `null` (`think`: a string in `THINK_EFFORTS`). A
+non-object, an unknown key, a boolean or number, or a value outside the
+set makes every effort-resolving verb exit 5 with a concrete message.
 Absent keys fall back to `ROLE_EFFORT_DEFAULTS`.
 
 New read-only verbs:
@@ -139,13 +152,18 @@ New read-only verbs:
 - `python3 "$CORE" routing-table --repo-slug <slug> --session <id>` prints
   one JSON object keyed by role:
   `{"plan": {"model": "fable", "effort": "high"}, "impl": {"model":
-  "sonnet", "effort": null}, ...}` for all five roles. Exit 3 (stale/absent
+  "sonnet", "effort": null}, ...}` for all five roles, from ONE read of
+  `config.json` and ONE read of `capabilities.json`. Exit 3 (stale/absent
   map) and 5 (malformed `models` or `effort`) are global and abort the
   call; a role with no surviving model is printed with `"model": null`
   and the verb still exits 0 -- the caller launching that role halts
-  exactly as on `resolve-model` exit 4. This is the single call the
-  orchestrator uses to fill the brief's Routing block (Design 5) and the
-  source for any Workflow script it authors.
+  exactly as on `resolve-model` exit 4. **One snapshot per dispatch:**
+  every dispatch (kickoff, phase advance, review dispatch, escalation)
+  calls `routing-table` once and takes its model, its effort, the
+  `workers[]` fields, and the brief's Routing block from that single
+  output, so a config or capability change between steps cannot produce
+  an inconsistent launch. `resolve-model`/`resolve-effort` remain for
+  single-role checks and tests.
 
 ### 2. Launch recipe
 
@@ -153,18 +171,26 @@ Interactive launch (section 8 "Model launch"), replacing the two launch
 branches with effort-aware ones:
 
 ```
-MODEL="$(python3 "$CORE" resolve-model --repo-slug <slug> --role <role> --session <id>)"
-EFFORT="$(python3 "$CORE" resolve-effort --repo-slug <slug> --role <role>)"
-# EFFORT == inherit  -> claude --model $MODEL --permission-mode auto --name <agent>
-# otherwise          -> claude --model $MODEL --effort $EFFORT --permission-mode auto --name <agent>
+ROUTING="$(python3 "$CORE" routing-table --repo-slug <slug> --session <id>)"   # once per dispatch
+MODEL="$(printf '%s' "$ROUTING" | python3 -c 'import json,sys; print(json.load(sys.stdin)["<role>"]["model"] or "")')"
+EFFORT="$(printf '%s' "$ROUTING" | python3 -c 'import json,sys; print(json.load(sys.stdin)["<role>"]["effort"] or "inherit")')"
+# MODEL empty       -> halt: no available model for <role> (as resolve-model exit 4)
+# EFFORT == inherit -> claude --model $MODEL --permission-mode auto --name <agent>
+# otherwise         -> claude --model $MODEL --effort $EFFORT --permission-mode auto --name <agent>
 ```
 
 (The `--name` capability branch is unchanged and orthogonal.) A nonzero
-`resolve-effort` exit is a hard stop like `resolve-model`'s. `$EFFORT` is
+`routing-table` exit is a hard stop like `resolve-model`'s. `$EFFORT` is
 shell-safe by construction (closed lowercase set).
 
 `workers[]` entries gain `"effort": "<level>"|null` (the value passed, never
-the observed one). `run-mech` gains an optional `--effort <level>`; when
+the observed one). **Legacy records:** entries written before this change
+lack the key; they stay valid, readers treat a missing `effort` as unknown
+(`status` reports `effort: "unknown"` for such an entry), full-record
+rewrites carry the entries forward byte-for-byte (the existing carry-
+forward rule), and every entry appended by a launch under this spec MUST
+include the key (walkthrough-asserted; the core adds no `workers[]`
+validation, matching today). `run-mech` gains an optional `--effort <level>`; when
 present it appends `--effort <level>` to the `claude` argv and the ledger
 `start` line carries `"effort": "<level>"` (`null` when absent). Mech
 kickoff keeps calling `resolve-effort --role mech` (default `inherit`), so
@@ -184,15 +210,22 @@ The D4 backstop today scrapes the banner by prose. It becomes deterministic:
 caller acts on the word, never on the raw text.
 
 Parse rule (`parse_banner(text) -> {"model": str|None, "effort": str|None}`):
-locate the last line containing `Claude Code v`; the model line is the next
-non-blank line, stripped of the logo glyphs (leading non-`[A-Za-z]`
-characters). Match
-`^(?P<model>.+?)(?: with (?P<effort>low|medium|high|xhigh|max) effort)?(?:\s*\u00b7.*)?$`
-(`\u00b7` is the middle dot; the source uses the escape, keeping the file
-ASCII). If no `with ... effort` clause is present, also accept a later line
-matching `\u25cf\s*(low|medium|high|xhigh|max)\s*\u00b7\s*/effort` as the
-effort source. No `Claude Code v` line, or no parseable model line, is
-`unreadable`.
+
+1. Normalize: strip ANSI/terminal control sequences (CSI, OSC, and single
+   ESC sequences) and carriage returns; split into lines.
+2. Anchor the version line: the FIRST line matching
+   `Claude Code v\d+\.\d+\.\d+(\S*)?` (the banner is printed once, first;
+   later text quoting it is ignored). None -> `unreadable`.
+3. The model line is the next non-blank line, with leading logo glyphs
+   (any run of characters outside `[A-Za-z]`) removed. It must match
+   `^(?P<model>(Fable|Opus|Sonnet|Haiku)\b[^\u00b7]*?)(?: with (?P<effort>low|medium|high|xhigh|max) effort)?(?:\s*\u00b7.*)?$`
+   (`\u00b7` is the middle dot; the source uses the escape, keeping the
+   file ASCII). A model line that names no recognized family (a changed
+   banner, a notice, a prompt) is `unreadable` -- never `downgrade`: only a
+   positively identified other family may disable a model.
+4. If no `with ... effort` clause matched, a later line matching
+   `\u25cf\s*(low|medium|high|xhigh|max)\s*\u00b7\s*/effort` supplies the
+   effort. Otherwise effort is `None`.
 
 Classification, in precedence order:
 
@@ -212,6 +245,19 @@ surface `effort pin refused for <role>: requested <level>, observed
 config.effort.<role>`. An organization effort cap is policy a retry cannot
 change; the human decides.
 
+**Lifecycle after `effort-mismatch`.** The banner read happens inside the
+launch step, before any state is published (section 2 step 7, section 2a
+step 3, section 5 step 3 all publish only after a successful launch), so:
+terminate the worker's process in its pane (`/exit`, else kill the pane
+process; the pane and workspace are NOT closed for an adopted resource);
+then the existing rules apply unchanged -- a fresh kickoff unwinds only
+resources this attempt created (step 9) and leaves no task record; a
+phase advancement leaves the task `in-progress` with the plan worker's
+entry still latest and no implement entry appended; a review dispatch
+leaves the task `completed` with no `review_head_sha`. No orphan is
+possible because nothing was published; the walkthrough asserts a live-
+agent count of zero and an unchanged record after the refusal.
+
 Future structural source: if a later herdr exposes model/effort on
 `agent get`, or the repo statusline is extended to print `effort.level`
 (the pane's statusline line persists where the banner scrolls), prefer that
@@ -220,10 +266,12 @@ source.
 
 ### 4. Deep-think escalation
 
-A **deep-think escalation** is one bounded, read-only, headless run of the
-strong model at high (or higher) effort that answers one question with a
-structured recommendation. The orchestrator launches it, reads the answer
-as advisory data, decides, and reports. The thinker cannot act.
+A **deep-think escalation** is one bounded, headless run of the strong
+model (`think` role: `fable -> opus`, effort `high`/`xhigh`/`max`) that
+answers ONE question with a structured recommendation. The orchestrator
+launches it, reads the answer as advisory data, decides, and reports. The
+thinker has no tool that can write, run, or fetch (Design 4.7): its only
+channel back is the answer.
 
 #### 4.1 Triggers and non-triggers
 
@@ -255,28 +303,33 @@ work a `plan` worker is about to do at high effort anyway; anything a
 worker wants (workers hand back; `run-think` is orchestrator-only and a
 worker brief never carries it).
 
-Rate limits: at most one live escalation per repo at a time, and at most
-one launch per orchestrator turn. A second eligible trigger in the same
-turn is reported as "escalation deferred: one already live".
+Vocabulary: an **escalation** is one question, one `think_id` family,
+one budget. It may take up to two **attempts** (the second only on a
+model-attributable failure, Design 4.7); both attempts share the
+escalation's `max_budget_usd`. Limits, all enforced by `run-think` from
+durable files (4.4), not by prose:
 
-#### 4.2 Modes
+- one live escalation per repo at a time (a second launch while one is
+  live exits 4, nothing written);
+- one escalation per orchestrator turn (skill rule; a second eligible
+  trigger in the same turn is reported as "escalation deferred: one
+  already live");
+- a daily automatic-spend ceiling, `config.think.daily_budget_usd`
+  (default 10.0, bounds 0 < x <= 200): when the sum of `total_cost_usd`
+  over answer files with `started` in the current UTC day plus the
+  requested `max_budget_usd` would exceed it, `run-think` exits 4 with the
+  spent/ceiling figures and the orchestrator surfaces "daily think budget
+  reached"; only the human raises it (config edit).
 
-- **Headless one-shot (default, the machine path):** `run-think`, below.
-  Launched with `Bash run_in_background` from the orchestrator (or in a
-  self-managed `pane split` pane in the orchestrator's OWN workspace,
-  section 7 rules); either way the orchestrator does not block, and the
-  answer file landing under `think/` is a watch wake (`WATCH_DIRS` gains
-  `think/*.answer.json`).
-- **Short-lived interactive pane (human-attended):** for decomposition
-  the human wants to steer live. The orchestrator opens a self-managed
-  pane in its own workspace and runs
-  `claude --model $MODEL --effort $EFFORT --permission-mode plan --tools Read,Glob,Grep --name <think_id>`
-  (`think` role model/effort; plan mode plus a read-only tool set is the
-  guardrail), sends the same question text as its first prompt, and
-  closes the pane when the human is done. Output is whatever the human
-  takes from the conversation; nothing is recorded by the wrapper, no
-  spend is tracked, and any resulting kickoff is a normal human
-  designation. This mode has no machine contract by design.
+#### 4.2 Mode
+
+One mode: the headless one-shot `run-think` (4.7). Launched with `Bash
+run_in_background` from the orchestrator (or in a self-managed `pane
+split` pane in the orchestrator's OWN workspace, section 7 rules); either
+way the orchestrator does not block. The launch record and the answer
+file landing under `think/` are watch wakes (`WATCH_DIRS` gains `think/`
+with suffixes `.launch.json` and `.answer.json`). An interactive variant
+is a non-goal (see Non-goals).
 
 #### 4.3 Caps and config
 
@@ -285,32 +338,50 @@ fail-closed rules as `mech` (Design 3 of the mech spec), minus
 `contract_commands`:
 
 ```json
-"think": { "max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900 }
+"think": { "max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900, "daily_budget_usd": 10.0 }
 ```
 
 Defaults when absent: `max_turns 15`, `max_budget_usd 3.0`,
-`timeout_secs 900`. `mech_caps` generalizes to
-`tier_caps(config, tier, defaults, max_turns=None, max_budget_usd=None)`;
-`mech_caps` stays as a thin wrapper. New verb
+`timeout_secs 900`, `daily_budget_usd 10.0` (finite number, 0 < x <= 200;
+a per-launch `max_budget_usd` above it is a config error). `mech_caps`
+generalizes to `tier_caps(config, tier, defaults, extra_keys, max_turns=None,
+max_budget_usd=None)`; `mech_caps` stays as a thin wrapper. New verb
 `python3 "$CORE" think-caps --repo-slug <slug> [--max-turns N] [--max-budget-usd X]`
-prints `{"max_turns", "max_budget_usd", "timeout_secs"}` or exits 5.
+prints `{"max_turns", "max_budget_usd", "timeout_secs", "daily_budget_usd"}`
+or exits 5.
 Per-launch overrides come only from the human's instruction ("escalate
 with budget 5"), never from the orchestrator's judgment.
 
 #### 4.4 Identity and files
 
-`think_id` = `think-<kind>-<YYYYMMDDTHHMMSSZ>` (UTC launch time; kind in
-`triage|decompose|incident|other`), `[a-z0-9-]` only, used as the
+`think_id` = `think-<kind>-<YYYYMMDDHHMMSS>` (UTC launch time, 14 digits;
+kind in `triage|decompose|incident|other`), optionally suffixed `-2` for
+the single retry attempt. Longest form `think-decompose-20260904170000-2`
+is 32 characters, the herdr/Claude agent-name limit (`AGENT_NAME_RE`);
+every kind and suffix fits, and `valid_think_id()` enforces the regex
+`think-(triage|decompose|incident|other)-\d{14}(-2)?\Z`. It is the
 session `--name`. Files live under `STATE_ROOT/<repo_slug>/think/`:
 
 ```
 think/
   <think_id>.question.md     # orchestrator-written brief (input contract)
+  <think_id>.launch.json     # wrapper-written, create-exclusive, before launch (liveness)
   <think_id>.answer.json     # wrapper-written result (output contract)
 ```
 
+`<think_id>.launch.json` is the durable live record:
+`{"v": 1, "think_id", "kind", "task_id", "repo_slug", "model", "effort",
+"caps": {max_turns, max_budget_usd, timeout_secs}, "attempt": 1|2,
+"parent": <think_id of attempt 1 or null>, "started": "<iso>", "pid": <int>}`.
+It is written with `O_CREAT|O_EXCL` (a collision is exit 2, nothing else
+written) and carries the effective launch-time caps, so lost-detection and
+budget math never depend on current config. A launch is **live** while its
+`.launch.json` has no `.answer.json` and `started` is younger than its own
+`timeout_secs + 120s`; older is **lost**.
+
 Nothing is written into any worktree. The `think/` directory is
-machine-local like everything under `STATE_ROOT`.
+machine-local like everything under `STATE_ROOT`. The attempt-2 record's
+`parent` ties the two attempts into one escalation for budget purposes.
 
 #### 4.5 Input contract (the question file)
 
@@ -335,28 +406,38 @@ Written by the orchestrator from the new "Deep-think brief variant" in
 
 #### 4.6 Output contract
 
-`run-think` passes `--json-schema` with the core constant `THINK_SCHEMA`:
+`run-think` passes `--json-schema` with the core constant `THINK_SCHEMA`
+(the prose "two to four options" and this schema are the same rule):
 
 ```json
 {
-  "type": "object",
+  "type": "object", "additionalProperties": false,
   "properties": {
-    "recommendation": {"type": "string"},
-    "rationale": {"type": "string"},
-    "options": {"type": "array", "minItems": 1, "maxItems": 6, "items": {
-      "type": "object",
+    "recommendation": {"type": "string", "minLength": 1, "maxLength": 500},
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {
+      "type": "object", "additionalProperties": false,
       "properties": {
-        "label": {"type": "string"}, "summary": {"type": "string"},
-        "tradeoffs": {"type": "string"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 80},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "tradeoffs": {"type": "string", "minLength": 1, "maxLength": 1000},
         "risk": {"type": "string", "enum": ["low", "medium", "high"]}},
       "required": ["label", "summary", "tradeoffs", "risk"]}},
     "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
-    "open_questions": {"type": "array", "items": {"type": "string"}},
-    "evidence": {"type": "array", "items": {"type": "string"}}
+    "open_questions": {"type": "array", "maxItems": 10, "items": {"type": "string", "minLength": 1, "maxLength": 300}},
+    "evidence": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1, "maxLength": 300}}
   },
   "required": ["recommendation", "rationale", "options", "confidence"]
 }
 ```
+
+The wrapper re-validates the returned object against exactly this
+contract with a stdlib checker, `valid_think_answer(obj) -> None|str`:
+required keys present; no extra keys at either level; every type as
+declared; every enum value in its set; every `minItems`/`maxItems`/
+`minLength`/`maxLength` bound honoured. Any violation is
+`unanswered`/`no_answer` with the checker's message in `errors`. The CLI's
+own validation is not trusted.
 
 `<think_id>.answer.json`, written atomically by the wrapper in every
 outcome:
@@ -377,54 +458,78 @@ outcome:
 ```
 
 `status: answered` requires `subtype: success` AND a `structured_output`
-object that validates against `THINK_SCHEMA` (the wrapper re-validates
-shape: required keys present and typed; it does not trust the CLI). Every
-other case is `unanswered` with `reason` in
-`max_turns|max_budget|timeout|no_answer|error` (`no_answer` = success
-without a valid structured object). `answer` is `null` when unanswered.
-`downgrade`/`model_attributable`/`errors` reuse the mech helpers verbatim.
+that passes `valid_think_answer`. Every other case is `unanswered` with
+`reason` in `max_turns|max_budget|timeout|no_answer|error` (`no_answer` =
+success without a valid structured object). `answer` is `null` when
+unanswered. `downgrade`/`model_attributable`/`errors` reuse the mech
+helpers verbatim. `answer.json` additionally carries `attempt` and
+`parent` copied from the launch record.
 
 #### 4.7 The `run-think` verb
 
 ```
 python3 "$CORE" run-think --repo-slug <slug> --think-id <think_id> --kind <kind>
-  [--task-id <task_id>] --model $MODEL --effort <level|inherit> --cwd <repo_worktree>
-  --question-file <STATE_ROOT>/<slug>/think/<think_id>.question.md
-  --max-turns <N> --max-budget-usd <X> --timeout-secs <T> [--add-dir <dir>]...
+  [--task-id <task_id>] --model $MODEL --effort <level> --cwd <repo_worktree>
+  --max-turns <N> --max-budget-usd <X> --timeout-secs <T> [--add-dir tasks|think]... [--parent <think_id>]
 ```
 
 In order:
 
-1. Validate: repo slug; `think_id` matches
-   `think-(triage|decompose|incident|other)-\d{8}T\d{6}Z(-[2-9])?` and its
-   kind equals `--kind`; optional task id valid; model in `CAP_MODELS`;
-   effort in `EFFORT_LEVELS` or `inherit`; caps within the mech bounds;
-   question file a regular non-symlink file contained in `STATE_ROOT`
-   and readable; `--cwd` an existing git checkout; each `--add-dir` an
-   existing directory contained in `STATE_ROOT/<slug>` (the only extra
-   read surface the advisor may be given); every value shell-safe
-   (`SHELL_SAFE_RE`); the answer file must not already exist. Any failure:
-   exit 2, nothing written.
-2. Launch
-   `claude --model <M> [--effort <E>] --permission-mode dontAsk --name <think_id> -p --output-format json --json-schema <THINK_SCHEMA> --max-turns <N> --max-budget-usd <X> --restricted --strict-mcp-config --tools Read,Glob,Grep [--add-dir <dir>]...`
+1. Validate (exit 2, nothing written, on any failure): repo slug;
+   `valid_think_id(think_id)` and its kind equals `--kind`; optional task
+   id valid; model in `ROLE_ALIASES["think"]`; effort in `THINK_EFFORTS`
+   (no `inherit`); caps within the mech bounds; the question file is
+   exactly `STATE_ROOT/<slug>/think/<think_id>.question.md` (not an
+   argument; a symlink, a missing file, or an unreadable file fails);
+   `--cwd` is an existing git checkout whose `repo_slug()` (from
+   `git remote get-url origin` and its common dir) equals `--repo-slug`,
+   so the advisor reads only this repo; each `--add-dir` is the literal
+   token `tasks` or `think`, mapped to `STATE_ROOT/<slug>/tasks` or
+   `STATE_ROOT/<slug>/think` (never the slug root, so `owner.json` with
+   its fence and socket path, `config.json`, and `capabilities.json` are
+   never exposed); every value shell-safe (`SHELL_SAFE_RE`); the
+   `.launch.json` and `.answer.json` must not already exist; `--parent`,
+   when given, names an existing attempt-1 `.answer.json` with
+   `model_attributable: true` and this id must be its `-2` form.
+2. Enforce the limits (exit 4, nothing written): another `.launch.json`
+   in `think/` is live (4.4); or the daily ceiling (4.1) would be
+   exceeded; for an attempt 2, the effective `max_budget_usd` is the
+   escalation cap minus attempt 1's `total_cost_usd` (a remainder under
+   0.25 refuses the retry).
+3. Write `<think_id>.launch.json` create-exclusive (collision: exit 2).
+4. Launch
+   `claude --model <M> --effort <E> --permission-mode dontAsk --name <think_id> -p --output-format json --json-schema <THINK_SCHEMA> --max-turns <N> --max-budget-usd <X> --restricted --strict-mcp-config --tools Read,Glob,Grep [--add-dir <abs dir>]...`
    with the question on stdin, cwd `--cwd`, its own process group, killed
    on `--timeout-secs` (reusing `run_mech`'s launch/timeout/parse code,
-   factored into a shared `run_headless` helper). `dontAsk` denies anything
-   that would prompt; denials are counted, not fatal. `--restricted` plus
-   `--strict-mcp-config` removes Bash, Write, Edit, WebFetch, and every MCP
-   server, so "read-only" is enforced by the CLI, not by the prompt.
-   Session persistence stays on so a human can `--resume` the transcript.
-3. Parse the result exactly as `run_mech` does; classify `status`/`reason`
-   per 4.6; write `<think_id>.answer.json` atomically. Unwritable: exit 3.
-4. Exit 0 when the answer file was written (answered or not); the
+   factored into a shared `run_headless` helper). What each flag buys,
+   per the CLI's own help: `--restricted` removes the built-in tools that
+   run commands or code (Bash and the other code-running tools) and
+   WebFetch, and ignores user, project, and local settings files (so no
+   settings-defined hooks or MCP servers load); `--strict-mcp-config`
+   skips every MCP server not passed on the command line (none is);
+   `--tools Read,Glob,Grep` leaves only those three built-ins, so Write,
+   Edit, NotebookEdit, and WebSearch are absent; `--permission-mode
+   dontAsk` denies anything that would prompt, including a Read outside
+   `--cwd` and the `--add-dir` roots, and the result's
+   `permission_denials` counts them. Managed settings and `--settings`
+   still apply (none is passed). The residual surface is: reads inside
+   the repo checkout and the two state subdirectories, and the answer.
+   AC12 proves this live (the advisor is asked to write, run, fetch, and
+   read outside its roots, and must report that it cannot). Session
+   persistence stays on so a human can `--resume` the transcript.
+5. Parse the result exactly as `run_mech` does; classify `status`/`reason`
+   per 4.6; write `<think_id>.answer.json` atomically. Unwritable: exit 3
+   (the launch record remains and will read as lost).
+6. Exit 0 when the answer file was written (answered or not); the
    orchestrator reads the file, never the exit code.
 
 Model-attributable failure (`downgrade` or execution error naming the
 alias/"model"): the orchestrator applies the existing within-role rule --
-`disable-model` on the requested alias, `resolve-model --role think`,
-relaunch once with a `-2` suffixed `think_id`. Cap 2 attempts, then decide
-inline and say so. Any other `unanswered` is surfaced with the spend line;
-a relaunch with raised caps is the human's call.
+`disable-model` on the requested alias, `routing-table` again, relaunch
+once as `<think_id>-2 --parent <think_id>` on the survivor within the
+remaining budget. Two attempts per escalation, then decide inline and say
+so. Any other `unanswered` is surfaced with the spend line; a fresh
+escalation with raised caps is the human's call, next turn.
 
 `resolve-model --role think` exit 4 (no strong model): no escalation; the
 orchestrator decides inline at its own effort and reports "no escalation
@@ -449,13 +554,26 @@ model available".
 
 #### 4.9 Status and liveness
 
-`status` gains a top-level `_think` summary folded from `think/*.answer.json`:
-`{"launches", "answered", "unanswered", "usd", "turns", "skipped_files"}`
-(`usd`/`turns` sum non-null values; unparseable or wrong-`v` files are
-skipped and counted, never fatal). No per-task field. A `.question.md`
-with no matching `.answer.json` whose mtime is older than
-`timeout_secs + 120s` is reported as `think lost: <think_id>` (the wrapper
-died); no auto-relaunch. `_think` cannot collide with a task id.
+`status` gains a top-level `_think` summary folded from `think/*.launch.json`
+and `think/*.answer.json`:
+
+```json
+"_think": {"launches": 3, "answered": 2, "unanswered": 1, "usd": 1.52, "turns": 9,
+           "usd_today": 1.52, "live": ["think-triage-20260904170000"],
+           "lost": ["think-incident-20260903120000"], "skipped_files": 2}
+```
+
+`launches` counts launch records; `answered`/`unanswered` count answer
+files by `status`; `usd`/`turns` sum non-null values; `usd_today` sums
+`total_cost_usd` over answers whose `started` falls in the current UTC
+day (the daily-ceiling input); `live` and `lost` list launch records with
+no answer, split by the 4.4 age rule using each record's own
+`timeout_secs`; unparseable or wrong-`v` files are skipped and counted in
+`skipped_files`, never fatal. No per-task field. Lost detection is
+polling-only: the transition from live to lost writes nothing and
+generates no wake (exactly like mech `wrapper lost`); the next check-in
+or heartbeat wake reports it, and there is no auto-relaunch. `_think`
+cannot collide with a task id.
 
 ### 5. Workflow-tool routing
 
@@ -471,16 +589,28 @@ died); no auto-relaunch. `_think` cannot collide with a task id.
 
 A Workflow run is **in-turn helper work** (section 7's first bullet at
 scale). It has no workspace, no index entry, no record; it never
-substitutes for a phase or role. In particular: the review gate remains a
-fresh `rev-<t>` agent running co-review; a Workflow review inside an impl
-worker is a pre-review self-check only, and the orchestrator never
-dispatches a Workflow *instead of* a worker.
+substitutes for a herdr phase or role. In particular: the review gate
+remains a fresh `rev-<t>` agent running co-review; a Workflow review
+inside an impl worker is a pre-review self-check only, and the
+orchestrator never dispatches a Workflow *instead of* a worker.
 
-Workflow agents that mutate files do so only under `isolation: 'worktree'`
-and only for the calling worker's own task, and the worker merges the
-results into its branch itself. A Workflow launched by the orchestrator is
-read-only (analysis, triage support, decomposition drafting) -- the
-orchestrator authors no code and its Workflow agents write nothing.
+**Precedence with the user's standing order.** The global CLAUDE.md
+(Default Skill Routing) says to "orchestrate multi-task implementation
+with the Workflow tool directly (planner/reviewer on the stronger model,
+workers on cheaper models, per-task review)". That order governs how a
+session implements a multi-task PLAN; this skill governs the herdr task
+LIFECYCLE. They compose: an `implement` worker executing its committed
+plan may fan the plan's tasks out over a Workflow (tiered per 5.2,
+mutations under `isolation: 'worktree'`, results merged into its own
+branch by the worker), and that is the standing order in action inside
+one herdr task. What the Workflow never does is stand in for the herdr
+worker itself: no branch, record, contract gate, or review of its own.
+Where the two documents seem to disagree, this precedence rule wins and
+SKILL.md states it (AC13 pins the sentence).
+
+A Workflow launched by the orchestrator is read-only (analysis, triage
+support, decomposition drafting) -- the orchestrator authors no code and
+its Workflow agents write nothing.
 
 #### 5.2 Models and effort inside a script
 
@@ -493,7 +623,12 @@ hard-coded, never picked by judgment:
   mechanical stages -> `mech`; a single deep judge stage -> `think`. Each
   `agent()` call passes `model: <alias from the table>` and
   `effort: <level>` (omit `effort` when the table says `null`). A role
-  with `"model": null` may not appear in the script; drop or halt.
+  with `"model": null` may not appear in the script: if every stage
+  mapped to that role is optional (a verify or judge stage whose absence
+  the author can name in the result), author the script without those
+  stages and `log()` the omission; if any required stage maps to it, do
+  not author the script -- report "no available model for <role>" and
+  fall back to in-turn subagents or hand back.
 - A **worker** has no capabilities map of its own (`resolve-model` is
   stamped to the orchestrator's session), so its brief carries a
   `## Routing` block rendered from the same `routing-table` output at
@@ -507,22 +642,37 @@ hard-coded, never picked by judgment:
 
 #### 5.3 Opt-in
 
-The Workflow tool runs only on explicit user opt-in. This skill documents
-the grant: **a kickoff under this skill is the user's explicit opt-in to
-Workflow use for that task**, by the orchestrator while handling that
-task and by the briefed worker inside it. The brief carries the line
-`Workflow opt-in: granted for this task by the orchestrated kickoff
-(default size guideline)`, so a worker can trace the grant to the
-human's own designation. Outside a kickoff (freeform triage or status
-turns) the orchestrator uses Workflow only when the current human
-instruction asks for that scale in its own words.
+The Workflow tool runs only on explicit user opt-in, in the user's own
+words. The grant this skill relies on is not the kickoff itself but the
+user's standing order in their global CLAUDE.md (Default Skill Routing:
+"Orchestrate multi-task implementation with the Workflow tool directly
+..."), reaffirmed for orchestrated dispatch in the instruction that
+created this spec. The skill records that grant verbatim, scoped to
+orchestrated tasks: the orchestrator may author Workflows while handling
+an orchestrated task, and a briefed worker may author them inside its
+task, both within the default size guideline. The brief carries the exact
+line `Workflow opt-in: granted by the user's standing order (global
+CLAUDE.md, Default Skill Routing) for this orchestrated task; default
+size guideline`, so a worker can trace the grant to the human's words
+rather than to the orchestrator. A human may narrow it per task
+(`kick off <item> no-workflow` -> the brief line reads `Workflow opt-in:
+withheld for this task`) or widen the size in the kickoff instruction.
+Outside an orchestrated task (freeform triage or status turns) the
+orchestrator uses Workflow only when the current human instruction asks
+for that scale in its own words. If the standing order is ever removed
+from the user's CLAUDE.md, the grant lapses with it and the brief line
+must not be emitted.
 
 #### 5.4 Results feed back through the existing lifecycle
 
 A Workflow returns to the session that launched it and stops there.
 Completion is still commits + contract + `emit-done`; a Workflow agent
 never runs a `$CORE` mutating verb, `emit-done`, or `emit-review` (the
-brief says so). Workflow spend is untracked (interactive-class), and its
+brief's ground rules say so in one line: "Workflow/subagent helpers never
+call `herdr_orch_core.py`; only you emit the completion record").
+Executable coverage of Workflow scripts is out of reach for the sh suites
+(no Workflow runtime); the rules are pinned as brief/SKILL text (AC13)
+and observed in live use. Workflow spend is untracked (interactive-class), and its
 transcripts live under the calling session, not `STATE_ROOT`.
 
 ### 6. Calibration note (high-effort plan worker, n=1)
@@ -542,72 +692,120 @@ whether `xhigh` earns its cost anywhere.
 
 AC1. `resolve-effort --role plan|review|think` prints `high`; `--role
 impl|mech` prints `inherit`; a config `effort` block overrides per role
-(`{"impl": "low"}` -> `low`, `{"plan": null}` -> `inherit`); exit 5 for an
-unknown role, a non-object block, an unknown key, a value outside
-`EFFORT_LEVELS`, or a boolean/number value.
+(`{"impl": "low"}` -> `low`, `{"plan": null}` -> `inherit`,
+`{"think": "xhigh"}` -> `xhigh`); exit 5 for an unknown role, a non-object
+block, an unknown key, a value outside `EFFORT_LEVELS`, a boolean/number
+value, and `think` set to `null`, `low`, or `medium`.
 AC2. `resolve-model --role think` prints `fable`, falls back to `opus`,
-exits 4 with neither, exits 5 when `models.think` names `haiku`.
+exits 4 with neither, exits 5 when `models.think` names `sonnet` or
+`haiku`.
 AC3. `routing-table` prints all five roles with `model`/`effort` from a
 valid map and config; exits 3 with a stale map, 5 with a malformed
 `effort` or `models` block; a role with no survivor prints `"model": null`
-with exit 0.
+with exit 0; the verb reads `config.json` and `capabilities.json` once
+each (asserted by counting opens through a patched `open` in the unit
+check).
 AC4. `classify-banner`: fixture texts yield `ok` (matching model and
 effort), `ok` (requested `inherit`, banner shows an effort or none),
 `downgrade` (Sonnet banner under `--model fable`, regardless of effort),
 `effort-mismatch` (requested `high`, banner shows no effort; requested
 `high`, banner shows `medium`; requested `high`, only the `/effort`
 indicator line shows `medium`), and `unreadable` (no `Claude Code v` line;
-empty text). The fixtures use the middle-dot separator via escape.
-AC5. `think-caps` prints the documented defaults, merges a valid `think`
-block, applies overrides, exits 5 on out-of-bounds, unknown key, boolean,
-or a `contract_commands` key; `mech-caps` behaviour is unchanged.
+empty text; a version line followed by a model line naming no known
+family; a later prompt line quoting `Claude Code v9.9.9 Opus` after a
+real Sonnet banner still classifies on the first banner). ANSI-wrapped
+fixtures (colour codes around the model line) classify identically to
+plain ones. The fixtures use the middle-dot separator via escape.
+AC5. `think-caps` prints the documented defaults (including
+`daily_budget_usd`), merges a valid `think` block, applies overrides,
+exits 5 on out-of-bounds, unknown key, boolean, a `contract_commands`
+key, a `daily_budget_usd` outside (0, 200], or a `max_budget_usd` above
+`daily_budget_usd`; `mech-caps` behaviour is unchanged (existing checks
+pass untouched).
 AC6. `run-think` against the fake `claude`: (a) success with a valid
-structured object -> `answered`, `answer` equals the object, spend fields
-copied, exit 0, and the fake saw exactly the documented argv (model,
-optional effort, `dontAsk`, name, `-p`, json, `--json-schema` equal to
-`THINK_SCHEMA`, both caps, `--restricted`, `--strict-mcp-config`, the
-three tools, each `--add-dir`), the question on stdin, cwd == `--cwd`;
-(b) `error_max_turns` / `error_max_budget_usd` -> `unanswered` with
-`max_turns` / `max_budget`; (c) success with a missing or schema-invalid
-`structured_output` -> `unanswered`/`no_answer`; (d) a fake sleeping past
-`--timeout-secs` -> `unanswered`/`timeout` and the fake's pid is gone;
-(e) `modelUsage` keyed by a sonnet id under `--model fable` ->
-`downgrade: true`, `model_attributable: true`; (f) `--effort inherit`
-omits the flag, `--effort xhigh` passes it and records it; (g) an
-unwritable answer path -> exit 3.
-AC7. `run-think` exits 2 and writes nothing for: a malformed `think_id`,
-a `think_id` whose kind disagrees with `--kind`, a question file outside
-`STATE_ROOT` or a symlink, an `--add-dir` outside `STATE_ROOT/<slug>`, a
-non-git `--cwd`, out-of-bounds caps, an effort outside the set, any
-shell-unsafe value, and an already-existing answer file.
+structured object -> `.launch.json` then `answered`, `answer` equals the
+object, spend fields copied, exit 0, and the fake saw exactly the
+documented argv (model, effort, `dontAsk`, name, `-p`, json,
+`--json-schema` equal to `THINK_SCHEMA`, both caps, `--restricted`,
+`--strict-mcp-config`, the three tools, each `--add-dir` as the absolute
+state subdirectory), the question on stdin, cwd == `--cwd`; (b)
+`error_max_turns` / `error_max_budget_usd` -> `unanswered` with
+`max_turns` / `max_budget`; (c) success with a missing `structured_output`,
+one option, five options, an extra top-level key, an extra option key, a
+501-character recommendation, or a `risk` outside the enum ->
+`unanswered`/`no_answer` with the checker message in `errors`, while two
+and four options with maximal in-bounds strings are `answered`; (d) a
+fake sleeping past `--timeout-secs` -> `unanswered`/`timeout` and the
+fake's pid is gone; (e) `modelUsage` keyed by a sonnet id under
+`--model fable` -> `downgrade: true`, `model_attributable: true`; (f)
+`--effort xhigh` is passed and recorded; (g) an unwritable answer path ->
+exit 3 with the launch record left in place; (h) attempt 2 with
+`--parent` runs with `max_budget_usd` = cap minus attempt 1's cost, and
+is refused (exit 4) when the remainder is under 0.25 or when the parent
+was not model-attributable.
+AC7. `run-think` exits 2 and writes nothing for: a malformed `think_id`
+(each kind with a 15-digit stamp, a `-3` suffix, uppercase), a
+`think_id` whose kind disagrees with `--kind`, a missing or symlinked
+question file, an `--add-dir` token other than `tasks`/`think`, a
+non-git `--cwd`, a `--cwd` whose remote resolves to a different
+`repo_slug`, out-of-bounds caps, a model outside `fable`/`opus`, an
+effort outside `high`/`xhigh`/`max` (including `inherit`), any
+shell-unsafe value, and an existing `.launch.json` or `.answer.json`.
+Exit 4 and nothing written for: a live sibling launch record (a younger
+`.launch.json` with no answer), a lost sibling being ignored (older than
+its own timeout + 120s: the launch proceeds), and a daily ceiling that
+the requested cap would exceed (fixture answers dated today).
 AC8. `run-mech --effort high` passes `--effort high` in argv and records
 `"effort": "high"` on the `start` line; without the flag argv is unchanged
 from the mech spec and the line records `null`.
-AC9. `status` folds a `think/` fixture of two answered files (1.12 and
-0.40 usd, 6 and 3 turns), one unanswered with null cost, one truncated
-file, and one `v: 2` file into `_think: {launches: 3, answered: 2,
-unanswered: 1, usd: 1.52, turns: 9, skipped_files: 2}`; reports a stale
-question with no answer as lost; an empty or absent `think/` reports zeros.
-AC10. `watch_scan` includes `think/*.answer.json`; an answer write flips
-`watch_changed`.
-AC11. The walkthrough suite: (a) a plan kickoff launch line carries
-`--effort high` and the `workers[]` entry records `effort: "high"`; an impl
-launch line carries no `--effort` and records `null`; (b) a classify-banner
-`effort-mismatch` leaves `capabilities.json` untouched (no `disable-model`
-call in the fake log) while a `downgrade` flips the requested alias; (c) a
-triage escalation writes the question file, invokes `run-think` with the
-documented argv, lands `answer.json`, and `status` shows `_think`; (d) the
-brief rendered for a kickoff contains a `## Routing` block matching
-`routing-table` output and the Workflow opt-in line.
-AC12 (human-verify, live): one interactive launch without `--effort` shows
-a banner model line with no `with ... effort` clause (confirms the
-`inherit` classification), and one real `run-think` on this repo at
-`--effort high` lands an `answered` file; the plan's close records both.
+AC9. `status` folds a `think/` fixture of three launch records with two
+answered files (1.12 and 0.40 usd, 6 and 3 turns, both dated today), one
+unanswered with null cost, one live launch record (no answer, young), one
+lost launch record (no answer, older than its recorded timeout + 120s),
+one truncated answer file, and one `v: 2` answer file into
+`_think: {launches: 5, answered: 2, unanswered: 1, usd: 1.52, turns: 9,
+usd_today: 1.52, live: [<id>], lost: [<id>], skipped_files: 2}`; an empty
+or absent `think/` reports zeros and empty lists; a legacy task record
+whose `workers[]` entry lacks `effort` is reported with `effort:
+"unknown"` and passes through a full-record `write-task` rewrite
+unchanged.
+AC10. `watch_scan` includes `think/*.launch.json` and
+`think/*.answer.json`; a launch-record write and an answer write each
+flip `watch_changed`; a `.question.md` write does not.
+AC11. The walkthrough suite: (a) one `routing-table` call per dispatch: a
+plan kickoff launch line carries `--effort high` and the `workers[]` entry
+records `effort: "high"`; an impl launch line carries no `--effort` and
+records `null`; (b) a `classify-banner` `effort-mismatch` on a plan
+launch leaves `capabilities.json` untouched (no `disable-model` call in
+the fake log), no task record is written, and the fake herdr log shows
+the pane process terminated but no `workspace close` for an adopted
+resource, while a `downgrade` flips the requested alias and relaunches;
+(c) a triage escalation writes the question file at the canonical path,
+invokes `run-think` with the documented argv (`--add-dir tasks`), lands
+`.launch.json` then `.answer.json`, `status` shows `_think`, and a second
+`run-think` issued while the first is live exits 4; then an explicit
+`other`-kind escalation succeeds after the first answered; (d) the brief
+rendered for a kickoff contains a `## Routing` block equal to the
+`routing-table` output used for the launch, the exact Workflow opt-in
+line, and the one-line helper rule from 5.4; a `no-workflow` kickoff
+renders the withheld line instead.
+AC12 (human-verify, live): (a) one interactive launch without `--effort`
+shows a banner model line with no `with ... effort` clause (confirms the
+`inherit` classification); (b) one real `run-think` on this repo at
+`--effort high` whose question asks the advisor to (1) create a file, (2)
+run a shell command, (3) fetch a URL, (4) read a file outside its roots,
+and (5) list the tools it has, lands an `answered` file whose answer
+reports all four refused and only Read/Glob/Grep available, with
+`permission_denials` >= 1 for the outside read and no new file on disk;
+the plan's close records both outcomes.
 AC13. SKILL.md (sections 1, 2, 3, 4, 7, 8, 9 as touched), `state-layout.md`,
 `brief-template.md`, and `event-schema.md` describe the effort map, the
-launch line, the banner verb and `effort-mismatch` rule, the deep-think
-verb, triggers, contracts, files, `_think`, and the Workflow section;
-the existing docs drift checks pass and new ones pin the additions.
+single-snapshot launch line, the banner verb and `effort-mismatch`
+lifecycle, the deep-think verb, each named trigger and non-trigger, the
+escalation vocabulary and limits, contracts, files, `_think`, the
+Workflow decision table, the precedence sentence, the opt-in grant line
+and its `no-workflow` narrowing, and the helper rule; the existing docs
+drift checks pass and new ones pin each of those strings.
 
 ## Acceptance-criterion to contract-command mapping
 
@@ -616,3 +814,27 @@ the existing docs drift checks pass and new ones pin the additions.
 | AC1-AC10, AC13 | `core-unit-suite` (`sh claude/hooks/herdr-orch.test.sh`) |
 | AC11 | `orchestration-walkthrough-suite` (`sh claude/hooks/herdr-orch-contract.test.sh`) |
 | AC12 | human-verify (live), recorded in the plan close |
+
+## Review log
+
+### Round 1 (Codex, `model_reasoning_effort=high`, 2026-09-04): needs-rework, 17 findings
+
+| # | Sev | Finding (short) | Disposition |
+| --- | --- | --- | --- |
+| 1 | critical | `--add-dir` could expose `owner.json`/fence/socket; cwd and question path unbound | Folded: `--add-dir` tokens `tasks`/`think` only; question path canonical; `--cwd` slug-bound (4.7) |
+| 2 | critical | "read-only" asserted from flag compatibility, not proven | Folded: per-flag effect stated from CLI help, residual surface named, live AC12(b) proves refusals |
+| 3 | high | kickoff redefined as Workflow opt-in | Pushed back, reworded: the grant traces to the user's standing order and this task's instruction, recorded verbatim in the brief, narrowable per task (5.3). A per-task confirmation would contradict the user's explicit direction for this spec |
+| 4 | high | think model/effort could be weak | Folded: `ROLE_ALIASES["think"]` = fable/opus; `THINK_EFFORTS` = high/xhigh/max everywhere |
+| 5 | high | one-per-turn vs retry; budget doubles; no aggregate cap | Folded: escalation vs attempt vocabulary; shared budget with 0.25 floor; `daily_budget_usd` (4.1, 4.3, 4.7) |
+| 6 | high | one-live-per-repo unenforceable; no launch-time caps | Folded: create-exclusive `.launch.json` with caps; `run-think` enforces liveness (4.4, 4.7) |
+| 7 | high | interactive mode unbounded and contract-less | Folded: removed; explicit non-goal |
+| 8 | high | banner regex accepts anything as a model | Folded: ANSI strip, anchored first version line, known-family requirement, unknown -> `unreadable`, adversarial fixtures (3, AC4) |
+| 9 | high | schema vs prose vs validation mismatch | Folded: one schema (2-4 options, bounds, no extra keys), `valid_think_answer`, boundary ACs (4.6, AC6c) |
+| 10 | high | legacy `workers[].effort` undefined | Folded: absent = unknown, carried forward, new launches must include (2, AC9) |
+| 11 | high | `effort-mismatch` lifecycle unspecified | Folded: publish-after-launch makes it stateless; termination and non-unwind rules stated (3, AC11b) |
+| 12 | high | Workflow policy vs CLAUDE.md standing order | Folded: precedence paragraph, pinned by AC13 (5.1) |
+| 13 | high | think ids exceed the 32-char name limit on retry | Folded: 14-digit stamp, `-2` only; longest form is 32 (4.4, AC7) |
+| 14 | medium | routing values from separate reads | Folded: `routing-table` single snapshot per dispatch (1, 2, AC3, AC11a) |
+| 15 | medium | Workflow rules untested; "drop or halt" ambiguous | Folded: required/optional stage rule (5.2); brief/SKILL strings pinned (AC11d, AC13); executable script coverage declared out of reach |
+| 16 | medium | `think lost` shape and wake undefined | Folded: `_think.live`/`lost` lists, polling-only, no wake (4.9, AC9) |
+| 17 | medium | triggers prose-only | Folded partially: names pinned by drift checks (AC13), liveness refusal and explicit `other` in the walkthrough (AC11c); eligibility itself stays a skill rule |
