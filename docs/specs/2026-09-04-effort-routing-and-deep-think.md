@@ -5,7 +5,7 @@ Base: origin/main @ 8a377cc (verification contracts merged, #78), designed
 against the mech-tier branch
 `talon/td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical/cheap-model-tier`
 (unmerged at spec time; this work lands after it and reuses its machinery).
-Status: spec, revision 2 after Codex spec review round 1 (branch-only;
+Status: spec, revision 3 after Codex spec review rounds 1 and 2 (branch-only;
 dropped before merge per repo convention). Review log at the end.
 
 ## Problem
@@ -191,8 +191,10 @@ rewrites carry the entries forward byte-for-byte (the existing carry-
 forward rule), and every entry appended by a launch under this spec MUST
 include the key (walkthrough-asserted; the core adds no `workers[]`
 validation, matching today). `run-mech` gains an optional `--effort <level>`; when
-present it appends `--effort <level>` to the `claude` argv and the ledger
-`start` line carries `"effort": "<level>"` (`null` when absent). Mech
+present it must be a value in `EFFORT_LEVELS` (`inherit` and anything else
+is rejected with exit 2 before the ledger `start` line is written); it
+appends `--effort <level>` to the `claude` argv and the ledger `start` line
+carries `"effort": "<level>"` (`null` when absent). Mech
 kickoff keeps calling `resolve-effort --role mech` (default `inherit`), so
 nothing changes for mech until a config sets `effort.mech`.
 
@@ -206,8 +208,10 @@ The D4 backstop today scrapes the banner by prose. It becomes deterministic:
 
 `python3 "$CORE" classify-banner --model <alias> --effort <level|inherit> --text-file <path>`
 (or `--text '<captured text>'`) prints exactly one of
-`ok | downgrade | effort-mismatch | unreadable`, exit 0 for all four; the
-caller acts on the word, never on the raw text.
+`ok | downgrade | effort-mismatch | unreadable`, exit 0 for all four; with
+`--json` it prints `{"class": "<word>", "model": "<display>|null",
+"effort": "<level>|null"}` so the caller can quote the OBSERVED model and
+effort in its report without ever parsing the raw capture itself.
 
 Parse rule (`parse_banner(text) -> {"model": str|None, "effort": str|None}`):
 
@@ -306,20 +310,27 @@ worker brief never carries it).
 Vocabulary: an **escalation** is one question, one `think_id` family,
 one budget. It may take up to two **attempts** (the second only on a
 model-attributable failure, Design 4.7); both attempts share the
-escalation's `max_budget_usd`. Limits, all enforced by `run-think` from
-durable files (4.4), not by prose:
+escalation's `max_budget_usd`.
 
-- one live escalation per repo at a time (a second launch while one is
-  live exits 4, nothing written);
-- one escalation per orchestrator turn (skill rule; a second eligible
-  trigger in the same turn is reported as "escalation deferred: one
-  already live");
-- a daily automatic-spend ceiling, `config.think.daily_budget_usd`
-  (default 10.0, bounds 0 < x <= 200): when the sum of `total_cost_usd`
-  over answer files with `started` in the current UTC day plus the
-  requested `max_budget_usd` would exceed it, `run-think` exits 4 with the
-  spent/ceiling figures and the orchestrator surfaces "daily think budget
-  reached"; only the human raises it (config edit).
+Core-enforced limits (`run-think`, from durable files under a repo-wide
+lock, 4.4):
+
+- one live escalation per repo at a time: a launch while another launch
+  record is live exits 4, nothing written;
+- a daily spend ceiling, `config.think.daily_budget_usd` (default 10.0,
+  bounds 0 < x <= 200). The day's committed spend is the sum, over launch
+  records with `started` in the current UTC day, of the answer's numeric
+  `total_cost_usd` when one exists, else the launch's reserved
+  `caps.max_budget_usd` (live, lost, unwritable-answer, and null-cost runs
+  all count at their cap, never double-counted). When committed spend plus
+  the requested cap would exceed the ceiling, `run-think` exits 4 with the
+  figures and the orchestrator surfaces "daily think budget reached"; only
+  the human raises it (config edit);
+- the retry budget rule (4.7 step 2).
+
+Skill-enforced limit (prose, not a file): one escalation per orchestrator
+turn. A second eligible trigger in the same turn is reported as
+"escalation deferred: already launched this turn".
 
 #### 4.2 Mode
 
@@ -379,9 +390,20 @@ budget math never depend on current config. A launch is **live** while its
 `.launch.json` has no `.answer.json` and `started` is younger than its own
 `timeout_secs + 120s`; older is **lost**.
 
+`think/.lock` is a repo-wide lock file held (`fcntl.flock`, exclusive)
+by `run-think` from the liveness scan through the daily-budget check to
+the create-exclusive launch-record write, so two concurrent invocations
+with distinct ids cannot both observe "nothing live": exactly one wins,
+the other exits 4. The lock is released before `claude` is launched (the
+launch record is the liveness token from then on).
+
 Nothing is written into any worktree. The `think/` directory is
 machine-local like everything under `STATE_ROOT`. The attempt-2 record's
 `parent` ties the two attempts into one escalation for budget purposes.
+Attempt 2 reuses the parent's question: the orchestrator copies
+`<parent>.question.md` to `<parent>-2.question.md` byte-for-byte before
+the relaunch, and `run-think` refuses a retry whose question differs from
+the parent's (exit 2).
 
 #### 4.5 Input contract (the question file)
 
@@ -401,7 +423,8 @@ Written by the orchestrator from the new "Deep-think brief variant" in
 4. `## Constraints` -- what is fixed (existing gates, the human-merge
    rule, budget) and what is out of bounds.
 5. `## Answer shape` -- restates the output fields and asks for two to four
-   options with the recommendation first, rationale grounded in the
+   options (unordered alternatives; the `recommendation` field stands on
+   its own and need not name one of them), rationale grounded in the
    context, and open questions only for what the context cannot settle.
 
 #### 4.6 Output contract
@@ -444,7 +467,7 @@ outcome:
 
 ```json
 {
-  "v": 1, "think_id": "think-triage-20260904T170000Z", "kind": "triage",
+  "v": 1, "think_id": "think-triage-20260904170000", "kind": "triage",
   "task_id": null, "repo_slug": "<slug>", "model": "fable", "effort": "high",
   "caps": {"max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900},
   "status": "answered|unanswered", "reason": null,
@@ -468,14 +491,23 @@ helpers verbatim. `answer.json` additionally carries `attempt` and
 #### 4.7 The `run-think` verb
 
 ```
-python3 "$CORE" run-think --repo-slug <slug> --think-id <think_id> --kind <kind>
-  [--task-id <task_id>] --model $MODEL --effort <level> --cwd <repo_worktree>
+python3 "$CORE" run-think --repo-slug <slug> --session <id> --fence <fence>
+  --think-id <think_id> --kind <kind> [--task-id <task_id>]
+  --model $MODEL --effort <level> --cwd <repo_worktree>
   --max-turns <N> --max-budget-usd <X> --timeout-secs <T> [--add-dir tasks|think]... [--parent <think_id>]
 ```
 
+`run-think` is a **fenced** verb like `write-task`: it takes the owning
+orchestrator's `--session`/`--fence` and refuses under a stale or foreign
+fence exactly as the other fenced verbs do (nonzero exit, nothing
+written), so a stale orchestrator or a worker cannot launch one. The
+fence is checked first, and checked again immediately before the launch
+record is created (inside the lock).
+
 In order:
 
-1. Validate (exit 2, nothing written, on any failure): repo slug;
+1. Validate (exit 2, nothing written, on any failure): fence (as above);
+   repo slug;
    `valid_think_id(think_id)` and its kind equals `--kind`; optional task
    id valid; model in `ROLE_ALIASES["think"]`; effort in `THINK_EFFORTS`
    (no `inherit`); caps within the mech bounds; the question file is
@@ -488,15 +520,23 @@ In order:
    `STATE_ROOT/<slug>/think` (never the slug root, so `owner.json` with
    its fence and socket path, `config.json`, and `capabilities.json` are
    never exposed); every value shell-safe (`SHELL_SAFE_RE`); the
-   `.launch.json` and `.answer.json` must not already exist; `--parent`,
-   when given, names an existing attempt-1 `.answer.json` with
-   `model_attributable: true` and this id must be its `-2` form.
-2. Enforce the limits (exit 4, nothing written): another `.launch.json`
-   in `think/` is live (4.4); or the daily ceiling (4.1) would be
+   `.launch.json` and `.answer.json` must not already exist. Retry
+   identity is an iff: a `-2` id requires `--parent` and `--parent`
+   requires a `-2` id; `--parent` must equal this id minus `-2`; the
+   parent's `.answer.json` must exist with `model_attributable: true`,
+   the same `kind` and `task_id`, and a numeric `total_cost_usd` (a null
+   parent cost refuses the retry, exit 4, since the remainder is
+   undefined); this launch's `--model` must differ from the parent's
+   (the survivor after `disable-model`); `<think_id>.question.md` must be
+   byte-identical to the parent's question.
+2. Under `think/.lock` (4.4), re-check the fence, then enforce the limits
+   (exit 4, nothing written): another `.launch.json` in `think/` is live
+   (4.4); or the daily ceiling (4.1, reservation semantics) would be
    exceeded; for an attempt 2, the effective `max_budget_usd` is the
-   escalation cap minus attempt 1's `total_cost_usd` (a remainder under
-   0.25 refuses the retry).
-3. Write `<think_id>.launch.json` create-exclusive (collision: exit 2).
+   escalation cap minus attempt 1's numeric `total_cost_usd` (a remainder
+   under 0.25 refuses the retry).
+3. Still under the lock, write `<think_id>.launch.json` create-exclusive
+   (collision: exit 2); release the lock.
 4. Launch
    `claude --model <M> --effort <E> --permission-mode dontAsk --name <think_id> -p --output-format json --json-schema <THINK_SCHEMA> --max-turns <N> --max-budget-usd <X> --restricted --strict-mcp-config --tools Read,Glob,Grep [--add-dir <abs dir>]...`
    with the question on stdin, cwd `--cwd`, its own process group, killed
@@ -511,12 +551,19 @@ In order:
    Edit, NotebookEdit, and WebSearch are absent; `--permission-mode
    dontAsk` denies anything that would prompt, including a Read outside
    `--cwd` and the `--add-dir` roots, and the result's
-   `permission_denials` counts them. Managed settings and `--settings`
-   still apply (none is passed). The residual surface is: reads inside
-   the repo checkout and the two state subdirectories, and the answer.
-   AC12 proves this live (the advisor is asked to write, run, fetch, and
-   read outside its roots, and must report that it cannot). Session
-   persistence stays on so a human can `--resume` the transcript.
+   `permission_denials` counts them. **Trust boundary:** managed
+   (organization) settings and an explicit `--settings` still apply
+   (`run-think` passes none). "Read-only" therefore holds relative to
+   the managed configuration: on a machine whose managed settings add
+   hooks or MCP servers with side effects, those run under the managed
+   policy's authority and this verb cannot exclude them; the skill states
+   this assumption, and an adversarial acceptance case is not possible
+   without managed settings on the test machine. The residual surface on
+   an unmanaged machine is: reads inside the repo checkout and the two
+   state subdirectories, and the answer. AC12 proves this live (the
+   advisor is asked to write, run, fetch, and read outside its roots, and
+   must report that it cannot). Session persistence stays on so a human
+   can `--resume` the transcript.
 5. Parse the result exactly as `run_mech` does; classify `status`/`reason`
    per 4.6; write `<think_id>.answer.json` atomically. Unwritable: exit 3
    (the launch record remains and will read as lost).
@@ -525,10 +572,11 @@ In order:
 
 Model-attributable failure (`downgrade` or execution error naming the
 alias/"model"): the orchestrator applies the existing within-role rule --
-`disable-model` on the requested alias, `routing-table` again, relaunch
-once as `<think_id>-2 --parent <think_id>` on the survivor within the
-remaining budget. Two attempts per escalation, then decide inline and say
-so. Any other `unanswered` is surfaced with the spend line; a fresh
+`disable-model` on the requested alias, `routing-table` again, copy the
+question to `<think_id>-2.question.md`, relaunch once as `<think_id>-2
+--parent <think_id>` on the survivor (a different alias by construction)
+within the remaining budget. Two attempts per escalation, then decide
+inline and say so. Any other `unanswered` is surfaced with the spend line; a fresh
 escalation with raised caps is the human's call, next turn.
 
 `resolve-model --role think` exit 4 (no strong model): no escalation; the
@@ -565,8 +613,9 @@ and `think/*.answer.json`:
 
 `launches` counts launch records; `answered`/`unanswered` count answer
 files by `status`; `usd`/`turns` sum non-null values; `usd_today` sums
-`total_cost_usd` over answers whose `started` falls in the current UTC
-day (the daily-ceiling input); `live` and `lost` list launch records with
+committed spend over launches whose `started` falls in the current UTC
+day (the daily-ceiling input, reservation semantics: numeric answer cost,
+else the launch's cap); `live` and `lost` list launch records with
 no answer, split by the 4.4 age rule using each record's own
 `timeout_secs`; unparseable or wrong-`v` files are skipped and counted in
 `skipped_files`, never fatal. No per-task field. Lost detection is
@@ -706,7 +755,9 @@ with exit 0; the verb reads `config.json` and `capabilities.json` once
 each (asserted by counting opens through a patched `open` in the unit
 check).
 AC4. `classify-banner`: fixture texts yield `ok` (matching model and
-effort), `ok` (requested `inherit`, banner shows an effort or none),
+effort), `ok` (requested `inherit`, banner shows an effort or none); with
+`--json` the observed `model`/`effort` are reported (`"effort": "medium"`
+for a medium banner, `null` for none, `"model": null` when unreadable);
 `downgrade` (Sonnet banner under `--model fable`, regardless of effort),
 `effort-mismatch` (requested `high`, banner shows no effort; requested
 `high`, banner shows `medium`; requested `high`, only the `/effort`
@@ -743,21 +794,31 @@ exit 3 with the launch record left in place; (h) attempt 2 with
 `--parent` runs with `max_budget_usd` = cap minus attempt 1's cost, and
 is refused (exit 4) when the remainder is under 0.25 or when the parent
 was not model-attributable.
-AC7. `run-think` exits 2 and writes nothing for: a malformed `think_id`
+AC7. `run-think` refuses under a stale or foreign fence like every fenced
+verb (nonzero, nothing written). It exits 2 and writes nothing for: a
+malformed `think_id`
 (each kind with a 15-digit stamp, a `-3` suffix, uppercase), a
 `think_id` whose kind disagrees with `--kind`, a missing or symlinked
 question file, an `--add-dir` token other than `tasks`/`think`, a
 non-git `--cwd`, a `--cwd` whose remote resolves to a different
 `repo_slug`, out-of-bounds caps, a model outside `fable`/`opus`, an
 effort outside `high`/`xhigh`/`max` (including `inherit`), any
-shell-unsafe value, and an existing `.launch.json` or `.answer.json`.
-Exit 4 and nothing written for: a live sibling launch record (a younger
-`.launch.json` with no answer), a lost sibling being ignored (older than
-its own timeout + 120s: the launch proceeds), and a daily ceiling that
-the requested cap would exceed (fixture answers dated today).
+shell-unsafe value, an existing `.launch.json` or `.answer.json`, a `-2`
+id without `--parent`, `--parent` with a non-`-2` id, a `--parent` that is
+not this id minus `-2`, a parent with a different `kind` or `task_id`, a
+retry `--model` equal to the parent's, and a retry question that differs
+from the parent's. Exit 4 and nothing written for: a live sibling launch
+record (a younger `.launch.json` with no answer), a daily ceiling that the
+requested cap would exceed (fixture answers dated today; a live sibling
+dated today with no answer counts at its cap), and a parent with a null
+`total_cost_usd`. A lost sibling (older than its own timeout + 120s) is
+ignored and the launch proceeds (exit 0). Two concurrent `run-think`
+invocations with distinct ids (started in the background against a fake
+`claude` that sleeps) yield exactly one `.launch.json` and one exit 4.
 AC8. `run-mech --effort high` passes `--effort high` in argv and records
 `"effort": "high"` on the `start` line; without the flag argv is unchanged
-from the mech spec and the line records `null`.
+from the mech spec and the line records `null`; `--effort inherit` or
+`--effort turbo` exits 2 with no ledger line written.
 AC9. `status` folds a `think/` fixture of three launch records with two
 answered files (1.12 and 0.40 usd, 6 and 3 turns, both dated today), one
 unanswered with null cost, one live launch record (no answer, young), one
@@ -838,3 +899,19 @@ drift checks pass and new ones pin each of those strings.
 | 15 | medium | Workflow rules untested; "drop or halt" ambiguous | Folded: required/optional stage rule (5.2); brief/SKILL strings pinned (AC11d, AC13); executable script coverage declared out of reach |
 | 16 | medium | `think lost` shape and wake undefined | Folded: `_think.live`/`lost` lists, polling-only, no wake (4.9, AC9) |
 | 17 | medium | triggers prose-only | Folded partially: names pinned by drift checks (AC13), liveness refusal and explicit `other` in the walkthrough (AC11c); eligibility itself stays a skill rule |
+
+### Round 2 (Codex, `model_reasoning_effort=high`, 2026-09-04): needs-rework, 11 findings -- last round per the review skill's cap; proceeding to plan
+
+| # | Sev | Finding (short) | Disposition |
+| --- | --- | --- | --- |
+| 1 | high | `run-think` unfenced | Folded: fenced verb, checked before validation and again under the lock (4.7) |
+| 2 | high | scan-then-create not atomic | Folded: `think/.lock` flock across scan, budget, launch write; concurrency AC (4.4, AC7) |
+| 3 | high | daily ceiling ignores live/lost/null-cost runs | Folded: reservation semantics (cap until numeric cost); null parent cost refuses retry (4.1, 4.7, 4.9) |
+| 4 | high | retry identity incomplete | Folded: `-2` iff `--parent`, exact base, same kind/task, different model, identical question (4.4, 4.7, AC7) |
+| 5 | high | managed settings unstated | Folded: trust boundary paragraph; adversarial case declared infeasible on an unmanaged test machine (4.7) |
+| 6 | medium | observed effort not exposed | Folded: `classify-banner --json` (3, AC4) |
+| 7 | medium | "recommendation first" untestable | Folded: ordering requirement removed (4.5) |
+| 8 | medium | core vs skill limits conflated | Folded: split; "already launched this turn" (4.1) |
+| 9 | medium | AC7 lost-sibling placement | Folded (AC7) |
+| 10 | low | example id format | Folded (4.6) |
+| 11 | low | `run-mech --effort` invalid input | Folded (2, AC8) |
