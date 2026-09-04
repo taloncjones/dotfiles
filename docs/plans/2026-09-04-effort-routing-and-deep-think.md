@@ -903,7 +903,7 @@ Validation rules (fail closed; an invalid file is skipped and counted, and a lau
 
 - launch record: `v == 1` (int), `think_id == tid`, `kind == think_kind(tid)`, `task_id` None or a valid task id, `model` in `ROLE_ALIASES["think"]`, `effort` in `THINK_EFFORTS`, `caps` an object whose `max_turns`/`max_budget_usd`/`timeout_secs` each pass `_cap_error`, `attempt` in (1, 2) and equal to 2 iff `tid` ends in `-2`, `parent` None iff `attempt == 1` else `tid[:-2]`, `started` parseable as `%Y-%m-%dT%H:%M:%SZ`.
 - answer record: `v == 1`, `think_id == tid`, `status` in (`answered`, `unanswered`), `total_cost_usd` None or finite non-negative, `num_turns` None or finite non-negative int, `started` parseable; `answered` requires `answer` to pass `valid_think_answer`; `unanswered` requires `reason` in `THINK_REASONS` and `answer` None.
-- A malformed launch record is listed under `corrupt` (the `run-think` handler refuses with exit 4 while any exists: liveness cannot be judged); a malformed answer file is skipped only.
+- A malformed launch record is listed under `corrupt` only (not in `skipped_files`; the `run-think` handler refuses with exit 4 while any exists: liveness cannot be judged); a malformed, orphan (no launch), truncated, or wrong-`v` answer file is skipped and counted.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1038,8 +1038,7 @@ def think_scan(rd, now_ts):
                 out["launches"].append(rec)
                 launched.add(tid)
             else:
-                out["skipped_files"] += 1
-                out["corrupt"].append(tid)
+                out["corrupt"].append(tid)          # listed, not counted as skipped
     for name in names:
         if name.endswith(".answer.json") and valid_think_id(name[: -len(".answer.json")]):
             tid = name[: -len(".answer.json")]
@@ -1913,7 +1912,7 @@ Then follow the implement brief's close (emit-done with `--phase implement`) -- 
 
 - **Spec coverage:** spec 1 -> Tasks 1-2; spec 2 -> Tasks 2, 5, 9 (legacy), 10; spec 3 -> Task 3 (+10 prose, 11 lifecycle); spec 4.1-4.9 -> Tasks 4, 6, 8, 9, 10, 11; spec 5 -> Tasks 10, 11 (brief rendering); spec 6 -> no code (spec text only); AC12 -> Task 12.
 - **Placeholders:** none; every step carries code or exact strings. The docs task lists content requirements plus the exact pinned strings rather than full prose, which is the pattern the mech plan used.
-- **Type consistency:** `role_effort` returns `(level_or_None, code)`; `routing_table` returns `(dict, code)`; `think_scan` keys `launches/answers/live/lost/skipped_files`; `run_think(rd, a, question, launch, add_dirs)` (8c) matches the 8d handler call (the handler builds and publishes `launch` under `think_lock`); `think_scan` returns the six keys `launches/answers/live/lost/skipped_files/corrupt` everywhere (8a, 8d, 9); `think_outcome` returns a 4-tuple consumed only inside `run_think`.
+- **Type consistency:** `role_effort` returns `(level_or_None, code)`; `routing_table` returns `(dict, code)`; `run_think(rd, a, question, launch, add_dirs)` (8c) matches the 8d handler call (the handler builds and publishes `launch` under `think_lock`); `think_scan` returns the six keys `launches/answers/live/lost/skipped_files/corrupt` everywhere (8a, 8d, 9); `think_outcome` returns a 4-tuple consumed only inside `run_think`.
 
 ## Plan review log
 
