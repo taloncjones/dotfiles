@@ -220,6 +220,10 @@ Parse rule (`parse_banner(text) -> {"model": str|None, "effort": str|None}`):
 2. Anchor the version line: the FIRST line matching
    `Claude Code v\d+\.\d+\.\d+(\S*)?` (the banner is printed once, first;
    later text quoting it is ignored). None -> `unreadable`.
+   The version line must START the line after any leading logo glyphs
+   (anchored), so a prompt or notice merely mentioning the string is not a
+   banner; the effort-indicator search below is bounded to the banner
+   region (the next 12 lines).
 3. The model line is the next non-blank line, with leading logo glyphs
    (any run of characters outside `[A-Za-z]`) removed. It must match
    `^(?P<model>(Fable|Opus|Sonnet|Haiku)\b[^\u00b7]*?)(?: with (?P<effort>low|medium|high|xhigh|max) effort)?(?:\s*\u00b7.*)?$`
@@ -389,6 +393,16 @@ written) and carries the effective launch-time caps, so lost-detection and
 budget math never depend on current config. A launch is **live** while its
 `.launch.json` has no `.answer.json` and `started` is younger than its own
 `timeout_secs + 120s`; older is **lost**.
+
+Both files are published create-exclusively (same-directory temp file,
+fsync, `os.link`, temp removed on every path), so a failure leaves no
+partial record and an existing file is never replaced. Records are
+validated whole on read (`valid_launch_record`/`valid_answer_record`: every
+field typed and in range, `attempt`/`parent` consistent with the id suffix,
+an `answered` record carrying a schema-valid answer); an invalid answer
+file never completes its launch (the launch stays live or lost), an
+invalid launch record is `corrupt` and `run-think` refuses (exit 4) while
+one exists, since liveness cannot be judged.
 
 `think/.lock` is a repo-wide lock file held (`fcntl.flock`, exclusive)
 by `run-think` from the liveness scan through the daily-budget check to
@@ -740,7 +754,8 @@ whether `xhigh` earns its cost anywhere.
 ## Acceptance criteria
 
 AC1. `resolve-effort --role plan|review|think` prints `high`; `--role
-impl|mech` prints `inherit`; a config `effort` block overrides per role
+impl|mech` prints `inherit`; an explicit top-level `"effort": null` is a
+malformed block (exit 5), unlike an absent key; a config `effort` block overrides per role
 (`{"impl": "low"}` -> `low`, `{"plan": null}` -> `inherit`,
 `{"think": "xhigh"}` -> `xhigh`); exit 5 for an unknown role, a non-object
 block, an unknown key, a value outside `EFFORT_LEVELS`, a boolean/number
@@ -808,7 +823,8 @@ id without `--parent`, `--parent` with a non-`-2` id, a `--parent` that is
 not this id minus `-2`, a parent with a different `kind` or `task_id`, a
 retry `--model` equal to the parent's, and a retry question that differs
 from the parent's. Exit 4 and nothing written for: a live sibling launch
-record (a younger `.launch.json` with no answer), a daily ceiling that the
+record (a younger `.launch.json` with no answer), a corrupt launch record
+present in `think/`, a daily ceiling that the
 requested cap would exceed (fixture answers dated today; a live sibling
 dated today with no answer counts at its cap), and a parent with a null
 `total_cost_usd`. A lost sibling (older than its own timeout + 120s) is
@@ -819,14 +835,18 @@ AC8. `run-mech --effort high` passes `--effort high` in argv and records
 `"effort": "high"` on the `start` line; without the flag argv is unchanged
 from the mech spec and the line records `null`; `--effort inherit` or
 `--effort turbo` exits 2 with no ledger line written.
-AC9. `status` folds a `think/` fixture of three launch records with two
-answered files (1.12 and 0.40 usd, 6 and 3 turns, both dated today), one
-unanswered with null cost, one live launch record (no answer, young), one
-lost launch record (no answer, older than its recorded timeout + 120s),
-one truncated answer file, and one `v: 2` answer file into
-`_think: {launches: 5, answered: 2, unanswered: 1, usd: 1.52, turns: 9,
-usd_today: 1.52, live: [<id>], lost: [<id>], skipped_files: 2}`; an empty
-or absent `think/` reports zeros and empty lists; a legacy task record
+AC9. `status` folds a `think/` fixture of five launch records: two
+answered (1.12 and 0.40 usd, 6 and 3 turns, dated today), one unanswered
+with null cost (dated today), one live (no answer, young, dated today),
+one lost (no answer, older than its recorded timeout + 120s, dated the
+previous day), plus one truncated answer file and one `v: 2` answer file,
+into `_think: {launches: 5, answered: 2, unanswered: 1, usd: 1.52, turns:
+9, usd_today: 7.52, live: [<id>], lost: [<id>], skipped_files: 2, corrupt:
+[]}` (`usd` is actual spend; `usd_today` is committed spend: the null-cost
+and the live launch each reserve their 3.0 cap); an invalid answer file
+leaves its launch live and is counted in `skipped_files`; a malformed
+launch record appears in `corrupt`; an empty or absent `think/` reports
+zeros and empty lists; a legacy task record
 whose `workers[]` entry lacks `effort` is reported with `effort:
 "unknown"` and passes through a full-record `write-task` rewrite
 unchanged.
@@ -915,3 +935,11 @@ drift checks pass and new ones pin each of those strings.
 | 9 | medium | AC7 lost-sibling placement | Folded (AC7) |
 | 10 | low | example id format | Folded (4.6) |
 | 11 | low | `run-mech --effort` invalid input | Folded (2, AC8) |
+
+### Plan review round 1 feedback that touched the spec (2026-09-04)
+
+Folded from the Codex plan review: create-exclusive publication and whole-
+record validation for think files with a `corrupt` list (4.4, 4.9, AC7,
+AC9); `usd_today` under reservation semantics in the AC9 fixture; explicit
+`"effort": null` rejected (AC1); anchored banner version line and bounded
+indicator scan (3).
