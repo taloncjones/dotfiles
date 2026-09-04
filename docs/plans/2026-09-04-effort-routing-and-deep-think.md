@@ -1390,7 +1390,7 @@ OTHER=$(mktemp -d); git -C "$OTHER" init -q; git -C "$OTHER" -c user.name=t -c u
 q ${T}0114; try $F2 --model fable --effort high --cwd $OTHER --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0114          # foreign repo
 try $ok --think-id ${T}0115                                                     # question missing
 printf 'q\n' > "$RD/think/${T}0116.real.md"; ln -s "$RD/think/${T}0116.real.md" "$RD/think/${T}0116.question.md"; try $ok --think-id ${T}0116
-q ${T}0117; : > "$RD/think/${T}0117.launch.json"; rc=0; $CLI run-think $ok --think-id ${T}0117 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ]; rm "$RD/think/${T}0117.launch.json"   # corrupt launch record -> 4
+q ${T}0117; : > "$RD/think/${T}0199.launch.json"; rc=0; $CLI run-think $ok --think-id ${T}0117 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/${T}0117.launch.json" ]; rm "$RD/think/${T}0199.launch.json"   # corrupt SIBLING launch record -> 4 (own id would hit the exists check, exit 2)
 q ${T}0118; : > "$RD/think/${T}0118.answer.json"; try $ok --think-id ${T}0118; rm "$RD/think/${T}0118.answer.json"
 [ ! -s "$FAKE_CLAUDE_LOG.argv" ]                                                # none of the refusals launched
 for f in "$RD"/think/${T}01*.launch.json; do [ -e "$f" ] && { echo "unexpected $f" >&2; exit 1; }; done; true
