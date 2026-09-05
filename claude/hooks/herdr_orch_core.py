@@ -920,6 +920,9 @@ def valid_think_answer(obj):
     return _check_schema(obj, THINK_SCHEMA)
 
 
+THINK_ADD_DIRS = ("tasks", "think")
+THINK_RETRY_FLOOR_USD = 0.25
+
 THINK_LOST_GRACE_SECS = 120
 
 
@@ -1729,6 +1732,13 @@ def main(argv=None) -> int:
     rm.add_argument("--max-budget-usd", type=float, required=True)
     rm.add_argument("--timeout-secs", type=int, required=True)
     rm.add_argument("--effort", default=None)
+    rt = add("run-think", "--think-id", "--kind", "--model", "--effort", "--cwd", fenced=True)
+    rt.add_argument("--task-id", default=None)
+    rt.add_argument("--max-turns", type=int, required=True)
+    rt.add_argument("--max-budget-usd", type=float, required=True)
+    rt.add_argument("--timeout-secs", type=int, required=True)
+    rt.add_argument("--add-dir", action="append", default=[])
+    rt.add_argument("--parent", default=None)
     add("classify-probe", "--model", "--json")
     cb = add("classify-banner", "--model", "--effort")
     cb.add_argument("--text-file", default=None)
@@ -2234,6 +2244,104 @@ def main(argv=None) -> int:
         except OSError:
             pass  # run_mech's first append reports the unwritable ledger as exit 2
         return run_mech(rd, ns, brief, ns.timeout_secs)
+    if ns.cmd == "run-think":
+        rd = _fenced(ns)                      # stale/foreign fence refused like write-task (exit 2)
+        _require(valid_think_id(ns.think_id), "invalid think-id")
+        _require(ns.kind in THINK_KINDS and think_kind(ns.think_id) == ns.kind, "kind must match the think-id")
+        _require(ns.task_id is None or valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.model in ROLE_ALIASES["think"], "model must be fable or opus")
+        _require(ns.effort in THINK_EFFORTS, "effort must be high, xhigh, or max")
+        for name in ("repo_slug", "think_id", "kind", "model", "effort", "cwd"):
+            _require(SHELL_SAFE_RE.match(str(getattr(ns, name))),
+                     f"--{name.replace('_', '-')} contains whitespace or a shell metacharacter")
+        for k in ("max_turns", "max_budget_usd", "timeout_secs"):
+            err = _cap_error(k, getattr(ns, k))
+            _require(err is None, err or "")
+        qf = think_dir(rd) / f"{ns.think_id}.question.md"
+        _require(qf.is_file() and not qf.is_symlink(), "question file missing or not a regular file")
+        try:
+            question = qf.read_text()
+        except (OSError, UnicodeDecodeError):
+            question = None
+        _require(question is not None, "question file is not readable as text")
+        is_retry = ns.think_id.endswith("-2")
+        _require(is_retry == (ns.parent is not None), "a -2 id requires --parent and vice versa")
+        cwd = Path(ns.cwd)
+        _require(cwd.is_dir() and _git(str(cwd), "rev-parse", "--git-dir") is not None, "cwd must be a git checkout")
+        remote = _git(str(cwd), "remote", "get-url", "origin")
+        common = _git(str(cwd), "rev-parse", "--git-common-dir")
+        common_abs = str((cwd / common).resolve()) if common else None
+        _require(common_abs is not None and repo_slug(remote or "", common_abs) == ns.repo_slug,
+                 "cwd does not belong to --repo-slug")
+        add_dirs = []
+        for tok in ns.add_dir:
+            _require(tok in THINK_ADD_DIRS, "add-dir must be tasks or think")
+            p = rd / tok
+            _require(p.is_dir() and contained(p, state_root()), f"{tok} directory missing")
+            add_dirs.append(str(p))
+        ld, ad = think_dir(rd) / f"{ns.think_id}.launch.json", think_dir(rd) / f"{ns.think_id}.answer.json"
+        _require(not ld.exists() and not ad.exists(), "launch or answer record already exists")
+        caps = {"max_turns": ns.max_turns, "max_budget_usd": ns.max_budget_usd, "timeout_secs": ns.timeout_secs}
+        attempt, budget = 1, ns.max_budget_usd
+        if ns.parent is not None:
+            _require(ns.think_id == ns.parent + "-2", "think-id must be the parent's -2 form")
+
+            def _load(name):
+                try:
+                    return json.loads((think_dir(rd) / name).read_text())
+                except (OSError, ValueError):
+                    return None
+            plaunch, prec = _load(f"{ns.parent}.launch.json"), _load(f"{ns.parent}.answer.json")
+            _require(valid_launch_record(plaunch, ns.parent) and plaunch["attempt"] == 1,
+                     "parent must have a valid attempt-1 launch record")
+            _require(valid_answer_record(prec, ns.parent) and prec.get("status") == "unanswered"
+                     and prec.get("model_attributable") is True,
+                     "parent must be a valid unanswered model-attributable record")
+            for k in ("kind", "task_id", "model"):
+                _require(prec.get(k) == plaunch[k], f"parent answer/launch disagree on {k}")
+            _require(plaunch["kind"] == ns.kind and plaunch["task_id"] == ns.task_id, "parent kind/task must match")
+            _require(plaunch["model"] != ns.model, "retry must run on a different model than the parent")
+            _require(ns.max_budget_usd == plaunch["caps"]["max_budget_usd"],
+                     "retry --max-budget-usd must equal the parent launch's cap (the escalation budget)")
+            try:
+                same_q = (think_dir(rd) / f"{ns.parent}.question.md").read_bytes() == qf.read_bytes()
+            except OSError:
+                same_q = False
+            _require(same_q, "retry question must be byte-identical to the parent's")
+            spent = prec.get("total_cost_usd")
+            if spent is None:
+                sys.stderr.write("[X] parent cost unknown; retry remainder undefined\n")
+                return 4
+            budget = round(plaunch["caps"]["max_budget_usd"] - spent, 4)   # remainder of the ESCALATION budget
+            attempt = 2
+            if budget < THINK_RETRY_FLOOR_USD:
+                sys.stderr.write(f"[X] retry budget {budget} below the {THINK_RETRY_FLOOR_USD} floor\n")
+                return 4
+        cfg_caps, err = think_caps(read_config(rd))
+        _require(err is None, err or "")
+        with think_lock(rd):
+            _require(check_fence(rd, ns.session, int(ns.fence)), "stale fence")
+            now = now_iso()
+            scan = think_scan(rd, now)
+            if scan["corrupt"]:
+                sys.stderr.write(f"[X] corrupt launch record(s) {scan['corrupt']}; liveness unknown -- human cleanup\n")
+                return 4
+            live = [t for t in scan["live"] if t != ns.think_id]
+            if live:
+                sys.stderr.write(f"[X] escalation already live: {live[0]}\n")
+                return 4
+            spent_today = think_usd_today(scan, now[:10])
+            if spent_today + budget > cfg_caps["daily_budget_usd"]:
+                sys.stderr.write(f"[X] daily think budget: spent {spent_today} + {budget} > {cfg_caps['daily_budget_usd']}\n")
+                return 4
+            launch = {"v": 1, "think_id": ns.think_id, "kind": ns.kind, "task_id": ns.task_id,
+                      "repo_slug": ns.repo_slug, "model": ns.model, "effort": ns.effort,
+                      "caps": dict(caps, max_budget_usd=budget), "attempt": attempt,
+                      "parent": ns.parent, "started": now, "pid": os.getpid()}
+            if not publish_exclusive(ld, launch):
+                sys.stderr.write("[X] launch record exists or is unwritable\n")
+                return 2
+        return run_think(rd, ns, question, launch, add_dirs)
     return 2
 
 

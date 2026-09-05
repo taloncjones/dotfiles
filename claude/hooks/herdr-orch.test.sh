@@ -1973,5 +1973,113 @@ os.environ.pop("FAKE_CLAUDE_HOOK")
 sys.exit(0)
 PY
 
+check "run-think handler: happy path via CLI, stale fence, exit 2 cases write nothing" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo2.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo2.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think" "$RD/tasks"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+q() { printf 'q\n' > "$RD/think/$1.question.md"; }
+GOOD='{"recommendation":"do A","rationale":"because","options":[{"label":"A","summary":"s","tradeoffs":"t","risk":"low"},{"label":"B","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}'
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.9,"modelUsage":{"claude-fable-5-1":{}},"structured_output":%s}' "$GOOD" > "$FAKE_CLAUDE_JSON"
+ok="--repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
+ID=think-triage-20260904180000; q $ID
+rc=0; $CLI run-think --repo-slug $SLUG --session S --fence 999 --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$RD/think/$ID.launch.json" ]                                  # stale fence
+$CLI run-think $ok --think-id $ID --add-dir tasks --add-dir think
+python3 -c "import json;l=json.load(open('$RD/think/$ID.launch.json'));a=json.load(open('$RD/think/$ID.answer.json'));assert l['caps']['max_budget_usd']==3.0 and l['attempt']==1 and a['status']=='answered',(l,a)"
+grep -qx -- "$RD/tasks" "$FAKE_CLAUDE_LOG.argv" && grep -qx -- "$RD/think" "$FAKE_CLAUDE_LOG.argv"
+: > "$FAKE_CLAUDE_LOG.argv"
+n=0
+try() { n=$((n+1)); rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 2 ] || { echo "expected 2 got $rc for: $*" >&2; exit 1; }; }
+T="think-triage-2026090418"          # distinct ids per case: ${T}01xx
+q ${T}0101; try $ok --think-id ${T}010                                         # 13-digit stamp
+q ${T}0102; try $ok --think-id ${T}0102-3
+q ${T}0103; try $ok --think-id think-Triage-20260904180103
+q ${T}0104; try $ok --think-id think-other-20260904180104                       # kind disagrees
+F2="--repo-slug $SLUG --session S --fence $FE --kind triage"
+q ${T}0105; try $F2 --model sonnet --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0105
+q ${T}0106; try $F2 --model fable --effort inherit --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0106
+q ${T}0107; try $F2 --model fable --effort medium --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0107
+q ${T}0108; try $F2 --model fable --effort high --cwd $WT --max-turns 0 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0108
+q ${T}0109-2; try $ok --think-id ${T}0109-2                                     # -2 without --parent
+q ${T}0110; try $ok --think-id ${T}0110 --parent $ID                            # --parent with a non -2 id
+q ${T}0111; try $ok --think-id ${T}0111 --add-dir owner
+q ${T}0112; try $ok --think-id ${T}0112 --add-dir "$RD"
+q ${T}0113; try $F2 --model fable --effort high --cwd "$(mktemp -d)" --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0113   # non-git cwd
+OTHER=$(mktemp -d); git -C "$OTHER" init -q; git -C "$OTHER" -c user.name=t -c user.email=t@x commit -q --allow-empty -m b; git -C "$OTHER" remote add origin https://github.com/org/elsewhere.git
+q ${T}0114; try $F2 --model fable --effort high --cwd $OTHER --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0114          # foreign repo
+try $ok --think-id ${T}0115                                                     # question missing
+printf 'q\n' > "$RD/think/${T}0116.real.md"; ln -s "$RD/think/${T}0116.real.md" "$RD/think/${T}0116.question.md"; try $ok --think-id ${T}0116
+q ${T}0117; : > "$RD/think/${T}0199.launch.json"; rc=0; $CLI run-think $ok --think-id ${T}0117 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/${T}0117.launch.json" ]; rm "$RD/think/${T}0199.launch.json"   # corrupt SIBLING launch record -> 4 (own id would hit the exists check, exit 2)
+q ${T}0118; : > "$RD/think/${T}0118.answer.json"; try $ok --think-id ${T}0118; rm "$RD/think/${T}0118.answer.json"
+[ ! -s "$FAKE_CLAUDE_LOG.argv" ]                                                # none of the refusals launched
+for f in "$RD"/think/${T}01*.launch.json; do [ -e "$f" ] && { echo "unexpected $f" >&2; exit 1; }; done; true
+SH
+
+check "run-think limits: live sibling, lost sibling ignored, daily ceiling with reservation, retry rules, concurrency" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo3.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo3.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+q() { printf 'q\n' > "$RD/think/$1.question.md"; }
+L() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"repo_slug":"%s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":null,"started":"%s","pid":1}' "$1" "$2" "$SLUG" "$3" > "$RD/think/$1.launch.json"; }
+A() { printf '{"v":1,"think_id":"%s","status":"%s","reason":%s,"answer":%s,"total_cost_usd":%s,"num_turns":%s,"started":"%s"}' "$1" "$2" "$3" "$4" "$5" "$6" "$7" > "$RD/think/$1.answer.json"; }
+GOOD='{"recommendation":"do A","rationale":"because","options":[{"label":"A","summary":"s","tradeoffs":"t","risk":"low"},{"label":"B","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}'
+ok="--repo-slug $SLUG --session S --fence $FE --kind other --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ); TODAY=$(date -u +%Y-%m-%d)
+# live sibling -> 4, nothing written
+L think-triage-20260904170000 triage "$NOW"; q think-other-20260904170100
+rc=0; $CLI run-think $ok --think-id think-other-20260904170100 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/think-other-20260904170100.launch.json" ]
+# lost sibling (older than 60+120s) ignored -> proceeds
+L think-triage-20260904170000 triage "2020-01-01T00:00:00Z"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.5,"structured_output":%s}' "$GOOD" > "$FAKE_CLAUDE_JSON"
+$CLI run-think $ok --think-id think-other-20260904170100 && [ -e "$RD/think/think-other-20260904170100.answer.json" ]
+rm "$RD"/think/think-*
+# daily ceiling: 2 answered at 3.0 + 1 null-cost unanswered reserved at 3.0 = 9.0; +3.0 > 10.0 -> 4; then a 1.0 cap fits
+for n in 1 2 3; do L think-other-2026090410000$n other "${TODAY}T10:00:0${n}Z"; done
+for n in 1 2; do A think-other-2026090410000$n answered null "$GOOD" 3.0 1 "${TODAY}T10:00:0${n}Z"; done
+A think-other-20260904100003 unanswered '"error"' null null null "${TODAY}T10:00:03Z"
+q think-other-20260904170200
+rc=0; $CLI run-think $ok --think-id think-other-20260904170200 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/think-other-20260904170200.launch.json" ]
+$CLI run-think --repo-slug $SLUG --session S --fence $FE --kind other --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 1.0 --timeout-secs 60 --think-id think-other-20260904170200
+rm "$RD"/think/think-*
+# retry rules
+P=think-triage-20260904190000; q $P; q $P-2
+L $P triage "2020-01-01T00:00:00Z"
+PA() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"model":"fable","status":"%s","reason":%s,"answer":%s,"model_attributable":%s,"total_cost_usd":%s,"num_turns":1,"started":"2020-01-01T00:00:00Z"}' "$P" "$1" "${5:-unanswered}" "${6:-\"error\"}" "${7:-null}" "$2" "$3" > "$RD/think/$P.answer.json"; }
+R2="--repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P"
+t2() { rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq "$EXP" ] || { echo "expected $EXP got $rc for: $*" >&2; exit 1; }; [ ! -e "$RD/think/$P-2.launch.json" ]; }
+PA triage false 1.0;  EXP=2 t2 $R2                                                          # parent not model-attributable
+PA triage true 1.0 x answered null "$GOOD"; EXP=2 t2 $R2                                    # answered parent cannot be retried
+PA triage true 1.0;   mv "$RD/think/$P.launch.json" "$RD/think/$P.launch.bak"; EXP=2 t2 $R2; mv "$RD/think/$P.launch.bak" "$RD/think/$P.launch.json"   # orphan parent answer (no launch)
+PA triage true 1.0;   EXP=2 t2 --repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 9.0 --timeout-secs 60 --think-id $P-2 --parent $P   # inflated retry cap
+PA triage true 1.0;   EXP=2 t2 --repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P   # same model
+PA incident true 1.0; EXP=2 t2 $R2                                                          # parent kind differs
+PA triage true 1.0;   printf 'different\n' > "$RD/think/$P-2.question.md"; EXP=2 t2 $R2; q $P-2
+PA triage true null;  EXP=4 t2 $R2                                                          # null parent cost
+PA triage true 2.9;   EXP=4 t2 $R2                                                          # remainder below 0.25
+PA triage true 1.0
+printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":2.0}' > "$FAKE_CLAUDE_JSON"
+$CLI run-think $R2
+grep -qx -- '2.0' "$FAKE_CLAUDE_LOG.argv"
+python3 -c "import json;l=json.load(open('$RD/think/$P-2.launch.json'));a=json.load(open('$RD/think/$P-2.answer.json'));assert l['attempt']==2 and l['parent']=='$P' and l['caps']['max_budget_usd']==2.0 and a['reason']=='max_budget' and a['parent']=='$P',(l,a)"
+rm "$RD"/think/think-*
+# concurrency: two distinct ids racing -> exactly one launch record and one exit 4
+IDA=think-other-20260904170400; IDB=think-other-20260904170500; q $IDA; q $IDB
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.1}' > "$FAKE_CLAUDE_JSON"
+FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logA" $CLI run-think $ok --think-id $IDA >/dev/null 2>&1 & PA_=$!
+FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logB" $CLI run-think $ok --think-id $IDB >/dev/null 2>&1 & PB_=$!
+ra=0; wait $PA_ || ra=$?; rb=0; wait $PB_ || rb=$?
+[ $((ra + rb)) -eq 4 ] && [ "$(ls "$RD/think/" | grep -c -E "($IDA|$IDB)\.launch\.json")" -eq 1 ]
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
