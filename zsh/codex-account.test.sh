@@ -1,6 +1,8 @@
 #!/bin/sh
 # Exercise the installed .zshenv route against a recording Codex binary.
 set -u
+# Cases declare their machine policy independently of the launching shell.
+unset CLAUDE_PERSONAL_ONLY
 
 if ! command -v zsh >/dev/null 2>&1; then
     echo "SKIP: zsh not installed"
@@ -65,6 +67,10 @@ run_case() {
 run_case "personal directory disables Atlassian in noninteractive shells" "$PERSONAL" yes exec hi
 run_case "work directory keeps original plugin policy" "$WORK" no exec hi
 run_case "unknown directory keeps original plugin policy" "$UNKNOWN" no exec hi
+CLAUDE_PERSONAL_ONLY=1 run_case "personal-only machine disables Atlassian in work directory" "$WORK" yes exec hi
+CLAUDE_PERSONAL_ONLY=1 run_case "personal-only machine disables Atlassian in unknown directory" "$UNKNOWN" yes exec hi
+CLAUDE_PERSONAL_ONLY=1 run_case "personal-only machine disables Atlassian for explicit work target" "$UNKNOWN" yes -C "$WORK" exec hi
+CLAUDE_PERSONAL_ONLY=0 run_case "personal-only flag zero preserves work plugin policy" "$WORK" no exec hi
 run_case "personal path prefix requires a directory boundary" "$SBHOME/Git" no --cd personal-other
 run_case "symlink into personal tree gets personal policy" "$SBHOME/personal-shortcut" yes exec hi
 run_case "-C personal target overrides work cwd" "$WORK" yes -C "$PERSONAL" exec hi
@@ -106,21 +112,43 @@ run_case "personal checkout with metadata under work disables Atlassian" "$SEPAR
 run_case "personal checkout with external metadata disables Atlassian" "$SEPARATE_EXTERNAL" yes exec hi
 run_case "-C personal checkout with work metadata disables Atlassian" "$WORK" yes -C "$SEPARATE_WORK" exec hi
 
+# A machine-wide personal decision must not depend on Git availability or probes.
+mkdir -p "$TMP/probe-bin"
+cat > "$TMP/probe-bin/git" <<'EOF'
+#!/bin/sh
+: > "$GIT_PROBE_RECORD"
+exit 1
+EOF
+chmod +x "$TMP/probe-bin/git"
+CLAUDE_PERSONAL_ONLY=1 GIT_PROBE_RECORD="$TMP/git-probed" PATH="$TMP/probe-bin:$PATH" \
+    run_case "personal-only policy applies when Git is unavailable" "$WORK" yes exec hi
+if [ ! -e "$TMP/git-probed" ]; then
+    pass "personal-only policy skips Git probing"
+else
+    fail "personal-only policy skips Git probing"
+fi
+
 # The wrapper must not consume input or change binary output/status.
 printf 'stdin survives\n' > "$TMP/input"
-RECORD="$TMP/record" HOME="$SBHOME" ZDOTDIR="$TMP/zdot" \
-    PATH="$TMP/bin:$PATH" CASE_CWD="$PERSONAL" \
-    TEST_CODEX_STDIO=1 TEST_CODEX_STATUS=7 \
-    zsh -c 'cd -- "$CASE_CWD" && codex exec -' \
-    < "$TMP/input" > "$TMP/stdout" 2> "$TMP/stderr"
-rc=$?
 printf 'codex stderr\n' > "$TMP/expected-stderr"
-if [ "$rc" = 7 ] && cmp -s "$TMP/input" "$TMP/stdout" \
-    && cmp -s "$TMP/expected-stderr" "$TMP/stderr"; then
-    pass "exit status and stdin/stdout/stderr pass through"
-else
-    fail "exit status and stdin/stdout/stderr pass through"
-fi
+printf '%s\0' -c "$POLICY" exec - > "$TMP/expected"
+for personal_only in 0 1; do
+    stdio_cwd="$PERSONAL"
+    [ "$personal_only" = 0 ] || stdio_cwd="$WORK"
+    RECORD="$TMP/record" HOME="$SBHOME" ZDOTDIR="$TMP/zdot" \
+        PATH="$TMP/bin:$PATH" CASE_CWD="$stdio_cwd" \
+        CLAUDE_PERSONAL_ONLY="$personal_only" TEST_CODEX_STDIO=1 TEST_CODEX_STATUS=7 \
+        zsh -c 'cd -- "$CASE_CWD" && codex exec -' \
+        < "$TMP/input" > "$TMP/stdout" 2> "$TMP/stderr"
+    rc=$?
+    if [ "$rc" = 7 ] && cmp -s "$TMP/input" "$TMP/stdout" \
+        && cmp -s "$TMP/expected-stderr" "$TMP/stderr" \
+        && cmp -s "$TMP/expected" "$TMP/record"; then
+        pass "personal-only=$personal_only: policy preserves exit status and stdin/stdout/stderr"
+    else
+        fail "personal-only=$personal_only: policy preserves exit status and stdin/stdout/stderr"
+    fi
+done
 
 out="$(HOME="$SBHOME" ZDOTDIR="$TMP/zdot" zsh -c true 2>&1)"
 if [ -z "$out" ]; then

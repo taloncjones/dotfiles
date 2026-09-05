@@ -90,12 +90,12 @@ dedupe_codex_workflow_plugins() {
   [ -f "$config" ] || return 0
 
   if codex_plugin_enabled "$config" "ecc@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "ecc@ecc"
+    disable_codex_plugin "$config" "ecc@ecc" || return 1
   fi
 
   if codex_plugin_enabled "$config" "superpowers@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "superpowers@openai-curated"
-    disable_codex_plugin "$config" "superpowers@claude-plugins-official"
+    disable_codex_plugin "$config" "superpowers@openai-curated" || return 1
+    disable_codex_plugin "$config" "superpowers@claude-plugins-official" || return 1
   fi
 
   # Keep repo-owned compatibility repairs in the same install/update lifecycle.
@@ -113,4 +113,13 @@ dedupe_codex_workflow_plugins() {
       return 1
     fi
   fi
+}
+
+# Optional maintenance must not prevent unrelated installation and cleanup.
+# Explicit native plugin lifecycle commands use the strict function above.
+reconcile_codex_workflow_plugins_for_install() {
+  if ! dedupe_codex_workflow_plugins; then
+    echo "[WARNING] Codex surface reconciliation did not complete; continuing installation. Resolve the error above and retry the Codex surface helper." >&2
+  fi
+  return 0
 }

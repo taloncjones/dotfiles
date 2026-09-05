@@ -100,6 +100,52 @@ class SurfaceTests(unittest.TestCase):
         self.assertFalse(result["plugins"]["ecc@ecc"]["enabled"])
         self.assertEqual(result["skills"]["max_context_tokens"], 10000)
 
+    def test_optional_installers_continue_when_python_is_unavailable(self):
+        repo = Path(os.environ["CODEX_SURFACES_SCRIPT"]).resolve().parents[2]
+        toolbin = self.root / "installer-bin"
+        toolbin.mkdir()
+        for name in ("bash", "awk", "basename", "cp", "date", "dirname", "find", "grep", "ln", "mkdir", "mv", "rm", "rmdir", "sed", "wc"):
+            (toolbin / name).symlink_to(shutil.which(name))
+        self.write(toolbin / "python3", '#!/bin/sh\nexit 1\n')
+        (toolbin / "python3").chmod(0o755)
+        env = {**os.environ, "HOME": str(self.root), "CODEX_HOME": str(self.codex), "DOTFILEDIR": str(repo), "PATH": str(toolbin)}
+        self.config.write_text('# preserve this preference\n[skills]\nmax_context_tokens = 4000\n')
+        stale = self.codex / "skills/ecc-obsolete/SKILL.md"
+        self.write(stale, 'old managed snapshot\n')
+        for script in ("link.sh", "claude-plugins.sh"):
+            with self.subTest(script=script):
+                result = subprocess.run([str(toolbin / "bash"), str(repo / "install/common" / script)], env=env, cwd=self.root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('Codex surface reconciliation did not complete', result.stderr)
+        self.assertFalse(stale.exists(), 'later link cleanup must still run')
+        self.assertEqual(tomllib.loads(self.config.read_text())["skills"]["max_context_tokens"], 4000)
+        strict = subprocess.run([str(toolbin / "bash"), '-ec', 'source "$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"; dedupe_codex_workflow_plugins'], env=env, capture_output=True, text=True)
+        self.assertNotEqual(strict.returncode, 0, 'explicit reconciliation must report failure')
+
+    def test_optional_installers_preserve_unsupported_valid_toml(self):
+        repo = Path(os.environ["CODEX_SURFACES_SCRIPT"]).resolve().parents[2]
+        original = 'developer_instructions = """\n[skills]\nmax_context_tokens = 4000\n"""\n'
+        self.config.write_text(original)
+        env = {**os.environ, "HOME": str(self.root), "CODEX_HOME": str(self.codex), "DOTFILEDIR": str(repo)}
+        result = subprocess.run(['bash', '-ec', 'source "$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"; reconcile_codex_workflow_plugins_for_install; echo later-install-step'], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Codex surface reconciliation did not complete', result.stderr)
+        self.assertIn('later-install-step', result.stdout)
+        self.assertEqual(self.config.read_text(), original)
+        strict = subprocess.run(['bash', '-ec', 'source "$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"; dedupe_codex_workflow_plugins'], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertNotEqual(strict.returncode, 0)
+        self.assertEqual(self.config.read_text(), original)
+
+    def test_early_duplicate_failure_stops_strict_reconciliation(self):
+        repo = Path(os.environ["CODEX_SURFACES_SCRIPT"]).resolve().parents[2]
+        original = '[plugins."ecc@dotfiles-workflows"]\nenabled = true\n'
+        self.config.write_text(original)
+        env = {**os.environ, "HOME": str(self.root), "CODEX_HOME": str(self.codex), "DOTFILEDIR": str(repo)}
+        command = 'source "$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"; disable_codex_plugin() { return 7; }; if dedupe_codex_workflow_plugins; then exit 0; else exit 1; fi'
+        strict = subprocess.run(['bash', '-ec', command], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertNotEqual(strict.returncode, 0, 'a failed duplicate write must not be masked by successful later repair')
+        self.assertEqual(self.config.read_text(), original)
+
     def security_hook(self, asynchronous=True):
         self.write(self.security / ".claude-plugin/plugin.json", '{"name":"security-guidance"}')
         self.write(self.security / "hooks/hooks.json", json.dumps({"hooks": {

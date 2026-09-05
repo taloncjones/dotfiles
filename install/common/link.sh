@@ -133,8 +133,18 @@ ln -sf "$DOTFILEDIR"/claude/hooks/herdr_worktree_guard.py "$HOME"/.codex/hooks/h
 
 # These are repo-owned workflows, shared from one maintained source. Native
 # ECC and Superpowers plugin installations remain independent per runtime.
+link_codex_skill() {
+  local source="$1"
+  local destination="$2"
+  if [ -e "$destination" ] && [ ! -L "$destination" ]; then
+    echo "[WARNING] Preserving existing Codex skill: $destination; skipping managed symlink." >&2
+    return 0
+  fi
+  ln -sfn "$source" "$destination"
+}
+
 for shared_skill in repo-recall post-merge todos; do
-  ln -sfn "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
+  link_codex_skill "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
 done
 mkdir -p "$HOME/.codex/rules"
 ln -sf "$DOTFILEDIR/claude/rules/personal/agent-lessons.md" "$HOME/.codex/rules/agent-lessons.md"
@@ -142,7 +152,7 @@ ln -sf "$DOTFILEDIR/claude/rules/personal/agent-lessons.md" "$HOME/.codex/rules/
 if [ -d "$DOTFILEDIR"/codex/skills ]; then
   for codex_skill in "$DOTFILEDIR"/codex/skills/*; do
     [ -d "$codex_skill" ] || continue
-    ln -sfn "$codex_skill" "$HOME"/.codex/skills/"$(basename "$codex_skill")"
+    link_codex_skill "$codex_skill" "$HOME"/.codex/skills/"$(basename "$codex_skill")"
   done
 fi
 
@@ -265,7 +275,7 @@ add_codex_hook \
 # cycle (this link-time run happens before the plugins exist on that path).
 source "$DOTFILEDIR"/install/common/codex-plugin-dedupe.sh
 
-dedupe_codex_workflow_plugins
+reconcile_codex_workflow_plugins_for_install
 
 # Codex plugins are the canonical owner for ECC and Superpowers workflow
 # surfaces. The dotfiles only link repo-managed bridge skills above. Older

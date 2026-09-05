@@ -6,6 +6,11 @@
 
 function codex() {
     emulate -L zsh
+    # The machine's personal-only policy applies regardless of launch directory.
+    if [[ "${CLAUDE_PERSONAL_ONLY:-}" == 1 ]]; then
+        command codex -c 'plugins."atlassian@claude-plugins-official".enabled=false' "$@"
+        return $?
+    fi
     local target="$PWD" personal_tree="$HOME/Git/personal"
     local arg common_dir owner take_cd=0
     for arg in "$@"; do

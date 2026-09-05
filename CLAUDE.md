@@ -59,7 +59,7 @@ is the equivalent.
 
 **Symlink targets:**
 
-- `zsh/` -> `~/.zshrc`, `~/.zprofile`, `~/.zshenv` (`.zshenv` sources `zsh/claude-account.zsh` so the `claude()` wrapper exists in non-interactive shells; machine-local additions live in `~/.zshenv.local`, migrated there from a pre-existing `~/.zshenv` by `install/common/zshenv-migrate.sh`)
+- `zsh/` -> `~/.zshrc`, `~/.zprofile`, `~/.zshenv` (`.zshenv` sources both account wrappers so Claude routing and Codex's personal-repository Atlassian exclusion work in non-interactive shells; machine-local additions live in `~/.zshenv.local`, migrated there from a pre-existing `~/.zshenv` by `install/common/zshenv-migrate.sh`)
 - `git/` -> `~/.gitconfig` (no `[user]` block; identity comes from `includeIf` only — `useConfigOnly` makes git refuse to commit outside `~/Git/personal` and `~/Git/work`)
 - `git/personal/.gitconfig-personal` -> `~/.gitconfig-personal` (tracked)
 - `git/work/.gitconfig-work.tmpl` seeded to `~/.gitconfig-work` on first install (machine-local; run `identity-setup` to populate employer values)
@@ -71,15 +71,38 @@ is the equivalent.
 - `claude/rules/` -> `~/.claude*/rules`. Claude Code natively auto-loads every `.md` under `~/.claude/rules/` at launch (verified live in a cloud session, 2026-07-02): files with a `paths:` frontmatter load only when matching files are in context, files without one load every session. Only our own always-on rules under `claude/rules/personal/` are tracked (e.g. `claude-prompting.md`, the cross-model model-tuning layer; the dir serves both config dirs via the `claude/rules` symlink). ECC rules vendoring stays retired (2026-07-02): the full upstream tree ships in the ECC marketplace clone (`~/.claude/plugins/marketplaces/ecc/rules/`) wherever the plugin is installed — point on-demand consumers (e.g. ECC rules-distill's `RULES_DISTILL_DIR`) there; vendoring ECC's no-`paths:` `common/`/`web/` rules would inject generic/stale content into every session. Language dirs left in `claude/rules/` by older installs are NOT inert — they auto-load per the semantics above — so `ecc-install`/`ecc-update` flag them for removal (`claude/rules/.gitignore` keeps them uncommitted).
 - `claude/operating-principles.md` -> `~/.claude*/` (both config dirs). `claude/CLAUDE.md` `@import`s it into every session as standing, model-agnostic engineering discipline. Linked by `link_claude_config_dir`. (Per-model audit deep-dives `Fable5.md`/`Opus4.md`, if present locally, are gitignored and never committed — they hold private session content.)
 - `codex/` -> `~/.codex/` (AGENTS.md, hooks)
-- `claude/settings.json.tmpl` is seeded to `~/.claude/settings.json` and `~/.claude-work/settings.json` on first install, then reconciled on every `update`/link run (`reconcile_claude_settings_file` in `install/common/claude-links.sh`): template-owned keys (hooks, statusLine, permissions, env) are reasserted, plugin-installer keys (`enabledPlugins`, `extraKnownMarketplaces`) are unioned with live state winning, unknown keys preserved. The files stay machine-local (installers write to them) — never symlink them.
+- `claude/settings.json.tmpl` is seeded to `~/.claude/settings.json` and `~/.claude-work/settings.json` on first install, then reconciled on every `update`/link run (`reconcile_claude_settings_file` in `install/common/claude-links.sh`): template-owned keys (hooks, statusLine, permissions, env) are reasserted, plugin-installer keys (`enabledPlugins`, `extraKnownMarketplaces`) are unioned with live state winning, unknown keys preserved. The personal config always disables Atlassian; work config retains its existing choice. The files stay machine-local (installers write to them) — never symlink them.
 - `bin/identity-setup` -> `~/bin/identity-setup` — interactive wizard writing `~/.gitconfig-work`, `~/.ssh/id_ed25519_work.pub`, `~/.ssh/config_local`
 - `bin/identity-doctor` -> `~/bin/identity-doctor` — read-only chain verifier; also reachable as `git identity`
-- `claude/hooks/account_guard.py` — SessionStart hook that warns when the Claude account does not match the directory convention (registered in `settings.json.tmpl`; drift-checked by `claude-hooks.test.sh`)
+- `claude/hooks/account_guard.py` — SessionStart hook that warns when personal work uses a work account; work repositories allow either account (registered in `settings.json.tmpl`; drift-checked by `claude-hooks.test.sh`)
 - `claude/hooks/herdr_worktree_guard.py` — PreToolUse Bash hook that denies `herdr worktree create` without `--cwd` (a bare create anchors to the herdr server's current repo, not yours); `worktree open` is not guarded (registered in `settings.json.tmpl`; drift-checked by `claude-hooks.test.sh`)
 
 **Codex plugin integration:**
 
 ECC and Superpowers use native, independent plugin installations in both runtimes. Claude installs `ecc@ecc` and `superpowers@claude-plugins-official` into both account config dirs. Codex stages self-contained copies from separate upstream checkouts under `~/.local/share/dotfiles/codex-workflows`, then installs `ecc@dotfiles-workflows` and `superpowers@dotfiles-workflows`. Never run ECC's `sync-ecc-to-codex.sh` on a dotfiles-managed machine: it mutates shared `AGENTS.md`, MCP, agent, and git-hook surfaces. `install/common/link.sh` continues to sweep stale direct skill/agent mirrors from older installs.
+
+`install/common/codex-surfaces.py` reconciles native discovery during install and
+update. It disables proven duplicate skill copies and incompatible or inert
+Claude-only imports of `security-guidance`, `code-review`, and `code-simplifier`;
+custom or compatible implementations are preserved. It supplies
+`skills.max_context_tokens = 10000` only when unset; an explicit budget wins.
+The helper preserves skill files and unrelated configuration. Unsupported TOML
+layouts fail without being rewritten. Optional installer reconciliation warns
+and continues; explicit plugin lifecycle commands still report failure.
+
+Run the helper with `--check` to preview changes or `--apply` to write them.
+`--focus --apply` opts into the core ECC catalog in `codex/ecc-skills.txt`;
+subsequent updates retain that choice. Explicit skill overrides are preserved.
+To leave focused discovery, remove the complete `[[skills.config]]` blocks
+marked `# dotfiles-managed: ecc-focus` and their marker comments, then reconcile
+without `--focus`. Proven duplicates remain disabled. The compatibility checks
+run again on later updates; simply re-enabling an incompatible import does not
+opt it out.
+
+Restart Claude or Codex after changing plugin or hook configuration. A running
+session may retain old registrations, including across compaction. Verify a fresh
+Codex process with a harmless tool call and final response: startup alone does
+not exercise PostToolUse or Stop.
 
 **Herdr (agent terminal multiplexer):**
 

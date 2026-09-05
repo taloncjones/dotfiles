@@ -181,7 +181,7 @@ assert "installer disables duplicate managed workflow providers" \
     dedupes_managed_workflow_plugins
 
 assert "plugin lifecycle re-runs workflow dedupe post-install" \
-    sh -c "rg -q 'dedupe_codex_workflow_plugins' install/common/claude-plugins.sh"
+    rg -q '^reconcile_codex_workflow_plugins_for_install$' install/common/claude-plugins.sh
 
 removes_stale_claude_web_codex_hook() {
     tmp_home="$(mktemp -d)"
@@ -301,6 +301,41 @@ links_shared_workflow_surfaces() (
 
 assert "installer shares maintained workflows and Herd guard with Codex" \
     links_shared_workflow_surfaces
+
+preserves_custom_codex_skill_destinations() (
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    for skill in repo-recall claude-plan-review; do
+        mkdir -p "$tmp_home/.codex/skills/$skill"
+        printf 'custom skill\n' >"$tmp_home/.codex/skills/$skill/SKILL.md"
+    done
+    for skill in todos co-review; do
+        printf 'custom file\n' >"$tmp_home/.codex/skills/$skill"
+    done
+    ln -s "$tmp_home/missing-old-skill" "$tmp_home/.codex/skills/post-merge"
+    mkdir -p "$tmp_home/custom-target"
+    printf 'keep target\n' >"$tmp_home/custom-target/personal.txt"
+    ln -s "$tmp_home/custom-target" "$tmp_home/.codex/skills/claude-spec-review"
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >"$tmp_home/install.out" 2>"$tmp_home/install.err"
+    for skill in repo-recall claude-plan-review; do
+        [ ! -L "$tmp_home/.codex/skills/$skill" ] || return 1
+        [ "$(cat "$tmp_home/.codex/skills/$skill/SKILL.md")" = 'custom skill' ] || return 1
+        [ ! -e "$tmp_home/.codex/skills/$skill/$skill" ] || return 1
+        rg -q -F "Preserving existing Codex skill: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
+    done
+    for skill in todos co-review; do
+        [ ! -L "$tmp_home/.codex/skills/$skill" ] || return 1
+        [ "$(cat "$tmp_home/.codex/skills/$skill")" = 'custom file' ] || return 1
+        rg -q -F "Preserving existing Codex skill: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
+    done
+    [ "$(readlink "$tmp_home/.codex/skills/post-merge")" = "$PWD/claude/skills/post-merge" ] || return 1
+    [ "$(readlink "$tmp_home/.codex/skills/claude-spec-review")" = "$PWD/codex/skills/claude-spec-review" ] || return 1
+    [ "$(cat "$tmp_home/custom-target/personal.txt")" = 'keep target' ] || return 1
+    [ ! -e "$tmp_home/custom-target/claude-spec-review" ]
+)
+
+assert "installer preserves custom skill directories and files while refreshing symlinks" \
+    preserves_custom_codex_skill_destinations
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

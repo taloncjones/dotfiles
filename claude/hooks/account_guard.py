@@ -99,7 +99,7 @@ def main() -> None:
         if (
             not within(checkout, personal_tree)
             and not within(owner, personal_tree)
-            and within(owner, work_tree)
+            and (within(checkout, work_tree) or within(owner, work_tree))
         ):
             return
 

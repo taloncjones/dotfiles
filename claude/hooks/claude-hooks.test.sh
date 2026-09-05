@@ -428,6 +428,13 @@ guard_case "guard: personal checkout with separate work metadata -> warn" \
     warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/separate-work-metadata"
 guard_case "guard: personal checkout with separate external metadata -> warn" \
     warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/separate-external-metadata"
+guard_git init -q --separate-git-dir "$GUARD_FIX/b/external-work-metadata.git" "$GUARD_FIX/b/Git/work/separate-external-metadata"
+guard_case "guard: work checkout with separate external metadata permits work account" \
+    silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/separate-external-metadata"
+guard_case "guard: work checkout with separate external metadata permits personal override" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/separate-external-metadata"
+guard_case "guard: personal-only machine still rejects work account with separate metadata" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/separate-external-metadata" 1
 
 # Fixture C: no work login at all (cloud container / personal-only machine).
 # Account cannot be resolved -> config paths still protect personal scope.

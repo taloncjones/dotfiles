@@ -44,4 +44,4 @@ fi
 # skips deduplication on a first install/migration, where the canonical
 # providers do not exist yet.
 source "$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"
-dedupe_codex_workflow_plugins
+reconcile_codex_workflow_plugins_for_install
