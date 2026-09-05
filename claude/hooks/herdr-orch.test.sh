@@ -1494,6 +1494,26 @@ d=json.load(open("$RD/tasks/td-r.done.json")); assert d["outcome"]=="completed" 
 PY
 SH
 
+check "run-mech --effort passes the flag and records it; absent -> null and argv unchanged" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-me"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+BASE=$(git -C "$WT" rev-parse HEAD); printf 'brief\n' > "$RD/tasks/td-me.brief.md"
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.1,"modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
+base="$CLI run-mech --repo-slug slug-me --task-id td-me --workspace w1 --agent mech-td-me --model haiku --worktree $WT --base-sha $BASE --brief-file $RD/tasks/td-me.brief.md --max-turns 5 --max-budget-usd 0.5 --timeout-secs 60"
+$base --launch-id mech-td-me-1 --effort high
+grep -qx -- '--effort' "$FAKE_CLAUDE_LOG.argv" && grep -qx -- 'high' "$FAKE_CLAUDE_LOG.argv"
+python3 -c "import json;l=[json.loads(x) for x in open('$RD/tasks/td-me.spend.jsonl')];assert l[0]['kind']=='start' and l[0]['effort']=='high',l"
+$base --launch-id mech-td-me-2
+! grep -qx -- '--effort' "$FAKE_CLAUDE_LOG.argv"
+python3 -c "import json;l=[json.loads(x) for x in open('$RD/tasks/td-me.spend.jsonl')];assert l[2]['kind']=='start' and l[2]['effort'] is None,l"
+rc=0; $base --launch-id mech-td-me-3 --effort turbo 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+rc=0; $base --launch-id mech-td-me-4 --effort inherit 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+[ "$(wc -l < "$RD/tasks/td-me.spend.jsonl")" -eq 4 ]
+SH
+
 check "run-mech: cap hits, no_emit, errors, dirty, unparseable, downgrade, errors persisted -> wrapper records" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
 export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC

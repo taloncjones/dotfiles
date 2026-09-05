@@ -910,13 +910,16 @@ def run_mech(rd, a, brief, timeout_secs) -> int:
             "agent": a.agent, "launch_id": a.launch_id}
     try:
         append_spend(rd, a.task_id, dict(base, kind="start", role="mech",
-                                         model=a.model, ts=start_ts, **caps))
+                                         model=a.model, effort=getattr(a, "effort", None),
+                                         ts=start_ts, **caps))
     except OSError:
         sys.stderr.write("[X] cannot append the spend ledger\n")
         return 2
-    argv = ["claude", "--model", a.model, "--permission-mode", "auto",
-            "--name", a.agent, "-p", "--output-format", "json",
-            "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
+    argv = ["claude", "--model", a.model]
+    if getattr(a, "effort", None):
+        argv += ["--effort", a.effort]
+    argv += ["--permission-mode", "auto", "--name", a.agent, "-p", "--output-format", "json",
+             "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=a.worktree, stdin=subprocess.PIPE,
@@ -1401,6 +1404,7 @@ def main(argv=None) -> int:
     rm.add_argument("--max-turns", type=int, required=True)
     rm.add_argument("--max-budget-usd", type=float, required=True)
     rm.add_argument("--timeout-secs", type=int, required=True)
+    rm.add_argument("--effort", default=None)
     add("classify-probe", "--model", "--json")
     cb = add("classify-banner", "--model", "--effort")
     cb.add_argument("--text-file", default=None)
@@ -1884,6 +1888,7 @@ def main(argv=None) -> int:
                  "agent must be agent_name('mech', task_id) or a -2..-9 collision variant")
         _require(ns.launch_id.startswith(ns.agent + "-"), "launch-id must be prefixed by the agent name")
         _require(ns.model in CAP_MODELS, "model must be a known alias")
+        _require(ns.effort is None or ns.effort in EFFORT_LEVELS, "effort must be one of low/medium/high/xhigh/max")
         _require(SHA40_RE.match(ns.base_sha), "base-sha must be 40 hex")
         for k in ("max_turns", "max_budget_usd", "timeout_secs"):
             err = _cap_error(k, getattr(ns, k))
