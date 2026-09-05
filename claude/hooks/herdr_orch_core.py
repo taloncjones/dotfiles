@@ -381,6 +381,63 @@ def classify_probe(result, alias):
     return "indeterminate"
 
 
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"            # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b[@-Z\\-_]"                     # single-char escapes
+)
+_BANNER_VERSION_RE = re.compile(r"^[^A-Za-z]*Claude Code v\d+\.\d+\.\d+")   # anchored: glyphs, then the banner
+_BANNER_SCAN_LINES = 12                                                        # indicator lives within the banner region
+_BANNER_MODEL_RE = re.compile(
+    r"^(?P<model>(?:Fable|Opus|Sonnet|Haiku)\b[^\u00b7]*?)"
+    r"(?: with (?P<effort>low|medium|high|xhigh|max) effort)?"
+    r"(?:\s*\u00b7.*)?$"
+)
+_BANNER_EFFORT_LINE_RE = re.compile(r"\u25cf\s*(low|medium|high|xhigh|max)\s*\u00b7\s*/effort")
+_MODEL_FAMILY = {"fable": "fable", "opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", (text or "").replace("\r", ""))
+
+
+def parse_banner(text):
+    """{"model", "effort"} from the FIRST Claude Code banner in text, or
+    None when there is no anchored version line or the model line names no
+    known family (spec 3): unknown text is unreadable, never a downgrade."""
+    lines = strip_ansi(text).splitlines()
+    for i, line in enumerate(lines):
+        if not _BANNER_VERSION_RE.search(line):
+            continue
+        rest = [l for l in lines[i + 1:] if l.strip()]
+        if not rest:
+            return None
+        model_line = re.sub(r"^[^A-Za-z]+", "", rest[0]).strip()
+        m = _BANNER_MODEL_RE.match(model_line)
+        if not m:
+            return None
+        effort = m.group("effort")
+        if effort is None:
+            for later in rest[1:_BANNER_SCAN_LINES]:
+                e = _BANNER_EFFORT_LINE_RE.search(later)
+                if e:
+                    effort = e.group(1)
+                    break
+        return {"model": m.group("model").strip(), "effort": effort}
+    return None
+
+
+def classify_banner(parsed, alias, effort) -> str:
+    """Spec 3 precedence: unreadable > downgrade > effort-mismatch > ok."""
+    if not parsed:
+        return "unreadable"
+    if _MODEL_FAMILY[alias] not in parsed["model"].lower():
+        return "downgrade"
+    if effort != "inherit" and parsed.get("effort") != effort:
+        return "effort-mismatch"
+    return "ok"
+
+
 def state_root() -> Path:
     base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     return Path(base) / "herdr-orch"
@@ -1307,6 +1364,10 @@ def main(argv=None) -> int:
     rm.add_argument("--max-budget-usd", type=float, required=True)
     rm.add_argument("--timeout-secs", type=int, required=True)
     add("classify-probe", "--model", "--json")
+    cb = add("classify-banner", "--model", "--effort")
+    cb.add_argument("--text-file", default=None)
+    cb.add_argument("--text", default=None)
+    cb.add_argument("--json", action="store_true")
     ed = add(
         "emit-done",
         "--task-id",
@@ -1462,6 +1523,25 @@ def main(argv=None) -> int:
         except ValueError:
             result = None
         print(classify_probe(result, ns.model))
+        return 0
+    if ns.cmd == "classify-banner":
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
+        _require(ns.effort == "inherit" or ns.effort in EFFORT_LEVELS, "effort must be a level or inherit")
+        _require((ns.text is None) != (ns.text_file is None), "pass exactly one of --text/--text-file")
+        text = ns.text
+        if ns.text_file is not None:
+            try:
+                text = Path(ns.text_file).read_text(errors="replace")
+            except OSError:
+                text = None
+        _require(text is not None, "text-file not readable")
+        parsed = parse_banner(text)
+        cls = classify_banner(parsed, ns.model, ns.effort)
+        if ns.json:
+            print(json.dumps({"class": cls, "model": (parsed or {}).get("model"),
+                              "effort": (parsed or {}).get("effort")}))
+        else:
+            print(cls)
         return 0
     if ns.cmd in ("emit-done", "emit-review"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")

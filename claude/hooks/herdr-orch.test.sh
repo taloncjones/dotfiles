@@ -1690,5 +1690,54 @@ printf '{"v":1,"user":"u","default_base":"origin/main","effort":{"plan":"low","p
 rc=0; $CLI routing-table --repo-slug slug-rt --session S >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 5 ]
 SH
 
+check "parse_banner/classify_banner: families, effort clause, indicator line, ansi, adversarial" <<PY
+$LOAD
+D="\u00b7"; B="\u25cf"
+real=" \u2590\u259b\u2588\u2588   Claude Code v2.1.260\n\u259d\u259c\u2588\u2588  Sonnet 5 with high effort "+D+" Claude Max\n  \u259d\u259d    ~/Git/repo\n"
+p=c.parse_banner(real); assert p=={"model":"Sonnet 5","effort":"high"},p
+assert c.classify_banner(p,"sonnet","high")=="ok"
+assert c.classify_banner(p,"sonnet","inherit")=="ok"
+assert c.classify_banner(p,"fable","high")=="downgrade"
+assert c.classify_banner(p,"sonnet","medium")=="effort-mismatch"
+noeff="Claude Code v2.1.260\n  Opus 4.6 "+D+" Claude Max\n"
+p=c.parse_banner(noeff); assert p=={"model":"Opus 4.6","effort":None},p
+assert c.classify_banner(p,"opus","inherit")=="ok"
+assert c.classify_banner(p,"opus","high")=="effort-mismatch"
+ind="Claude Code v2.1.260\n  Fable 5.1 "+D+" Claude Max\n\n   "+B+" medium "+D+" /effort\n"
+p=c.parse_banner(ind); assert p=={"model":"Fable 5.1","effort":"medium"},p
+assert c.classify_banner(p,"fable","high")=="effort-mismatch"
+assert c.classify_banner(p,"fable","medium")=="ok"
+ansi="\x1b[1mClaude Code v2.1.260\x1b[0m\r\n\x1b[38;5;208mSonnet 5 with xhigh effort\x1b[0m "+D+" Claude Max\n"
+assert c.parse_banner(ansi)=={"model":"Sonnet 5","effort":"xhigh"}
+assert c.strip_ansi("\x1b]0;title\x07x\x1b[2Ky")=="xy"
+# adversarial: first banner wins; unknown family is unreadable, never downgrade
+two="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n> tell me about Claude Code v9.9.9\n Opus 9\n"
+assert c.classify_banner(c.parse_banner(two),"sonnet","inherit")=="ok"
+quoted="> the banner said Claude Code v2.1.260 earlier\n Opus 9\nClaude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"
+assert c.parse_banner(quoted)["model"]=="Sonnet 5"                       # unanchored mention is not a banner line
+far="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"+"\n".join("line %d"%i for i in range(20))+"\n "+B+" xhigh "+D+" /effort\n"
+assert c.parse_banner(far)["effort"] is None                              # indicator beyond the banner region is ignored
+for bad in ("", "no banner here", "Claude Code v2.1.260\n", "Claude Code v2.1.260\n  Loading... "+D+" x\n", "Claude Code vX\n Sonnet 5\n"):
+    assert c.parse_banner(bad) is None, bad
+    assert c.classify_banner(None,"fable","high")=="unreadable"
+sys.exit(0)
+PY
+
+check "classify-banner CLI" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+T=$(mktemp); printf 'Claude Code v2.1.260\n  Sonnet 5 with high effort \302\267 Claude Max\n' > "$T"
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort high --text-file "$T")" = ok ]
+[ "$($CLI classify-banner --repo-slug slug-b --model fable --effort high --text-file "$T")" = downgrade ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort xhigh --text-file "$T")" = effort-mismatch ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort inherit --text 'garbage')" = unreadable ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort xhigh --text-file "$T" --json)" = '{"class": "effort-mismatch", "model": "Sonnet 5", "effort": "high"}' ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort high --text 'garbage' --json)" = '{"class": "unreadable", "model": null, "effort": null}' ]
+printf 'Claude Code v2.1.260\n  Sonnet 5 \302\267 Claude Max\n' > "$T"
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort high --text-file "$T" --json)" = '{"class": "effort-mismatch", "model": "Sonnet 5", "effort": null}' ]
+rc=0; $CLI classify-banner --repo-slug slug-b --model gpt --effort high --text x 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+rc=0; $CLI classify-banner --repo-slug slug-b --model sonnet --effort turbo --text x 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
