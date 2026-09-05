@@ -47,6 +47,26 @@ of the toolchain, and do not reinstall any variant.
 - Claude-specific statusline, slash commands, agents, and lifecycle hooks are not copied wholesale into Codex
 - Prefer git hooks for policies that must apply outside a single agent runtime
 
+## Shared Workflow Policy
+
+- Use the current Codex tool surface and configured model/roles. Older ECC
+  supplement claims that Codex lacks hooks or native plugins, and its fixed
+  model recommendations, do not override this runtime's supported features.
+- Personal machines set `CLAUDE_PERSONAL_ONLY=1` in machine-local shell
+  configuration; never propagate that machine choice through this repo.
+  On machines using both accounts, a personal checkout or canonical owner
+  overrides inherited work-account settings. Capture the intended account
+  before launching partner reviewers or moving into temporary worktrees.
+- Work repositories may deliberately use personal Claude quota through
+  `claude --personal` or `CLAUDE_CONFIG_DIR="$HOME/.claude"`; preserve that
+  choice in child reviewers. The account restriction is one-way.
+- Read `~/.codex/rules/agent-lessons.md` when present before implementation
+  or review. It links to the same standing lessons used by Claude; do not
+  maintain a second copy or edit the ECC-managed block below.
+- Repo-owned skills may share canonical sources across runtimes. Keep
+  runtime-specific tool calls in their adapters and native plugin installs
+  independent.
+
 ## Worktree Default
 
 For implementation work, default to an isolated workspace before editing files.
@@ -79,6 +99,10 @@ Use these skills by default when the task matches:
   environment hardening.
 - `co-review` for top-level review orchestration after implementation, and
   `superpowers:verification-before-completion` before claiming work is done.
+- `repo-recall` for prior repo decisions, findings, plans, handoffs, and todos;
+  open the cited source before treating a search result as evidence.
+- `post-merge` for merged-branch cleanup and shared lessons distillation.
+- `todos` for inspecting and maintaining the repo's current and pending work.
 
 ## Superpowers Flow
 

@@ -11,7 +11,10 @@ does not. Replaces GSD's `.planning/todos/` without the worktree/hook machinery.
 
 All mechanics go through the backing script — never hand-create or hand-move
 todo files, because the script also keeps `TODO.md` in sync. Call it by
-absolute path: `~/.claude/skills/todos/scripts/todos.sh`.
+absolute path: resolve `scripts/todos.sh` from the directory of this loaded
+skill. Both runtimes link this repo-owned source. The existing cross-repo
+registry remains shared at `~/.claude/todos/repos.txt`; `TODOS_REGISTRY`
+can override it explicitly without moving either runtime's plugin files.
 
 ## Layout
 

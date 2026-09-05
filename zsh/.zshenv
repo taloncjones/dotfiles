@@ -17,4 +17,7 @@
 _dotfiles_zshenv="${${(%):-%N}:A}"
 [[ -f "${_dotfiles_zshenv:h}/claude-account.zsh" && -r "${_dotfiles_zshenv:h}/claude-account.zsh" ]] && \
     source "${_dotfiles_zshenv:h}/claude-account.zsh"
+# Apply personal Codex plugin policy to headless dispatches as well.
+[[ -f "${_dotfiles_zshenv:h}/codex-account.zsh" && -r "${_dotfiles_zshenv:h}/codex-account.zsh" ]] && \
+    source "${_dotfiles_zshenv:h}/codex-account.zsh"
 unset _dotfiles_zshenv

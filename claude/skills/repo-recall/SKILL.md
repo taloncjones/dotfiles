@@ -5,20 +5,23 @@ description: Use when answering questions about prior decisions, specs, plans, f
 
 # Repo Recall
 
-A per-repo full-text index over prose artifacts, stored under the active
-Claude config dir (never in the repo), refreshed at query time. One script,
-called by absolute path:
+A per-repo full-text index over prose artifacts, shared by Claude and Codex
+and refreshed at query time. Resolve the directory containing this loaded
+SKILL.md (including its symlink target), then invoke its adjacent script:
 
-    ~/.claude/skills/repo-recall/scripts/recall.py
+    python3 "<loaded-skill-directory>/scripts/recall.py" search <terms>
+
+Run from the repo being searched; the script path is independent of its
+installation under either runtime's skills directory.
 
 ## What it indexes
 
 | Kind     | Where                                                      |
 | -------- | ---------------------------------------------------------- |
 | docs     | `docs/**/*.md`, `*.md` at the repo root                    |
-| handoffs | `.claude/handoffs/*.md`                                    |
+| handoffs | `.claude/handoffs/*.md`, `.codex/handoffs/*.md`             |
 | todos    | `.todos/pending/*.md`, `.todos/completed/*.md`             |
-| findings | `docs/findings/**`, `.claude/findings/**` (md, txt, jsonl) |
+| findings | `docs/findings/**`, `.claude/findings/**`, `.codex/findings/**` (md, txt, jsonl) |
 | memory   | Claude auto-memory for this tree and its main checkout     |
 | extra    | `RECALL_EXTRA_GLOBS` (colon-separated, repo-relative)      |
 
@@ -28,11 +31,35 @@ matching kind: memory, extra, findings, handoffs, todos, docs.
 
 ## Where the index lives
 
-`<config_dir>/recall/<repo-id>/index.db`. The config dir follows the
-`claude()` wrapper rule: `CLAUDE_CONFIG_DIR` if set, else `~/.claude-work`
-for trees under `~/Git/work`, else `~/.claude`. So a work repo's index and
-memory stay under the work account. `recall.py status` prints the resolved
-paths.
+`<config_dir>/recall/<repo-id>/index.db`, always outside the repo.
+`RECALL_CONFIG_DIR`, when set, overrides index storage for either runtime.
+Within that shared root, the cache directory is
+`<repo-id>-account-<digest>`, where the digest identifies the resolved
+Claude memory root. Different accounts therefore cannot reuse each other's
+cached memory through `--no-refresh` or a locked-refresh fallback.
+`CLAUDE_PERSONAL_ONLY=1` makes the memory account `~/.claude` for every
+repo on a personal machine, regardless of inherited account variables or
+repo location. It also selects default storage there; an explicit
+`RECALL_CONFIG_DIR` continues to override storage alone.
+
+Otherwise, a checkout or canonical repository owner under `~/Git/personal`
+uses `~/.claude` for memory and default storage, even when
+`CLAUDE_CONFIG_DIR` was inherited from a work session. Either personal
+location wins, including linked worktrees and separate Git metadata.
+Other repos honor `CLAUDE_CONFIG_DIR` if set, else route `~/Git/work` to
+`~/.claude-work`, else use `~/.claude`; configured work-tree/account
+overrides retain their existing meaning.
+Both runtimes use the same index for the same checkout and memory account
+by sharing these settings; do not select a different cache automatically
+just because the caller is Codex. Existing default cache paths are unchanged.
+
+The storage override does not change Claude memory discovery: memory stays
+scoped to this repo and its main checkout under the account route above.
+Personal repos never discover inherited work-account memory. Global Codex
+memories and sessions are never indexed. `recall.py
+status` prints both storage and memory roots. Different worktrees retain
+separate indexes so their differing files cannot overwrite each other's
+search results.
 
 ## Commands
 

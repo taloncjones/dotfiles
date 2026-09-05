@@ -23,6 +23,7 @@ sh install/install.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
 sh zsh/claude-account.test.sh
+sh zsh/codex-account.test.sh
 sh claude/hooks/claude-hooks.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
@@ -38,6 +39,7 @@ bash claude/skills/lib/test_work_state.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
 bash claude/skills/repo-recall/scripts/tests/recall_test.sh
 sh install/claude-links.test.sh
+sh install/codex-surfaces.test.sh
 "
 
 if [ "${1:-}" = "--list" ]; then

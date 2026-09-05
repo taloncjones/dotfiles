@@ -129,6 +129,15 @@ ln -sf "$DOTFILEDIR"/codex/hooks/no_ai_attribution_bash.py "$HOME"/.codex/hooks/
 ln -sf "$DOTFILEDIR"/codex/hooks/block_secrets.py "$HOME"/.codex/hooks/block_secrets.py
 ln -sf "$DOTFILEDIR"/codex/hooks/emoji_guard.py "$HOME"/.codex/hooks/emoji_guard.py
 ln -sf "$DOTFILEDIR"/codex/hooks/no_ai_comments.py "$HOME"/.codex/hooks/no_ai_comments.py
+ln -sf "$DOTFILEDIR"/claude/hooks/herdr_worktree_guard.py "$HOME"/.codex/hooks/herdr_worktree_guard.py
+
+# These are repo-owned workflows, shared from one maintained source. Native
+# ECC and Superpowers plugin installations remain independent per runtime.
+for shared_skill in repo-recall post-merge todos; do
+  ln -sfn "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
+done
+mkdir -p "$HOME/.codex/rules"
+ln -sf "$DOTFILEDIR/claude/rules/personal/agent-lessons.md" "$HOME/.codex/rules/agent-lessons.md"
 
 if [ -d "$DOTFILEDIR"/codex/skills ]; then
   for codex_skill in "$DOTFILEDIR"/codex/skills/*; do
@@ -245,6 +254,11 @@ add_codex_hook \
   'no_ai_comments.py' \
   'Edit|Write|MultiEdit|apply_patch' \
   "$HOME/.codex/hooks/no_ai_comments.py"
+
+add_codex_hook \
+  'herdr_worktree_guard.py' \
+  'Bash|Shell|exec_command|shell_command|unified_exec' \
+  "$HOME/.codex/hooks/herdr_worktree_guard.py"
 
 # Shared with claude-plugins.sh, which re-runs the dedupe after the managed
 # installs so a first install closes the duplicate-provider window in the same

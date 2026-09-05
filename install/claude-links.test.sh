@@ -174,5 +174,25 @@ else
     fail "link path symlinks assets but keeps settings.json a real file"
 fi
 
+ACCOUNT_HOME="$TMP/account-home"
+mkdir -p "$ACCOUNT_HOME/.claude" "$ACCOUNT_HOME/.claude-work"
+printf '{"enabledPlugins":{"atlassian@claude-plugins-official":true,"keep@custom":true}}\n' \
+    > "$ACCOUNT_HOME/.claude/settings.json"
+cp "$ACCOUNT_HOME/.claude/settings.json" "$ACCOUNT_HOME/.claude-work/settings.json"
+HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
+    "$ACCOUNT_HOME/.claude/settings.json" >/dev/null
+HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
+    "$ACCOUNT_HOME/.claude-work/settings.json" >/dev/null
+if jget "$ACCOUNT_HOME/.claude/settings.json" "d['enabledPlugins']['atlassian@claude-plugins-official'] is False and d['enabledPlugins']['keep@custom'] is True"; then
+    pass "personal Claude config disables Atlassian and preserves other plugins"
+else
+    fail "personal Claude config disables Atlassian and preserves other plugins"
+fi
+if jget "$ACCOUNT_HOME/.claude-work/settings.json" "d['enabledPlugins']['atlassian@claude-plugins-official'] is True"; then
+    pass "work Claude config retains Atlassian"
+else
+    fail "work Claude config retains Atlassian"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

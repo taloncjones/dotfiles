@@ -282,5 +282,25 @@ preserves_codex_hook_with_unrecognized_script() {
 assert "installer preserves a Codex hook whose script is not the legacy bootstrap" \
     preserves_codex_hook_with_unrecognized_script
 
+links_shared_workflow_surfaces() (
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    for skill in repo-recall post-merge todos; do
+        [ "$(readlink "$tmp_home/.codex/skills/$skill")" = "$PWD/claude/skills/$skill" ] || return 1
+        [ -f "$tmp_home/.codex/skills/$skill/SKILL.md" ] || return 1
+    done
+    [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
+    [ "$(readlink "$tmp_home/.codex/hooks/herdr_worktree_guard.py")" = "$PWD/claude/hooks/herdr_worktree_guard.py" ] || return 1
+    [ "$(rg -c 'command = .*herdr_worktree_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    printf '%s\n' '{"tool_name":"exec_command","tool_input":{"cmd":"herdr worktree create task"}}' |
+        "$tmp_home/.codex/hooks/herdr_worktree_guard.py" >/dev/null 2>&1 && return 1
+    [ "$?" -eq 2 ]
+)
+
+assert "installer shares maintained workflows and Herd guard with Codex" \
+    links_shared_workflow_surfaces
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

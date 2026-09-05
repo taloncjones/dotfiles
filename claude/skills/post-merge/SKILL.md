@@ -7,6 +7,10 @@ description:
 
 # Post-Merge Cleanup (worktree + branch + Jira)
 
+This repo-owned workflow is shared by Claude and Codex. Use the active
+runtime's equivalent read, edit, shell, and connector tools; paths under
+`claude/` below identify canonical shared assets, not a required caller.
+
 Run this once a PR is merged. It does the teardown and Jira hygiene that a merge
 leaves behind. Everything is **propose-confirm-apply**: gather state, show the
 plan, get a yes, then act. Never destroy or transition before confirmation.
@@ -36,7 +40,12 @@ gh pr view <n> --json number,state,mergedAt,headRefName,baseRefName,title,body,u
 - **Jira key:** scan the PR title, **body**, commit messages, and branch name
   for `[A-Z]+-\d+`. Bodies matter — squash-merge appends
   the PR description, so the key is often only there. If none found, skip the
-  Jira half and say so.
+  Jira half and say so. `CLAUDE_PERSONAL_ONLY=1` also skips Jira entirely.
+  Personal repositories always skip Jira, even if a
+  matching key appears in discussion. Classify linked worktrees by their
+  original repository's resolved Git common directory, not the temporary
+  worktree location. Do not discover or authenticate Atlassian for a personal
+  repository.
 - **Lessons harvest (read BEFORE teardown deletes the sources):** collect
   `LESSON:` lines from (a) this session's own context; (b) in a
   herdr-managed repo, the task's review record — locate
@@ -81,10 +90,16 @@ git worktree remove --force /tmp/coreview-pr-<n>* 2>/dev/null || rm -rf /tmp/cor
 Do not touch worktrees for _other_ PRs. Verify after: the branch and worktree
 no longer appear in `git branch --list` / `git worktree list`.
 
-## Step 4 — Jira sync (if a key was found)
+## Step 4 — Jira sync (work repositories with a key only)
 
-All via the Atlassian MCP. Read the per-project config from
-`~/.claude/reconcile/projects.json` (the same config `reconcile`/`weekly` use):
+All via the Atlassian MCP. Read the shared per-project config from
+`<CLAUDE_CONFIG_DIR>/reconcile/projects.json` when that variable is set;
+otherwise use `~/.claude-work/reconcile/projects.json` for repositories
+under `~/Git/work`. Personal repositories skip this entire step. For an
+unclassified repository, establish its work account before using Atlassian.
+Honor configured `CLAUDE_WORK_TREE` and `CLAUDE_WORK_CONFIG_DIR` overrides.
+Codex reads this existing shared config; do not substitute a `.Codex` path
+or create a second config copy. Its fields are:
 `cloud_id` is the Jira cloudId, `jira_account_id` is my accountId,
 `default_epic` is the epic to file under, and `sprint_board_name` /
 `sprint_board_id` identify the team's sprint board. No config block → show the
@@ -132,15 +147,17 @@ after the step 4 confirmation.
    the step.
 2. **Filter** each candidate through the rules file's admission filter
    (process failure; recurring; not already covered; public-safe).
-   Duplicates of existing rules/CLAUDE.md/hooks: drop with a one-line note
+   Duplicates of existing rules/CLAUDE.md/AGENTS.md/hooks: drop with a one-line note
    naming the existing coverage.
 3. **Route rule vs hook (classification only — no writes yet).** Hookable
-   = a PreToolUse hook can detect the mistake deterministically from
+   = a hook can detect the mistake deterministically from
    tool-call input alone, with near-zero false positives if it is to block
    (warn-only tolerates more). Hookable -> a dotfiles hook todo (hooks
    live in dotfiles), deduped against open todos by
    `todos.sh list --all` title scan; hook implementation is deferred to
-   that todo — never done inline here. Not hookable -> a one-line rule.
+   that todo — never done inline here. Shared policy todos must name both
+   Claude and Codex adapters and their tests; prefer a git hook when its
+   event covers the policy across runtimes. Not hookable -> a one-line rule.
 4. **Propose (one combined confirmation):** the exact new rule line(s) AND
    the exact todo title(s)/body for hookable ones; at cap, which existing
    rule to drop or merge; for any prune candidate (dated 6+ calendar

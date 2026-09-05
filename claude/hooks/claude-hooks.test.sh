@@ -41,34 +41,39 @@ assert_allows() {
 # a JSON warning on stdout or staying silent. guard_case drives it against a
 # fixture HOME so the account-aware routing is deterministic and machine-state
 # independent.
-#   label expect(warn|silent) home cfg(empty=unset CLAUDE_CONFIG_DIR) cwd
+#   label expect(warn|info|silent) home cfg(empty=unset CLAUDE_CONFIG_DIR) cwd [personal-only]
 guard_case() {
     label="$1"
     expect="$2"
     ghome="$3"
     gcfg="$4"
     gcwd="$5"
+    gpersonal_only="${6:-0}"
     payload=$(printf '{"cwd":"%s"}' "$gcwd")
     if [ -n "$gcfg" ]; then
-        out=$(printf '%s' "$payload" | env \
+        out=$(printf '%s' "$payload" | env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
             HOME="$ghome" \
+            CLAUDE_PERSONAL_ONLY="$gpersonal_only" \
             CLAUDE_CONFIG_DIR="$gcfg" \
             CLAUDE_WORK_TREE="$ghome/Git/work" \
             CLAUDE_WORK_CONFIG_DIR="$ghome/.claude-work" \
             claude/hooks/account_guard.py 2>/dev/null)
     else
-        out=$(printf '%s' "$payload" | env -u CLAUDE_CONFIG_DIR \
+        out=$(printf '%s' "$payload" | env -u CLAUDE_CONFIG_DIR -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
             HOME="$ghome" \
+            CLAUDE_PERSONAL_ONLY="$gpersonal_only" \
             CLAUDE_WORK_TREE="$ghome/Git/work" \
             CLAUDE_WORK_CONFIG_DIR="$ghome/.claude-work" \
             claude/hooks/account_guard.py 2>/dev/null)
     fi
-    if [ "$expect" = warn ]; then
-        if printf '%s' "$out" | grep -q 'account_guard'; then
+    if [ "$expect" = warn ] || [ "$expect" = info ]; then
+        severity=WARNING
+        [ "$expect" != info ] || severity=INFO
+        if printf '%s' "$out" | grep -q "\\[$severity\\] account_guard"; then
             printf 'PASS  %s\n' "$label"
             PASS=$((PASS + 1))
         else
-            printf 'FAIL  %s (expected a warning, got silence)\n' "$label" >&2
+            printf 'FAIL  %s (expected %s, got: %s)\n' "$label" "$severity" "$out" >&2
             FAIL=$((FAIL + 1))
         fi
     else
@@ -374,20 +379,99 @@ printf '{"oauthAccount":{"accountUuid":"personal-uuid"}}' > "$GUARD_FIX/b/.claud
 
 guard_case "guard: personal account on personal repo -> silent" \
     silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/personal/repo"
-guard_case "guard: personal account on work repo -> warn" \
-    warn "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/repo"
+guard_case "guard: personal account override on work repo -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/repo"
 guard_case "guard: wrapper launch, work account on work repo -> silent" \
     silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/repo"
+guard_case "guard: work account on personal repo -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/repo"
+guard_case "guard: personal-only machine using personal account on work repo -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/repo" 1
+guard_case "guard: personal-only machine using work account on work repo -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/repo" 1
+guard_case "guard: personal-only machine catches work identity in default config" \
+    warn "$GUARD_FIX/a" "" "$GUARD_FIX/a/Git/work/repo" 1
+
+# Canonical repository ownership survives linked worktrees and symlinks.
+guard_git() {
+    env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        git -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+        -c user.name=Test -c user.email=test@example.invalid "$@"
+}
+for repo in "$GUARD_FIX/b/Git/personal/repo" "$GUARD_FIX/b/Git/work/repo"; do
+    guard_git init -q "$repo"
+    guard_git -C "$repo" commit -q --allow-empty -m fixture
+done
+guard_git -C "$GUARD_FIX/b/Git/personal/repo" worktree add -q --detach "$GUARD_FIX/b/Git/work/personal-worktree"
+guard_git -C "$GUARD_FIX/b/Git/work/repo" worktree add -q --detach "$GUARD_FIX/b/external-work-worktree"
+mkdir -p "$GUARD_FIX/b/Git/work/personal-worktree/nested"
+ln -s "$GUARD_FIX/b/Git/work/personal-worktree" "$GUARD_FIX/b/personal-shortcut"
+guard_case "guard: work identity on personal worktree under work tree -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/personal-worktree"
+guard_case "guard: work identity in personal worktree subdirectory -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/personal-worktree/nested"
+guard_case "guard: personal account on personal worktree under work tree -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/personal-worktree"
+guard_case "guard: symlink to personal worktree with work identity -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/personal-shortcut"
+guard_case "guard: external work worktree with work account -> silent" \
+    silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/external-work-worktree"
+guard_case "guard: external work worktree with personal override -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/external-work-worktree"
+guard_git -C "$GUARD_FIX/b/Git/work/repo" worktree add -q --detach "$GUARD_FIX/b/Git/personal/work-worktree"
+guard_case "guard: checkout under personal with work owner still protects personal scope" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/work-worktree"
+guard_git init -q --separate-git-dir "$GUARD_FIX/b/Git/work/personal-metadata.git" "$GUARD_FIX/b/Git/personal/separate-work-metadata"
+guard_git init -q --separate-git-dir "$GUARD_FIX/b/external-personal-metadata.git" "$GUARD_FIX/b/Git/personal/separate-external-metadata"
+guard_case "guard: personal checkout with separate work metadata -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/separate-work-metadata"
+guard_case "guard: personal checkout with separate external metadata -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/separate-external-metadata"
 
 # Fixture C: no work login at all (cloud container / personal-only machine).
-# Account cannot be resolved -> falls back to the original path-based check.
+# Account cannot be resolved -> config paths still protect personal scope.
 mkdir -p "$GUARD_FIX/c/.claude" \
     "$GUARD_FIX/c/Git/work/repo" "$GUARD_FIX/c/Git/personal/repo"
 
-guard_case "guard: fallback path check, default dir on work repo -> warn" \
-    warn "$GUARD_FIX/c" "" "$GUARD_FIX/c/Git/work/repo"
+guard_case "guard: fallback permits default dir on work repo -> silent" \
+    silent "$GUARD_FIX/c" "" "$GUARD_FIX/c/Git/work/repo"
 guard_case "guard: fallback path check, default dir on personal repo -> silent" \
     silent "$GUARD_FIX/c" "" "$GUARD_FIX/c/Git/personal/repo"
+guard_case "guard: fallback work config on personal repo -> warn" \
+    warn "$GUARD_FIX/c" "$GUARD_FIX/c/.claude-work" "$GUARD_FIX/c/Git/personal/repo"
+guard_case "guard: fallback custom config on work repo -> silent" \
+    silent "$GUARD_FIX/c" "$GUARD_FIX/c/custom" "$GUARD_FIX/c/Git/work/repo"
+guard_case "guard: fallback custom config on personal repo -> info" \
+    info "$GUARD_FIX/c" "$GUARD_FIX/c/custom" "$GUARD_FIX/c/Git/personal/repo"
+guard_case "guard: fallback personal-only machine with work config -> warn" \
+    warn "$GUARD_FIX/c" "$GUARD_FIX/c/.claude-work" "$GUARD_FIX/c/Git/work/repo" 1
+
+# The native default and an explicit ~/.claude select distinct authentication
+# namespaces. Metadata from one must not misidentify a session using the other.
+for fixture in d e f g; do
+    mkdir -p "$GUARD_FIX/$fixture/.claude-work" "$GUARD_FIX/$fixture/.claude" \
+        "$GUARD_FIX/$fixture/Git/personal/repo"
+    printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/$fixture/.claude-work/.claude.json"
+done
+printf '{"oauthAccount":{"accountUuid":"personal-uuid"}}' > "$GUARD_FIX/d/.claude.json"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/d/.claude/.claude.json"
+guard_case "guard: native default uses home metadata before explicit-dir metadata" \
+    silent "$GUARD_FIX/d" "" "$GUARD_FIX/d/Git/personal/repo"
+guard_case "guard: explicit default config uses its work metadata" \
+    warn "$GUARD_FIX/d" "$GUARD_FIX/d/.claude" "$GUARD_FIX/d/Git/personal/repo"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/e/.claude.json"
+printf '{"oauthAccount":{"accountUuid":"personal-uuid"}}' > "$GUARD_FIX/e/.claude/.claude.json"
+guard_case "guard: native default work identity cannot hide behind explicit personal metadata" \
+    warn "$GUARD_FIX/e" "" "$GUARD_FIX/e/Git/personal/repo"
+guard_case "guard: explicit default personal account ignores native work metadata" \
+    silent "$GUARD_FIX/e" "$GUARD_FIX/e/.claude" "$GUARD_FIX/e/Git/personal/repo"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/f/.claude.json"
+guard_case "guard: explicit namespace does not fall back to native work metadata" \
+    silent "$GUARD_FIX/f" "$GUARD_FIX/f/.claude" "$GUARD_FIX/f/Git/personal/repo"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/g/.claude/.claude.json"
+guard_case "guard: native namespace does not fall back to explicit work metadata" \
+    silent "$GUARD_FIX/g" "" "$GUARD_FIX/g/Git/personal/repo"
 
 # Settings drift: hand-merged machines that missed a SessionStart hook
 # entry must fail visibly instead of silently lacking the account-mismatch

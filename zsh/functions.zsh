@@ -428,6 +428,18 @@ function _codex_reinstall_plugin() {
     _codex_ensure_plugin "$plugin_id" "$marketplace_source"
 }
 
+function _codex_reconcile_workflow_surfaces() {
+    local surface_policy="$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"
+    [[ -f "$surface_policy" ]] \
+        || { echo "[X] Codex surface reconciliation helper is missing: $surface_policy"; return 1; }
+    # Share the installer policy while keeping its shell helpers local to this
+    # invocation. The policy resolves the caller's selected CODEX_HOME.
+    (
+        source "$surface_policy" || return 1
+        dedupe_codex_workflow_plugins
+    )
+}
+
 function _codex_normalize_skill_frontmatter() {
     local skills_dir="$1"
     command -v perl &>/dev/null \
@@ -474,13 +486,15 @@ function _codex_stage_ecc_plugin() {
 function _codex_install_ecc_plugin() {
     command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
     _codex_stage_ecc_plugin || return 1
-    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 function _codex_update_ecc_plugin() {
     command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
     _codex_stage_ecc_plugin || return 1
-    _codex_reinstall_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_reinstall_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 function _codex_stage_superpowers_plugin() {
@@ -525,13 +539,15 @@ function _codex_install_superpowers_plugin() {
     # Remove the account-provisioned variant before installing the managed
     # marketplace copy, preventing duplicate superpowers:* skill names.
     _codex_remove_plugin "superpowers@openai-curated" || return 1
-    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 function _codex_update_superpowers_plugin() {
     _codex_stage_superpowers_plugin || return 1
     _codex_remove_plugin "superpowers@openai-curated" || return 1
-    _codex_reinstall_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_reinstall_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 # --- ECC (Everything Claude Code) ---

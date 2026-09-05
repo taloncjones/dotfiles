@@ -108,6 +108,15 @@ for key, value in dest.items():
     if key not in result:
         result[key] = value
 
+# Personal sessions do not use Jira/Confluence. Scope this policy to the
+# personal account; work and custom config directories keep their own choice.
+personal_settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+if os.path.abspath(dest_path) == os.path.abspath(personal_settings):
+    result["enabledPlugins"] = {
+        **result.get("enabledPlugins", {}),
+        "atlassian@claude-plugins-official": False,
+    }
+
 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 with open(dest_path, "w") as fh:
     json.dump(result, fh, indent=2)

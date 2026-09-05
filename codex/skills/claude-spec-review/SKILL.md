@@ -18,6 +18,13 @@ Claude while the work is still cheap to reshape.
 
 ## Review Command
 
+Use the account selection policy in the sibling `co-review/SKILL.md` before
+dispatch. Run from the target repository through the dotfiles `claude()`
+wrapper, preserving a deliberate personal override for a work repository.
+For a direct binary invocation, explicitly unset `CLAUDE_CONFIG_DIR` for
+the default personal account; work/custom accounts use their captured
+absolute configuration path. Never infer ownership from a temporary folder.
+
 Inline the spec contents so the review is deterministic:
 
 ```bash

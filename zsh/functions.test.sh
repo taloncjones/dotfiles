@@ -330,5 +330,69 @@ else
     fail "Codex uninstall removes disabled plugins"
 fi
 
+# 10. Direct native lifecycle entry points must reconcile the same selected
+# Codex home after successful installs, without invoking live plugin CLIs.
+LIFECYCLE_REPO="$TMP/lifecycle-repo"
+mkdir -p "$LIFECYCLE_REPO/install/common"
+cat >"$LIFECYCLE_REPO/install/common/codex-plugin-dedupe.sh" <<'EOF'
+dedupe_codex_workflow_plugins() {
+    printf 'reconcile %s\n' "${CODEX_HOME:-$HOME/.codex}" >>"$LIFECYCLE_TRACE"
+    return "${RECONCILE_RESULT:-0}"
+}
+EOF
+
+LIFECYCLE_SETUP="
+    DOTFILEDIR='$LIFECYCLE_REPO'
+    CODEX_HOME='$TMP/alternate-codex'
+    LIFECYCLE_TRACE='$TMP/lifecycle-trace'
+    : >\"\$LIFECYCLE_TRACE\"
+    _codex_stage_ecc_plugin() { return 0; }
+    _codex_stage_superpowers_plugin() { return 0; }
+    _codex_remove_plugin() { return 0; }
+    _codex_ensure_plugin() {
+        [[ \"\$2\" == \"\$CODEX_WORKFLOW_MARKETPLACE_DIR\" ]] || return 1
+        printf 'install %s\\n' \"\$1\" >>\"\$LIFECYCLE_TRACE\"
+        return \"\${INSTALL_RESULT:-0}\"
+    }
+    _codex_reinstall_plugin() { _codex_ensure_plugin \"\$@\"; }
+"
+LIFECYCLE_CALLS='_codex_install_ecc_plugin _codex_update_ecc_plugin _codex_install_superpowers_plugin _codex_update_superpowers_plugin'
+
+if run_codex_case "$LIFECYCLE_SETUP
+    for lifecycle_call in $LIFECYCLE_CALLS; do
+        \$lifecycle_call || exit 1
+    done
+" && awk -v selected="$TMP/alternate-codex" '
+    NR % 2 == 1 && $1 != "install" { exit 1 }
+    NR % 2 == 0 && $0 != "reconcile " selected { exit 1 }
+    END { if (NR != 8) exit 1 }
+' "$TMP/lifecycle-trace"; then
+    pass "direct Codex installs and updates reconcile the selected home afterward"
+else
+    fail "direct Codex installs and updates reconcile the selected home afterward"
+fi
+
+if run_codex_case "$LIFECYCLE_SETUP
+    INSTALL_RESULT=1
+    for lifecycle_call in $LIFECYCLE_CALLS; do
+        if \$lifecycle_call; then exit 1; fi
+    done
+" && ! grep -q '^reconcile ' "$TMP/lifecycle-trace"; then
+    pass "failed native plugin installation skips reconciliation"
+else
+    fail "failed native plugin installation skips reconciliation"
+fi
+
+if run_codex_case "$LIFECYCLE_SETUP
+    RECONCILE_RESULT=1
+    for lifecycle_call in $LIFECYCLE_CALLS; do
+        if \$lifecycle_call; then exit 1; fi
+    done
+"; then
+    pass "direct native plugin lifecycles propagate reconciliation failures"
+else
+    fail "direct native plugin lifecycles propagate reconciliation failures"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

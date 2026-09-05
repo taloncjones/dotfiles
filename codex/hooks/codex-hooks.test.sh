@@ -81,5 +81,35 @@ assert_allows "allows workflow hook secret checker path" \
     codex/hooks/block_secrets.py \
     '{"tool_name":"Read","tool_input":{"file_path":"codex/hooks/block_secrets.py"}}'
 
+# Exercise the shared guard with both harness envelopes, without running Herd.
+for payload in \
+    '{"tool_name":"Bash","tool_input":{"command":"herdr worktree create task"}}' \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"herdr worktree create task"}}' \
+    '{"toolName":"shell_command","toolInput":{"command":"herdr worktree create task"}}' \
+    '{"tool_name":"unified_exec","tool_input":{"args":{"cmd":"herdr worktree create task"}}}'; do
+    if run_hook claude/hooks/herdr_worktree_guard.py "$payload"; then
+        hook_status=0
+    else
+        hook_status=$?
+    fi
+    if [ "$hook_status" -eq 2 ]; then
+        printf 'PASS  Herd guard rejects shell envelope\n'
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  Herd guard returned %s instead of 2\n' "$hook_status"
+        FAIL=$((FAIL + 1))
+    fi
+done
+
+assert_allows "Herd guard permits an explicit repository" \
+    claude/hooks/herdr_worktree_guard.py \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"herdr worktree create task --cwd /tmp/repo"}}'
+assert_allows "Herd guard ignores a non-shell tool" \
+    claude/hooks/herdr_worktree_guard.py \
+    '{"tool_name":"Write","tool_input":{"command":"herdr worktree create task"}}'
+assert_allows "Herd guard ignores malformed input" \
+    claude/hooks/herdr_worktree_guard.py \
+    '{"tool_name":"exec_command","tool_input":null}'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

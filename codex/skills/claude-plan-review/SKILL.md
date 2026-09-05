@@ -13,10 +13,19 @@ Claude before implementation starts.
 
 1. If the user passed a plan path, use it.
 2. Otherwise choose the newest plan-like file from the first existing location:
-   `docs/plans/`, `docs/superpowers/specs/`, `.planning/`, `~/.claude/plans/`.
+   `docs/plans/`, `docs/superpowers/specs/`, `.planning/` in this repository.
+   Never select a global account plan by recency; it may belong to another
+   repository or account.
 3. State the resolved path before running the review.
 
 ## Review Command
+
+Use the account selection policy in the sibling `co-review/SKILL.md` before
+dispatch. Run from the target repository through the dotfiles `claude()`
+wrapper, preserving a deliberate personal override for a work repository.
+For a direct binary invocation, explicitly unset `CLAUDE_CONFIG_DIR` for
+the default personal account; work/custom accounts use their captured
+absolute configuration path. Never infer ownership from a temporary folder.
 
 Inline the plan contents so the review is deterministic:
 
