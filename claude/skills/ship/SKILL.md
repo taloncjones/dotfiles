@@ -61,6 +61,11 @@ only proposes whatever cleanup is actually left.
 
 5. **Cleanup.** Invoke the `post-merge` skill: worktree teardown, local +
    remote branch deletion, Jira transition to Done, sprint/epic hygiene.
+   If the session lives in the PR's own worktree, expect the git half to end
+   as commands the user runs outside the session (not `!`-prefix -- that runs
+   in-session and hits the same isolation hook) unless the worktree is
+   EnterWorktree-managed (then `ExitWorktree` does the teardown) —
+   post-merge's self-teardown check covers this.
 
 6. **Exit state.** Confirm clean: no leftover worktree, no stale branch, Jira
    reconciled. Report in 3 lines max.
