@@ -5,7 +5,9 @@ single-writer ownership. Imported by the hook and driven as a CLI by the skill.
 Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 """
 
+import contextlib
 import datetime
+import fcntl
 import hashlib
 import json
 import math
@@ -1045,6 +1047,47 @@ def think_usd_today(scan, today_prefix) -> float:
         cost = (ans or {}).get("total_cost_usd")
         total += cost if (ans is not None and cost is not None) else launch["caps"]["max_budget_usd"]
     return round(total, 4)
+
+
+def publish_exclusive(path, data) -> bool:
+    """Create `path` with the JSON content or do nothing. Same-directory temp,
+    fsync, then os.link (fails if the target exists -- never a replace); the
+    temp is always removed, so a failure leaves no partial target."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def think_lock(rd):
+    """Repo-wide exclusive lock over the liveness/budget check and the launch
+    record write (spec 4.4). Released before claude is launched."""
+    d = think_dir(rd)
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def parse_claude_result(stdout: str):

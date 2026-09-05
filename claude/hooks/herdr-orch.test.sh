@@ -1863,6 +1863,29 @@ e=c.think_scan(tempfile.mkdtemp(),"2026-09-04T13:00:00Z"); assert e=={"launches"
 sys.exit(0)
 PY
 
+check "publish_exclusive never clobbers or leaves partials; think_lock serializes" <<PY
+$LOAD
+d=tempfile.mkdtemp(); p=os.path.join(d,"x.json")
+assert c.publish_exclusive(p,{"a":1}) and json.load(open(p))=={"a":1}
+assert not c.publish_exclusive(p,{"a":2}) and json.load(open(p))=={"a":1}      # no replace
+assert [n for n in os.listdir(d) if n!="x.json"]==[]                            # no temp left behind
+ro=os.path.join(d,"ro"); os.mkdir(ro); os.chmod(ro,0o555)
+try:
+    assert not c.publish_exclusive(os.path.join(ro,"y.json"),{"a":1}) and os.listdir(ro)==[]
+finally:
+    os.chmod(ro,0o755)
+import threading,time
+order=[]
+def hold(tag,secs):
+    with c.think_lock(d):
+        order.append(("in",tag)); time.sleep(secs); order.append(("out",tag))
+t1=threading.Thread(target=hold,args=("a",0.3)); t2=threading.Thread(target=hold,args=("b",0.0))
+t1.start(); time.sleep(0.05); t2.start(); t1.join(); t2.join()
+assert order==[("in","a"),("out","a"),("in","b"),("out","b")],order
+assert os.path.exists(os.path.join(d,"think",".lock"))
+sys.exit(0)
+PY
+
 check "run-mech characterization: popen failure, unparseable stdout, nonzero exit, timeout return" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
 CLI="python3 claude/hooks/herdr_orch_core.py"
