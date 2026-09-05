@@ -4,22 +4,22 @@
   "commands": [
     {
       "name": "recall-suite-native",
-      "run": "out=$(HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|passed'; [ \"$rc\" -eq 0 ] && printf '%s\\n' \"$out\" | grep -q 'ok   file_mode reads dir mode' && printf '%s\\n' \"$out\" | grep -q 'ok   file_mode reads file mode'",
+      "run": "if [ \"$(uname)\" = Darwin ]; then d=$(mktemp -d); ln -s /usr/bin/stat \"$d/stat\"; PATH=\"$d:$PATH\"; export PATH; fi; out=$(HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|mode 700|mode 600|passed'; [ \"$rc\" -eq 0 ] && printf '%s\\n' \"$out\" | grep -qx '117 passed, 0 failed' && printf '%s\\n' \"$out\" | grep -q 'ok   file_mode reads dir mode' && printf '%s\\n' \"$out\" | grep -q 'ok   file_mode reads file mode'",
       "timeout_secs": 300
     },
     {
       "name": "recall-suite-gnu-stat",
-      "run": "if [ \"$(uname)\" = Linux ]; then g=$(command -v stat); else g=$(command -v gstat) || { echo \"[X] gstat (Homebrew coreutils) missing; cannot emulate GNU stat\"; exit 1; }; fi; d=$(mktemp -d); ln -s \"$g\" \"$d/stat\"; out=$(PATH=\"$d:$PATH\" HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|mode 700|mode 600|passed'; [ \"$rc\" -eq 0 ] && printf '%s\\n' \"$out\" | grep -q 'ok   file_mode reads file mode'",
+      "run": "if [ \"$(uname)\" = Linux ]; then g=$(command -v stat); else g=$(command -v gstat) || { echo \"[X] gstat (Homebrew coreutils) missing; cannot emulate GNU stat\"; exit 1; }; fi; d=$(mktemp -d); ln -s \"$g\" \"$d/stat\"; out=$(PATH=\"$d:$PATH\" HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|mode 700|mode 600|passed'; [ \"$rc\" -eq 0 ] && printf '%s\\n' \"$out\" | grep -qx '117 passed, 0 failed' && printf '%s\\n' \"$out\" | grep -q 'ok   file_mode reads dir mode' && printf '%s\\n' \"$out\" | grep -q 'ok   file_mode reads file mode'",
       "timeout_secs": 300
     },
     {
       "name": "probe-guard-gnu-shaped-junk",
-      "run": "d=$(mktemp -d); printf '#!/bin/sh\\nprintf \"  File: junk\\\\nBlock size: junk\\\\n\"\\nexit 0\\n' > \"$d/stat\"; chmod +x \"$d/stat\"; out=$(PATH=\"$d:$PATH\" HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|passed'; [ \"$rc\" -ne 0 ] && printf '%s\\n' \"$out\" | grep -q 'MODE-PROBE-BROKEN' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads dir mode' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads file mode' && ! printf '%s\\n' \"$out\" | grep -q 'Block size'",
+      "run": "d=$(mktemp -d); printf '#!/bin/sh\\nprintf \"  File: junk\\\\nBlock size: junk\\\\n\"\\nexit 0\\n' > \"$d/stat\"; chmod +x \"$d/stat\"; out=$(PATH=\"$d:$PATH\" HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|mode 700|mode 600|passed'; [ \"$rc\" -ne 0 ] && printf '%s\\n' \"$out\" | grep -qx '111 passed, 6 failed' && printf '%s\\n' \"$out\" | grep -q 'got \\[MODE-PROBE-BROKEN\\]' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads dir mode' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads file mode' && ! printf '%s\\n' \"$out\" | grep -q 'Block size'",
       "timeout_secs": 300
     },
     {
       "name": "probe-guard-bsd-shaped-junk",
-      "run": "d=$(mktemp -d); printf '#!/bin/sh\\n[ \"$1\" = -c ] && { echo \"stat: illegal option -- c\" >&2; exit 1; }\\nprintf \"  File: junk\\\\nBlock size: junk\\\\n\"\\nexit 0\\n' > \"$d/stat\"; chmod +x \"$d/stat\"; out=$(PATH=\"$d:$PATH\" HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|passed'; [ \"$rc\" -ne 0 ] && printf '%s\\n' \"$out\" | grep -q 'MODE-PROBE-BROKEN' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads dir mode' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads file mode' && ! printf '%s\\n' \"$out\" | grep -q 'Block size'",
+      "run": "d=$(mktemp -d); printf '#!/bin/sh\\n[ \"$1\" = -c ] && { echo \"stat: illegal option -- c\" >&2; exit 1; }\\nprintf \"  File: junk\\\\nBlock size: junk\\\\n\"\\nexit 0\\n' > \"$d/stat\"; chmod +x \"$d/stat\"; out=$(PATH=\"$d:$PATH\" HOME=\"$(mktemp -d)\" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | grep -E 'file_mode|mode 700|mode 600|passed'; [ \"$rc\" -ne 0 ] && printf '%s\\n' \"$out\" | grep -qx '111 passed, 6 failed' && printf '%s\\n' \"$out\" | grep -q 'got \\[MODE-PROBE-BROKEN\\]' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads dir mode' && printf '%s\\n' \"$out\" | grep -q 'FAIL file_mode reads file mode' && ! printf '%s\\n' \"$out\" | grep -q 'Block size'",
       "timeout_secs": 300
     },
     {

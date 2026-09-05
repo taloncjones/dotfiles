@@ -193,3 +193,5 @@ cannot change any other assertion's behaviour.
   diagnostic truncated to one line so the filesystem dump never reaches suite
   output (medium); added the BSD-shaped broken-stat case AC3b (low); named
   the contract path and the exact diff command in AC4 (low).
+- Codex plan review round 1 (verdict minor-fixes) changed no requirement;
+  its folds live in the plan's review log.

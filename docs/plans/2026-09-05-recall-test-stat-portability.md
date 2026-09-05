@@ -10,6 +10,8 @@
 
 **Spec:** `docs/specs/2026-09-05-recall-test-stat-portability.md` (branch-only). Read it first; every task cites its section.
 
+Status: plan, revision 2 after Codex plan review round 1. Review log at the end.
+
 ## Global Constraints
 
 - Only `claude/skills/repo-recall/scripts/tests/recall_test.sh` changes (spec AC4). No edits to `recall.py`, other suites, `zsh/functions.zsh`, or CI.
@@ -17,10 +19,11 @@
 - Guard pattern is exactly `[0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]`; broken-probe token is exactly `MODE-PROBE-BROKEN` (spec Design).
 - Self-test modes are `750` (directory) and `640` (file); assertion names are `file_mode reads dir mode` and `file_mode reads file mode` (spec Design).
 - Pass count moves from `115 passed, 0 failed` to `117 passed, 0 failed` (spec AC1).
-- Run every suite from the worktree root with `HOME` pointed at a fresh `mktemp -d` so no real config dir is touched.
+- Run every suite and the runner from the worktree root with `HOME="$(mktemp -d)"` so no real config dir is touched. Every check captures the exit status and asserts it; never judge by eye from a `tail`.
+- While the branch-only spec and plan are tracked, `bin/dotfiles-tests` reports exactly one failing suite, `git/hooks/public-safety.test.sh` (`no tracked planning artifacts`). That is the drop-before-merge convention, not a regression; any other failing suite is.
 - Run every git command as `git -C <worktree> ...`; Bash cwd resets between commands.
-- No emojis, no AI attribution. Commit format `<scope>: <summary>` (<75 chars, imperative). `docs/` is ignored in this checkout, so branch-only docs need `git add -f`.
-- Local Linux stand-in: `gstat` at `/opt/homebrew/bin/gstat`. If it is missing, stop and report; do not skip the GNU run.
+- No emojis, no AI attribution, no hardcoded home-directory paths in any tracked file (the public-safety suite greps for them). Commit format `<scope>: <summary>` (<75 chars, imperative). `docs/` is ignored in this checkout, so branch-only docs need `git add -f`.
+- Local Linux stand-in: `gstat` (Homebrew coreutils, `/opt/homebrew/bin/gstat`). If it is missing, stop and report; do not skip the GNU run.
 
 ## File map
 
@@ -33,12 +36,29 @@
 
 | AC | Task | Contract command |
 | --- | --- | --- |
-| AC1 native run, 117 passed | 1 | `recall-suite-native` |
-| AC2 GNU stat run, 117 passed | 1 | `recall-suite-gnu-stat` (local, via `gstat` shim); CI on `ubuntu-latest` is the human-verify half |
-| AC3a GNU-shaped junk stat fails loudly | 2 | `probe-guard-gnu-shaped-junk` |
-| AC3b BSD-shaped junk stat fails loudly | 2 | `probe-guard-bsd-shaped-junk` |
-| AC4 single-file implementation diff | 3 | `diff-scope-single-file` |
-| AC5 `tests` workflow green on PR and main | 3 | human-verify: read the GitHub Actions run on the PR, then on main after merge |
+| AC1 native BSD-stat run, 117 passed | 1 | `recall-suite-native` (pins `/usr/bin/stat` first on Darwin; on Linux it is a second GNU run) |
+| AC2 GNU-stat run, 117 passed | 1 | `recall-suite-gnu-stat` (local, via `gstat` shim); CI on `ubuntu-latest` is the human-verify half |
+| AC3a GNU-shaped junk stat fails loudly | 1 | `probe-guard-gnu-shaped-junk` |
+| AC3b BSD-shaped junk stat fails loudly | 1 | `probe-guard-bsd-shaped-junk` |
+| AC4 single-file implementation diff | 2 | `diff-scope-single-file` |
+| AC5 `tests` workflow green on PR and main | 2 | human-verify: read the GitHub Actions run on the PR after the branch-only docs are dropped, then on main after merge |
+
+## Shim recipes
+
+Every shim lives in a fresh `mktemp -d` directory prepended to `PATH` for one run. Nothing else in the suite calls a `stat` binary (spec Verification), so a shim changes only `file_mode`.
+
+```bash
+# GNU stat shim: real coreutils stat first on PATH
+gnu_shim() { d=$(mktemp -d); ln -s "$(command -v gstat)" "$d/stat"; printf '%s\n' "$d"; }
+# GNU-shaped junk: prints a fake filesystem block and exits 0 on every call
+gnu_junk_shim() { d=$(mktemp -d); printf '#!/bin/sh\nprintf "  File: junk\\nBlock size: junk\\n"\nexit 0\n' > "$d/stat"; chmod +x "$d/stat"; printf '%s\n' "$d"; }
+# BSD-shaped junk: rejects -c like BSD stat, prints the fake block otherwise
+bsd_junk_shim() { d=$(mktemp -d); printf '#!/bin/sh\n[ "$1" = -c ] && { echo "stat: illegal option -- c" >&2; exit 1; }\nprintf "  File: junk\\nBlock size: junk\\n"\nexit 0\n' > "$d/stat"; chmod +x "$d/stat"; printf '%s\n' "$d"; }
+# run_suite <shim-dir or ""> : runs the suite isolated, prints the probe/mode/summary lines, sets RC and OUT
+run_suite() { OUT=$(PATH="${1:+$1:}$PATH" HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); RC=$?; printf '%s\n' "$OUT" | grep -E 'file_mode|mode 700|mode 600|passed'; echo "rc=$RC"; }
+```
+
+Paste these into the shell before any step below that calls them (they are step-local conveniences, not repo code).
 
 ---
 
@@ -47,20 +67,19 @@
 - [ ] **Step 1: Record the native baseline**
 
 ```bash
-HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1 | tail -1
+run_suite ""; [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qx '115 passed, 0 failed' && echo "[OK] baseline"
 ```
 
-Expected: `115 passed, 0 failed`. Carry this line into Task 1's commit body.
+Expected: `[OK] baseline`. Carry `115 passed, 0 failed` into Task 1's commit body.
 
 - [ ] **Step 2: Reproduce the CI failure locally with GNU stat**
 
 ```bash
-command -v gstat || { echo "[X] gstat missing; install coreutils via Homebrew"; exit 1; }
-d=$(mktemp -d); ln -s "$(command -v gstat)" "$d/stat"
-PATH="$d:$PATH" HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1 | grep -E 'FAIL|passed'
+command -v gstat >/dev/null || { echo "[X] gstat missing; install coreutils via Homebrew"; exit 1; }
+run_suite "$(gnu_shim)"; [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -qx '111 passed, 4 failed' && echo "[OK] reproduced"
 ```
 
-Expected: four `FAIL` lines (`work config dir mode 700`, `recall dir mode 700`, `index file mode 600`, `index dir mode 700`), each followed by a multi-line `got [ File: ...` value, and `111 passed, 4 failed`. If the run is green instead, the shim is not first on `PATH`; fix that before continuing.
+Expected: four `FAIL` lines (`work config dir mode 700`, `recall dir mode 700`, `index file mode 600`, `index dir mode 700`) whose `got [...]` values start with `File:`, then `[OK] reproduced`. If the run is green instead, the shim is not first on `PATH`; fix that before continuing.
 
 ---
 
@@ -71,7 +90,7 @@ Expected: four `FAIL` lines (`work config dir mode 700`, `recall dir mode 700`, 
 
 **Interfaces:**
 - Consumes: existing `ok`, `bad`, `assert_eq` helpers (lines 9-11).
-- Produces: `file_mode <path>` printing a 3- or 4-digit octal string, or `MODE-PROBE-BROKEN` with a one-line stderr diagnostic. Task 2's shims and the contract rely on the token text and on the two assertion names below.
+- Produces: `file_mode <path>` printing a 3- or 4-digit octal string, or `MODE-PROBE-BROKEN` with a one-line stderr diagnostic. The contract relies on the token text and on the two assertion names below.
 
 - [ ] **Step 1: Write the failing self-test**
 
@@ -87,14 +106,15 @@ assert_eq "file_mode reads dir mode" "$(file_mode "$PROBE/d")" 750
 assert_eq "file_mode reads file mode" "$(file_mode "$PROBE/f")" 640
 ```
 
-- [ ] **Step 2: Run it under GNU stat to verify it fails**
+- [ ] **Step 2: Run RED under GNU stat and under both junk shims (old probe still in place)**
 
 ```bash
-d=$(mktemp -d); ln -s "$(command -v gstat)" "$d/stat"
-PATH="$d:$PATH" HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1 | grep -E 'file_mode|passed'
+run_suite "$(gnu_shim)";      [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -q 'FAIL file_mode reads dir mode' && printf '%s\n' "$OUT" | grep -qx '111 passed, 6 failed' && echo "[OK] red: gnu"
+run_suite "$(gnu_junk_shim)"; [ "$RC" -ne 0 ] && ! printf '%s\n' "$OUT" | grep -q 'MODE-PROBE-BROKEN' && echo "[OK] red: gnu junk (no guard token yet)"
+run_suite "$(bsd_junk_shim)"; [ "$RC" -ne 0 ] && ! printf '%s\n' "$OUT" | grep -q 'MODE-PROBE-BROKEN' && echo "[OK] red: bsd junk (no guard token yet)"
 ```
 
-Expected: `FAIL file_mode reads dir mode`, `FAIL file_mode reads file mode`, and `111 passed, 6 failed`. The native run (no shim) is expected to already pass both new assertions; that is fine, the GNU run is the red step.
+Expected: all three `[OK] red:` lines. Under the GNU shim the two new assertions fail with a multi-line `got [ File: ...` value. Under the junk shims the mode assertions fail but nothing prints `MODE-PROBE-BROKEN`, which is the guard behaviour Step 3 adds. The native run (no shim) already passes both new assertions; that is fine, the GNU run is the red step for the probe order.
 
 - [ ] **Step 3: Replace the probe**
 
@@ -117,75 +137,40 @@ file_mode() {
 }
 ```
 
-- [ ] **Step 4: Run natively and under GNU stat to verify both pass**
+- [ ] **Step 4: Run GREEN on all four stat shapes**
 
 ```bash
-HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1 | tail -1
-d=$(mktemp -d); ln -s "$(command -v gstat)" "$d/stat"
-PATH="$d:$PATH" HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1 | tail -1
+run_suite "";                 [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qx '117 passed, 0 failed' && echo "[OK] green: native"
+run_suite "$(gnu_shim)";      [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qx '117 passed, 0 failed' && echo "[OK] green: gnu"
+run_suite "$(gnu_junk_shim)"; [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -qx '111 passed, 6 failed' && printf '%s\n' "$OUT" | grep -q 'got \[MODE-PROBE-BROKEN\]' && printf '%s\n' "$OUT" | grep -q 'FAIL file_mode reads dir mode' && printf '%s\n' "$OUT" | grep -q 'FAIL file_mode reads file mode' && ! printf '%s\n' "$OUT" | grep -q 'Block size' && echo "[OK] guard: gnu junk (AC3a)"
+run_suite "$(bsd_junk_shim)"; [ "$RC" -ne 0 ] && printf '%s\n' "$OUT" | grep -qx '111 passed, 6 failed' && printf '%s\n' "$OUT" | grep -q 'got \[MODE-PROBE-BROKEN\]' && printf '%s\n' "$OUT" | grep -q 'FAIL file_mode reads dir mode' && printf '%s\n' "$OUT" | grep -q 'FAIL file_mode reads file mode' && ! printf '%s\n' "$OUT" | grep -q 'Block size' && echo "[OK] guard: bsd junk (AC3b)"
 ```
 
-Expected: both print `117 passed, 0 failed`.
+Expected: all four `[OK]` lines. Under the junk shims the two self-test assertions and the four mode assertions all read `got [MODE-PROBE-BROKEN]`, the stderr diagnostic reads `file_mode: non-octal output for ...: [  File: junk]`, and `Block size` never appears. If any line is missing, fix the probe here and re-run this step; nothing is committed yet.
 
 - [ ] **Step 5: Syntax-gate the file the way CI does and run the full runner**
 
 ```bash
 bash -n claude/skills/repo-recall/scripts/tests/recall_test.sh && echo "[OK] syntax"
-bash bin/dotfiles-tests 2>&1 | tail -5
+ROUT=$(HOME="$(mktemp -d)" bash bin/dotfiles-tests 2>&1); RRC=$?
+printf '%s\n' "$ROUT" | grep -E '^\[X\]|dotfiles-tests:|^11[0-9] passed'
+printf '%s\n' "$ROUT" | grep -qx '117 passed, 0 failed' && [ "$(printf '%s\n' "$ROUT" | grep -c '^\[X\] FAILED')" -eq 1 ] && printf '%s\n' "$ROUT" | grep -q '^\[X\] FAILED git/hooks/public-safety.test.sh' && echo "[OK] runner (only the branch-only-docs suite failing)"
 ```
 
-Expected: `[OK] syntax`; the runner ends with every suite passing (the recall line reads `117 passed, 0 failed`).
+Expected: `[OK] syntax`, `RRC` is 1, the runner summary reads `18 suites passed, 1 failed`, and `[OK] runner ...`. The single failing suite is `git/hooks/public-safety.test.sh` on `no tracked planning artifacts` (see Global Constraints). If any other suite fails, stop: that is a regression to investigate before committing.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git -C <worktree> add claude/skills/repo-recall/scripts/tests/recall_test.sh
-git -C <worktree> commit -m "recall: Make test file-mode probe portable across GNU and BSD stat"
-```
+git -C <worktree> commit -m "recall: Make test file-mode probe portable across GNU and BSD stat" -m "GNU stat treats -f as filesystem status and prints a filesystem block before exiting 1, so the old probe captured the block plus the mode on Linux. Try -c first, guard the output, and self-test the probe at suite start.
 
-Commit body: the Task 0 baseline line (`115 passed, 0 failed` native; `111 passed, 4 failed` under GNU stat) and the new counts (`117 passed, 0 failed` on both).
+Baseline on ed5f036: 115 passed, 0 failed natively; 111 passed, 4 failed under GNU stat. After: 117 passed, 0 failed on both."
+```
 
 ---
 
-### Task 2: Prove the guard fires on a broken stat
-
-**Files:**
-- No repo file changes expected. Shims live in `mktemp -d` directories only.
-
-**Interfaces:**
-- Consumes: `MODE-PROBE-BROKEN` token and the two self-test assertion names from Task 1.
-
-- [ ] **Step 1: GNU-shaped junk stat (spec AC3a)**
-
-```bash
-d=$(mktemp -d)
-printf '#!/bin/sh\nprintf "  File: junk\\nBlock size: junk\\n"\nexit 0\n' > "$d/stat"; chmod +x "$d/stat"
-out=$(PATH="$d:$PATH" HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?
-printf '%s\n' "$out" | grep -E 'file_mode|passed'
-echo "rc=$rc"
-printf '%s\n' "$out" | grep -c 'Block size'
-```
-
-Expected: `FAIL file_mode reads dir mode` and `FAIL file_mode reads file mode`, each with `got [MODE-PROBE-BROKEN]`; two stderr lines `file_mode: non-octal output for ...: [  File: junk]`; `111 passed, 6 failed`; `rc=1`; the `Block size` count is `0`.
-
-- [ ] **Step 2: BSD-shaped junk stat (spec AC3b)**
-
-```bash
-d=$(mktemp -d)
-printf '#!/bin/sh\n[ "$1" = -c ] && { echo "stat: illegal option -- c" >&2; exit 1; }\nprintf "  File: junk\\nBlock size: junk\\n"\nexit 0\n' > "$d/stat"; chmod +x "$d/stat"
-out=$(PATH="$d:$PATH" HOME="$(mktemp -d)" bash claude/skills/repo-recall/scripts/tests/recall_test.sh 2>&1); rc=$?
-printf '%s\n' "$out" | grep -E 'file_mode|passed'
-echo "rc=$rc"
-printf '%s\n' "$out" | grep -c 'Block size'
-```
-
-Expected: identical to Step 1.
-
-- [ ] **Step 3: If either step deviates, fix the probe in Task 1's file, re-run Task 1 Steps 4-5, and add a new commit `recall: Tighten file-mode probe guard`. Do not amend.**
-
----
-
-### Task 3: Contract run and scope check
+### Task 2: Contract run and scope check
 
 **Files:**
 - Read only: `claude/contracts/td-2026-09-04-fix-recall-test-file-mode-check-so-ci-passes-on-li-contract.json`
@@ -193,10 +178,11 @@ Expected: identical to Step 1.
 - [ ] **Step 1: Confirm the implementation diff is one file (spec AC4)**
 
 ```bash
-git -C <worktree> diff --name-only ed5f036f37be67a7a8f2bc0a025794ea77326320 -- . ':(exclude)docs' ':(exclude)claude/contracts/td-2026-09-04-fix-recall-test-file-mode-check-so-ci-passes-on-li-contract.json'
+changed=$(git -C <worktree> diff --name-only ed5f036f37be67a7a8f2bc0a025794ea77326320 -- . ':(exclude)docs' ':(exclude)claude/contracts/td-2026-09-04-fix-recall-test-file-mode-check-so-ci-passes-on-li-contract.json')
+printf '%s\n' "$changed"; [ "$changed" = claude/skills/repo-recall/scripts/tests/recall_test.sh ] && echo "[OK] scope"
 ```
 
-Expected: exactly one line, `claude/skills/repo-recall/scripts/tests/recall_test.sh`.
+Expected: exactly one path printed, then `[OK] scope`.
 
 - [ ] **Step 2: Run the verification contract end to end**
 
@@ -206,19 +192,24 @@ python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py" verify-co
   --task-id td-2026-09-04-fix-recall-test-file-mode-check-so-ci-passes-on-li \
   --worktree <worktree> \
   --contract claude/contracts/td-2026-09-04-fix-recall-test-file-mode-check-so-ci-passes-on-li-contract.json \
-  --allow-unpinned
+  --allow-unpinned; echo "rc=$?"
 ```
 
-Expected: exit 0 with all five commands passing. A failing command names the AC to revisit via the mapping table above.
+Expected: `rc=0` with all five commands passing. A failing command names the AC to revisit via the mapping table above.
 
 - [ ] **Step 3: Record what is unverified**
 
-In the close, state plainly: Linux was verified locally through a `gstat` shim, not on a Linux host; the authoritative Linux run is the `tests` job on the PR (AC5), which a human reads from GitHub Actions after the branch is pushed. Nothing is pushed by the implementer.
+In the close, state plainly: Linux was verified locally through a `gstat` shim, not on a Linux host; the authoritative Linux run is the `tests` job on the PR (AC5), which a human reads from GitHub Actions after the branch-only docs are dropped and the branch is pushed. Nothing is pushed by the implementer.
 
 ---
 
 ## Self-review
 
-- Spec coverage: Goals 1-3 and Design land in Task 1; Failure shape and AC3a/AC3b in Task 2; AC4 in Task 3; AC5 is human-verify by design (CI is the only Linux host the repo owns).
-- Placeholders: none. Every step carries its command and expected output.
-- Name consistency: `MODE-PROBE-BROKEN`, `file_mode reads dir mode`, `file_mode reads file mode`, `750`/`640` match the spec and the contract verbatim.
+- Spec coverage: Goals 1-3, Design, Failure shape, AC1-AC3b land in Task 1; AC4 in Task 2; AC5 is human-verify by design (CI is the only Linux host the repo owns).
+- Placeholders: none. Every step carries its command, an asserted exit status, and the expected `[OK]` line.
+- Name consistency: `MODE-PROBE-BROKEN`, `file_mode reads dir mode`, `file_mode reads file mode`, `750`/`640`, `117 passed, 0 failed`, `111 passed, 6 failed` match the spec and the contract verbatim.
+
+## Review log
+
+- Revision 1: initial plan.
+- Revision 2: Codex plan review round 1 (verdict minor-fixes). Folded all seven: isolated `HOME` for the runner and the expected public-safety failure while docs are tracked (medium); every check asserts exit status and the exact summary instead of piping to `tail` (medium); junk-stat guard cases run RED before the probe rewrite and GREEN before the commit, old Task 2 folded into Task 1 (medium); contract suite commands require the exact `117 passed, 0 failed` line plus both self-test lines (medium); native contract command pins `/usr/bin/stat` first on Darwin (medium); guard snippets assert with `! grep -q` rather than print counts (low); commit carries a body via a second `-m` (low).
