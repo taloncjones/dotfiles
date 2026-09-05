@@ -104,7 +104,7 @@ class SurfaceTests(unittest.TestCase):
         repo = Path(os.environ["CODEX_SURFACES_SCRIPT"]).resolve().parents[2]
         toolbin = self.root / "installer-bin"
         toolbin.mkdir()
-        for name in ("bash", "awk", "basename", "cp", "date", "dirname", "find", "grep", "ln", "mkdir", "mv", "rm", "rmdir", "sed", "wc"):
+        for name in ("bash", "awk", "basename", "cp", "date", "dirname", "find", "grep", "ln", "mkdir", "mv", "rm", "rmdir", "sed", "tr", "wc"):
             (toolbin / name).symlink_to(shutil.which(name))
         self.write(toolbin / "python3", '#!/bin/sh\nexit 1\n')
         (toolbin / "python3").chmod(0o755)

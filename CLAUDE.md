@@ -89,6 +89,9 @@ custom or compatible implementations are preserved. It supplies
 The helper preserves skill files and unrelated configuration. Unsupported TOML
 layouts fail without being rewritten. Optional installer reconciliation warns
 and continues; explicit plugin lifecycle commands still report failure.
+Managed skill linking preserves existing real files and directories, including
+their contents, and warns instead of replacing them; inspect those destinations
+before moving custom content to make room for a managed symlink.
 
 Run the helper with `--check` to preview changes or `--apply` to write them.
 `--focus --apply` opts into the core ECC catalog in `codex/ecc-skills.txt`;

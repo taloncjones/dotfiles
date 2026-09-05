@@ -119,7 +119,7 @@ dedupe_codex_workflow_plugins() {
 # Explicit native plugin lifecycle commands use the strict function above.
 reconcile_codex_workflow_plugins_for_install() {
   if ! dedupe_codex_workflow_plugins; then
-    echo "[WARNING] Codex surface reconciliation did not complete; continuing installation. Resolve the error above and retry the Codex surface helper." >&2
+    echo "[WARNING] Codex surface reconciliation did not complete; continuing installation. Resolve the error above and retry reconciliation." >&2
   fi
   return 0
 }
