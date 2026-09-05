@@ -334,8 +334,30 @@ work identity run `identity-setup` or edit `~/.gitconfig-work` directly.
 ### Global Git Hooks
 
 `.gitconfig` sets `core.hooksPath` to `~/.config/git/hooks`, which the installer
-symlinks to `git/hooks/` in this repo. The hook is a no-op for repos that do not
-use `.todos/` or `.planning/`, so it is safe to leave globally enabled.
+symlinks to `git/hooks/` in this repo. Two hooks live there. The `post-checkout` hook is a no-op
+for repos that do not use `.todos/` or `.planning/`, and `commit-msg` only edits or
+rejects agent attribution, so both are safe to leave globally enabled.
+
+**`commit-msg`** — runs on every commit before the message is recorded. Two
+layers, in order:
+
+- **Strip** (no `rg` needed): removes agent attribution lines from line 2 onward
+  and writes every other line back byte-for-byte: `Co-Authored-By` trailers
+  naming an agent (Claude, Anthropic, Copilot, ChatGPT, GPT, Codex); session
+  trailers (`Claude-Session:` with any value, or any `*Session*:` key whose value
+  is a URL); and `Generated with|by <agent>` footer lines, emoji prefix included.
+  A message with nothing to strip is not rewritten. When it strips, the hook
+  prints `commit-msg: stripped N agent attribution line(s).` on stderr. A missing
+  `awk`/`grep`/`sed`/`mktemp` fails closed (the commit is refused).
+- **Block** (needs `rg`; warns and skips without it): rejects inline attribution
+  in the subject or body and emojis, as before.
+
+`DOTFILES_SKIP_COMMIT_MSG_GUARD=1` bypasses both layers. The hook cannot reach a
+squash merge: GitHub composes that message from the PR body, so the guard for PR
+descriptions is the `attribution.pr = ""` opt-out in `claude/settings.json.tmpl`
+(with `attribution.commit = ""` and `attribution.sessionUrl = false` as the first
+line of defense for commits). Keep those set; the hook is the backstop for
+sessions where `settings.json` did not load.
 
 **`post-checkout`** — runs after `git worktree add` (and other branch checkouts).
 Hydrates untracked worktree directories from the main checkout:

@@ -1,0 +1,66 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg",
+  "commands": [
+    {
+      "name": "hook-bash-syntax-and-executable",
+      "run": "bash -n git/hooks/commit-msg && test -x git/hooks/commit-msg",
+      "timeout_secs": 30
+    },
+    {
+      "name": "commit-msg-suite",
+      "run": "sh git/hooks/commit-msg.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "strips-agent-coauthor-line",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; printf 'scope: Subject\\n\\nBody.\\n\\nCo-Authored-By: Cl%sude <noreply@example.com>\\n' a >\"$d/m\"; git/hooks/commit-msg \"$d/m\" 2>\"$d/e\" && printf 'scope: Subject\\n\\nBody.\\n\\n' | cmp -s - \"$d/m\" && printf 'commit-msg: stripped 1 agent attribution line(s).\\n' | cmp -s - \"$d/e\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "strips-session-url-trailer",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; printf 'scope: Subject\\n\\nBody.\\n\\nCl%sude-Session: https://example.invalid/code/session_01ABC\\n' a >\"$d/m\"; git/hooks/commit-msg \"$d/m\" 2>\"$d/e\" && printf 'scope: Subject\\n\\nBody.\\n\\n' | cmp -s - \"$d/m\" && printf 'commit-msg: stripped 1 agent attribution line(s).\\n' | cmp -s - \"$d/e\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "strips-generated-with-footer",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; printf 'scope: Subject\\n\\nBody.\\n\\n\\360\\237\\244\\226 Generated with [Cl%sude Code](https://example.invalid/code)\\n' a >\"$d/m\"; git/hooks/commit-msg \"$d/m\" 2>\"$d/e\" && printf 'scope: Subject\\n\\nBody.\\n\\n' | cmp -s - \"$d/m\" && printf 'commit-msg: stripped 1 agent attribution line(s).\\n' | cmp -s - \"$d/e\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "clean-message-byte-identical",
+      "run": "command -v rg >/dev/null 2>&1 || { echo 'rg required' >&2; exit 1; }; d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; printf 'scope: Subject\\n\\nBody.\\n\\n\\nSecond paragraph.\\n\\nReviewed-by: Jane Doe <jane@example.com>\\nCo-Authored-By: Jane Doe <jane@example.com>\\n' >\"$d/m\"; cp \"$d/m\" \"$d/o\"; git/hooks/commit-msg \"$d/m\" 2>\"$d/e\" && cmp -s \"$d/m\" \"$d/o\" && [ ! -s \"$d/e\" ]",
+      "timeout_secs": 30
+    },
+    {
+      "name": "subject-attribution-still-blocked",
+      "run": "command -v rg >/dev/null 2>&1 || { echo 'rg required' >&2; exit 1; }; d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; printf 'scope: Generated with Co%sex\\n' d >\"$d/m\"; cp \"$d/m\" \"$d/o\"; if git/hooks/commit-msg \"$d/m\" 2>/dev/null; then exit 1; fi; cmp -s \"$d/m\" \"$d/o\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "mixed-offense-strips-then-blocks",
+      "run": "command -v rg >/dev/null 2>&1 || { echo 'rg required' >&2; exit 1; }; d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; printf 'scope: Generated with Co%sex\\n\\nCo-Authored-By: Cl%sude <noreply@example.com>\\n' d a >\"$d/m\"; if git/hooks/commit-msg \"$d/m\" 2>/dev/null; then exit 1; fi; printf 'scope: Generated with Co%sex\\n\\n' d | cmp -s - \"$d/m\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "strips-without-rg-on-path",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir \"$d/t\"; for x in bash awk grep sed cat mktemp mv rm; do ln -s \"$(command -v \"$x\")\" \"$d/t/$x\" || exit 1; done; printf 'scope: Subject\\n\\nBody.\\n\\nCo-Authored-By: Cl%sude <noreply@example.com>\\n' a >\"$d/m\"; PATH=\"$d/t\" git/hooks/commit-msg \"$d/m\" 2>\"$d/e\" && printf 'scope: Subject\\n\\nBody.\\n\\n' | cmp -s - \"$d/m\" && grep -q 'rg not found' \"$d/e\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "missing-tool-fails-closed",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir \"$d/t\"; for x in bash grep sed cat mktemp mv rm; do ln -s \"$(command -v \"$x\")\" \"$d/t/$x\" || exit 1; done; printf 'scope: Subject\\n\\nBody.\\n\\nCo-Authored-By: Cl%sude <noreply@example.com>\\n' a >\"$d/m\"; cp \"$d/m\" \"$d/o\"; if PATH=\"$d/t\" git/hooks/commit-msg \"$d/m\" 2>\"$d/e\"; then exit 1; fi; cmp -s \"$d/m\" \"$d/o\" && grep -q 'commit-msg: awk not found' \"$d/e\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "mktemp-failure-fails-closed",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir \"$d/t\" \"$d/w\"; for x in bash awk grep sed cat mv rm; do ln -s \"$(command -v \"$x\")\" \"$d/t/$x\" || exit 1; done; printf '#!/bin/sh\\nexit 1\\n' >\"$d/t/mktemp\"; chmod 755 \"$d/t/mktemp\"; printf 'scope: Subject\\n\\nBody.\\n\\nCo-Authored-By: Cl%sude <noreply@example.com>\\n' a >\"$d/w/m\"; cp \"$d/w/m\" \"$d/o\"; if PATH=\"$d/t\" git/hooks/commit-msg \"$d/w/m\" 2>\"$d/e\"; then exit 1; fi; cmp -s \"$d/w/m\" \"$d/o\" && grep -q 'commit-msg: cannot create a temp file' \"$d/e\" && [ \"$(ls -A \"$d/w\")\" = m ]",
+      "timeout_secs": 30
+    },
+    {
+      "name": "readme-documents-commit-msg-hook",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; awk '/^\\*\\*`commit-msg`\\*\\*/{p=1;next} /^\\*\\*`post-checkout`\\*\\*/{p=0} p' README.md >\"$d/s\"; test -s \"$d/s\" && grep -q 'Strip' \"$d/s\" && grep -q 'Block' \"$d/s\" && grep -q 'attribution.pr' \"$d/s\" && grep -q 'DOTFILES_SKIP_COMMIT_MSG_GUARD' \"$d/s\" && grep -q 'squash' \"$d/s\" && grep -q 'The `post-checkout` hook is a no-op' README.md",
+      "timeout_secs": 30
+    }
+  ]
+}
