@@ -1650,5 +1650,45 @@ grep -q -- '--launch-id <launch_id>' "$R/brief-template.md"
 grep -q 'spend.jsonl' "$R/event-schema.md"
 SH
 
+check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
+$LOAD
+avail={"fable":True,"opus":True,"sonnet":True,"haiku":True}
+t,code=c.routing_table(avail,{})
+assert code is None and set(t)=={"plan","impl","review","mech","think"},t
+assert t["plan"]=={"model":"fable","effort":"high"} and t["impl"]=={"model":"sonnet","effort":None}
+assert t["mech"]=={"model":"haiku","effort":None} and t["think"]=={"model":"fable","effort":"high"}
+t,code=c.routing_table({"fable":False,"opus":False,"sonnet":True,"haiku":True},{})
+assert code is None and t["think"]["model"] is None and t["impl"]["model"]=="sonnet"
+assert c.routing_table(None,{})==(None,3)
+assert c.routing_table(avail,{"effort":{"plan":"turbo"}})==(None,5)
+assert c.routing_table(avail,{"models":{"plan":["gpt"]}})==(None,5)
+assert c.routing_table(None,{"models":{"plan":["gpt"]}})==(None,5)   # config error outranks stale map
+# single snapshot: main reads config and capabilities exactly once
+calls={"cfg":0,"cap":0}
+real_cfg,real_cap=c.read_config,c.read_capabilities
+c.read_config=lambda rd:(calls.__setitem__("cfg",calls["cfg"]+1) or {})
+c.read_capabilities=lambda rd,s:(calls.__setitem__("cap",calls["cap"]+1) or avail)
+import io,contextlib
+buf=io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc=c.main(["routing-table","--repo-slug","slug-rt","--session","S"])
+assert rc==0 and calls=={"cfg":1,"cap":1},calls
+assert json.loads(buf.getvalue())["review"]=={"model":"opus","effort":"high"}
+c.read_config,c.read_capabilities=real_cfg,real_cap
+sys.exit(0)
+PY
+
+check "routing-table CLI exit codes" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-rt --session S --host h --pid 1)
+rc=0; $CLI routing-table --repo-slug slug-rt --session S >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 3 ]
+$CLI write-capabilities --repo-slug slug-rt --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
+$CLI routing-table --repo-slug slug-rt --session S | python3 -c "import json,sys;t=json.load(sys.stdin);assert t['plan']=={'model':'opus','effort':'high'} and t['impl']['effort'] is None,t"
+printf '{"v":1,"user":"u","default_base":"origin/main","effort":{"plan":"low","plan2":"x"}}' > "$CLAUDE_CONFIG_DIR/herdr-orch/slug-rt/config.json"
+rc=0; $CLI routing-table --repo-slug slug-rt --session S >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 5 ]
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

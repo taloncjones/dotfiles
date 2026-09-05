@@ -230,6 +230,23 @@ def role_effort(role, config):
     return (ROLE_EFFORT_DEFAULTS[role], None)
 
 
+def routing_table(available, config):
+    """{role: {model, effort}} for every role from one config + one
+    capabilities snapshot. (table, None), or (None, 5) on a malformed
+    models/effort block, (None, 3) on an absent/stale map. A role with no
+    surviving model gets model None (the caller halts that launch)."""
+    for role in ROLE_DEFAULTS:
+        if role_preference(role, config) is None or role_effort(role, config)[1] is not None:
+            return (None, 5)
+    if available is None:
+        return (None, 3)
+    table = {}
+    for role in ROLE_DEFAULTS:
+        model, _ = resolve_model(role, available, config)
+        table[role] = {"model": model, "effort": role_effort(role, config)[0]}
+    return (table, None)
+
+
 MECH_DEFAULTS = {"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
 MECH_BOUNDS = {"max_turns": (1, 500), "max_budget_usd": (0, 50), "timeout_secs": (60, 14400)}
 MECH_KEYS = frozenset(MECH_DEFAULTS) | {"contract_commands"}
@@ -1278,6 +1295,7 @@ def main(argv=None) -> int:
     add("write-capabilities", "--json", fenced=True)
     add("resolve-model", "--role", "--session")
     add("resolve-effort", "--role")
+    add("routing-table", "--session")
     add("disable-model", "--model", fenced=True)
     mc = add("mech-caps")
     mc.add_argument("--max-turns", type=int, default=None)
@@ -1415,6 +1433,18 @@ def main(argv=None) -> int:
             sys.stderr.write("[X] invalid role or config effort block\n")
             return code
         print(level or "inherit")
+        return 0
+    if ns.cmd == "routing-table":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        cfg = read_config(rd)
+        available = read_capabilities(rd, ns.session)
+        table, code = routing_table(available, cfg)
+        if code is not None:
+            sys.stderr.write({3: "[X] capabilities map absent or stale; re-probe first\n",
+                              5: "[X] invalid config models or effort block\n"}[code])
+            return code
+        print(json.dumps(table))
         return 0
     if ns.cmd == "disable-model":
         rd = _fenced(ns)
