@@ -2081,5 +2081,32 @@ ra=0; wait $PA_ || ra=$?; rb=0; wait $PB_ || rb=$?
 [ $((ra + rb)) -eq 4 ] && [ "$(ls "$RD/think/" | grep -c -E "($IDA|$IDB)\.launch\.json")" -eq 1 ]
 SH
 
+check "run-think retry: parent launch record missing task_id key does not crash" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo-taskidkey.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo-taskidkey.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+P=think-triage-20260904190500
+printf 'q\n' > "$RD/think/$P.question.md"
+printf 'q\n' > "$RD/think/$P-2.question.md"
+# launch record with the task_id key entirely omitted (not an explicit null) -- still
+# passes valid_launch_record, must not crash the retry cross-check with a bare KeyError
+printf '{"v":1,"think_id":"%s","kind":"triage","repo_slug":"%s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":900},"attempt":1,"parent":null,"started":"2020-01-01T00:00:00Z","pid":1}' "$P" "$SLUG" > "$RD/think/$P.launch.json"
+printf '{"v":1,"think_id":"%s","kind":"triage","task_id":null,"model":"fable","status":"unanswered","reason":"error","answer":null,"model_attributable":true,"total_cost_usd":1.0,"num_turns":1,"started":"2020-01-01T00:00:00Z"}' "$P" > "$RD/think/$P.answer.json"
+# matching (no --task-id passed, so ns.task_id is None -> equals the missing key's .get() default) -> succeeds cleanly, no traceback
+rc=0; out=$($CLI run-think --repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P 2>&1) || rc=$?
+[ "$rc" -eq 0 ] || { echo "expected 0 got $rc: $out" >&2; exit 1; }
+! printf '%s' "$out" | grep -q Traceback
+rm "$RD/think/$P-2.launch.json" "$RD/think/$P-2.answer.json"
+# mismatched --task-id against the missing-key parent -> exit 2, no traceback, no files written
+rc=0; out=$($CLI run-think --repo-slug $SLUG --session S --fence $FE --kind triage --task-id PROJ-99 --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P 2>&1) || rc=$?
+[ "$rc" -eq 2 ] || { echo "expected 2 got $rc: $out" >&2; exit 1; }
+! printf '%s' "$out" | grep -q Traceback
+[ ! -e "$RD/think/$P-2.launch.json" ] && [ ! -e "$RD/think/$P-2.answer.json" ]
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

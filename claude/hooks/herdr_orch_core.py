@@ -2298,8 +2298,8 @@ def main(argv=None) -> int:
                      and prec.get("model_attributable") is True,
                      "parent must be a valid unanswered model-attributable record")
             for k in ("kind", "task_id", "model"):
-                _require(prec.get(k) == plaunch[k], f"parent answer/launch disagree on {k}")
-            _require(plaunch["kind"] == ns.kind and plaunch["task_id"] == ns.task_id, "parent kind/task must match")
+                _require(prec.get(k) == plaunch.get(k), f"parent answer/launch disagree on {k}")
+            _require(plaunch["kind"] == ns.kind and plaunch.get("task_id") == ns.task_id, "parent kind/task must match")
             _require(plaunch["model"] != ns.model, "retry must run on a different model than the parent")
             _require(ns.max_budget_usd == plaunch["caps"]["max_budget_usd"],
                      "retry --max-budget-usd must equal the parent launch's cap (the escalation budget)")
