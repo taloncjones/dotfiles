@@ -831,6 +831,92 @@ def valid_mech_agent(agent, task_id) -> bool:
     return False
 
 
+THINK_KINDS = ("triage", "decompose", "incident", "other")
+THINK_ID_RE = re.compile(r"think-(triage|decompose|incident|other)-\d{14}(-2)?\Z")
+THINK_REASONS = ("max_turns", "max_budget", "timeout", "no_answer", "error")
+
+
+def valid_think_id(tid) -> bool:
+    return isinstance(tid, str) and len(tid) <= 32 and bool(THINK_ID_RE.match(tid))
+
+
+def think_kind(tid) -> str:
+    return tid.split("-")[1]
+
+
+def _s(mx):
+    return {"type": "string", "minLength": 1, "maxLength": mx}
+
+
+THINK_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "recommendation": _s(500),
+        "rationale": _s(4000),
+        "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"label": _s(80), "summary": _s(1000), "tradeoffs": _s(1000),
+                           "risk": {"type": "string", "enum": ["low", "medium", "high"]}},
+            "required": ["label", "summary", "tradeoffs", "risk"]}},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "open_questions": {"type": "array", "maxItems": 10, "items": _s(300)},
+        "evidence": {"type": "array", "maxItems": 20, "items": _s(300)},
+    },
+    "required": ["recommendation", "rationale", "options", "confidence"],
+}
+
+
+def _check_schema(obj, schema, path="$"):
+    """Minimal checker for the subset THINK_SCHEMA uses: object/array/string,
+    properties, required, additionalProperties:false, enum, min/maxItems,
+    min/maxLength. Returns the first violation as a string, else None."""
+    t = schema.get("type")
+    if t == "object":
+        if not isinstance(obj, dict):
+            return f"{path}: expected object"
+        props = schema.get("properties", {})
+        for k in schema.get("required", []):
+            if k not in obj:
+                return f"{path}: missing {k}"
+        if schema.get("additionalProperties") is False:
+            extra = set(obj) - set(props)
+            if extra:
+                return f"{path}: unexpected keys {sorted(extra)}"
+        for k, sub in props.items():
+            if k in obj:
+                err = _check_schema(obj[k], sub, f"{path}.{k}")
+                if err:
+                    return err
+        return None
+    if t == "array":
+        if not isinstance(obj, list):
+            return f"{path}: expected array"
+        if "minItems" in schema and len(obj) < schema["minItems"]:
+            return f"{path}: fewer than {schema['minItems']} items"
+        if "maxItems" in schema and len(obj) > schema["maxItems"]:
+            return f"{path}: more than {schema['maxItems']} items"
+        for i, item in enumerate(obj):
+            err = _check_schema(item, schema["items"], f"{path}[{i}]")
+            if err:
+                return err
+        return None
+    if t == "string":
+        if not isinstance(obj, str):
+            return f"{path}: expected string"
+        if "enum" in schema and obj not in schema["enum"]:
+            return f"{path}: not one of {schema['enum']}"
+        if len(obj) < schema.get("minLength", 0):
+            return f"{path}: too short"
+        if len(obj) > schema.get("maxLength", 10 ** 9):
+            return f"{path}: too long"
+        return None
+    return f"{path}: unsupported schema type {t}"
+
+
+def valid_think_answer(obj):
+    return _check_schema(obj, THINK_SCHEMA)
+
+
 def parse_claude_result(stdout: str):
     """The single result object from `claude -p --output-format json`, or
     None. Tolerates leading noise by scanning lines from the end."""

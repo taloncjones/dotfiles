@@ -1787,5 +1787,32 @@ rc=0; $CLI classify-banner --repo-slug slug-b --model gpt --effort high --text x
 rc=0; $CLI classify-banner --repo-slug slug-b --model sonnet --effort turbo --text x 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
 SH
 
+check "think ids: every kind fits 32 with the retry suffix; validator matches THINK_SCHEMA exactly" <<PY
+$LOAD
+for k in ("triage","decompose","incident","other"):
+    for suf in ("","-2"):
+        tid=f"think-{k}-20260904170000{suf}"
+        assert c.valid_think_id(tid) and len(tid)<=32 and re.fullmatch(c.AGENT_NAME_RE.pattern,tid), tid
+        assert c.think_kind(tid)==k
+for bad in ("think-triage-202609041700001","think-triage-20260904170000-3","think-Triage-20260904170000",
+            "think-triage-20260904T170000Z","think-x-20260904170000","",None,"think-triage-20260904170000-2-2"):
+    assert not c.valid_think_id(bad), bad
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+good={"recommendation":"r","rationale":"why","options":[opt(1),opt(2)],"confidence":"high"}
+assert c.valid_think_answer(good) is None
+full=dict(good,options=[opt(i) for i in range(4)],open_questions=["q"]*10,evidence=["e"]*20,
+          recommendation="x"*500,rationale="y"*4000)
+assert c.valid_think_answer(full) is None
+bad=[None,[],{},dict(good,options=[opt(1)]),dict(good,options=[opt(i) for i in range(5)]),
+     dict(good,extra=1),dict(good,options=[dict(opt(1),x=1),opt(2)]),dict(good,recommendation="x"*501),
+     dict(good,options=[dict(opt(1),risk="none"),opt(2)]),dict(good,confidence="sure"),
+     dict(good,open_questions=["q"]*11),dict(good,evidence=[""]),dict(good,rationale=""),
+     dict(good,options=[opt(1),{"label":"a","summary":"s","risk":"low"}]),dict(good,recommendation=3)]
+for b in bad:
+    assert isinstance(c.valid_think_answer(b),str), b
+assert c.THINK_SCHEMA["properties"]["options"]["minItems"]==2 and c.THINK_SCHEMA["additionalProperties"] is False
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
