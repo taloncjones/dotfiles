@@ -22,6 +22,22 @@ You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
 - Base: <base_ref> @ <base_sha>
 - Phase: implement
 
+## Routing
+Models and efforts were resolved by the orchestrator from one `routing-table`
+snapshot at launch; use these aliases verbatim in any Workflow `agent()` call
+(`effort` omitted where it says inherit); a role listed as unavailable may not
+appear in a script you author:
+- plan: <model> / <effort|inherit>
+- impl: <model> / <effort|inherit>
+- review: <model> / <effort|inherit>
+- mech: <model> / <effort|inherit>
+- think: <model|unavailable> / <effort>
+Workflow opt-in: granted by the user's standing order (global CLAUDE.md, Default Skill Routing) for this orchestrated task; default size guideline
+
+(For a `kick off <item> no-workflow` kickoff, the last line instead reads
+`Workflow opt-in: withheld for this task`, and no Workflow authoring is
+permitted this task.)
+
 ## Ground rules
 - This is your own workspace -- commit as you go, don't leave uncommitted
   work at a stop.
@@ -32,6 +48,8 @@ You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
   agent panel is orchestrator territory, not yours. If the task genuinely
   needs an independent long-lived actor, hand back to the orchestrator to
   decompose it into a sibling task.
+- Workflow/subagent helpers never call `herdr_orch_core.py`; only you emit
+  the completion record.
 - Never merge, push directly to the default branch, or open a PR yourself.
 - Follow the repo's own CLAUDE.md and skill routing for how the work itself
   gets done (worktree/brainstorm/spec/plan/review pipeline as applicable).
@@ -61,9 +79,9 @@ this record.
 ## Plan-phase brief variant (`plan-<t>`, raw items only)
 
 Sent instead of the implement brief when kickoff dispatches a `plan` worker for
-a raw item (SKILL.md section 2). Same workspace/ground-rules framing; the task
-section says to PRODUCE the spec + plan (not implement), and the close emits
-phase `plan`:
+a raw item (SKILL.md section 2). Same workspace/ground-rules framing --
+including the `## Routing` block above -- the task section says to PRODUCE the
+spec + plan (not implement), and the close emits phase `plan`:
 
 ```
 You are `<agent-name>` planning task `<task_id>` in repo `<repo_slug>`.
@@ -131,6 +149,18 @@ emit `paused --reason needs_design`. Commit as you go.
 - Base: <base_ref> @ <base_sha>   (launch base; your commits must land past it)
 - Phase: implement
 
+## Routing
+Models and efforts were resolved by the orchestrator from one `routing-table`
+snapshot at launch; use these aliases verbatim in any Workflow `agent()` call
+(`effort` omitted where it says inherit); a role listed as unavailable may not
+appear in a script you author:
+- plan: <model> / <effort|inherit>
+- impl: <model> / <effort|inherit>
+- review: <model> / <effort|inherit>
+- mech: <model> / <effort|inherit>
+- think: <model|unavailable> / <effort>
+Workflow opt-in: granted by the user's standing order (global CLAUDE.md, Default Skill Routing) for this orchestrated task; default size guideline
+
 ## Close
 1. Commit all work.
 2. Run `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`;
@@ -149,8 +179,9 @@ result (`reason: no_emit`/`timeout`/`error`/`max_turns`/`max_budget`), so
 ## Reviewer brief variant (`rev-<t>`)
 
 Sent instead of the above when dispatching review (section 5 of SKILL.md).
-Same workspace/ground-rules framing, with the task section and close
-replaced:
+Same workspace/ground-rules framing -- including the `## Routing` block above,
+rendered from the fresh `routing-table` snapshot taken for this dispatch --
+with the task section and close replaced:
 
 ```
 You are `<agent-name>` reviewing task `<task_id>` in repo `<repo_slug>` at
@@ -178,3 +209,45 @@ When review is complete:
 
 Never push, merge, or open a PR.
 ```
+
+## Deep-think brief variant (`<think_id>`)
+
+Written by the orchestrator, not sent via `agent prompt` -- the thinker runs
+headless (`run-think`, SKILL.md section 8, Deep-think escalation), so this
+is the input contract, not a chat brief. Fill every `<...>` placeholder and
+write it to `STATE_ROOT/<slug>/think/<think_id>.question.md` before
+launching. Five sections, in order:
+
+```
+You are `<think_id>`, a read-only advisor for the orchestrator of repo
+`<repo_slug>`. You have Read/Glob/Grep only, at most `<max_turns>` turns
+and $`<max_budget_usd>`. You cannot and must not change anything. Your only
+output is the structured answer.
+
+## Question
+<one decision, phrased as a question>
+Kind: <triage|decompose|incident|other>
+Task: <task_id or none>
+
+## Context
+<inlined excerpts -- task records, todo bodies, transition evidence, the
+ranked triage list -- and worktree-relative paths the advisor may read.
+Inline what matters; paths are secondary. Never a fence token, socket path,
+or credential.>
+
+## Constraints
+<what is fixed (existing gates, the human-merge rule, budget) and what is
+out of bounds>
+
+## Answer shape
+Restate the output fields and ask for two to four options (unordered
+alternatives; the `recommendation` field stands on its own and need not
+name one of them), rationale grounded in the context, and open questions
+only for what the context cannot settle.
+```
+
+The thinker's channel back is the structured answer only
+(`<think_id>.answer.json`, `references/state-layout.md`); it never writes,
+runs, or fetches. An attempt-2 retry (model-attributable failure only)
+copies the parent's question byte-for-byte to `<think_id>-2.question.md`
+rather than re-authoring it.

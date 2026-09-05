@@ -1698,6 +1698,38 @@ grep -q -- '--launch-id <launch_id>' "$R/brief-template.md"
 grep -q 'spend.jsonl' "$R/event-schema.md"
 SH
 
+check "docs pin effort routing, banner verb, deep think, and Workflow routing" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+grep -q 'routing-table --repo-slug' "$S"                     # one snapshot per dispatch
+grep -q 'One snapshot per dispatch' "$S"
+grep -q -- '--effort \$EFFORT' "$S"                          # launch line
+grep -q 'classify-banner --model' "$S"
+grep -q 'effort-mismatch' "$S"
+grep -q 'not availability data' "$S"                         # never disable-model on effort-mismatch
+grep -q 'Deep-think escalation' "$S"
+grep -q 'run-think --repo-slug' "$S"
+grep -q 'think-caps --repo-slug' "$S"
+for t in 'Ambiguous triage' 'Milestone/epic decomposition' 'Novel incident' 'Not eligible'; do grep -q "$t" "$S"; done
+grep -q 'one live escalation per repo' "$S"
+grep -q 'daily_budget_usd' "$S"
+grep -q 'escalation deferred' "$S"
+grep -q '_think' "$S"
+grep -q 'Workflow' "$S" && grep -q 'in-turn helper work' "$S"
+grep -q 'Precedence with the user' "$S"
+grep -q 'Workflow opt-in: granted by the user' "$R/brief-template.md"
+grep -q 'Workflow opt-in: withheld for this task' "$R/brief-template.md"
+grep -q '## Routing' "$R/brief-template.md"
+grep -q 'never call `herdr_orch_core.py`' "$R/brief-template.md"
+grep -q 'Deep-think brief variant' "$R/brief-template.md"
+grep -q '"effort": {' "$R/state-layout.md"
+grep -q '"think": {' "$R/state-layout.md"
+grep -q '\.launch\.json' "$R/state-layout.md"
+grep -q '\.answer\.json' "$R/state-layout.md"
+grep -q 'workers\[\].effort\|"effort": "high"' "$R/state-layout.md"
+grep -q 'think/' "$R/event-schema.md"
+grep -q 'models.think\|"think": \["fable", "opus"\]' "$R/state-layout.md"
+SH
+
 check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
 $LOAD
 avail={"fable":True,"opus":True,"sonnet":True,"haiku":True}

@@ -34,6 +34,12 @@ run-mech`) is watched like the completion sidecars so an append wakes the
 orchestrator; its lines are ledger records, not events, and are folded only
 by `status`.
 
+`think/<think_id>.launch.json` and `think/<think_id>.answer.json` (written
+by `$CORE run-think`, `references/state-layout.md`) are watched the same
+way: a write to either wakes the orchestrator, but they are records, not
+events, and are folded only by `status` (into the `_think` summary), never
+appended to `events.jsonl`.
+
 After appending, the hook also pushes one wake line to the owning
 orchestrator's inbox socket (`$CORE post_wake`, path from
 `owner.json.messaging_socket`). The wake is not an event: it is written to no
