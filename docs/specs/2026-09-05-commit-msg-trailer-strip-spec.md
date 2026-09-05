@@ -291,15 +291,24 @@ symlinks, resolved with `command -v`, to a chosen tool set):
   `mktemp`, `mv`, `rm`; an agent co-author line is still stripped and the
   hook exits 0, and stderr contains the existing `rg not found` notice
   (proving the block checks were reached and skipped).
-- T20 required tool absent: same tool set minus `awk`; the hook exits
-  non-zero, stderr contains `commit-msg: awk not found`, and the file is
-  byte-identical.
-- T10 failure path: the message file lives in a directory made read-only
-  (`chmod 500`), so `mktemp` cannot create the temp file; the hook exits
-  non-zero, stderr contains a line starting `commit-msg:`, the original file
-  is byte-identical, and the directory contains no file other than the
-  original. The case is skipped with a visible `SKIP` line when the test runs
-  as root (root ignores directory permissions).
+- T20 required tool absent, one case per tool in `awk grep sed cat mktemp
+  mv rm`: the tool set minus that tool; the hook exits non-zero, stderr
+  contains `commit-msg: <tool> not found`, and the file is byte-identical.
+- T10 `mktemp` failure: the tool set with `mktemp` replaced by a shim that
+  always exits 1 (a PATH shim, not a permission change, so the case is
+  deterministic as root and as a user); the hook exits non-zero, stderr
+  contains `commit-msg: cannot create a temp file`, the original file is
+  byte-identical, and its directory contains no file other than the
+  original.
+- T23 `mv` failure: the tool set with `mv` replaced by an always-failing
+  shim; the temp file has been written by then, so this proves the `EXIT`
+  trap removes it: the hook exits non-zero, stderr contains `commit-msg:
+  failed to replace`, the original is byte-identical, and its directory
+  contains no file other than the original.
+
+The suite requires `rg` and exits 2 with a visible `FAIL:` line when it is
+missing, rather than reporting success without running the block-rule
+cases.
 
 Existing assertions: "blocks AI coauthor" becomes a strip-and-allow case
 (it is T1); every other existing assertion is unchanged.
@@ -309,7 +318,7 @@ No test-runner change is needed: the suite is already listed in
 
 ## Acceptance criteria
 
-- AC1: `sh git/hooks/commit-msg.test.sh` passes with every case T1-T22
+- AC1: `sh git/hooks/commit-msg.test.sh` passes with every case T1-T23
   present and the amended existing assertions.
 - AC2: An agent `Co-Authored-By` line after a body is removed and the commit
   is allowed, with the exact stderr notice (T1, T11, T12).
@@ -332,7 +341,7 @@ No test-runner change is needed: the suite is already listed in
 - AC9: Stripping works with `rg` absent from `PATH` (T9).
 - AC10: A strip-pass failure exits non-zero, reports on stderr with the
   `commit-msg:` prefix, leaves the original unchanged, and leaves no temp
-  file (T10, T20).
+  file (T10, T20, T23).
 - AC11: The accepted collisions strip as documented (T15, T16).
 - AC12: `README.md` "Global Git Hooks" documents the `commit-msg` hook,
   names `post-checkout` in the no-op sentence, and states that the PR-body
@@ -349,9 +358,9 @@ No test-runner change is needed: the suite is already listed in
   the value stops being a URL, R2 needs an update.
 - The hook's reach is bounded by G1: `--no-verify`, a local `core.hooksPath`
   override, and clients that skip hooks are not covered, exactly as today.
-- T10 depends on directory permissions being enforced, which is true for the
-  non-root CI runner and for local runs; the root skip keeps the suite green
-  elsewhere.
+- Failure-path cases use PATH shims (a tool script that exits 1) so they do
+  not depend on filesystem permissions and behave the same as root and as a
+  user.
 - Requiring the strip-pass tools turns a previously silent environment gap
   (no `rg`) into a partially loud one: `rg` absence is still a warn-and-skip
   for the block checks, but a missing `awk`/`sed`/`grep`/`mktemp` now blocks

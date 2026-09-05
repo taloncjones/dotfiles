@@ -4,7 +4,7 @@
 
 **Goal:** Extend the global `commit-msg` git hook so agent-injected attribution lines (agent `Co-Authored-By` trailers, session-URL trailers, `Generated with|by <agent>` footers) are removed from the commit message instead of blocking it, with every other line kept byte-for-byte.
 
-**Architecture:** A new strip pass runs at the top of the existing `git/hooks/commit-msg`, before the unchanged rg-based block checks. It uses only `bash`, `awk`, `grep`, `sed`, `cat`, `mktemp`, `mv`, `rm`, so it works in containers without `rg`. Line 1 is never touched; the rewrite is atomic (temp file plus `mv`) and happens only when at least one line matched. The existing test suite is rewritten around a per-process temp dir and byte-comparison helpers, then grown case by case.
+**Architecture:** A new strip pass runs at the top of the existing `git/hooks/commit-msg`, before the unchanged rg-based block checks. It uses only `bash`, `awk`, `grep`, `sed`, `cat`, `mktemp`, `mv`, `rm`, so it works in containers without `rg`. Line 1 is never touched; the rewrite is atomic (temp file plus `mv`) and happens only when at least one line matched. The existing test suite is rewritten around a per-process temp dir and byte-comparison helpers, then grown case by case; failure paths are forced with PATH shims, not filesystem permissions, so they behave the same as root and as a user.
 
 **Tech Stack:** bash 3.2+ (hook), POSIX sh (test), BSD and GNU awk/sed/grep, `cmp`.
 
@@ -29,10 +29,13 @@
 - Regexes in the hook are POSIX ERE with bracket classes only: no `\b`, no
   `\s`, no `\d`. They must behave identically under macOS awk (bwk 20200816)
   and GNU awk.
+- `rg` is a hard requirement of the test suite (the block-rule cases need it;
+  the Brewfile and CI install ripgrep). The suite exits 2 without it rather
+  than reporting success; the strip pass itself never needs `rg`.
 - The spec and this plan are branch-only. `docs/specs/` and `docs/plans/` are
   gitignored and `git/hooks/public-safety.test.sh` fails while they are
-  tracked. Do not un-ignore them. Drop their commits before merge (see the
-  final task).
+  tracked. Do not un-ignore them. Remove them with a deletion commit before
+  merge (Task 6); never drop the commit that also carries the contract.
 - Never merge, push, or open a PR from this plan's tasks.
 
 ---
@@ -43,7 +46,7 @@
   between the early exits and the `rg` check. Existing block logic is kept
   verbatim.
 - Rewrite: `git/hooks/commit-msg.test.sh`. Per-process temp dir, byte-compare
-  helpers, existing six cases preserved, new cases T1-T22 appended in the
+  helpers, existing six cases preserved, new cases T1-T23 appended in the
   order below.
 - Modify: `README.md` section "Global Git Hooks" (lines 334-352 today): reword
   the no-op sentence to name `post-checkout`, add the `commit-msg` entry.
@@ -62,10 +65,10 @@ No other file changes. `bin/dotfiles-tests` already lists the suite.
 **Interfaces:**
 - Consumes: `git/hooks/commit-msg` as it exists today.
 - Produces: helpers `run_hook`, `assert_strips`, `assert_passthrough`,
-  `assert_blocks`, `assert_blocks_leaving`, `assert_stderr_is`, and the
-  fixture variables `CLAUDE_NAME`, `CLAUDE_UPPER`, `CLAUDE_LOWER`,
-  `CODEX_NAME`, `ROBOT`, `BODY_MSG`, `WORK`, `MSG`, `EXPECTED`, `OUT`,
-  `ERR`. Tasks 2 and 3 append cases that use exactly these names.
+  `assert_blocks`, `assert_blocks_leaving`, and the fixture variables
+  `CLAUDE_NAME`, `CLAUDE_UPPER`, `CLAUDE_LOWER`, `CODEX_NAME`, `ROBOT`,
+  `BODY_MSG`, `WORK`, `MSG`, `EXPECTED`, `EXPECTED_ERR`, `OUT`, `ERR`.
+  Tasks 2 and 3 append cases that use exactly these names.
 
 - [ ] **Step 1: Record the baseline**
 
@@ -86,8 +89,9 @@ Write `git/hooks/commit-msg.test.sh` with exactly this content:
 # tracked content and command text for those. Every scratch file lives in one
 # per-process directory so concurrent runs cannot collide.
 #
-# Requires rg for the block-rule cases (the hook warns and skips without it;
-# T9 below proves the strip pass still runs in that situation).
+# rg is required: the block-rule cases need it, and a silent skip would report
+# success without testing anything. The Brewfile and CI install ripgrep. T9
+# proves the strip pass itself still runs when rg is absent.
 
 set -e
 
@@ -97,13 +101,14 @@ if [ ! -f "$HOOK" ]; then
     exit 2
 fi
 if ! command -v rg >/dev/null 2>&1; then
-    echo "SKIP: rg not installed; the hook's block rules need it (CI installs ripgrep)"
-    exit 0
+    echo "FAIL: rg not installed; the block-rule cases need it (brew install ripgrep)" >&2
+    exit 2
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/commit-msg-test.XXXXXX")"
 MSG="$WORK/msg"
 EXPECTED="$WORK/expected"
+EXPECTED_ERR="$WORK/expected_err"
 OUT="$WORK/out"
 ERR="$WORK/err"
 PASS=0
@@ -120,7 +125,6 @@ BODY_MSG="codex: Add hook
 Body paragraph."
 
 cleanup() {
-    chmod -R u+w "$WORK" 2>/dev/null || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -141,10 +145,12 @@ run_hook() {
     "$HOOK" "$MSG" >"$OUT" 2>"$ERR"
 }
 
-# label, input, expected: exit 0 and MSG equals expected (plus final newline).
+# label, input, expected, count: exit 0, MSG equals expected (plus final
+# newline), and stderr is exactly the strip notice for count lines.
 assert_strips() {
     printf '%s\n' "$3" >"$EXPECTED"
-    if run_hook "$2" && cmp -s "$MSG" "$EXPECTED"; then
+    printf 'commit-msg: stripped %s agent attribution line(s).\n' "$4" >"$EXPECTED_ERR"
+    if run_hook "$2" && cmp -s "$MSG" "$EXPECTED" && cmp -s "$ERR" "$EXPECTED_ERR"; then
         pass "$1"
     else
         fail "$1"
@@ -179,16 +185,6 @@ assert_blocks_leaving() {
     if run_hook "$2"; then
         fail "$1"
     elif cmp -s "$MSG" "$EXPECTED"; then
-        pass "$1"
-    else
-        fail "$1"
-    fi
-}
-
-# label, line: stderr of the most recent hook run is exactly that one line.
-assert_stderr_is() {
-    printf '%s\n' "$2" >"$EXPECTED"
-    if cmp -s "$ERR" "$EXPECTED"; then
         pass "$1"
     else
         fail "$1"
@@ -253,7 +249,9 @@ git commit -m "git: Rebuild commit-msg test harness around a per-run temp dir"
   `re_footer`, functions `count_agent_lines <file>` (prints the number of
   matching lines from line 2 onward) and `write_without_agent_lines <in>
   <out>`, and the stderr line `commit-msg: stripped N agent attribution
-  line(s).` Task 3 adds the tool check in front of these.
+  line(s).` Task 3 adds the tool check in front of these and relies on the
+  exact failure strings `commit-msg: cannot create a temp file in` and
+  `commit-msg: failed to replace`.
 
 - [ ] **Step 1: Replace the co-author block case and append the new cases**
 
@@ -265,27 +263,27 @@ block immediately before the `# --- Summary` line:
 # --- Strip cases: exit 0, matching lines removed, everything else kept ------
 
 # The blank line that preceded the stripped trailer survives, so the expected
-# text ends with one empty line.
+# text ends with one empty line. The last argument is the stripped-line count
+# the hook must report on stderr.
 assert_strips "T1 strips agent co-author trailer" "${BODY_MSG}
 
 Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" "${BODY_MSG}
-"
-assert_stderr_is "T1 reports one stripped line" "commit-msg: stripped 1 agent attribution line(s)."
+" 1
 
 assert_strips "T2 strips session URL trailer, mixed-case key" "${BODY_MSG}
 
 ${CLAUDE_UPPER}-session: https://example.invalid/code/session_01ABC" "${BODY_MSG}
-"
+" 1
 
 assert_strips "T3 strips session URL trailer with another agent key" "${BODY_MSG}
 
 ${CODEX_NAME}-Session: https://example.invalid/s/1" "${BODY_MSG}
-"
+" 1
 
 assert_strips "T4 strips generated-with footer with emoji prefix, mixed case" "${BODY_MSG}
 
 ${ROBOT} generated WITH [${CLAUDE_NAME} Code](https://example.invalid/code)" "${BODY_MSG}
-"
+" 1
 
 assert_strips "T5 strips all three kinds, keeps human trailer and blank lines" "${BODY_MSG}
 
@@ -296,38 +294,37 @@ ${CLAUDE_NAME}-Session: https://example.invalid/code/session_01ABC
 ${ROBOT} Generated with [${CLAUDE_NAME} Code](https://example.invalid/code)" "${BODY_MSG}
 
 Reviewed-by: Jane Doe <jane@example.com>
-"
-assert_stderr_is "T5 reports three stripped lines" "commit-msg: stripped 3 agent attribution line(s)."
+" 3
 
 assert_strips "T11 strips lowercase co-author key and name" "${BODY_MSG}
 
 co-authored-by: ${CLAUDE_LOWER} <noreply@example.com>" "${BODY_MSG}
-"
+" 1
 
 assert_strips "T12 strips co-author with leading whitespace" "${BODY_MSG}
 
     Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" "${BODY_MSG}
-"
+" 1
 
 assert_strips "T13 strips generated-by with the ai token" "${BODY_MSG}
 
 Generated by A""I" "${BODY_MSG}
-"
+" 1
 
 assert_strips "T14 strips claude-session with a non-URL value" "${BODY_MSG}
 
 ${CLAUDE_NAME}-Session: local run, no link" "${BODY_MSG}
-"
+" 1
 
 assert_strips "T15 accepted collision: body line starting generated with codex" "${BODY_MSG}
 
 Generated with ${CODEX_NAME}, this change rewrites the parser." "${BODY_MSG}
-"
+" 1
 
 assert_strips "T16 accepted collision: human co-author containing an agent token" "${BODY_MSG}
 
 Co-Authored-By: ${CLAUDE_NAME} Martin <cm@example.com>" "${BODY_MSG}
-"
+" 1
 
 # T21: no trailing newline on the stripped last line; output ends with the
 # previous line plus LF.
@@ -336,7 +333,8 @@ printf '%s' "${BODY_MSG}
 Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" >"$MSG"
 printf '%s\n' "${BODY_MSG}
 " >"$EXPECTED"
-if "$HOOK" "$MSG" >"$OUT" 2>"$ERR" && cmp -s "$MSG" "$EXPECTED"; then
+printf 'commit-msg: stripped 1 agent attribution line(s).\n' >"$EXPECTED_ERR"
+if "$HOOK" "$MSG" >"$OUT" 2>"$ERR" && cmp -s "$MSG" "$EXPECTED" && cmp -s "$ERR" "$EXPECTED_ERR"; then
     pass "T21 strips an unterminated final agent line"
 else
     fail "T21 strips an unterminated final agent line"
@@ -386,10 +384,10 @@ Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" "codex: Generated with ${C
 - [ ] **Step 2: Run the suite to see the new cases fail**
 
 Run: `sh git/hooks/commit-msg.test.sh`
-Expected: FAIL lines for T1, T1 stderr, T2, T3, T4, T5, T5 stderr, T11,
-T12, T13, T14, T15, T16, T21, and T19 (the hook currently blocks instead of
-stripping, or ignores session lines). T6, T7, T17a, T17b, T18, T22 and the
-existing cases pass. Non-zero exit.
+Expected: FAIL lines for T1, T2, T3, T4, T5, T11, T12, T13, T14, T15, T16,
+T21, and T19 (the hook currently blocks instead of stripping, or ignores
+session lines). T6, T7, T17a, T17b, T18, T22 and the existing cases pass.
+Non-zero exit.
 
 - [ ] **Step 3: Add the strip pass to the hook**
 
@@ -498,17 +496,18 @@ Notes for the implementer:
   backslashes, so they pass through unchanged.
 - The `if ! strip_tmp="$(mktemp ...)"` form is what makes `set -e` safe here:
   the assignment's exit status is `mktemp`'s, and on failure `strip_tmp` is
-  empty so the trap has nothing to remove.
+  empty so the trap has nothing to remove. When `mv` fails, `strip_tmp` is
+  still set, so the trap removes the temp file on exit.
 - Do not add a tool-presence loop yet; Task 3 does that with its own test.
 
 - [ ] **Step 4: Run the suite to see everything pass**
 
 Run: `sh git/hooks/commit-msg.test.sh`
-Expected: `27 passed, 0 failed` (6 existing-policy assertions after the
-co-author block case moved under T1, plus 14 strip assertions: T1, T1
-stderr, T2, T3, T4, T5, T5 stderr, T11, T12, T13, T14, T15, T16, T21; 5
-pass-through: T6, T7, T17a, T18, T22; 2 block: T17b, T19). If the count
-differs, list the PASS/FAIL lines and reconcile before moving on.
+Expected: `25 passed, 0 failed` (6 existing-policy assertions after the
+co-author block case moved under T1, plus 12 strip assertions: T1, T2, T3,
+T4, T5, T11, T12, T13, T14, T15, T16, T21; 5 pass-through: T6, T7, T17a,
+T18, T22; 2 block: T17b, T19). If the count differs, list the PASS/FAIL
+lines and reconcile before moving on.
 
 - [ ] **Step 5: Syntax-check the hook and confirm it is executable**
 
@@ -524,19 +523,21 @@ git commit -m "git: Strip agent attribution lines in the commit-msg hook"
 
 ---
 
-### Task 3: Tool check and environment cases
+### Task 3: Tool check and forced-failure cases
 
 **Files:**
 - Modify: `git/hooks/commit-msg` (insert the tool check at the top of the
   strip pass)
-- Modify: `git/hooks/commit-msg.test.sh` (append T9, T20, T10 before the
-  Summary section)
+- Modify: `git/hooks/commit-msg.test.sh` (append T9, T20, T10, T23 before
+  the Summary section)
 
 **Interfaces:**
-- Consumes: Task 2 strip pass; Task 1 helpers and `WORK`, `MSG`,
-  `EXPECTED`, `OUT`, `ERR`, `BODY_MSG`, `CLAUDE_NAME`, `pass`, `fail`.
+- Consumes: Task 2 strip pass and its failure strings; Task 1 helpers and
+  `WORK`, `MSG`, `EXPECTED`, `OUT`, `ERR`, `BODY_MSG`, `CLAUDE_NAME`,
+  `pass`, `fail`.
 - Produces: stderr line `commit-msg: <tool> not found; refusing to commit
-  unchecked.` for each of `awk grep sed cat mktemp mv rm`.
+  unchecked.` for each of `awk grep sed cat mktemp mv rm`; test helpers
+  `link_tools DIR TOOL...` and `write_failing_shim DIR NAME`.
 
 - [ ] **Step 1: Append the environment cases**
 
@@ -545,73 +546,104 @@ Insert immediately before the `# --- Summary` line in
 
 ```sh
 # --- Environment cases ------------------------------------------------------
+# Failure paths are forced with PATH shims (a tool that always exits 1), not
+# filesystem permissions, so they behave identically as root and as a user.
 
-# T9: rg absent. PATH holds only the tools the hook needs, resolved from the
-# real PATH; the strip pass must still run and the block checks must report
-# the missing rg.
+AGENT_MSG="${BODY_MSG}
+
+Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>"
+STRIPPED_MSG="${BODY_MSG}
+"
+
+# link_tools DIR TOOL...: populate DIR with symlinks to the real tools, so a
+# hook run with PATH=DIR sees exactly that tool set.
+link_tools() {
+    dir="$1"
+    shift
+    mkdir -p "$dir"
+    for tool in "$@"; do
+        ln -s "$(command -v "$tool")" "$dir/$tool"
+    done
+}
+
+# write_failing_shim DIR NAME: a NAME on PATH that always exits 1.
+write_failing_shim() {
+    printf '#!/bin/sh\nexit 1\n' >"$1/$2"
+    chmod 755 "$1/$2"
+}
+
+# T9: rg absent. The strip pass must still run and the block checks must
+# report the missing rg.
 TOOLS="$WORK/tools"
-mkdir "$TOOLS"
-for tool in bash awk grep sed cat mktemp mv rm; do
-    ln -s "$(command -v "$tool")" "$TOOLS/$tool"
-done
-printf '%s\n' "${BODY_MSG}
-
-Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" >"$MSG"
-printf '%s\n' "${BODY_MSG}
-" >"$EXPECTED"
+link_tools "$TOOLS" bash awk grep sed cat mktemp mv rm
+printf '%s\n' "$AGENT_MSG" >"$MSG"
+printf '%s\n' "$STRIPPED_MSG" >"$EXPECTED"
 if PATH="$TOOLS" "$HOOK" "$MSG" >"$OUT" 2>"$ERR" && cmp -s "$MSG" "$EXPECTED" && grep -q 'rg not found' "$ERR"; then
     pass "T9 strips without rg on PATH"
 else
     fail "T9 strips without rg on PATH"
 fi
 
-# T20: a required strip-pass tool is missing; the hook must refuse, not allow.
-NOAWK="$WORK/noawk"
-mkdir "$NOAWK"
-for tool in bash grep sed cat mktemp mv rm; do
-    ln -s "$(command -v "$tool")" "$NOAWK/$tool"
+# T20: each required strip-pass tool missing in turn; the hook must refuse
+# with the named tool, and the file must be untouched.
+for missing in awk grep sed cat mktemp mv rm; do
+    dir="$WORK/no-$missing"
+    mkdir "$dir"
+    for tool in bash awk grep sed cat mktemp mv rm; do
+        [ "$tool" = "$missing" ] || ln -s "$(command -v "$tool")" "$dir/$tool"
+    done
+    printf '%s\n' "$AGENT_MSG" >"$MSG"
+    cp "$MSG" "$EXPECTED"
+    if PATH="$dir" "$HOOK" "$MSG" >"$OUT" 2>"$ERR"; then
+        fail "T20 refuses when $missing is missing"
+    elif cmp -s "$MSG" "$EXPECTED" && grep -q "commit-msg: $missing not found" "$ERR"; then
+        pass "T20 refuses when $missing is missing"
+    else
+        fail "T20 refuses when $missing is missing"
+    fi
 done
-printf '%s\n' "${BODY_MSG}
 
-Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" >"$MSG"
-cp "$MSG" "$EXPECTED"
-if PATH="$NOAWK" "$HOOK" "$MSG" >"$OUT" 2>"$ERR"; then
-    fail "T20 refuses when awk is missing"
-elif cmp -s "$MSG" "$EXPECTED" && grep -q 'commit-msg: awk not found' "$ERR"; then
-    pass "T20 refuses when awk is missing"
+# T10: mktemp fails. Exit non-zero, commit-msg: line on stderr, original
+# untouched, no temp residue next to it.
+MKTEMP_FAIL="$WORK/mktemp-fail"
+link_tools "$MKTEMP_FAIL" bash awk grep sed cat mv rm
+write_failing_shim "$MKTEMP_FAIL" mktemp
+DIR10="$WORK/t10"
+mkdir "$DIR10"
+printf '%s\n' "$AGENT_MSG" >"$DIR10/msg"
+cp "$DIR10/msg" "$EXPECTED"
+if PATH="$MKTEMP_FAIL" "$HOOK" "$DIR10/msg" >"$OUT" 2>"$ERR"; then
+    fail "T10 fails closed when mktemp fails"
+elif cmp -s "$DIR10/msg" "$EXPECTED" && grep -q 'commit-msg: cannot create a temp file' "$ERR" && [ "$(ls -A "$DIR10")" = "msg" ]; then
+    pass "T10 fails closed when mktemp fails"
 else
-    fail "T20 refuses when awk is missing"
+    fail "T10 fails closed when mktemp fails"
 fi
 
-# T10: the message file's directory is read-only, so mktemp cannot create the
-# temp file. Root ignores directory permissions, so skip visibly there.
-if [ "$(id -u)" = 0 ]; then
-    printf 'SKIP  T10 fails closed on a read-only directory (running as root)\n'
+# T23: mv fails after the temp file was written. Same guarantees, and the
+# EXIT trap must have removed the temp file.
+MV_FAIL="$WORK/mv-fail"
+link_tools "$MV_FAIL" bash awk grep sed cat mktemp rm
+write_failing_shim "$MV_FAIL" mv
+DIR23="$WORK/t23"
+mkdir "$DIR23"
+printf '%s\n' "$AGENT_MSG" >"$DIR23/msg"
+cp "$DIR23/msg" "$EXPECTED"
+if PATH="$MV_FAIL" "$HOOK" "$DIR23/msg" >"$OUT" 2>"$ERR"; then
+    fail "T23 fails closed when mv fails and leaves no temp file"
+elif cmp -s "$DIR23/msg" "$EXPECTED" && grep -q 'commit-msg: failed to replace' "$ERR" && [ "$(ls -A "$DIR23")" = "msg" ]; then
+    pass "T23 fails closed when mv fails and leaves no temp file"
 else
-    RO="$WORK/ro"
-    mkdir "$RO"
-    printf '%s\n' "${BODY_MSG}
-
-Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" >"$RO/msg"
-    cp "$RO/msg" "$EXPECTED"
-    chmod 500 "$RO"
-    if "$HOOK" "$RO/msg" >"$OUT" 2>"$ERR"; then
-        fail "T10 fails closed on a read-only directory"
-    elif cmp -s "$RO/msg" "$EXPECTED" && grep -q '^commit-msg:' "$ERR" && [ "$(ls -A "$RO")" = "msg" ]; then
-        pass "T10 fails closed on a read-only directory"
-    else
-        fail "T10 fails closed on a read-only directory"
-    fi
-    chmod 700 "$RO"
+    fail "T23 fails closed when mv fails and leaves no temp file"
 fi
 ```
 
-- [ ] **Step 2: Run the suite; T20 must fail, T9 and T10 pass**
+- [ ] **Step 2: Run the suite; the seven T20 cases must fail, the rest pass**
 
 Run: `sh git/hooks/commit-msg.test.sh`
-Expected: `FAIL  T20 refuses when awk is missing` (bash aborts on the
-missing `awk` with its own error, not the `commit-msg:` line); T9 and T10
-PASS; total `29 passed, 1 failed`, non-zero exit.
+Expected: seven `FAIL  T20 refuses when <tool> is missing` lines (bash
+aborts on the missing tool with its own error, not the `commit-msg:` line);
+T9, T10, T23 PASS; total `28 passed, 7 failed`, non-zero exit.
 
 - [ ] **Step 3: Add the tool check to the hook**
 
@@ -632,14 +664,23 @@ done
 - [ ] **Step 4: Run the suite to see everything pass**
 
 Run: `sh git/hooks/commit-msg.test.sh`
-Expected: `30 passed, 0 failed` (or `29 passed, 0 failed` plus one `SKIP`
-line when running as root).
+Expected: `35 passed, 0 failed` (25 from Task 2, plus T9, seven T20, T10,
+T23). No SKIP lines exist in this suite.
 
 - [ ] **Step 5: Run the suite twice concurrently to prove there is no shared scratch path**
 
-Run: `sh git/hooks/commit-msg.test.sh >/dev/null & sh git/hooks/commit-msg.test.sh | tail -1; wait`
-Expected: `30 passed, 0 failed` from the foreground run and a zero exit
-from the background one.
+Run:
+
+```bash
+a="$(mktemp)"; b="$(mktemp)"
+sh git/hooks/commit-msg.test.sh >"$a" 2>&1 & p1=$!
+sh git/hooks/commit-msg.test.sh >"$b" 2>&1 & p2=$!
+wait "$p1"; r1=$?; wait "$p2"; r2=$?
+tail -1 "$a" "$b"; echo "exit codes: $r1 $r2"; rm -f "$a" "$b"
+```
+
+Expected: both tails read `35 passed, 0 failed` and the last line is
+`exit codes: 0 0`.
 
 - [ ] **Step 6: Commit**
 
@@ -658,10 +699,12 @@ git commit -m "git: Fail closed when commit-msg strip tools are missing"
 
 **Interfaces:**
 - Consumes: the final hook behavior from Tasks 2 and 3.
-- Produces: four grep-able facts the contract checks: the phrase
-  `The \`post-checkout\` hook is a no-op`, a line starting
-  `**\`commit-msg\`**`, the literal `attribution.pr`, and the literal
-  `DOTFILES_SKIP_COMMIT_MSG_GUARD`.
+- Produces: a `commit-msg` entry starting with a line `**\`commit-msg\`**`
+  and ending where the `**\`post-checkout\`**` entry begins. The contract
+  extracts exactly that span and requires it to mention `Strip`, `Block`,
+  `attribution.pr`, `DOTFILES_SKIP_COMMIT_MSG_GUARD`, and `squash`, and
+  requires the sentence `The \`post-checkout\` hook is a no-op` elsewhere in
+  the file.
 
 - [ ] **Step 1: Reword the no-op sentence**
 
@@ -711,10 +754,15 @@ sessions where `settings.json` did not load.
 
 ```
 
-- [ ] **Step 3: Verify the grep-able facts**
+- [ ] **Step 3: Verify the section the contract will extract**
 
-Run: `grep -c 'The `post-checkout` hook is a no-op' README.md; grep -c '^\*\*`commit-msg`\*\*' README.md; grep -c 'attribution.pr' README.md; grep -c 'DOTFILES_SKIP_COMMIT_MSG_GUARD' README.md`
-Expected: four lines, each `1` or more.
+Run:
+
+```bash
+awk '/^\*\*`commit-msg`\*\*/{p=1;next} /^\*\*`post-checkout`\*\*/{p=0} p' README.md > /tmp/cm-section.$$ && for w in Strip Block attribution.pr DOTFILES_SKIP_COMMIT_MSG_GUARD squash; do grep -c "$w" /tmp/cm-section.$$; done; grep -c 'The `post-checkout` hook is a no-op' README.md; rm -f /tmp/cm-section.$$
+```
+
+Expected: six lines, each `1` or more.
 
 - [ ] **Step 4: Commit**
 
@@ -730,31 +778,31 @@ git commit -m "docs: Document the commit-msg strip layer and PR-side opt-out"
 **Files:**
 - Read only: `claude/contracts/td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg-contract.json`
 
-- [ ] **Step 1: Validate and run the contract**
+- [ ] **Step 1: Validate and run the contract with the repo-local verifier**
 
-Run (single line, from the worktree root):
+Run from the worktree root (the repo copy of the verifier is used so the
+result does not depend on which `~/.claude` symlink this machine has):
 
 ```bash
-python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py" verify-contract --repo-slug git-personal-taloncjones-dotfiles-6c3f6099 --task-id td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg --worktree "$PWD" --contract claude/contracts/td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg-contract.json --allow-unpinned
+python3 claude/hooks/herdr_orch_core.py verify-contract --repo-slug git-personal-taloncjones-dotfiles-6c3f6099 --task-id td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg --worktree "$PWD" --contract claude/contracts/td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg-contract.json --allow-unpinned
 ```
 
 Expected: one `ok <name> exit=0` line per command and a final
 `PASS 12 commands`.
 
-- [ ] **Step 2: Run the sibling git-hook suites and the hook drift check**
+- [ ] **Step 2: Run the full suite and account for the one known failure**
 
-Run: `sh git/hooks/pre-commit.test.sh && sh git/hooks/post-checkout.test.sh && HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh`
-Expected: each ends with `0 failed`.
+Run: `bin/dotfiles-tests; echo "exit=$?"`
+Expected: `1 failed`, and the failing suite is
+`git/hooks/public-safety.test.sh` with exactly one FAIL line,
+`no tracked planning artifacts`, caused by the branch-only spec and plan.
+Every other suite reports `[OK]`. If `claude/hooks/claude-hooks.test.sh`
+reports settings drift instead, that is machine state, not this change:
+rerun it alone as `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh`
+and expect `0 failed`. Any other failure is a regression to fix before
+continuing.
 
-- [ ] **Step 3: Run the public-safety suite and read the one expected failure**
-
-Run: `sh git/hooks/public-safety.test.sh`
-Expected on this branch: exactly one FAIL, `no tracked planning artifacts`,
-because the branch-only spec and plan commits are still present. Every other
-assertion PASS. This failure clears at merge time (next task). Any other
-FAIL is a regression to fix now.
-
-- [ ] **Step 4: Confirm the hook is what a real commit runs**
+- [ ] **Step 3: Confirm the hook is what a real commit runs**
 
 Run: `git config --get core.hooksPath; readlink "$HOME/.config/git/hooks"`
 Expected: `~/.config/git/hooks` and a path ending in `/git/hooks` inside a
@@ -764,20 +812,37 @@ the suite above exercised the worktree copy directly.
 
 ---
 
-### Task 6: Branch gate notes (human-run at merge time)
+### Task 6: Branch gate (human-run at merge time)
 
-No code. These are the steps the merger runs; they are recorded here so the
-mapping table below has a human-verify target.
+No code changes to the hook. These are the steps the merger runs; they are
+recorded here so the mapping table below has a human-verify target.
 
-- [ ] Drop the branch-only commits touching `docs/specs/` and `docs/plans/`
-  before merge (the PR #77 precedent is a final `docs: Drop branch-only ...
-  spec/plan before merge` commit that deletes the two files). Do not drop the
-  contract file; it is tracked on purpose.
-- [ ] Run `bin/dotfiles-tests` on the merge candidate and confirm
-  `public-safety.test.sh` passes now that the planning files are gone
-  (acceptance criterion AC13).
-- [ ] Confirm the PR description carries no attribution footer (the
-  `attribution.pr = ""` opt-out is the only guard there; see README).
+- [ ] **Step 1: Remove the branch-only artifacts with a deletion commit**
+
+Do not drop or rewrite earlier commits: the commit that added the plan also
+added the tracked contract. Delete only the two files:
+
+```bash
+git rm -q docs/specs/2026-09-05-commit-msg-trailer-strip-spec.md docs/plans/2026-09-05-commit-msg-trailer-strip-plan.md
+git commit -m "docs: Drop branch-only trailer-strip spec and plan before merge"
+```
+
+- [ ] **Step 2: Confirm the contract survived and the tree is public-safe**
+
+Run: `git ls-files --error-unmatch claude/contracts/td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg-contract.json && ! git ls-files 'docs/specs/**' 'docs/plans/**' | grep -q . && sh git/hooks/public-safety.test.sh`
+Expected: the contract path is printed, then the public-safety suite ends
+with `0 failed`.
+
+- [ ] **Step 3: Run the full suite on the merge candidate**
+
+Run: `bin/dotfiles-tests`
+Expected: `0 failed` (acceptance criterion AC13).
+
+- [ ] **Step 4: Check the PR description**
+
+Confirm the PR body carries no attribution footer. The `attribution.pr = ""`
+opt-out is the only guard there (see README); a git hook never sees the PR
+body.
 
 ---
 
@@ -787,43 +852,56 @@ Contract file:
 `claude/contracts/td-2026-09-04-strip-agent-attribution-trailers-with-a-commit-msg-contract.json`.
 Commands run via `sh -c` from the worktree root. Fixture agent names are
 built with `printf 'Cl%sude' a` and `printf 'Co%sex' d` so the contract
-contains no literal attribution string.
+contains no literal attribution string. `rg` is required by
+`commit-msg-suite`, `clean-message-byte-identical`,
+`subject-attribution-still-blocked`, and `mixed-offense-strips-then-blocks`;
+none of them skips when it is absent, they fail.
 
 | Criterion | Contract command | Notes |
 |-----------|------------------|-------|
-| AC1 suite passes (T1-T22) | `commit-msg-suite` | `sh git/hooks/commit-msg.test.sh`; SKIPs itself without `rg` |
-| AC2 agent co-author stripped, exact notice | `strips-agent-coauthor-line` | independent of the suite: builds the message, runs the hook, `cmp`s, greps the notice |
-| AC3 session trailers stripped | `strips-session-url-trailer` | `Claude-Session:` URL case; the non-URL and other-key cases are suite-only (T3, T14) |
-| AC4 generated-with footer stripped | `strips-generated-with-footer` | emoji prefix built from octal escapes |
-| AC5 other lines survive, count matches | `strips-agent-coauthor-line`, `commit-msg-suite` | T5 in the suite is the full multi-line check |
-| AC6 clean message byte-identical, empty stderr | `clean-message-byte-identical` | stderr check applies only when `rg` is present, same condition as the spec |
+| AC1 suite passes (T1-T23) | `commit-msg-suite` | `sh git/hooks/commit-msg.test.sh`; exits 2 without `rg` |
+| AC2 agent co-author stripped, exact notice | `strips-agent-coauthor-line` | independent of the suite: builds the message, runs the hook, `cmp`s the file and the one-line stderr |
+| AC3 session trailers stripped | `strips-session-url-trailer` | `Claude-Session:` URL case with exact stderr; the non-URL and other-key cases are suite-only (T3, T14) |
+| AC4 generated-with footer stripped | `strips-generated-with-footer` | emoji prefix built from octal escapes; exact stderr |
+| AC5 other lines survive, count matches | `strips-agent-coauthor-line`, `commit-msg-suite` | T5 in the suite is the full multi-line check with count 3 |
+| AC6 clean message byte-identical, empty stderr | `clean-message-byte-identical` | requires `rg` (the block layer prints without it) |
 | AC7 human co-author survives | `clean-message-byte-identical` | fixture includes `Co-Authored-By: Jane Doe` |
-| AC8 subject untouched, mixed offense strips then blocks | `subject-attribution-still-blocked`, `mixed-offense-strips-then-blocks` | both exit 0 early when `rg` is absent (the block rule needs it) |
+| AC8 subject untouched, mixed offense strips then blocks | `subject-attribution-still-blocked`, `mixed-offense-strips-then-blocks` | require `rg` |
 | AC9 strip works without `rg` | `strips-without-rg-on-path` | PATH limited to the eight required tools |
-| AC10 fail closed | `missing-tool-fails-closed`, `readonly-dir-fails-closed` | the read-only case exits 0 early as root |
+| AC10 fail closed | `missing-tool-fails-closed`, `mktemp-failure-fails-closed` | PATH shims; deterministic as root or user. The `mv` case (T23) and the per-tool loop (T20) are suite-only |
 | AC11 accepted collisions | `commit-msg-suite` | T15, T16 |
-| AC12 README | `readme-documents-commit-msg-hook` | four greps |
-| AC13 full suite green at merge | human-verify (Task 6) | `public-safety.test.sh` cannot pass while the branch-only spec/plan are tracked, so the full-suite run belongs at the branch gate |
+| AC12 README | `readme-documents-commit-msg-hook` | extracts the `commit-msg` entry span and checks its five required terms plus the reworded no-op sentence |
+| AC13 full suite green at merge | human-verify (Task 6) | `public-safety.test.sh` cannot pass while the branch-only spec/plan are tracked, so the full-suite run belongs at the branch gate after the deletion commit |
 | hook parses and is executable | `hook-bash-syntax-and-executable` | guards a truncated or non-executable hook file |
 
 Falsifiability check: reverting the hook to its pre-task content fails
 `strips-agent-coauthor-line`, `strips-session-url-trailer`,
 `strips-generated-with-footer`, `mixed-offense-strips-then-blocks`,
-`strips-without-rg-on-path`, `missing-tool-fails-closed`, and the suite.
-Removing the README entry fails `readme-documents-commit-msg-hook`.
+`strips-without-rg-on-path`, `missing-tool-fails-closed`,
+`mktemp-failure-fails-closed`, and the suite. Removing the README entry
+fails `readme-documents-commit-msg-hook`.
 
 ## Self-review record
 
 - Spec coverage: G1-G5 map to Tasks 2-4; every T-case in the spec appears
   in Task 1 (existing), Task 2 (T1-T8, T11-T19, T21, T22), or Task 3 (T9,
-  T10, T20). AC13 is human-verify by design.
+  T10, T20, T23). AC13 is human-verify by design.
 - Placeholders: none; every step carries its content.
 - Name consistency: `count_agent_lines`, `write_without_agent_lines`,
   `strip_tmp`, `cleanup_strip_tmp`, `re_coauthor`, `re_session`,
   `re_footer` are used identically in Tasks 2 and 3; test helper names in
-  Task 1 match every later call.
+  Task 1 match every later call; the failure strings Task 3 greps for are
+  the ones Task 2 prints.
 - Counts in "Expected" lines were confirmed by assembling the hook and test
-  from this plan's code blocks in a scratch directory and running them
-  (30 passed, 0 failed) and by running the contract against that scratch
-  copy (PASS 12 commands). The contract also fails against the pre-task hook
-  on `strips-agent-coauthor-line`, which is the falsifiability proof.
+  from this plan's code blocks in a scratch directory and running them, and
+  by running the contract against that scratch copy (PASS 12 commands). The
+  contract also fails against the pre-task hook on
+  `strips-agent-coauthor-line`, which is the falsifiability proof.
+- Codex plan review (one round) findings folded in: no success-skip on
+  missing `rg`; per-tool missing-tool loop; `mktemp` and `mv` failures forced
+  with PATH shims instead of directory permissions; exact stderr on every
+  strip case and in the contract; concurrency step propagates both exit
+  codes; Task 5 runs the repo-local verifier and the full suite; Task 6 is a
+  deletion commit that keeps the contract; README check is scoped to the
+  entry's span. Kept as-is: the merge gate remains human (repo operating
+  principle), with the deterministic checks listed under Task 6.
