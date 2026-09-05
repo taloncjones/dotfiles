@@ -1389,6 +1389,7 @@ WATCH_DIRS = {
     "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
               (".spend.jsonl", valid_task_id)),
     "workspaces": ((".events.jsonl", valid_workspace_id),),
+    "think": ((".launch.json", valid_think_id), (".answer.json", valid_think_id)),
 }
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
@@ -2010,10 +2011,18 @@ def main(argv=None) -> int:
                 untracked += sum(
                     1 for w in workers if isinstance(w, dict) and w.get("role") != "mech"
                 )
+            effort_list = []
+            if isinstance(workers, list):
+                for w in workers:
+                    if not isinstance(w, dict) or "effort" not in w:
+                        effort_list.append("unknown")
+                    else:
+                        effort_list.append(w["effort"] if w["effort"] is not None else "inherit")
             result[tid] = {
                 "status": task.get("status"),
                 "fold": fold_status(by_task.get(tid, [])),
                 "spend": spend,
+                "workers_effort": effort_list,
             }
         totals["usd"] = round(totals["usd"], 4)
         totals["untracked_launches"] = untracked
@@ -2025,6 +2034,21 @@ def main(argv=None) -> int:
                     orphans.add(tid)
         result["_totals"] = totals
         result["_orphans"] = sorted(orphans)
+        now = now_iso()
+        scan = think_scan(rd, now)
+        answers = list(scan["answers"].values())
+        result["_think"] = {
+            "launches": len(scan["launches"]),
+            "answered": sum(1 for a in answers if a.get("status") == "answered"),
+            "unanswered": sum(1 for a in answers if a.get("status") == "unanswered"),
+            "usd": round(sum(a["total_cost_usd"] for a in answers
+                             if _finite_nonneg(a.get("total_cost_usd")) and a.get("total_cost_usd") is not None), 4),
+            "turns": sum(a["num_turns"] for a in answers
+                         if _finite_nonneg(a.get("num_turns"), True) and a.get("num_turns") is not None),
+            "usd_today": think_usd_today(scan, now[:10]),
+            "live": scan["live"], "lost": scan["lost"], "skipped_files": scan["skipped_files"],
+            "corrupt": scan["corrupt"],
+        }
         print(json.dumps(result))
         return 0
     if ns.cmd == "should-dispatch-review":

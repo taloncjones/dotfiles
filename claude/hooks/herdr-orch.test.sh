@@ -383,7 +383,7 @@ $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome approved
 # the sidecar sorts after PROJ-1.json; status must still report the real status
-$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1','_totals','_orphans'] and s['PROJ-1']['status']=='reviewed',s"
+$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1','_totals','_orphans','_think'] and s['PROJ-1']['status']=='reviewed',s"
 SH
 
 check "CLI should-dispatch-review: once per HEAD, re-review on new HEAD" <<'SH'
@@ -2106,6 +2106,47 @@ rc=0; out=$($CLI run-think --repo-slug $SLUG --session S --fence $FE --kind tria
 [ "$rc" -eq 2 ] || { echo "expected 2 got $rc: $out" >&2; exit 1; }
 ! printf '%s' "$out" | grep -q Traceback
 [ ! -e "$RD/think/$P-2.launch.json" ] && [ ! -e "$RD/think/$P-2.answer.json" ]
+SH
+
+check "status: _think fold, legacy workers effort unknown, watch includes think files" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-st --session S --host h --pid 1)
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-st"; mkdir -p "$RD/think"
+TODAY=$(date -u +%Y-%m-%d)
+L() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"repo_slug":"slug-st","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":%s},"attempt":1,"parent":null,"started":"%s","pid":1}' "$1" "$2" "$3" "$4" > "$RD/think/$1.launch.json"; }
+GOOD='{"recommendation":"r","rationale":"w","options":[{"label":"a","summary":"s","tradeoffs":"t","risk":"low"},{"label":"b","summary":"s","tradeoffs":"t","risk":"low"}],"confidence":"high"}'
+A() { if [ "$2" = answered ]; then R=null; AN="$GOOD"; else R='"error"'; AN=null; fi; printf '{"v":1,"think_id":"%s","status":"%s","reason":%s,"answer":%s,"total_cost_usd":%s,"num_turns":%s,"started":"%s"}' "$1" "$2" "$R" "$AN" "$3" "$4" "$5" > "$RD/think/$1.answer.json"; }
+L think-triage-20260904100000 triage 900 "${TODAY}T10:00:00Z"; A think-triage-20260904100000 answered 1.12 6 "${TODAY}T10:00:00Z"
+L think-other-20260904110000 other 900 "${TODAY}T11:00:00Z";  A think-other-20260904110000 answered 0.40 3 "${TODAY}T11:00:00Z"
+L think-incident-20260904120000 incident 900 "${TODAY}T12:00:00Z"; A think-incident-20260904120000 unanswered null null "${TODAY}T12:00:00Z"
+L think-decompose-20260904125900 decompose 900 "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+L think-incident-20260903120000 incident 600 "2026-09-03T12:00:00Z"
+printf '{"v":1,"trunc' > "$RD/think/think-other-20260904130000.answer.json"
+printf '{"v":2,"think_id":"think-other-20260904140000"}' > "$RD/think/think-other-20260904140000.answer.json"
+$CLI write-task --repo-slug slug-st --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"in-progress","workers":[{"role":"impl","phase":"plan","model":"fable"},{"role":"impl","phase":"implement","model":"sonnet","effort":null},{"role":"review","model":"opus","effort":"high"}]}'
+$CLI status --repo-slug slug-st | python3 -c "
+import json,sys;s=json.load(sys.stdin);t=s['_think']
+assert t=={'launches':5,'answered':2,'unanswered':1,'usd':1.52,'turns':9,'usd_today':7.52,'live':['think-decompose-20260904125900'],'lost':['think-incident-20260903120000'],'skipped_files':2,'corrupt':[]},t   # usd = actual spend; usd_today = committed (reserved) spend
+assert s['PROJ-1']['workers_effort']==['unknown','inherit','high'],s['PROJ-1']"
+rm -r "$RD/think"
+$CLI status --repo-slug slug-st | python3 -c "import json,sys;t=json.load(sys.stdin)['_think'];assert t=={'launches':0,'answered':0,'unanswered':0,'usd':0.0,'turns':0,'usd_today':0.0,'live':[],'lost':[],'skipped_files':0,'corrupt':[]},t"
+python3 - "$RD" <<'PY'
+import importlib.util,sys,os,json
+s=importlib.util.spec_from_file_location("c","claude/hooks/herdr_orch_core.py");c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+rd=sys.argv[1]; os.makedirs(os.path.join(rd,"think"),exist_ok=True)
+assert "think" in c.WATCH_DIRS
+snap0,_=c.watch_scan(rd,{})
+open(os.path.join(rd,"think","think-triage-20260904150000.question.md"),"w").write("q")
+snap0b,_=c.watch_scan(rd,snap0)
+assert not c.watch_changed(snap0, snap0b)
+open(os.path.join(rd,"think","think-triage-20260904150000.launch.json"),"w").write("{}")
+snap1,_=c.watch_scan(rd,snap0); assert c.watch_changed(snap0,snap1)
+open(os.path.join(rd,"think","think-triage-20260904150000.answer.json"),"w").write("{}")
+snap2,_=c.watch_scan(rd,snap1)
+assert c.watch_changed(snap1, snap2)
+PY
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
