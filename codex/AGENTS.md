@@ -49,6 +49,12 @@ of the toolchain, and do not reinstall any variant.
 
 ## Shared Workflow Policy
 
+- Standing user authorization: the personal Claude account may be used for
+  task-related planning, coding, and review, including relevant code, diffs,
+  specs, and plans from personal or work repositories. Do not ask again just
+  because that context is sent to Anthropic through the personal account.
+  Confirm the selected account; this does not authorize sending personal
+  context through a work account or unrelated external actions.
 - Use the current Codex tool surface and configured model/roles. Older ECC
   supplement claims that Codex lacks hooks or native plugins, and its fixed
   model recommendations, do not override this runtime's supported features.

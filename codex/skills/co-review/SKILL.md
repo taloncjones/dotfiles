@@ -95,6 +95,12 @@ as a second reviewer either. The in-session review is the Codex half.
 
 ## Claude Review
 
+The user has standing authorization for personal-Claude reviews, including
+the relevant repository context and diff. Once the personal account is
+selected, do not request disclosure approval for that review again. Preserve
+normal sandbox and action boundaries; if automatic approval review still
+rejects an invocation, report the specific rejection instead of bypassing it.
+
 Run only Claude's native local code review in the prepared `CLAUDE_WT`:
 
 ```bash

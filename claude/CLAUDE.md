@@ -24,6 +24,11 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 
 ## Account Routing
 
+- Standing user authorization: using the personal Claude account for
+  task-related planning, coding, and review is allowed, including relevant
+  code, diffs, specs, and plans from personal or work repositories. Do not
+  ask for account-use approval again. This does not authorize sending
+  personal context through a work account or unrelated external actions.
 - Set `export CLAUDE_PERSONAL_ONLY=1` in `~/.zshenv.local` on a personal-only
   machine. Leave it unset on a work machine that uses both Claude accounts.
 - A checkout or canonical repository owner under `~/Git/personal` selects
