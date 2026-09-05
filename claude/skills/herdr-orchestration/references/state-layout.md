@@ -507,7 +507,7 @@ copied from the launch record.
 ```json
 "_think": {"launches": 3, "answered": 2, "unanswered": 1, "usd": 1.52, "turns": 9,
            "usd_today": 1.52, "live": ["think-triage-20260904170000"],
-           "lost": ["think-incident-20260903120000"], "skipped_files": 2}
+           "lost": ["think-incident-20260903120000"], "corrupt": [], "skipped_files": 2}
 ```
 
 `launches` counts launch records; `answered`/`unanswered` count answer files

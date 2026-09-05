@@ -969,7 +969,7 @@ under its fence. Nothing about an escalation is written to a task record --
 Status gains a top-level `_think` summary (section 4) folded from
 `think/*.launch.json` and `think/*.answer.json`: `launches`, `answered`,
 `unanswered`, `usd`, `turns`, `usd_today` (committed spend for the current
-UTC day), `live` and `lost` launch-id lists, `skipped_files`. `think lost`
+UTC day), `live` and `lost` launch-id lists, `corrupt`, `skipped_files`. `think lost`
 is polling-only -- the live-to-lost transition writes nothing and generates
 no wake; the next check-in or heartbeat reports it, and there is no
 auto-relaunch.
