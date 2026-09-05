@@ -1814,5 +1814,31 @@ assert c.THINK_SCHEMA["properties"]["options"]["minItems"]==2 and c.THINK_SCHEMA
 sys.exit(0)
 PY
 
+check "run-mech characterization: popen failure, unparseable stdout, nonzero exit, timeout return" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-ch"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+BASE=$(git -C "$WT" rev-parse HEAD); printf 'brief\n' > "$RD/tasks/td-ch.brief.md"
+export FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+base="$CLI run-mech --repo-slug slug-ch --task-id td-ch --workspace w1 --agent mech-td-ch --model haiku --worktree $WT --base-sha $BASE --brief-file $RD/tasks/td-ch.brief.md --max-turns 5 --max-budget-usd 0.5 --timeout-secs 60"
+end() { python3 -c "import json,sys;l=[json.loads(x) for x in open('$RD/tasks/td-ch.spend.jsonl')];e=[x for x in l if x['kind']=='end'][-1];print(json.dumps(e))"; }
+done_() { python3 -c "import json;print(json.dumps(json.load(open('$RD/tasks/td-ch.done.json'))))"; }
+# 1. no claude on PATH (but python3/git/sh present): exit_code null, subtype unparseable, failed/error (HEAD == base)
+NOCL=$(mktemp -d); for b in python3 git sh; do ln -s "$(command -v $b)" "$NOCL/$b"; done
+PATH="$NOCL" $base --launch-id mech-td-ch-1 || true
+end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='unparseable' and e['exit_code'] is None and e['num_turns'] is None,e"
+done_ | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['outcome']=='failed' and d['reason']=='error',d"
+# 2. unparseable stdout from a running fake
+export PATH="$FAKE_CLAUDE_DIR:$PATH"; printf 'garbage\n' > "$FAKE_CLAUDE_JSON"
+$base --launch-id mech-td-ch-2; end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='unparseable' and e['exit_code']==0 and e['total_cost_usd'] is None,e"
+# 3. nonzero exit with a parseable error result
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"errors":["boom"]}' > "$FAKE_CLAUDE_JSON"
+FAKE_CLAUDE_RC=7 $base --launch-id mech-td-ch-3; end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='error_during_execution' and e['exit_code']==7 and e['errors']==['boom'] and e['model_attributable'] is False,e"
+# 4. timeout: subtype timeout, negative exit code (killed), num_turns null
+FAKE_CLAUDE_SLEEP=70 $base --launch-id mech-td-ch-4 --max-turns 5 2>/dev/null || true
+end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='timeout' and e['num_turns'] is None,e"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

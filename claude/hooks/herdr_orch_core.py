@@ -985,6 +985,34 @@ def wrapper_outcome(subtype, head_sha, base_sha, dirty):
     return ("paused" if usable else "failed"), "error"
 
 
+def run_headless(argv, cwd, stdin_text, timeout_secs):
+    """Run `claude -p` with the text on stdin in its own process group; kill
+    the group on timeout. (subtype, result, exit_code) where subtype is
+    'timeout', 'unparseable', or the result's subtype."""
+    subtype, result, exit_code, stdout = "unparseable", None, None, ""
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+    except OSError as e:
+        sys.stderr.write(f"[X] cannot launch claude: {e}\n")
+        return subtype, result, exit_code
+    try:
+        stdout, _err = proc.communicate(stdin_text, timeout=timeout_secs)
+        exit_code = proc.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+        return "timeout", None, proc.returncode
+    result = parse_claude_result(stdout)
+    if result is not None:
+        subtype = str(result.get("subtype") or "unparseable")
+    return subtype, result, exit_code
+
+
 def run_mech(rd, a, brief, timeout_secs) -> int:
     """Launch a headless capped worker; write start/end ledger lines and a
     guaranteed completion record. Exit 0 all writes ok; 2 nothing written;
@@ -1006,28 +1034,7 @@ def run_mech(rd, a, brief, timeout_secs) -> int:
         argv += ["--effort", a.effort]
     argv += ["--permission-mode", "auto", "--name", a.agent, "-p", "--output-format", "json",
              "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
-    subtype, result, exit_code, stdout = "unparseable", None, None, ""
-    try:
-        proc = subprocess.Popen(argv, cwd=a.worktree, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
-    except OSError as e:
-        sys.stderr.write(f"[X] cannot launch claude: {e}\n")
-    else:
-        try:
-            stdout, _err = proc.communicate(brief, timeout=timeout_secs)
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.wait()
-            subtype, exit_code = "timeout", proc.returncode
-    if subtype != "timeout":
-        result = parse_claude_result(stdout)
-        if result is not None:
-            subtype = str(result.get("subtype") or "unparseable")
+    subtype, result, exit_code = run_headless(argv, a.worktree, brief, timeout_secs)
     used = models_used(result)
     errors = result_errors(result)
     downgrade = is_downgrade(used, a.model)
