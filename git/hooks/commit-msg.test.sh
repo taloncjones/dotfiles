@@ -242,6 +242,98 @@ assert_blocks_leaving "T19 mixed offense: trailer stripped, subject still blocke
 Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" "codex: Generated with ${CODEX_NAME}
 "
 
+# --- Environment cases ------------------------------------------------------
+# Failure paths are forced with PATH shims (a tool that always exits 1), not
+# filesystem permissions, so they behave identically as root and as a user.
+
+AGENT_MSG="${BODY_MSG}
+
+Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>"
+STRIPPED_MSG="${BODY_MSG}
+"
+
+# link_tools DIR TOOL...: populate DIR with symlinks to the real tools, so a
+# hook run with PATH=DIR sees exactly that tool set.
+link_tools() {
+    dir="$1"
+    shift
+    mkdir -p "$dir"
+    for tool in "$@"; do
+        ln -s "$(command -v "$tool")" "$dir/$tool"
+    done
+}
+
+# write_failing_shim DIR NAME: a NAME on PATH that always exits 1.
+write_failing_shim() {
+    printf '#!/bin/sh\nexit 1\n' >"$1/$2"
+    chmod 755 "$1/$2"
+}
+
+# T9: rg absent. The strip pass must still run and the block checks must
+# report the missing rg.
+TOOLS="$WORK/tools"
+link_tools "$TOOLS" bash awk grep sed cat mktemp mv rm
+printf '%s\n' "$AGENT_MSG" >"$MSG"
+printf '%s\n' "$STRIPPED_MSG" >"$EXPECTED"
+if PATH="$TOOLS" "$HOOK" "$MSG" >"$OUT" 2>"$ERR" && cmp -s "$MSG" "$EXPECTED" && grep -q 'rg not found' "$ERR"; then
+    pass "T9 strips without rg on PATH"
+else
+    fail "T9 strips without rg on PATH"
+fi
+
+# T20: each required strip-pass tool missing in turn; the hook must refuse
+# with the named tool, and the file must be untouched.
+for missing in awk grep sed cat mktemp mv rm; do
+    dir="$WORK/no-$missing"
+    mkdir "$dir"
+    for tool in bash awk grep sed cat mktemp mv rm; do
+        [ "$tool" = "$missing" ] || ln -s "$(command -v "$tool")" "$dir/$tool"
+    done
+    printf '%s\n' "$AGENT_MSG" >"$MSG"
+    cp "$MSG" "$EXPECTED"
+    if PATH="$dir" "$HOOK" "$MSG" >"$OUT" 2>"$ERR"; then
+        fail "T20 refuses when $missing is missing"
+    elif cmp -s "$MSG" "$EXPECTED" && grep -q "commit-msg: $missing not found" "$ERR"; then
+        pass "T20 refuses when $missing is missing"
+    else
+        fail "T20 refuses when $missing is missing"
+    fi
+done
+
+# T10: mktemp fails. Exit non-zero, commit-msg: line on stderr, original
+# untouched, no temp residue next to it.
+MKTEMP_FAIL="$WORK/mktemp-fail"
+link_tools "$MKTEMP_FAIL" bash awk grep sed cat mv rm
+write_failing_shim "$MKTEMP_FAIL" mktemp
+DIR10="$WORK/t10"
+mkdir "$DIR10"
+printf '%s\n' "$AGENT_MSG" >"$DIR10/msg"
+cp "$DIR10/msg" "$EXPECTED"
+if PATH="$MKTEMP_FAIL" "$HOOK" "$DIR10/msg" >"$OUT" 2>"$ERR"; then
+    fail "T10 fails closed when mktemp fails"
+elif cmp -s "$DIR10/msg" "$EXPECTED" && grep -q 'commit-msg: cannot create a temp file' "$ERR" && [ "$(ls -A "$DIR10")" = "msg" ]; then
+    pass "T10 fails closed when mktemp fails"
+else
+    fail "T10 fails closed when mktemp fails"
+fi
+
+# T23: mv fails after the temp file was written. Same guarantees, and the
+# EXIT trap must have removed the temp file.
+MV_FAIL="$WORK/mv-fail"
+link_tools "$MV_FAIL" bash awk grep sed cat mktemp rm
+write_failing_shim "$MV_FAIL" mv
+DIR23="$WORK/t23"
+mkdir "$DIR23"
+printf '%s\n' "$AGENT_MSG" >"$DIR23/msg"
+cp "$DIR23/msg" "$EXPECTED"
+if PATH="$MV_FAIL" "$HOOK" "$DIR23/msg" >"$OUT" 2>"$ERR"; then
+    fail "T23 fails closed when mv fails and leaves no temp file"
+elif cmp -s "$DIR23/msg" "$EXPECTED" && grep -q 'commit-msg: failed to replace' "$ERR" && [ "$(ls -A "$DIR23")" = "msg" ]; then
+    pass "T23 fails closed when mv fails and leaves no temp file"
+else
+    fail "T23 fails closed when mv fails and leaves no temp file"
+fi
+
 # --- Summary ---------------------------------------------------------------
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

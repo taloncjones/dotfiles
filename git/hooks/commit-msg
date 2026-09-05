@@ -25,6 +25,13 @@ fi
 
 # --- Strip pass --------------------------------------------------------------
 
+for tool in awk grep sed cat mktemp mv rm; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'commit-msg: %s not found; refusing to commit unchecked.\n' "$tool" >&2
+    exit 1
+  fi
+done
+
 # Lowercase POSIX ERE, matched against tolower($0) so BSD and GNU awk agree on
 # case-insensitivity. Bracket classes only: no \b, no \s.
 agent_tokens='(claude|anthropic|copilot|chatgpt|gpt|codex)'
