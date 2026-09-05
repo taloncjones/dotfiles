@@ -1912,5 +1912,66 @@ FAKE_CLAUDE_SLEEP=70 $base --launch-id mech-td-ch-4 --max-turns 5 2>/dev/null ||
 end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='timeout' and e['num_turns'] is None,e"
 SH
 
+check "run_think: argv contract, answered/unanswered mapping, popen failure, unparseable, exit 3" <<PY
+$LOAD
+import types,subprocess,shutil
+rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
+wt=tempfile.mkdtemp(); subprocess.run(["git","init","-q",wt],check=True)
+fake=os.environ["FAKE_CLAUDE_DIR"]; log=os.path.join(rd,"log"); resj=os.path.join(rd,"res.json")
+os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=resj); os.environ.pop("FAKE_CLAUDE_HOOK",None); os.environ.pop("FAKE_CLAUDE_SLEEP",None)
+os.environ["PATH"]=fake+os.pathsep+os.environ["PATH"]
+tid="think-triage-20260904170000"
+a=types.SimpleNamespace(think_id=tid,kind="triage",task_id=None,repo_slug="slug",model="fable",effort="high",cwd=wt)
+launch={"v":1,"think_id":tid,"kind":"triage","task_id":None,"repo_slug":"slug","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":None,"started":"2026-09-04T17:00:00Z","pid":1}
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+good={"recommendation":"do A","rationale":"because","options":[opt(1),opt(2)],"confidence":"high"}
+def res(**kw): open(resj,"w").write(json.dumps(dict({"type":"result"},**kw)))
+def ans(): return json.load(open(os.path.join(td,tid+".answer.json")))
+def reset():
+    for n in os.listdir(td): os.unlink(os.path.join(td,n))
+res(subtype="success",is_error=False,num_turns=4,total_cost_usd=0.9,duration_ms=1000,session_id="sid",permission_denials=[{"tool":"Read"}],modelUsage={"claude-fable-5-1":{}},structured_output=good)
+assert c.run_think(rd,a,"Which item first?\n",launch,[os.path.join(rd,"tasks")])==0
+r=ans(); assert r["status"]=="answered" and r["answer"]==good and r["total_cost_usd"]==0.9 and r["num_turns"]==4 and r["permission_denials"]==1 and r["attempt"]==1 and r["caps"]["timeout_secs"]==60,r
+argv=open(log+".argv").read().splitlines()          # fake claude's "$@" excludes argv[0] ("claude" itself)
+exp=["--model","fable","--effort","high","--permission-mode","dontAsk","--name",tid,"-p","--output-format","json","--json-schema"]
+assert argv[:len(exp)]==exp,argv
+i=argv.index("--json-schema"); assert json.loads(argv[i+1])==c.THINK_SCHEMA
+assert argv[i+2:]==["--max-turns","15","--max-budget-usd","3.0","--restricted","--strict-mcp-config","--tools","Read,Glob,Grep","--add-dir",os.path.join(rd,"tasks")],argv[i+2:]
+assert open(log+".stdin").read()=="Which item first?\n" and os.path.realpath(open(log+".cwd").read().strip())==os.path.realpath(wt)
+reset(); res(subtype="error_max_turns",is_error=True,num_turns=15,total_cost_usd=2.0)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="max_turns" and ans()["answer"] is None
+reset(); res(subtype="error_max_budget_usd",is_error=True,num_turns=3,total_cost_usd=3.0)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="max_budget"
+reset(); res(subtype="success",is_error=False,num_turns=2,total_cost_usd=0.2,structured_output=dict(good,options=[opt(1)]))
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="no_answer" and "fewer than 2" in ans()["errors"][0]
+reset(); res(subtype="success",is_error=False,num_turns=2,total_cost_usd=0.2)          # no structured_output at all
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="no_answer"
+reset(); res(subtype="success",is_error=False,num_turns=1,total_cost_usd=0.1,modelUsage={"claude-sonnet-5":{}},structured_output=good)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["downgrade"] is True and ans()["model_attributable"] is True
+reset(); open(resj,"w").write("not json at all")                                      # unparseable stdout
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["subtype"]=="unparseable" and ans()["total_cost_usd"] is None
+reset(); res(subtype="error_during_execution",is_error=True,num_turns=1,total_cost_usd=0.1,errors=["model fable unavailable"])
+os.environ["FAKE_CLAUDE_RC"]="1"
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["exit_code"]==1 and ans()["model_attributable"] is True
+os.environ.pop("FAKE_CLAUDE_RC")
+reset(); os.environ["FAKE_CLAUDE_SLEEP"]="3"
+assert c.run_think(rd,a,"q",dict(launch,caps=dict(launch["caps"],timeout_secs=1)),[])==0 and ans()["reason"]=="timeout"
+pid=int(open(log+".pid").read()); import time; time.sleep(0.2)
+try:
+    os.kill(pid,0); alive=True
+except OSError:
+    alive=False
+assert not alive
+os.environ.pop("FAKE_CLAUDE_SLEEP")
+reset(); saved=os.environ["PATH"]; os.environ["PATH"]=tempfile.mkdtemp()                # no claude on PATH -> Popen fails
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["exit_code"] is None
+os.environ["PATH"]=saved
+reset(); res(subtype="success",is_error=False,num_turns=1,total_cost_usd=0.1,structured_output=good)
+os.environ["FAKE_CLAUDE_HOOK"]=f"mkdir {os.path.join(td,tid+'.answer.json')}"          # answer path taken while claude runs
+assert c.run_think(rd,a,"q",launch,[])==3 and os.path.isdir(os.path.join(td,tid+".answer.json"))
+os.environ.pop("FAKE_CLAUDE_HOOK")
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

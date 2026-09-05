@@ -1090,6 +1090,64 @@ def think_lock(rd):
         os.close(fd)
 
 
+THINK_TOOLS = "Read,Glob,Grep"
+
+
+def think_outcome(subtype, result):
+    """(status, reason, answer, errors) per spec 4.6."""
+    errors = result_errors(result)
+    if subtype in _CAP_SUBTYPES:
+        return "unanswered", _CAP_SUBTYPES[subtype], None, errors
+    if subtype == "timeout":
+        return "unanswered", "timeout", None, errors
+    if subtype == "success":
+        answer = (result or {}).get("structured_output")
+        err = valid_think_answer(answer)
+        if err is None:
+            return "answered", None, answer, errors
+        return "unanswered", "no_answer", None, [err] + errors
+    return "unanswered", "error", None, errors
+
+
+def run_think(rd, a, question, launch, add_dirs) -> int:
+    """Spec 4.7 steps 4-6, after the handler published the launch record
+    under the lock. Exit 0 answer published; 3 answer could not be
+    published (the launch record stays and reads as lost)."""
+    caps = launch["caps"]
+    argv = ["claude", "--model", a.model, "--effort", a.effort, "--permission-mode", "dontAsk",
+            "--name", a.think_id, "-p", "--output-format", "json",
+            "--json-schema", json.dumps(THINK_SCHEMA, separators=(",", ":")),
+            "--max-turns", str(caps["max_turns"]), "--max-budget-usd", str(caps["max_budget_usd"]),
+            "--restricted", "--strict-mcp-config", "--tools", THINK_TOOLS]
+    for ad in add_dirs:
+        argv += ["--add-dir", ad]
+    subtype, result, exit_code = run_headless(argv, a.cwd, question, caps["timeout_secs"])
+    status, reason, answer, errors = think_outcome(subtype, result)
+    used = models_used(result)
+    downgrade = is_downgrade(used, a.model)
+
+    def _num(k, integer=False):
+        v = (result or {}).get(k)
+        return v if _finite_nonneg(v, integer) else None
+
+    denials = (result or {}).get("permission_denials")
+    rec = {"v": 1, "think_id": a.think_id, "kind": a.kind, "task_id": a.task_id,
+           "repo_slug": a.repo_slug, "model": a.model, "effort": a.effort,
+           "caps": caps, "attempt": launch["attempt"], "parent": launch["parent"],
+           "status": status, "reason": reason, "answer": answer,
+           "subtype": subtype, "is_error": bool((result or {}).get("is_error", subtype != "success")),
+           "num_turns": _num("num_turns", True), "total_cost_usd": _num("total_cost_usd"),
+           "duration_ms": _num("duration_ms", True), "models_used": used, "downgrade": downgrade,
+           "model_attributable": model_attributable(subtype, downgrade, errors, a.model),
+           "permission_denials": len(denials) if isinstance(denials, list) else 0,
+           "errors": errors, "exit_code": exit_code,
+           "session_id": (result or {}).get("session_id"), "started": launch["started"], "ts": now_iso()}
+    if not publish_exclusive(think_dir(rd) / f"{a.think_id}.answer.json", rec):
+        sys.stderr.write("[X] cannot publish the answer file\n")
+        return 3
+    return 0
+
+
 def parse_claude_result(stdout: str):
     """The single result object from `claude -p --output-format json`, or
     None. Tolerates leading noise by scanning lines from the end."""
