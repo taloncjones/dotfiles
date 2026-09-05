@@ -186,7 +186,10 @@ phase-appropriate brief (references/brief-template.md) and model.
    flag gates cleanup on failure (step 9).
 5. **`herdr worktree create --cwd <repo_root>`** (or `worktree open --cwd
 <repo_root>` if adopting) -- the explicit `--cwd` is MANDATORY, never a bare
-   path. Resolve `<repo_root>` first as the intended repo's top level:
+   path. A PreToolUse hook (`claude/hooks/herdr_worktree_guard.py`) denies a
+   `worktree create` that lacks `--cwd`; `open` is not hook-guarded, so its
+   `--cwd` stays on you. Resolve `<repo_root>` first as the intended repo's
+   top level:
    `REPO_ROOT="$(git -C <path-in-repo> rev-parse --show-toplevel)"`.
    **Why (submodule-adjacency mis-anchor):** when the target path sits inside or
    beside a git submodule, a bare `worktree create` can anchor the new worktree

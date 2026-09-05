@@ -75,6 +75,7 @@ is the equivalent.
 - `bin/identity-setup` -> `~/bin/identity-setup` — interactive wizard writing `~/.gitconfig-work`, `~/.ssh/id_ed25519_work.pub`, `~/.ssh/config_local`
 - `bin/identity-doctor` -> `~/bin/identity-doctor` — read-only chain verifier; also reachable as `git identity`
 - `claude/hooks/account_guard.py` — SessionStart hook that warns when the Claude account does not match the directory convention (registered in `settings.json.tmpl`; drift-checked by `claude-hooks.test.sh`)
+- `claude/hooks/herdr_worktree_guard.py` — PreToolUse Bash hook that denies `herdr worktree create` without `--cwd` (a bare create anchors to the herdr server's current repo, not yours); `worktree open` is not guarded (registered in `settings.json.tmpl`; drift-checked by `claude-hooks.test.sh`)
 
 **Codex plugin integration:**
 
