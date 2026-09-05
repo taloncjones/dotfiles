@@ -81,8 +81,6 @@ cask "firefox" unless system("test -e /Applications/Firefox.app")
 cask "1password-cli"
 cask "miniconda"
 cask "docker-desktop" unless system("test -e /Applications/Docker.app")
-# https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/private-net/warp-to-warp/
-cask "cloudflare-warp" 
 
 
 ###############################
