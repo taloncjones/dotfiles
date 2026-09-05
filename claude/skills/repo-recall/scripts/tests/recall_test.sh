@@ -39,7 +39,27 @@ recall() {
 # repo_id <repo> / mem_dir <config_dir> <repo>: paths derived by the script itself.
 repo_id() { python3 "$RECALL" --repo-id "$1"; }
 mem_dir() { printf '%s/projects/%s/memory' "$1" "$(python3 "$RECALL" --slug "$2")"; }
-file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+# GNU coreutils first: BSD stat rejects -c outright (exit 1, nothing on
+# stdout), so the fallback runs clean. The reverse order is the bug this
+# replaces: GNU stat accepts -f as "filesystem status", prints a filesystem
+# block to stdout, and only then exits 1, so $(...) captures the block too.
+file_mode() {
+  local mode
+  mode=$(stat -c %a "$1" 2>/dev/null) || mode=$(stat -f %Lp "$1" 2>/dev/null)
+  case "$mode" in
+    [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s\n' "$mode" ;;
+    *) printf 'MODE-PROBE-BROKEN\n'
+       printf '     file_mode: non-octal output for %s: [%.60s]\n' \
+         "$1" "${mode%%$'\n'*}" >&2 ;;
+  esac
+}
+
+echo "== probe self-test"
+PROBE=$(mktemp -d)
+mkdir "$PROBE/d"; chmod 750 "$PROBE/d"
+touch "$PROBE/f"; chmod 640 "$PROBE/f"
+assert_eq "file_mode reads dir mode" "$(file_mode "$PROBE/d")" 750
+assert_eq "file_mode reads file mode" "$(file_mode "$PROBE/f")" 640
 
 echo "== unit tests"
 python3 "$HERE/test_recall_units.py" -q 2>&1 | tail -3
