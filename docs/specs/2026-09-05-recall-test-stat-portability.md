@@ -2,8 +2,8 @@
 
 Task: `td-2026-09-04-fix-recall-test-file-mode-check-so-ci-passes-on-li`
 Base: origin/main @ ed5f036 (PR #79 merged)
-Status: spec, revision 1 (branch-only; dropped before merge per repo
-convention). Review log at the end.
+Status: spec, revision 2 after Codex spec review round 1 (branch-only;
+dropped before merge per repo convention). Review log at the end.
 
 ## Problem
 
@@ -46,7 +46,8 @@ outright with nothing on stdout. They are out of scope.
    `stat` is first on `PATH`.
 2. The probe validates its own output. Anything that is not a 3- or 4-digit
    octal string makes the affected assertion fail with a message that names
-   the probe, never with a filesystem dump.
+   the probe. The raw output is reported on stderr as one truncated line for
+   diagnosis; the multi-line filesystem block never reaches the suite output.
 3. The suite self-tests the probe once at startup on a file and a directory
    with known, non-default modes, so a future regression fails on a line that
    says "file_mode", before any recall behaviour is tested.
@@ -78,10 +79,15 @@ file_mode() {
   case "$mode" in
     [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s\n' "$mode" ;;
     *) printf 'MODE-PROBE-BROKEN\n'
-       printf '     file_mode: non-octal output for %s: [%s]\n' "$1" "$mode" >&2 ;;
+       printf '     file_mode: non-octal output for %s: [%.60s]\n' \
+         "$1" "${mode%%$'\n'*}" >&2 ;;
   esac
 }
 ```
+
+The stderr diagnostic keeps only the first line of the raw output, cut at 60
+characters, so a filesystem block collapses to its `File:` line. The
+`MODE-PROBE-BROKEN` token on stdout is what the assertion compares against.
 
 Behaviour by platform (both verified locally on 2026-09-05; `gstat` stands
 in for GNU coreutils on macOS):
@@ -90,7 +96,8 @@ in for GNU coreutils on macOS):
 | --- | --- | --- | --- |
 | GNU coreutils (Linux CI) | prints `700`, exit 0 | not reached | `700` |
 | BSD (macOS) | `illegal option -- c`, exit 1, empty stdout | prints `700`, exit 0 | `700` |
-| Any stat printing junk | non-octal | non-octal | `MODE-PROBE-BROKEN` |
+| Any stat printing junk on `-c` | non-octal, exit 0 | not reached | `MODE-PROBE-BROKEN` |
+| Any stat rejecting `-c`, junk on `-f` | exit 1, empty stdout | non-octal, exit 0 | `MODE-PROBE-BROKEN` |
 
 The guard accepts four digits so a setuid/setgid/sticky mode (`4755`,
 `1777`) is not misreported as broken; the assertions in this suite only ever
@@ -133,13 +140,19 @@ and CI go red on a line that names the probe.
 - AC2: With GNU coreutils `stat` first on `PATH` (natively on
   `ubuntu-latest`; locally via a `stat` symlink to `gstat` prepended to
   `PATH`), the suite prints `117 passed, 0 failed` and exits 0.
-- AC3: With a `stat` on `PATH` that prints non-octal text and exits 0 for
-  every invocation, the suite exits non-zero, its output contains
-  `MODE-PROBE-BROKEN`, and both `file_mode reads ... mode` assertions report
-  `FAIL`.
-- AC4: The implementation diff against `ed5f036` touches only
-  `claude/skills/repo-recall/scripts/tests/recall_test.sh` (branch-only docs
-  and the contract file excluded).
+- AC3a: With a `stat` on `PATH` that prints a fake multi-line filesystem
+  block (first line `  File: junk`, second line `Block size: junk`) and exits
+  0 for every invocation, the suite exits non-zero, its combined output
+  contains `MODE-PROBE-BROKEN`, both `file_mode reads ... mode` assertions
+  report `FAIL`, and the combined output does not contain `Block size`.
+- AC3b: With a `stat` on `PATH` that exits 1 with empty stdout when its first
+  argument is `-c` and otherwise prints the same fake block and exits 0 (the
+  BSD-shaped failure), the suite behaves exactly as in AC3a.
+- AC4: After the branch-only artifacts are removed, the only path that
+  differs from `ed5f036` is
+  `claude/skills/repo-recall/scripts/tests/recall_test.sh`. On the branch,
+  `git diff --name-only ed5f036 -- . ':(exclude)docs' ':(exclude)claude/contracts/td-2026-09-04-fix-recall-test-file-mode-check-so-ci-passes-on-li-contract.json'`
+  prints exactly that one path.
 - AC5: The `tests` workflow is green on the PR and on main after merge
   (human-verified from the GitHub Actions run; CI is the only Linux
   execution the repo owns).
@@ -154,9 +167,11 @@ temporary directory so nothing under the real config dirs is touched:
    to `PATH`, then run the suite. `gstat` is Homebrew coreutils, present on
    the development machine at `/opt/homebrew/bin/gstat`; the step fails
    loudly if it is absent rather than skipping.
-3. Broken probe: prepend a temp dir containing a `stat` shell script that
-   prints a fake filesystem block and exits 0, run the suite, and assert a
-   non-zero exit plus `MODE-PROBE-BROKEN` in the output.
+3. Broken probe, GNU-shaped (AC3a): prepend a temp dir containing a `stat`
+   shell script that prints the fake block and exits 0, run the suite, and
+   assert a non-zero exit, `MODE-PROBE-BROKEN` present, `Block size` absent.
+4. Broken probe, BSD-shaped (AC3b): same, with a `stat` script that exits 1
+   on `-c` and prints the fake block on anything else.
 
 Nothing else in the suite invokes a `stat` binary (checked with `rg` on
 2026-09-05: the only hits are the four `file_mode` call sites), so the shims
@@ -174,3 +189,7 @@ cannot change any other assertion's behaviour.
 ## Review log
 
 - Revision 1: initial spec.
+- Revision 2: Codex spec review round 1 (verdict minor-fixes). Folded:
+  diagnostic truncated to one line so the filesystem dump never reaches suite
+  output (medium); added the BSD-shaped broken-stat case AC3b (low); named
+  the contract path and the exact diff command in AC4 (low).
