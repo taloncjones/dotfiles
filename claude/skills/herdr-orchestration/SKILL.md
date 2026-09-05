@@ -939,7 +939,7 @@ question file from the "Deep-think brief variant"
 then launch:
 
 ```
-python3 "$CORE" run-think --repo-slug <slug> --think-id <think_id> --kind <kind> [--task-id <task_id>] --model $MODEL --effort $EFFORT --cwd <repo_worktree> --max-turns <N> --max-budget-usd <X> --timeout-secs <T> [--add-dir tasks] [--add-dir think]
+python3 "$CORE" run-think --repo-slug <slug> --session <id> --fence <fence> --think-id <think_id> --kind <kind> [--task-id <task_id>] --model $MODEL --effort $EFFORT --cwd <repo_worktree> --max-turns <N> --max-budget-usd <X> --timeout-secs <T> [--add-dir tasks] [--add-dir think]
 ```
 
 launched with `Bash run_in_background` (or a self-managed `pane split` in
