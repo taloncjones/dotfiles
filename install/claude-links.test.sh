@@ -34,7 +34,7 @@ export DOTFILEDIR
 # jget <file> <python-expr over d>: evaluate an expression against parsed JSON.
 jget() {
     python3 -c "
-import json, sys
+import json, os, sys
 d = json.load(open(sys.argv[1]))
 sys.exit(0 if ($2) else 1)
 " "$1"
@@ -192,6 +192,44 @@ if jget "$ACCOUNT_HOME/.claude-work/settings.json" "d['enabledPlugins']['atlassi
     pass "work Claude config retains Atlassian"
 else
     fail "work Claude config retains Atlassian"
+fi
+
+# 7. Canvas hooks from ECC 2.2.1 resolve their state under the default
+# ~/.claude path even when CLAUDE_CONFIG_DIR selects another account. Keep the
+# two automatic hooks disabled in every account settings file, retain existing
+# hook opt-outs and unrelated env keys, and set the manual Canvas state dir
+# beside the settings file so the two accounts do not share it.
+PERSONAL_HOOKS='keep-me,session-start:plan-canvas-sessions'
+WORK_HOOKS='work-only,stop:plan-canvas-pending'
+printf '{"env":{"PERSONAL_ONLY":"yes","ECC_DISABLED_HOOKS":"%s"}}\n' "$PERSONAL_HOOKS" \
+    > "$ACCOUNT_HOME/.claude/settings.json"
+printf '{"env":{"WORK_ONLY":"yes","ECC_DISABLED_HOOKS":"%s"}}\n' "$WORK_HOOKS" \
+    > "$ACCOUNT_HOME/.claude-work/settings.json"
+HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
+    "$ACCOUNT_HOME/.claude/settings.json" >/dev/null
+HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
+    "$ACCOUNT_HOME/.claude-work/settings.json" >/dev/null
+cp "$ACCOUNT_HOME/.claude/settings.json" "$TMP/personal-canvas.before"
+cp "$ACCOUNT_HOME/.claude-work/settings.json" "$TMP/work-canvas.before"
+HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
+    "$ACCOUNT_HOME/.claude/settings.json" >/dev/null
+HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
+    "$ACCOUNT_HOME/.claude-work/settings.json" >/dev/null
+if jget "$ACCOUNT_HOME/.claude/settings.json" "d['env']['PERSONAL_ONLY'] == 'yes' and d['env']['ECC_DISABLED_HOOKS'].split(',').count('keep-me') == 1 and set(('session-start:plan-canvas-sessions', 'stop:plan-canvas-pending')).issubset(d['env']['ECC_DISABLED_HOOKS'].split(',')) and d['env']['ECC_PLAN_CANVAS_STATE_DIR'] == os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), 'plan-canvas'))"; then
+    pass "personal Canvas policy preserves env and scopes state"
+else
+    fail "personal Canvas policy preserves env and scopes state"
+fi
+if jget "$ACCOUNT_HOME/.claude-work/settings.json" "d['env']['WORK_ONLY'] == 'yes' and d['env']['ECC_DISABLED_HOOKS'].split(',').count('work-only') == 1 and set(('session-start:plan-canvas-sessions', 'stop:plan-canvas-pending')).issubset(d['env']['ECC_DISABLED_HOOKS'].split(',')) and d['env']['ECC_PLAN_CANVAS_STATE_DIR'] == os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), 'plan-canvas'))"; then
+    pass "work Canvas policy preserves env and scopes state"
+else
+    fail "work Canvas policy preserves env and scopes state"
+fi
+if cmp -s "$ACCOUNT_HOME/.claude/settings.json" "$TMP/personal-canvas.before" &&
+   cmp -s "$ACCOUNT_HOME/.claude-work/settings.json" "$TMP/work-canvas.before"; then
+    pass "Canvas reconcile is stable across account namespaces"
+else
+    fail "Canvas reconcile is stable across account namespaces"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

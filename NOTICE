@@ -12,6 +12,8 @@ reproduced here as required.
    Paths in this repository:
      git/hooks/pre-commit     (adapted from the ECC Codex git hooks)
      git/hooks/pre-push       (adapted from the ECC Codex git hooks)
+     install/codex-roles.test.sh (three historical Codex role test fixtures;
+                                 ECC commit 06c376ae8b3a11bdafcb56c642b81480622740fc)
    (Historical: claude/rules/ carried an untracked vendored subset of the
    upstream rules until vendoring was retired on 2026-07-02; machines may
    still hold inert leftover copies covered by this same notice.)

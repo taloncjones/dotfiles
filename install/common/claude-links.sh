@@ -103,6 +103,36 @@ for key in PLUGIN_KEYS:
     if merged:
         result[key] = merged
 
+# Keep account-local environment additions instead of dropping them whenever a
+# tracked template changes. ECC 2.2.1's two automatic Plan Canvas hooks ignore
+# CLAUDE_CONFIG_DIR and otherwise read the default account's state. Disable
+# only those IDs; manual Canvas state is explicitly stored beside the selected
+# settings.json, while unrelated existing hook opt-outs retain their order.
+env = {}
+existing_env = dest.get("env", {})
+if isinstance(existing_env, dict):
+    env.update(existing_env)
+env.update(tmpl.get("env", {}))
+required_canvas_hooks = (
+    "session-start:plan-canvas-sessions",
+    "stop:plan-canvas-pending",
+)
+disabled_hooks = (
+    existing_env.get("ECC_DISABLED_HOOKS", env.get("ECC_DISABLED_HOOKS", ""))
+    if isinstance(existing_env, dict)
+    else env.get("ECC_DISABLED_HOOKS", "")
+)
+if isinstance(disabled_hooks, str):
+    hook_tokens = [token.strip() for token in disabled_hooks.split(",") if token.strip()]
+else:
+    hook_tokens = []
+for hook_id in required_canvas_hooks:
+    if hook_id not in hook_tokens:
+        hook_tokens.append(hook_id)
+env["ECC_DISABLED_HOOKS"] = ",".join(hook_tokens)
+env["ECC_PLAN_CANVAS_STATE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plan-canvas")
+result["env"] = env
+
 # Preserve any platform/installer keys the template does not define.
 for key, value in dest.items():
     if key not in result:

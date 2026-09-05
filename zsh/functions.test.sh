@@ -112,6 +112,20 @@ exit 1
 EOF
 chmod +x "$TMP"/stubs/*/claude
 
+# marketplace-fails: the marketplace refresh fails while the plugin update
+# reports success. ecc-update must report the partial failure and leave its
+# success epoch untouched.
+mkdir -p "$TMP/stubs/marketplace-fails"
+cat >"$TMP/stubs/marketplace-fails/claude" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *"plugin marketplace update ecc"*) exit 7 ;;
+    *"plugins update ecc@ecc"*) exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TMP/stubs/marketplace-fails/claude"
+
 # Codex stub: records marketplace and plugin operations in HOME so the real
 # helpers can verify state through `codex plugin list --json`.
 mkdir -p "$TMP/stubs/codex-good"
@@ -138,14 +152,37 @@ case "$1 $2 ${3:-}" in
             esac
             plugin_name=${plugin_id%%@*}
             marketplace=${plugin_id#*@}
-            printf '{\n  "installed": [\n    {\n      "pluginId": "%s",\n      "name": "%s",\n      "marketplaceName": "%s",\n      "installed": true,\n      "enabled": %s\n    }\n  ]\n}\n' \
-                "$plugin_id" "$plugin_name" "$marketplace" "$enabled"
+            source_path=""
+            if [ -f "$marketplaces" ]; then
+                source_path=$(awk -v name="$marketplace" '$1 == name { print $2 }' "$marketplaces")
+            fi
+            if [ -n "$source_path" ]; then
+                source_path="$source_path/plugins/$plugin_name"
+                version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$source_path/.codex-plugin/plugin.json" | head -n 1)
+                printf '{\n  "installed": [\n    {\n      "pluginId": "%s",\n      "name": "%s",\n      "marketplaceName": "%s",\n      "version": "%s",\n      "installed": true,\n      "enabled": %s,\n      "source": {"source": "local", "path": "%s"}\n    }\n  ]\n}\n' \
+                    "$plugin_id" "$plugin_name" "$marketplace" "$version" "$enabled" "$source_path"
+            else
+                printf '{\n  "installed": [\n    {\n      "pluginId": "%s",\n      "name": "%s",\n      "marketplaceName": "%s",\n      "installed": true,\n      "enabled": %s\n    }\n  ]\n}\n' \
+                    "$plugin_id" "$plugin_name" "$marketplace" "$enabled"
+            fi
         else
             printf '{"installed":[]}'
         fi
         ;;
     "plugin add "*)
-        printf '%s\n' "$3" >"$state"
+        plugin_id="$3"
+        plugin_name=${plugin_id%%@*}
+        marketplace=${plugin_id#*@}
+        source_root=$(awk -v name="$marketplace" '$1 == name { print $2 }' "$marketplaces")
+        source_path="$source_root/plugins/$plugin_name"
+        version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$source_path/.codex-plugin/plugin.json" | head -n 1)
+        if [ -d "$source_path" ] && [ -n "$version" ]; then
+            cache_path="${CODEX_HOME:-$HOME/.codex}/plugins/cache/$marketplace/$plugin_name/$version"
+            rm -rf "$cache_path"
+            mkdir -p "$cache_path"
+            cp -R "$source_path/." "$cache_path/"
+        fi
+        printf '%s\n' "$plugin_id" >"$state"
         ;;
     "plugin remove "*)
         rm -f "$state"
@@ -293,6 +330,101 @@ if grep -q '^description: "Quoted: description"$' "$STAGED/plugins/ecc/skills/qu
 else
     fail "ECC staging preserves quoted frontmatter"
 fi
+if [ -f "$STAGED/plugins/ecc/.dotfiles-provenance.json" ] &&
+   grep -q '"wrapperVersion"' "$STAGED/plugins/ecc/.dotfiles-provenance.json" &&
+   grep -q '"upstreamCommit"' "$STAGED/plugins/ecc/.dotfiles-provenance.json" &&
+   grep -q '"upstreamVersion"' "$STAGED/plugins/ecc/.dotfiles-provenance.json" &&
+   grep -q '"payloadDigest"' "$STAGED/plugins/ecc/.dotfiles-provenance.json"; then
+    pass "ECC staging records wrapper upstream and payload provenance"
+else
+    fail "ECC staging records wrapper upstream and payload provenance"
+fi
+if [ ! -e "$STAGED/plugins/ecc/.claude-plugin" ] &&
+   [ ! -e "$STAGED/plugins/ecc/hooks" ]; then
+    pass "ECC staging does not import Claude manifests or hooks"
+else
+    fail "ECC staging does not import Claude manifests or hooks"
+fi
+rm -rf "$TMP/home-codex"
+if run_codex_case "CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_ensure_plugin ecc@dotfiles-workflows '$STAGED' && _codex_staged_plugin_is_effective ecc@dotfiles-workflows '$STAGED/plugins/ecc'"; then
+    pass "ECC native install verifies its effective staged payload"
+else
+    fail "ECC native install verifies its effective staged payload"
+fi
+CACHE_PAYLOAD="$TMP/home-codex/.codex/plugins/cache/dotfiles-workflows/ecc/2.0.0"
+printf '%s\n' '{}' >"$CACHE_PAYLOAD/.dotfiles-provenance.json"
+if run_codex_case "_codex_staged_plugin_is_effective ecc@dotfiles-workflows '$STAGED/plugins/ecc'"; then
+    fail "invalid cache provenance never verifies from staged source alone"
+else
+    pass "invalid cache provenance never verifies from staged source alone"
+fi
+cp -R "$STAGED/plugins/ecc/." "$CACHE_PAYLOAD/"
+python3 - "$CACHE_PAYLOAD/.dotfiles-provenance.json" <<'PY'
+import json
+from pathlib import Path
+
+path = Path(__import__("sys").argv[1])
+record = json.loads(path.read_text())
+record["schemaVersion"] = "1"
+path.write_text(json.dumps(record) + "\n")
+PY
+if run_codex_case "_codex_staged_plugin_is_effective ecc@dotfiles-workflows '$STAGED/plugins/ecc'"; then
+    fail "wrong-type cache provenance never verifies"
+else
+    pass "wrong-type cache provenance never verifies"
+fi
+cp -R "$STAGED/plugins/ecc/." "$CACHE_PAYLOAD/"
+python3 - "$CACHE_PAYLOAD/.dotfiles-provenance.json" <<'PY'
+import json
+from pathlib import Path
+
+path = Path(__import__("sys").argv[1])
+record = json.loads(path.read_text())
+record["schemaVersion"] = 2
+path.write_text(json.dumps(record) + "\n")
+PY
+if run_codex_case "_codex_staged_plugin_is_effective ecc@dotfiles-workflows '$STAGED/plugins/ecc'"; then
+    fail "unsupported cache provenance schema never verifies"
+else
+    pass "unsupported cache provenance schema never verifies"
+fi
+cp -R "$STAGED/plugins/ecc/." "$CACHE_PAYLOAD/"
+printf '%s\n' 'stale cache payload' >>"$CACHE_PAYLOAD/skills/sample/SKILL.md"
+if run_codex_case "_codex_staged_plugin_is_effective ecc@dotfiles-workflows '$STAGED/plugins/ecc'"; then
+    fail "stale cache bytes never verify from copied provenance alone"
+else
+    pass "stale cache bytes never verify from copied provenance alone"
+fi
+if run_codex_case "_codex_verify_or_refresh_managed_plugin ecc@dotfiles-workflows '$STAGED/plugins/ecc' '$STAGED'" &&
+   cmp -s "$STAGED/plugins/ecc/skills/sample/SKILL.md" "$CACHE_PAYLOAD/skills/sample/SKILL.md"; then
+    pass "stale managed cache refreshes through the native lifecycle"
+else
+    fail "stale managed cache refreshes through the native lifecycle"
+fi
+FIRST_DIGEST=$(awk -F '"' '/payloadDigest/ { print $4 }' "$STAGED/plugins/ecc/.dotfiles-provenance.json")
+printf '%s\n' 'updated source payload' >>"$ECC_FIXTURE/skills/sample/SKILL.md"
+if run_codex_case "ECC_REPO_DIR='$ECC_FIXTURE'; CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_stage_ecc_plugin"; then
+    SECOND_DIGEST=$(awk -F '"' '/payloadDigest/ { print $4 }' "$STAGED/plugins/ecc/.dotfiles-provenance.json")
+    if [ "$FIRST_DIGEST" != "$SECOND_DIGEST" ] &&
+       grep -q '"wrapperVersion": "2.0.0"' "$STAGED/plugins/ecc/.dotfiles-provenance.json"; then
+        pass "ECC provenance detects new payload under unchanged wrapper version"
+    else
+        fail "ECC provenance detects new payload under unchanged wrapper version"
+    fi
+else
+    fail "ECC provenance detects new payload under unchanged wrapper version"
+fi
+if run_codex_case "_codex_staged_plugin_is_effective ecc@dotfiles-workflows '$STAGED/plugins/ecc'"; then
+    fail "new staged payload fails against old cache under unchanged wrapper version"
+else
+    pass "new staged payload fails against old cache under unchanged wrapper version"
+fi
+if run_codex_case "_codex_verify_or_refresh_managed_plugin ecc@dotfiles-workflows '$STAGED/plugins/ecc' '$STAGED'" &&
+   cmp -s "$STAGED/plugins/ecc/skills/sample/SKILL.md" "$CACHE_PAYLOAD/skills/sample/SKILL.md"; then
+    pass "new staged payload refreshes its old cache through Codex"
+else
+    fail "new staged payload refreshes its old cache through Codex"
+fi
 
 # 8. Superpowers is independently staged into the same native marketplace,
 #    without depending on Codex's account-provisioned curated marketplace.
@@ -348,6 +480,7 @@ LIFECYCLE_SETUP="
     : >\"\$LIFECYCLE_TRACE\"
     _codex_stage_ecc_plugin() { return 0; }
     _codex_stage_superpowers_plugin() { return 0; }
+    _codex_staged_plugin_is_effective() { return 0; }
     _codex_remove_plugin() { return 0; }
     _codex_ensure_plugin() {
         [[ \"\$2\" == \"\$CODEX_WORKFLOW_MARKETPLACE_DIR\" ]] || return 1
@@ -392,6 +525,30 @@ if run_codex_case "$LIFECYCLE_SETUP
     pass "direct native plugin lifecycles propagate reconciliation failures"
 else
     fail "direct native plugin lifecycles propagate reconciliation failures"
+fi
+
+# 11. A Claude marketplace refresh is part of the ECC update transaction. Its
+# failure must not be hidden by a subsequent plugin update or record an epoch.
+ECC_UPDATE_REPO="$TMP/ecc-update-repo"
+ECC_UPDATE_CACHE="$TMP/ecc-update-cache"
+mkdir -p "$ECC_UPDATE_REPO" "$TMP/home/.claude/plugins" "$ECC_UPDATE_CACHE"
+printf '%s\n' '{"plugins":{"ecc@ecc":[{"scope":"user"}]}}' >"$TMP/home/.claude/plugins/installed_plugins.json"
+rm -f "$ECC_UPDATE_CACHE/.ecc-update"
+if run_case marketplace-fails "
+    ECC_REPO_DIR='$ECC_UPDATE_REPO'
+    ZSH_CACHE_DIR='$ECC_UPDATE_CACHE'
+    git() { return 0; }
+    _codex_update_ecc_plugin() { return 0; }
+    ecc-update
+"; then
+    fail "failed Claude marketplace refresh fails ECC update"
+else
+    pass "failed Claude marketplace refresh fails ECC update"
+fi
+if [ ! -e "$ECC_UPDATE_CACHE/.ecc-update" ]; then
+    pass "failed Claude marketplace refresh leaves ECC epoch untouched"
+else
+    fail "failed Claude marketplace refresh leaves ECC epoch untouched"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
