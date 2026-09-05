@@ -26,6 +26,10 @@ STATE_ROOT/
       <task_id>.review.json           # review worker verdict (separate file)
       <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
       <task_id>.brief.md              # mech kickoff brief file (--brief-file)
+    think/
+      <think_id>.question.md          # orchestrator-written brief (input contract)
+      <think_id>.launch.json          # wrapper-written, create-exclusive, before launch (liveness)
+      <think_id>.answer.json          # wrapper-written result (output contract)
     workspaces/
       <HERDR_WORKSPACE_ID>.json               # reverse index (task/repo/role)
       <HERDR_WORKSPACE_ID>.events.jsonl       # per-workspace hint log
@@ -124,8 +128,10 @@ STATE_ROOT/
     "plan": ["fable", "opus"],
     "impl": ["sonnet", "opus"],
     "review": ["opus", "sonnet"],
-    "mech": ["haiku", "sonnet"]
+    "mech": ["haiku", "sonnet"],
+    "think": ["fable", "opus"]
   },
+  "effort": { "plan": "high", "impl": null, "review": "high", "think": "high" },
   "mech": {
     "max_turns": 40,
     "max_budget_usd": 2.0,
@@ -137,6 +143,12 @@ STATE_ROOT/
         "timeout_secs": 600
       }
     ]
+  },
+  "think": {
+    "max_turns": 15,
+    "max_budget_usd": 3.0,
+    "timeout_secs": 900,
+    "daily_budget_usd": 10.0
   }
 }
 ```
@@ -144,12 +156,30 @@ STATE_ROOT/
 Validation: required `user`, `default_base`; `epics` a (possibly empty)
 list; `soft_cap` a positive int (default 3); `models` optional (falls back
 to the built-in preferences). `models`, when present, must be an object keyed
-by the canonical resolver roles `plan`/`impl`/`review`/`mech` (no
+by the canonical resolver roles `plan`/`impl`/`review`/`mech`/`think` (no
 `orchestrator` -- its model is fixed at session launch), each value a list of
 the aliases `fable`/`opus`/`sonnet`/`haiku`; `haiku` is legal only in
-`models.mech`. A malformed `models` block (non-object, a non-list override,
-a token outside the alias set, or `haiku` under a non-`mech` role) makes
-`resolve-model` exit 5.
+`models.mech`, and `models.think` may name only `fable`/`opus` (`sonnet` or
+`haiku` under `think` is a config error, exit 5 -- deep think is the strong
+tier only, by construction). A malformed `models` block (non-object, a
+non-list override, a token outside the alias set, `haiku` under a
+non-`mech` role, or `sonnet`/`haiku` under `think`) makes `resolve-model`
+exit 5.
+
+`effort` is optional and mirrors `models`'s validation: when present it must
+be an object whose keys are a subset of `plan`/`impl`/`review`/`mech`/`think`
+and whose values are a string in `low`/`medium`/`high`/`xhigh`/`max` or
+`null` (`null` means _inherit_: no `--effort` flag, the worker takes the
+CLI's own default for its model; an explicit top-level `"effort": null` is
+itself a malformed block, unlike an absent key). `think` is constrained
+further -- its value must be `high`/`xhigh`/`max`, never `null`/`low`/`medium`
+-- so `resolve-effort --role think` never prints `inherit`: "deep think"
+means the strong tier at high effort or above, by construction, in config,
+resolver, wrapper validation, and tests alike. A non-object, an unknown key,
+a boolean or number, or a value outside the set makes every effort-resolving
+verb (`resolve-effort`, `routing-table`) exit 5. Absent keys fall back to the
+built-in defaults (`plan` high, `impl` inherit, `review` high, `mech`
+inherit, `think` high).
 
 `mech` is optional and fails closed: absent -> `mech_caps` falls back to the
 built-in defaults above (`max_turns` 40, `max_budget_usd` 2.0, `timeout_secs`
@@ -159,9 +189,19 @@ with only the keys `max_turns` (int, 1-500), `max_budget_usd` (number, 0-50),
 in the same shape as the contract schema below); an unknown key, an
 out-of-bounds value, or an invalid `contract_commands` entry makes
 `mech-caps`/`mech-contract` exit 5 with a concrete message -- never silently
-clamped or defaulted. Missing/invalid config -> mutating actions refuse with
-a concrete message. This file holds the only employer/user identifiers; the
-shipped skill and fixtures never contain them.
+clamped or defaulted.
+
+`think` is optional and fails closed the same way, minus `contract_commands`
+(a deep-think run is read-only, so it has no commands to run): absent ->
+`think_caps` falls back to the built-in defaults above (`max_turns` 15,
+`max_budget_usd` 3.0, `timeout_secs` 900, `daily_budget_usd` 10.0); present,
+it must be a JSON object with only the keys `max_turns` (int, 1-500),
+`max_budget_usd` (number, 0-50, and never above `daily_budget_usd`),
+`timeout_secs` (int, 60-14400), and `daily_budget_usd` (number, 0 < x <= 200);
+an unknown key or an out-of-bounds value makes `think-caps` exit 5. Missing/
+invalid config -> mutating actions refuse with a concrete message. This file
+holds the only employer/user identifiers; the shipped skill and fixtures
+never contain them.
 
 ### `capabilities.json` -- session-stamped strong-model availability
 
@@ -207,6 +247,7 @@ Written only by the owning orchestrator, via `$CORE write-task`.
       "agent": "impl-proj-123",
       "peer_name": "impl-proj-123",
       "model": "sonnet",
+      "effort": "high",
       "created_by_this_orch": true,
       "started": "..."
     },
@@ -217,6 +258,7 @@ Written only by the owning orchestrator, via `$CORE write-task`.
       "agent": "mech-proj-123",
       "peer_name": null,
       "model": "haiku",
+      "effort": null,
       "launch_id": "mech-proj-123-20260901T200000Z",
       "caps": { "max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800 },
       "created_by_this_orch": true,
@@ -246,6 +288,16 @@ launch), and `launch_id`/`caps` are mech-only fields -- `launch_id` names
 the live headless run (`<agent>-<YYYYMMDDTHHMMSSZ>`, also correlated in the
 spend ledger below) and `caps` is the resolved `mech-caps` output for that
 launch (`max_turns`/`max_budget_usd`/`timeout_secs`).
+
+`effort` is `"<level>"|null` (the value passed on the launch line, never the
+observed one) -- `null` means `inherit` (no `--effort` flag). **Legacy
+records:** an entry written before effort routing landed lacks the
+`effort` key entirely; readers treat a missing key as `effort: "unknown"`
+(distinct from the explicit `null` that means inherit), and a full-record
+rewrite carries such entries forward byte-for-byte -- the core adds no
+`workers[]` validation, matching the pre-existing `peer_name`/`model`
+carry-forward behavior. Every entry appended by a launch under effort
+routing MUST include the key.
 
 `contract_path` (worktree-relative) and `contract_sha256` are the
 verification-contract pin, written by the orchestrator at implement dispatch
@@ -359,6 +411,115 @@ keys summed across every task, plus `untracked_launches` -- non-`mech`
 task ids with a `.spend.jsonl`/`.done.json` sidecar but no primary
 `tasks/<task_id>.json` -- surfaced for human cleanup, never auto-adopted or
 relaunched).
+
+### `think/<think_id>.launch.json` -- deep-think liveness record
+
+Written by `$CORE run-think`, create-exclusive (`O_CREAT|O_EXCL`; a
+collision is exit 2, nothing else written), before the headless launch:
+
+```json
+{
+  "v": 1,
+  "think_id": "think-triage-20260904170000",
+  "kind": "triage",
+  "task_id": null,
+  "repo_slug": "<slug>",
+  "model": "fable",
+  "effort": "high",
+  "caps": { "max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900 },
+  "attempt": 1,
+  "parent": null,
+  "started": "2026-09-04T17:00:00Z",
+  "pid": 12345
+}
+```
+
+It carries the effective launch-time caps, so lost-detection and budget
+math never depend on current config. A launch is **live** while its
+`.launch.json` has no matching `.answer.json` and `started` is younger than
+its own `caps.timeout_secs + 120s`; older is **lost**. `attempt` is `1` or
+`2`; `parent` is the attempt-1 `think_id` (or `null`) -- attempt 2 (a
+retry after a model-attributable failure) ties the two attempts into one
+escalation for budget purposes. `think/.lock` is a repo-wide lock file held
+(`fcntl.flock`, exclusive) by `run-think` from the liveness scan through the
+daily-budget check to this file's create-exclusive write, released before
+`claude` is launched. Validated whole on read (`valid_launch_record`): every
+field typed and in range, `attempt`/`parent` consistent with the id suffix;
+an invalid record is `corrupt` and `run-think` refuses (exit 4) while one
+exists, since liveness cannot be judged.
+
+### `think/<think_id>.answer.json` -- deep-think output contract
+
+Written atomically by `$CORE run-think` (same-directory temp file, fsync,
+`os.link`, temp removed on every path) in every outcome:
+
+```json
+{
+  "v": 1,
+  "think_id": "think-triage-20260904170000",
+  "kind": "triage",
+  "task_id": null,
+  "repo_slug": "<slug>",
+  "model": "fable",
+  "effort": "high",
+  "caps": { "max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900 },
+  "status": "answered|unanswered",
+  "reason": null,
+  "answer": {
+    "recommendation": "...",
+    "rationale": "...",
+    "options": [],
+    "confidence": "high"
+  },
+  "subtype": "success",
+  "is_error": false,
+  "num_turns": 6,
+  "total_cost_usd": 1.12,
+  "duration_ms": 184000,
+  "models_used": ["claude-fable-5-1"],
+  "downgrade": false,
+  "model_attributable": false,
+  "permission_denials": 0,
+  "errors": [],
+  "session_id": "<uuid>",
+  "attempt": 1,
+  "parent": null,
+  "started": "2026-09-04T17:00:00Z",
+  "ts": "2026-09-04T17:03:04Z"
+}
+```
+
+`status: answered` requires `subtype: success` AND a `structured_output`
+that passes `valid_think_answer` (required keys present, no extra keys at
+either level, every type/enum/length bound honoured against the schema
+restated in SKILL.md section 8, Deep-think escalation). Every other case is
+`unanswered` with `reason` in `max_turns`/`max_budget`/`timeout`/
+`no_answer`/`error` (`no_answer` = success without a valid structured
+object); `answer` is `null` when unanswered. `downgrade`/`model_attributable`/
+`errors` reuse the mech ledger's helpers verbatim. `attempt`/`parent` are
+copied from the launch record.
+
+### `_think` status object
+
+`$CORE status` gains a top-level `_think` summary folded from
+`think/*.launch.json` and `think/*.answer.json`:
+
+```json
+"_think": {"launches": 3, "answered": 2, "unanswered": 1, "usd": 1.52, "turns": 9,
+           "usd_today": 1.52, "live": ["think-triage-20260904170000"],
+           "lost": ["think-incident-20260903120000"], "corrupt": [], "skipped_files": 2}
+```
+
+`launches` counts launch records; `answered`/`unanswered` count answer files
+by `status`; `usd`/`turns` sum non-null values; `usd_today` sums committed
+spend over launches whose `started` falls in the current UTC day (the
+daily-ceiling input, reservation semantics: numeric answer cost when one
+exists, else the launch's reserved cap -- live, lost, unwritable-answer, and
+null-cost runs all count at their cap, never double-counted); `live`/`lost`
+list launch records with no answer, split by the launch-liveness rule above
+using each record's own `timeout_secs`; unparseable or wrong-`v` files are
+skipped and counted in `skipped_files`, never fatal. No per-task field.
+`_think` cannot collide with a task id.
 
 ### `workspaces/<HERDR_WORKSPACE_ID>.json` -- reverse index
 

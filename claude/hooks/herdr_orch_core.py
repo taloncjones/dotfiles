@@ -5,6 +5,9 @@ single-writer ownership. Imported by the hook and driven as a CLI by the skill.
 Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 """
 
+import contextlib
+import datetime
+import fcntl
 import hashlib
 import json
 import math
@@ -31,6 +34,7 @@ ROLE_DEFAULTS = {
     "impl": ("sonnet", "opus"),
     "review": ("opus", "sonnet"),
     "mech": ("haiku", "sonnet"),
+    "think": ("fable", "opus"),
 }
 
 # Aliases a role's config override may name. haiku is mech-only: the cheap
@@ -41,7 +45,14 @@ ROLE_ALIASES = {
     "impl": ("fable", "opus", "sonnet"),
     "review": ("fable", "opus", "sonnet"),
     "mech": CAP_MODELS,
+    "think": ("fable", "opus"),
 }
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+THINK_EFFORTS = ("high", "xhigh", "max")
+# None = inherit: no --effort flag on the launch line.
+ROLE_EFFORT_DEFAULTS = {"plan": "high", "impl": None, "review": "high",
+                        "mech": None, "think": "high"}
 
 # A 429 whose message names usage/credit exhaustion is reliable "this model is
 # not launchable" data (the account is out of credits); a bare 429 is an
@@ -195,9 +206,52 @@ def resolve_model(role, available, config):
     return (survivors[0], None)
 
 
+def role_effort(role, config):
+    """(level_or_None, None) on success -- None means inherit; (None, 5) when
+    the role is unknown or the config 'effort' block is malformed: not a
+    dict, a key outside the roles, a value outside EFFORT_LEVELS (or outside
+    THINK_EFFORTS / null for think), or a bool/number. Fail closed like the
+    models block."""
+    if role not in ROLE_EFFORT_DEFAULTS:
+        return (None, 5)
+    cfg = config or {}
+    if "effort" not in cfg:
+        return (ROLE_EFFORT_DEFAULTS[role], None)
+    block = cfg["effort"]                      # an explicit null is a malformed block
+    if not isinstance(block, dict) or any(k not in ROLE_EFFORT_DEFAULTS for k in block):
+        return (None, 5)
+    for k, v in block.items():
+        if v is None:
+            if k == "think":
+                return (None, 5)
+            continue
+        allowed = THINK_EFFORTS if k == "think" else EFFORT_LEVELS
+        if isinstance(v, bool) or not isinstance(v, str) or v not in allowed:
+            return (None, 5)
+    if role in block:
+        return (block[role], None)
+    return (ROLE_EFFORT_DEFAULTS[role], None)
+
+
+def routing_table(available, config):
+    """{role: {model, effort}} for every role from one config + one
+    capabilities snapshot. (table, None), or (None, 5) on a malformed
+    models/effort block, (None, 3) on an absent/stale map. A role with no
+    surviving model gets model None (the caller halts that launch)."""
+    for role in ROLE_DEFAULTS:
+        if role_preference(role, config) is None or role_effort(role, config)[1] is not None:
+            return (None, 5)
+    if available is None:
+        return (None, 3)
+    table = {}
+    for role in ROLE_DEFAULTS:
+        model, _ = resolve_model(role, available, config)
+        table[role] = {"model": model, "effort": role_effort(role, config)[0]}
+    return (table, None)
+
+
 MECH_DEFAULTS = {"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
 MECH_BOUNDS = {"max_turns": (1, 500), "max_budget_usd": (0, 50), "timeout_secs": (60, 14400)}
-MECH_KEYS = frozenset(MECH_DEFAULTS) | {"contract_commands"}
 
 MECH_REASONS = ("max_turns", "max_budget", "timeout", "no_emit", "error",
                 "needs_design", "blocked_on_human", "other")
@@ -224,19 +278,35 @@ def _cap_error(key, value):
     return None
 
 
-def mech_caps(config, max_turns=None, max_budget_usd=None):
-    """Effective mech caps: defaults <- config.mech <- per-launch overrides.
-    (caps, None) or (None, message). Fail closed on any malformed value or
-    unknown key, matching the `models` rule -- never silently default."""
-    block = (config or {}).get("mech")
-    caps = dict(MECH_DEFAULTS)
+THINK_DEFAULTS = {"max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900,
+                  "daily_budget_usd": 10.0}
+DAILY_BOUNDS = (0, 200)
+
+
+def _daily_error(value):
+    """Error message when a daily_budget_usd value is out of bounds or
+    mistyped, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return "daily_budget_usd must be a finite number"
+    lo, hi = DAILY_BOUNDS
+    if not (lo < value <= hi):
+        return f"daily_budget_usd must be > {lo} and <= {hi}"
+    return None
+
+
+def tier_caps(config, tier, defaults, extra_keys, max_turns=None, max_budget_usd=None):
+    """Effective caps for a headless tier: defaults <- config.<tier> <- per-launch
+    overrides. (caps, None) or (None, message). Fail closed on any malformed
+    value or unknown key -- never silently default."""
+    block = (config or {}).get(tier)
+    caps = dict(defaults)
     if block is not None:
         if not isinstance(block, dict):
-            return None, "mech must be a JSON object"
-        unknown = set(block) - MECH_KEYS
+            return None, f"{tier} must be a JSON object"
+        unknown = set(block) - (set(defaults) | set(extra_keys))
         if unknown:
-            return None, f"mech has unknown keys: {sorted(unknown)}"
-        for k in MECH_BOUNDS:
+            return None, f"{tier} has unknown keys: {sorted(unknown)}"
+        for k in defaults:
             if k in block:
                 caps[k] = block[k]
         if "contract_commands" in block:
@@ -244,7 +314,7 @@ def mech_caps(config, max_turns=None, max_budget_usd=None):
                 {"v": 1, "task_id": "x", "commands": block["contract_commands"]}, "x"
             )
             if err:
-                return None, f"mech.contract_commands: {err}"
+                return None, f"{tier}.contract_commands: {err}"
     if max_turns is not None:
         caps["max_turns"] = max_turns
     if max_budget_usd is not None:
@@ -253,7 +323,27 @@ def mech_caps(config, max_turns=None, max_budget_usd=None):
         err = _cap_error(k, caps[k])
         if err:
             return None, err
+    if "daily_budget_usd" in caps:
+        err = _daily_error(caps["daily_budget_usd"])
+        if err:
+            return None, err
+        if caps["max_budget_usd"] > caps["daily_budget_usd"]:
+            return None, "max_budget_usd exceeds daily_budget_usd"
     return caps, None
+
+
+def mech_caps(config, max_turns=None, max_budget_usd=None):
+    """Effective mech caps: defaults <- config.mech <- per-launch overrides.
+    (caps, None) or (None, message). Fail closed on any malformed value or
+    unknown key, matching the `models` rule -- never silently default."""
+    return tier_caps(config, "mech", MECH_DEFAULTS, ("contract_commands",), max_turns, max_budget_usd)
+
+
+def think_caps(config, max_turns=None, max_budget_usd=None):
+    """Effective think caps: defaults <- config.think <- per-launch overrides.
+    (caps, None) or (None, message). Fail closed on any malformed value or
+    unknown key, matching the `mech` rule -- never silently default."""
+    return tier_caps(config, "think", THINK_DEFAULTS, (), max_turns, max_budget_usd)
 
 
 def mech_contract(config, task_id):
@@ -327,6 +417,63 @@ def classify_probe(result, alias):
         if isinstance(mu, dict) and any(alias in str(k) for k in mu):
             return "available"
     return "indeterminate"
+
+
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"            # CSI
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b[@-Z\\-_]"                     # single-char escapes
+)
+_BANNER_VERSION_RE = re.compile(r"^[^A-Za-z]*Claude Code v\d+\.\d+\.\d+")   # anchored: glyphs, then the banner
+_BANNER_SCAN_LINES = 12                                                        # indicator lives within the banner region
+_BANNER_MODEL_RE = re.compile(
+    r"^(?P<model>(?:Fable|Opus|Sonnet|Haiku)\b[^\u00b7]*?)"
+    r"(?: with (?P<effort>low|medium|high|xhigh|max) effort)?"
+    r"(?:\s*\u00b7.*)?$"
+)
+_BANNER_EFFORT_LINE_RE = re.compile(r"\u25cf\s*(low|medium|high|xhigh|max)\s*\u00b7\s*/effort")
+_MODEL_FAMILY = {"fable": "fable", "opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", (text or "").replace("\r", ""))
+
+
+def parse_banner(text):
+    """{"model", "effort"} from the FIRST Claude Code banner in text, or
+    None when there is no anchored version line or the model line names no
+    known family (spec 3): unknown text is unreadable, never a downgrade."""
+    lines = strip_ansi(text).splitlines()
+    for i, line in enumerate(lines):
+        if not _BANNER_VERSION_RE.search(line):
+            continue
+        rest = [l for l in lines[i + 1:] if l.strip()]
+        if not rest:
+            return None
+        model_line = re.sub(r"^[^A-Za-z]+", "", rest[0]).strip()
+        m = _BANNER_MODEL_RE.match(model_line)
+        if not m:
+            return None
+        effort = m.group("effort")
+        if effort is None:
+            for later in rest[1:_BANNER_SCAN_LINES]:
+                e = _BANNER_EFFORT_LINE_RE.search(later)
+                if e:
+                    effort = e.group(1)
+                    break
+        return {"model": m.group("model").strip(), "effort": effort}
+    return None
+
+
+def classify_banner(parsed, alias, effort) -> str:
+    """Spec 3 precedence: unreadable > downgrade > effort-mismatch > ok."""
+    if not parsed:
+        return "unreadable"
+    if _MODEL_FAMILY[alias] not in parsed["model"].lower():
+        return "downgrade"
+    if effort != "inherit" and parsed.get("effort") != effort:
+        return "effort-mismatch"
+    return "ok"
 
 
 def state_root() -> Path:
@@ -687,6 +834,323 @@ def valid_mech_agent(agent, task_id) -> bool:
     return False
 
 
+THINK_KINDS = ("triage", "decompose", "incident", "other")
+THINK_ID_RE = re.compile(r"think-(triage|decompose|incident|other)-\d{14}(-2)?\Z")
+THINK_REASONS = ("max_turns", "max_budget", "timeout", "no_answer", "error")
+
+
+def valid_think_id(tid) -> bool:
+    return isinstance(tid, str) and len(tid) <= 32 and bool(THINK_ID_RE.match(tid))
+
+
+def think_kind(tid) -> str:
+    return tid.split("-")[1]
+
+
+def _s(mx):
+    return {"type": "string", "minLength": 1, "maxLength": mx}
+
+
+THINK_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "recommendation": _s(500),
+        "rationale": _s(4000),
+        "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"label": _s(80), "summary": _s(1000), "tradeoffs": _s(1000),
+                           "risk": {"type": "string", "enum": ["low", "medium", "high"]}},
+            "required": ["label", "summary", "tradeoffs", "risk"]}},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "open_questions": {"type": "array", "maxItems": 10, "items": _s(300)},
+        "evidence": {"type": "array", "maxItems": 20, "items": _s(300)},
+    },
+    "required": ["recommendation", "rationale", "options", "confidence"],
+}
+
+
+def _check_schema(obj, schema, path="$"):
+    """Minimal checker for the subset THINK_SCHEMA uses: object/array/string,
+    properties, required, additionalProperties:false, enum, min/maxItems,
+    min/maxLength. Returns the first violation as a string, else None."""
+    t = schema.get("type")
+    if t == "object":
+        if not isinstance(obj, dict):
+            return f"{path}: expected object"
+        props = schema.get("properties", {})
+        for k in schema.get("required", []):
+            if k not in obj:
+                return f"{path}: missing {k}"
+        if schema.get("additionalProperties") is False:
+            extra = set(obj) - set(props)
+            if extra:
+                return f"{path}: unexpected keys {sorted(extra)}"
+        for k, sub in props.items():
+            if k in obj:
+                err = _check_schema(obj[k], sub, f"{path}.{k}")
+                if err:
+                    return err
+        return None
+    if t == "array":
+        if not isinstance(obj, list):
+            return f"{path}: expected array"
+        if "minItems" in schema and len(obj) < schema["minItems"]:
+            return f"{path}: fewer than {schema['minItems']} items"
+        if "maxItems" in schema and len(obj) > schema["maxItems"]:
+            return f"{path}: more than {schema['maxItems']} items"
+        for i, item in enumerate(obj):
+            err = _check_schema(item, schema["items"], f"{path}[{i}]")
+            if err:
+                return err
+        return None
+    if t == "string":
+        if not isinstance(obj, str):
+            return f"{path}: expected string"
+        if "enum" in schema and obj not in schema["enum"]:
+            return f"{path}: not one of {schema['enum']}"
+        if len(obj) < schema.get("minLength", 0):
+            return f"{path}: too short"
+        if len(obj) > schema.get("maxLength", 10 ** 9):
+            return f"{path}: too long"
+        return None
+    return f"{path}: unsupported schema type {t}"
+
+
+def valid_think_answer(obj):
+    return _check_schema(obj, THINK_SCHEMA)
+
+
+THINK_ADD_DIRS = ("tasks", "think")
+THINK_RETRY_FLOOR_USD = 0.25
+
+THINK_LOST_GRACE_SECS = 120
+
+
+def think_dir(rd) -> Path:
+    return Path(rd) / "think"
+
+
+def _parse_iso(ts):
+    try:
+        return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _v1(rec) -> bool:
+    return isinstance(rec, dict) and rec.get("v") == 1 and not isinstance(rec.get("v"), bool)
+
+
+def valid_launch_record(rec, tid) -> bool:
+    if not (_v1(rec) and rec.get("think_id") == tid and valid_think_id(tid)):
+        return False
+    if rec.get("kind") != think_kind(tid):
+        return False
+    if rec.get("task_id") is not None and not valid_task_id(rec.get("task_id")):
+        return False
+    if rec.get("model") not in ROLE_ALIASES["think"] or rec.get("effort") not in THINK_EFFORTS:
+        return False
+    caps = rec.get("caps")
+    if not isinstance(caps, dict) or any(k not in caps or _cap_error(k, caps[k]) for k in MECH_BOUNDS):
+        return False
+    retry = tid.endswith("-2")
+    if rec.get("attempt") != (2 if retry else 1) or isinstance(rec.get("attempt"), bool):
+        return False
+    if rec.get("parent") != (tid[:-2] if retry else None):
+        return False
+    return _parse_iso(rec.get("started")) is not None
+
+
+def valid_answer_record(rec, tid) -> bool:
+    if not (_v1(rec) and rec.get("think_id") == tid):
+        return False
+    status = rec.get("status")
+    cost, turns = rec.get("total_cost_usd"), rec.get("num_turns")
+    if not (_finite_nonneg(cost) and _finite_nonneg(turns, True)):
+        return False
+    if _parse_iso(rec.get("started")) is None:
+        return False
+    if status == "answered":
+        return rec.get("reason") is None and valid_think_answer(rec.get("answer")) is None
+    if status == "unanswered":
+        return rec.get("reason") in THINK_REASONS and rec.get("answer") is None
+    return False
+
+
+def think_scan(rd, now_ts):
+    """Validated launch and answer records under think/, plus live/lost lists
+    computed from each launch record's own timeout (spec 4.4). Invalid files
+    are skipped and counted; a malformed launch record is listed in
+    `corrupt` (liveness cannot be judged -> run-think refuses); a launch
+    with an invalid answer file stays live regardless of age. Never raises."""
+    out = {"launches": [], "answers": {}, "live": [], "lost": [], "skipped_files": 0, "corrupt": []}
+    d = think_dir(rd)
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    launched = set()
+    answer_present = set()
+    for name in names:
+        if name.endswith(".launch.json"):
+            tid = name[: -len(".launch.json")]
+            if not valid_think_id(tid):
+                out["corrupt"].append(tid)          # unknown stem: liveness cannot be judged
+                continue
+            try:
+                rec = json.loads((d / name).read_text())
+            except (OSError, ValueError):
+                rec = None
+            if valid_launch_record(rec, tid):
+                out["launches"].append(rec)
+                launched.add(tid)
+            else:
+                out["corrupt"].append(tid)          # listed, not counted as skipped
+    for name in names:
+        if name.endswith(".answer.json"):
+            tid = name[: -len(".answer.json")]
+            if not valid_think_id(tid):
+                out["skipped_files"] += 1
+                continue
+            answer_present.add(tid)
+            try:
+                rec = json.loads((d / name).read_text())
+            except (OSError, ValueError):
+                rec = None
+            if tid in launched and valid_answer_record(rec, tid):
+                out["answers"][tid] = rec
+            else:
+                out["skipped_files"] += 1
+    now = _parse_iso(now_ts)
+    for rec in out["launches"]:
+        tid = rec["think_id"]
+        if tid in out["answers"]:
+            continue
+        if tid in answer_present:
+            out["live"].append(tid)          # invalid answer file: leave the launch live
+            continue
+        started = _parse_iso(rec["started"])
+        to = rec["caps"]["timeout_secs"]
+        if now is not None and (now - started).total_seconds() <= to + THINK_LOST_GRACE_SECS:
+            out["live"].append(tid)
+        else:
+            out["lost"].append(tid)
+    return out
+
+
+def think_usd_today(scan, today_prefix) -> float:
+    """Committed spend for the UTC day (spec 4.1 reservation semantics): per
+    launch record started today, the answer's numeric total_cost_usd when
+    one exists, else the launch's reserved caps.max_budget_usd."""
+    total = 0.0
+    for launch in scan["launches"]:
+        if not launch["started"].startswith(today_prefix):
+            continue
+        ans = scan["answers"].get(launch["think_id"])
+        cost = (ans or {}).get("total_cost_usd")
+        total += cost if (ans is not None and cost is not None) else launch["caps"]["max_budget_usd"]
+    return round(total, 4)
+
+
+def publish_exclusive(path, data) -> bool:
+    """Create `path` with the JSON content or do nothing. Same-directory temp,
+    fsync, then os.link (fails if the target exists -- never a replace); the
+    temp is always removed, so a failure leaves no partial target."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def think_lock(rd):
+    """Repo-wide exclusive lock over the liveness/budget check and the launch
+    record write (spec 4.4). Released before claude is launched."""
+    d = think_dir(rd)
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+THINK_TOOLS = "Read,Glob,Grep"
+
+
+def think_outcome(subtype, result):
+    """(status, reason, answer, errors) per spec 4.6."""
+    errors = result_errors(result)
+    if subtype in _CAP_SUBTYPES:
+        return "unanswered", _CAP_SUBTYPES[subtype], None, errors
+    if subtype == "timeout":
+        return "unanswered", "timeout", None, errors
+    if subtype == "success":
+        answer = (result or {}).get("structured_output")
+        err = valid_think_answer(answer)
+        if err is None:
+            return "answered", None, answer, errors
+        return "unanswered", "no_answer", None, [err] + errors
+    return "unanswered", "error", None, errors
+
+
+def run_think(rd, a, question, launch, add_dirs) -> int:
+    """Spec 4.7 steps 4-6, after the handler published the launch record
+    under the lock. Exit 0 answer published; 3 answer could not be
+    published (the launch record stays and reads as lost)."""
+    caps = launch["caps"]
+    argv = ["claude", "--model", a.model, "--effort", a.effort, "--permission-mode", "dontAsk",
+            "--name", a.think_id, "-p", "--output-format", "json",
+            "--json-schema", json.dumps(THINK_SCHEMA, separators=(",", ":")),
+            "--max-turns", str(caps["max_turns"]), "--max-budget-usd", str(caps["max_budget_usd"]),
+            "--restricted", "--strict-mcp-config", "--tools", THINK_TOOLS]
+    for ad in add_dirs:
+        argv += ["--add-dir", ad]
+    subtype, result, exit_code = run_headless(argv, a.cwd, question, caps["timeout_secs"])
+    status, reason, answer, errors = think_outcome(subtype, result)
+    used = models_used(result)
+    downgrade = is_downgrade(used, a.model)
+
+    def _num(k, integer=False):
+        v = (result or {}).get(k)
+        return v if _finite_nonneg(v, integer) else None
+
+    denials = (result or {}).get("permission_denials")
+    rec = {"v": 1, "think_id": a.think_id, "kind": a.kind, "task_id": a.task_id,
+           "repo_slug": a.repo_slug, "model": a.model, "effort": a.effort,
+           "caps": caps, "attempt": launch["attempt"], "parent": launch["parent"],
+           "status": status, "reason": reason, "answer": answer,
+           "subtype": subtype, "is_error": bool((result or {}).get("is_error", subtype != "success")),
+           "num_turns": _num("num_turns", True), "total_cost_usd": _num("total_cost_usd"),
+           "duration_ms": _num("duration_ms", True), "models_used": used, "downgrade": downgrade,
+           "model_attributable": model_attributable(subtype, downgrade, errors, a.model),
+           "permission_denials": len(denials) if isinstance(denials, list) else 0,
+           "errors": errors, "exit_code": exit_code,
+           "session_id": (result or {}).get("session_id"), "started": launch["started"], "ts": now_iso()}
+    if not publish_exclusive(think_dir(rd) / f"{a.think_id}.answer.json", rec):
+        sys.stderr.write("[X] cannot publish the answer file\n")
+        return 3
+    return 0
+
+
 def parse_claude_result(stdout: str):
     """The single result object from `claude -p --output-format json`, or
     None. Tolerates leading noise by scanning lines from the end."""
@@ -755,6 +1219,34 @@ def wrapper_outcome(subtype, head_sha, base_sha, dirty):
     return ("paused" if usable else "failed"), "error"
 
 
+def run_headless(argv, cwd, stdin_text, timeout_secs):
+    """Run `claude -p` with the text on stdin in its own process group; kill
+    the group on timeout. (subtype, result, exit_code) where subtype is
+    'timeout', 'unparseable', or the result's subtype."""
+    subtype, result, exit_code, stdout = "unparseable", None, None, ""
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+    except OSError as e:
+        sys.stderr.write(f"[X] cannot launch claude: {e}\n")
+        return subtype, result, exit_code
+    try:
+        stdout, _err = proc.communicate(stdin_text, timeout=timeout_secs)
+        exit_code = proc.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+        return "timeout", None, proc.returncode
+    result = parse_claude_result(stdout)
+    if result is not None:
+        subtype = str(result.get("subtype") or "unparseable")
+    return subtype, result, exit_code
+
+
 def run_mech(rd, a, brief, timeout_secs) -> int:
     """Launch a headless capped worker; write start/end ledger lines and a
     guaranteed completion record. Exit 0 all writes ok; 2 nothing written;
@@ -766,35 +1258,17 @@ def run_mech(rd, a, brief, timeout_secs) -> int:
             "agent": a.agent, "launch_id": a.launch_id}
     try:
         append_spend(rd, a.task_id, dict(base, kind="start", role="mech",
-                                         model=a.model, ts=start_ts, **caps))
+                                         model=a.model, effort=getattr(a, "effort", None),
+                                         ts=start_ts, **caps))
     except OSError:
         sys.stderr.write("[X] cannot append the spend ledger\n")
         return 2
-    argv = ["claude", "--model", a.model, "--permission-mode", "auto",
-            "--name", a.agent, "-p", "--output-format", "json",
-            "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
-    subtype, result, exit_code, stdout = "unparseable", None, None, ""
-    try:
-        proc = subprocess.Popen(argv, cwd=a.worktree, stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
-    except OSError as e:
-        sys.stderr.write(f"[X] cannot launch claude: {e}\n")
-    else:
-        try:
-            stdout, _err = proc.communicate(brief, timeout=timeout_secs)
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            proc.wait()
-            subtype, exit_code = "timeout", proc.returncode
-    if subtype != "timeout":
-        result = parse_claude_result(stdout)
-        if result is not None:
-            subtype = str(result.get("subtype") or "unparseable")
+    argv = ["claude", "--model", a.model]
+    if getattr(a, "effort", None):
+        argv += ["--effort", a.effort]
+    argv += ["--permission-mode", "auto", "--name", a.agent, "-p", "--output-format", "json",
+             "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
+    subtype, result, exit_code = run_headless(argv, a.worktree, brief, timeout_secs)
     used = models_used(result)
     errors = result_errors(result)
     downgrade = is_downgrade(used, a.model)
@@ -915,6 +1389,7 @@ WATCH_DIRS = {
     "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
               (".spend.jsonl", valid_task_id)),
     "workspaces": ((".events.jsonl", valid_workspace_id),),
+    "think": ((".launch.json", valid_think_id), (".answer.json", valid_think_id)),
 }
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
@@ -1242,17 +1717,34 @@ def main(argv=None) -> int:
     add("write-index", "--workspace", "--json", fenced=True)
     add("write-capabilities", "--json", fenced=True)
     add("resolve-model", "--role", "--session")
+    add("resolve-effort", "--role")
+    add("routing-table", "--session")
     add("disable-model", "--model", fenced=True)
     mc = add("mech-caps")
     mc.add_argument("--max-turns", type=int, default=None)
     mc.add_argument("--max-budget-usd", type=float, default=None)
     add("mech-contract", "--task-id", "--worktree", "--base-sha")
+    tc = add("think-caps")
+    tc.add_argument("--max-turns", type=int, default=None)
+    tc.add_argument("--max-budget-usd", type=float, default=None)
     rm = add("run-mech", "--task-id", "--workspace", "--agent", "--launch-id",
              "--model", "--worktree", "--base-sha", "--brief-file")
     rm.add_argument("--max-turns", type=int, required=True)
     rm.add_argument("--max-budget-usd", type=float, required=True)
     rm.add_argument("--timeout-secs", type=int, required=True)
+    rm.add_argument("--effort", default=None)
+    rt = add("run-think", "--think-id", "--kind", "--model", "--effort", "--cwd", fenced=True)
+    rt.add_argument("--task-id", default=None)
+    rt.add_argument("--max-turns", type=int, required=True)
+    rt.add_argument("--max-budget-usd", type=float, required=True)
+    rt.add_argument("--timeout-secs", type=int, required=True)
+    rt.add_argument("--add-dir", action="append", default=[])
+    rt.add_argument("--parent", default=None)
     add("classify-probe", "--model", "--json")
+    cb = add("classify-banner", "--model", "--effort")
+    cb.add_argument("--text-file", default=None)
+    cb.add_argument("--text", default=None)
+    cb.add_argument("--json", action="store_true")
     ed = add(
         "emit-done",
         "--task-id",
@@ -1372,6 +1864,26 @@ def main(argv=None) -> int:
             return code
         print(model)
         return 0
+    if ns.cmd == "resolve-effort":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        level, code = role_effort(ns.role, read_config(repo_dir(ns.repo_slug)))
+        if code is not None:
+            sys.stderr.write("[X] invalid role or config effort block\n")
+            return code
+        print(level or "inherit")
+        return 0
+    if ns.cmd == "routing-table":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        cfg = read_config(rd)
+        available = read_capabilities(rd, ns.session)
+        table, code = routing_table(available, cfg)
+        if code is not None:
+            sys.stderr.write({3: "[X] capabilities map absent or stale; re-probe first\n",
+                              5: "[X] invalid config models or effort block\n"}[code])
+            return code
+        print(json.dumps(table))
+        return 0
     if ns.cmd == "disable-model":
         rd = _fenced(ns)
         _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
@@ -1388,6 +1900,25 @@ def main(argv=None) -> int:
         except ValueError:
             result = None
         print(classify_probe(result, ns.model))
+        return 0
+    if ns.cmd == "classify-banner":
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
+        _require(ns.effort == "inherit" or ns.effort in EFFORT_LEVELS, "effort must be a level or inherit")
+        _require((ns.text is None) != (ns.text_file is None), "pass exactly one of --text/--text-file")
+        text = ns.text
+        if ns.text_file is not None:
+            try:
+                text = Path(ns.text_file).read_text(errors="replace")
+            except OSError:
+                text = None
+        _require(text is not None, "text-file not readable")
+        parsed = parse_banner(text)
+        cls = classify_banner(parsed, ns.model, ns.effort)
+        if ns.json:
+            print(json.dumps({"class": cls, "model": (parsed or {}).get("model"),
+                              "effort": (parsed or {}).get("effort")}))
+        else:
+            print(cls)
         return 0
     if ns.cmd in ("emit-done", "emit-review"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -1480,10 +2011,18 @@ def main(argv=None) -> int:
                 untracked += sum(
                     1 for w in workers if isinstance(w, dict) and w.get("role") != "mech"
                 )
+            effort_list = []
+            if isinstance(workers, list):
+                for w in workers:
+                    if not isinstance(w, dict) or "effort" not in w:
+                        effort_list.append("unknown")
+                    else:
+                        effort_list.append(w["effort"] if w["effort"] is not None else "inherit")
             result[tid] = {
                 "status": task.get("status"),
                 "fold": fold_status(by_task.get(tid, [])),
                 "spend": spend,
+                "workers_effort": effort_list,
             }
         totals["usd"] = round(totals["usd"], 4)
         totals["untracked_launches"] = untracked
@@ -1495,6 +2034,21 @@ def main(argv=None) -> int:
                     orphans.add(tid)
         result["_totals"] = totals
         result["_orphans"] = sorted(orphans)
+        now = now_iso()
+        scan = think_scan(rd, now)
+        answers = list(scan["answers"].values())
+        result["_think"] = {
+            "launches": len(scan["launches"]),
+            "answered": sum(1 for a in answers if a.get("status") == "answered"),
+            "unanswered": sum(1 for a in answers if a.get("status") == "unanswered"),
+            "usd": round(sum(a["total_cost_usd"] for a in answers
+                             if _finite_nonneg(a.get("total_cost_usd")) and a.get("total_cost_usd") is not None), 4),
+            "turns": sum(a["num_turns"] for a in answers
+                         if _finite_nonneg(a.get("num_turns"), True) and a.get("num_turns") is not None),
+            "usd_today": think_usd_today(scan, now[:10]),
+            "live": scan["live"], "lost": scan["lost"], "skipped_files": scan["skipped_files"],
+            "corrupt": scan["corrupt"],
+        }
         print(json.dumps(result))
         return 0
     if ns.cmd == "should-dispatch-review":
@@ -1645,6 +2199,15 @@ def main(argv=None) -> int:
             return 5
         print(json.dumps(caps))
         return 0
+    if ns.cmd == "think-caps":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        caps, err = think_caps(read_config(repo_dir(ns.repo_slug)),
+                               ns.max_turns, ns.max_budget_usd)
+        if err:
+            sys.stderr.write(f"[X] {err}\n")
+            return 5
+        print(json.dumps(caps))
+        return 0
     if ns.cmd == "mech-contract":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -1683,6 +2246,7 @@ def main(argv=None) -> int:
                  "agent must be agent_name('mech', task_id) or a -2..-9 collision variant")
         _require(ns.launch_id.startswith(ns.agent + "-"), "launch-id must be prefixed by the agent name")
         _require(ns.model in CAP_MODELS, "model must be a known alias")
+        _require(ns.effort is None or ns.effort in EFFORT_LEVELS, "effort must be one of low/medium/high/xhigh/max")
         _require(SHA40_RE.match(ns.base_sha), "base-sha must be 40 hex")
         for k in ("max_turns", "max_budget_usd", "timeout_secs"):
             err = _cap_error(k, getattr(ns, k))
@@ -1704,6 +2268,104 @@ def main(argv=None) -> int:
         except OSError:
             pass  # run_mech's first append reports the unwritable ledger as exit 2
         return run_mech(rd, ns, brief, ns.timeout_secs)
+    if ns.cmd == "run-think":
+        rd = _fenced(ns)                      # stale/foreign fence refused like write-task (exit 2)
+        _require(valid_think_id(ns.think_id), "invalid think-id")
+        _require(ns.kind in THINK_KINDS and think_kind(ns.think_id) == ns.kind, "kind must match the think-id")
+        _require(ns.task_id is None or valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.model in ROLE_ALIASES["think"], "model must be fable or opus")
+        _require(ns.effort in THINK_EFFORTS, "effort must be high, xhigh, or max")
+        for name in ("repo_slug", "think_id", "kind", "model", "effort", "cwd"):
+            _require(SHELL_SAFE_RE.match(str(getattr(ns, name))),
+                     f"--{name.replace('_', '-')} contains whitespace or a shell metacharacter")
+        for k in ("max_turns", "max_budget_usd", "timeout_secs"):
+            err = _cap_error(k, getattr(ns, k))
+            _require(err is None, err or "")
+        qf = think_dir(rd) / f"{ns.think_id}.question.md"
+        _require(qf.is_file() and not qf.is_symlink(), "question file missing or not a regular file")
+        try:
+            question = qf.read_text()
+        except (OSError, UnicodeDecodeError):
+            question = None
+        _require(question is not None, "question file is not readable as text")
+        is_retry = ns.think_id.endswith("-2")
+        _require(is_retry == (ns.parent is not None), "a -2 id requires --parent and vice versa")
+        cwd = Path(ns.cwd)
+        _require(cwd.is_dir() and _git(str(cwd), "rev-parse", "--git-dir") is not None, "cwd must be a git checkout")
+        remote = _git(str(cwd), "remote", "get-url", "origin")
+        common = _git(str(cwd), "rev-parse", "--git-common-dir")
+        common_abs = str((cwd / common).resolve()) if common else None
+        _require(common_abs is not None and repo_slug(remote or "", common_abs) == ns.repo_slug,
+                 "cwd does not belong to --repo-slug")
+        add_dirs = []
+        for tok in ns.add_dir:
+            _require(tok in THINK_ADD_DIRS, "add-dir must be tasks or think")
+            p = rd / tok
+            _require(p.is_dir() and contained(p, state_root()), f"{tok} directory missing")
+            add_dirs.append(str(p))
+        ld, ad = think_dir(rd) / f"{ns.think_id}.launch.json", think_dir(rd) / f"{ns.think_id}.answer.json"
+        _require(not ld.exists() and not ad.exists(), "launch or answer record already exists")
+        caps = {"max_turns": ns.max_turns, "max_budget_usd": ns.max_budget_usd, "timeout_secs": ns.timeout_secs}
+        attempt, budget = 1, ns.max_budget_usd
+        if ns.parent is not None:
+            _require(ns.think_id == ns.parent + "-2", "think-id must be the parent's -2 form")
+
+            def _load(name):
+                try:
+                    return json.loads((think_dir(rd) / name).read_text())
+                except (OSError, ValueError):
+                    return None
+            plaunch, prec = _load(f"{ns.parent}.launch.json"), _load(f"{ns.parent}.answer.json")
+            _require(valid_launch_record(plaunch, ns.parent) and plaunch["attempt"] == 1,
+                     "parent must have a valid attempt-1 launch record")
+            _require(valid_answer_record(prec, ns.parent) and prec.get("status") == "unanswered"
+                     and prec.get("model_attributable") is True,
+                     "parent must be a valid unanswered model-attributable record")
+            for k in ("kind", "task_id", "model"):
+                _require(prec.get(k) == plaunch.get(k), f"parent answer/launch disagree on {k}")
+            _require(plaunch["kind"] == ns.kind and plaunch.get("task_id") == ns.task_id, "parent kind/task must match")
+            _require(plaunch["model"] != ns.model, "retry must run on a different model than the parent")
+            _require(ns.max_budget_usd == plaunch["caps"]["max_budget_usd"],
+                     "retry --max-budget-usd must equal the parent launch's cap (the escalation budget)")
+            try:
+                same_q = (think_dir(rd) / f"{ns.parent}.question.md").read_bytes() == qf.read_bytes()
+            except OSError:
+                same_q = False
+            _require(same_q, "retry question must be byte-identical to the parent's")
+            spent = prec.get("total_cost_usd")
+            if spent is None:
+                sys.stderr.write("[X] parent cost unknown; retry remainder undefined\n")
+                return 4
+            budget = round(plaunch["caps"]["max_budget_usd"] - spent, 4)   # remainder of the ESCALATION budget
+            attempt = 2
+            if budget < THINK_RETRY_FLOOR_USD:
+                sys.stderr.write(f"[X] retry budget {budget} below the {THINK_RETRY_FLOOR_USD} floor\n")
+                return 4
+        cfg_caps, err = think_caps(read_config(rd))
+        _require(err is None, err or "")
+        with think_lock(rd):
+            _require(check_fence(rd, ns.session, int(ns.fence)), "stale fence")
+            now = now_iso()
+            scan = think_scan(rd, now)
+            if scan["corrupt"]:
+                sys.stderr.write(f"[X] corrupt launch record(s) {scan['corrupt']}; liveness unknown -- human cleanup\n")
+                return 4
+            live = [t for t in scan["live"] if t != ns.think_id]
+            if live:
+                sys.stderr.write(f"[X] escalation already live: {live[0]}\n")
+                return 4
+            spent_today = think_usd_today(scan, now[:10])
+            if spent_today + budget > cfg_caps["daily_budget_usd"]:
+                sys.stderr.write(f"[X] daily think budget: spent {spent_today} + {budget} > {cfg_caps['daily_budget_usd']}\n")
+                return 4
+            launch = {"v": 1, "think_id": ns.think_id, "kind": ns.kind, "task_id": ns.task_id,
+                      "repo_slug": ns.repo_slug, "model": ns.model, "effort": ns.effort,
+                      "caps": dict(caps, max_budget_usd=budget), "attempt": attempt,
+                      "parent": ns.parent, "started": now, "pid": os.getpid()}
+            if not publish_exclusive(ld, launch):
+                sys.stderr.write("[X] launch record exists or is unwritable\n")
+                return 2
+        return run_think(rd, ns, question, launch, add_dirs)
     return 2
 
 

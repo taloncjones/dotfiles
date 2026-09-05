@@ -383,7 +383,7 @@ $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome approved
 # the sidecar sorts after PROJ-1.json; status must still report the real status
-$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1','_totals','_orphans'] and s['PROJ-1']['status']=='reviewed',s"
+$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1','_totals','_orphans','_think'] and s['PROJ-1']['status']=='reviewed',s"
 SH
 
 check "CLI should-dispatch-review: once per HEAD, re-review on new HEAD" <<'SH'
@@ -1334,6 +1334,34 @@ printf '{"v":1,"user":"u","default_base":"origin/main"}' > "$RD/config.json"
 rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-y --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]   # no template
 SH
 
+check "think_caps: defaults, merge, overrides, fail-closed; mech_caps unchanged" <<PY
+$LOAD
+caps,err=c.think_caps({})
+assert err is None and caps=={"max_turns":15,"max_budget_usd":3.0,"timeout_secs":900,"daily_budget_usd":10.0},caps
+caps,err=c.think_caps({"think":{"max_turns":20,"daily_budget_usd":25}},max_budget_usd=4.5)
+assert err is None and caps["max_turns"]==20 and caps["max_budget_usd"]==4.5 and caps["daily_budget_usd"]==25
+bad=[{"think":{"max_turns":0}},{"think":{"bogus":1}},{"think":{"max_turns":True}},{"think":[]},
+     {"think":{"contract_commands":[{"name":"a","run":"true"}]}},{"think":{"daily_budget_usd":0}},
+     {"think":{"daily_budget_usd":200.5}},{"think":{"daily_budget_usd":True}},
+     {"think":{"max_budget_usd":12,"daily_budget_usd":10}},{"think":{"daily_budget_usd":float("nan")}}]
+for b in bad:
+    caps,err=c.think_caps(b); assert caps is None and err, b
+caps,err=c.think_caps({},max_budget_usd=11); assert caps is None       # override above daily ceiling
+assert c.mech_caps({})==({"max_turns":40,"max_budget_usd":2.0,"timeout_secs":1800},None)
+caps,err=c.mech_caps({"mech":{"daily_budget_usd":5}}); assert caps is None  # not a mech key
+sys.exit(0)
+PY
+
+check "think-caps CLI" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-t"; mkdir -p "$RD"
+[ "$($CLI think-caps --repo-slug slug-t)" = '{"max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900, "daily_budget_usd": 10.0}' ]
+printf '{"v":1,"user":"u","default_base":"origin/main","think":{"timeout_secs":600}}' > "$RD/config.json"
+[ "$($CLI think-caps --repo-slug slug-t --max-turns 5)" = '{"max_turns": 5, "max_budget_usd": 3.0, "timeout_secs": 600, "daily_budget_usd": 10.0}' ]
+rc=0; $CLI think-caps --repo-slug slug-t --max-budget-usd 60 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+SH
+
 check "emit-done: optional launch_id and reason round-trip; bad reason rejected" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
 CLI="python3 claude/hooks/herdr_orch_core.py"
@@ -1466,6 +1494,26 @@ d=json.load(open("$RD/tasks/td-r.done.json")); assert d["outcome"]=="completed" 
 PY
 SH
 
+check "run-mech --effort passes the flag and records it; absent -> null and argv unchanged" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-me"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+BASE=$(git -C "$WT" rev-parse HEAD); printf 'brief\n' > "$RD/tasks/td-me.brief.md"
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.1,"modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
+base="$CLI run-mech --repo-slug slug-me --task-id td-me --workspace w1 --agent mech-td-me --model haiku --worktree $WT --base-sha $BASE --brief-file $RD/tasks/td-me.brief.md --max-turns 5 --max-budget-usd 0.5 --timeout-secs 60"
+$base --launch-id mech-td-me-1 --effort high
+grep -qx -- '--effort' "$FAKE_CLAUDE_LOG.argv" && grep -qx -- 'high' "$FAKE_CLAUDE_LOG.argv"
+python3 -c "import json;l=[json.loads(x) for x in open('$RD/tasks/td-me.spend.jsonl')];assert l[0]['kind']=='start' and l[0]['effort']=='high',l"
+$base --launch-id mech-td-me-2
+! grep -qx -- '--effort' "$FAKE_CLAUDE_LOG.argv"
+python3 -c "import json;l=[json.loads(x) for x in open('$RD/tasks/td-me.spend.jsonl')];assert l[2]['kind']=='start' and l[2]['effort'] is None,l"
+rc=0; $base --launch-id mech-td-me-3 --effort turbo 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+rc=0; $base --launch-id mech-td-me-4 --effort inherit 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+[ "$(wc -l < "$RD/tasks/td-me.spend.jsonl")" -eq 4 ]
+SH
+
 check "run-mech: cap hits, no_emit, errors, dirty, unparseable, downgrade, errors persisted -> wrapper records" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
 export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
@@ -1591,6 +1639,45 @@ try $base --agent mech-td-r --launch-id 'mech-td-r 1' --base-sha "$BASE" --brief
 [ ! -e "$RD/tasks/td-r.spend.jsonl" ] && [ ! -e "$RD/tasks/td-r.done.json" ] && [ ! -e "$FAKE_CLAUDE_LOG.argv" ]
 SH
 
+check "effort map: defaults, think constraints, config overrides fail closed" <<PY
+$LOAD
+assert c.EFFORT_LEVELS==("low","medium","high","xhigh","max") and c.THINK_EFFORTS==("high","xhigh","max")
+assert c.ROLE_DEFAULTS["think"]==("fable","opus") and c.ROLE_ALIASES["think"]==("fable","opus")
+assert c.role_effort("plan",{})==("high",None) and c.role_effort("review",{})==("high",None)
+assert c.role_effort("impl",{})==(None,None) and c.role_effort("mech",{})==(None,None)
+assert c.role_effort("think",{})==("high",None)
+assert c.role_effort("impl",{"effort":{"impl":"low"}})==("low",None)
+assert c.role_effort("plan",{"effort":{"plan":None}})==(None,None)
+assert c.role_effort("think",{"effort":{"think":"xhigh"}})==("xhigh",None)
+assert c.role_effort("review",{"effort":{"plan":"low"}})==("high",None)   # sibling override untouched
+bad=[{"effort":[]},{"effort":None},{"effort":{"bogus":"high"}},{"effort":{"plan":"turbo"}},{"effort":{"plan":True}},
+     {"effort":{"plan":3}},{"effort":{"think":None}},{"effort":{"think":"low"}},{"effort":{"think":"medium"}}]
+for b in bad:
+    assert c.role_effort("plan",b)==(None,5), b
+assert c.role_effort("orchestrator",{})==(None,5)
+assert c.resolve_model("think",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{})==("fable",None)
+assert c.resolve_model("think",{"fable":False,"opus":True,"sonnet":True,"haiku":True},{})==("opus",None)
+assert c.resolve_model("think",{"fable":False,"opus":False,"sonnet":True,"haiku":True},{})==(None,4)
+assert c.resolve_model("think",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{"models":{"think":["sonnet"]}})==(None,5)
+assert c.resolve_model("think",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{"models":{"think":["haiku"]}})==(None,5)
+sys.exit(0)
+PY
+
+check "resolve-effort CLI prints level or inherit, exit 5 on bad config" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-e"; mkdir -p "$RD"
+[ "$($CLI resolve-effort --repo-slug slug-e --role plan)" = high ]
+[ "$($CLI resolve-effort --repo-slug slug-e --role impl)" = inherit ]
+[ "$($CLI resolve-effort --repo-slug slug-e --role think)" = high ]
+printf '{"v":1,"user":"u","default_base":"origin/main","effort":{"impl":"low","think":"xhigh"}}' > "$RD/config.json"
+[ "$($CLI resolve-effort --repo-slug slug-e --role impl)" = low ]
+[ "$($CLI resolve-effort --repo-slug slug-e --role think)" = xhigh ]
+printf '{"v":1,"user":"u","default_base":"origin/main","effort":{"think":null}}' > "$RD/config.json"
+rc=0; $CLI resolve-effort --repo-slug slug-e --role plan 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+rc=0; $CLI resolve-effort --repo-slug slug-e --role nope 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+SH
+
 check "docs pin the mech tier: role row, run-mech launch, liveness table, ledger schema, brief variant" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 grep -q '| Mechanical worker (`mech`)' "$S"
@@ -1609,6 +1696,489 @@ grep -q 'launch_id' "$R/state-layout.md"
 grep -q 'Mech brief variant' "$R/brief-template.md"
 grep -q -- '--launch-id <launch_id>' "$R/brief-template.md"
 grep -q 'spend.jsonl' "$R/event-schema.md"
+SH
+
+check "docs pin effort routing, banner verb, deep think, and Workflow routing" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+grep -q 'routing-table --repo-slug' "$S"                     # one snapshot per dispatch
+grep -q 'One snapshot per dispatch' "$S"
+grep -q -- '--effort \$EFFORT' "$S"                          # launch line
+grep -q 'classify-banner --model' "$S"
+grep -q 'effort-mismatch' "$S"
+grep -q 'not availability data' "$S"                         # never disable-model on effort-mismatch
+grep -q 'Deep-think escalation' "$S"
+grep -q 'run-think --repo-slug' "$S"
+grep -q 'think-caps --repo-slug' "$S"
+for t in 'Ambiguous triage' 'Milestone/epic decomposition' 'Novel incident' 'Not eligible'; do grep -q "$t" "$S"; done
+grep -q 'one live escalation per repo' "$S"
+grep -q 'daily_budget_usd' "$S"
+grep -q 'escalation deferred' "$S"
+grep -q '_think' "$S"
+grep -q 'Workflow' "$S" && grep -q 'in-turn helper work' "$S"
+grep -q 'Precedence with the user' "$S"
+grep -q 'Workflow opt-in: granted by the user' "$R/brief-template.md"
+grep -q 'Workflow opt-in: withheld for this task' "$R/brief-template.md"
+grep -q '## Routing' "$R/brief-template.md"
+grep -q 'never call `herdr_orch_core.py`' "$R/brief-template.md"
+grep -q 'Deep-think brief variant' "$R/brief-template.md"
+grep -q '"effort": {' "$R/state-layout.md"
+grep -q '"think": {' "$R/state-layout.md"
+grep -q '\.launch\.json' "$R/state-layout.md"
+grep -q '\.answer\.json' "$R/state-layout.md"
+grep -q 'workers\[\].effort\|"effort": "high"' "$R/state-layout.md"
+grep -q 'think/' "$R/event-schema.md"
+grep -q 'models.think\|"think": \["fable", "opus"\]' "$R/state-layout.md"
+SH
+
+check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
+$LOAD
+avail={"fable":True,"opus":True,"sonnet":True,"haiku":True}
+t,code=c.routing_table(avail,{})
+assert code is None and set(t)=={"plan","impl","review","mech","think"},t
+assert t["plan"]=={"model":"fable","effort":"high"} and t["impl"]=={"model":"sonnet","effort":None}
+assert t["mech"]=={"model":"haiku","effort":None} and t["think"]=={"model":"fable","effort":"high"}
+t,code=c.routing_table({"fable":False,"opus":False,"sonnet":True,"haiku":True},{})
+assert code is None and t["think"]["model"] is None and t["impl"]["model"]=="sonnet"
+assert c.routing_table(None,{})==(None,3)
+assert c.routing_table(avail,{"effort":{"plan":"turbo"}})==(None,5)
+assert c.routing_table(avail,{"models":{"plan":["gpt"]}})==(None,5)
+assert c.routing_table(None,{"models":{"plan":["gpt"]}})==(None,5)   # config error outranks stale map
+# single snapshot: main reads config and capabilities exactly once
+calls={"cfg":0,"cap":0}
+real_cfg,real_cap=c.read_config,c.read_capabilities
+c.read_config=lambda rd:(calls.__setitem__("cfg",calls["cfg"]+1) or {})
+c.read_capabilities=lambda rd,s:(calls.__setitem__("cap",calls["cap"]+1) or avail)
+import io,contextlib
+buf=io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc=c.main(["routing-table","--repo-slug","slug-rt","--session","S"])
+assert rc==0 and calls=={"cfg":1,"cap":1},calls
+assert json.loads(buf.getvalue())["review"]=={"model":"opus","effort":"high"}
+c.read_config,c.read_capabilities=real_cfg,real_cap
+sys.exit(0)
+PY
+
+check "routing-table CLI exit codes" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-rt --session S --host h --pid 1)
+rc=0; $CLI routing-table --repo-slug slug-rt --session S >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 3 ]
+$CLI write-capabilities --repo-slug slug-rt --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
+$CLI routing-table --repo-slug slug-rt --session S | python3 -c "import json,sys;t=json.load(sys.stdin);assert t['plan']=={'model':'opus','effort':'high'} and t['impl']['effort'] is None,t"
+printf '{"v":1,"user":"u","default_base":"origin/main","effort":{"plan":"low","plan2":"x"}}' > "$CLAUDE_CONFIG_DIR/herdr-orch/slug-rt/config.json"
+rc=0; $CLI routing-table --repo-slug slug-rt --session S >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 5 ]
+SH
+
+check "parse_banner/classify_banner: families, effort clause, indicator line, ansi, adversarial" <<PY
+$LOAD
+D="\u00b7"; B="\u25cf"
+real=" \u2590\u259b\u2588\u2588   Claude Code v2.1.260\n\u259d\u259c\u2588\u2588  Sonnet 5 with high effort "+D+" Claude Max\n  \u259d\u259d    ~/Git/repo\n"
+p=c.parse_banner(real); assert p=={"model":"Sonnet 5","effort":"high"},p
+assert c.classify_banner(p,"sonnet","high")=="ok"
+assert c.classify_banner(p,"sonnet","inherit")=="ok"
+assert c.classify_banner(p,"fable","high")=="downgrade"
+assert c.classify_banner(p,"sonnet","medium")=="effort-mismatch"
+noeff="Claude Code v2.1.260\n  Opus 4.6 "+D+" Claude Max\n"
+p=c.parse_banner(noeff); assert p=={"model":"Opus 4.6","effort":None},p
+assert c.classify_banner(p,"opus","inherit")=="ok"
+assert c.classify_banner(p,"opus","high")=="effort-mismatch"
+ind="Claude Code v2.1.260\n  Fable 5.1 "+D+" Claude Max\n\n   "+B+" medium "+D+" /effort\n"
+p=c.parse_banner(ind); assert p=={"model":"Fable 5.1","effort":"medium"},p
+assert c.classify_banner(p,"fable","high")=="effort-mismatch"
+assert c.classify_banner(p,"fable","medium")=="ok"
+ansi="\x1b[1mClaude Code v2.1.260\x1b[0m\r\n\x1b[38;5;208mSonnet 5 with xhigh effort\x1b[0m "+D+" Claude Max\n"
+assert c.parse_banner(ansi)=={"model":"Sonnet 5","effort":"xhigh"}
+assert c.strip_ansi("\x1b]0;title\x07x\x1b[2Ky")=="xy"
+# adversarial: first banner wins; unknown family is unreadable, never downgrade
+two="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n> tell me about Claude Code v9.9.9\n Opus 9\n"
+assert c.classify_banner(c.parse_banner(two),"sonnet","inherit")=="ok"
+quoted="> the banner said Claude Code v2.1.260 earlier\n Opus 9\nClaude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"
+assert c.parse_banner(quoted)["model"]=="Sonnet 5"                       # unanchored mention is not a banner line
+far="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"+"\n".join("line %d"%i for i in range(20))+"\n "+B+" xhigh "+D+" /effort\n"
+assert c.parse_banner(far)["effort"] is None                              # indicator beyond the banner region is ignored
+for bad in ("", "no banner here", "Claude Code v2.1.260\n", "Claude Code v2.1.260\n  Loading... "+D+" x\n", "Claude Code vX\n Sonnet 5\n"):
+    assert c.parse_banner(bad) is None, bad
+    assert c.classify_banner(None,"fable","high")=="unreadable"
+sys.exit(0)
+PY
+
+check "classify-banner CLI" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+T=$(mktemp); printf 'Claude Code v2.1.260\n  Sonnet 5 with high effort \302\267 Claude Max\n' > "$T"
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort high --text-file "$T")" = ok ]
+[ "$($CLI classify-banner --repo-slug slug-b --model fable --effort high --text-file "$T")" = downgrade ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort xhigh --text-file "$T")" = effort-mismatch ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort inherit --text 'garbage')" = unreadable ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort xhigh --text-file "$T" --json)" = '{"class": "effort-mismatch", "model": "Sonnet 5", "effort": "high"}' ]
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort high --text 'garbage' --json)" = '{"class": "unreadable", "model": null, "effort": null}' ]
+printf 'Claude Code v2.1.260\n  Sonnet 5 \302\267 Claude Max\n' > "$T"
+[ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort high --text-file "$T" --json)" = '{"class": "effort-mismatch", "model": "Sonnet 5", "effort": null}' ]
+rc=0; $CLI classify-banner --repo-slug slug-b --model gpt --effort high --text x 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+rc=0; $CLI classify-banner --repo-slug slug-b --model sonnet --effort turbo --text x 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+SH
+
+check "think ids: every kind fits 32 with the retry suffix; validator matches THINK_SCHEMA exactly" <<PY
+$LOAD
+for k in ("triage","decompose","incident","other"):
+    for suf in ("","-2"):
+        tid=f"think-{k}-20260904170000{suf}"
+        assert c.valid_think_id(tid) and len(tid)<=32 and re.fullmatch(c.AGENT_NAME_RE.pattern,tid), tid
+        assert c.think_kind(tid)==k
+for bad in ("think-triage-202609041700001","think-triage-20260904170000-3","think-Triage-20260904170000",
+            "think-triage-20260904T170000Z","think-x-20260904170000","",None,"think-triage-20260904170000-2-2"):
+    assert not c.valid_think_id(bad), bad
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+good={"recommendation":"r","rationale":"why","options":[opt(1),opt(2)],"confidence":"high"}
+assert c.valid_think_answer(good) is None
+full=dict(good,options=[opt(i) for i in range(4)],open_questions=["q"]*10,evidence=["e"]*20,
+          recommendation="x"*500,rationale="y"*4000)
+assert c.valid_think_answer(full) is None
+bad=[None,[],{},dict(good,options=[opt(1)]),dict(good,options=[opt(i) for i in range(5)]),
+     dict(good,extra=1),dict(good,options=[dict(opt(1),x=1),opt(2)]),dict(good,recommendation="x"*501),
+     dict(good,options=[dict(opt(1),risk="none"),opt(2)]),dict(good,confidence="sure"),
+     dict(good,open_questions=["q"]*11),dict(good,evidence=[""]),dict(good,rationale=""),
+     dict(good,options=[opt(1),{"label":"a","summary":"s","risk":"low"}]),dict(good,recommendation=3)]
+for b in bad:
+    assert isinstance(c.valid_think_answer(b),str), b
+assert c.THINK_SCHEMA["properties"]["options"]["minItems"]==2 and c.THINK_SCHEMA["additionalProperties"] is False
+sys.exit(0)
+PY
+
+check "think validators + scan: invalid records fail closed; live/lost per record timeout; reservation accounting" <<PY
+$LOAD
+rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
+def w(name,rec): open(os.path.join(td,name),"w").write(json.dumps(rec))
+L=lambda tid,started,to=900,**kw:dict({"v":1,"think_id":tid,"kind":c.think_kind(tid),"task_id":None,"repo_slug":"s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":to},"attempt":2 if tid.endswith("-2") else 1,"parent":tid[:-2] if tid.endswith("-2") else None,"started":started,"pid":1},**kw)
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+ANS={"recommendation":"r","rationale":"w","options":[opt(1),opt(2)],"confidence":"high"}
+A=lambda tid,status,cost,turns,started,**kw:dict({"v":1,"think_id":tid,"status":status,"reason":None if status=="answered" else "error","answer":ANS if status=="answered" else None,"total_cost_usd":cost,"num_turns":turns,"started":started},**kw)
+assert c.valid_launch_record(L("think-triage-20260904100000","2026-09-04T10:00:00Z"),"think-triage-20260904100000")
+assert c.valid_launch_record(L("think-triage-20260904100000-2","2026-09-04T10:00:00Z"),"think-triage-20260904100000-2")
+for bad in (L("think-triage-20260904100000","2026-09-04T10:00:00Z",caps={}), L("think-triage-20260904100000","nope"),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",model="sonnet"), L("think-triage-20260904100000","2026-09-04T10:00:00Z",effort="low"),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",attempt=2), L("think-triage-20260904100000-2","2026-09-04T10:00:00Z",parent=None),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",kind="other"), dict(L("think-triage-20260904100000","2026-09-04T10:00:00Z"),v=True), {}):
+    assert not c.valid_launch_record(bad,"think-triage-20260904100000"), bad
+assert c.valid_answer_record(A("t","answered",1.0,2,"2026-09-04T10:00:00Z"),"t")
+assert c.valid_answer_record(A("t","unanswered",None,None,"2026-09-04T10:00:00Z"),"t")
+for bad in (A("t","answered",1.0,2,"2026-09-04T10:00:00Z",answer={"recommendation":"r"}), A("t","done",1.0,2,"2026-09-04T10:00:00Z"),
+            A("t","answered",-1,2,"2026-09-04T10:00:00Z"), A("t","answered",1.0,True,"2026-09-04T10:00:00Z"),
+            A("t","unanswered",None,None,"2026-09-04T10:00:00Z",reason="bogus"), A("t","unanswered",None,None,"2026-09-04T10:00:00Z",answer=ANS), {"v":1,"think_id":"t"}):
+    assert not c.valid_answer_record(bad,"t"), bad
+w("think-triage-20260904100000.launch.json",L("think-triage-20260904100000","2026-09-04T10:00:00Z"))
+w("think-triage-20260904100000.answer.json",A("think-triage-20260904100000","answered",1.12,6,"2026-09-04T10:00:00Z"))
+w("think-other-20260904110000.launch.json",L("think-other-20260904110000","2026-09-04T11:00:00Z"))
+w("think-other-20260904110000.answer.json",A("think-other-20260904110000","answered",0.40,3,"2026-09-04T11:00:00Z"))
+w("think-incident-20260904120000.launch.json",L("think-incident-20260904120000","2026-09-04T12:00:00Z"))
+w("think-incident-20260904120000.answer.json",A("think-incident-20260904120000","unanswered",None,None,"2026-09-04T12:00:00Z"))
+w("think-decompose-20260904125900.launch.json",L("think-decompose-20260904125900","2026-09-04T12:59:00Z"))      # live: 1 min old
+w("think-incident-20260903120000.launch.json",L("think-incident-20260903120000","2026-09-03T12:00:00Z",600))  # lost
+w("think-other-20260904124000.launch.json",L("think-other-20260904124000","2026-09-04T12:40:00Z"))            # invalid answer -> still live
+w("think-other-20260904124000.answer.json",{"v":1,"think_id":"think-other-20260904124000","status":"answered"})
+open(os.path.join(td,"think-other-20260904130000.answer.json"),"w").write('{"v":1,"trunc')
+w("think-other-20260904140000.answer.json",{"v":2,"think_id":"think-other-20260904140000"})
+w("think-other-20260904150000.answer.json",A("think-other-20260904150000","answered",0.5,1,"2026-09-04T15:00:00Z"))   # orphan answer: no launch -> skipped
+w("think-triage-20260904160000.launch.json",{"v":1,"think_id":"think-triage-20260904160000"})                          # corrupt launch
+w("bogus-stem.launch.json",{"v":1})                                                                                       # invalid launch stem -> corrupt
+w("bogus-stem.answer.json",{"v":1})                                                                                       # invalid answer stem -> skipped
+s=c.think_scan(rd,"2026-09-04T13:00:00Z")
+assert [l["think_id"] for l in s["launches"]]==sorted(["think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000","think-decompose-20260904125900","think-incident-20260903120000","think-other-20260904124000"]),s["launches"]
+assert set(s["answers"])=={"think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000"},s["answers"].keys()
+assert s["live"]==["think-decompose-20260904125900","think-other-20260904124000"] and s["lost"]==["think-incident-20260903120000"],s
+assert s["skipped_files"]==5 and s["corrupt"]==["bogus-stem","think-triage-20260904160000"],s
+# reservation: 1.12 + 0.40 + 3.0 (null-cost unanswered) + 3.0 (live decompose) + 3.0 (live with invalid answer) = 10.52
+assert c.think_usd_today(s,"2026-09-04")==10.52, c.think_usd_today(s,"2026-09-04")
+assert c.think_usd_today(s,"2026-09-03")==3.0                                   # lost launch counts its cap
+e=c.think_scan(tempfile.mkdtemp(),"2026-09-04T13:00:00Z"); assert e=={"launches":[],"answers":{},"live":[],"lost":[],"skipped_files":0,"corrupt":[]},e
+sys.exit(0)
+PY
+
+check "publish_exclusive never clobbers or leaves partials; think_lock serializes" <<PY
+$LOAD
+d=tempfile.mkdtemp(); p=os.path.join(d,"x.json")
+assert c.publish_exclusive(p,{"a":1}) and json.load(open(p))=={"a":1}
+assert not c.publish_exclusive(p,{"a":2}) and json.load(open(p))=={"a":1}      # no replace
+assert [n for n in os.listdir(d) if n!="x.json"]==[]                            # no temp left behind
+ro=os.path.join(d,"ro"); os.mkdir(ro); os.chmod(ro,0o555)
+try:
+    assert not c.publish_exclusive(os.path.join(ro,"y.json"),{"a":1}) and os.listdir(ro)==[]
+finally:
+    os.chmod(ro,0o755)
+import threading,time
+order=[]
+def hold(tag,secs):
+    with c.think_lock(d):
+        order.append(("in",tag)); time.sleep(secs); order.append(("out",tag))
+t1=threading.Thread(target=hold,args=("a",0.3)); t2=threading.Thread(target=hold,args=("b",0.0))
+t1.start(); time.sleep(0.05); t2.start(); t1.join(); t2.join()
+assert order==[("in","a"),("out","a"),("in","b"),("out","b")],order
+assert os.path.exists(os.path.join(d,"think",".lock"))
+sys.exit(0)
+PY
+
+check "run-mech characterization: popen failure, unparseable stdout, nonzero exit, timeout return" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-ch"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+BASE=$(git -C "$WT" rev-parse HEAD); printf 'brief\n' > "$RD/tasks/td-ch.brief.md"
+export FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+base="$CLI run-mech --repo-slug slug-ch --task-id td-ch --workspace w1 --agent mech-td-ch --model haiku --worktree $WT --base-sha $BASE --brief-file $RD/tasks/td-ch.brief.md --max-turns 5 --max-budget-usd 0.5 --timeout-secs 60"
+end() { python3 -c "import json,sys;l=[json.loads(x) for x in open('$RD/tasks/td-ch.spend.jsonl')];e=[x for x in l if x['kind']=='end'][-1];print(json.dumps(e))"; }
+done_() { python3 -c "import json;print(json.dumps(json.load(open('$RD/tasks/td-ch.done.json'))))"; }
+# 1. no claude on PATH (but python3/git/sh present): exit_code null, subtype unparseable, failed/error (HEAD == base)
+NOCL=$(mktemp -d); for b in python3 git sh; do ln -s "$(command -v $b)" "$NOCL/$b"; done
+PATH="$NOCL" $base --launch-id mech-td-ch-1 || true
+end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='unparseable' and e['exit_code'] is None and e['num_turns'] is None,e"
+done_ | python3 -c "import json,sys;d=json.load(sys.stdin);assert d['outcome']=='failed' and d['reason']=='error',d"
+# 2. unparseable stdout from a running fake
+export PATH="$FAKE_CLAUDE_DIR:$PATH"; printf 'garbage\n' > "$FAKE_CLAUDE_JSON"
+$base --launch-id mech-td-ch-2; end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='unparseable' and e['exit_code']==0 and e['total_cost_usd'] is None,e"
+# 3. nonzero exit with a parseable error result
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"errors":["boom"]}' > "$FAKE_CLAUDE_JSON"
+FAKE_CLAUDE_RC=7 $base --launch-id mech-td-ch-3; end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='error_during_execution' and e['exit_code']==7 and e['errors']==['boom'] and e['model_attributable'] is False,e"
+# 4. timeout: subtype timeout, negative exit code (killed), num_turns null
+FAKE_CLAUDE_SLEEP=70 $base --launch-id mech-td-ch-4 --max-turns 5 2>/dev/null || true
+end | python3 -c "import json,sys;e=json.load(sys.stdin);assert e['subtype']=='timeout' and e['num_turns'] is None,e"
+SH
+
+check "run_think: argv contract, answered/unanswered mapping, popen failure, unparseable, exit 3" <<PY
+$LOAD
+import types,subprocess,shutil
+rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
+wt=tempfile.mkdtemp(); subprocess.run(["git","init","-q",wt],check=True)
+fake=os.environ["FAKE_CLAUDE_DIR"]; log=os.path.join(rd,"log"); resj=os.path.join(rd,"res.json")
+os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=resj); os.environ.pop("FAKE_CLAUDE_HOOK",None); os.environ.pop("FAKE_CLAUDE_SLEEP",None)
+os.environ["PATH"]=fake+os.pathsep+os.environ["PATH"]
+tid="think-triage-20260904170000"
+a=types.SimpleNamespace(think_id=tid,kind="triage",task_id=None,repo_slug="slug",model="fable",effort="high",cwd=wt)
+launch={"v":1,"think_id":tid,"kind":"triage","task_id":None,"repo_slug":"slug","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":None,"started":"2026-09-04T17:00:00Z","pid":1}
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+good={"recommendation":"do A","rationale":"because","options":[opt(1),opt(2)],"confidence":"high"}
+def res(**kw): open(resj,"w").write(json.dumps(dict({"type":"result"},**kw)))
+def ans(): return json.load(open(os.path.join(td,tid+".answer.json")))
+def reset():
+    for n in os.listdir(td): os.unlink(os.path.join(td,n))
+res(subtype="success",is_error=False,num_turns=4,total_cost_usd=0.9,duration_ms=1000,session_id="sid",permission_denials=[{"tool":"Read"}],modelUsage={"claude-fable-5-1":{}},structured_output=good)
+assert c.run_think(rd,a,"Which item first?\n",launch,[os.path.join(rd,"tasks")])==0
+r=ans(); assert r["status"]=="answered" and r["answer"]==good and r["total_cost_usd"]==0.9 and r["num_turns"]==4 and r["permission_denials"]==1 and r["attempt"]==1 and r["caps"]["timeout_secs"]==60,r
+argv=open(log+".argv").read().splitlines()          # fake claude's "$@" excludes argv[0] ("claude" itself)
+exp=["--model","fable","--effort","high","--permission-mode","dontAsk","--name",tid,"-p","--output-format","json","--json-schema"]
+assert argv[:len(exp)]==exp,argv
+i=argv.index("--json-schema"); assert json.loads(argv[i+1])==c.THINK_SCHEMA
+assert argv[i+2:]==["--max-turns","15","--max-budget-usd","3.0","--restricted","--strict-mcp-config","--tools","Read,Glob,Grep","--add-dir",os.path.join(rd,"tasks")],argv[i+2:]
+assert open(log+".stdin").read()=="Which item first?\n" and os.path.realpath(open(log+".cwd").read().strip())==os.path.realpath(wt)
+reset(); res(subtype="error_max_turns",is_error=True,num_turns=15,total_cost_usd=2.0)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="max_turns" and ans()["answer"] is None
+reset(); res(subtype="error_max_budget_usd",is_error=True,num_turns=3,total_cost_usd=3.0)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="max_budget"
+reset(); res(subtype="success",is_error=False,num_turns=2,total_cost_usd=0.2,structured_output=dict(good,options=[opt(1)]))
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="no_answer" and "fewer than 2" in ans()["errors"][0]
+reset(); res(subtype="success",is_error=False,num_turns=2,total_cost_usd=0.2)          # no structured_output at all
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="no_answer"
+reset(); res(subtype="success",is_error=False,num_turns=1,total_cost_usd=0.1,modelUsage={"claude-sonnet-5":{}},structured_output=good)
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["downgrade"] is True and ans()["model_attributable"] is True
+reset(); open(resj,"w").write("not json at all")                                      # unparseable stdout
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["subtype"]=="unparseable" and ans()["total_cost_usd"] is None
+reset(); res(subtype="error_during_execution",is_error=True,num_turns=1,total_cost_usd=0.1,errors=["model fable unavailable"])
+os.environ["FAKE_CLAUDE_RC"]="1"
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["exit_code"]==1 and ans()["model_attributable"] is True
+os.environ.pop("FAKE_CLAUDE_RC")
+reset(); os.environ["FAKE_CLAUDE_SLEEP"]="3"
+assert c.run_think(rd,a,"q",dict(launch,caps=dict(launch["caps"],timeout_secs=1)),[])==0 and ans()["reason"]=="timeout"
+pid=int(open(log+".pid").read()); import time; time.sleep(0.2)
+try:
+    os.kill(pid,0); alive=True
+except OSError:
+    alive=False
+assert not alive
+os.environ.pop("FAKE_CLAUDE_SLEEP")
+reset(); saved=os.environ["PATH"]; os.environ["PATH"]=tempfile.mkdtemp()                # no claude on PATH -> Popen fails
+assert c.run_think(rd,a,"q",launch,[])==0 and ans()["reason"]=="error" and ans()["exit_code"] is None
+os.environ["PATH"]=saved
+reset(); res(subtype="success",is_error=False,num_turns=1,total_cost_usd=0.1,structured_output=good)
+os.environ["FAKE_CLAUDE_HOOK"]=f"mkdir {os.path.join(td,tid+'.answer.json')}"          # answer path taken while claude runs
+assert c.run_think(rd,a,"q",launch,[])==3 and os.path.isdir(os.path.join(td,tid+".answer.json"))
+os.environ.pop("FAKE_CLAUDE_HOOK")
+sys.exit(0)
+PY
+
+check "run-think handler: happy path via CLI, stale fence, exit 2 cases write nothing" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo2.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo2.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think" "$RD/tasks"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+q() { printf 'q\n' > "$RD/think/$1.question.md"; }
+GOOD='{"recommendation":"do A","rationale":"because","options":[{"label":"A","summary":"s","tradeoffs":"t","risk":"low"},{"label":"B","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}'
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.9,"modelUsage":{"claude-fable-5-1":{}},"structured_output":%s}' "$GOOD" > "$FAKE_CLAUDE_JSON"
+ok="--repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
+ID=think-triage-20260904180000; q $ID
+rc=0; $CLI run-think --repo-slug $SLUG --session S --fence 999 --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $ID >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$RD/think/$ID.launch.json" ]                                  # stale fence
+$CLI run-think $ok --think-id $ID --add-dir tasks --add-dir think
+python3 -c "import json;l=json.load(open('$RD/think/$ID.launch.json'));a=json.load(open('$RD/think/$ID.answer.json'));assert l['caps']['max_budget_usd']==3.0 and l['attempt']==1 and a['status']=='answered',(l,a)"
+grep -qx -- "$RD/tasks" "$FAKE_CLAUDE_LOG.argv" && grep -qx -- "$RD/think" "$FAKE_CLAUDE_LOG.argv"
+: > "$FAKE_CLAUDE_LOG.argv"
+n=0
+try() { n=$((n+1)); rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 2 ] || { echo "expected 2 got $rc for: $*" >&2; exit 1; }; }
+T="think-triage-2026090418"          # distinct ids per case: ${T}01xx
+q ${T}0101; try $ok --think-id ${T}010                                         # 13-digit stamp
+q ${T}0102; try $ok --think-id ${T}0102-3
+q ${T}0103; try $ok --think-id think-Triage-20260904180103
+q ${T}0104; try $ok --think-id think-other-20260904180104                       # kind disagrees
+F2="--repo-slug $SLUG --session S --fence $FE --kind triage"
+q ${T}0105; try $F2 --model sonnet --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0105
+q ${T}0106; try $F2 --model fable --effort inherit --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0106
+q ${T}0107; try $F2 --model fable --effort medium --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0107
+q ${T}0108; try $F2 --model fable --effort high --cwd $WT --max-turns 0 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0108
+q ${T}0109-2; try $ok --think-id ${T}0109-2                                     # -2 without --parent
+q ${T}0110; try $ok --think-id ${T}0110 --parent $ID                            # --parent with a non -2 id
+q ${T}0111; try $ok --think-id ${T}0111 --add-dir owner
+q ${T}0112; try $ok --think-id ${T}0112 --add-dir "$RD"
+q ${T}0113; try $F2 --model fable --effort high --cwd "$(mktemp -d)" --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0113   # non-git cwd
+OTHER=$(mktemp -d); git -C "$OTHER" init -q; git -C "$OTHER" -c user.name=t -c user.email=t@x commit -q --allow-empty -m b; git -C "$OTHER" remote add origin https://github.com/org/elsewhere.git
+q ${T}0114; try $F2 --model fable --effort high --cwd $OTHER --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id ${T}0114          # foreign repo
+try $ok --think-id ${T}0115                                                     # question missing
+printf 'q\n' > "$RD/think/${T}0116.real.md"; ln -s "$RD/think/${T}0116.real.md" "$RD/think/${T}0116.question.md"; try $ok --think-id ${T}0116
+q ${T}0117; : > "$RD/think/${T}0199.launch.json"; rc=0; $CLI run-think $ok --think-id ${T}0117 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/${T}0117.launch.json" ]; rm "$RD/think/${T}0199.launch.json"   # corrupt SIBLING launch record -> 4 (own id would hit the exists check, exit 2)
+q ${T}0118; : > "$RD/think/${T}0118.answer.json"; try $ok --think-id ${T}0118; rm "$RD/think/${T}0118.answer.json"
+[ ! -s "$FAKE_CLAUDE_LOG.argv" ]                                                # none of the refusals launched
+for f in "$RD"/think/${T}01*.launch.json; do [ -e "$f" ] && { echo "unexpected $f" >&2; exit 1; }; done; true
+SH
+
+check "run-think limits: live sibling, lost sibling ignored, daily ceiling with reservation, retry rules, concurrency" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo3.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo3.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+export PATH="$FAKE_CLAUDE_DIR:$PATH" FAKE_CLAUDE_LOG="$RD/log" FAKE_CLAUDE_JSON="$RD/res.json"
+q() { printf 'q\n' > "$RD/think/$1.question.md"; }
+L() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"repo_slug":"%s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":null,"started":"%s","pid":1}' "$1" "$2" "$SLUG" "$3" > "$RD/think/$1.launch.json"; }
+A() { printf '{"v":1,"think_id":"%s","status":"%s","reason":%s,"answer":%s,"total_cost_usd":%s,"num_turns":%s,"started":"%s"}' "$1" "$2" "$3" "$4" "$5" "$6" "$7" > "$RD/think/$1.answer.json"; }
+GOOD='{"recommendation":"do A","rationale":"because","options":[{"label":"A","summary":"s","tradeoffs":"t","risk":"low"},{"label":"B","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}'
+ok="--repo-slug $SLUG --session S --fence $FE --kind other --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ); TODAY=$(date -u +%Y-%m-%d)
+# live sibling -> 4, nothing written
+L think-triage-20260904170000 triage "$NOW"; q think-other-20260904170100
+rc=0; $CLI run-think $ok --think-id think-other-20260904170100 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/think-other-20260904170100.launch.json" ]
+# lost sibling (older than 60+120s) ignored -> proceeds
+L think-triage-20260904170000 triage "2020-01-01T00:00:00Z"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.5,"structured_output":%s}' "$GOOD" > "$FAKE_CLAUDE_JSON"
+$CLI run-think $ok --think-id think-other-20260904170100 && [ -e "$RD/think/think-other-20260904170100.answer.json" ]
+rm "$RD"/think/think-*
+# daily ceiling: 2 answered at 3.0 + 1 null-cost unanswered reserved at 3.0 = 9.0; +3.0 > 10.0 -> 4; then a 1.0 cap fits
+for n in 1 2 3; do L think-other-2026090410000$n other "${TODAY}T10:00:0${n}Z"; done
+for n in 1 2; do A think-other-2026090410000$n answered null "$GOOD" 3.0 1 "${TODAY}T10:00:0${n}Z"; done
+A think-other-20260904100003 unanswered '"error"' null null null "${TODAY}T10:00:03Z"
+q think-other-20260904170200
+rc=0; $CLI run-think $ok --think-id think-other-20260904170200 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 4 ] && [ ! -e "$RD/think/think-other-20260904170200.launch.json" ]
+$CLI run-think --repo-slug $SLUG --session S --fence $FE --kind other --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 1.0 --timeout-secs 60 --think-id think-other-20260904170200
+rm "$RD"/think/think-*
+# retry rules
+P=think-triage-20260904190000; q $P; q $P-2
+L $P triage "2020-01-01T00:00:00Z"
+PA() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"model":"fable","status":"%s","reason":%s,"answer":%s,"model_attributable":%s,"total_cost_usd":%s,"num_turns":1,"started":"2020-01-01T00:00:00Z"}' "$P" "$1" "${5:-unanswered}" "${6:-\"error\"}" "${7:-null}" "$2" "$3" > "$RD/think/$P.answer.json"; }
+R2="--repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P"
+t2() { rc=0; $CLI run-think "$@" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq "$EXP" ] || { echo "expected $EXP got $rc for: $*" >&2; exit 1; }; [ ! -e "$RD/think/$P-2.launch.json" ]; }
+PA triage false 1.0;  EXP=2 t2 $R2                                                          # parent not model-attributable
+PA triage true 1.0 x answered null "$GOOD"; EXP=2 t2 $R2                                    # answered parent cannot be retried
+PA triage true 1.0;   mv "$RD/think/$P.launch.json" "$RD/think/$P.launch.bak"; EXP=2 t2 $R2; mv "$RD/think/$P.launch.bak" "$RD/think/$P.launch.json"   # orphan parent answer (no launch)
+PA triage true 1.0;   EXP=2 t2 --repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 9.0 --timeout-secs 60 --think-id $P-2 --parent $P   # inflated retry cap
+PA triage true 1.0;   EXP=2 t2 --repo-slug $SLUG --session S --fence $FE --kind triage --model fable --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P   # same model
+PA incident true 1.0; EXP=2 t2 $R2                                                          # parent kind differs
+PA triage true 1.0;   printf 'different\n' > "$RD/think/$P-2.question.md"; EXP=2 t2 $R2; q $P-2
+PA triage true null;  EXP=4 t2 $R2                                                          # null parent cost
+PA triage true 2.9;   EXP=4 t2 $R2                                                          # remainder below 0.25
+PA triage true 1.0
+printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":2.0}' > "$FAKE_CLAUDE_JSON"
+$CLI run-think $R2
+grep -qx -- '2.0' "$FAKE_CLAUDE_LOG.argv"
+python3 -c "import json;l=json.load(open('$RD/think/$P-2.launch.json'));a=json.load(open('$RD/think/$P-2.answer.json'));assert l['attempt']==2 and l['parent']=='$P' and l['caps']['max_budget_usd']==2.0 and a['reason']=='max_budget' and a['parent']=='$P',(l,a)"
+rm "$RD"/think/think-*
+# concurrency: two distinct ids racing -> exactly one launch record and one exit 4
+IDA=think-other-20260904170400; IDB=think-other-20260904170500; q $IDA; q $IDB
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.1}' > "$FAKE_CLAUDE_JSON"
+FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logA" $CLI run-think $ok --think-id $IDA >/dev/null 2>&1 & PA_=$!
+FAKE_CLAUDE_SLEEP=2 FAKE_CLAUDE_LOG="$RD/logB" $CLI run-think $ok --think-id $IDB >/dev/null 2>&1 & PB_=$!
+ra=0; wait $PA_ || ra=$?; rb=0; wait $PB_ || rb=$?
+[ $((ra + rb)) -eq 4 ] && [ "$(ls "$RD/think/" | grep -c -E "($IDA|$IDB)\.launch\.json")" -eq 1 ]
+SH
+
+check "run-think retry: parent launch record missing task_id key does not crash" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$WT" remote add origin https://github.com/org/repo-taskidkey.git
+SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo-taskidkey.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/think"
+FE=$($CLI claim-owner --repo-slug $SLUG --session S --host h --pid 1)
+P=think-triage-20260904190500
+printf 'q\n' > "$RD/think/$P.question.md"
+printf 'q\n' > "$RD/think/$P-2.question.md"
+# launch record with the task_id key entirely omitted (not an explicit null) -- still
+# passes valid_launch_record, must not crash the retry cross-check with a bare KeyError
+printf '{"v":1,"think_id":"%s","kind":"triage","repo_slug":"%s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":900},"attempt":1,"parent":null,"started":"2020-01-01T00:00:00Z","pid":1}' "$P" "$SLUG" > "$RD/think/$P.launch.json"
+printf '{"v":1,"think_id":"%s","kind":"triage","task_id":null,"model":"fable","status":"unanswered","reason":"error","answer":null,"model_attributable":true,"total_cost_usd":1.0,"num_turns":1,"started":"2020-01-01T00:00:00Z"}' "$P" > "$RD/think/$P.answer.json"
+# matching (no --task-id passed, so ns.task_id is None -> equals the missing key's .get() default) -> succeeds cleanly, no traceback
+rc=0; out=$($CLI run-think --repo-slug $SLUG --session S --fence $FE --kind triage --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P 2>&1) || rc=$?
+[ "$rc" -eq 0 ] || { echo "expected 0 got $rc: $out" >&2; exit 1; }
+! printf '%s' "$out" | grep -q Traceback
+rm "$RD/think/$P-2.launch.json" "$RD/think/$P-2.answer.json"
+# mismatched --task-id against the missing-key parent -> exit 2, no traceback, no files written
+rc=0; out=$($CLI run-think --repo-slug $SLUG --session S --fence $FE --kind triage --task-id PROJ-99 --model opus --effort high --cwd $WT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 60 --think-id $P-2 --parent $P 2>&1) || rc=$?
+[ "$rc" -eq 2 ] || { echo "expected 2 got $rc: $out" >&2; exit 1; }
+! printf '%s' "$out" | grep -q Traceback
+[ ! -e "$RD/think/$P-2.launch.json" ] && [ ! -e "$RD/think/$P-2.answer.json" ]
+SH
+
+check "status: _think fold, legacy workers effort unknown, watch includes think files" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-st --session S --host h --pid 1)
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-st"; mkdir -p "$RD/think"
+TODAY=$(date -u +%Y-%m-%d)
+L() { printf '{"v":1,"think_id":"%s","kind":"%s","task_id":null,"repo_slug":"slug-st","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":%s},"attempt":1,"parent":null,"started":"%s","pid":1}' "$1" "$2" "$3" "$4" > "$RD/think/$1.launch.json"; }
+GOOD='{"recommendation":"r","rationale":"w","options":[{"label":"a","summary":"s","tradeoffs":"t","risk":"low"},{"label":"b","summary":"s","tradeoffs":"t","risk":"low"}],"confidence":"high"}'
+A() { if [ "$2" = answered ]; then R=null; AN="$GOOD"; else R='"error"'; AN=null; fi; printf '{"v":1,"think_id":"%s","status":"%s","reason":%s,"answer":%s,"total_cost_usd":%s,"num_turns":%s,"started":"%s"}' "$1" "$2" "$R" "$AN" "$3" "$4" "$5" > "$RD/think/$1.answer.json"; }
+L think-triage-20260904100000 triage 900 "${TODAY}T10:00:00Z"; A think-triage-20260904100000 answered 1.12 6 "${TODAY}T10:00:00Z"
+L think-other-20260904110000 other 900 "${TODAY}T11:00:00Z";  A think-other-20260904110000 answered 0.40 3 "${TODAY}T11:00:00Z"
+L think-incident-20260904120000 incident 900 "${TODAY}T12:00:00Z"; A think-incident-20260904120000 unanswered null null "${TODAY}T12:00:00Z"
+L think-decompose-20260904125900 decompose 900 "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+L think-incident-20260903120000 incident 600 "2026-09-03T12:00:00Z"
+printf '{"v":1,"trunc' > "$RD/think/think-other-20260904130000.answer.json"
+printf '{"v":2,"think_id":"think-other-20260904140000"}' > "$RD/think/think-other-20260904140000.answer.json"
+$CLI write-task --repo-slug slug-st --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"in-progress","workers":[{"role":"impl","phase":"plan","model":"fable"},{"role":"impl","phase":"implement","model":"sonnet","effort":null},{"role":"review","model":"opus","effort":"high"}]}'
+$CLI status --repo-slug slug-st | python3 -c "
+import json,sys;s=json.load(sys.stdin);t=s['_think']
+assert t=={'launches':5,'answered':2,'unanswered':1,'usd':1.52,'turns':9,'usd_today':7.52,'live':['think-decompose-20260904125900'],'lost':['think-incident-20260903120000'],'skipped_files':2,'corrupt':[]},t   # usd = actual spend; usd_today = committed (reserved) spend
+assert s['PROJ-1']['workers_effort']==['unknown','inherit','high'],s['PROJ-1']"
+rm -r "$RD/think"
+$CLI status --repo-slug slug-st | python3 -c "import json,sys;t=json.load(sys.stdin)['_think'];assert t=={'launches':0,'answered':0,'unanswered':0,'usd':0.0,'turns':0,'usd_today':0.0,'live':[],'lost':[],'skipped_files':0,'corrupt':[]},t"
+python3 - "$RD" <<'PY'
+import importlib.util,sys,os,json
+s=importlib.util.spec_from_file_location("c","claude/hooks/herdr_orch_core.py");c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+rd=sys.argv[1]; os.makedirs(os.path.join(rd,"think"),exist_ok=True)
+assert "think" in c.WATCH_DIRS
+snap0,_=c.watch_scan(rd,{})
+open(os.path.join(rd,"think","think-triage-20260904150000.question.md"),"w").write("q")
+snap0b,_=c.watch_scan(rd,snap0)
+assert not c.watch_changed(snap0, snap0b)
+open(os.path.join(rd,"think","think-triage-20260904150000.launch.json"),"w").write("{}")
+snap1,_=c.watch_scan(rd,snap0); assert c.watch_changed(snap0,snap1)
+open(os.path.join(rd,"think","think-triage-20260904150000.answer.json"),"w").write("{}")
+snap2,_=c.watch_scan(rd,snap1)
+assert c.watch_changed(snap1, snap2)
+PY
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
