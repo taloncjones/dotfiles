@@ -24,12 +24,23 @@ AGENT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 REPO_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 TASK_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
-CAP_MODELS = ("fable", "opus", "sonnet")
+CAP_MODELS = ("fable", "opus", "sonnet", "haiku")
 
 ROLE_DEFAULTS = {
     "plan": ("fable", "opus"),
     "impl": ("sonnet", "opus"),
     "review": ("opus", "sonnet"),
+    "mech": ("haiku", "sonnet"),
+}
+
+# Aliases a role's config override may name. haiku is mech-only: the cheap
+# tier is human-designated per task, never a silent option for design,
+# implementation, or review.
+ROLE_ALIASES = {
+    "plan": ("fable", "opus", "sonnet"),
+    "impl": ("fable", "opus", "sonnet"),
+    "review": ("fable", "opus", "sonnet"),
+    "mech": CAP_MODELS,
 }
 
 # A 429 whose message names usage/credit exhaustion is reliable "this model is
@@ -159,9 +170,10 @@ def role_preference(role, config):
             # (which would mislabel it as an availability failure, exit 4).
             if not isinstance(override, list) or not override:
                 return None
+            allowed = ROLE_ALIASES[role]
             seen = []
             for m in override:
-                if m not in CAP_MODELS:
+                if m not in allowed:
                     return None
                 if m not in seen:
                     seen.append(m)
@@ -181,6 +193,87 @@ def resolve_model(role, available, config):
     if not survivors:
         return (None, 4)
     return (survivors[0], None)
+
+
+MECH_DEFAULTS = {"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
+MECH_BOUNDS = {"max_turns": (1, 500), "max_budget_usd": (0, 50), "timeout_secs": (60, 14400)}
+MECH_KEYS = frozenset(MECH_DEFAULTS) | {"contract_commands"}
+
+MECH_REASONS = ("max_turns", "max_budget", "timeout", "no_emit", "error",
+                "needs_design", "blocked_on_human", "other")
+
+SHELL_SAFE_RE = re.compile(r"[A-Za-z0-9_./+:@-]+\Z")
+SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
+_CAP_SUBTYPES = {"error_max_turns": "max_turns", "error_max_budget_usd": "max_budget"}
+_ERRORS_MAX, _ERROR_LEN = 5, 500
+
+
+def _cap_error(key, value):
+    """Error message when a cap value is out of bounds or mistyped, else None."""
+    lo, hi = MECH_BOUNDS[key]
+    if isinstance(value, bool):
+        return f"{key} must be a number, not a boolean"
+    if key == "max_budget_usd":
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            return f"{key} must be a finite number"
+        if not (lo < value <= hi):
+            return f"{key} must be > {lo} and <= {hi}"
+        return None
+    if not isinstance(value, int) or not (lo <= value <= hi):
+        return f"{key} must be an int in [{lo}, {hi}]"
+    return None
+
+
+def mech_caps(config, max_turns=None, max_budget_usd=None):
+    """Effective mech caps: defaults <- config.mech <- per-launch overrides.
+    (caps, None) or (None, message). Fail closed on any malformed value or
+    unknown key, matching the `models` rule -- never silently default."""
+    block = (config or {}).get("mech")
+    caps = dict(MECH_DEFAULTS)
+    if block is not None:
+        if not isinstance(block, dict):
+            return None, "mech must be a JSON object"
+        unknown = set(block) - MECH_KEYS
+        if unknown:
+            return None, f"mech has unknown keys: {sorted(unknown)}"
+        for k in MECH_BOUNDS:
+            if k in block:
+                caps[k] = block[k]
+        if "contract_commands" in block:
+            err = validate_contract(
+                {"v": 1, "task_id": "x", "commands": block["contract_commands"]}, "x"
+            )
+            if err:
+                return None, f"mech.contract_commands: {err}"
+    if max_turns is not None:
+        caps["max_turns"] = max_turns
+    if max_budget_usd is not None:
+        caps["max_budget_usd"] = max_budget_usd
+    for k in MECH_BOUNDS:
+        err = _cap_error(k, caps[k])
+        if err:
+            return None, err
+    return caps, None
+
+
+def mech_contract(config, task_id):
+    """Contract dict generated from config.mech.contract_commands, or None
+    when the template is absent. Caller validates config via mech_caps first."""
+    block = (config or {}).get("mech") or {}
+    cmds = block.get("contract_commands") if isinstance(block, dict) else None
+    if not cmds:
+        return None
+    return {"v": 1, "task_id": task_id, "commands": json.loads(json.dumps(cmds))}
+
+
+def _git(worktree, *args):
+    """stdout of a git command in the worktree, or None on any failure."""
+    try:
+        cp = subprocess.run(["git", "-C", worktree, *args], capture_output=True,
+                            text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return cp.stdout.strip() if cp.returncode == 0 else None
 
 
 def _usage_exhausted(result) -> bool:
@@ -565,8 +658,262 @@ def fold_status(events):
     return {"authoritative": authoritative, "last_hint": last_hint}
 
 
+SPEND_KEYS = ("usd", "turns", "launches", "unknown_cost_launches", "skipped_lines")
+
+
+def spend_path(rd, task_id) -> Path:
+    return Path(rd) / "tasks" / f"{task_id}.spend.jsonl"
+
+
+def append_spend(rd, task_id, rec) -> None:
+    """Append one ledger line. Raises OSError on failure (caller maps it)."""
+    p = spend_path(rd, task_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+        f.flush()
+
+
+def valid_mech_agent(agent, task_id) -> bool:
+    """agent is the canonical agent_name("mech", task_id) or one of its
+    collision variants -2..-9 (same truncation rule as agent_name)."""
+    base = agent_name("mech", task_id)
+    if agent == base:
+        return True
+    for n in range(2, 10):
+        suffix = f"-{n}"
+        if agent == base[: 32 - len(suffix)] + suffix:
+            return True
+    return False
+
+
+def parse_claude_result(stdout: str):
+    """The single result object from `claude -p --output-format json`, or
+    None. Tolerates leading noise by scanning lines from the end."""
+    for candidate in [stdout] + list(reversed(stdout.splitlines())):
+        try:
+            obj = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            return obj
+    return None
+
+
+def models_used(result) -> list:
+    mu = (result or {}).get("modelUsage")
+    return sorted(mu.keys()) if isinstance(mu, dict) else []
+
+
+def is_downgrade(models: list, alias: str) -> bool:
+    """True when the CLI reports models and none belong to the requested
+    alias family (alias is a substring of every model id in its family)."""
+    return bool(models) and not any(alias in m for m in models)
+
+
+def result_errors(result) -> list:
+    """The result's errors[] as a bounded list of strings (non-strings dropped,
+    each clipped, at most _ERRORS_MAX) -- persisted so the orchestrator can
+    judge model-attributability without the transcript."""
+    errs = (result or {}).get("errors")
+    if not isinstance(errs, list):
+        return []
+    return [e[:_ERROR_LEN] for e in errs if isinstance(e, str)][:_ERRORS_MAX]
+
+
+def model_attributable(subtype, downgrade, errors, alias) -> bool:
+    """Spec s4 within-role fallback trigger: a downgrade, or an execution
+    error whose text names the alias or 'model'."""
+    if downgrade:
+        return True
+    if subtype != "error_during_execution":
+        return False
+    text = " ".join(errors).lower()
+    return alias in text or "model" in text
+
+
+def own_launch_record(done, workspace, agent, launch_id, start_ts) -> bool:
+    if not isinstance(done, dict):
+        return False
+    if done.get("workspace_id") != workspace or done.get("agent") != agent:
+        return False
+    if "launch_id" in done:
+        return done.get("launch_id") == launch_id
+    ts = done.get("ts")
+    return isinstance(ts, str) and ts >= start_ts
+
+
+def wrapper_outcome(subtype, head_sha, base_sha, dirty):
+    """(outcome, reason) for a launch whose worker left no record."""
+    if subtype in _CAP_SUBTYPES:
+        return "paused", _CAP_SUBTYPES[subtype]
+    if subtype == "timeout":
+        return "paused", "timeout"
+    if subtype == "success":
+        return "paused", "no_emit"
+    usable = head_sha is not None and head_sha != base_sha and not dirty
+    return ("paused" if usable else "failed"), "error"
+
+
+def run_mech(rd, a, brief, timeout_secs) -> int:
+    """Launch a headless capped worker; write start/end ledger lines and a
+    guaranteed completion record. Exit 0 all writes ok; 2 nothing written;
+    3 a post-start step failed (git lookup, record write, or end line)."""
+    start_ts = now_iso()
+    caps = {"max_turns": a.max_turns, "max_budget_usd": a.max_budget_usd,
+            "timeout_secs": a.timeout_secs}
+    base = {"v": 1, "task_id": a.task_id, "workspace_id": a.workspace,
+            "agent": a.agent, "launch_id": a.launch_id}
+    try:
+        append_spend(rd, a.task_id, dict(base, kind="start", role="mech",
+                                         model=a.model, ts=start_ts, **caps))
+    except OSError:
+        sys.stderr.write("[X] cannot append the spend ledger\n")
+        return 2
+    argv = ["claude", "--model", a.model, "--permission-mode", "auto",
+            "--name", a.agent, "-p", "--output-format", "json",
+            "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
+    subtype, result, exit_code, stdout = "unparseable", None, None, ""
+    try:
+        proc = subprocess.Popen(argv, cwd=a.worktree, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+    except OSError as e:
+        sys.stderr.write(f"[X] cannot launch claude: {e}\n")
+    else:
+        try:
+            stdout, _err = proc.communicate(brief, timeout=timeout_secs)
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.wait()
+            subtype, exit_code = "timeout", proc.returncode
+    if subtype != "timeout":
+        result = parse_claude_result(stdout)
+        if result is not None:
+            subtype = str(result.get("subtype") or "unparseable")
+    used = models_used(result)
+    errors = result_errors(result)
+    downgrade = is_downgrade(used, a.model)
+    head = _git(a.worktree, "rev-parse", "HEAD")
+    porcelain = _git(a.worktree, "status", "--porcelain")
+    git_ok = head is not None and porcelain is not None
+    dirty = not git_ok or porcelain != ""
+    done_path = rd / "tasks" / f"{a.task_id}.done.json"
+    try:
+        existing = json.loads(done_path.read_text())
+    except (OSError, ValueError):
+        existing = None
+    rc = 0
+    written_by = "worker"
+    if not own_launch_record(existing, a.workspace, a.agent, a.launch_id, start_ts):
+        if not git_ok:
+            # No trustworthy HEAD: never fabricate a completion record.
+            sys.stderr.write("[X] git unavailable in the worktree; no completion record\n")
+            written_by, rc = "none", 3
+        else:
+            outcome, reason = wrapper_outcome(subtype, head, a.base_sha, dirty)
+            done = {"v": 1, "task_id": a.task_id, "workspace_id": a.workspace,
+                    "agent": a.agent, "phase": "implement", "outcome": outcome,
+                    "head_sha": head, "base_sha": a.base_sha,
+                    "launch_id": a.launch_id, "reason": reason, "dirty": dirty,
+                    "ts": now_iso()}
+            try:
+                write_json_atomic(done_path, done)
+                written_by = "wrapper"
+            except OSError:
+                sys.stderr.write("[X] cannot write the completion record\n")
+                written_by, rc = "none", 3
+
+    def _num(k, integer=False):
+        v = (result or {}).get(k)
+        return v if _finite_nonneg(v, integer) else None
+
+    end = dict(base, kind="end", subtype=subtype,
+               is_error=bool((result or {}).get("is_error", subtype != "success")),
+               num_turns=_num("num_turns", True), total_cost_usd=_num("total_cost_usd"),
+               duration_ms=_num("duration_ms", True), models_used=used,
+               downgrade=downgrade, errors=errors,
+               model_attributable=model_attributable(subtype, downgrade, errors, a.model),
+               record_written_by=written_by, git_ok=git_ok, exit_code=exit_code,
+               session_id=(result or {}).get("session_id"), ts=now_iso())
+    try:
+        append_spend(rd, a.task_id, end)
+    except OSError:
+        sys.stderr.write("[X] cannot append the spend ledger end line\n")
+        rc = 3
+    return rc
+
+
+def _finite_nonneg(x, integer=False) -> bool:
+    """None passes (absent/unknown); bools never; ints/floats must be finite
+    and >= 0; integer=True additionally requires an int."""
+    if x is None:
+        return True
+    if isinstance(x, bool):
+        return False
+    if integer:
+        return isinstance(x, int) and x >= 0
+    return isinstance(x, (int, float)) and math.isfinite(x) and x >= 0
+
+
+def valid_spend_line(rec, task_id) -> bool:
+    if not isinstance(rec, dict):
+        return False
+    v = rec.get("v")
+    if not isinstance(v, int) or isinstance(v, bool) or v != 1:
+        return False
+    if rec.get("kind") not in ("start", "end"):
+        return False
+    if rec.get("task_id") != task_id or not _nonempty_str(rec.get("launch_id")):
+        return False
+    if rec["kind"] == "end":
+        if "num_turns" not in rec or "total_cost_usd" not in rec:
+            return False
+        if not _finite_nonneg(rec.get("num_turns"), integer=True):
+            return False
+        if not _finite_nonneg(rec.get("total_cost_usd")):
+            return False
+    return True
+
+
+def fold_spend(lines, task_id):
+    """Sum a task's ledger. Malformed/foreign lines are skipped and counted,
+    never fatal -- same posture as parse_events."""
+    out = {k: 0 for k in SPEND_KEYS}
+    out["usd"] = 0.0
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            out["skipped_lines"] += 1
+            continue
+        if not valid_spend_line(rec, task_id):
+            out["skipped_lines"] += 1
+            continue
+        if rec["kind"] == "start":
+            out["launches"] += 1
+            continue
+        cost = rec.get("total_cost_usd")
+        if cost is None:
+            out["unknown_cost_launches"] += 1
+        else:
+            out["usd"] += cost
+        if rec.get("num_turns") is not None:
+            out["turns"] += rec["num_turns"]
+    out["usd"] = round(out["usd"], 4)
+    return out
+
+
 WATCH_DIRS = {
-    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id)),
+    "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
+              (".spend.jsonl", valid_task_id)),
     "workspaces": ((".events.jsonl", valid_workspace_id),),
 }
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
@@ -896,8 +1243,17 @@ def main(argv=None) -> int:
     add("write-capabilities", "--json", fenced=True)
     add("resolve-model", "--role", "--session")
     add("disable-model", "--model", fenced=True)
+    mc = add("mech-caps")
+    mc.add_argument("--max-turns", type=int, default=None)
+    mc.add_argument("--max-budget-usd", type=float, default=None)
+    add("mech-contract", "--task-id", "--worktree", "--base-sha")
+    rm = add("run-mech", "--task-id", "--workspace", "--agent", "--launch-id",
+             "--model", "--worktree", "--base-sha", "--brief-file")
+    rm.add_argument("--max-turns", type=int, required=True)
+    rm.add_argument("--max-budget-usd", type=float, required=True)
+    rm.add_argument("--timeout-secs", type=int, required=True)
     add("classify-probe", "--model", "--json")
-    add(
+    ed = add(
         "emit-done",
         "--task-id",
         "--workspace",
@@ -907,6 +1263,8 @@ def main(argv=None) -> int:
         "--head-sha",
         "--base-sha",
     )
+    ed.add_argument("--launch-id", default=None)
+    ed.add_argument("--reason", default=None)
     er = add(
         "emit-review",
         "--task-id",
@@ -993,7 +1351,7 @@ def main(argv=None) -> int:
         _require(
             valid_capabilities(rec, ns.session),
             "capabilities json must be {v:1, session_id==--session, "
-            "available:{fable,opus,sonnet all bool}}",
+            "available:{fable,opus,sonnet,haiku all bool}}",
         )
         Path(rd).mkdir(parents=True, exist_ok=True)
         write_json_atomic(rd / "capabilities.json", rec)
@@ -1016,7 +1374,7 @@ def main(argv=None) -> int:
         return 0
     if ns.cmd == "disable-model":
         rd = _fenced(ns)
-        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet")
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
         available = read_capabilities(rd, ns.session)
         _require(available is not None, "capabilities map absent or stale")
         rec = {"v": 1, "session_id": ns.session, "available": dict(available)}
@@ -1024,7 +1382,7 @@ def main(argv=None) -> int:
         write_json_atomic(rd / "capabilities.json", rec)
         return 0
     if ns.cmd == "classify-probe":
-        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet")
+        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
         try:
             result = json.loads(ns.json)
         except ValueError:
@@ -1049,6 +1407,12 @@ def main(argv=None) -> int:
                 "base_sha": ns.base_sha,
                 "ts": now_iso(),
             }
+            if ns.launch_id:
+                done["launch_id"] = ns.launch_id
+            if ns.reason is not None:
+                _require(ns.reason in MECH_REASONS,
+                         f"reason must be one of {'|'.join(MECH_REASONS)}")
+                done["reason"] = ns.reason
             out = rd / "tasks" / f"{ns.task_id}.done.json"
         else:
             done = {
@@ -1088,20 +1452,49 @@ def main(argv=None) -> int:
         for tid in by_task:
             by_task[tid].sort(key=lambda r: (r.get("ts", ""), r.get("event", "")))
         result = {}
+        totals = {k: 0 for k in SPEND_KEYS}
+        totals["usd"] = 0.0
+        untracked = 0
+        primary = set()
         for tf in sorted((rd / "tasks").glob("*.json")):
-            # Only the primary <task_id>.json record; the .done.json/.review.json
-            # sidecars sort after it and would otherwise overwrite the entry.
             if tf.name.endswith((".done.json", ".review.json")):
                 continue
             try:
                 task = json.loads(tf.read_text())
             except ValueError:
                 continue
+            if not isinstance(task, dict):
+                continue
             tid = task.get("task_id")
+            primary.add(tf.name[: -len(".json")])
+            sp = spend_path(rd, tid) if isinstance(tid, str) else None
+            try:
+                lines = sp.read_text().splitlines() if sp and sp.is_file() else []
+            except OSError:
+                lines = []
+            spend = fold_spend(lines, tid)
+            for k in SPEND_KEYS:
+                totals[k] += spend[k]
+            workers = task.get("workers")
+            if isinstance(workers, list):
+                untracked += sum(
+                    1 for w in workers if isinstance(w, dict) and w.get("role") != "mech"
+                )
             result[tid] = {
                 "status": task.get("status"),
                 "fold": fold_status(by_task.get(tid, [])),
+                "spend": spend,
             }
+        totals["usd"] = round(totals["usd"], 4)
+        totals["untracked_launches"] = untracked
+        orphans = set()
+        for suffix in (".spend.jsonl", ".done.json"):
+            for f in (rd / "tasks").glob(f"*{suffix}"):
+                tid = f.name[: -len(suffix)]
+                if valid_task_id(tid) and tid not in primary:
+                    orphans.add(tid)
+        result["_totals"] = totals
+        result["_orphans"] = sorted(orphans)
         print(json.dumps(result))
         return 0
     if ns.cmd == "should-dispatch-review":
@@ -1243,6 +1636,74 @@ def main(argv=None) -> int:
             print(actual_sha)
             return 0
         return run_contract_commands(rec["commands"], str(wt))
+    if ns.cmd == "mech-caps":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        caps, err = mech_caps(read_config(repo_dir(ns.repo_slug)),
+                              ns.max_turns, ns.max_budget_usd)
+        if err:
+            sys.stderr.write(f"[X] {err}\n")
+            return 5
+        print(json.dumps(caps))
+        return 0
+    if ns.cmd == "mech-contract":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        wt = Path(ns.worktree)
+        _require(wt.is_dir(), "worktree must be an existing directory")
+        head = _git(str(wt), "rev-parse", "HEAD")
+        _require(head is not None, "worktree must be a git checkout")
+        _require(head == ns.base_sha, "worktree HEAD != --base-sha (adopted branch diverged)")
+        _require(_git(str(wt), "status", "--porcelain") == "", "worktree must be clean")
+        cfg = read_config(repo_dir(ns.repo_slug))
+        _, err = mech_caps(cfg)
+        if err:
+            sys.stderr.write(f"[X] {err}\n")
+            return 5
+        rec = mech_contract(cfg, ns.task_id)
+        if rec is None:
+            sys.stderr.write("[X] config has no mech.contract_commands\n")
+            return 5
+        rel = f"claude/contracts/{ns.task_id}-contract.json"
+        out = wt / rel
+        _require(contained(out, wt), "contract path escapes the worktree")
+        _require(not out.exists(), "contract already exists; use it or remove it deliberately")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(rec, indent=2) + "\n")
+        print(rel)
+        return 0
+    if ns.cmd == "run-mech":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(valid_workspace_id(ns.workspace), "invalid workspace")
+        for name in ("repo_slug", "task_id", "workspace", "agent", "launch_id",
+                     "model", "worktree", "base_sha", "brief_file"):
+            _require(SHELL_SAFE_RE.match(str(getattr(ns, name))),
+                     f"--{name.replace('_', '-')} contains whitespace or a shell metacharacter")
+        _require(valid_mech_agent(ns.agent, ns.task_id),
+                 "agent must be agent_name('mech', task_id) or a -2..-9 collision variant")
+        _require(ns.launch_id.startswith(ns.agent + "-"), "launch-id must be prefixed by the agent name")
+        _require(ns.model in CAP_MODELS, "model must be a known alias")
+        _require(SHA40_RE.match(ns.base_sha), "base-sha must be 40 hex")
+        for k in ("max_turns", "max_budget_usd", "timeout_secs"):
+            err = _cap_error(k, getattr(ns, k))
+            _require(err is None, err or "")
+        bf = Path(ns.brief_file)
+        _require(bf.is_file() and not bf.is_symlink() and contained(bf, state_root()),
+                 "brief-file must be a regular file under STATE_ROOT")
+        try:
+            brief = bf.read_text()
+        except (OSError, UnicodeDecodeError):
+            brief = None
+        _require(brief is not None, "brief-file is not readable as text")
+        wt = Path(ns.worktree)
+        _require(wt.is_dir() and _git(str(wt), "rev-parse", "--git-dir") is not None,
+                 "worktree must be an existing git checkout")
+        rd = repo_dir(ns.repo_slug)
+        try:
+            (rd / "tasks").mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # run_mech's first append reports the unwritable ledger as exit 2
+        return run_mech(rd, ns, brief, ns.timeout_secs)
     return 2
 
 

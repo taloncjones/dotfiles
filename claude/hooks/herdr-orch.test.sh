@@ -27,6 +27,26 @@ LOAD='import importlib.util,sys,os,tempfile,json,re
 spec=importlib.util.spec_from_file_location("core","claude/hooks/herdr_orch_core.py")
 c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)'
 
+# Fake claude for run-mech checks, built once and reached via exported
+# FAKE_CLAUDE_DIR (shell functions do not survive into `sh -e -` snippets).
+# It records argv/cwd/stdin/pid under $FAKE_CLAUDE_LOG.*, runs the shell
+# snippet in $FAKE_CLAUDE_HOOK (e.g. a simulated worker emit-done), sleeps
+# $FAKE_CLAUDE_SLEEP secs, prints the JSON file $FAKE_CLAUDE_JSON, exits
+# $FAKE_CLAUDE_RC (default 0).
+FAKE_CLAUDE_DIR=$(mktemp -d); export FAKE_CLAUDE_DIR
+cat > "$FAKE_CLAUDE_DIR/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_CLAUDE_LOG.argv"
+pwd > "$FAKE_CLAUDE_LOG.cwd"
+cat > "$FAKE_CLAUDE_LOG.stdin"
+echo $$ > "$FAKE_CLAUDE_LOG.pid"
+[ -n "$FAKE_CLAUDE_HOOK" ] && sh -c "$FAKE_CLAUDE_HOOK"
+sleep "${FAKE_CLAUDE_SLEEP:-0}"
+[ -n "$FAKE_CLAUDE_JSON" ] && cat "$FAKE_CLAUDE_JSON"
+exit "${FAKE_CLAUDE_RC:-0}"
+EOF
+chmod +x "$FAKE_CLAUDE_DIR/claude"
+
 check "repo_slug deterministic + hashed + valid" <<PY
 $LOAD
 a=c.repo_slug("git@github.com:org/repo.git")
@@ -363,7 +383,7 @@ $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
 $CLI emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h1 --outcome approved
 # the sidecar sorts after PROJ-1.json; status must still report the real status
-$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1'] and s['PROJ-1']['status']=='reviewed',s"
+$CLI status --repo-slug slug-x | python3 -c "import json,sys;s=json.load(sys.stdin);assert list(s)==['PROJ-1','_totals','_orphans'] and s['PROJ-1']['status']=='reviewed',s"
 SH
 
 check "CLI should-dispatch-review: once per HEAD, re-review on new HEAD" <<'SH'
@@ -428,13 +448,13 @@ hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"
 
 check "valid_capabilities strict: exact keys, int-not-bool v, session match" <<PY
 $LOAD
-ok={"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True}}
+ok={"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"haiku":True}}
 assert c.valid_capabilities(ok,"S")
 assert not c.valid_capabilities(ok,"OTHER")
-assert not c.valid_capabilities({"v":True,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True}},"S")
-assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"opus":True,"sonnet":True}},"S")
-assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"gpt":True}},"S")
-assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":0,"opus":True,"sonnet":True}},"S")
+assert not c.valid_capabilities({"v":True,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"haiku":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"opus":True,"sonnet":True,"haiku":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":False,"opus":True,"sonnet":True,"haiku":True,"gpt":True}},"S")
+assert not c.valid_capabilities({"v":1,"session_id":"S","available":{"fable":0,"opus":True,"sonnet":True,"haiku":True}},"S")
 assert not c.valid_capabilities({"v":1,"session_id":"S","available":[]},"S")
 assert not c.valid_capabilities([],"S")
 sys.exit(0)
@@ -445,13 +465,13 @@ CLI="python3 claude/hooks/herdr_orch_core.py"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
 test -f "$CLAUDE_CONFIG_DIR/herdr-orch/slug-x/capabilities.json"
 rc=0; $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"T","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null || rc=$?
+  --json '{"v":1,"session_id":"T","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}' 2>/dev/null || rc=$?
 test "$rc" != "0"
 rc=0; $CLI write-capabilities --repo-slug slug-x --session S --fence 999 \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null || rc=$?
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}' 2>/dev/null || rc=$?
 test "$rc" != "0"
 SH
 
@@ -493,10 +513,10 @@ F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 rc=0; out=$($CLI resolve-model --repo-slug slug-x --role plan --session S 2>/dev/null) || rc=$?
 test "$rc" = "3"; test -z "$out"
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
 m=$($CLI resolve-model --repo-slug slug-x --role plan --session S); test "$m" = "opus"
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":false,"sonnet":false}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":false,"sonnet":false,"haiku":false}}'
 rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session S >/dev/null 2>&1 || rc=$?; test "$rc" = "4"
 rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session OTHER >/dev/null 2>&1 || rc=$?; test "$rc" = "3"
 rc=0; $CLI resolve-model --repo-slug slug-x --role nope --session S >/dev/null 2>&1 || rc=$?; test "$rc" = "5"
@@ -509,18 +529,18 @@ CLI="python3 claude/hooks/herdr_orch_core.py"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
-  --json '{"v":1,"session_id":"S","available":{"fable":true,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"S","available":{"fable":true,"opus":true,"sonnet":true,"haiku":true}}'
 $CLI disable-model --repo-slug slug-x --session S --fence "$F" --model fable
 python3 - <<PY
 import json,os
 d=json.load(open(os.environ["CLAUDE_CONFIG_DIR"]+"/herdr-orch/slug-x/capabilities.json"))
-assert d["available"]=={"fable":False,"opus":True,"sonnet":True}, d
+assert d["available"]=={"fable":False,"opus":True,"sonnet":True,"haiku":True}, d
 PY
 $CLI disable-model --repo-slug slug-x --session S --fence "$F" --model sonnet
 python3 - <<PY
 import json,os
 d=json.load(open(os.environ["CLAUDE_CONFIG_DIR"]+"/herdr-orch/slug-x/capabilities.json"))
-assert d["available"]=={"fable":False,"opus":True,"sonnet":False}, d
+assert d["available"]=={"fable":False,"opus":True,"sonnet":False,"haiku":True}, d
 PY
 rc=0; $CLI disable-model --repo-slug slug-x --session S --fence "$F" --model gpt 2>/dev/null || rc=$?; test "$rc" != "0"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
@@ -1229,6 +1249,366 @@ $CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
 $CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
   --allow-unpinned 2>/dev/null; [ $? -eq 2 ] || exit 1   # --allow-unpinned needs --contract
 exit 0
+SH
+
+check "mech role: haiku-first defaults, haiku only legal in mech, 4-alias capabilities" <<PY
+$LOAD
+assert c.CAP_MODELS==("fable","opus","sonnet","haiku")
+assert c.role_preference("mech",{})==("haiku","sonnet")
+assert c.role_preference("mech",{"models":{"mech":["sonnet","haiku"]}})==("sonnet","haiku")
+for r in ("plan","impl","review"):
+    assert c.role_preference(r,{"models":{r:["haiku"]}}) is None, r
+assert c.role_preference("plan",{"models":{"mech":["haiku"]}})==("fable","opus")  # sibling override does not taint
+ok3={"v":1,"session_id":"S","available":{"fable":True,"opus":True,"sonnet":True}}
+assert not c.valid_capabilities(ok3,"S")                      # old 3-alias map is stale
+ok4=dict(ok3,available=dict(ok3["available"],haiku=True))
+assert c.valid_capabilities(ok4,"S")
+assert c.resolve_model("mech",{"fable":False,"opus":True,"sonnet":True,"haiku":True},{})==("haiku",None)
+assert c.resolve_model("mech",{"fable":False,"opus":True,"sonnet":True,"haiku":False},{})==("sonnet",None)
+assert c.resolve_model("mech",{"fable":False,"opus":True,"sonnet":False,"haiku":False},{})==(None,4)
+assert c.resolve_model("mech",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{"models":{"mech":["gpt"]}})==(None,5)
+sys.exit(0)
+PY
+
+check "resolve-model/disable-model CLI accept the mech role and haiku alias" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+F=$($CLI claim-owner --repo-slug slug-m --session S --host h --pid 1)
+! $CLI write-capabilities --repo-slug slug-m --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null
+$CLI write-capabilities --repo-slug slug-m --session S --fence "$F" \
+  --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
+[ "$($CLI resolve-model --repo-slug slug-m --role mech --session S)" = haiku ]
+$CLI disable-model --repo-slug slug-m --session S --fence "$F" --model haiku
+[ "$($CLI resolve-model --repo-slug slug-m --role mech --session S)" = sonnet ]
+[ "$($CLI resolve-model --repo-slug slug-m --role plan --session S)" = opus ]   # other roles unaffected
+SH
+
+check "mech_caps: defaults, config merge, overrides, fail-closed validation" <<PY
+$LOAD
+caps,err=c.mech_caps({})
+assert err is None and caps=={"max_turns":40,"max_budget_usd":2.0,"timeout_secs":1800},caps
+caps,err=c.mech_caps({"mech":{"max_turns":60,"max_budget_usd":3}})
+assert err is None and caps["max_turns"]==60 and caps["max_budget_usd"]==3 and caps["timeout_secs"]==1800
+caps,err=c.mech_caps({"mech":{"max_turns":60}},max_turns=10,max_budget_usd=0.5)
+assert err is None and caps["max_turns"]==10 and caps["max_budget_usd"]==0.5
+bad=[{"mech":{"max_turns":0}},{"mech":{"max_turns":501}},{"mech":{"max_budget_usd":0}},
+     {"mech":{"max_budget_usd":50.01}},{"mech":{"timeout_secs":59}},{"mech":{"max_turns":True}},
+     {"mech":{"bogus":1}},{"mech":[]},{"mech":{"max_budget_usd":float("inf")}},
+     {"mech":{"contract_commands":[]}},{"mech":{"contract_commands":[{"name":"a","run":"true","x":1}]}}]
+for b in bad:
+    caps,err=c.mech_caps(b); assert caps is None and err, b
+caps,err=c.mech_caps({},max_turns=0); assert caps is None
+caps,err=c.mech_caps({},max_budget_usd=51); assert caps is None
+good={"mech":{"contract_commands":[{"name":"t","run":"true","timeout_secs":5}]}}
+assert c.mech_caps(good)[1] is None
+assert c.mech_contract(good,"td-x")=={"v":1,"task_id":"td-x","commands":[{"name":"t","run":"true","timeout_secs":5}]}
+assert c.mech_contract({},"td-x") is None
+sys.exit(0)
+PY
+
+check "mech-caps / mech-contract CLI" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-c"; mkdir -p "$RD"
+out=$($CLI mech-caps --repo-slug slug-c)
+[ "$out" = '{"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}' ]
+printf '{"v":1,"user":"u","default_base":"origin/main","mech":{"max_turns":60,"contract_commands":[{"name":"t","run":"true"}]}}' > "$RD/config.json"
+out=$($CLI mech-caps --repo-slug slug-c --max-budget-usd 1.5)
+[ "$out" = '{"max_turns": 60, "max_budget_usd": 1.5, "timeout_secs": 1800}' ]
+rc=0; $CLI mech-caps --repo-slug slug-c --max-turns 999 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+B=$(git -C "$WT" rev-parse HEAD)
+touch "$WT/dirty"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B" 2>/dev/null || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$WT/claude/contracts/td-x-contract.json" ]                                             # dirty -> nothing written
+rm "$WT/dirty"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$(printf %040d 1)" 2>/dev/null || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$WT/claude/contracts/td-x-contract.json" ]                                             # diverged -> nothing written
+rel=$($CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B")
+[ "$rel" = claude/contracts/td-x-contract.json ]
+python3 -c "import json;d=json.load(open('$WT/$rel'));assert d=={'v':1,'task_id':'td-x','commands':[{'name':'t','run':'true'}]},d"
+git -C "$WT" add "$rel"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m c; B2=$(git -C "$WT" rev-parse HEAD)
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]   # exists
+printf '{"v":1,"user":"u","default_base":"origin/main"}' > "$RD/config.json"
+rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-y --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]   # no template
+SH
+
+check "emit-done: optional launch_id and reason round-trip; bad reason rejected" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+$CLI emit-done --repo-slug slug-e --task-id td-x --workspace w1 --agent mech-td-x --phase implement \
+  --outcome paused --head-sha h1 --base-sha b0 --launch-id mech-td-x-20260901T000000Z --reason needs_design
+python3 -c "import json;d=json.load(open('$CLAUDE_CONFIG_DIR/herdr-orch/slug-e/tasks/td-x.done.json'));assert d['launch_id']=='mech-td-x-20260901T000000Z' and d['reason']=='needs_design',d"
+$CLI emit-done --repo-slug slug-e --task-id td-x --workspace w1 --agent impl-td-x --phase implement \
+  --outcome completed --head-sha h1 --base-sha b0
+python3 -c "import json;d=json.load(open('$CLAUDE_CONFIG_DIR/herdr-orch/slug-e/tasks/td-x.done.json'));assert 'launch_id' not in d and 'reason' not in d,d"
+rc=0; $CLI emit-done --repo-slug slug-e --task-id td-x --workspace w1 --agent impl-td-x --phase implement \
+  --outcome paused --head-sha h1 --base-sha b0 --reason tired 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]
+SH
+
+check "agent_name mech prefix obeys canonical constraints" <<PY
+$LOAD
+n=c.agent_name("mech","td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical")
+assert n.startswith("mech-") and len(n)<=32 and re.fullmatch(r"mech-[a-z0-9-]{1,27}",n),n
+assert c.agent_name("mech","TD-1",existing={"mech-td-1"})=="mech-td-1-2"
+assert c.MECH_REASONS==("max_turns","max_budget","timeout","no_emit","error","needs_design","blocked_on_human","other")
+sys.exit(0)
+PY
+
+check "fold_spend: exact AC6 fixture" <<PY
+$LOAD
+L=[
+ '{"v":1,"kind":"start","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L1","ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L1","num_turns":17,"total_cost_usd":0.42,"ts":"t"}',
+ '{"v":1,"kind":"start","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L2","ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","workspace_id":"w1","agent":"mech-td-x","launch_id":"L2","num_turns":3,"total_cost_usd":null,"ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","launch_id":"L3","num_tur',
+ '{"v":1,"kind":"end","task_id":"td-other","launch_id":"L4","num_turns":1,"total_cost_usd":9.0,"ts":"t"}',
+ '{"v":1,"kind":"end","task_id":"td-x","launch_id":"L5","num_turns":1,"total_cost_usd":true,"ts":"t"}',
+]
+assert c.fold_spend(L,"td-x")=={"usd":0.42,"turns":20,"launches":2,"unknown_cost_launches":1,"skipped_lines":3}
+assert c.fold_spend([],"td-x")=={"usd":0.0,"turns":0,"launches":0,"unknown_cost_launches":0,"skipped_lines":0}
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":-1},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","total_cost_usd":float("nan")},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":2.5},"td-x")
+assert not c.valid_spend_line({"v":True,"kind":"end","task_id":"td-x","launch_id":"L"},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"mid","task_id":"td-x","launch_id":"L"},"td-x")
+assert not c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":1},"td-x")   # total_cost_usd key required
+assert c.valid_spend_line({"v":1,"kind":"end","task_id":"td-x","launch_id":"L","num_turns":None,"total_cost_usd":None,"subtype":"weird"},"td-x")
+assert (".spend.jsonl", c.valid_task_id) in c.WATCH_DIRS["tasks"]
+sys.exit(0)
+PY
+
+check "status: per-task spend, _totals with untracked_launches, _orphans" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-s"; mkdir -p "$RD/tasks" "$RD/workspaces"
+F=$($CLI claim-owner --repo-slug slug-s --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-s --task-id td-a --session S --fence "$F" \
+  --json '{"task_id":"td-a","status":"in-progress","workers":[{"role":"mech","launch_id":"L1"},{"role":"impl"}]}'
+$CLI write-task --repo-slug slug-s --task-id td-b --session S --fence "$F" \
+  --json '{"task_id":"td-b","status":"in-progress","workers":[{"role":"review"}]}'
+printf '%s\n' '{"v":1,"kind":"start","task_id":"td-a","launch_id":"L1","ts":"t"}' \
+  '{"v":1,"kind":"end","task_id":"td-a","launch_id":"L1","num_turns":17,"total_cost_usd":0.42,"ts":"t"}' > "$RD/tasks/td-a.spend.jsonl"
+printf '{"v":1,"kind":"start","task_id":"td-z","launch_id":"L9","ts":"t"}\n' > "$RD/tasks/td-z.spend.jsonl"
+$CLI status --repo-slug slug-s | python3 -c '
+import json,sys; s=json.load(sys.stdin)
+assert s["td-a"]["spend"]=={"usd":0.42,"turns":17,"launches":1,"unknown_cost_launches":0,"skipped_lines":0},s
+assert s["td-b"]["spend"]["launches"]==0 and s["td-b"]["spend"]["usd"]==0.0
+assert s["_totals"]=={"usd":0.42,"turns":17,"launches":1,"unknown_cost_launches":0,"skipped_lines":0,"untracked_launches":2},s
+assert s["_orphans"]==["td-z"],s
+'
+SH
+
+check "run-mech helpers: agent validity, result parsing, downgrade, errors, provenance, outcome" <<PY
+$LOAD
+t="td-2026-09-01-add-budget-capped-cheap-model-tier-for-mechanical"
+base=c.agent_name("mech",t)
+assert c.valid_mech_agent(base,t) and c.valid_mech_agent(c.agent_name("mech",t,existing={base}),t)
+assert c.valid_mech_agent("mech-td-r-9","td-r") and not c.valid_mech_agent("mech-td-r-10","td-r")
+assert not c.valid_mech_agent("mech-other","td-r") and not c.valid_mech_agent("mech-","td-r") and not c.valid_mech_agent("mech-Td-r","td-r")
+assert not c.valid_mech_agent("impl-td-r","td-r")
+r=c.parse_claude_result('noise\n{"type":"result","subtype":"success","num_turns":2}\n')
+assert r and r["num_turns"]==2
+assert c.parse_claude_result("not json") is None and c.parse_claude_result('{"type":"other"}') is None
+assert c.models_used({"modelUsage":{"claude-haiku-4-5-20251001":{},"claude-sonnet-5":{}}})==["claude-haiku-4-5-20251001","claude-sonnet-5"]
+assert c.models_used({}) == [] and c.models_used(None) == []
+assert c.is_downgrade(["claude-sonnet-5"],"haiku") and not c.is_downgrade(["claude-haiku-4-5-20251001"],"haiku") and not c.is_downgrade([],"haiku")
+assert c.result_errors({"errors":["a","b"*1000,3]})==["a","b"*500]
+assert c.result_errors({}) == [] and c.result_errors({"errors":"x"}) == []
+assert c.model_attributable("success",True,[],"haiku")
+assert c.model_attributable("error_during_execution",False,["haiku is not available"],"haiku")
+assert c.model_attributable("error_during_execution",False,["Unknown model"],"haiku")
+assert not c.model_attributable("error_during_execution",False,["network timeout"],"haiku")
+assert not c.model_attributable("error_max_turns",False,["model x"],"haiku")
+d={"workspace_id":"w1","agent":"mech-td-r","launch_id":"L1","ts":"2026-09-01T00:00:01Z"}
+assert c.own_launch_record(d,"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(d,"w1","mech-td-r","L2","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(dict(d,agent="impl-td-r"),"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+old={"workspace_id":"w1","agent":"mech-td-r","ts":"2026-08-01T00:00:00Z"}
+assert not c.own_launch_record(old,"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert c.own_launch_record(dict(old,ts="2026-09-01T00:00:00Z"),"w1","mech-td-r","L1","2026-09-01T00:00:00Z")
+assert not c.own_launch_record(None,"w1","mech-td-r","L1","t")
+assert c.wrapper_outcome("error_max_turns","h","b",False)==("paused","max_turns")
+assert c.wrapper_outcome("error_max_budget_usd","h","b",False)==("paused","max_budget")
+assert c.wrapper_outcome("timeout","h","b",False)==("paused","timeout")
+assert c.wrapper_outcome("success","h","b",False)==("paused","no_emit")
+assert c.wrapper_outcome("error_during_execution","h","b",False)==("paused","error")
+assert c.wrapper_outcome("error_during_execution","b","b",False)==("failed","error")
+assert c.wrapper_outcome("error_during_execution","h","b",True)==("failed","error")
+assert c.wrapper_outcome("unparseable",None,"b",True)==("failed","error")
+assert c.SHELL_SAFE_RE.match("a/b+c:d@e.f_g-1") and not c.SHELL_SAFE_RE.match("a b") and not c.SHELL_SAFE_RE.match("a;b") and not c.SHELL_SAFE_RE.match("")
+assert c.SHA40_RE.match("0"*40) and not c.SHA40_RE.match("abc") and not c.SHA40_RE.match("A"*40)
+sys.exit(0)
+PY
+
+check "run-mech: success with fresh worker record; argv/stdin/cwd exact; ledger start+end" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 $PWD/claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+printf 'do the thing\n' > "$RD/tasks/td-r.brief.md"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":0.11,"duration_ms":10,"session_id":"sid","modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
+export FAKE_CLAUDE_HOOK="git -C $WT -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; $CLI emit-done --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --phase implement --outcome completed --head-sha \$(git -C $WT rev-parse HEAD) --base-sha $BASE --launch-id mech-td-r-20260901T000000Z"
+$CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id mech-td-r-20260901T000000Z \
+  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/td-r.brief.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60
+[ "$(tr '\n' ' ' < $FAKE_CLAUDE_LOG.argv)" = "--model haiku --permission-mode auto --name mech-td-r -p --output-format json --max-turns 7 --max-budget-usd 0.5 " ]
+[ "$(cat $FAKE_CLAUDE_LOG.stdin)" = "do the thing" ]
+[ "$(cd "$WT" && pwd -P)" = "$(cd "$(cat $FAKE_CLAUDE_LOG.cwd)" && pwd -P)" ]
+python3 - <<PY
+import json
+L=[json.loads(l) for l in open("$RD/tasks/td-r.spend.jsonl")]
+assert [l["kind"] for l in L]==["start","end"],L
+assert L[0]["max_turns"]==7 and L[0]["max_budget_usd"]==0.5 and L[0]["model"]=="haiku" and L[0]["launch_id"]=="mech-td-r-20260901T000000Z"
+e=L[1]; assert e["subtype"]=="success" and e["total_cost_usd"]==0.11 and e["num_turns"]==5 and e["downgrade"] is False and e["record_written_by"]=="worker" and e["models_used"]==["claude-haiku-4-5-20251001"] and e["errors"]==[] and e["model_attributable"] is False,e
+d=json.load(open("$RD/tasks/td-r.done.json")); assert d["outcome"]=="completed" and "reason" not in d,d
+PY
+SH
+
+check "run-mech: cap hits, no_emit, errors, dirty, unparseable, downgrade, errors persisted -> wrapper records" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 $PWD/claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+: > "$RD/tasks/b.md"
+run() { $CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id "mech-td-r-$1" \
+  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/b.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60; }
+expect() { python3 -c "import json;d=json.load(open('$RD/tasks/td-r.done.json'));assert (d['outcome'],d['reason'],d['launch_id'])==('$1','$2','mech-td-r-$3'),d"; }
+last() { python3 -c "import json,sys;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];e=L[-1];assert e['kind']=='end';$1"; }
+printf '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":7,"total_cost_usd":0.2}' > "$FAKE_CLAUDE_JSON"; run 1; expect paused max_turns 1
+printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":3,"total_cost_usd":0.5}' > "$FAKE_CLAUDE_JSON"; run 2; expect paused max_budget 2
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01}' > "$FAKE_CLAUDE_JSON"; run 3; expect paused no_emit 3
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"errors":["network timeout"]}' > "$FAKE_CLAUDE_JSON"; run 4; expect failed error 4   # HEAD == base
+last "assert e['errors']==['network timeout'] and e['model_attributable'] is False,e"
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"errors":["Unknown model: haiku"]}' > "$FAKE_CLAUDE_JSON"; run 5
+last "assert e['model_attributable'] is True,e"
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; run 6; expect paused error 6              # ahead + clean
+touch "$WT/dirty"; run 7; expect failed error 7                                                                            # ahead + dirty
+rm "$WT/dirty"; git -C "$WT" checkout -q --detach "$BASE"; git -C "$WT" checkout -q -B main
+printf 'not json' > "$FAKE_CLAUDE_JSON"; run 8; expect failed error 8
+last "assert e['subtype']=='unparseable' and e['total_cost_usd'] is None and e['num_turns'] is None,e"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"modelUsage":{"claude-sonnet-5":{}}}' > "$FAKE_CLAUDE_JSON"; run 9
+last "assert e['downgrade'] is True and e['models_used']==['claude-sonnet-5'] and e['model_attributable'] is True,e"
+# stale record from another launch is replaced; a live-launch record survives a cap hit
+export FAKE_CLAUDE_HOOK="$CLI emit-done --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --phase implement --outcome completed --head-sha $BASE --base-sha $BASE --launch-id mech-td-r-10"
+printf '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":2,"total_cost_usd":0.5}' > "$FAKE_CLAUDE_JSON"; run 10
+python3 -c "import json;d=json.load(open('$RD/tasks/td-r.done.json'));assert d['outcome']=='completed' and d['launch_id']=='mech-td-r-10',d"
+unset FAKE_CLAUDE_HOOK; run 11; expect paused max_budget 11
+python3 -c "import json;L=[json.loads(l) for l in open('$RD/tasks/td-r.spend.jsonl')];assert len([l for l in L if l['kind']=='start'])==11 and L[-1]['record_written_by']=='wrapper',len(L)"
+SH
+
+check "run-mech: timeout kills the child process (import seam, 2s wall clock)" <<PY
+$LOAD
+import types, subprocess as sp, time
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-r"); (rd/"tasks").mkdir(parents=True)
+wt=tempfile.mkdtemp(); sp.run(["git","-C",wt,"init","-q","-b","main"],check=True)
+sp.run(["git","-C",wt,"-c","user.name=t","-c","user.email=t@x","commit","-q","--allow-empty","-m","b"],check=True)
+base=sp.run(["git","-C",wt,"rev-parse","HEAD"],capture_output=True,text=True,check=True).stdout.strip()
+log=tempfile.mkdtemp()+"/log"; res=tempfile.mkdtemp()+"/res.json"; open(res,"w").write('{"type":"result","subtype":"success"}')
+os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=res,FAKE_CLAUDE_SLEEP="30"); os.environ.pop("FAKE_CLAUDE_HOOK",None)
+os.environ["PATH"]=os.environ["FAKE_CLAUDE_DIR"]+":"+os.environ["PATH"]
+a=types.SimpleNamespace(repo_slug="slug-r",task_id="td-r",workspace="w1",agent="mech-td-r",launch_id="mech-td-r-1",
+  model="haiku",worktree=wt,base_sha=base,brief_file="unused",max_turns=7,max_budget_usd=0.5,timeout_secs=60)
+t0=time.time(); rc=c.run_mech(rd,a,"brief text",2); assert rc==0 and time.time()-t0<10
+d=json.load(open(rd/"tasks"/"td-r.done.json")); assert (d["outcome"],d["reason"])==("paused","timeout"),d
+L=[json.loads(l) for l in open(rd/"tasks"/"td-r.spend.jsonl")]; assert L[-1]["subtype"]=="timeout",L
+pid=int(open(log+".pid").read())
+try:
+    os.kill(pid,0); alive=True
+except ProcessLookupError:
+    alive=False
+assert not alive, "fake claude survived the kill"
+sys.exit(0)
+PY
+
+check "run-mech: git failure after start and unwritable done target both exit 3 with the end line appended" <<PY
+$LOAD
+import types, subprocess as sp
+root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-r"); (rd/"tasks").mkdir(parents=True)
+wt=tempfile.mkdtemp(); sp.run(["git","-C",wt,"init","-q","-b","main"],check=True)
+sp.run(["git","-C",wt,"-c","user.name=t","-c","user.email=t@x","commit","-q","--allow-empty","-m","b"],check=True)
+base=sp.run(["git","-C",wt,"rev-parse","HEAD"],capture_output=True,text=True,check=True).stdout.strip()
+log=tempfile.mkdtemp()+"/log"; res=tempfile.mkdtemp()+"/res.json"; open(res,"w").write('{"type":"result","subtype":"success"}')
+os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=res); os.environ.pop("FAKE_CLAUDE_HOOK",None); os.environ.pop("FAKE_CLAUDE_SLEEP",None)
+os.environ["PATH"]=os.environ["FAKE_CLAUDE_DIR"]+":"+os.environ["PATH"]
+mk=lambda lid: types.SimpleNamespace(repo_slug="slug-r",task_id="td-r",workspace="w1",agent="mech-td-r",launch_id=lid,
+  model="haiku",worktree=wt,base_sha=base,brief_file="unused",max_turns=7,max_budget_usd=0.5,timeout_secs=60)
+# (1) unwritable completion record: a directory sits where the file must go
+(rd/"tasks"/"td-r.done.json").mkdir()
+assert c.run_mech(rd,mk("mech-td-r-1"),"x",60)==3
+L=[json.loads(l) for l in open(rd/"tasks"/"td-r.spend.jsonl")]
+assert [l["kind"] for l in L]==["start","end"] and L[-1]["record_written_by"]=="none",L
+os.rmdir(rd/"tasks"/"td-r.done.json")
+# (2) git unavailable after start: the worktree's git dir is moved away during the run
+os.environ["FAKE_CLAUDE_HOOK"]=f"mv {wt}/.git {wt}/.git-gone"
+assert c.run_mech(rd,mk("mech-td-r-2"),"x",60)==3
+L=[json.loads(l) for l in open(rd/"tasks"/"td-r.spend.jsonl")]
+assert [l["kind"] for l in L]==["start","end","start","end"] and L[-1]["record_written_by"]=="none" and L[-1]["git_ok"] is False,L
+assert not (rd/"tasks"/"td-r.done.json").exists()
+sys.exit(0)
+PY
+
+check "run-mech: unwritable ledger dir exits 2 before any write (fresh task id)" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+: > "$RD/tasks/b.md"; printf '{"type":"result","subtype":"success"}' > "$FAKE_CLAUDE_JSON"
+chmod 500 "$RD/tasks"
+rc=0; $CLI run-mech --repo-slug slug-r --task-id td-new --workspace w1 --agent mech-td-new --launch-id mech-td-new-1 \
+  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/b.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60 2>/dev/null || rc=$?
+chmod 700 "$RD/tasks"
+[ "$rc" -eq 2 ] && [ ! -e "$RD/tasks/td-new.spend.jsonl" ] && [ ! -e "$RD/tasks/td-new.done.json" ] && [ ! -e "$FAKE_CLAUDE_LOG.argv" ]
+SH
+
+check "run-mech: validation exits 2 and writes nothing" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+: > "$RD/tasks/b.md"; OUT=$(mktemp -d); : > "$OUT/b.md"; : > "$RD/tasks/noread.md"; chmod 000 "$RD/tasks/noread.md"
+base="--repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree $WT --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60"
+try() { rc=0; $CLI run-mech "$@" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ] || { echo "expected 2 got $rc: $*" >&2; return 1; }; }
+try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$OUT/b.md"             # brief outside STATE_ROOT
+try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/noread.md"   # brief unreadable
+try $base --agent mech- --launch-id mech--1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"                # empty suffix
+try $base --agent mech-Td-r --launch-id mech-Td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"        # uppercase
+try $base --agent mech-other --launch-id mech-other-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"      # not this task's agent
+try $base --agent mech-td-r-10 --launch-id mech-td-r-10-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"  # collision suffix > 9
+try $base --agent mech-td-r --launch-id other-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"            # launch id not prefixed
+try $base --agent mech-td-r --launch-id mech-td-r-1 --base-sha abc --brief-file "$RD/tasks/b.md"            # bad sha
+try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$(mktemp -d)" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60 \
+    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"             # non-git worktree
+try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$WT" --max-turns 0 --max-budget-usd 0.5 --timeout-secs 60 \
+    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"             # cap out of bounds
+try --repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree "$WT" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 59 \
+    --agent mech-td-r --launch-id mech-td-r-1 --base-sha "$BASE" --brief-file "$RD/tasks/b.md"             # timeout below floor
+try $base --agent mech-td-r --launch-id 'mech-td-r-1;rm' --base-sha "$BASE" --brief-file "$RD/tasks/b.md"  # metachar
+try $base --agent mech-td-r --launch-id 'mech-td-r 1' --base-sha "$BASE" --brief-file "$RD/tasks/b.md"     # whitespace
+[ ! -e "$RD/tasks/td-r.spend.jsonl" ] && [ ! -e "$RD/tasks/td-r.done.json" ] && [ ! -e "$FAKE_CLAUDE_LOG.argv" ]
+SH
+
+check "docs pin the mech tier: role row, run-mech launch, liveness table, ledger schema, brief variant" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+grep -q '| Mechanical worker (`mech`)' "$S"
+grep -q 'resolve-model --role mech' "$S"
+grep -q 'run-mech --repo-slug' "$S"
+grep -q '"haiku":true' "$S"                                  # probe writes the fourth alias
+grep -q 'mech-caps --repo-slug' "$S"
+grep -q 'mech-contract --repo-slug' "$S"
+grep -q 'Launch base' "$S"                                   # base_sha = post-contract HEAD
+grep -q 'wrapper lost' "$S"                                  # mech liveness table
+grep -q '_totals' "$S"
+grep -q '"mech": {' "$R/state-layout.md"
+grep -q '\.spend\.jsonl' "$R/state-layout.md"
+grep -q '"haiku": true' "$R/state-layout.md"
+grep -q 'launch_id' "$R/state-layout.md"
+grep -q 'Mech brief variant' "$R/brief-template.md"
+grep -q -- '--launch-id <launch_id>' "$R/brief-template.md"
+grep -q 'spend.jsonl' "$R/event-schema.md"
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

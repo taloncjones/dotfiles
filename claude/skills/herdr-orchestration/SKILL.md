@@ -90,8 +90,8 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
      The file is diagnostic-only (never read by orchestrator logic; the
      probe step is already owner-only), machine-local, and deletable once
      a real exhaustion sample has validated the regex.
-   - `available`/`unavailable` -> write the map (opus/sonnet default true):
-     `python3 "$CORE" write-capabilities --repo-slug <slug> --session <id> --fence <fence> --json '{"v":1,"session_id":"<id>","available":{"fable":<true|false>,"opus":true,"sonnet":true}}'`
+   - `available`/`unavailable` -> write the map (opus/sonnet/haiku default true):
+     `python3 "$CORE" write-capabilities --repo-slug <slug> --session <id> --fence <fence> --json '{"v":1,"session_id":"<id>","available":{"fable":<true|false>,"opus":true,"sonnet":true,"haiku":true}}'`
    - `indeterminate` (no `claude`, network error, transient 429 rate limit,
      other status, unparseable) ->
      write NO map; ABORT launches this turn and surface it -- never assume.
@@ -165,6 +165,29 @@ Maturity check: a Jira ticket in a refined/ready state, or an existing committed
 spec+plan for the task, is plan-ready; anything else is raw. When unsure, treat
 it as raw -- an extra plan phase is cheap insurance against a cheap model making
 design decisions.
+
+- **Mech item** -- a human-designated mechanical task (`kick off <item> as
+mech [max-turns <int>] [budget <number>]`, or todo frontmatter `tier: mech`
+  with optional `mech_max_turns` / `mech_max_budget_usd`; instruction values
+  override frontmatter field by field; any other form is not a mech kickoff).
+  Never raw: it skips the plan phase and dispatches `phase: implement`,
+  `role: mech` on the model `resolve-model --role mech` returns (default
+  `haiku -> sonnet`), headless and capped (section 8, Mech launch). Caps come
+  from `python3 "$CORE" mech-caps --repo-slug <slug> [--max-turns N]
+[--max-budget-usd X]` (exit 5 refuses the kickoff with its message; never
+  clamp by hand). Contract source, in order: (1) committed at HEAD -> use it;
+  (2) `config.mech.contract_commands` present, worktree clean, and the branch
+  either created by this kickoff or adopted with HEAD == `base_sha` ->
+  `python3 "$CORE" mech-contract --repo-slug <slug> --task-id <task_id>
+--worktree <path> --base-sha <base_sha>` writes it, then `git add` + commit it as
+  `<task_id>: Add mech contract` (the only commit the orchestrator ever
+  authors; inside the step 3-6 window so step 9 cleanup covers it);
+  (3) else refuse: "mech kickoff needs a committed contract or
+  `mech.contract_commands` in config; kick off as raw instead". **`Launch base`:**
+  after a generated-contract commit, record `base_sha` as the post-commit HEAD
+  (the launch base) so every ahead-of-base check demands real worker commits;
+  `base_ref` still names the ref. Then run the "Contract pinning" steps below
+  unchanged.
 
 The steps below call the dispatched worker "the worker"; they apply to whichever
 phase is launched (`plan` for a raw item, else `implement`), with the
@@ -240,7 +263,8 @@ phase-appropriate brief (references/brief-template.md) and model.
      `null`. Discovery completes inside step 6 (it ends with the second
      `ListAgents` call right after `agent prompt --until working`), so the
      value is known before this first `write-task`; no later read-modify-
-     write is needed.
+     write is needed. For a `mech` dispatch the `workers[]` entry carries
+     `role: "mech"`, `launch_id`, `caps`, and `peer_name: null`.
 8. **Jira writeback** (kind == `"jira"` only): transition the ticket to In
    Progress -- see section 10.
 9. **Partial-failure/crash:** on any failure during steps 3-6, clean up only
@@ -348,6 +372,51 @@ per-task status. Reconcile that against a live `herdr agent list` /
 | `idle`/`done`                     | run the completion correlation (below); set `completed`/`paused`/`failed` accordingly -- **never** report success from `idle`/`done` alone |
 | `unknown`                         | report unknown; do not advance status                                                                                                      |
 | absent (agent+worktree both gone) | `abandoned`, if never completed                                                                                                            |
+
+**Mech workers (`role: mech`) use the ledger, not the agent poll.** The live
+launch is the latest `workers[]` entry's `launch_id`; read
+`tasks/<task_id>.spend.jsonl`:
+
+| Ledger state for the live `launch_id`                          | Action                                                                                                            |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| no `start` line                                                | never began: report; a record older than a minute with no start is a failed launch (relaunch is the human's call) |
+| `start` without `end`, start age <= `caps.timeout_secs` + 120s | in-progress (`blocked` on a hook `blocked` hint)                                                                  |
+| `start` without `end`, older                                   | wrapper lost: report `paused: wrapper_lost`; status stays `in-progress`; no auto-relaunch                         |
+| `end` present                                                  | correlate `done.json` (below)                                                                                     |
+
+Correlation on `end`: `done.json` must carry this task id, the live
+workspace, agent, and `launch_id` (lacking one, a `ts` >= the start line).
+`completed` -> facts 1-6 unchanged (the git-ahead check runs against the
+launch `base_sha`); `paused` -> stays `in-progress`, report "paused:
+<reason or none>, spent $<usd> over <turns> turns of cap <max_turns>/$<max_budget_usd>"
+with next actions in order: relaunch as mech with raised caps, or resume on
+`impl`; `failed` -> `failed`. No mech transition depends on a Stop hint.
+The `abandoned` rule (workspace AND worktree gone) is unchanged.
+
+**Within-role fallback (right after `run-mech` returns).** An `end` line
+with `model_attributable: true` (computed by the wrapper: `downgrade`, or
+`subtype: error_during_execution` whose `errors` text names the requested
+alias or "model") is model-attributable:
+`disable-model --model <requested alias>`, re-run `resolve-model --role
+mech`, relaunch once with a fresh `launch_id` (new `workers[]` entry; the
+old launch's ledger lines stay). Cap 2 attempts per dispatch, then surface.
+
+**Mech relaunch** is the "record exists + worker gone -> resume" path: allowed
+only when the live launch has an `end` line (or is wrapper lost) and status
+is `in-progress`/`blocked`; mint a new `launch_id`, append a `workers[]`
+entry (caps via `mech-caps` from the new instruction/frontmatter), launch
+`run-mech` again in the same workspace with `base_sha` unchanged. A `start`
+without `end` inside the timeout window is "live" for kickoff idempotency.
+
+**Blocked headless worker.** A `blocked` hint sets `blocked` as today; a
+print-mode worker cannot be unblocked interactively -- the wall clock ends
+it (`paused: timeout`); recommend relaunching with a brief that pre-answers
+the prompt, or on `impl`.
+
+The report line carries each task's `spend` and the summary carries
+`_totals` (`usd`, `turns`, `launches`, `unknown_cost_launches`,
+`skipped_lines`, `untracked_launches`) and `_orphans` (sidecars with no
+primary record -- list for human cleanup; never auto-adopt or relaunch).
 
 **Completion is orchestrator-confirmed, never inferred from `done`.**
 Correlate these independent facts, all keyed to the same `task_id`/
@@ -591,12 +660,13 @@ never picks a worker model by judgment. The `Orchestrator` row below is
 advisory only -- its model is fixed when this session launched and is NOT
 resolved by `resolve-model` (the resolver has no `orchestrator` role).
 
-| Role / phase             | Preference (first available wins) | Effort  | Notes                                                                                                                                                 |
-| ------------------------ | --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Orchestrator             | fable -> opus                     | low/med | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)                                                       |
-| Planning worker (`plan`) | fable -> opus                     | high    | raw items only: brainstorm/spec/plan on the strong model so design judgment is never delegated to the cheap impl worker; skipped for plan-ready items |
-| Implementation worker    | sonnet -> opus                    | default | cheap execution of an existing plan                                                                                                                   |
-| Reviewer (co-review)     | opus -> sonnet                    | high    | co-review report-only (Claude `/code-review` + Codex) in the task worktree, fresh agent; Opus Claude-half adds model diversity vs a Sonnet impl       |
+| Role / phase               | Preference (first available wins) | Effort  | Notes                                                                                                                                                 |
+| -------------------------- | --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Orchestrator               | fable -> opus                     | low/med | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)                                                       |
+| Planning worker (`plan`)   | fable -> opus                     | high    | raw items only: brainstorm/spec/plan on the strong model so design judgment is never delegated to the cheap impl worker; skipped for plan-ready items |
+| Implementation worker      | sonnet -> opus                    | default | cheap execution of an existing plan                                                                                                                   |
+| Mechanical worker (`mech`) | haiku -> sonnet                   | default | human-designated mechanical work, headless `claude -p`, turn+budget+wall-clock capped; spend in `tasks/<task_id>.spend.jsonl`                         |
+| Reviewer (co-review)       | opus -> sonnet                    | high    | co-review report-only (Claude `/code-review` + Codex) in the task worktree, fresh agent; Opus Claude-half adds model diversity vs a Sonnet impl       |
 
 Fallback scaffolding: when Fable is unavailable (enterprise account, usage
 exhausted, or the current session is already Opus), fall back to Opus and
@@ -721,6 +791,20 @@ model, but an interactive pane launch can silently DOWNGRADE to Sonnet -- which
 is exactly what this backstop catches when the banner is readable, and fails
 closed (abort) when it is not.
 
+**Mech launch (headless, wrapped).** Caps exist only in print mode, so a mech
+worker is launched through the core wrapper in the workspace's root pane:
+
+`herdr pane run <pane_id> "python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"`
+
+Shell-safety: every value must match `[A-Za-z0-9_./+:@-]+`; refuse the launch
+naming the offending value otherwise (`run-mech` re-checks and exits 2).
+`<agent>` = `agent_name("mech", task_id)`; `<launch_id>` =
+`<agent>-<YYYYMMDDTHHMMSSZ>` (UTC now), also placed in the brief. Write the
+brief (references/brief-template.md, mech variant) to the `--brief-file` path
+first. No `--name` capability check, no D4 banner read, no `ListAgents`
+discovery (`peer_name: null`): the wrapper's `end` ledger line carries
+`models_used` as the structural model signal. Publish state (section 2 step 7) right after `pane run` returns.
+
 ## 9. State transition table (authoritative)
 
 The "Event" column below names the conceptual transition, not an emitted
@@ -736,6 +820,8 @@ the new `status`; that write is the authoritative record.
 | blocked                                      | live no longer blocked                                                         | (recheck)                                      | in-progress             | no        |
 | in-progress (plan phase)                     | correlated `done.json` `phase: plan` completed + git ahead                     | `phase-advance` (launch implement, section 2a) | in-progress (implement) | no        |
 | in-progress/blocked (implement)              | correlated `done.json` `phase: implement` completed + git ahead                | `completed`                                    | completed               | no        |
+| in-progress (mech)                           | ledger `end` + `done.json` `paused` for the live launch                        | `paused`                                       | in-progress             | no        |
+| in-progress (mech)                           | ledger `end` + `done.json` `failed` (branch not usable)                        | `failed`                                       | failed                  | yes       |
 | in-progress/blocked                          | Stop hint + no done.json + no commits                                          | `paused`                                       | in-progress             | no        |
 | in-progress/blocked                          | Stop hint + `outcome: failed` or errored, no usable branch                     | `failed`                                       | failed                  | yes       |
 | in-progress/blocked/completed                | workspace+worktree gone, no completion                                         | `abandoned`                                    | abandoned               | yes       |

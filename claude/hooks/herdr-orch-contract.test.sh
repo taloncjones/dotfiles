@@ -149,7 +149,7 @@ MF=$($CLI claim-owner --repo-slug "$MSLUG" --session M --host h --pid 2)
 ok "resolve-model fails closed (exit 3) with no capability map" \
   'rc=0; $CLI resolve-model --repo-slug "$MSLUG" --role plan --session M >/dev/null 2>&1 || rc=$?; [ "$rc" = 3 ]'
 $CLI write-capabilities --repo-slug "$MSLUG" --session M --fence "$MF" \
-  --json '{"v":1,"session_id":"M","available":{"fable":false,"opus":true,"sonnet":true}}'
+  --json '{"v":1,"session_id":"M","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
 ok "resolve-model falls back to opus when fable unavailable" \
   '[ "$($CLI resolve-model --repo-slug "$MSLUG" --role plan --session M)" = opus ]'
 $CLI disable-model --repo-slug "$MSLUG" --session M --fence "$MF" --model sonnet
@@ -159,7 +159,7 @@ ok "disable-model left fable/opus untouched (downward-only, single alias)" \
   'python3 - <<PY
 import json
 d=json.load(open("$ROOT/herdr-orch/$MSLUG/capabilities.json"))
-assert d["available"]=={"fable":False,"opus":True,"sonnet":False}, d
+assert d["available"]=={"fable":False,"opus":True,"sonnet":False,"haiku":True}, d
 PY'
 ok "resolve-model rejects a malformed models override (exit 5)" \
   'python3 - <<PY
@@ -256,6 +256,76 @@ if git -C "$TMP" -c user.email=t@t -c user.name=t rebase -q "$MAIN2" >/dev/null 
 ok "conflicting rebase reports failure for conflict result" "[ $RB -eq 1 ]"
 git -C "$TMP" rebase --abort 2>/dev/null || true
 git -C "$GR" worktree remove --force "$TMP"
+
+# 10. mech kickoff: config-generated contract committed on a fresh branch,
+# base_sha = post-contract HEAD, pin computed, shell-safety, run-mech through
+# pane run, ledger + record, status spend; relaunch; contract-only cannot complete.
+# Section 6 took ownership of $SLUG with session T (and section 8 reclaimed as
+# T again); claim-owner --session M --stale-secs 0 takes over again, which is
+# why every fenced write here uses M/$F.
+FAKE=$(mktemp -d)   # same fake claude as herdr-orch.test.sh
+cat > "$FAKE/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_CLAUDE_LOG.argv"
+pwd > "$FAKE_CLAUDE_LOG.cwd"
+cat > "$FAKE_CLAUDE_LOG.stdin"
+echo $$ > "$FAKE_CLAUDE_LOG.pid"
+[ -n "$FAKE_CLAUDE_HOOK" ] && sh -c "$FAKE_CLAUDE_HOOK"
+sleep "${FAKE_CLAUDE_SLEEP:-0}"
+[ -n "$FAKE_CLAUDE_JSON" ] && cat "$FAKE_CLAUDE_JSON"
+exit "${FAKE_CLAUDE_RC:-0}"
+EOF
+chmod +x "$FAKE/claude"; PATH="$FAKE:$PATH"
+export FAKE_CLAUDE_LOG="$FAKE/log"; export FAKE_CLAUDE_JSON="$FAKE/res.json"
+F=$($CLI claim-owner --repo-slug "$SLUG" --session M --host h --pid 7 --stale-secs 0)
+RD="$ROOT/herdr-orch/$SLUG"
+printf '{"v":1,"user":"talon","default_base":"origin/main","mech":{"max_turns":9,"contract_commands":[{"name":"t","run":"true"}]}}' > "$RD/config.json"
+$CLI write-capabilities --repo-slug "$SLUG" --session M --fence "$F" \
+  --json '{"v":1,"session_id":"M","available":{"fable":false,"opus":true,"sonnet":true,"haiku":true}}'
+ok "mech model resolves to haiku" "[ \"\$($CLI resolve-model --repo-slug '$SLUG' --role mech --session M)\" = haiku ]"
+CAPS=$($CLI mech-caps --repo-slug "$SLUG" --max-budget-usd 1)
+ok "mech-caps merges config and override" "[ '$CAPS' = '{\"max_turns\": 9, \"max_budget_usd\": 1.0, \"timeout_secs\": 1800}' ]"
+# fresh task branch in a scratch repo standing in for the worktree
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+ORIG=$(git -C "$WT" rev-parse HEAD); git -C "$WT" checkout -q -b talon/td-m/x
+REL=$($CLI mech-contract --repo-slug "$SLUG" --task-id td-m --worktree "$WT" --base-sha "$ORIG")
+git -C "$WT" add "$REL"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m "td-m: Add mech contract"
+BASE=$(git -C "$WT" rev-parse HEAD)
+ok "launch base is the post-contract HEAD, not origin" "[ '$BASE' != '$ORIG' ]"
+SHA=$($CLI verify-contract --repo-slug "$SLUG" --task-id td-m --worktree "$WT" --contract "$REL" --allow-unpinned --validate-only)
+ok "generated contract validates and pins" "printf '%s' '$SHA' | grep -qE '^[0-9a-f]{64}$'"
+BRIEF="$RD/tasks/td-m.brief.md"; mkdir -p "$RD/tasks"; printf 'lint sweep\n' > "$BRIEF"
+LID="mech-td-m-20260901T000000Z"
+CMD="python3 claude/hooks/herdr_orch_core.py run-mech --repo-slug $SLUG --task-id td-m --workspace w1 --agent mech-td-m --launch-id $LID --model haiku --worktree $WT --base-sha $BASE --brief-file $BRIEF --max-turns 9 --max-budget-usd 1.0 --timeout-secs 1800"
+ok "every launch value is shell-safe" "python3 -c \"import re,sys;sys.exit(0 if all(re.fullmatch(r'[A-Za-z0-9_./+:@-]+',w) for w in '$CMD'.split()) else 1)\""
+: > "$BIN/calls.log"
+PID=$(herdr worktree create --cwd "$PWD" --branch talon/td-m/x --base origin/main --label td-m | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
+herdr pane run "$PID" "$CMD"
+ok "mech launch goes through pane run in the root pane with run-mech, no claude argv" \
+  "grep -q '^pane run w1:p1 python3 claude/hooks/herdr_orch_core.py run-mech ' '$BIN/calls.log' && ! grep -q 'pane run w1:p1 claude' '$BIN/calls.log'"
+# the fake herdr only logs; run the same command for real to land state
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.3,"modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
+export FAKE_CLAUDE_HOOK="$CLI emit-done --repo-slug $SLUG --task-id td-m --workspace w1 --agent mech-td-m --phase implement --outcome completed --head-sha $BASE --base-sha $BASE --launch-id $LID"
+$CMD
+$CLI write-task --repo-slug "$SLUG" --task-id td-m --session M --fence "$F" \
+  --json "{\"task_id\":\"td-m\",\"base_sha\":\"$BASE\",\"status\":\"in-progress\",\"contract_path\":\"$REL\",\"contract_sha256\":\"$SHA\",\"workers\":[{\"role\":\"mech\",\"phase\":\"implement\",\"workspace_id\":\"w1\",\"agent\":\"mech-td-m\",\"launch_id\":\"$LID\",\"model\":\"haiku\",\"peer_name\":null,\"caps\":$CAPS,\"created_by_this_orch\":true,\"started\":\"t\"}]}"
+ok "the fake saw the brief on stdin and the worktree as cwd" \
+  "[ \"\$(cat $FAKE_CLAUDE_LOG.stdin)\" = 'lint sweep' ] && [ \"\$(cd '$WT' && pwd -P)\" = \"\$(cd \"\$(cat $FAKE_CLAUDE_LOG.cwd)\" && pwd -P)\" ]"
+ok "ledger has start+end and status reports spend" \
+  "$CLI status --repo-slug '$SLUG' | python3 -c \"import json,sys;s=json.load(sys.stdin);assert s['td-m']['spend']['usd']==0.3 and s['td-m']['spend']['launches']==1,s\""
+ok "contract-only branch with a completed record cannot complete (HEAD == launch base)" \
+  "! $CLI confirm-completion --repo-slug '$SLUG' --task-id td-m --workspace w1 --head-sha '$BASE'"
+# relaunch: new launch id, second workers[] entry, launches doubles
+unset FAKE_CLAUDE_HOOK
+printf '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":9,"total_cost_usd":0.7}' > "$FAKE_CLAUDE_JSON"
+LID2="mech-td-m-20260901T001000Z"
+CAPS2=$($CLI mech-caps --repo-slug "$SLUG" --max-turns 20 --max-budget-usd 2)
+$CLI run-mech --repo-slug "$SLUG" --task-id td-m --workspace w1 --agent mech-td-m --launch-id "$LID2" --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$BRIEF" --max-turns 20 --max-budget-usd 2.0 --timeout-secs 1800
+# the orchestrator appends a second workers[] entry (same workspace, new launch_id, raised caps); status unchanged
+$CLI write-task --repo-slug "$SLUG" --task-id td-m --session M --fence "$F" \
+  --json "{\"task_id\":\"td-m\",\"base_sha\":\"$BASE\",\"status\":\"in-progress\",\"contract_path\":\"$REL\",\"contract_sha256\":\"$SHA\",\"workers\":[{\"role\":\"mech\",\"phase\":\"implement\",\"workspace_id\":\"w1\",\"agent\":\"mech-td-m\",\"launch_id\":\"$LID\",\"model\":\"haiku\",\"peer_name\":null,\"caps\":$CAPS,\"created_by_this_orch\":true,\"started\":\"t\"},{\"role\":\"mech\",\"phase\":\"implement\",\"workspace_id\":\"w1\",\"agent\":\"mech-td-m\",\"launch_id\":\"$LID2\",\"model\":\"haiku\",\"peer_name\":null,\"caps\":$CAPS2,\"created_by_this_orch\":true,\"started\":\"t2\"}]}"
+ok "relaunch: second workers[] entry with a distinct launch id and raised caps; record superseded by launch id; launches doubles" \
+  "python3 -c \"import json;t=json.load(open('$RD/tasks/td-m.json'));w=t['workers'];assert len(w)==2 and w[0]['launch_id']!=w[1]['launch_id'] and w[1]['caps']['max_turns']==20,t;d=json.load(open('$RD/tasks/td-m.done.json'));assert d['launch_id']=='$LID2' and d['reason']=='max_turns',d\" && $CLI status --repo-slug '$SLUG' | python3 -c \"import json,sys;s=json.load(sys.stdin);assert s['td-m']['spend']=={'usd':1.0,'turns':13,'launches':2,'unknown_cost_launches':0,'skipped_lines':0},s\""
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
