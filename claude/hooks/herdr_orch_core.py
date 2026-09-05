@@ -31,6 +31,7 @@ ROLE_DEFAULTS = {
     "impl": ("sonnet", "opus"),
     "review": ("opus", "sonnet"),
     "mech": ("haiku", "sonnet"),
+    "think": ("fable", "opus"),
 }
 
 # Aliases a role's config override may name. haiku is mech-only: the cheap
@@ -41,7 +42,14 @@ ROLE_ALIASES = {
     "impl": ("fable", "opus", "sonnet"),
     "review": ("fable", "opus", "sonnet"),
     "mech": CAP_MODELS,
+    "think": ("fable", "opus"),
 }
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+THINK_EFFORTS = ("high", "xhigh", "max")
+# None = inherit: no --effort flag on the launch line.
+ROLE_EFFORT_DEFAULTS = {"plan": "high", "impl": None, "review": "high",
+                        "mech": None, "think": "high"}
 
 # A 429 whose message names usage/credit exhaustion is reliable "this model is
 # not launchable" data (the account is out of credits); a bare 429 is an
@@ -193,6 +201,33 @@ def resolve_model(role, available, config):
     if not survivors:
         return (None, 4)
     return (survivors[0], None)
+
+
+def role_effort(role, config):
+    """(level_or_None, None) on success -- None means inherit; (None, 5) when
+    the role is unknown or the config 'effort' block is malformed: not a
+    dict, a key outside the roles, a value outside EFFORT_LEVELS (or outside
+    THINK_EFFORTS / null for think), or a bool/number. Fail closed like the
+    models block."""
+    if role not in ROLE_EFFORT_DEFAULTS:
+        return (None, 5)
+    cfg = config or {}
+    if "effort" not in cfg:
+        return (ROLE_EFFORT_DEFAULTS[role], None)
+    block = cfg["effort"]                      # an explicit null is a malformed block
+    if not isinstance(block, dict) or any(k not in ROLE_EFFORT_DEFAULTS for k in block):
+        return (None, 5)
+    for k, v in block.items():
+        if v is None:
+            if k == "think":
+                return (None, 5)
+            continue
+        allowed = THINK_EFFORTS if k == "think" else EFFORT_LEVELS
+        if isinstance(v, bool) or not isinstance(v, str) or v not in allowed:
+            return (None, 5)
+    if role in block:
+        return (block[role], None)
+    return (ROLE_EFFORT_DEFAULTS[role], None)
 
 
 MECH_DEFAULTS = {"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
@@ -1242,6 +1277,7 @@ def main(argv=None) -> int:
     add("write-index", "--workspace", "--json", fenced=True)
     add("write-capabilities", "--json", fenced=True)
     add("resolve-model", "--role", "--session")
+    add("resolve-effort", "--role")
     add("disable-model", "--model", fenced=True)
     mc = add("mech-caps")
     mc.add_argument("--max-turns", type=int, default=None)
@@ -1371,6 +1407,14 @@ def main(argv=None) -> int:
             )
             return code
         print(model)
+        return 0
+    if ns.cmd == "resolve-effort":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        level, code = role_effort(ns.role, read_config(repo_dir(ns.repo_slug)))
+        if code is not None:
+            sys.stderr.write("[X] invalid role or config effort block\n")
+            return code
+        print(level or "inherit")
         return 0
     if ns.cmd == "disable-model":
         rd = _fenced(ns)

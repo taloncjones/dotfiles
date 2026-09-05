@@ -1591,6 +1591,45 @@ try $base --agent mech-td-r --launch-id 'mech-td-r 1' --base-sha "$BASE" --brief
 [ ! -e "$RD/tasks/td-r.spend.jsonl" ] && [ ! -e "$RD/tasks/td-r.done.json" ] && [ ! -e "$FAKE_CLAUDE_LOG.argv" ]
 SH
 
+check "effort map: defaults, think constraints, config overrides fail closed" <<PY
+$LOAD
+assert c.EFFORT_LEVELS==("low","medium","high","xhigh","max") and c.THINK_EFFORTS==("high","xhigh","max")
+assert c.ROLE_DEFAULTS["think"]==("fable","opus") and c.ROLE_ALIASES["think"]==("fable","opus")
+assert c.role_effort("plan",{})==("high",None) and c.role_effort("review",{})==("high",None)
+assert c.role_effort("impl",{})==(None,None) and c.role_effort("mech",{})==(None,None)
+assert c.role_effort("think",{})==("high",None)
+assert c.role_effort("impl",{"effort":{"impl":"low"}})==("low",None)
+assert c.role_effort("plan",{"effort":{"plan":None}})==(None,None)
+assert c.role_effort("think",{"effort":{"think":"xhigh"}})==("xhigh",None)
+assert c.role_effort("review",{"effort":{"plan":"low"}})==("high",None)   # sibling override untouched
+bad=[{"effort":[]},{"effort":None},{"effort":{"bogus":"high"}},{"effort":{"plan":"turbo"}},{"effort":{"plan":True}},
+     {"effort":{"plan":3}},{"effort":{"think":None}},{"effort":{"think":"low"}},{"effort":{"think":"medium"}}]
+for b in bad:
+    assert c.role_effort("plan",b)==(None,5), b
+assert c.role_effort("orchestrator",{})==(None,5)
+assert c.resolve_model("think",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{})==("fable",None)
+assert c.resolve_model("think",{"fable":False,"opus":True,"sonnet":True,"haiku":True},{})==("opus",None)
+assert c.resolve_model("think",{"fable":False,"opus":False,"sonnet":True,"haiku":True},{})==(None,4)
+assert c.resolve_model("think",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{"models":{"think":["sonnet"]}})==(None,5)
+assert c.resolve_model("think",{"fable":True,"opus":True,"sonnet":True,"haiku":True},{"models":{"think":["haiku"]}})==(None,5)
+sys.exit(0)
+PY
+
+check "resolve-effort CLI prints level or inherit, exit 5 on bad config" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-e"; mkdir -p "$RD"
+[ "$($CLI resolve-effort --repo-slug slug-e --role plan)" = high ]
+[ "$($CLI resolve-effort --repo-slug slug-e --role impl)" = inherit ]
+[ "$($CLI resolve-effort --repo-slug slug-e --role think)" = high ]
+printf '{"v":1,"user":"u","default_base":"origin/main","effort":{"impl":"low","think":"xhigh"}}' > "$RD/config.json"
+[ "$($CLI resolve-effort --repo-slug slug-e --role impl)" = low ]
+[ "$($CLI resolve-effort --repo-slug slug-e --role think)" = xhigh ]
+printf '{"v":1,"user":"u","default_base":"origin/main","effort":{"think":null}}' > "$RD/config.json"
+rc=0; $CLI resolve-effort --repo-slug slug-e --role plan 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+rc=0; $CLI resolve-effort --repo-slug slug-e --role nope 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+SH
+
 check "docs pin the mech tier: role row, run-mech launch, liveness table, ledger schema, brief variant" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 grep -q '| Mechanical worker (`mech`)' "$S"
