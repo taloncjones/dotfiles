@@ -2,6 +2,17 @@
 set -euo pipefail
 
 # Global commit-msg guard for portable commit message policy.
+#
+# Two layers, in order:
+#   1. Strip pass (no rg needed): removes agent attribution lines that tools
+#      inject -- agent Co-Authored-By trailers, session-URL trailers, and
+#      "Generated with|by <agent>" footers -- from line 2 onward. Every other
+#      line is written back byte-for-byte; a message with nothing to strip is
+#      not rewritten at all.
+#   2. Block checks (rg): reject what cannot be safely edited -- inline
+#      attribution in the subject or body, and emojis.
+# Squash-merge messages come from the PR body, which no git hook sees; the
+# PR-side opt-out lives in claude/settings.json.tmpl (attribution.pr).
 
 if [[ "${DOTFILES_SKIP_COMMIT_MSG_GUARD:-0}" == "1" ]]; then
   exit 0
@@ -11,6 +22,67 @@ message_file="${1:-}"
 if [[ -z "$message_file" || ! -f "$message_file" ]]; then
   exit 0
 fi
+
+# --- Strip pass --------------------------------------------------------------
+
+# Lowercase POSIX ERE, matched against tolower($0) so BSD and GNU awk agree on
+# case-insensitivity. Bracket classes only: no \b, no \s.
+agent_tokens='(claude|anthropic|copilot|chatgpt|gpt|codex)'
+re_coauthor="^[[:space:]]*co-authored-by:.*${agent_tokens}"
+re_session='^[[:space:]]*(claude-session:|[a-z-]*session[a-z-]*:[[:space:]]*https?://)'
+re_footer='^[^[:alnum:]]*generated[[:space:]]+(with|by)[^[:alnum:]]*(claude|anthropic|copilot|chatgpt|gpt|codex|ai)([^[:alnum:]]|$)'
+
+# Line 1 (the subject) is never stripped. LC_ALL=C makes emoji bytes count as
+# non-alphanumeric for the footer prefix.
+count_agent_lines() {
+  LC_ALL=C awk -v re_co="$re_coauthor" -v re_se="$re_session" -v re_fo="$re_footer" '
+    NR == 1 { next }
+    { line = tolower($0) }
+    line ~ re_co || line ~ re_se || line ~ re_fo { n++ }
+    END { print n + 0 }
+  ' "$1"
+}
+
+write_without_agent_lines() {
+  LC_ALL=C awk -v re_co="$re_coauthor" -v re_se="$re_session" -v re_fo="$re_footer" '
+    NR == 1 { print; next }
+    { line = tolower($0) }
+    line ~ re_co || line ~ re_se || line ~ re_fo { next }
+    { print }
+  ' "$1" > "$2"
+}
+
+strip_tmp=""
+cleanup_strip_tmp() {
+  if [[ -n "$strip_tmp" ]]; then
+    rm -f "$strip_tmp"
+  fi
+}
+trap cleanup_strip_tmp EXIT
+
+agent_lines="$(count_agent_lines "$message_file")"
+if [[ "$agent_lines" -gt 0 ]]; then
+  message_dir="${message_file%/*}"
+  if [[ "$message_dir" == "$message_file" ]]; then
+    message_dir="."
+  fi
+  if ! strip_tmp="$(mktemp "${message_dir}/.commit-msg.XXXXXX")"; then
+    printf 'commit-msg: cannot create a temp file in %s; refusing to commit unchecked.\n' "$message_dir" >&2
+    exit 1
+  fi
+  if ! write_without_agent_lines "$message_file" "$strip_tmp"; then
+    printf 'commit-msg: failed to write the stripped message; refusing to commit unchecked.\n' >&2
+    exit 1
+  fi
+  if ! mv -f "$strip_tmp" "$message_file"; then
+    printf 'commit-msg: failed to replace %s; refusing to commit unchecked.\n' "$message_file" >&2
+    exit 1
+  fi
+  strip_tmp=""
+  printf 'commit-msg: stripped %s agent attribution line(s).\n' "$agent_lines" >&2
+fi
+
+# --- Block checks (unchanged) ------------------------------------------------
 
 if ! command -v rg >/dev/null 2>&1; then
   printf 'commit-msg: rg not found; skipping attribution and emoji checks.\n' >&2
