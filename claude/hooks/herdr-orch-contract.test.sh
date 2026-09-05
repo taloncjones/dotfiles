@@ -327,5 +327,96 @@ $CLI write-task --repo-slug "$SLUG" --task-id td-m --session M --fence "$F" \
 ok "relaunch: second workers[] entry with a distinct launch id and raised caps; record superseded by launch id; launches doubles" \
   "python3 -c \"import json;t=json.load(open('$RD/tasks/td-m.json'));w=t['workers'];assert len(w)==2 and w[0]['launch_id']!=w[1]['launch_id'] and w[1]['caps']['max_turns']==20,t;d=json.load(open('$RD/tasks/td-m.done.json'));assert d['launch_id']=='$LID2' and d['reason']=='max_turns',d\" && $CLI status --repo-slug '$SLUG' | python3 -c \"import json,sys;s=json.load(sys.stdin);assert s['td-m']['spend']=={'usd':1.0,'turns':13,'launches':2,'unknown_cost_launches':0,'skipped_lines':0},s\""
 
+# 11. effort routing + deep-think: one routing-table snapshot per dispatch, effort on the
+# launch line and in workers[], effort-mismatch publishes nothing and touches no
+# capability, think escalation lands launch+answer and refuses a concurrent second.
+ESLUG="github-com-org-effort-0badf00d"
+EF=$($CLI claim-owner --repo-slug "$ESLUG" --session E --host h --pid 3)
+ERD="$ROOT/herdr-orch/$ESLUG"; mkdir -p "$ERD/tasks" "$ERD/think"
+printf '{"v":1,"user":"talon","default_base":"origin/main"}' > "$ERD/config.json"
+$CLI write-capabilities --repo-slug "$ESLUG" --session E --fence "$EF" \
+  --json '{"v":1,"session_id":"E","available":{"fable":true,"opus":true,"sonnet":true,"haiku":true}}'
+ROUTING=$($CLI routing-table --repo-slug "$ESLUG" --session E)
+PM=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["plan"]["model"])')
+PE=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["plan"]["effort"] or "inherit")')
+IM=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["impl"]["model"])')
+IE=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["impl"]["effort"] or "inherit")')
+ok "routing snapshot: plan fable/high, impl sonnet/inherit" "[ '$PM/$PE' = fable/high ] && [ '$IM/$IE' = sonnet/inherit ]"
+: > "$BIN/calls.log"
+PID=$(herdr worktree create --cwd "$PWD" --branch talon/PROJ-E/x --base origin/main --label PROJ-E | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
+herdr pane run "$PID" "claude --model $PM --effort $PE --permission-mode auto --name plan-proj-e"
+ok "plan launch line carries --effort high" "grep -q '^pane run w1:p1 claude --model fable --effort high --permission-mode auto --name plan-proj-e$' '$BIN/calls.log'"
+# impl inherits: the snapshot says null, so the launch line has NO --effort; review is high
+if [ "$IE" = inherit ]; then herdr pane run "$PID" "claude --model $IM --permission-mode auto --name impl-proj-e"; else herdr pane run "$PID" "claude --model $IM --effort $IE --permission-mode auto --name impl-proj-e"; fi
+ok "impl launch line omits --effort when the snapshot says inherit" "grep -q '^pane run w1:p1 claude --model sonnet --permission-mode auto --name impl-proj-e$' '$BIN/calls.log'"
+RM=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["review"]["model"])'); RE=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["review"]["effort"] or "inherit")')
+herdr pane run "$PID" "claude --model $RM --effort $RE --permission-mode auto --name rev-proj-e"
+ok "review launch line carries --effort high" "grep -q '^pane run w1:p1 claude --model opus --effort high --permission-mode auto --name rev-proj-e$' '$BIN/calls.log'"
+BANNER=$(mktemp); printf 'Claude Code v2.1.260\n  Fable 5.1 with high effort \302\267 Claude Max\n' > "$BANNER"
+ok "banner classifies ok for the requested pin" "[ \"\$($CLI classify-banner --repo-slug '$ESLUG' --model $PM --effort $PE --text-file '$BANNER')\" = ok ]"
+$CLI write-task --repo-slug "$ESLUG" --task-id PROJ-E --session E --fence "$EF" \
+  --json "{\"task_id\":\"PROJ-E\",\"base_sha\":\"b0\",\"status\":\"in-progress\",\"workers\":[{\"role\":\"impl\",\"phase\":\"plan\",\"workspace_id\":\"w1\",\"agent\":\"plan-proj-e\",\"model\":\"$PM\",\"effort\":\"$PE\",\"created_by_this_orch\":true,\"started\":\"t\"}]}"
+ok "workers[] records the pinned effort" "python3 -c \"import json;t=json.load(open('$ERD/tasks/PROJ-E.json'));assert t['workers'][0]['effort']=='high',t\""
+# effort-mismatch: a config pins impl to high (fresh snapshot), the banner shows none -> nothing published, capabilities untouched, no disable-model, no workspace close
+printf '{"v":1,"user":"talon","default_base":"origin/main","effort":{"impl":"high"}}' > "$ERD/config.json"
+ROUTING2=$($CLI routing-table --repo-slug "$ESLUG" --session E)
+IE2=$(printf '%s' "$ROUTING2" | python3 -c 'import json,sys;print(json.load(sys.stdin)["impl"]["effort"])')
+ok "config override pins impl effort in a fresh snapshot" "[ '$IE2' = high ]"
+printf 'Claude Code v2.1.260\n  Sonnet 5 \302\267 Claude Max\n' > "$BANNER"
+CLS=$($CLI classify-banner --repo-slug "$ESLUG" --model sonnet --effort $IE2 --text-file "$BANNER" --json)
+ok "impl pinned high but banner shows none -> effort-mismatch with observed effort null" "[ '$CLS' = '{\"class\": \"effort-mismatch\", \"model\": \"Sonnet 5\", \"effort\": null}' ]"
+CAP_BEFORE=$(cat "$ERD/capabilities.json"); : > "$BIN/calls.log"
+herdr pane run "$PID" "claude --model sonnet --effort $IE2 --permission-mode auto --name impl-proj-e"
+# the skill terminates the worker and publishes nothing; simulate exactly that and assert the invariants
+herdr agent prompt "$PID" "/exit"
+ok "effort-mismatch: capabilities unchanged, no disable-model, no workspace close, record unchanged" \
+  "[ \"\$(cat '$ERD/capabilities.json')\" = \"\$CAP_BEFORE\" ] && ! grep -q disable-model '$BIN/calls.log' && ! grep -q 'workspace close' '$BIN/calls.log' && python3 -c \"import json;t=json.load(open('$ERD/tasks/PROJ-E.json'));assert len(t['workers'])==1 and t['status']=='in-progress',t\""
+printf 'Claude Code v2.1.260\n  Sonnet 5 with high effort \302\267 Claude Max\n' > "$BANNER"
+ok "downgrade still flips the requested alias" \
+  "[ \"\$($CLI classify-banner --repo-slug '$ESLUG' --model fable --effort high --text-file '$BANNER')\" = downgrade ] && $CLI disable-model --repo-slug '$ESLUG' --session E --fence '$EF' --model fable && [ \"\$($CLI resolve-model --repo-slug '$ESLUG' --role plan --session E)\" = opus ]"
+# think escalation (triage): question at the canonical path, run-think with --add-dir tasks, launch+answer, status _think, concurrent refusal, then an explicit other
+TWT=$(mktemp -d); git -C "$TWT" init -q; git -C "$TWT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+git -C "$TWT" remote add origin https://github.com/org/effort.git
+TSLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/effort.git'))")
+TRD="$ROOT/herdr-orch/$TSLUG"; mkdir -p "$TRD/tasks" "$TRD/think"
+TF=$($CLI claim-owner --repo-slug "$TSLUG" --session E --host h --pid 4)
+TID=think-triage-20260904170000
+printf 'You are %s ...\n## Question\nWhich of the three todos first?\n' "$TID" > "$TRD/think/$TID.question.md"
+export FAKE_CLAUDE_LOG="$FAKE/tlog" FAKE_CLAUDE_JSON="$FAKE/tres.json"
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":1.1,"modelUsage":{"claude-fable-5-1":{}},"structured_output":{"recommendation":"todo B first","rationale":"unblocks A and C","options":[{"label":"B first","summary":"s","tradeoffs":"t","risk":"low"},{"label":"A first","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}}' > "$FAKE_CLAUDE_JSON"
+TCMD="python3 claude/hooks/herdr_orch_core.py run-think --repo-slug $TSLUG --session E --fence $TF --think-id $TID --kind triage --model fable --effort high --cwd $TWT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 900 --add-dir tasks"
+ok "every think launch value is shell-safe" "python3 -c \"import re,sys;sys.exit(0 if all(re.fullmatch(r'[A-Za-z0-9_./+:@-]+',w) for w in '$TCMD'.split()) else 1)\""
+$TCMD
+ok "think launch record then answer landed, answered" \
+  "python3 -c \"import json;l=json.load(open('$TRD/think/$TID.launch.json'));a=json.load(open('$TRD/think/$TID.answer.json'));assert l['kind']=='triage' and a['status']=='answered' and a['answer']['recommendation']=='todo B first',(l,a)\""
+ok "the advisor saw the question on stdin, the repo as cwd, and --add-dir tasks" \
+  "grep -q 'Which of the three todos first' '$FAKE_CLAUDE_LOG.stdin' && grep -qx -- '$TRD/tasks' '$FAKE_CLAUDE_LOG.argv' && grep -qx -- '--restricted' '$FAKE_CLAUDE_LOG.argv'"
+ok "status reports _think" "$CLI status --repo-slug '$TSLUG' | python3 -c \"import json,sys;t=json.load(sys.stdin)['_think'];assert t['launches']==1 and t['answered']==1 and t['usd']==1.1,t\""
+TID2=think-other-20260904170100; printf 'q\n' > "$TRD/think/$TID2.question.md"
+rm "$TRD/think/$TID.answer.json"          # first escalation looks live again
+ok "a second run-think while one is live exits 4 and writes nothing" \
+  "rc=0; $CLI run-think --repo-slug $TSLUG --session E --fence $TF --think-id $TID2 --kind other --model fable --effort high --cwd $TWT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 900 >/dev/null 2>&1 || rc=\$?; [ \"\$rc\" = 4 ] && [ ! -e '$TRD/think/$TID2.launch.json' ]"
+python3 -c "import json;p='$TRD/think/$TID.launch.json';d=json.load(open(p));d['started']='2020-01-01T00:00:00Z';json.dump(d,open(p,'w'))"
+$CLI run-think --repo-slug $TSLUG --session E --fence $TF --think-id $TID2 --kind other --model fable --effort high --cwd $TWT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 900
+ok "explicit other-kind escalation succeeds once the first is no longer live" "[ -e '$TRD/think/$TID2.answer.json' ]"
+# brief rendering: Routing block equals the snapshot; opt-in line; helper rule; no-workflow variant
+render_brief() {   # $1 = ROUTING json, $2 = granted|withheld
+  printf '%s' "$1" | python3 -c '
+import json,sys
+t=json.load(sys.stdin); mode=sys.argv[1]
+print("## Routing")
+for r in ("plan","impl","review","mech","think"):
+    m=t[r]["model"] or "unavailable"; e=t[r]["effort"] or "inherit"
+    print(f"- {r}: {m} / {e}")
+print("Workflow opt-in: granted by the user'"'"'s standing order (global CLAUDE.md, Default Skill Routing) for this orchestrated task; default size guideline" if mode=="granted" else "Workflow opt-in: withheld for this task")
+print("Workflow/subagent helpers never call `herdr_orch_core.py`; only you emit the completion record.")' "$2"
+}
+B1=$(render_brief "$ROUTING" granted); B2=$(render_brief "$ROUTING" withheld)
+ok "brief Routing block matches the snapshot and carries the grant + helper rule" \
+  "printf '%s' \"\$B1\" | grep -q '^- plan: fable / high$' && printf '%s' \"\$B1\" | grep -q '^- impl: sonnet / inherit$' && printf '%s' \"\$B1\" | grep -q '^Workflow opt-in: granted by the user' && printf '%s' \"\$B1\" | grep -q 'never call \`herdr_orch_core.py\`'"
+ok "no-workflow kickoff renders the withheld line" "printf '%s' \"\$B2\" | grep -q '^Workflow opt-in: withheld for this task$'"
+ok "skill documents the brief Routing block and both opt-in lines" \
+  "grep -q '## Routing' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'withheld for this task' claude/skills/herdr-orchestration/references/brief-template.md"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
