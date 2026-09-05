@@ -1814,6 +1814,55 @@ assert c.THINK_SCHEMA["properties"]["options"]["minItems"]==2 and c.THINK_SCHEMA
 sys.exit(0)
 PY
 
+check "think validators + scan: invalid records fail closed; live/lost per record timeout; reservation accounting" <<PY
+$LOAD
+rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
+def w(name,rec): open(os.path.join(td,name),"w").write(json.dumps(rec))
+L=lambda tid,started,to=900,**kw:dict({"v":1,"think_id":tid,"kind":c.think_kind(tid),"task_id":None,"repo_slug":"s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":to},"attempt":2 if tid.endswith("-2") else 1,"parent":tid[:-2] if tid.endswith("-2") else None,"started":started,"pid":1},**kw)
+opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
+ANS={"recommendation":"r","rationale":"w","options":[opt(1),opt(2)],"confidence":"high"}
+A=lambda tid,status,cost,turns,started,**kw:dict({"v":1,"think_id":tid,"status":status,"reason":None if status=="answered" else "error","answer":ANS if status=="answered" else None,"total_cost_usd":cost,"num_turns":turns,"started":started},**kw)
+assert c.valid_launch_record(L("think-triage-20260904100000","2026-09-04T10:00:00Z"),"think-triage-20260904100000")
+assert c.valid_launch_record(L("think-triage-20260904100000-2","2026-09-04T10:00:00Z"),"think-triage-20260904100000-2")
+for bad in (L("think-triage-20260904100000","2026-09-04T10:00:00Z",caps={}), L("think-triage-20260904100000","nope"),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",model="sonnet"), L("think-triage-20260904100000","2026-09-04T10:00:00Z",effort="low"),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",attempt=2), L("think-triage-20260904100000-2","2026-09-04T10:00:00Z",parent=None),
+            L("think-triage-20260904100000","2026-09-04T10:00:00Z",kind="other"), dict(L("think-triage-20260904100000","2026-09-04T10:00:00Z"),v=True), {}):
+    assert not c.valid_launch_record(bad,"think-triage-20260904100000"), bad
+assert c.valid_answer_record(A("t","answered",1.0,2,"2026-09-04T10:00:00Z"),"t")
+assert c.valid_answer_record(A("t","unanswered",None,None,"2026-09-04T10:00:00Z"),"t")
+for bad in (A("t","answered",1.0,2,"2026-09-04T10:00:00Z",answer={"recommendation":"r"}), A("t","done",1.0,2,"2026-09-04T10:00:00Z"),
+            A("t","answered",-1,2,"2026-09-04T10:00:00Z"), A("t","answered",1.0,True,"2026-09-04T10:00:00Z"),
+            A("t","unanswered",None,None,"2026-09-04T10:00:00Z",reason="bogus"), A("t","unanswered",None,None,"2026-09-04T10:00:00Z",answer=ANS), {"v":1,"think_id":"t"}):
+    assert not c.valid_answer_record(bad,"t"), bad
+w("think-triage-20260904100000.launch.json",L("think-triage-20260904100000","2026-09-04T10:00:00Z"))
+w("think-triage-20260904100000.answer.json",A("think-triage-20260904100000","answered",1.12,6,"2026-09-04T10:00:00Z"))
+w("think-other-20260904110000.launch.json",L("think-other-20260904110000","2026-09-04T11:00:00Z"))
+w("think-other-20260904110000.answer.json",A("think-other-20260904110000","answered",0.40,3,"2026-09-04T11:00:00Z"))
+w("think-incident-20260904120000.launch.json",L("think-incident-20260904120000","2026-09-04T12:00:00Z"))
+w("think-incident-20260904120000.answer.json",A("think-incident-20260904120000","unanswered",None,None,"2026-09-04T12:00:00Z"))
+w("think-decompose-20260904125900.launch.json",L("think-decompose-20260904125900","2026-09-04T12:59:00Z"))      # live: 1 min old
+w("think-incident-20260903120000.launch.json",L("think-incident-20260903120000","2026-09-03T12:00:00Z",600))  # lost
+w("think-other-20260904124000.launch.json",L("think-other-20260904124000","2026-09-04T12:40:00Z"))            # invalid answer -> still live
+w("think-other-20260904124000.answer.json",{"v":1,"think_id":"think-other-20260904124000","status":"answered"})
+open(os.path.join(td,"think-other-20260904130000.answer.json"),"w").write('{"v":1,"trunc')
+w("think-other-20260904140000.answer.json",{"v":2,"think_id":"think-other-20260904140000"})
+w("think-other-20260904150000.answer.json",A("think-other-20260904150000","answered",0.5,1,"2026-09-04T15:00:00Z"))   # orphan answer: no launch -> skipped
+w("think-triage-20260904160000.launch.json",{"v":1,"think_id":"think-triage-20260904160000"})                          # corrupt launch
+w("bogus-stem.launch.json",{"v":1})                                                                                       # invalid launch stem -> corrupt
+w("bogus-stem.answer.json",{"v":1})                                                                                       # invalid answer stem -> skipped
+s=c.think_scan(rd,"2026-09-04T13:00:00Z")
+assert [l["think_id"] for l in s["launches"]]==sorted(["think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000","think-decompose-20260904125900","think-incident-20260903120000","think-other-20260904124000"]),s["launches"]
+assert set(s["answers"])=={"think-triage-20260904100000","think-other-20260904110000","think-incident-20260904120000"},s["answers"].keys()
+assert s["live"]==["think-decompose-20260904125900","think-other-20260904124000"] and s["lost"]==["think-incident-20260903120000"],s
+assert s["skipped_files"]==5 and s["corrupt"]==["bogus-stem","think-triage-20260904160000"],s
+# reservation: 1.12 + 0.40 + 3.0 (null-cost unanswered) + 3.0 (live decompose) + 3.0 (live with invalid answer) = 10.52
+assert c.think_usd_today(s,"2026-09-04")==10.52, c.think_usd_today(s,"2026-09-04")
+assert c.think_usd_today(s,"2026-09-03")==3.0                                   # lost launch counts its cap
+e=c.think_scan(tempfile.mkdtemp(),"2026-09-04T13:00:00Z"); assert e=={"launches":[],"answers":{},"live":[],"lost":[],"skipped_files":0,"corrupt":[]},e
+sys.exit(0)
+PY
+
 check "run-mech characterization: popen failure, unparseable stdout, nonzero exit, timeout return" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
 CLI="python3 claude/hooks/herdr_orch_core.py"

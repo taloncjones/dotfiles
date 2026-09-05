@@ -5,6 +5,7 @@ single-writer ownership. Imported by the hook and driven as a CLI by the skill.
 Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 """
 
+import datetime
 import hashlib
 import json
 import math
@@ -915,6 +916,135 @@ def _check_schema(obj, schema, path="$"):
 
 def valid_think_answer(obj):
     return _check_schema(obj, THINK_SCHEMA)
+
+
+THINK_LOST_GRACE_SECS = 120
+
+
+def think_dir(rd) -> Path:
+    return Path(rd) / "think"
+
+
+def _parse_iso(ts):
+    try:
+        return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _v1(rec) -> bool:
+    return isinstance(rec, dict) and rec.get("v") == 1 and not isinstance(rec.get("v"), bool)
+
+
+def valid_launch_record(rec, tid) -> bool:
+    if not (_v1(rec) and rec.get("think_id") == tid and valid_think_id(tid)):
+        return False
+    if rec.get("kind") != think_kind(tid):
+        return False
+    if rec.get("task_id") is not None and not valid_task_id(rec.get("task_id")):
+        return False
+    if rec.get("model") not in ROLE_ALIASES["think"] or rec.get("effort") not in THINK_EFFORTS:
+        return False
+    caps = rec.get("caps")
+    if not isinstance(caps, dict) or any(k not in caps or _cap_error(k, caps[k]) for k in MECH_BOUNDS):
+        return False
+    retry = tid.endswith("-2")
+    if rec.get("attempt") != (2 if retry else 1) or isinstance(rec.get("attempt"), bool):
+        return False
+    if rec.get("parent") != (tid[:-2] if retry else None):
+        return False
+    return _parse_iso(rec.get("started")) is not None
+
+
+def valid_answer_record(rec, tid) -> bool:
+    if not (_v1(rec) and rec.get("think_id") == tid):
+        return False
+    status = rec.get("status")
+    cost, turns = rec.get("total_cost_usd"), rec.get("num_turns")
+    if not (_finite_nonneg(cost) and _finite_nonneg(turns, True)):
+        return False
+    if _parse_iso(rec.get("started")) is None:
+        return False
+    if status == "answered":
+        return rec.get("reason") is None and valid_think_answer(rec.get("answer")) is None
+    if status == "unanswered":
+        return rec.get("reason") in THINK_REASONS and rec.get("answer") is None
+    return False
+
+
+def think_scan(rd, now_ts):
+    """Validated launch and answer records under think/, plus live/lost lists
+    computed from each launch record's own timeout (spec 4.4). Invalid files
+    are skipped and counted; a malformed launch record is listed in
+    `corrupt` (liveness cannot be judged -> run-think refuses); a launch
+    with an invalid answer file stays live regardless of age. Never raises."""
+    out = {"launches": [], "answers": {}, "live": [], "lost": [], "skipped_files": 0, "corrupt": []}
+    d = think_dir(rd)
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    launched = set()
+    answer_present = set()
+    for name in names:
+        if name.endswith(".launch.json"):
+            tid = name[: -len(".launch.json")]
+            if not valid_think_id(tid):
+                out["corrupt"].append(tid)          # unknown stem: liveness cannot be judged
+                continue
+            try:
+                rec = json.loads((d / name).read_text())
+            except (OSError, ValueError):
+                rec = None
+            if valid_launch_record(rec, tid):
+                out["launches"].append(rec)
+                launched.add(tid)
+            else:
+                out["corrupt"].append(tid)          # listed, not counted as skipped
+    for name in names:
+        if name.endswith(".answer.json"):
+            tid = name[: -len(".answer.json")]
+            if not valid_think_id(tid):
+                out["skipped_files"] += 1
+                continue
+            answer_present.add(tid)
+            try:
+                rec = json.loads((d / name).read_text())
+            except (OSError, ValueError):
+                rec = None
+            if tid in launched and valid_answer_record(rec, tid):
+                out["answers"][tid] = rec
+            else:
+                out["skipped_files"] += 1
+    now = _parse_iso(now_ts)
+    for rec in out["launches"]:
+        tid = rec["think_id"]
+        if tid in out["answers"]:
+            continue
+        if tid in answer_present:
+            out["live"].append(tid)          # invalid answer file: leave the launch live
+            continue
+        started = _parse_iso(rec["started"])
+        to = rec["caps"]["timeout_secs"]
+        if now is not None and (now - started).total_seconds() <= to + THINK_LOST_GRACE_SECS:
+            out["live"].append(tid)
+        else:
+            out["lost"].append(tid)
+    return out
+
+
+def think_usd_today(scan, today_prefix) -> float:
+    """Committed spend for the UTC day (spec 4.1 reservation semantics): per
+    launch record started today, the answer's numeric total_cost_usd when
+    one exists, else the launch's reserved caps.max_budget_usd."""
+    total = 0.0
+    for launch in scan["launches"]:
+        if not launch["started"].startswith(today_prefix):
+            continue
+        ans = scan["answers"].get(launch["think_id"])
+        cost = (ans or {}).get("total_cost_usd")
+        total += cost if (ans is not None and cost is not None) else launch["caps"]["max_budget_usd"]
+    return round(total, 4)
 
 
 def parse_claude_result(stdout: str):
