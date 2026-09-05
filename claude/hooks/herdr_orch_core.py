@@ -249,7 +249,6 @@ def routing_table(available, config):
 
 MECH_DEFAULTS = {"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}
 MECH_BOUNDS = {"max_turns": (1, 500), "max_budget_usd": (0, 50), "timeout_secs": (60, 14400)}
-MECH_KEYS = frozenset(MECH_DEFAULTS) | {"contract_commands"}
 
 MECH_REASONS = ("max_turns", "max_budget", "timeout", "no_emit", "error",
                 "needs_design", "blocked_on_human", "other")
@@ -276,19 +275,35 @@ def _cap_error(key, value):
     return None
 
 
-def mech_caps(config, max_turns=None, max_budget_usd=None):
-    """Effective mech caps: defaults <- config.mech <- per-launch overrides.
-    (caps, None) or (None, message). Fail closed on any malformed value or
-    unknown key, matching the `models` rule -- never silently default."""
-    block = (config or {}).get("mech")
-    caps = dict(MECH_DEFAULTS)
+THINK_DEFAULTS = {"max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900,
+                  "daily_budget_usd": 10.0}
+DAILY_BOUNDS = (0, 200)
+
+
+def _daily_error(value):
+    """Error message when a daily_budget_usd value is out of bounds or
+    mistyped, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return "daily_budget_usd must be a finite number"
+    lo, hi = DAILY_BOUNDS
+    if not (lo < value <= hi):
+        return f"daily_budget_usd must be > {lo} and <= {hi}"
+    return None
+
+
+def tier_caps(config, tier, defaults, extra_keys, max_turns=None, max_budget_usd=None):
+    """Effective caps for a headless tier: defaults <- config.<tier> <- per-launch
+    overrides. (caps, None) or (None, message). Fail closed on any malformed
+    value or unknown key -- never silently default."""
+    block = (config or {}).get(tier)
+    caps = dict(defaults)
     if block is not None:
         if not isinstance(block, dict):
-            return None, "mech must be a JSON object"
-        unknown = set(block) - MECH_KEYS
+            return None, f"{tier} must be a JSON object"
+        unknown = set(block) - (set(defaults) | set(extra_keys))
         if unknown:
-            return None, f"mech has unknown keys: {sorted(unknown)}"
-        for k in MECH_BOUNDS:
+            return None, f"{tier} has unknown keys: {sorted(unknown)}"
+        for k in defaults:
             if k in block:
                 caps[k] = block[k]
         if "contract_commands" in block:
@@ -296,7 +311,7 @@ def mech_caps(config, max_turns=None, max_budget_usd=None):
                 {"v": 1, "task_id": "x", "commands": block["contract_commands"]}, "x"
             )
             if err:
-                return None, f"mech.contract_commands: {err}"
+                return None, f"{tier}.contract_commands: {err}"
     if max_turns is not None:
         caps["max_turns"] = max_turns
     if max_budget_usd is not None:
@@ -305,7 +320,27 @@ def mech_caps(config, max_turns=None, max_budget_usd=None):
         err = _cap_error(k, caps[k])
         if err:
             return None, err
+    if "daily_budget_usd" in caps:
+        err = _daily_error(caps["daily_budget_usd"])
+        if err:
+            return None, err
+        if caps["max_budget_usd"] > caps["daily_budget_usd"]:
+            return None, "max_budget_usd exceeds daily_budget_usd"
     return caps, None
+
+
+def mech_caps(config, max_turns=None, max_budget_usd=None):
+    """Effective mech caps: defaults <- config.mech <- per-launch overrides.
+    (caps, None) or (None, message). Fail closed on any malformed value or
+    unknown key, matching the `models` rule -- never silently default."""
+    return tier_caps(config, "mech", MECH_DEFAULTS, ("contract_commands",), max_turns, max_budget_usd)
+
+
+def think_caps(config, max_turns=None, max_budget_usd=None):
+    """Effective think caps: defaults <- config.think <- per-launch overrides.
+    (caps, None) or (None, message). Fail closed on any malformed value or
+    unknown key, matching the `mech` rule -- never silently default."""
+    return tier_caps(config, "think", THINK_DEFAULTS, (), max_turns, max_budget_usd)
 
 
 def mech_contract(config, task_id):
@@ -1358,6 +1393,9 @@ def main(argv=None) -> int:
     mc.add_argument("--max-turns", type=int, default=None)
     mc.add_argument("--max-budget-usd", type=float, default=None)
     add("mech-contract", "--task-id", "--worktree", "--base-sha")
+    tc = add("think-caps")
+    tc.add_argument("--max-turns", type=int, default=None)
+    tc.add_argument("--max-budget-usd", type=float, default=None)
     rm = add("run-mech", "--task-id", "--workspace", "--agent", "--launch-id",
              "--model", "--worktree", "--base-sha", "--brief-file")
     rm.add_argument("--max-turns", type=int, required=True)
@@ -1794,6 +1832,15 @@ def main(argv=None) -> int:
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         caps, err = mech_caps(read_config(repo_dir(ns.repo_slug)),
                               ns.max_turns, ns.max_budget_usd)
+        if err:
+            sys.stderr.write(f"[X] {err}\n")
+            return 5
+        print(json.dumps(caps))
+        return 0
+    if ns.cmd == "think-caps":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        caps, err = think_caps(read_config(repo_dir(ns.repo_slug)),
+                               ns.max_turns, ns.max_budget_usd)
         if err:
             sys.stderr.write(f"[X] {err}\n")
             return 5

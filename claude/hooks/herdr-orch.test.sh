@@ -1334,6 +1334,34 @@ printf '{"v":1,"user":"u","default_base":"origin/main"}' > "$RD/config.json"
 rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-y --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]   # no template
 SH
 
+check "think_caps: defaults, merge, overrides, fail-closed; mech_caps unchanged" <<PY
+$LOAD
+caps,err=c.think_caps({})
+assert err is None and caps=={"max_turns":15,"max_budget_usd":3.0,"timeout_secs":900,"daily_budget_usd":10.0},caps
+caps,err=c.think_caps({"think":{"max_turns":20,"daily_budget_usd":25}},max_budget_usd=4.5)
+assert err is None and caps["max_turns"]==20 and caps["max_budget_usd"]==4.5 and caps["daily_budget_usd"]==25
+bad=[{"think":{"max_turns":0}},{"think":{"bogus":1}},{"think":{"max_turns":True}},{"think":[]},
+     {"think":{"contract_commands":[{"name":"a","run":"true"}]}},{"think":{"daily_budget_usd":0}},
+     {"think":{"daily_budget_usd":200.5}},{"think":{"daily_budget_usd":True}},
+     {"think":{"max_budget_usd":12,"daily_budget_usd":10}},{"think":{"daily_budget_usd":float("nan")}}]
+for b in bad:
+    caps,err=c.think_caps(b); assert caps is None and err, b
+caps,err=c.think_caps({},max_budget_usd=11); assert caps is None       # override above daily ceiling
+assert c.mech_caps({})==({"max_turns":40,"max_budget_usd":2.0,"timeout_secs":1800},None)
+caps,err=c.mech_caps({"mech":{"daily_budget_usd":5}}); assert caps is None  # not a mech key
+sys.exit(0)
+PY
+
+check "think-caps CLI" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_orch_core.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-t"; mkdir -p "$RD"
+[ "$($CLI think-caps --repo-slug slug-t)" = '{"max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900, "daily_budget_usd": 10.0}' ]
+printf '{"v":1,"user":"u","default_base":"origin/main","think":{"timeout_secs":600}}' > "$RD/config.json"
+[ "$($CLI think-caps --repo-slug slug-t --max-turns 5)" = '{"max_turns": 5, "max_budget_usd": 3.0, "timeout_secs": 600, "daily_budget_usd": 10.0}' ]
+rc=0; $CLI think-caps --repo-slug slug-t --max-budget-usd 60 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]
+SH
+
 check "emit-done: optional launch_id and reason round-trip; bad reason rejected" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
 CLI="python3 claude/hooks/herdr_orch_core.py"
