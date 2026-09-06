@@ -30,6 +30,35 @@ mk_todo() {
   cat >"$repo/.todos/pending/$name.md"
 }
 
+# Repo with origin/main (via update-ref, no network), merged-b at an ancestor
+# commit, and open-b one commit ahead. Echoes its path.
+mk_branch_repo() {
+  local d; d=$(mk_repo)
+  ( cd "$d" \
+    && git commit -q --allow-empty -m base \
+    && git branch merged-b \
+    && git update-ref refs/remotes/origin/main HEAD \
+    && git checkout -q -b open-b \
+    && git commit -q --allow-empty -m extra \
+    && git checkout -q - ) >/dev/null 2>&1
+  printf '%s' "$d"
+}
+# Fake gh. mk_gh_stub <path>: pr view 1/2/3 -> MERGED/OPEN/CLOSED, else exit 1;
+# pr list --head merged-away or --head open-b -> MERGED, --head gone-open -> OPEN,
+# else exit 1. Every invocation appends one line to <path>.calls.
+mk_gh_stub() {
+  cat >"$1" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$1.calls"
+case "\$1 \$2" in
+  "pr view") case "\$3" in 1) echo MERGED ;; 2) echo OPEN ;; 3) echo CLOSED ;; *) exit 1 ;; esac ;;
+  "pr list") case " \$* " in *" --head merged-away "*|*" --head open-b "*) echo MERGED ;; *" --head gone-open "*) echo OPEN ;; *) exit 1 ;; esac ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$1"
+}
+
 # --- cases ---
 test_today_override() {
   local out; out=$(TODOS_TODAY=2026-06-08 bash "$TODOS" today)
@@ -546,6 +575,75 @@ test_depends_normalize() {
   ok "depends: normalize refs"
 }
 test_depends_normalize
+
+test_resolve_todo() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-open-item <<'EOF'
+---
+created: 2026-05-01
+title: Open item
+---
+EOF
+  mkdir -p "$repo/.todos/completed"
+  printf -- '---\ncreated: 2026-05-01\ntitle: Done item\n---\n' >"$repo/.todos/completed/2026-05-01-done-item.md"
+  assert_eq "resolve: completed todo is done" \
+    "$(cd "$repo" && bash "$TODOS" _resolve todo:2026-05-01-done-item)" "done"
+  assert_eq "resolve: pending todo is open" \
+    "$(cd "$repo" && bash "$TODOS" _resolve todo:2026-05-01-open-item)" "open"
+  assert_eq "resolve: absent todo is missing" \
+    "$(cd "$repo" && bash "$TODOS" _resolve todo:2026-05-01-nope)" "missing"
+  assert_eq "resolve: bad input is invalid" \
+    "$(cd "$repo" && bash "$TODOS" _resolve parity)" "invalid"
+  ok "resolve: todo states"
+  rm -rf "$repo"
+}
+test_resolve_todo
+
+test_resolve_branch() {
+  local repo; repo=$(mk_branch_repo)
+  assert_eq "resolve: ancestor branch is merged" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:merged-b)" "merged"
+  assert_eq "resolve: ahead branch is open" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:open-b)" "open"
+  assert_eq "resolve: absent branch offline is unknown" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:absent-b)" "unknown"
+  assert_eq "resolve: missing base ref is unknown" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 TODOS_BASE_REF=origin/nope bash "$TODOS" _resolve branch:merged-b)" "unknown"
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  assert_eq "resolve: present branch merged via gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:open-b)" "merged"
+  assert_eq "resolve: present branch unknown to gh stays open" \
+    "$(cd "$repo" && git branch -q lonely-b open-b && TODOS_GH="$stub" bash "$TODOS" _resolve branch:lonely-b)" "open"
+  assert_eq "resolve: remote-tracking ref preferred" \
+    "$(cd "$repo" && git update-ref refs/remotes/origin/open-b refs/remotes/origin/main && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:open-b)" "merged"
+  ok "resolve: branch states"
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls"
+}
+test_resolve_branch
+
+test_resolve_pr() {
+  local repo; repo=$(mk_branch_repo)
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  assert_eq "resolve: pr MERGED" "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:1)" "merged"
+  assert_eq "resolve: pr OPEN"   "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:2)" "open"
+  assert_eq "resolve: pr CLOSED" "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:3)" "closed"
+  assert_eq "resolve: pr gh failure is unknown" "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:4)" "unknown"
+  assert_eq "resolve: pr offline is unknown" "$(cd "$repo" && TODOS_OFFLINE=1 TODOS_GH="$stub" bash "$TODOS" _resolve pr:1)" "unknown"
+  local errf; errf=$(mktemp)
+  local out; out=$(cd "$repo" && TODOS_GH=/nonexistent/gh bash "$TODOS" _resolve pr:1 2>"$errf")
+  assert_eq "resolve: pr missing gh is unknown" "$out" "unknown"
+  assert_eq "resolve: pr missing gh is silent" "$(cat "$errf")" ""
+  ok "resolve: pr states via gh stub"
+  assert_eq "resolve: absent branch merged via gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:merged-away)" "merged"
+  assert_eq "resolve: absent branch open via gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:gone-open)" "open"
+  assert_eq "resolve: absent branch unknown to gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:never-heard)" "unknown"
+  ok "resolve: absent branch via gh stub"
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls" "$errf"
+}
+test_resolve_pr
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

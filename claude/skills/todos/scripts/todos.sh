@@ -154,6 +154,85 @@ depends_list() {
   ' "$1" | strip_value
 }
 
+deps_offline() {
+  # True when no network may be used: TODOS_OFFLINE set, or DEPS_OFFLINE=1
+  # set in-process (list --offline; regenerate_index always).
+  [ -n "${TODOS_OFFLINE:-}" ] || [ "${DEPS_OFFLINE:-0}" = 1 ]
+}
+
+gh_state() {
+  # gh_state <gh args...> -> MERGED|OPEN|CLOSED on stdout, or nothing.
+  # Never fails: a missing binary, non-zero exit, or odd output all print nothing.
+  local gh="${TODOS_GH:-gh}" out
+  deps_offline && return 0
+  command -v "$gh" >/dev/null 2>&1 || return 0
+  out=$("$gh" "$@" 2>/dev/null) || return 0
+  case "$out" in MERGED|OPEN|CLOSED) printf '%s\n' "$out" ;; esac
+  return 0
+}
+
+map_gh_state() {
+  case "${1:-}" in
+    MERGED) printf 'merged\n' ;;
+    OPEN)   printf 'open\n' ;;
+    CLOSED) printf 'closed\n' ;;
+    *)      printf 'unknown\n' ;;
+  esac
+}
+
+resolve_ref() {
+  # resolve_ref <canonical-ref> -> state token (never `self`; see resolve_cached).
+  local ref="$1" root kind payload base bref st rc
+  root=$(repo_root)
+  kind="${ref%%:*}"; payload="${ref#*:}"
+  case "$kind" in
+    todo)
+      if   [ -e "$root/$TODOS_DIRNAME/completed/$payload.md" ]; then printf 'done\n'
+      elif [ -e "$root/$TODOS_DIRNAME/pending/$payload.md" ];   then printf 'open\n'
+      else printf 'missing\n'; fi ;;
+    branch)
+      base="${TODOS_BASE_REF:-origin/main}"
+      if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
+        printf 'unknown\n'; return 0
+      fi
+      if   git show-ref --verify --quiet "refs/remotes/origin/$payload"; then bref="refs/remotes/origin/$payload"
+      elif git show-ref --verify --quiet "refs/heads/$payload";          then bref="refs/heads/$payload"
+      else bref=""; fi
+      if [ -n "$bref" ]; then
+        # exit 0 ancestor, 1 not an ancestor, >1 git error. The `|| rc=$?`
+        # shape is required: a bare failing command would trip set -e.
+        rc=0; git merge-base --is-ancestor "$bref" "$base" 2>/dev/null || rc=$?
+        [ "$rc" -eq 0 ] && { printf 'merged\n'; return 0; }
+        [ "$rc" -le 1 ] || { printf 'unknown\n'; return 0; }
+      fi
+      # Squash merges never make the branch an ancestor; ask gh by head name.
+      st=$(gh_state pr list --head "$payload" --state all --limit 1 --json state --jq '.[0].state')
+      case "$st" in
+        MERGED|OPEN|CLOSED) map_gh_state "$st" ;;
+        *) if [ -n "$bref" ]; then printf 'open\n'; else printf 'unknown\n'; fi ;;
+      esac ;;
+    pr)
+      st=$(gh_state pr view "$payload" --json state --jq .state)
+      map_gh_state "$st" ;;
+    *) printf 'invalid\n' ;;
+  esac
+}
+
+resolve_cached() {
+  # resolve_cached <canonical-ref> <self-basename> -> state token, adding
+  # `self` and memoizing per invocation in the file $DEPS_CACHE when set
+  # (bash 3.2 has no associative arrays).
+  local ref="$1" self="$2" st
+  [ "$ref" = "todo:$self" ] && { printf 'self\n'; return 0; }
+  if [ -n "${DEPS_CACHE:-}" ] && [ -f "$DEPS_CACHE" ]; then
+    st=$(awk -F'\t' -v r="$ref" '$1 == r { print $2; exit }' "$DEPS_CACHE")
+    if [ -n "$st" ]; then printf '%s\n' "$st"; return 0; fi
+  fi
+  st=$(resolve_ref "$ref")
+  [ -n "${DEPS_CACHE:-}" ] && printf '%s\t%s\n' "$ref" "$st" >>"$DEPS_CACHE"
+  printf '%s\n' "$st"
+}
+
 ensure_init() {
   local root pending completed
   root=$(repo_root)
@@ -525,7 +604,7 @@ cmd_repos() {
 
 main() {
   [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|done|index|share|path|register|repos|brief|today} ..."
-  local cmd="$1"; shift
+  local cmd="$1" ref; shift
   case "$cmd" in
     init)     cmd_init "$@" ;;
     new)      cmd_new "$@" ;;
@@ -542,6 +621,7 @@ main() {
     _date_shift) date_shift "${1:-}" "${2:-}" ;;
     _normalize_ref) normalize_ref "${1:-}" ;;
     _depends) depends_list "${1:-}" ;;
+    _resolve) if ref=$(normalize_ref "${1:-}"); then resolve_ref "$ref"; else printf 'invalid\n'; fi ;;
     *)        die "unknown command: $cmd" ;;
   esac
 }
