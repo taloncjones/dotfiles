@@ -1,0 +1,51 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-05-let-auto-mode-decide-rm-commands-instead-of-asking",
+  "commands": [
+    {
+      "name": "template-parses-and-rm-ask-rule-gone",
+      "run": "python3 -c \"import json,sys; p=json.load(open('claude/settings.json.tmpl'))['permissions']; sys.exit(0 if 'Bash(rm:*)' not in p['ask'] and 'Bash(rm:*)' not in p['allow'] and p['defaultMode']=='auto' else 1)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "template-ask-rules-exact",
+      "run": "python3 -c \"import json,sys; p=json.load(open('claude/settings.json.tmpl'))['permissions']; sys.exit(0 if p['ask']==['Bash(git push --force:*)','Bash(git push -f:*)','Bash(git push --force-with-lease:*)','Bash(git push --mirror:*)','mcp__plugin_atlassian_atlassian__createJiraIssue'] else 1)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "template-deny-floor-empty",
+      "run": "python3 -c \"import json,sys; p=json.load(open('claude/settings.json.tmpl'))['permissions']; sys.exit(0 if p['deny']==[] else 1)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "template-registers-rm-guard-hook",
+      "run": "python3 -c \"import json,sys; tmpl=json.load(open('claude/settings.json.tmpl'))['hooks']['PreToolUse']; cmds=[h['command'] for e in tmpl if e.get('matcher')=='Bash' for h in e['hooks']]; sys.exit(0 if cmds==['~/.claude/hooks/commit_guard.py','~/.claude/hooks/no_ai_attribution_bash.py','~/.claude/hooks/push_guard.py','~/.claude/hooks/herdr_worktree_guard.py','~/.claude/hooks/rm_guard.py'] else 1)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "rm-guard-hook-exists-and-executable",
+      "run": "test -x claude/hooks/rm_guard.py",
+      "timeout_secs": 30
+    },
+    {
+      "name": "claude-hooks-suite-sandboxed",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 300
+    },
+    {
+      "name": "claude-hooks-suite-has-permissions-checks",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh 2>/dev/null | grep -c '^PASS  permissions: ' | grep -qx 3",
+      "timeout_secs": 300
+    },
+    {
+      "name": "claude-hooks-suite-has-rm-guard-checks",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh 2>/dev/null | grep -c '^PASS  rmg: ' | grep -qx 57",
+      "timeout_secs": 300
+    },
+    {
+      "name": "claude-links-suite-with-rm-guard-hook-delivery",
+      "run": "sh install/claude-links.test.sh 2>/dev/null | tee /dev/stderr | grep -q '^PASS  link path registers rm_guard.py as a PreToolUse Bash hook' && sh install/claude-links.test.sh >/dev/null 2>&1",
+      "timeout_secs": 300
+    }
+  ]
+}

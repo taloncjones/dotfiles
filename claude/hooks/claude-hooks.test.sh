@@ -334,6 +334,7 @@ want = [
     "~/.claude/hooks/no_ai_attribution_bash.py",
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
+    "~/.claude/hooks/rm_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
@@ -366,6 +367,224 @@ else
     printf 'FAIL  canvas: template excludes exactly the two Plan Canvas hooks\n' >&2
     FAIL=$((FAIL + 1))
 fi
+
+# Permissions floor: the template must not ask (or allow) for rm, so auto
+# mode's classifier decides scratch cleanup; must keep the force-push and
+# Jira-create ask rules; and must deny the literal root / home / .git
+# removal shapes, which block in every mode. Static: independent of live
+# machine state (the live drift check below covers reconciled machines).
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+sys.exit(0 if "Bash(rm:*)" not in p["ask"] and "Bash(rm:*)" not in p["allow"] else 1)
+PY
+then
+    printf 'PASS  permissions: template has no rm ask or allow rule\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template has no rm ask or allow rule\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+want = [
+    "Bash(git push --force:*)",
+    "Bash(git push -f:*)",
+    "Bash(git push --force-with-lease:*)",
+    "Bash(git push --mirror:*)",
+    "mcp__plugin_atlassian_atlassian__createJiraIssue",
+]
+sys.exit(0 if p["ask"] == want else 1)
+PY
+then
+    printf 'PASS  permissions: template ask list is exactly force-push plus Jira create\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template ask list is exactly force-push plus Jira create\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+sys.exit(0 if p["deny"] == [] else 1)
+PY
+then
+    printf 'PASS  permissions: template deny floor is empty (rm_guard.py replaces it)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template deny floor is empty (rm_guard.py replaces it)\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# rm_guard.py: runs the real hook (not a rule-model simulation) against the
+# catastrophic shapes a literal deny-floor pattern cannot express (finding
+# F1: glob-under-root/home/.git, system paths, compound commands, variable
+# targets) and against the harmless scratch-cleanup shapes it must not block.
+RMG=claude/hooks/rm_guard.py
+# Mostly-synthetic paths, not real directories -- the hook is pure string
+# logic for every check except the git-worktree-root branch (N3 below),
+# which stats `<cwd>/.git` and so needs a real temp directory. Deliberately
+# outside /tmp, /var, and /private so the fixture cwd itself does not
+# collide with the system-path denial.
+RMG_HOME="/Users/rmg-test-user"
+RMG_CWD="$RMG_HOME/proj"
+rmg_payload() {
+    printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$1" "$RMG_CWD"
+}
+rmg_payload_at() {
+    printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$1" "$2"
+}
+rmg_blocks() {
+    label="$1"
+    cmd="$2"
+    if printf '%s' "$(rmg_payload "$cmd")" | HOME="$RMG_HOME" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    else
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    fi
+}
+rmg_allows() {
+    label="$1"
+    cmd="$2"
+    if printf '%s' "$(rmg_payload "$cmd")" | HOME="$RMG_HOME" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+rmg_blocks_at() {
+    label="$1"
+    cmd="$2"
+    cwd="$3"
+    home="${4:-$RMG_HOME}"
+    if printf '%s' "$(rmg_payload_at "$cmd" "$cwd")" | HOME="$home" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    else
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    fi
+}
+rmg_allows_at() {
+    label="$1"
+    cmd="$2"
+    cwd="$3"
+    home="${4:-$RMG_HOME}"
+    if printf '%s' "$(rmg_payload_at "$cmd" "$cwd")" | HOME="$home" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# F1 bypass shapes: every one a literal deny-floor pattern cannot express.
+rmg_blocks "blocks rm -rf /*" 'rm -rf /*'
+rmg_blocks "blocks rm -rf ~/*" 'rm -rf ~/*'
+rmg_blocks "blocks rm -rf \$HOME/*" 'rm -rf $HOME/*'
+rmg_blocks "blocks rm -rf .git/*" 'rm -rf .git/*'
+rmg_blocks "blocks rm -rf /bin" 'rm -rf /bin'
+rmg_blocks "blocks rm -rf /etc" 'rm -rf /etc'
+rmg_blocks "blocks rm -rf /usr /bin" 'rm -rf /usr /bin'
+rmg_blocks "blocks rm -fr --no-preserve-root /*" 'rm -fr --no-preserve-root /*'
+rmg_blocks "blocks compound cd / && rm -rf *" 'cd / && rm -rf *'
+rmg_blocks 'blocks rm -rf $X with unexpanded variable target' 'rm -rf $X'
+rmg_blocks "blocks compound command split on ;" 'echo hi; rm -rf /*'
+rmg_blocks "blocks compound command split on |" 'true | rm -rf /*'
+
+# Harmless scratch-cleanup shapes must not be blocked.
+rmg_allows "allows rm -rf dist/ build/" 'rm -rf dist/ build/'
+rmg_allows "allows rm -rf ./.github" 'rm -rf ./.github'
+rmg_allows "allows rm ./file~" 'rm ./file~'
+rmg_allows "allows rm -rf node_modules" 'rm -rf node_modules'
+rmg_allows "allows rm -rf ~/proj/build" 'rm -rf ~/proj/build'
+rmg_allows 'allows rm -rf $HOME/.cache/x' 'rm -rf $HOME/.cache/x'
+rmg_allows "allows rm -rf .git/index.lock" 'rm -rf .git/index.lock'
+rmg_allows "allows non-rm command" 'echo rm -rf /'
+if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}' \
+        | HOME="$RMG_HOME" "$RMG"; then
+    printf 'PASS  rmg: allows non-Bash tool\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rmg: allows non-Bash tool\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# round-2 review BF1: shell-wrapper passthrough (sh/bash/zsh -c, and nested
+# wrappers) must be unwrapped and the inner script re-parsed.
+rmg_blocks "blocks rm -rf /* wrapped in sh -c" "sh -c 'rm -rf /*'"
+rmg_blocks "blocks rm -rf / wrapped in bash -c" "bash -c 'rm -rf /'"
+rmg_blocks "blocks rm -rf /etc wrapped in zsh -c" "zsh -c 'rm -rf /etc'"
+rmg_blocks "blocks sh -c rm wrapped in nohup" "nohup sh -c 'rm -rf /*'"
+rmg_blocks "blocks bash -c rm wrapped in time" "time bash -c 'rm -rf /etc'"
+rmg_blocks "blocks sh -c rm wrapped in env" "env sh -c 'rm -rf /'"
+rmg_blocks "blocks sh -c rm wrapped in nice" "nice sh -c 'rm -rf /'"
+rmg_blocks "blocks sh -c rm wrapped in nested env+nohup" "env nohup bash -c 'rm -rf /etc'"
+rmg_blocks "blocks compound command inside sh -c" "sh -c 'ls; rm -rf /'"
+rmg_allows "allows harmless sh -c command" "sh -c 'echo hi'"
+rmg_allows "allows narrow rm inside bash -c" "bash -c 'rm -rf ./build'"
+
+# round-2 review BF2: brace-expanded targets must expand before classifying.
+rmg_blocks "blocks rm -rf /{,bin} (brace includes root)" 'rm -rf /{,bin}'
+rmg_blocks "blocks rm -rf /{bin,etc,usr} (brace includes system path)" 'rm -rf /{bin,etc,usr,var,lib,opt}'
+rmg_blocks "blocks rm -rf /b{i,i}n (brace resolves to system path)" 'rm -rf /b{i,i}n'
+rmg_allows "allows rm -rf ~/{.ssh,Documents} (named subdirs, not catastrophic)" 'rm -rf ~/{.ssh,Documents}'
+
+# round-2 review BF3: `(` subshell groups and `cd ...;` must track cwd like
+# the unparenthesized `&&` form already does.
+rmg_blocks "blocks (cd / && rm -rf *) subshell" '(cd / && rm -rf *)'
+rmg_blocks "blocks ( cd /usr && rm -rf * ) with spaces" '( cd /usr && rm -rf * )'
+rmg_blocks "blocks (cd /etc && rm -rf *) subshell" '(cd /etc && rm -rf *)'
+rmg_blocks "blocks cd /; rm -rf * split on semicolon" 'cd /; rm -rf *'
+
+# round-2 review BF4: repeated slashes and .././. components must normalize
+# to reach the same root/system-path check as their canonical form.
+rmg_blocks "blocks rm -rf // (double-slash root)" 'rm -rf //'
+rmg_blocks "blocks rm -rf //* (double-slash root glob)" 'rm -rf //*'
+rmg_blocks "blocks rm -rf /./ (dot component)" 'rm -rf /./'
+rmg_blocks "blocks rm -rf /x/../ (dot-dot component)" 'rm -rf /x/../'
+
+# round-2 review N1: macOS aliases /tmp->/private/tmp and /var->/private/var,
+# so scratch/mktemp cleanup under either spelling must stay allowed while
+# real system paths under /var remain blocked.
+rmg_allows "allows \$TMPDIR-style /var/folders cleanup" 'rm -rf /var/folders/pk/xxxx/T/tmp.abc'
+rmg_allows "allows /private/tmp scratch cleanup" 'rm -rf /private/tmp/mybuild'
+rmg_allows "allows /tmp scratch cleanup" 'rm -rf /tmp/scratch'
+rmg_blocks "blocks /var/db (real system path, not scratch)" 'rm -rf /var/db'
+
+# round-2 review N2: previously-untested denial branches.
+rmg_blocks "blocks exact rm -rf / (no glob needed)" 'rm -rf /'
+rmg_blocks "blocks exact rm -rf ~ (no glob needed)" 'rm -rf ~'
+rmg_blocks 'blocks exact rm -rf $HOME (no glob needed)' 'rm -rf $HOME'
+rmg_blocks "blocks exact rm -rf .git (dir itself, no glob)" 'rm -rf .git'
+rmg_blocks_at "blocks rm -rf on a parent of a deeper cwd" \
+    "rm -rf $RMG_HOME/proj" "$RMG_HOME/proj/sub/deep"
+
+# round-2 review N3: `rm -rf .`/`rm -rf ./` at a git worktree root or home
+# must be denied; the same command elsewhere is an intentional allow.
+RMG_GITROOT=$(mktemp -d)
+trap 'rm -rf "$RMG_GITROOT"' EXIT
+: > "$RMG_GITROOT/.git"
+rmg_blocks_at "blocks rm -rf . at a git worktree root" 'rm -rf .' "$RMG_GITROOT"
+rmg_blocks_at "blocks rm -rf ./ at a git worktree root" 'rm -rf ./' "$RMG_GITROOT"
+rmg_blocks_at "blocks rm -rf . at HOME" 'rm -rf .' "$RMG_HOME" "$RMG_HOME"
+RMG_PLAIN=$(mktemp -d)
+trap 'rm -rf "$RMG_GITROOT" "$RMG_PLAIN"' EXIT
+rmg_allows_at "allows rm -rf . in a plain (non-git, non-home) scratch dir" 'rm -rf .' "$RMG_PLAIN"
+rm -rf "$RMG_GITROOT" "$RMG_PLAIN"
+trap - EXIT
 
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
