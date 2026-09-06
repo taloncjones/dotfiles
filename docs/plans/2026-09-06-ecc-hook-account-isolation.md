@@ -54,7 +54,7 @@
 
 - [ ] **Step 1: Add the failing unit case for substitution to `install/claude-links.test.sh`**
 
-Insert after the existing unit cases (before the line `# --- link_claude_config_dir integration ---` or, if that comment is absent, before `CFG="$TMP/cfg"`):
+Insert after the existing unit cases, before the line `# --- link_claude_config_dir integration (real repo template) ---` (the line before `CFG="$TMP/cfg"`):
 
 ```sh
 # 6. Config-dir token: env string values carry {{CLAUDE_CONFIG_DIR}} in the
@@ -241,6 +241,8 @@ want = {
     "post:bash:command-log-audit",
     "post:bash:command-log-cost",
     "post:skill:track",
+    "pre:mcp-health-check",
+    "post:mcp-health-check",
 }
 sys.exit(0 if ids == want else 1)
 PY
@@ -292,6 +294,8 @@ want = {
     "post:bash:command-log-audit",
     "post:bash:command-log-cost",
     "post:skill:track",
+    "pre:mcp-health-check",
+    "post:mcp-health-check",
 }
 for missing in sorted(want - ids):
     print("  missing exclusion: " + missing)
@@ -632,6 +636,10 @@ else
 fi
 
 # --- flag gate: exactly the seven ids are off; neighbours stay on ---
+# check-hook-enabled is called without a profile CSV, so the gate falls back
+# to standard,strict: the "yes" cases prove the ids are NOT EXCLUDED under
+# the template value, not their real profile membership (same caveat as
+# plan-canvas-isolation.test.sh).
 DISABLED="$(python3 -c 'import json; print(json.load(open("claude/settings.json.tmpl")).get("env", {}).get("ECC_DISABLED_HOOKS", ""))')"
 enabled_is() {
     got="$(CLAUDE_PLUGIN_ROOT="$ECC_ROOT" ECC_HOOKS_ENABLED=true ECC_HOOK_PROFILE=standard \
