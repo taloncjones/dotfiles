@@ -1,0 +1,91 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-06-add-task-dependencies-to-todos-and-gate-dispatch-o",
+  "commands": [
+    {
+      "name": "todos-suite",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'depends: parse block list' 'depends: normalize refs' 'resolve: todo states' 'resolve: branch states' 'resolve: pr states via gh stub' 'resolve: absent branch via gh stub' 'list: blocked-on annotation' 'index: blocked marker, no network' 'new: --depends-on' 'depend: add refs' 'depend: refuses self-dependency' 'list: invalid and self refs warn'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "suite-grew",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1 | tail -1); printf '%s\\n' \"$out\"; printf '%s\\n' \"$out\" | awk '{ exit !($1 >= 130 && $3 == 0) }'",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac1-parse",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'depends: parse block list'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac2-normalize",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'depends: normalize refs'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac3-resolve-todo",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'resolve: todo states'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac4-resolve-branch",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'resolve: branch states'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac5-resolve-pr",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'resolve: pr states via gh stub' 'resolve: absent branch via gh stub'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac6-list",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'list: blocked-on annotation'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac7-index",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'index: blocked marker, no network'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac8-new-flag",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'new: --depends-on'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac9-depend",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'depend: add refs' 'depend: refuses self-dependency'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "ac10-diagnostics",
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'list: invalid and self refs warn'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "bash-syntax",
+      "run": "bash -n claude/skills/todos/scripts/todos.sh && bash -n claude/skills/todos/scripts/tests/todos_test.sh",
+      "timeout_secs": 60
+    },
+    {
+      "name": "skill-doc-pins",
+      "run": "for s in 'depends_on:' '--depends-on' 'todos.sh depend' 'pr:85' 'TODOS_OFFLINE' 'unverified'; do grep -qF -- \"$s\" claude/skills/todos/SKILL.md || { printf '[X] SKILL.md missing: %s\\n' \"$s\"; exit 1; }; done",
+      "timeout_secs": 60
+    },
+    {
+      "name": "diff-scope",
+      "run": "base=$(git merge-base origin/main HEAD) || exit 1; changed=$(git diff --name-only \"$base\" -- . ':(exclude)docs' ':(exclude)claude/contracts/td-2026-09-06-add-task-dependencies-to-todos-and-gate-dispatch-o-contract.json'); printf '%s\\n' \"$changed\"; [ -n \"$changed\" ] || { echo '[X] no implementation changes'; exit 1; }; for f in $changed; do case \"$f\" in claude/skills/todos/scripts/todos.sh|claude/skills/todos/scripts/tests/todos_test.sh|claude/skills/todos/SKILL.md) ;; *) printf '[X] out of scope: %s\\n' \"$f\"; exit 1 ;; esac; done",
+      "timeout_secs": 60
+    },
+    {
+      "name": "ascii-added-lines",
+      "run": "base=$(git merge-base origin/main HEAD) || exit 1; git diff \"$base\" -- . ':(exclude)docs' | python3 -c \"import sys;bad=[l for l in sys.stdin.buffer.read().split(b'\\n') if l.startswith(b'+') and not l.startswith(b'+++') and any(b>127 for b in l)];[print('[X] non-ascii added line:',l[:80]) for l in bad];sys.exit(1 if bad else 0)\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "no-attribution-in-added-lines",
+      "run": "base=$(git merge-base origin/main HEAD) || exit 1; if git diff \"$base\" -- . ':(exclude)docs' | grep '^+' | grep -v '^+++' | grep -iE 'co-authored-by|generated (by|with)'; then echo '[X] attribution text in added lines'; exit 1; fi; exit 0",
+      "timeout_secs": 60
+    }
+  ]
+}
