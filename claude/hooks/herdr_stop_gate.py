@@ -148,6 +148,26 @@ def record_accepted(rd, task_id, ws, role, launch=None):
     return launch is None or ts >= launch
 
 
+def block_count(session_id):
+    """Refusals already recorded in this session's transcript, or None when
+    it cannot be established: unsafe session id, zero or several files
+    matching <config dir>/projects/*/<session_id>.jsonl, unreadable."""
+    if not isinstance(session_id, str) or not SESSION_ID_RE.match(session_id):
+        return None
+    base = core.state_root().parent  # the config dir itself, not herdr-orch
+    try:
+        matches = list(base.glob(f"projects/*/{session_id}.jsonl"))
+    except OSError:
+        return None
+    if len(matches) != 1:
+        return None
+    try:
+        with open(matches[0], errors="replace") as f:
+            return sum(1 for line in f if MARKER in line)
+    except OSError:
+        return None
+
+
 def emit_command(rd, index, ws, task, entry):
     """The exact emit-done (impl) or emit-review (review) line for this
     worker; fields the task record lacks stay literal <placeholders>."""
@@ -181,6 +201,14 @@ def refuse(n, command):
     return 2
 
 
+def release(reason, task_id):
+    print(json.dumps({
+        "systemMessage": f"herdr-stop-gate: released without a completion record "
+                         f"({reason}); the orchestrator will see idle with no "
+                         f"record for {task_id}"}))
+    return 0
+
+
 def decide(payload):
     """Exit status for one Stop payload: 0 allow/release, 2 refuse."""
     if not isinstance(payload, dict) or payload.get("hook_event_name") != "Stop":
@@ -202,7 +230,19 @@ def decide(payload):
     entry = launch_entry(task, ws, role)
     if record_accepted(rd, task_id, ws, role, launch_time(entry)):
         return 0
-    return refuse(1, emit_command(rd, index, ws, task, entry))
+    count = block_count(payload.get("session_id"))
+    if payload.get("stop_hook_active") is True:
+        # Each release row below is a loop backstop: an active stop hook
+        # proves a refusal already happened, so no countable evidence means
+        # the transcript is not recording the marker and the cap can never
+        # be reached by counting. Never refuse more than MAX_BLOCKS in a row.
+        if count is None:
+            return release("transcript unavailable", task_id)
+        if count == 0:
+            return release("transcript evidence missing", task_id)
+        if count >= MAX_BLOCKS:
+            return release("cap reached", task_id)
+    return refuse((count or 0) + 1, emit_command(rd, index, ws, task, entry))
 
 
 def main():

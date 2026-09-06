@@ -943,5 +943,21 @@ else
     printf 'FAIL  gate: parse_ts and launch_time follow the spec parser\n' >&2; FAIL=$((FAIL + 1))
 fi
 
+GATE_P_T='{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":true}'
+gate_case "second refusal counts the transcript" block-2 w1 impl none 1 "$GATE_P_T"
+gate_case "released after two refusals" "release-cap reached" w1 impl none 2 "$GATE_P_T"
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); m=d.get("systemMessage"); sys.exit(0 if isinstance(m, str) and "PROJ-1" in m and list(d) == ["systemMessage"] else 1)' "$GATE_LAST/out"; then
+    printf 'PASS  gate: release is one systemMessage object naming the task\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: release is one systemMessage object naming the task (got: %s)\n' "$(cat "$GATE_LAST/out")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "released when transcript is missing" "release-transcript unavailable" w1 impl none nofile "$GATE_P_T"
+gate_case "released when transcript has no marker" "release-transcript evidence missing" w1 impl none 0 "$GATE_P_T"
+gate_case "released when two transcripts match the session" "release-transcript unavailable" w1 impl none dup "$GATE_P_T"
+gate_case "released when the session id is unsafe" "release-transcript unavailable" w1 impl none 2 '{"hook_event_name":"Stop","session_id":"../x","stop_hook_active":true}'
+gate_case "fresh cycle is refused again after a release" block-3 w1 impl none 2 "$GATE_P_F"
+gate_case "active hook with a fresh record is allowed silently" allow w1 impl done:fresh:w1:PROJ-1 2 "$GATE_P_T"
+gate_case "stop_hook_active must be boolean true to release" block-3 w1 impl none 2 '{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":"true"}'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
