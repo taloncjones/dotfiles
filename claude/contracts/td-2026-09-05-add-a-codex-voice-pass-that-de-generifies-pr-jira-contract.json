@@ -54,7 +54,7 @@
     },
     {
       "name": "new-files-ascii-no-emoji",
-      "run": "python3 -c \"import os,sys; bad=[]; [bad.append(os.path.join(d,f)) for d,_,fs in os.walk('claude/skills/voice') for f in fs if any(b > 127 for b in open(os.path.join(d,f),'rb').read())]; print('non-ascii:', bad) if bad else None; sys.exit(1 if bad else 0)\"",
+      "run": "git ls-files -z claude/skills/voice | python3 -c \"import sys; files=[p for p in sys.stdin.buffer.read().split(b'\\0') if p]; bad=[p.decode() for p in files if any(b > 127 for b in open(p,'rb').read())]; print('non-ascii:', bad) if bad else None; sys.exit(1 if bad else 0)\"",
       "timeout_secs": 60
     },
     {
