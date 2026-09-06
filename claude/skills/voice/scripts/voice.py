@@ -389,6 +389,140 @@ def pr_units(number, args, workdir):
     return [title_report, body_report]
 
 
+# --- range unit: code-comment with load-bearing protection -----------------
+
+RANGE_RE = re.compile(r"^(.+):(\d+)-(\d+)$")
+DEF_RE = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)")
+COMMENT_PREFIXES = ("#", "//", "/*", "*")
+MIN_REFERENCE_LEN = 12
+
+
+def parse_range(spec):
+    m = RANGE_RE.match(spec or "")
+    if not m:
+        raise VoiceError("--range must be FILE:A-B")
+    return m.group(1), int(m.group(2)), int(m.group(3))
+
+
+def repo_root(path):
+    # realpath everywhere: on macOS mktemp gives /var/... while git reports
+    # /private/var/..., and grep echoes whichever root it was handed. One
+    # canonical form keeps the self-exclusion below and the relpath in the
+    # reason strings consistent.
+    proc = subprocess.run(["git", "-C", os.path.dirname(os.path.realpath(path)),
+                           "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if proc.returncode == 0 and proc.stdout.strip():
+        return os.path.realpath(proc.stdout.strip())
+    return os.path.dirname(os.path.realpath(path))
+
+
+def grep_files(needle, root, exclude_path):
+    """Fixed-string, recursive, file names only; drops exclude_path itself."""
+    proc = subprocess.run(["grep", "-rIlF", "--exclude-dir=.git", "--", needle, root],
+                          capture_output=True, text=True)
+    skip = os.path.realpath(exclude_path)
+    hits = [h for h in proc.stdout.splitlines() if os.path.realpath(h) != skip]
+    return sorted(hits)
+
+
+def referenced_elsewhere(text, root, path):
+    needle = text.strip().lstrip("#/* ").strip().rstrip('"').strip()
+    if len(needle) < MIN_REFERENCE_LEN:
+        return None
+    hits = grep_files(needle, root, path)
+    if hits:
+        return "referenced elsewhere (%s)" % os.path.relpath(hits[0], root)
+    return None
+
+
+def docstring_displayed(owner, root, path):
+    if not owner:
+        return None
+    for needle in (owner + ".__doc__", "getdoc(" + owner, owner + ".doc"):
+        hits = grep_files(needle, root, path)
+        if hits:
+            return "docstring displayed (%s in %s)" % (needle, os.path.relpath(hits[0], root))
+    return None
+
+
+def classify_range(path, start, end):
+    path = os.path.realpath(path)
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    if start < 1 or end > len(lines) or start > end:
+        raise VoiceError("range %d-%d out of bounds for %s (%d lines)"
+                         % (start, end, path, len(lines)))
+    root = repo_root(path)
+    rows = []
+    in_doc = False
+    owner = None
+    for n, line in enumerate(lines, 1):
+        stripped = line.strip()
+        m = DEF_RE.match(line)
+        if m:
+            owner = m.group(1)
+        is_doc = False
+        if in_doc:
+            is_doc = True
+            if '"""' in stripped:
+                in_doc = False
+        elif stripped.startswith('"""'):
+            is_doc = True
+            if stripped.count('"""') < 2:
+                in_doc = True
+        if not (start <= n <= end):
+            continue
+        if is_doc:
+            reason = docstring_displayed(owner, root, path) or referenced_elsewhere(line, root, path)
+        elif stripped.startswith(COMMENT_PREFIXES):
+            reason = referenced_elsewhere(line, root, path)
+        else:
+            rows.append((n, "code", line, ""))
+            continue
+        if reason:
+            rows.append((n, "protected", line, reason))
+        else:
+            rows.append((n, "candidate", line, ""))
+    return rows
+
+
+def run_range_unit(path, start, end, args, workdir):
+    rows = classify_range(path, start, end)
+    text = "\n".join(line for _, _, line, _ in rows) + "\n"
+    target = "%s:%d-%d" % (path, start, end)
+    lint = lint_text("code-comment", text)
+    protected = ["%s:%d  protected: %s" % (os.path.basename(path), n, reason)
+                 for n, status, _, reason in rows if status == "protected"]
+    if not any(status == "candidate" for _, status, _, _ in rows):
+        return make_report("code-comment", target, text, lint, protected=protected,
+                           status="unchanged")
+    prompt = build_prompt("code-comment", text, rows)
+    if args.dry_run:
+        sys.stdout.write(prompt)
+        return make_report("code-comment", target, text, lint, status="dry-run")
+    unit_dir = tempfile.mkdtemp(prefix="unit.", dir=workdir)
+    data = run_codex(prompt, "code-comment", args.effort, unit_dir)
+    got = data.get("lines")
+    if not isinstance(got, list) or [g.get("n") for g in got] != [n for n, _, _, _ in rows]:
+        raise VoiceError("codex returned lines that do not match %d-%d; log: %s"
+                         % (start, end, os.path.join(unit_dir, "codex.log")))
+    new_lines = []
+    replacements = []
+    for (n, status, line, _), g in zip(rows, got):
+        new = g.get("text")
+        if not isinstance(new, str):
+            raise VoiceError("codex line %d is not a string" % n)
+        if status != "candidate" and new != line:
+            raise VoiceError("invariant violated: line %d changed (%s)" % (n, status))
+        if new != line:
+            replacements.append("replace line %d with: %s" % (n, new))
+        new_lines.append(new)
+    after = "\n".join(new_lines) + "\n"
+    return make_report("code-comment", target, text, lint, after, data["changes"],
+                       protected=protected, apply="\n".join(replacements))
+
+
 STATUS_RC = {"dry-run": 0, "empty": 0, "unchanged": 0, "changed": 1}
 
 
@@ -407,7 +541,10 @@ def cmd_rewrite(args):
     if args.pr is not None:
         return emit(pr_units(args.pr, args, workdir), args)
     if args.line_range:
-        raise VoiceError("--range is not implemented yet")
+        if args.kind != "code-comment":
+            raise VoiceError("--range requires --kind code-comment")
+        path, start, end = parse_range(args.line_range)
+        return emit([run_range_unit(path, start, end, args, workdir)], args)
     check_kind(args.kind)
     if args.kind == "code-comment":
         raise VoiceError("code-comment needs --range FILE:A-B")

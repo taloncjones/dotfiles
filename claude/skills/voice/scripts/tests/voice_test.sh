@@ -173,5 +173,51 @@ run_voice rewrite --pr 19
 assert_eq "bad gh json exits 2" "$RC" 2
 assert_contains "names gh" "$ERR" "gh pr view"
 
+echo "== rewrite: code-comment range protects a displayed docstring (AC8)"
+REPO="$SANDBOX/gui_repo"
+cp -R "$FIX/gui_repo" "$REPO"
+( cd "$REPO" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init )
+run_voice rewrite --kind code-comment --range "$REPO/widgets.py:1-6"
+assert_eq "range rewrite exits 1" "$RC" 1
+assert_contains "comment line rewritten" "$OUT" "+# To run a check we call the checker here."
+assert_contains "docstring protected reason" "$OUT" "widgets.py:3  protected: docstring displayed (run_check.__doc__ in gui.py)"
+assert_not_contains "docstring not in diff" "$OUT" "-    \"\"\"Runs a comprehensive"
+assert_contains "apply is line replacement" "$OUT" "replace line 1 with: # To run a check we call the checker here."
+run_voice rewrite --kind code-comment --range "$REPO/widgets.py:1-6" --json
+printf '%s\n' "$OUT" > "$SANDBOX/range.json"
+python3 - "$SANDBOX/range.json" <<'PY' && ok "docstring byte-identical in after" || bad "docstring byte-identical in after" "$OUT"
+import json, sys
+r = json.load(open(sys.argv[1]))[0]
+before = r["before"].splitlines(); after = r["after"].splitlines()
+assert before[2:6] == after[2:6], (before[2:6], after[2:6])
+assert after[0] == "# To run a check we call the checker here."
+PY
+
+echo "== rewrite: touched protected line is an invariant violation"
+FAKE_CODEX_MODE=touch-protected run_voice rewrite --kind code-comment --range "$REPO/widgets.py:1-6"
+assert_eq "touched protected exits 2" "$RC" 2
+assert_contains "names the line" "$ERR" "invariant violated: line 3 changed"
+
+echo "== rewrite: referenced-elsewhere comment is protected"
+printf '# Keep this exact wording, the dashboard greps for it.\nx = 1\n' > "$REPO/other.py"
+printf 'MARK = "Keep this exact wording, the dashboard greps for it."\n' > "$REPO/dash.py"
+run_voice rewrite --kind code-comment --range "$REPO/other.py:1-1"
+assert_eq "referenced comment unchanged exits 0" "$RC" 0
+assert_contains "referenced reason" "$OUT" "other.py:1  protected: referenced elsewhere (dash.py)"
+
+echo "== rewrite: --range guards (AC9c)"
+rm -f "$FAKE_CODEX_MARKER"
+run_voice rewrite --kind pr-body --range "$REPO/widgets.py:1-6"
+assert_eq "range with wrong kind exits 2" "$RC" 2
+assert_contains "names the rule" "$ERR" "--range requires --kind code-comment"
+[ -e "$FAKE_CODEX_MARKER" ] && bad "codex not called on kind error" "marker exists" || ok "codex not called on kind error"
+run_voice rewrite --kind code-comment --range "$REPO/widgets.py:5-99"
+assert_eq "out of bounds exits 2" "$RC" 2
+run_voice rewrite --kind code-comment --range "$REPO/widgets.py:1-6" --dry-run
+assert_eq "range dry-run exits 0" "$RC" 0
+assert_contains "dry-run lists rows" "$OUT" "3|protected|"
+assert_contains "dry-run lists candidate" "$OUT" "1|candidate|# In order to"
+assert_contains "dry-run lists code" "$OUT" "2|code|def run_check():"
+
 printf 'voice: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
