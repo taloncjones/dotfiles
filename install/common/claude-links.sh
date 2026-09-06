@@ -54,6 +54,8 @@ seed_machine_local_file() {
 # every install/update:
 #   - template-owned keys (hooks, statusLine, permissions, env, ...) come from
 #     the template -- template drift is reconciled away;
+#   - env string values have {{CLAUDE_CONFIG_DIR}} replaced by the absolute
+#     config dir the file lands in (per-account ECC state paths);
 #   - plugin-installer-owned keys (enabledPlugins, extraKnownMarketplaces) are
 #     unioned with live state winning on conflict, so nothing an installer
 #     wrote is lost;
@@ -107,6 +109,20 @@ for key in PLUGIN_KEYS:
 for key, value in dest.items():
     if key not in result:
         result[key] = value
+
+# Per-config-dir values: the template is shared by ~/.claude and
+# ~/.claude-work, and Claude Code does not expand variables inside env
+# values, so a value that must differ per account carries this token and
+# is resolved here to the directory settings.json is written into. env
+# only: no other template key is substituted.
+CONFIG_DIR_TOKEN = "{{CLAUDE_CONFIG_DIR}}"
+config_dir = os.path.dirname(os.path.abspath(dest_path))
+env = result.get("env")
+if isinstance(env, dict):
+    result["env"] = {
+        k: (v.replace(CONFIG_DIR_TOKEN, config_dir) if isinstance(v, str) else v)
+        for k, v in env.items()
+    }
 
 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 with open(dest_path, "w") as fh:

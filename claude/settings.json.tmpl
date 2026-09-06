@@ -9,7 +9,8 @@
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
     "CLAUDE_CODE_DISABLE_TELEMETRY": "1",
     "ECC_CONTEXT_MONITOR_COST_WARNINGS": "0",
-    "ECC_DISABLED_HOOKS": "session-start:plan-canvas-sessions,stop:plan-canvas-pending"
+    "ECC_DISABLED_HOOKS": "session-start:plan-canvas-sessions,stop:plan-canvas-pending,post:bash:command-log-audit,post:bash:command-log-cost,post:skill:track,pre:mcp-health-check,post:mcp-health-check",
+    "ECC_AGENT_DATA_HOME": "{{CLAUDE_CONFIG_DIR}}"
   },
   "permissions": {
     "allow": [

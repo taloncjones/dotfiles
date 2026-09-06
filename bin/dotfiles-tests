@@ -26,6 +26,7 @@ sh zsh/functions.test.sh
 sh zsh/claude-account.test.sh
 sh claude/hooks/claude-hooks.test.sh
 sh claude/hooks/plan-canvas-isolation.test.sh
+sh claude/hooks/ecc-hook-isolation.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
 sh codex/hooks/codex-hooks.test.sh

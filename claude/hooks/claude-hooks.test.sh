@@ -346,25 +346,52 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Plan Canvas exclusion: ECC 2.2.1 keys Canvas state on ~/.claude/plan-canvas
-# regardless of CLAUDE_CONFIG_DIR, so both accounts share it. The template
-# switches off exactly the two Canvas hooks; nothing else may ride along in
-# the exclusion, and both ids must be present. Set comparison: ECC parses the
-# value into a set, so order is stylistic.
+# Account-leaking ECC hooks: ECC 2.2.1 resolves several hook state paths
+# through os.homedir() or $HOME/.claude, ignoring CLAUDE_CONFIG_DIR, so both
+# accounts would share them. Hooks with an upstream env knob are scoped per
+# config dir by the token key below; the seven ids here have no usable knob
+# and are switched off. Exact set: nothing else may ride along, none may be
+# missing.
+# See claude/hooks/ecc-hook-isolation.test.sh for the behavioural proof.
 if python3 - <<'PY'
 import json
 import sys
 
 env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
 ids = {s.strip().lower() for s in env.get("ECC_DISABLED_HOOKS", "").split(",") if s.strip()}
-want = {"session-start:plan-canvas-sessions", "stop:plan-canvas-pending"}
+want = {
+    "session-start:plan-canvas-sessions",
+    "stop:plan-canvas-pending",
+    "post:bash:command-log-audit",
+    "post:bash:command-log-cost",
+    "post:skill:track",
+    "pre:mcp-health-check",
+    "post:mcp-health-check",
+}
 sys.exit(0 if ids == want else 1)
 PY
 then
-    printf 'PASS  canvas: template excludes exactly the two Plan Canvas hooks\n'
+    printf 'PASS  isolation: template excludes exactly the seven account-leaking ECC hook ids\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  canvas: template excludes exactly the two Plan Canvas hooks\n' >&2
+    printf 'FAIL  isolation: template excludes exactly the seven account-leaking ECC hook ids\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# The per-account key must carry the literal token in the template;
+# reconcile_claude_settings_file resolves it per config dir.
+if python3 - <<'PY'
+import json
+import sys
+
+env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
+sys.exit(0 if env.get("ECC_AGENT_DATA_HOME") == "{{CLAUDE_CONFIG_DIR}}" else 1)
+PY
+then
+    printf 'PASS  isolation: template carries the config-dir token in ECC_AGENT_DATA_HOME\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  isolation: template carries the config-dir token in ECC_AGENT_DATA_HOME\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
@@ -701,7 +728,7 @@ PY
         fi
 
         # Exclusion drift: env is template-owned, so a reconciled machine must
-        # carry both Plan Canvas ids. Superset check so a machine-local extra
+        # carry all seven excluded ids. Superset check so a machine-local extra
         # id does not fail here (the reconcile would drop it on the next
         # update anyway).
         if SETTINGS_PATH="$settings_dir/settings.json" python3 - <<'PY'
@@ -711,16 +738,55 @@ import sys
 
 env = json.load(open(os.environ["SETTINGS_PATH"])).get("env") or {}
 ids = {s.strip().lower() for s in env.get("ECC_DISABLED_HOOKS", "").split(",") if s.strip()}
-want = {"session-start:plan-canvas-sessions", "stop:plan-canvas-pending"}
+want = {
+    "session-start:plan-canvas-sessions",
+    "stop:plan-canvas-pending",
+    "post:bash:command-log-audit",
+    "post:bash:command-log-cost",
+    "post:skill:track",
+    "pre:mcp-health-check",
+    "post:mcp-health-check",
+}
 for missing in sorted(want - ids):
     print("  missing exclusion: " + missing)
 sys.exit(0 if want <= ids else 1)
 PY
         then
-            printf 'PASS  settings: %s excludes the Plan Canvas hooks\n' "$settings_dir"
+            printf 'PASS  settings: %s excludes the account-leaking ECC hooks\n' "$settings_dir"
             PASS=$((PASS + 1))
         else
-            printf 'FAIL  settings: %s does not exclude the Plan Canvas hooks (run update to reconcile)\n' "$settings_dir" >&2
+            printf 'FAIL  settings: %s does not exclude the account-leaking ECC hooks (run update to reconcile)\n' "$settings_dir" >&2
+            FAIL=$((FAIL + 1))
+        fi
+
+        # Scope drift: the per-account key must resolve to THIS config dir
+        # (abspath, not realpath -- reconcile uses abspath too), and no
+        # unsubstituted token may remain anywhere in env.
+        if SETTINGS_PATH="$settings_dir/settings.json" SETTINGS_DIR="$settings_dir" python3 - <<'PY'
+import json
+import os
+import sys
+
+env = json.load(open(os.environ["SETTINGS_PATH"])).get("env") or {}
+cfg = os.path.abspath(os.environ["SETTINGS_DIR"])
+tmpl_env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
+ok = True
+want = str(tmpl_env.get("ECC_AGENT_DATA_HOME", "")).replace("{{CLAUDE_CONFIG_DIR}}", cfg)
+got = env.get("ECC_AGENT_DATA_HOME")
+if got != want:
+    print("  ECC_AGENT_DATA_HOME: live=" + repr(got) + " want=" + repr(want))
+    ok = False
+for key, value in env.items():
+    if isinstance(value, str) and "{{CLAUDE_CONFIG_DIR}}" in value:
+        print("  unsubstituted token in " + key)
+        ok = False
+sys.exit(0 if ok else 1)
+PY
+        then
+            printf 'PASS  settings: %s scopes ECC state to this config dir\n' "$settings_dir"
+            PASS=$((PASS + 1))
+        else
+            printf 'FAIL  settings: %s does not scope ECC state to this config dir (run update to reconcile)\n' "$settings_dir" >&2
             FAIL=$((FAIL + 1))
         fi
     else
