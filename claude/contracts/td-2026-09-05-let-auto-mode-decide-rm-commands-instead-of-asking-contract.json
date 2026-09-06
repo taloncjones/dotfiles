@@ -1,0 +1,41 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-05-let-auto-mode-decide-rm-commands-instead-of-asking",
+  "commands": [
+    {
+      "name": "template-parses-and-rm-ask-rule-gone",
+      "run": "python3 -c \"import json,sys; p=json.load(open('claude/settings.json.tmpl'))['permissions']; sys.exit(0 if 'Bash(rm:*)' not in p['ask'] and 'Bash(rm:*)' not in p['allow'] and p['defaultMode']=='auto' else 1)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "template-ask-rules-exact",
+      "run": "python3 -c \"import json,sys; p=json.load(open('claude/settings.json.tmpl'))['permissions']; sys.exit(0 if p['ask']==['Bash(git push --force:*)','Bash(git push -f:*)','Bash(git push --force-with-lease:*)','Bash(git push --mirror:*)','mcp__plugin_atlassian_atlassian__createJiraIssue'] else 1)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "template-deny-floor-exact",
+      "run": "python3 -c \"import json,sys; p=json.load(open('claude/settings.json.tmpl'))['permissions']; t=['/','~','~/','\\$HOME','\\$HOME/','\\\"\\$HOME\\\"','\\\"\\$HOME/\\\"','\\${HOME}','\\${HOME}/','.git','.git/','./.git','./.git/']; want=[r for x in t for r in ('Bash(rm * %s)'%x,'Bash(rm * %s *)'%x)]; sys.exit(0 if p['deny']==want else 1)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "template-rule-model-harmless-and-prohibited",
+      "run": "python3 - <<'PY'\nimport json, re, sys\np = json.load(open('claude/settings.json.tmpl'))['permissions']\ndef m(rule, cmd):\n    pat = rule[len('Bash('):-1]\n    if pat.endswith(':*'):\n        pat = pat[:-2] + ' *'\n    if pat.endswith(' *') and pat.count('*') == 1:\n        rx = '^' + re.escape(pat[:-2]) + '( .*)?$'\n    else:\n        rx = '^' + '.*'.join(re.escape(x) for x in pat.split('*')) + '$'\n    return re.match(rx, cmd, re.DOTALL) is not None\nbash_rules = [r for r in p['deny'] + p['ask'] if r.startswith('Bash(')]\nharmless = ['rm -f /tmp/scratch.txt', 'rm -rf /tmp/co-review-snap.x', 'rm -rf .git/index.lock', 'rm -rf build', 'rm -rf ~/proj/build', 'rm -rf $HOME/.cache/x', 'rm .gitignore', 'rm -rf ./.github']\nprohibited = ['rm -rf /', 'rm -r -f ~', 'rm -rf \"$HOME\"', 'rm -rf ${HOME}', 'rm -rf .git', 'rm -rf ./.git/', 'rm -rf / --no-preserve-root', 'rm --recursive --force ~/', 'rm -rf ${HOME}/', 'rm -f ~']\nbad = [c for c in harmless if any(m(r, c) for r in bash_rules)]\nbad += [c for c in prohibited if not any(m(r, c) for r in p['deny'])]\nprint('rule-model failures:', bad)\nsys.exit(1 if bad else 0)\nPY",
+      "timeout_secs": 30
+    },
+    {
+      "name": "claude-hooks-suite-sandboxed",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 300
+    },
+    {
+      "name": "claude-hooks-suite-has-permissions-checks",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh 2>/dev/null | grep -c '^PASS  permissions: ' | grep -qx 4",
+      "timeout_secs": 300
+    },
+    {
+      "name": "claude-links-suite-with-deny-floor-delivery",
+      "run": "sh install/claude-links.test.sh 2>/dev/null | tee /dev/stderr | grep -q '^PASS  link path delivers the rm deny floor and drops the rm ask rule' && sh install/claude-links.test.sh >/dev/null 2>&1",
+      "timeout_secs": 300
+    }
+  ]
+}
