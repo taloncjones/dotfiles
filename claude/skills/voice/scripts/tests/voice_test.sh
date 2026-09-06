@@ -231,6 +231,21 @@ run_voice rewrite --kind code-comment --range "$REPO/other.py:1-1"
 assert_eq "referenced comment unchanged exits 0" "$RC" 0
 assert_contains "referenced reason" "$OUT" "other.py:1  protected: referenced elsewhere (dash.py)"
 
+echo "== rewrite: non-docstring multi-line literal does not flip code after it into a candidate (F2)"
+printf 'value = """\ntemplate text here\n"""\ndef real():\n    secret = load()\n    return secret\n' > "$REPO/multiline.py"
+F2_OUT=$(python3 - <<PY
+import sys
+sys.path.insert(0, "$HERE/..")
+import voice
+rows = voice.classify_range("$REPO/multiline.py", 4, 6)
+for n, status, line, _ in rows:
+    print("%d|%s|%s" % (n, status, line))
+PY
+)
+assert_contains "def real is code, not candidate" "$F2_OUT" "4|code|def real():"
+assert_contains "secret assignment is code, not candidate" "$F2_OUT" "5|code|    secret = load()"
+assert_contains "return secret is code, not candidate" "$F2_OUT" "6|code|    return secret"
+
 echo "== rewrite: --range guards (AC9c)"
 rm -f "$FAKE_CODEX_MARKER"
 run_voice rewrite --kind pr-body --range "$REPO/widgets.py:1-6"

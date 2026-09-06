@@ -461,22 +461,34 @@ def classify_range(path, start, end):
                          % (start, end, path, len(lines)))
     root = repo_root(path)
     rows = []
-    in_doc = False
+    # `string_state` tracks whichever triple-quoted literal, if any, is open
+    # across lines: "doc" for a real docstring, "other" for any other
+    # multi-line string (e.g. `value = """`). Toggling on odd-parity `"""`
+    # counts (not mere presence) keeps a non-docstring literal's closing line
+    # from being misread as a fresh docstring open, which would otherwise
+    # leave the real code after it misclassified as a rewritable candidate.
+    string_state = None
     owner = None
     for n, line in enumerate(lines, 1):
         stripped = line.strip()
         m = DEF_RE.match(line)
         if m:
             owner = m.group(1)
-        is_doc = False
-        if in_doc:
-            is_doc = True
-            if '"""' in stripped:
-                in_doc = False
+        flips = stripped.count('"""') % 2 == 1
+        if string_state is not None:
+            is_doc = string_state == "doc"
+            if flips:
+                string_state = None
         elif stripped.startswith('"""'):
             is_doc = True
-            if stripped.count('"""') < 2:
-                in_doc = True
+            if flips:
+                string_state = "doc"
+        elif '"""' in stripped:
+            is_doc = False
+            if flips:
+                string_state = "other"
+        else:
+            is_doc = False
         if not (start <= n <= end):
             continue
         if is_doc:
