@@ -13,7 +13,8 @@
 ## Global Constraints
 
 - Run every command from the task worktree root. Before every commit, `git rev-parse --show-toplevel` must print a path ending in `rm-auto-mode` and `git branch --show-current` must print `talon/td-2026-09-05-let-auto-mode-decide-rm-commands-instead-of-asking/rm-auto-mode`. Use `git -C <worktree> ...` for every git command; the Bash cwd resets between commands.
-- Pre-implementation gate (before Task 1): `git status --porcelain` is empty. Record `shasum -a 256 ~/.claude/settings.json ~/.claude-work/settings.json` for the final check; neither may change during implementation.
+- Pre-implementation gate (before Task 1): set `W="$(git rev-parse --show-toplevel)"` and confirm it ends in `rm-auto-mode`; every later `git -C "$W"` and `--worktree "$W"` uses that value. `git -C "$W" status --porcelain` is empty. Record `shasum -a 256 ~/.claude/settings.json ~/.claude-work/settings.json` for the final check; neither may change during implementation.
+- The spec, this plan, and the two `docs:` commits carrying them (`cd847b8`, `0fe85b2`, plus any later docs-only commit) are branch-only and are dropped before merge, the same way earlier tasks handled theirs; the merged diff is the three implementation files plus the contract. Dropping them is a pre-merge human step, not part of this plan.
 - Do NOT run `update`, `link.sh`, `dotfiles-repair`, or `reconcile_claude_settings_file` against a live config dir, and do NOT edit `~/.claude*/settings.json`. Template only. The live permissions-drift check in the hook suite fails on this machine until the user runs `update` after merge; that is expected (spec, design section).
 - Always run the hook suite sandboxed: `HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh` (the live drift section SKIPs).
 - Baselines recorded 2026-09-06 on this branch: hook suite sandboxed 76 passed, 0 failed; `install/claude-links.test.sh` 16 passed, 0 failed. Expected after Task 1: 80 and 17 passed, 0 failed.
@@ -289,6 +290,8 @@ If the commit is refused by the auto-mode classifier, stop and report per Global
 **Interfaces:**
 - Consumes: the orchestrator CLI `python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract` (runs every contract command via `sh -c` in the worktree; first failure stops the run).
 
+Precondition: Task 1 step 7 committed successfully. If that commit was refused by the auto-mode classifier, the plan ends at Task 1's staged-change report; do not run Task 2 against a dirty tree.
+
 - [ ] **Step 1: Run the full contract**
 
 Run:
@@ -305,7 +308,7 @@ Expected: exit 0, all 7 commands pass.
 - [ ] **Step 2: Run the full repo test runner**
 
 Run: `bin/dotfiles-tests 2>&1 | grep -E 'passed, [1-9]|FAIL' || echo all-green`
-Expected: `all-green`, except that the unsandboxed hook suite inside the runner reports the live permissions drift on this machine as `FAIL  settings: ... permissions drifted` until the user runs `update`. If those two `settings:` lines (one per config dir) and the hook suite's own summary line are the only failures, record them as expected and continue.
+Expected: `all-green`, except that the unsandboxed hook suite inside the runner reports the live permissions drift on this machine until the user runs `update`. The exact expected deviation is two lines `FAIL  settings: <dir> permissions drifted ...` (one per config dir) and the hook suite's summary line reading exactly `84 passed, 2 failed` (baseline unsandboxed 80 passed plus the four new `permissions:` checks, minus the two drift lines). Any other failing line, or any other count, is a regression: stop and report it.
 
 - [ ] **Step 3: Confirm scope and untouched machine state**
 
@@ -320,7 +323,7 @@ Expected: empty.
 
 - [ ] **Step 4: Report**
 
-State the two suite totals, the contract result, the scope check, and the one item left for a human after merge: run `update`, which reconciles both config dirs so the live drift check passes and the new rules take effect in the next session. Note whether the Task 1 commit needed a human hand.
+State the two suite totals, the contract result, the scope check, and the one item left for a human after merge: run `update`, which reconciles both config dirs so the live drift check passes and the new rules take effect in the next session. Say plainly that every pre-merge check exercises a model of the rule matcher, not Claude Code itself, so live deny behavior is unproven until the spec's criterion 5 probes run after merge; `80 passed` is not evidence that the floor blocks anything live. Note whether the Task 1 commit needed a human hand.
 
 ## Self-review
 
