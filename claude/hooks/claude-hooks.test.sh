@@ -912,6 +912,36 @@ gate_case "mech role is allowed" allow w1 mech none nofile "$GATE_P_F"
 gate_case "non-Stop payload is allowed" allow w1 impl none nofile '{"hook_event_name":"Notification","notification_type":"permission_prompt"}'
 gate_case "non-JSON stdin is allowed" allow w1 impl none nofile 'not json'
 gate_case "JSON array stdin is allowed" allow w1 impl none nofile '[]'
+gate_case "stale record from before launch is refused" block-1 w1 impl done:stale:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record with unparseable ts is refused" block-1 w1 impl done:badts:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record accepted when launch time is unknown" allow w1 impl notask,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "unreadable task record makes launch unknown" allow w1 impl dirtask,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "unreadable task record still refuses without record" block-1 w1 impl dirtask nofile "$GATE_P_F"
+gate_case "later mech entry does not move the launch time" allow w1 impl mechentry,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+if python3 - <<'PY'
+import importlib.util
+from datetime import datetime, timezone
+spec = importlib.util.spec_from_file_location("g", "claude/hooks/herdr_stop_gate.py")
+g = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(g)
+utc = timezone.utc
+assert g.parse_ts("2026-09-06T18:38:51Z") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51.921Z") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51+02:00") == datetime(2026, 9, 6, 16, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51-0130") == datetime(2026, 9, 6, 20, 8, 51, tzinfo=utc)
+for bad in ("2026-09-06", "2026-09-06 18:38:51Z", "", None, 5, "2026-13-06T18:38:51Z", "2026-09-06T18:38:51Zx"):
+    assert g.parse_ts(bad) is None, bad
+assert g.launch_time({"started": "2026-09-06T12:00:00Z", "ts": "2026-09-06T13:00:00Z"}) == datetime(2026, 9, 6, 12, 0, 0, tzinfo=utc)
+assert g.launch_time({"started": "garbage", "ts": "2026-09-06T13:00:00Z"}) is None
+assert g.launch_time({"ts": "2026-09-06T13:00:00Z"}) == datetime(2026, 9, 6, 13, 0, 0, tzinfo=utc)
+assert g.launch_time({}) is None and g.launch_time(None) is None
+PY
+then
+    printf 'PASS  gate: parse_ts and launch_time follow the spec parser\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: parse_ts and launch_time follow the spec parser\n' >&2; FAIL=$((FAIL + 1))
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

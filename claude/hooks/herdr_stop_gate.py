@@ -36,6 +36,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,6 +53,27 @@ SESSION_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 TS_RE = re.compile(
     r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?\Z")
+
+
+def parse_ts(value):
+    """UTC datetime for `YYYY-MM-DDTHH:MM:SS[.fff][Z|+HH:MM|-HHMM]`, else
+    None. Not datetime.fromisoformat: that rejects a trailing Z before
+    Python 3.11 and core.now_iso always writes one."""
+    if not isinstance(value, str):
+        return None
+    m = TS_RE.match(value)
+    if not m:
+        return None
+    try:
+        dt = datetime(*(int(g) for g in m.groups()[:6]), tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    tz = m.group(7)
+    if tz and tz != "Z":
+        digits = tz[1:].replace(":", "")
+        offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+        dt = dt - offset if tz[0] == "+" else dt + offset
+    return dt
 
 
 def read_json_object(path):
@@ -100,12 +122,30 @@ def launch_entry(task, ws, role):
     return found
 
 
+def launch_time(entry):
+    """Launch time of a workers[] entry: `started` when the key exists
+    (the documented name), else `ts` (what the live orchestrator writes).
+    None when absent or unparseable -- unknown never blocks by itself."""
+    if not entry:
+        return None
+    value = entry.get("started") if "started" in entry else entry.get("ts")
+    return parse_ts(value)
+
+
 def record_accepted(rd, task_id, ws, role, launch=None):
-    """True iff the role's record exists for this task and workspace."""
+    """True iff the role's record exists for this task and workspace, its
+    `ts` parses, and (when the launch time is known) `ts` is not before
+    it. Second resolution, equality accepted, no tolerance: any window
+    wide enough to matter would re-accept the previous phase's record."""
     rec = read_json_object(Path(rd) / "tasks" / f"{task_id}{RECORD_SUFFIX[role]}")
     if not rec:
         return False
-    return rec.get("task_id") == task_id and rec.get("workspace_id") == ws
+    if rec.get("task_id") != task_id or rec.get("workspace_id") != ws:
+        return False
+    ts = parse_ts(rec.get("ts"))
+    if ts is None:
+        return False
+    return launch is None or ts >= launch
 
 
 def emit_command(rd, index, ws, task, entry):
@@ -160,7 +200,7 @@ def decide(payload):
         return 0
     task = read_json_object(Path(rd) / "tasks" / f"{task_id}.json")
     entry = launch_entry(task, ws, role)
-    if record_accepted(rd, task_id, ws, role):
+    if record_accepted(rd, task_id, ws, role, launch_time(entry)):
         return 0
     return refuse(1, emit_command(rd, index, ws, task, entry))
 
