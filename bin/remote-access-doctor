@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# remote-access-doctor - verify the Cloudflare Access SSH remote-access setup.
+#
+# Client checks: cloudflared on PATH, the ~/.ssh/config Include, the seeded
+# ~/.ssh/config_cloudflared (a regular file with the ProxyCommand and an
+# edited zone), and the Access login cache. Host checks run only when a
+# tunnel service unit exists on this machine: authorized_keys must carry
+# the personal public key. See README "Remote Access" for the runbook.
+#
+# Read-only: never modifies anything, never touches the network, never
+# needs root. Only HOME and PATH are read. Exit 1 if any [X] check fails.
+#
+# Usage: remote-access-doctor
+
+set -uo pipefail
+
+FAILED=0
+ok()   { printf '[OK]      %s\n' "$1"; }
+warn() { printf '[WARNING] %s\n' "$1"; }
+info() { printf '[INFO]    %s\n' "$1"; }
+fail() { printf '[X]       %s\n' "$1"; FAILED=1; }
+
+section() { printf '\n--- %s ---\n' "$1"; }
+
+SSH_CONFIG="$HOME/.ssh/config"
+CF_CONFIG="$HOME/.ssh/config_cloudflared"
+PLACEHOLDER_ZONE='ssh.example.com'
+PERSONAL_PUB="$HOME/.ssh/id_ed25519_personal.pub"
+AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
+
+# --- client: cloudflared -------------------------------------------------
+section "client: cloudflared"
+
+if command -v cloudflared >/dev/null 2>&1; then
+  ok "cloudflared on PATH ($(command -v cloudflared))"
+else
+  fail "cloudflared not on PATH (brew bundle with install/common/Brewfile.rb)"
+fi
+
+# --- client: ssh config --------------------------------------------------
+section "client: ssh config"
+
+if [[ -f "$SSH_CONFIG" ]] && grep -q '^Include ~/.ssh/config_cloudflared$' "$SSH_CONFIG"; then
+  ok "~/.ssh/config includes config_cloudflared"
+else
+  fail "~/.ssh/config does not include config_cloudflared (re-run link.sh)"
+fi
+
+if [[ -L "$CF_CONFIG" ]]; then
+  fail "~/.ssh/config_cloudflared is a symlink; expected a machine-local file (re-run link.sh)"
+elif [[ -f "$CF_CONFIG" ]]; then
+  ok "~/.ssh/config_cloudflared present (machine-local)"
+  if grep -q 'ProxyCommand cloudflared access ssh' "$CF_CONFIG"; then
+    ok "config_cloudflared routes through cloudflared access ssh"
+  else
+    fail "config_cloudflared has no 'ProxyCommand cloudflared access ssh' line"
+  fi
+  if grep -q "^Host .*\\.${PLACEHOLDER_ZONE}\$" "$CF_CONFIG"; then
+    warn "client not configured: config_cloudflared still uses the ${PLACEHOLDER_ZONE} placeholder zone"
+  elif grep -q '^Host ' "$CF_CONFIG"; then
+    ok "config_cloudflared zone edited: $(grep '^Host ' "$CF_CONFIG" | head -1)"
+  else
+    warn "client not configured: config_cloudflared has no Host block"
+  fi
+else
+  fail "~/.ssh/config_cloudflared missing (re-run link.sh to seed it)"
+fi
+
+# --- client: access login ------------------------------------------------
+section "client: access login"
+
+if [[ -d "$HOME/.cloudflared" ]] && find "$HOME/.cloudflared" -maxdepth 1 -type f 2>/dev/null | grep -q .; then
+  info "~/.cloudflared has cached files (an Access login or tunnel credentials)"
+else
+  info "no ~/.cloudflared cache yet; the first ssh opens the Access login in a browser"
+fi
+
+# --- host role -----------------------------------------------------------
+section "host role"
+
+unit_found=""
+for unit in \
+  "$HOME/Library/LaunchAgents/com.cloudflare.cloudflared.plist" \
+  "/Library/LaunchDaemons/com.cloudflare.cloudflared.plist" \
+  "/etc/systemd/system/cloudflared.service"; do
+  if [[ -f "$unit" ]]; then
+    unit_found="$unit"
+    break
+  fi
+done
+
+if [[ -n "$unit_found" ]]; then
+  info "tunnel service unit present: $unit_found (this machine is a session host)"
+  if [[ -f "$PERSONAL_PUB" && -f "$AUTHORIZED_KEYS" ]] \
+     && grep -qF -- "$(awk '{print $2}' "$PERSONAL_PUB")" "$AUTHORIZED_KEYS"; then
+    ok "authorized_keys carries the personal public key"
+  else
+    warn "authorized_keys does not carry the personal public key; ssh through the tunnel will be refused after the Access login"
+  fi
+else
+  info "no tunnel service unit found; this machine is a client only"
+fi
+
+# --- verdict -------------------------------------------------------------
+echo
+if [[ "$FAILED" -eq 0 ]]; then
+  echo "[OK] remote-access-doctor: no failures"
+  exit 0
+fi
+echo "[X] remote-access-doctor: failures above"
+exit 1
