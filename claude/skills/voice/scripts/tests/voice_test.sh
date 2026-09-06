@@ -106,6 +106,32 @@ assert_eq "invariant violation exits 2" "$RC" 2
 assert_contains "names the violation" "$ERR" "invariant violated: url https://example.atlassian.net/browse/DOT-42"
 assert_not_contains "no candidate shown" "$OUT" "+++ after"
 
+echo "== rewrite: invariant checks exact multiset, not substring containment (F1)"
+python3 - <<PY > "$SANDBOX/f1.py"
+import sys
+sys.path.insert(0, "$HERE/..")
+import voice
+
+def show(label, missing):
+    print("%s: %s" % (label, missing))
+
+show("extend", voice.check_invariants("pr-title", "See DOT-42.", "See DOT-420."))
+show("query-append", voice.check_invariants(
+    "pr-comment", "Read https://x.io/a for details.",
+    "Read https://x.io/a?evil=1 for details."))
+show("dedupe", voice.check_invariants(
+    "pr-comment", "https://x.io/a and https://x.io/a again.",
+    "https://x.io/a again."))
+show("survives", voice.check_invariants(
+    "pr-comment", "https://x.io/a and https://x.io/a again.",
+    "https://x.io/a and https://x.io/a still there."))
+PY
+F1_OUT=$(cat "$SANDBOX/f1.py")
+assert_contains "extend flags DOT-42" "$F1_OUT" "extend: ['jira-key DOT-42']"
+assert_contains "query-append flags url" "$F1_OUT" "query-append: ['url https://x.io/a']"
+assert_contains "dedupe flags dropped copy" "$F1_OUT" "dedupe: ['url https://x.io/a']"
+assert_contains "unchanged multiset passes" "$F1_OUT" "survives: []"
+
 echo "== rewrite: codex failure (AC11)"
 FAKE_CODEX_MODE=fail run_voice rewrite --kind pr-body --file "$FIX/pr_body_generated.md"
 assert_eq "codex failure exits 2" "$RC" 2

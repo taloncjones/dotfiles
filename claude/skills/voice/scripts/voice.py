@@ -21,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RULES_PATH = os.path.join(HERE, "..", "rules.md")
@@ -288,11 +289,16 @@ def run_codex(prompt, kind, effort, workdir):
 
 
 def check_invariants(kind, before, after):
+    """Each protected token must survive with its exact multiset intact: same
+    count, byte-identical text. A superstring (DOT-42 -> DOT-420) or a dropped
+    duplicate both show up as the original token's count falling in `after`."""
     missing = []
     for name in INVARIANTS_BY_KIND[kind]:
-        for m in INVARIANT_EXTRACTORS[name].finditer(before):
-            if m.group() not in after:
-                missing.append("%s %s" % (name, m.group()))
+        before_counts = Counter(INVARIANT_EXTRACTORS[name].findall(before))
+        after_counts = Counter(INVARIANT_EXTRACTORS[name].findall(after))
+        for token, count in before_counts.items():
+            if after_counts.get(token, 0) < count:
+                missing.append("%s %s" % (name, token))
     return missing
 
 
