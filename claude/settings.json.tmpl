@@ -154,34 +154,7 @@
       "mcp__plugin_atlassian_atlassian__getTransitionsForJiraIssue",
       "mcp__plugin_atlassian_atlassian__transitionJiraIssue"
     ],
-    "deny": [
-      "Bash(rm * /)",
-      "Bash(rm * / *)",
-      "Bash(rm * ~)",
-      "Bash(rm * ~ *)",
-      "Bash(rm * ~/)",
-      "Bash(rm * ~/ *)",
-      "Bash(rm * $HOME)",
-      "Bash(rm * $HOME *)",
-      "Bash(rm * $HOME/)",
-      "Bash(rm * $HOME/ *)",
-      "Bash(rm * \"$HOME\")",
-      "Bash(rm * \"$HOME\" *)",
-      "Bash(rm * \"$HOME/\")",
-      "Bash(rm * \"$HOME/\" *)",
-      "Bash(rm * ${HOME})",
-      "Bash(rm * ${HOME} *)",
-      "Bash(rm * ${HOME}/)",
-      "Bash(rm * ${HOME}/ *)",
-      "Bash(rm * .git)",
-      "Bash(rm * .git *)",
-      "Bash(rm * .git/)",
-      "Bash(rm * .git/ *)",
-      "Bash(rm * ./.git)",
-      "Bash(rm * ./.git *)",
-      "Bash(rm * ./.git/)",
-      "Bash(rm * ./.git/ *)"
-    ],
+    "deny": [],
     "ask": [
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
@@ -211,6 +184,10 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/herdr_worktree_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/rm_guard.py"
           }
         ]
       },

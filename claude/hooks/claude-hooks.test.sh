@@ -334,6 +334,7 @@ want = [
     "~/.claude/hooks/no_ai_attribution_bash.py",
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
+    "~/.claude/hooks/rm_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
@@ -412,79 +413,81 @@ import json
 import sys
 
 p = json.load(open("claude/settings.json.tmpl"))["permissions"]
-targets = ["/", "~", "~/", "$HOME", "$HOME/", '"$HOME"', '"$HOME/"', "${HOME}", "${HOME}/",
-           ".git", ".git/", "./.git", "./.git/"]
-want = [r for t in targets for r in ("Bash(rm * %s)" % t, "Bash(rm * %s *)" % t)]
-sys.exit(0 if p["deny"] == want else 1)
+sys.exit(0 if p["deny"] == [] else 1)
 PY
 then
-    printf 'PASS  permissions: template deny floor is exactly the 26 root/home/.git rules\n'
+    printf 'PASS  permissions: template deny floor is empty (rm_guard.py replaces it)\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  permissions: template deny floor is exactly the 26 root/home/.git rules\n' >&2
+    printf 'FAIL  permissions: template deny floor is empty (rm_guard.py replaces it)\n' >&2
     FAIL=$((FAIL + 1))
 fi
-# Rule model: the documented Bash rule matcher (`*` matches any text; a
-# trailing sole ` *` also matches the bare command; everything else is
-# literal and the pattern spans the whole subcommand). Harmless scratch
-# shapes must match no ask/deny rule; prohibited shapes must match a deny
-# rule. This checks the rule text against the documented semantics, not
-# the live matcher.
-if python3 - <<'PY'
-import json
-import re
-import sys
 
-p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+# rm_guard.py: runs the real hook (not a rule-model simulation) against the
+# catastrophic shapes a literal deny-floor pattern cannot express (finding
+# F1: glob-under-root/home/.git, system paths, compound commands, variable
+# targets) and against the harmless scratch-cleanup shapes it must not block.
+RMG=claude/hooks/rm_guard.py
+# Synthetic paths, not real directories -- the hook is pure string logic and
+# never stats the filesystem. Deliberately outside /tmp, /var, and /private
+# so the fixture cwd itself does not collide with the system-path denial.
+RMG_HOME="/Users/rmg-test-user"
+RMG_CWD="$RMG_HOME/proj"
+rmg_payload() {
+    printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$1" "$RMG_CWD"
+}
+rmg_blocks() {
+    label="$1"
+    cmd="$2"
+    if printf '%s' "$(rmg_payload "$cmd")" | HOME="$RMG_HOME" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    else
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    fi
+}
+rmg_allows() {
+    label="$1"
+    cmd="$2"
+    if printf '%s' "$(rmg_payload "$cmd")" | HOME="$RMG_HOME" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
 
+# F1 bypass shapes: every one a literal deny-floor pattern cannot express.
+rmg_blocks "blocks rm -rf /*" 'rm -rf /*'
+rmg_blocks "blocks rm -rf ~/*" 'rm -rf ~/*'
+rmg_blocks "blocks rm -rf \$HOME/*" 'rm -rf $HOME/*'
+rmg_blocks "blocks rm -rf .git/*" 'rm -rf .git/*'
+rmg_blocks "blocks rm -rf /bin" 'rm -rf /bin'
+rmg_blocks "blocks rm -rf /etc" 'rm -rf /etc'
+rmg_blocks "blocks rm -rf /usr /bin" 'rm -rf /usr /bin'
+rmg_blocks "blocks rm -fr --no-preserve-root /*" 'rm -fr --no-preserve-root /*'
+rmg_blocks "blocks compound cd / && rm -rf *" 'cd / && rm -rf *'
+rmg_blocks 'blocks rm -rf $X with unexpanded variable target' 'rm -rf $X'
+rmg_blocks "blocks compound command split on ;" 'echo hi; rm -rf /*'
+rmg_blocks "blocks compound command split on |" 'true | rm -rf /*'
 
-def matches(rule, cmd):
-    pat = rule[len("Bash("):-1]
-    if pat.endswith(":*"):
-        pat = pat[:-2] + " *"
-    if pat.endswith(" *") and pat.count("*") == 1:
-        rx = "^" + re.escape(pat[:-2]) + "( .*)?$"
-    else:
-        rx = "^" + ".*".join(re.escape(x) for x in pat.split("*")) + "$"
-    return re.match(rx, cmd, re.DOTALL) is not None
-
-
-assert matches("Bash(ls *)", "ls") and not matches("Bash(ls *)", "lsof")
-assert matches("Bash(* --help *)", "npm --help x") and not matches("Bash(* --help *)", "npm --help")
-bash_rules = [r for r in p["deny"] + p["ask"] if r.startswith("Bash(")]
-harmless = [
-    "rm -f /tmp/scratch.txt",
-    "rm -rf /tmp/co-review-snap.x",
-    "rm -rf .git/index.lock",
-    "rm -rf build",
-    "rm -rf ~/proj/build",
-    "rm -rf $HOME/.cache/x",
-    "rm .gitignore",
-    "rm -rf ./.github",
-]
-prohibited = [
-    "rm -rf /",
-    "rm -r -f ~",
-    'rm -rf "$HOME"',
-    "rm -rf ${HOME}",
-    "rm -rf ${HOME}/",
-    "rm -f ~",
-    "rm -rf .git",
-    "rm -rf ./.git/",
-    "rm -rf / --no-preserve-root",
-    "rm --recursive --force ~/",
-]
-bad = [c for c in harmless if any(matches(r, c) for r in bash_rules)]
-bad += [c for c in prohibited if not any(matches(r, c) for r in p["deny"])]
-for c in bad:
-    print("  rule-model failure: " + c)
-sys.exit(1 if bad else 0)
-PY
-then
-    printf 'PASS  permissions: rule model leaves scratch cleanup unmatched and denies prohibited targets\n'
+# Harmless scratch-cleanup shapes must not be blocked.
+rmg_allows "allows rm -rf dist/ build/" 'rm -rf dist/ build/'
+rmg_allows "allows rm -rf ./.github" 'rm -rf ./.github'
+rmg_allows "allows rm ./file~" 'rm ./file~'
+rmg_allows "allows rm -rf node_modules" 'rm -rf node_modules'
+rmg_allows "allows rm -rf ~/proj/build" 'rm -rf ~/proj/build'
+rmg_allows 'allows rm -rf $HOME/.cache/x' 'rm -rf $HOME/.cache/x'
+rmg_allows "allows rm -rf .git/index.lock" 'rm -rf .git/index.lock'
+rmg_allows "allows non-rm command" 'echo rm -rf /'
+if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}' \
+        | HOME="$RMG_HOME" "$RMG"; then
+    printf 'PASS  rmg: allows non-Bash tool\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  permissions: rule model leaves scratch cleanup unmatched and denies prohibited targets\n' >&2
+    printf 'FAIL  rmg: allows non-Bash tool\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
