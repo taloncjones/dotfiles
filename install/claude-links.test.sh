@@ -168,6 +168,20 @@ if jget "$CFG/settings.json" "d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'claud
 else
     fail "link path maps the Opus alias to Opus 4.8 1M"
 fi
+if jget "$CFG/settings.json" "{x.strip().lower() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending'}"; then
+    pass "link path delivers the Plan Canvas hook exclusion"
+else
+    fail "link path delivers the Plan Canvas hook exclusion"
+fi
+# Two consecutive update runs must converge: the exclusion is delivered once
+# and never re-written differently.
+cp "$CFG/settings.json" "$TMP/link-first.json"
+link_claude_config_dir "$CFG" >/dev/null 2>&1
+if cmp -s "$CFG/settings.json" "$TMP/link-first.json"; then
+    pass "second link run leaves settings.json byte-identical"
+else
+    fail "second link run leaves settings.json byte-identical"
+fi
 if [ -L "$CFG/CLAUDE.md" ] && [ ! -L "$CFG/settings.json" ]; then
     pass "link path symlinks assets but keeps settings.json a real file"
 else

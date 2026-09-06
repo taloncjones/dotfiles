@@ -76,6 +76,7 @@ is the equivalent.
 - `bin/identity-doctor` -> `~/bin/identity-doctor` — read-only chain verifier; also reachable as `git identity`
 - `claude/hooks/account_guard.py` — SessionStart hook that warns when the Claude account does not match the directory convention (registered in `settings.json.tmpl`; drift-checked by `claude-hooks.test.sh`)
 - `claude/hooks/herdr_worktree_guard.py` — PreToolUse Bash hook that denies `herdr worktree create` without `--cwd` (a bare create anchors to the herdr server's current repo, not yours); `worktree open` is not guarded (registered in `settings.json.tmpl`; drift-checked by `claude-hooks.test.sh`)
+- `ECC_DISABLED_HOOKS` in `claude/settings.json.tmpl` `env` switches off ECC's two Plan Canvas hooks (`session-start:plan-canvas-sessions`, `stop:plan-canvas-pending`) for BOTH accounts. ECC 2.2.1 keys Canvas state on `~/.claude/plan-canvas` regardless of `CLAUDE_CONFIG_DIR`, so on a dual-account machine the work account would see personal Canvas sessions at SessionStart and receive personal browser feedback at Stop. The deliberate `plan-canvas await` CLI loop is unaffected. Proven inert by `claude/hooks/plan-canvas-isolation.test.sh` (SKIPs where ECC is not installed); the template value is drift-checked by `claude-hooks.test.sh`. Remove the exclusion once upstream ECC scopes the state dir and server port by config dir.
 
 **Codex plugin integration:**
 
