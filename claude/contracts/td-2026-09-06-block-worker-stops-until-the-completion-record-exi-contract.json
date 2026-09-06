@@ -119,17 +119,17 @@
     },
     {
       "name": "changed-files-within-scope",
-      "run": "git diff --name-only 682d9db093eb63609a72070d78444aa8bb403c06 HEAD | grep -v '^docs/' | grep -v '^claude/contracts/' | sort > \"${TMPDIR:-/tmp}/sg-changed.$$\"; printf '%s\\n' CLAUDE.md claude/hooks/claude-hooks.test.sh claude/hooks/herdr_stop_gate.py claude/settings.json.tmpl | sort > \"${TMPDIR:-/tmp}/sg-allowed.$$\"; test -s \"${TMPDIR:-/tmp}/sg-changed.$$\" && ! comm -23 \"${TMPDIR:-/tmp}/sg-changed.$$\" \"${TMPDIR:-/tmp}/sg-allowed.$$\" | grep -q .; rc=$?; rm -f \"${TMPDIR:-/tmp}/sg-changed.$$\" \"${TMPDIR:-/tmp}/sg-allowed.$$\"; exit $rc",
+      "run": "git diff --name-only $(git merge-base origin/main HEAD) HEAD | grep -v '^docs/' | grep -v '^claude/contracts/' | sort > \"${TMPDIR:-/tmp}/sg-changed.$$\"; printf '%s\\n' CLAUDE.md claude/hooks/claude-hooks.test.sh claude/hooks/herdr_stop_gate.py claude/settings.json.tmpl | sort > \"${TMPDIR:-/tmp}/sg-allowed.$$\"; test -s \"${TMPDIR:-/tmp}/sg-changed.$$\" && ! comm -23 \"${TMPDIR:-/tmp}/sg-changed.$$\" \"${TMPDIR:-/tmp}/sg-allowed.$$\" | grep -q .; rc=$?; rm -f \"${TMPDIR:-/tmp}/sg-changed.$$\" \"${TMPDIR:-/tmp}/sg-allowed.$$\"; exit $rc",
       "timeout_secs": 30
     },
     {
       "name": "forbidden-files-untouched",
-      "run": "! git diff --name-only 682d9db093eb63609a72070d78444aa8bb403c06 HEAD | grep -q -e '^claude/hooks/herdr_orch_core.py$' -e '^claude/hooks/herdr_worker_status.py$' -e '^claude/skills/herdr-orchestration/' -e '^claude/skills/co-review/' -e '^git/hooks/commit-msg$' -e '^install/common/codex-'",
+      "run": "! git diff --name-only $(git merge-base origin/main HEAD) HEAD | grep -q -e '^claude/hooks/herdr_orch_core.py$' -e '^claude/hooks/herdr_worker_status.py$' -e '^claude/skills/herdr-orchestration/' -e '^claude/skills/co-review/' -e '^git/hooks/commit-msg$' -e '^install/common/codex-'",
       "timeout_secs": 30
     },
     {
       "name": "ascii-added-lines",
-      "run": "! git diff 682d9db093eb63609a72070d78444aa8bb403c06 HEAD -- claude/hooks/herdr_stop_gate.py claude/hooks/claude-hooks.test.sh claude/settings.json.tmpl | grep '^+' | grep -v '^+++' | LC_ALL=C grep -q \"[^ -~$(printf '\\t')]\"",
+      "run": "! git diff $(git merge-base origin/main HEAD) HEAD -- claude/hooks/herdr_stop_gate.py claude/hooks/claude-hooks.test.sh claude/settings.json.tmpl | grep '^+' | grep -v '^+++' | LC_ALL=C grep -q \"[^ -~$(printf '\\t')]\"",
       "timeout_secs": 30
     }
   ]
