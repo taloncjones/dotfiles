@@ -44,7 +44,7 @@
     },
     {
       "name": "canvas-isolation-suite-fails-without-template-value",
-      "run": "test -f claude/hooks/plan-canvas-isolation.test.sh && d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/claude\"; python3 -c \"import json,sys; t=json.load(open('claude/settings.json.tmpl')); t['env'].pop('ECC_DISABLED_HOOKS', None); json.dump(t, open(sys.argv[1], 'w'), indent=2)\" \"$d/claude/settings.json.tmpl\"; if (cd \"$d\" && PLAN_CANVAS_TEST_REQUIRE_ECC=1 sh \"$OLDPWD/claude/hooks/plan-canvas-isolation.test.sh\" >\"$d/out\" 2>\"$d/err\"); then exit 1; fi; grep -q '^FAIL  stop: pending personal feedback in this repo is not delivered' \"$d/err\"",
+      "run": "test -f claude/hooks/plan-canvas-isolation.test.sh || exit 1; d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/claude\"; python3 -c \"import json,sys; t=json.load(open('claude/settings.json.tmpl')); t['env'].pop('ECC_DISABLED_HOOKS', None); json.dump(t, open(sys.argv[1], 'w'), indent=2)\" \"$d/claude/settings.json.tmpl\"; if (cd \"$d\" && PLAN_CANVAS_TEST_REQUIRE_ECC=1 sh \"$OLDPWD/claude/hooks/plan-canvas-isolation.test.sh\" >\"$d/out\" 2>\"$d/err\"); then exit 1; fi; grep -q '^FAIL  stop: pending personal feedback in this repo is not delivered' \"$d/err\"",
       "timeout_secs": 300
     },
     {
