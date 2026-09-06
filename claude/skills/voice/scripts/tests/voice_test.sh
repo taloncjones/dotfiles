@@ -246,6 +246,20 @@ assert_contains "def real is code, not candidate" "$F2_OUT" "4|code|def real():"
 assert_contains "secret assignment is code, not candidate" "$F2_OUT" "5|code|    secret = load()"
 assert_contains "return secret is code, not candidate" "$F2_OUT" "6|code|    return secret"
 
+echo "== rewrite: module docstring is protected like a function docstring (F3)"
+printf '"""Module summary line."""\ndef foo():\n    pass\n' > "$REPO/modsrc.py"
+printf 'import modsrc\nx = modsrc.__doc__\n' > "$REPO/moduser.py"
+run_voice rewrite --kind code-comment --range "$REPO/modsrc.py:1-1"
+assert_eq "module docstring unchanged exits 0" "$RC" 0
+assert_contains "module docstring protected reason" "$OUT" "modsrc.py:1  protected: docstring displayed (modsrc.__doc__ in moduser.py)"
+
+echo "== rewrite: referenced_elsewhere needle strips the leading triple-quote (F4)"
+printf 'def f():\n    """Keep this exact wording for the dashboard search."""\n    return 1\n' > "$REPO/docref.py"
+printf 'NEEDLE = "Keep this exact wording for the dashboard search."\n' > "$REPO/docsearch.py"
+run_voice rewrite --kind code-comment --range "$REPO/docref.py:2-2"
+assert_eq "docstring referenced-elsewhere unchanged exits 0" "$RC" 0
+assert_contains "docstring fallback protection fires" "$OUT" "docref.py:2  protected: referenced elsewhere (docsearch.py)"
+
 echo "== rewrite: --range guards (AC9c)"
 rm -f "$FAKE_CODEX_MARKER"
 run_voice rewrite --kind pr-body --range "$REPO/widgets.py:1-6"

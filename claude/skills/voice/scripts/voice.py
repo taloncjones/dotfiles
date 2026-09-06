@@ -433,7 +433,7 @@ def grep_files(needle, root, exclude_path):
 
 
 def referenced_elsewhere(text, root, path):
-    needle = text.strip().lstrip("#/* ").strip().rstrip('"').strip()
+    needle = text.strip().lstrip('"#/* ').strip().rstrip('"').strip()
     if len(needle) < MIN_REFERENCE_LEN:
         return None
     hits = grep_files(needle, root, path)
@@ -460,6 +460,7 @@ def classify_range(path, start, end):
         raise VoiceError("range %d-%d out of bounds for %s (%d lines)"
                          % (start, end, path, len(lines)))
     root = repo_root(path)
+    module_name = os.path.splitext(os.path.basename(path))[0]
     rows = []
     # `string_state` tracks whichever triple-quoted literal, if any, is open
     # across lines: "doc" for a real docstring, "other" for any other
@@ -492,7 +493,10 @@ def classify_range(path, start, end):
         if not (start <= n <= end):
             continue
         if is_doc:
-            reason = docstring_displayed(owner, root, path) or referenced_elsewhere(line, root, path)
+            # Before any def/class, a docstring is the module's own, keyed by
+            # the file's module name rather than a def/class owner.
+            reason = (docstring_displayed(owner or module_name, root, path)
+                      or referenced_elsewhere(line, root, path))
         elif stripped.startswith(COMMENT_PREFIXES):
             reason = referenced_elsewhere(line, root, path)
         else:
