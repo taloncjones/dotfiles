@@ -1,0 +1,14 @@
+# Cloudflare Access SSH hosts (see README "Remote Access").
+#
+# Seeded once to ~/.ssh/config_cloudflared by install/common/link.sh and
+# then machine-local: edit the zone in THAT file, never this template.
+# The placeholder pattern below matches nothing until the zone is edited,
+# so a fresh machine is inert. Host-side setup (tunnel, Access app, sshd)
+# is a manual runbook; nothing in dotfiles creates it.
+#
+# Client use:   ssh <host>.ssh.<zone>
+#               herdr --remote <host>.ssh.<zone>
+Host *.ssh.example.com
+    ProxyCommand cloudflared access ssh --hostname %h
+    IdentityFile ~/.ssh/id_ed25519_personal
+    IdentitiesOnly yes
