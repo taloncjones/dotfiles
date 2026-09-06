@@ -177,7 +177,7 @@ HOME="$d" sh claude/hooks/claude-hooks.test.sh; echo "exit=$?"
 rm -rf "$d"
 HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh | tail -1
 ```
-Expected: first run prints `FAIL  settings: .../.claude does not exclude the Plan Canvas hooks` and `exit=1`; second run ends `81 passed, 0 failed`.
+Expected: first run prints `FAIL  settings: .../.claude does not exclude the Plan Canvas hooks` and `exit=1`; second run ends `77 passed, 0 failed` (sandboxed HOME has no live settings, so the per-dir drift checks SKIP; the sandboxed baseline is 76 and the static assertion adds one). Against the real HOME the suite reports two new FAILs, one per config dir, until Task 7 reconciles the live files; that is the intended drift signal, not a defect.
 
 - [ ] **Step 4: Commit**
 
@@ -200,7 +200,7 @@ git commit -m "claude: Drift-check the Plan Canvas hook exclusion"
 - [ ] **Step 1: Add the assertions**
 
 ```sh
-if jget "$CFG/settings.json" "{x.strip() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending'}"; then
+if jget "$CFG/settings.json" "{x.strip().lower() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending'}"; then
     pass "link path delivers the Plan Canvas hook exclusion"
 else
     fail "link path delivers the Plan Canvas hook exclusion"
@@ -216,12 +216,24 @@ else
 fi
 ```
 
-- [ ] **Step 2: Run the suite**
+- [ ] **Step 2: Prove the delivery assertion is falsifiable**
+
+Run the suite against a scratch dotfiles root whose template lacks the key (the suite reads `$DOTFILEDIR/claude/settings.json.tmpl`):
+```bash
+d="$(mktemp -d)"; mkdir -p "$d/claude" "$d/install/common"
+cp -R claude/. "$d/claude/"
+python3 -c 'import json,sys; t=json.load(open("claude/settings.json.tmpl")); t["env"].pop("ECC_DISABLED_HOOKS", None); json.dump(t, open(sys.argv[1], "w"), indent=2)' "$d/claude/settings.json.tmpl"
+cp install/claude-links.test.sh "$d/links.test.sh"; cp install/common/claude-links.sh "$d/install/common/"
+(cd "$d" && sh links.test.sh 2>&1 | grep 'Plan Canvas'); rm -rf "$d"
+```
+Expected: `FAIL  link path delivers the Plan Canvas hook exclusion`.
+
+- [ ] **Step 3: Run the suite green**
 
 Run: `sh install/claude-links.test.sh | tail -3`
 Expected: both new PASS lines and `18 passed, 0 failed`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add install/claude-links.test.sh
@@ -240,7 +252,7 @@ git commit -m "install: Assert reconcile delivers the Plan Canvas exclusion"
 - Produces: exit 0 with `N passed, 0 failed`; exit 0 with a `SKIP:` line when ECC is absent; exit 1 when `PLAN_CANVAS_TEST_REQUIRE_ECC=1` and ECC is absent.
 - Env knobs: `ECC_PLUGIN_ROOT` overrides root resolution; `PLAN_CANVAS_TEST_REQUIRE_ECC=1` turns SKIP into FAIL (the contract uses it).
 
-Behavior facts the suite relies on (verified 2026-09-06 against ECC 2.2.1 with a scratchpad prototype): a disabled hook echoes stdin unchanged and exits 0; an enabled Stop hook with pending feedback under its cwd prints `{"decision":"block","reason":...}` containing the feedback text and rewrites `sessions.json`; an enabled SessionStart hook prints `[PlanCanvas] Open browser review sessions` with every open artifact path; the Stop hook honors the payload `cwd` for scoping; `os.homedir()` follows `HOME`; `check-hook-enabled.js <id>` prints `no` for excluded ids before any profile check.
+Behavior facts the suite relies on (verified 2026-09-06 against ECC 2.2.1 with a scratchpad prototype): a disabled hook echoes stdin unchanged and exits 0; an enabled Stop hook with pending feedback under its cwd prints `{"decision":"block","reason":...}` containing the feedback text and rewrites `sessions.json`; an enabled SessionStart hook prints `[PlanCanvas] Open browser review sessions` with every open artifact path, followed by the raw payload echoed by the flag gate (so never write an exact-match assertion against that output); the Stop hook honors the payload `cwd` for scoping; `os.homedir()` follows `HOME`; `check-hook-enabled.js <id>` prints `no` for excluded ids before any profile check.
 
 - [ ] **Step 1: Write the suite**
 
@@ -421,7 +433,9 @@ fi
 
 # --- collateral: only the two Canvas ids are off under the template env ---
 # check-hook-enabled exercises ECC's flag gate (the exclusion short-circuits
-# before the profile check), not the hooks.json wiring.
+# before the profile check), not the hooks.json wiring. With no profile CSV
+# the gate falls back to standard,strict, so the "yes" cases prove the ids
+# are NOT EXCLUDED under the template env; profile membership is not tested.
 enabled_is() {
     got="$(CLAUDE_PLUGIN_ROOT="$ECC_ROOT" ECC_HOOKS_ENABLED=true ECC_HOOK_PROFILE=standard \
         ECC_DISABLED_HOOKS="$DISABLED" node "$ECC_ROOT/scripts/hooks/check-hook-enabled.js" "$1" 2>/dev/null)"
@@ -436,7 +450,7 @@ ok=1
 for id in stop:session-end pre:bash:dispatcher post:dispatcher:sync; do
     enabled_is "$id" yes || ok=0
 done
-if [ "$ok" = 1 ]; then pass "flag gate: TDD and dispatcher hooks stay enabled"; else fail "flag gate: TDD and dispatcher hooks stay enabled"; fi
+if [ "$ok" = 1 ]; then pass "flag gate: TDD and dispatcher hook ids are not excluded"; else fail "flag gate: TDD and dispatcher hook ids are not excluded"; fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
@@ -506,8 +520,11 @@ directly after the `sh claude/hooks/claude-hooks.test.sh` line.
 
 - [ ] **Step 2: Run the full runner**
 
-Run: `bash bin/dotfiles-tests 2>&1 | tail -4`
-Expected while the branch-only spec and plan are still tracked: `=== dotfiles-tests: 19 suites passed, 1 failed` with only `git/hooks/public-safety.test.sh` failing on `no tracked planning artifacts` (the baseline shows the same single failure for the same reason). Every other suite `[OK]`, including the new `claude/hooks/plan-canvas-isolation.test.sh`. After the branch-only docs are dropped before merge, `20 suites passed, 0 failed`.
+Run with a sandboxed HOME, because the live settings files do not carry the key until Task 7 reconciles them and the Task 2 live-drift assertion would otherwise fail twice:
+```bash
+HOME="$(mktemp -d)" bash bin/dotfiles-tests 2>&1 | grep '^\[OK\]\|^\[X\]\|^==='
+```
+Expected while the branch-only spec and plan are still tracked: `=== dotfiles-tests: 19 suites passed, 1 failed` with only `git/hooks/public-safety.test.sh` failing on `no tracked planning artifacts` (the baseline shows the same single failure for the same reason). Every other suite `[OK]`, including the new `claude/hooks/plan-canvas-isolation.test.sh`. After Task 7 the same command passes against the real HOME too, and after the branch-only docs are dropped before merge, `20 suites passed, 0 failed`.
 
 - [ ] **Step 3: Commit**
 
@@ -531,12 +548,11 @@ git commit -m "bin: Register the Plan Canvas isolation suite"
 
 - [ ] **Step 2: Verify and run the docs guards**
 
-Run:
+Run (the same four strings the contract greps):
 ```bash
-grep -c 'ECC_DISABLED_HOOKS' CLAUDE.md
-grep -c 'plan-canvas-isolation.test.sh' CLAUDE.md
+for s in ECC_DISABLED_HOOKS plan-canvas-isolation.test.sh session-start:plan-canvas-sessions stop:plan-canvas-pending; do grep -c "$s" CLAUDE.md; done
 ```
-Expected: `1` and `1`.
+Expected: four lines, each `1` or more.
 
 - [ ] **Step 3: Commit**
 
