@@ -25,6 +25,11 @@ pass() { printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
 fail() { printf 'FAIL  %s\n' "$1" >&2; FAIL=$((FAIL + 1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/claude-links-test.XXXXXX")"
+# Normalize: macOS sets TMPDIR with a trailing slash, which would otherwise
+# leave a doubled slash in $TMP that os.path.abspath() (used by the reconcile
+# substitution under test) normalizes away -- collapse it here so string
+# comparisons against reconciled paths match.
+TMP="$(cd "$TMP" && pwd)"
 trap 'rm -rf "$TMP"' EXIT
 
 DOTFILEDIR="$(pwd)"
@@ -135,6 +140,43 @@ else
     fail "dest untouched when template missing"
 fi
 
+# 6. Config-dir token: env string values carry {{CLAUDE_CONFIG_DIR}} in the
+# template; reconcile replaces it with the absolute dir it writes into, and
+# only inside env (a token elsewhere is left alone). No token survives in env.
+TOKTMPL="$TMP/tok-tmpl.json"
+cat >"$TOKTMPL" <<'EOF'
+{
+  "env": {
+    "ECC_AGENT_DATA_HOME": "{{CLAUDE_CONFIG_DIR}}",
+    "ECC_FIXTURE_MULTI": "a:{{CLAUDE_CONFIG_DIR}}/x:{{CLAUDE_CONFIG_DIR}}/y",
+    "PLAIN": "unchanged"
+  },
+  "statusLine": {"type": "command", "command": "echo {{CLAUDE_CONFIG_DIR}}"}
+}
+EOF
+mkdir -p "$TMP/tok-cfg"
+reconcile_claude_settings_file "$TOKTMPL" "$TMP/tok-cfg/settings.json" >/dev/null 2>&1
+if jget "$TMP/tok-cfg/settings.json" "d['env']['ECC_AGENT_DATA_HOME'] == '$TMP/tok-cfg'"; then
+    pass "reconcile substitutes the config-dir token with the dest dir"
+else
+    fail "reconcile substitutes the config-dir token with the dest dir"
+fi
+if jget "$TMP/tok-cfg/settings.json" "d['env']['ECC_FIXTURE_MULTI'] == 'a:$TMP/tok-cfg/x:$TMP/tok-cfg/y'"; then
+    pass "reconcile substitutes every token occurrence in one value"
+else
+    fail "reconcile substitutes every token occurrence in one value"
+fi
+if jget "$TMP/tok-cfg/settings.json" "d['env']['PLAIN'] == 'unchanged' and d['statusLine']['command'] == 'echo {{CLAUDE_CONFIG_DIR}}'"; then
+    pass "reconcile leaves non-env values and token-free env values alone"
+else
+    fail "reconcile leaves non-env values and token-free env values alone"
+fi
+if ! grep -q '{{CLAUDE_CONFIG_DIR}}' "$TMP/tok-cfg/settings.json" 2>/dev/null || jget "$TMP/tok-cfg/settings.json" "all('{{CLAUDE_CONFIG_DIR}}' not in v for v in d['env'].values())"; then
+    pass "reconcile leaves no token in env"
+else
+    fail "reconcile leaves no token in env"
+fi
+
 # --- link_claude_config_dir integration (real repo template) ---
 # The campaign 3.2 gate: run the machine link path against a scratch config
 # dir whose settings.json holds only installer-written keys, and prove the
@@ -168,10 +210,25 @@ if jget "$CFG/settings.json" "d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'claud
 else
     fail "link path maps the Opus alias to Opus 4.8 1M"
 fi
-if jget "$CFG/settings.json" "{x.strip().lower() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending'}"; then
-    pass "link path delivers the Plan Canvas hook exclusion"
+if jget "$CFG/settings.json" "{x.strip().lower() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending', 'post:bash:command-log-audit', 'post:bash:command-log-cost', 'post:skill:track', 'pre:mcp-health-check', 'post:mcp-health-check'}"; then
+    pass "link path delivers the seven-id ECC hook exclusion"
 else
-    fail "link path delivers the Plan Canvas hook exclusion"
+    fail "link path delivers the seven-id ECC hook exclusion"
+fi
+if jget "$CFG/settings.json" "d['env']['ECC_AGENT_DATA_HOME'] == '$CFG'"; then
+    pass "link path scopes the ECC data home to this config dir"
+else
+    fail "link path scopes the ECC data home to this config dir"
+fi
+# A second config dir (the work account) must receive its own path, not a
+# copy of the first dir's.
+CFG2="$TMP/cfg-work"
+mkdir -p "$CFG2"
+link_claude_config_dir "$CFG2" >/dev/null 2>&1
+if jget "$CFG2/settings.json" "d['env']['ECC_AGENT_DATA_HOME'] == '$CFG2'"; then
+    pass "link path gives a second config dir its own ECC data home"
+else
+    fail "link path gives a second config dir its own ECC data home"
 fi
 # Two consecutive update runs must converge: the exclusion is delivered once
 # and never re-written differently.
