@@ -70,6 +70,10 @@ ln -sf "$DOTFILEDIR"/ssh/keys/id_ed25519_personal.pub "$HOME"/.ssh/id_ed25519_pe
 # The work key's public half is machine-local (employer key never tracked):
 # identity-setup writes ~/.ssh/id_ed25519_work.pub. Nothing to link here.
 
+# Cloudflare Access SSH stanza: seed once, then machine-local (the real
+# zone never enters the repo). See README "Remote Access".
+seed_machine_local_file "$DOTFILEDIR"/ssh/configs/config_cloudflared.tmpl "$HOME"/.ssh/config_cloudflared
+
 # 1Password SSH agent config: seed once, then machine-local (real vault/item
 # names stay off the repo). 1Password reads a real file here, not a symlink.
 mkdir -p "$HOME"/.config/1Password/ssh
@@ -93,6 +97,7 @@ ln -sf "$DOTFILEDIR"/bin/dotfiles-repair "$HOME"/bin/dotfiles-repair
 ln -sf "$DOTFILEDIR"/bin/setup-claude "$HOME"/bin/setup-claude
 ln -sf "$DOTFILEDIR"/bin/identity-setup "$HOME"/bin/identity-setup
 ln -sf "$DOTFILEDIR"/bin/identity-doctor "$HOME"/bin/identity-doctor
+ln -sf "$DOTFILEDIR"/bin/remote-access-doctor "$HOME"/bin/remote-access-doctor
 ln -sf "$DOTFILEDIR"/bin/dotfiles-tests "$HOME"/bin/dotfiles-tests
 
 # Ghostty terminal configuration
