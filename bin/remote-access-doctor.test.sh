@@ -91,7 +91,26 @@ run_doctor "$h" "$h/out" || true
 assert "doctor: host without the personal key in authorized_keys warns" \
     grep -q '^\[WARNING\] .*authorized_keys' "$h/out"
 
-# 8. the script stays read-only
+# 8. host role: zero-byte pubkey must not falsely OK a non-empty authorized_keys
+h="$(fresh_home host-emptykey)"
+mkdir -p "$h/Library/LaunchAgents"
+: > "$h/Library/LaunchAgents/com.cloudflare.cloudflared.plist"
+: > "$h/.ssh/id_ed25519_personal.pub"
+printf 'ssh-ed25519 AAAATESTKEYONLY test@example.com\n' > "$h/.ssh/authorized_keys"
+run_doctor "$h" "$h/out" || true
+assert "doctor: zero-byte pubkey does not print authorized_keys OK" \
+    sh -c "! grep -q '^\[OK\] .*authorized_keys' '$h/out'"
+assert "doctor: zero-byte pubkey warns about authorized_keys instead" \
+    grep -q '^\[WARNING\] .*authorized_keys' "$h/out"
+
+# 9. placeholder-zone regex does not match a look-alike host
+h="$(fresh_home placeholder-lookalike)"
+printf 'Host *.sshXexampleYcom\n  ProxyCommand cloudflared access ssh --hostname %%h\n' > "$h/.ssh/config_cloudflared"
+run_doctor "$h" "$h/out" || true
+assert "doctor: sshXexampleYcom is not treated as the placeholder zone" \
+    sh -c "! grep '^\[WARNING\]' '$h/out' | grep -q 'placeholder zone'"
+
+# 10. the script stays read-only
 assert "doctor: contains no service or tunnel mutation outside comments" \
     sh -c "! grep -v '^[[:space:]]*#' '$DOCTOR' | grep -E -q 'sudo|launchctl (load|bootstrap|kickstart)|systemctl (enable|start|restart)|cloudflared tunnel|cloudflared service'"
 assert "doctor: is executable and parses" sh -c "test -x '$DOCTOR' && bash -n '$DOCTOR'"

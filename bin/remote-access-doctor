@@ -25,6 +25,7 @@ section() { printf '\n--- %s ---\n' "$1"; }
 SSH_CONFIG="$HOME/.ssh/config"
 CF_CONFIG="$HOME/.ssh/config_cloudflared"
 PLACEHOLDER_ZONE='ssh.example.com'
+PLACEHOLDER_ZONE_RE="${PLACEHOLDER_ZONE//./\\.}"
 PERSONAL_PUB="$HOME/.ssh/id_ed25519_personal.pub"
 AUTHORIZED_KEYS="$HOME/.ssh/authorized_keys"
 
@@ -55,7 +56,7 @@ elif [[ -f "$CF_CONFIG" ]]; then
   else
     fail "config_cloudflared has no 'ProxyCommand cloudflared access ssh' line"
   fi
-  if grep -q "^Host .*\\.${PLACEHOLDER_ZONE}\$" "$CF_CONFIG"; then
+  if grep -q "^Host .*\\.${PLACEHOLDER_ZONE_RE}\$" "$CF_CONFIG"; then
     warn "client not configured: config_cloudflared still uses the ${PLACEHOLDER_ZONE} placeholder zone"
   elif grep -q '^Host ' "$CF_CONFIG"; then
     ok "config_cloudflared zone edited: $(grep '^Host ' "$CF_CONFIG" | head -1)"
@@ -91,8 +92,10 @@ done
 
 if [[ -n "$unit_found" ]]; then
   info "tunnel service unit present: $unit_found (this machine is a session host)"
-  if [[ -f "$PERSONAL_PUB" && -f "$AUTHORIZED_KEYS" ]] \
-     && grep -qF -- "$(awk '{print $2}' "$PERSONAL_PUB")" "$AUTHORIZED_KEYS"; then
+  key=""
+  [[ -f "$PERSONAL_PUB" ]] && key="$(awk '{print $2}' "$PERSONAL_PUB")"
+  if [[ -n "$key" && -f "$AUTHORIZED_KEYS" ]] \
+     && grep -qF -- "$key" "$AUTHORIZED_KEYS"; then
     ok "authorized_keys carries the personal public key"
   else
     warn "authorized_keys does not carry the personal public key; ssh through the tunnel will be refused after the Access login"
