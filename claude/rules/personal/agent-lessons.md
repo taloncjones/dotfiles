@@ -20,3 +20,5 @@ is the staging tier, not an archive.
 - (2026-09) Non-interactive shells: set CLAUDE_CONFIG_DIR explicitly and
   call the real claude binary; the zsh claude() wrapper assumes an
   interactive shell for account routing and fails auth without it.
+- (2026-09) The Bash tool runs zsh: unquoted $var never word-splits (use
+  arrays or explicit args, not `set -- $p`), PIPESTATUS is `pipestatus`.
