@@ -181,8 +181,208 @@ def cmd_lint(args):
     return 1 if findings else 0
 
 
+# --- rewrite: prompt, Codex call, invariants, report -----------------------
+
+INVARIANT_EXTRACTORS = {
+    "url": re.compile(r"https?://\S+"),
+    "jira-key": re.compile(r"\b[A-Z][A-Z0-9]+-[0-9]+\b"),
+    "fence": re.compile(r"```.*?```", re.S),
+    "inline": re.compile(r"`[^`\n]+`"),
+}
+INVARIANTS_BY_KIND = {
+    "pr-title": ("url", "jira-key"),
+    "jira-title": ("url", "jira-key"),
+    "pr-comment": ("url", "jira-key", "fence"),
+    "jira-comment": ("url", "jira-key", "fence"),
+    "pr-body": ("url", "jira-key", "fence", "inline"),
+    "jira-description": ("url", "jira-key", "fence", "inline"),
+    "code-comment": (),
+}
+
+
+def read_rules():
+    with open(RULES_PATH, encoding="utf-8") as f:
+        return f.read()
+
+
+def invariants_text(kind):
+    names = INVARIANTS_BY_KIND[kind]
+    if kind == "code-comment":
+        return "Every line whose status is code or protected comes back byte-identical."
+    return "Copy byte-for-byte every: %s." % ", ".join(names)
+
+
+def build_prompt(kind, text, rows=None):
+    parts = [read_rules().rstrip("\n"), "",
+             "=== KIND: %s ===" % kind, ADDENDA[kind], "",
+             "=== INVARIANTS ===", invariants_text(kind), "",
+             "=== OUTPUT ==="]
+    if kind == "code-comment":
+        parts += ['Return JSON: {"lines": [{"n": <line number>, "text": <line>}], '
+                  '"changes": [{"before": ..., "after": ..., "rule": ...}]} with '
+                  "exactly one entry per input line, in order.", "",
+                  "=== LINES ==="]
+        parts += ["%d|%s|%s" % (n, status, line) for n, status, line, _ in rows]
+    else:
+        parts += ['Return JSON: {"rewritten": <the full text>, '
+                  '"changes": [{"before": ..., "after": ..., "rule": ...}]}.', "",
+                  "=== TEXT ===", text]
+    prompt = "\n".join(parts)
+    # Text ends the prompt; do not add a newline the input did not have, or
+    # the model's faithful copy diffs against the input at EOF.
+    return prompt if prompt.endswith("\n") else prompt + "\n"
+
+
+def schema_for(kind):
+    change = {"type": "object",
+              "properties": {"before": {"type": "string"},
+                             "after": {"type": "string"},
+                             "rule": {"type": "string"}},
+              "required": ["before", "after", "rule"],
+              "additionalProperties": False}
+    if kind == "code-comment":
+        line = {"type": "object",
+                "properties": {"n": {"type": "integer"}, "text": {"type": "string"}},
+                "required": ["n", "text"], "additionalProperties": False}
+        props = {"lines": {"type": "array", "items": line},
+                 "changes": {"type": "array", "items": change}}
+    else:
+        props = {"rewritten": {"type": "string"},
+                 "changes": {"type": "array", "items": change}}
+    return {"type": "object", "properties": props,
+            "required": list(props), "additionalProperties": False}
+
+
+def run_codex(prompt, kind, effort, workdir):
+    scratch = tempfile.mkdtemp(prefix="scratch.", dir=workdir)
+    prompt_path = os.path.join(workdir, "prompt.txt")
+    schema_path = os.path.join(workdir, "schema.json")
+    last_path = os.path.join(workdir, "last.json")
+    log_path = os.path.join(workdir, "codex.log")
+    with open(prompt_path, "w", encoding="utf-8") as f:
+        f.write(prompt)
+    with open(schema_path, "w") as f:
+        json.dump(schema_for(kind), f)
+    cmd = [os.environ.get("VOICE_CODEX_BIN", "codex"), "exec", "-",
+           "-m", CODEX_MODEL,
+           "-c", 'model_reasoning_effort="%s"' % effort,
+           "-c", 'approval_policy="never"',
+           "-c", 'sandbox_mode="read-only"',
+           "-C", scratch, "--skip-git-repo-check", "--ephemeral",
+           "--output-schema", schema_path, "-o", last_path]
+    with open(prompt_path, "rb") as pin, open(log_path, "wb") as log:
+        rc = subprocess.call(cmd, stdin=pin, stdout=log, stderr=subprocess.STDOUT)
+    if rc != 0:
+        raise VoiceError("codex exited %d; log: %s" % (rc, log_path))
+    try:
+        with open(last_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise VoiceError("codex output is not JSON (%s); log: %s" % (e, log_path))
+    if not isinstance(data, dict) or not isinstance(data.get("changes"), list):
+        raise VoiceError("codex output missing changes; log: %s" % log_path)
+    for c in data["changes"]:
+        if not all(isinstance(c.get(k), str) for k in ("before", "after", "rule")):
+            raise VoiceError("codex change entry malformed; log: %s" % log_path)
+    return data
+
+
+def check_invariants(kind, before, after):
+    missing = []
+    for name in INVARIANTS_BY_KIND[kind]:
+        for m in INVARIANT_EXTRACTORS[name].finditer(before):
+            if m.group() not in after:
+                missing.append("%s %s" % (name, m.group()))
+    return missing
+
+
+def normalize(text):
+    return "\n".join(line.rstrip() for line in text.rstrip().splitlines())
+
+
+def make_report(kind, target, text, lint, after=None, changes=None,
+                protected=None, apply=None, status=None):
+    if status is None:
+        status = "unchanged" if normalize(after) == normalize(text) else "changed"
+    diff = ""
+    if status == "changed":
+        diff = "".join(difflib.unified_diff(
+            text.splitlines(True), after.splitlines(True), "before", "after"))
+        if diff and not diff.endswith("\n"):
+            diff += "\n"
+    return {"kind": kind, "target": target, "status": status, "lint": lint,
+            "before": text, "after": after if after is not None else text,
+            "diff": diff, "changes": changes or [], "protected": protected or [],
+            "apply": apply if status == "changed" else None}
+
+
+def report_text(r):
+    head = "%d changes" % len(r["changes"]) if r["status"] == "changed" else r["status"]
+    lines = ["VOICE %s %s: %s" % (r["kind"], r["target"], head)]
+    if r["lint"]:
+        lines.append("Lint:")
+        lines += ["  " + f for f in r["lint"]]
+    if r["status"] == "changed":
+        lines.append(r["diff"].rstrip("\n"))
+        lines.append("Changes:")
+        for i, c in enumerate(r["changes"], 1):
+            lines.append('  %d. %s: "%s" -> "%s"' % (i, c["rule"], c["before"], c["after"]))
+    if r["protected"]:
+        lines.append("Protected (left alone):")
+        lines += ["  " + p for p in r["protected"]]
+    if r["apply"]:
+        lines.append("Apply with:")
+        lines += ["  " + a for a in r["apply"].splitlines()]
+    return "\n".join(lines) + "\n"
+
+
+def run_text_unit(kind, target, text, args, workdir, apply=None):
+    lint = lint_text(kind, text)
+    if not text.strip():
+        return make_report(kind, target, text, lint, status="empty")
+    prompt = build_prompt(kind, text)
+    if args.dry_run:
+        sys.stdout.write(prompt)
+        return make_report(kind, target, text, lint, status="dry-run")
+    unit_dir = tempfile.mkdtemp(prefix="unit.", dir=workdir)
+    data = run_codex(prompt, kind, args.effort, unit_dir)
+    after = data.get("rewritten")
+    if not isinstance(after, str):
+        raise VoiceError("codex output missing rewritten; log: %s"
+                         % os.path.join(unit_dir, "codex.log"))
+    missing = check_invariants(kind, text, after)
+    if missing:
+        raise VoiceError("invariant violated: " + "; ".join(missing))
+    return make_report(kind, target, text, lint, after, data["changes"],
+                       apply=apply or "paste the after block")
+
+
+STATUS_RC = {"dry-run": 0, "empty": 0, "unchanged": 0, "changed": 1}
+
+
+def emit(reports, args):
+    if args.as_json:
+        json.dump(reports, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    elif not args.dry_run:
+        for r in reports:
+            sys.stdout.write(report_text(r))
+    return max(STATUS_RC[r["status"]] for r in reports)
+
+
 def cmd_rewrite(args):
-    raise VoiceError("rewrite is not implemented yet")
+    workdir = tempfile.mkdtemp(prefix="voice.")
+    if args.pr is not None:
+        raise VoiceError("--pr is not implemented yet")
+    if args.line_range:
+        raise VoiceError("--range is not implemented yet")
+    check_kind(args.kind)
+    if args.kind == "code-comment":
+        raise VoiceError("code-comment needs --range FILE:A-B")
+    text = read_input(args)
+    target = args.file if args.file else "stdin"
+    reports = [run_text_unit(args.kind, target, text, args, workdir)]
+    return emit(reports, args)
 
 
 def parse_args(argv):
