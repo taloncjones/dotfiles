@@ -14,9 +14,10 @@
 #
 # Usage:
 #   todos.sh init                       set up .todos/ (local-only)
-#   todos.sh new "<title>" [--area A] [--file P]...   create a pending todo
-#   todos.sh list [--all]               list pending (--all also lists completed)
+#   todos.sh new "<title>" [--area A] [--file P]... [--depends-on REF]...   create a pending todo
+#   todos.sh list [--all] [--offline]   list pending (--all adds completed; --offline skips gh)
 #   todos.sh done <slug-or-substring>   move a todo pending -> completed
+#   todos.sh depend <slug> REF...        add dependency refs (todo:<id> | branch:<name> | pr:<n>)
 #   todos.sh index                      regenerate TODO.md
 #   todos.sh share                      stop ignoring .todos/ (commit in this repo)
 #   todos.sh path                       print the .todos/ directory path
@@ -257,6 +258,87 @@ blocked_refs() {
   done < <(depends_list "$f")
 }
 
+find_pending() {
+  # find_pending <query> -> path of the unique pending todo whose basename is
+  # exactly <query> (sans .md) or contains it; dies when none or ambiguous.
+  local query="$1" root pending f matches=()
+  root=$(repo_root); pending="$root/$TODOS_DIRNAME/pending"
+  if [ -e "$pending/$query.md" ]; then printf '%s\n' "$pending/$query.md"; return 0; fi
+  for f in "$pending"/*.md; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in *"$query"*) matches+=("$f") ;; esac
+  done
+  [ "${#matches[@]}" -gt 0 ] || die "no pending todo matches '$query'"
+  if [ "${#matches[@]}" -gt 1 ]; then
+    printf 'todos: ambiguous; matches:\n' >&2
+    for f in "${matches[@]}"; do printf '  %s\n' "$(basename "$f")" >&2; done
+    exit 1
+  fi
+  printf '%s\n' "${matches[0]}"
+}
+
+resolve_todo_payload() {
+  # resolve_todo_payload <query> -> exact basename of the unique pending or
+  # completed todo matching <query> (exact first, then substring); dies otherwise.
+  local q="$1" root dir f matches=()
+  root=$(repo_root)
+  for dir in pending completed; do
+    [ -e "$root/$TODOS_DIRNAME/$dir/$q.md" ] && { printf '%s\n' "$q"; return 0; }
+  done
+  for dir in pending completed; do
+    for f in "$root/$TODOS_DIRNAME/$dir"/*.md; do
+      [ -e "$f" ] || continue
+      case "$(basename "$f" .md)" in *"$q"*) matches+=("$(basename "$f" .md)") ;; esac
+    done
+  done
+  [ "${#matches[@]}" -gt 0 ] || die "dependency names no todo: '$q'"
+  [ "${#matches[@]}" -eq 1 ] || die "ambiguous todo dependency '$q' (${#matches[@]} matches)"
+  printf '%s\n' "${matches[0]}"
+}
+
+prepare_ref() {
+  # prepare_ref <input> -> canonical ref for writing. A todo: payload may be a
+  # substring; the stored form is the exact basename, which must exist.
+  local in="$1" q ref
+  in=$(printf '%s' "$in" | strip_value)
+  case "$in" in
+    todo:*) q="${in#todo:}"; q="${q%.md}"; q=$(resolve_todo_payload "$q") || exit 1; in="todo:$q" ;;
+  esac
+  ref=$(normalize_ref "$in") || die "invalid dependency ref '$1' (use todo:<id>, branch:<name>, or pr:<n>)"
+  case "$ref" in
+    todo:*) resolve_todo_payload "${ref#todo:}" >/dev/null || exit 1 ;;
+  esac
+  printf '%s\n' "$ref"
+}
+
+add_depends() {
+  # add_depends <file> <canonical-ref>... -> append refs not already present
+  # to the frontmatter depends_on block (created before files:, or before the
+  # closing --- when there is no files: key). Atomic via temp file + mv.
+  local f="$1"; shift
+  local existing new="" ref raw
+  existing=$(depends_list "$f" | while IFS= read -r raw; do normalize_ref "$raw" || printf '%s\n' "$raw"; done)
+  # Refs never contain spaces (branch names, todo ids, PR numbers), so the
+  # new items travel to awk space-joined: BSD awk rejects a newline in -v.
+  for ref in "$@"; do
+    printf '%s\n' "$existing" | grep -qxF -- "$ref" && continue
+    case " $new " in *" $ref "*) continue ;; esac
+    new="${new:+$new }$ref"
+  done
+  [ -n "$new" ] || return 0
+  local tmp="$f.tmp.$$"
+  awk -v items="$new" '
+    BEGIN { cnt = split(items, arr, " ") }
+    function emit(   i) { for (i = 1; i <= cnt; i++) print "  - " arr[i]; done = 1 }
+    /^---$/ { n++; if (n == 2 && !done) { if (!have) print "depends_on:"; emit() } print; next }
+    n == 1 && /^depends_on:/          { have = 1; inlist = 1; print; next }
+    n == 1 && inlist && /^  - /       { print; next }
+    n == 1 && inlist                  { inlist = 0; emit(); print; next }
+    n == 1 && !have && !done && /^files:/ { print "depends_on:"; emit(); print; next }
+    { print }
+  ' "$f" >"$tmp" && mv "$tmp" "$f"
+}
+
 join_refs() {
   # stdin "<ref>\t<state>" lines -> "ref (state), ref (state)" when $1 is 1,
   # "ref, ref" when 0. No trailing newline; empty for empty input.
@@ -295,14 +377,15 @@ cmd_init() {
 cmd_new() {
   [ "$#" -ge 1 ] || die 'new requires a "<title>"'
   local title="$1"; shift
-  local area="" due="" surface="" priority="" files=()
+  local area="" due="" surface="" priority="" files=() deps_in=() deps=() ref d
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --area)     [ "$#" -ge 2 ] || die "--area needs a value"; area="$2"; shift 2 ;;
-      --file)     [ "$#" -ge 2 ] || die "--file needs a value"; files+=("$2"); shift 2 ;;
-      --due)      [ "$#" -ge 2 ] || die "--due needs a value"; due="$2"; shift 2 ;;
-      --surface)  [ "$#" -ge 2 ] || die "--surface needs a value"; surface="$2"; shift 2 ;;
-      --priority) [ "$#" -ge 2 ] || die "--priority needs a value"; priority="$2"; shift 2 ;;
+      --area)        [ "$#" -ge 2 ] || die "--area needs a value"; area="$2"; shift 2 ;;
+      --file)        [ "$#" -ge 2 ] || die "--file needs a value"; files+=("$2"); shift 2 ;;
+      --due)         [ "$#" -ge 2 ] || die "--due needs a value"; due="$2"; shift 2 ;;
+      --surface)     [ "$#" -ge 2 ] || die "--surface needs a value"; surface="$2"; shift 2 ;;
+      --priority)    [ "$#" -ge 2 ] || die "--priority needs a value"; priority="$2"; shift 2 ;;
+      --depends-on)  [ "$#" -ge 2 ] || die "--depends-on needs a value"; deps_in+=("$2"); shift 2 ;;
       *) die "unknown flag for new: $1" ;;
     esac
   done
@@ -310,6 +393,14 @@ cmd_new() {
   [ -z "$due" ]     || validate_date "$due"     || die "invalid --due (need calendar YYYY-MM-DD): $due"
   [ -z "$surface" ] || validate_date "$surface" || die "invalid --surface (need calendar YYYY-MM-DD): $surface"
   case "$priority" in ''|high|med|low) ;; *) die "invalid --priority (high|med|low): $priority" ;; esac
+
+  if [ "${#deps_in[@]}" -gt 0 ]; then
+    for d in "${deps_in[@]}"; do
+      ref=$(prepare_ref "$d") || exit 1
+      printf '%s\n' "${deps[@]:-}" | grep -qxF -- "$ref" && continue
+      deps+=("$ref")
+    done
+  fi
 
   ensure_init
   local root pending completed slug date base cand file n
@@ -328,6 +419,10 @@ cmd_new() {
   done
   file="$pending/$cand.md"
 
+  for ref in "${deps[@]:-}"; do
+    [ "$ref" != "todo:$cand" ] || die "a todo cannot depend on itself"
+  done
+
   {
     printf -- '---\n'
     printf 'created: %s\n' "$date"
@@ -336,6 +431,10 @@ cmd_new() {
     [ -n "$due" ]      && printf 'due: %s\n' "$due"
     [ -n "$surface" ]  && printf 'surface: %s\n' "$surface"
     [ -n "$priority" ] && printf 'priority: %s\n' "$priority"
+    if [ "${#deps[@]}" -gt 0 ]; then
+      printf 'depends_on:\n'
+      for ref in "${deps[@]}"; do printf '  - %s\n' "$ref"; done
+    fi
     printf 'files:\n'
     if [ "${#files[@]}" -gt 0 ]; then
       for f in "${files[@]}"; do printf '  - %s\n' "$f"; done
@@ -400,23 +499,29 @@ cmd_done() {
   pending="$root/$TODOS_DIRNAME/pending"
   completed="$root/$TODOS_DIRNAME/completed"
 
-  local matches=() f
-  for f in "$pending"/*.md; do
-    [ -e "$f" ] || continue
-    case "$(basename "$f")" in *"$query"*) matches+=("$f") ;; esac
-  done
-
-  [ "${#matches[@]}" -gt 0 ] || die "no pending todo matches '$query'"
-  if [ "${#matches[@]}" -gt 1 ]; then
-    printf 'todos: ambiguous; matches:\n' >&2
-    for f in "${matches[@]}"; do printf '  %s\n' "$(basename "$f")" >&2; done
-    exit 1
-  fi
+  local f; f=$(find_pending "$query") || exit 1
 
   mkdir -p "$completed"
-  mv "${matches[0]}" "$completed/$(basename "${matches[0]}")"
+  mv "$f" "$completed/$(basename "$f")"
   regenerate_index
-  printf 'done: %s\n' "$(basename "${matches[0]}")"
+  printf 'done: %s\n' "$(basename "$f")"
+}
+
+cmd_depend() {
+  [ "$#" -ge 1 ] || die "depend requires a slug or substring"
+  local query="$1"; shift
+  [ "$#" -ge 1 ] || die "depend requires at least one ref"
+  local target base refs=() ref d
+  target=$(find_pending "$query") || exit 1
+  base=$(basename "$target" .md)
+  for d in "$@"; do
+    ref=$(prepare_ref "$d") || exit 1
+    [ "$ref" != "todo:$base" ] || die "a todo cannot depend on itself"
+    refs+=("$ref")
+  done
+  add_depends "$target" "${refs[@]}"
+  regenerate_index
+  printf '%s\n' "$target"
 }
 
 regenerate_index() {
@@ -661,13 +766,14 @@ cmd_repos() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|done|index|share|path|register|repos|brief|today} ..."
+  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|done|depend|index|share|path|register|repos|brief|today} ..."
   local cmd="$1" ref; shift
   case "$cmd" in
     init)     cmd_init "$@" ;;
     new)      cmd_new "$@" ;;
     list)     cmd_list "$@" ;;
     done)     cmd_done "$@" ;;
+    depend)   cmd_depend "$@" ;;
     index)    cmd_index "$@" ;;
     share)    cmd_share "$@" ;;
     path)     cmd_path "$@" ;;

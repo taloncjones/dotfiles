@@ -18,8 +18,11 @@ assert_status() { # name expected_code cmd...
 canon_helper() { /usr/bin/env realpath "$1" 2>/dev/null || printf '%s' "$1"; }
 
 # Make a throwaway git repo with a .todos backlog; echoes its path.
+# Canonicalized so it matches what `git rev-parse --show-toplevel` reports
+# (macOS TMPDIR is a symlink into /private; git resolves it, mktemp doesn't).
 mk_repo() {
   local d; d=$(mktemp -d)
+  d=$(canon_helper "$d")
   ( cd "$d" && git init -q && git config user.email t@t && git config user.name t )
   printf '%s' "$d"
 }
@@ -790,6 +793,157 @@ EOF
   rm -rf "$repo"; rm -f "$errf"
 }
 test_list_invalid_and_self
+
+test_new_depends_on() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-let-auto-mode-decide <<'EOF'
+---
+created: 2026-05-01
+title: Existing dep
+---
+EOF
+  mk_todo "$repo" 2026-05-01-let-auto-mode-decide-2 <<'EOF'
+---
+created: 2026-05-01
+title: Existing dep twin
+---
+EOF
+  local f
+  f=$( (cd "$repo" && TODOS_TODAY=2026-06-08 bash "$TODOS" new "Needs things" --priority high \
+        --depends-on '#85' --depends-on todo:2026-05-01-let-auto-mode-decide-2 \
+        --depends-on talon/parity --depends-on pr:85 --file a.py) )
+  local body; body=$(cat "$f")
+  assert_contains "new: canonical list between priority and files" "$body" \
+    "$(printf 'priority: high\ndepends_on:\n  - pr:85\n  - todo:2026-05-01-let-auto-mode-decide-2\n  - branch:talon/parity\nfiles:\n  - a.py')"
+  assert_eq "new: refs deduped" "$(grep -c 'pr:85' "$f")" "1"
+  f=$( (cd "$repo" && TODOS_TODAY=2026-06-08 bash "$TODOS" new "Substring dep" --depends-on todo:decide-2) )
+  assert_contains "new: unique substring stored as exact basename" "$(cat "$f")" "  - todo:2026-05-01-let-auto-mode-decide-2"
+  local before; before=$(ls "$repo/.todos/pending" | wc -l | tr -d ' ')
+  assert_status "new: invalid ref exits 1"     1 bash -c '(cd "$1" && bash "$2" new x --depends-on parity)' _ "$repo" "$TODOS"
+  assert_status "new: unknown todo exits 1"    1 bash -c '(cd "$1" && bash "$2" new x --depends-on todo:2026-05-01-nope)' _ "$repo" "$TODOS"
+  assert_status "new: ambiguous todo exits 1"  1 bash -c '(cd "$1" && bash "$2" new x --depends-on todo:let-auto-mode)' _ "$repo" "$TODOS"
+  assert_status "new: dangling --depends-on"   1 bash -c '(cd "$1" && bash "$2" new x --depends-on)' _ "$repo" "$TODOS"
+  assert_eq "new: failures write no file" "$(ls "$repo/.todos/pending" | wc -l | tr -d ' ')" "$before"
+  ok "new: --depends-on"
+  rm -rf "$repo"
+}
+test_new_depends_on
+
+test_depend_add() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-target-one <<'EOF'
+---
+created: 2026-05-01
+title: Target with files
+area: x
+files:
+  - keep/me.py
+---
+
+## Problem
+
+Body stays.
+EOF
+  mk_todo "$repo" 2026-05-01-target-two <<'EOF'
+---
+created: 2026-05-01
+title: Target with list
+depends_on:
+  - pr:1
+---
+EOF
+  mk_todo "$repo" 2026-05-01-target-three <<'EOF'
+---
+created: 2026-05-01
+title: Target bare
+---
+EOF
+  mk_todo "$repo" 2026-05-01-target-four <<'EOF'
+---
+created: 2026-05-01
+title: Target list then files
+depends_on:
+  - pr:1
+files:
+  - keep/me.py
+---
+EOF
+  local out
+  out=$(cd "$repo" && bash "$TODOS" depend target-one '#2' branch:talon/x)
+  assert_eq "depend: prints the path" "$out" "$repo/.todos/pending/2026-05-01-target-one.md"
+  local want; want=$(mktemp)
+  cat >"$want" <<'EOF'
+---
+created: 2026-05-01
+title: Target with files
+area: x
+depends_on:
+  - pr:2
+  - branch:talon/x
+files:
+  - keep/me.py
+---
+
+## Problem
+
+Body stays.
+EOF
+  diff -u "$want" "$repo/.todos/pending/2026-05-01-target-one.md" >/dev/null \
+    && ok "depend: key inserted before files, rest byte-identical" \
+    || bad "depend: key inserted before files, rest byte-identical" "$(diff -u "$want" "$repo/.todos/pending/2026-05-01-target-one.md")"
+  ( cd "$repo" && bash "$TODOS" depend target-two pr:1 '#3' pr:3 >/dev/null )
+  assert_eq "depend: appends and dedupes" "$(cd "$repo" && bash "$TODOS" _depends .todos/pending/2026-05-01-target-two.md)" \
+    "$(printf 'pr:1\npr:3')"
+  ( cd "$repo" && bash "$TODOS" depend 2026-05-01-target-three pr:4 >/dev/null )
+  assert_contains "depend: key before closing --- when no files" \
+    "$(cat "$repo/.todos/pending/2026-05-01-target-three.md")" "$(printf 'title: Target bare\ndepends_on:\n  - pr:4\n---')"
+  ( cd "$repo" && bash "$TODOS" depend target-four pr:6 >/dev/null )
+  assert_contains "depend: appends before files when list precedes files" \
+    "$(cat "$repo/.todos/pending/2026-05-01-target-four.md")" "$(printf 'depends_on:\n  - pr:1\n  - pr:6\nfiles:\n  - keep/me.py')"
+  assert_contains "depend: index regenerated" "$(cat "$repo/.todos/TODO.md")" "[unverified: pr:2, branch:talon/x]"
+  assert_status "depend: no refs exits 1"     1 bash -c '(cd "$1" && bash "$2" depend target-one)' _ "$repo" "$TODOS"
+  assert_status "depend: ambiguous target"    1 bash -c '(cd "$1" && bash "$2" depend target pr:5)' _ "$repo" "$TODOS"
+  assert_status "depend: invalid ref"         1 bash -c '(cd "$1" && bash "$2" depend target-one parity)' _ "$repo" "$TODOS"
+  assert_status "depend: completed target refused" 1 bash -c '(mkdir -p "$1/.todos/completed" && printf -- "---\ncreated: 2026-05-01\ntitle: c\n---\n" >"$1/.todos/completed/2026-05-01-closed.md" && cd "$1" && bash "$2" depend closed pr:5)' _ "$repo" "$TODOS"
+  ok "depend: add refs"
+  rm -rf "$repo"; rm -f "$want"
+}
+test_depend_add
+
+test_depend_self() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-loop-me <<'EOF'
+---
+created: 2026-05-01
+title: Loop me
+---
+EOF
+  local errf; errf=$(mktemp)
+  ( cd "$repo" && bash "$TODOS" depend loop-me todo:2026-05-01-loop-me ) >/dev/null 2>"$errf"
+  assert_eq "depend: self by exact basename exits 1" "$?" "1"
+  assert_contains "depend: self message" "$(cat "$errf")" "todos: a todo cannot depend on itself"
+  assert_status "depend: self by substring exits 1" 1 bash -c '(cd "$1" && bash "$2" depend loop-me todo:loop)' _ "$repo" "$TODOS"
+  assert_status "depend: self by bare id exits 1"   1 bash -c '(cd "$1" && bash "$2" depend loop-me 2026-05-01-loop-me)' _ "$repo" "$TODOS"
+  case "$(cat "$repo/.todos/pending/2026-05-01-loop-me.md")" in *depends_on*) bad "depend: self writes nothing" "wrote";; *) ok "depend: self writes nothing";; esac
+  ok "depend: refuses self-dependency"
+  rm -rf "$repo"; rm -f "$errf"
+}
+test_depend_self
+
+test_done_still_matches() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-finish-me <<'EOF'
+---
+created: 2026-05-01
+title: Finish me
+---
+EOF
+  local out; out=$(cd "$repo" && bash "$TODOS" done finish)
+  assert_eq "done: substring still moves the todo" "$out" "done: 2026-05-01-finish-me.md"
+  [ -e "$repo/.todos/completed/2026-05-01-finish-me.md" ] && ok "done: file moved" || bad "done: file moved" "missing"
+  rm -rf "$repo"
+}
+test_done_still_matches
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
