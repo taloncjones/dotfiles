@@ -959,5 +959,57 @@ gate_case "fresh cycle is refused again after a release" block-3 w1 impl none 2 
 gate_case "active hook with a fresh record is allowed silently" allow w1 impl done:fresh:w1:PROJ-1 2 "$GATE_P_T"
 gate_case "stop_hook_active must be boolean true to release" block-3 w1 impl none 2 '{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":"true"}'
 
+# Static registration: the template's Stop group is one `*` matcher listing
+# the status hook then the gate. Order is documentary (a group's hooks run
+# in parallel) but pinned so an edit cannot drop or reorder the pair.
+if python3 - <<'PY'
+import json
+import sys
+
+group = json.load(open("claude/settings.json.tmpl"))["hooks"]["Stop"]
+cmds = [h["command"] for e in group for h in e["hooks"]]
+sys.exit(0 if cmds == ["~/.claude/hooks/herdr_worker_status.py",
+                        "~/.claude/hooks/herdr_stop_gate.py"]
+         and [e.get("matcher") for e in group] == ["*"] else 1)
+PY
+then
+    printf 'PASS  gate: template lists the Stop hooks in order, gate last\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: template lists the Stop hooks in order, gate last\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+# Read-only: a content hash of the whole fixture config dir is identical
+# after a refusal, a counted refusal, a release, and an allow.
+gd=$(mktemp -d)
+gate_fixture "$gd" w1 impl done:stale:w1:PROJ-1 1
+gate_snapshot() {
+    python3 - "$1" <<'PY'
+import hashlib,os,sys
+root=sys.argv[1]
+for dp,dn,fn in os.walk(root):
+    for f in sorted(fn):
+        if f in ("out","err"): continue
+        p=os.path.join(dp,f)
+        print(os.path.relpath(p,root), hashlib.sha256(open(p,"rb").read()).hexdigest())
+PY
+}
+before=$(gate_snapshot "$gd")
+gate_run() {   # payload -> exit status, without tripping set -e
+    if printf '%s' "$1" | env CLAUDE_CONFIG_DIR="$gd" HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 "$HSG" >"$gd/out" 2>"$gd/err"; then
+        echo 0
+    else
+        echo $?
+    fi
+}
+rc1=$(gate_run "$GATE_P_F")
+rc2=$(gate_run "$GATE_P_T")
+rc3=$(gate_run "$GATE_P_T")
+after=$(gate_snapshot "$gd")
+if [ "$rc1" = 2 ] && [ "$rc2" = 2 ] && [ "$rc3" = 2 ] && [ -n "$before" ] && [ "$before" = "$after" ]; then
+    printf 'PASS  gate: hook leaves the config dir byte-identical\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: hook leaves the config dir byte-identical (rc=%s/%s/%s)\n' "$rc1" "$rc2" "$rc3" >&2; FAIL=$((FAIL + 1))
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
