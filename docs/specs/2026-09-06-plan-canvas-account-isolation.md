@@ -75,7 +75,8 @@ R1. `claude/settings.json.tmpl` `env` carries
 `"ECC_DISABLED_HOOKS": "session-start:plan-canvas-sessions,stop:plan-canvas-pending"`.
 The value is the complete exclusion list. No other ECC hook id appears in it
 (the template holds no exclusions today, in either live settings file, so
-nothing existing is dropped).
+nothing existing is dropped). Order is stylistic: ECC parses the value into a
+set, so every assertion on it compares the set of ids, not the string.
 
 R2. Every other template env key is preserved unchanged
 (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `CLAUDE_CODE_DISABLE_TELEMETRY`,
@@ -86,17 +87,29 @@ settings files carry the value from R1. Two consecutive reconcile runs produce
 byte-identical output.
 
 R4. The settings drift test (`claude/hooks/claude-hooks.test.sh`) asserts,
-statically from the template, that the exclusion list is exactly the two ids,
-and, against each live settings file that exists, that its `env` contains both
-ids. Machines that missed an update fail visibly, matching the existing hook
-and permissions drift checks.
+statically from the template, that the set of excluded ids is exactly the two
+Canvas ids, and, against each live settings file that exists, that its `env`
+exclusion set contains both ids. Machines that missed an update fail visibly,
+matching the existing hook and permissions drift checks. This proves the file
+contents only; the platform's export of settings `env` into hook processes is
+covered by AC9.
 
-R5. A hermetic behavioral test proves the isolation against the installed ECC
-scripts using a fake state dir and a fake home, never the real
-`~/.claude/plan-canvas`. It is a repo test file run by the verification
-contract, and by `bin/dotfiles-tests` with a SKIP when no ECC clone is
-installed (CI has none). Scenarios, each run under a fake personal config dir
-and a fake work config dir:
+R5. A hermetic behavioral test proves the two hooks are inert under the
+template env, against the installed ECC scripts, using a fake home and fake
+state dir under a throwaway tmp sandbox, never the real `~/.claude/plan-canvas`.
+It proves the hooks are switched off; it does not prove Canvas state is
+account-scoped (that is the deferred upstream item). It is a repo test file run
+by the verification contract, and by `bin/dotfiles-tests` with a SKIP when no
+ECC clone is installed (CI has none). Fixture rules: every scenario runs on its
+own fresh copy of the fixture state (the enabled control drains and rewrites
+`sessions.json`); the fixture never contains `server.json`, so the Stop hook
+can never contact a real Canvas server on the default port; the test env pins
+`ECC_HOOKS_ENABLED=true` and `ECC_HOOK_PROFILE=standard` so a machine-level
+profile cannot produce false failures, and passes `CLAUDE_PLUGIN_ROOT` at the
+resolved ECC root. The `check-hook-enabled.js` assertions exercise ECC's flag
+gate, which short-circuits on the exclusion before the profile check, not the
+`hooks.json` wiring. Scenarios, each run under a fake personal config dir and a
+fake work config dir:
 
 - personal-to-work isolation: pending personal feedback for an artifact under
   the hook cwd, Stop hook runs with the template env, output is stdin
@@ -119,12 +132,17 @@ and a fake work config dir:
   drain, no migration of personal content).
 
 R6. No vendored file under any `plugins/` cache or marketplace clone is
-modified. No file outside the repo is written by the tests or the contract.
+modified. The tests and the contract write only under a throwaway tmp sandbox
+they create and remove; they never write the real `~/.claude*/plan-canvas`,
+either live `settings.json`, or any vendored plugin file.
 
 R7. Legitimate personal Canvas use in a work repo is unchanged in the only path
-that still exists: the deliberate `plan-canvas await` CLI loop. The spec records
-that hook-driven delivery is off for both accounts; this is a documentation
-requirement (CLAUDE.md note next to the ECC plugin description), not a test.
+that still exists: the deliberate `plan-canvas await` CLI loop. This is
+reasoned, not tested: the CLI and server never consult `ECC_DISABLED_HOOKS`
+(confirmed by reading `scripts/plan-canvas.js` and `scripts/lib/plan-canvas/`).
+The spec records that hook-driven delivery is off for both accounts; this is a
+documentation requirement (CLAUDE.md note next to the ECC plugin description),
+not a test.
 
 R8. The change is confined to `claude/settings.json.tmpl`,
 `claude/hooks/claude-hooks.test.sh`, `install/claude-links.test.sh`, one new
@@ -134,8 +152,8 @@ parallel branch is editing.
 
 ## Acceptance criteria
 
-AC1. Template env contains exactly the two Canvas hook ids in
-`ECC_DISABLED_HOOKS` and the three pre-existing keys with their current values.
+AC1. The set of ids in the template's `ECC_DISABLED_HOOKS` is exactly the two
+Canvas hook ids, and the three pre-existing env keys keep their current values.
 AC2. Reconcile into a scratch config dir yields the value; a second reconcile
 is byte-identical.
 AC3. Drift test passes on a reconciled machine and fails when a live env lacks
@@ -145,11 +163,18 @@ accounts for cwd-scoped, unrelated-repo, and concurrent-feedback cases, and the
 fixture state file is unchanged afterward.
 AC5. Behavioral fixture without the exclusion blocks and enumerates
 (falsifiable control).
-AC6. Non-Canvas ECC hook ids remain enabled under the template env.
-AC7. `git status` of the plugin caches and marketplace clone is unchanged by
-the implementation and its tests, and `bin/dotfiles-tests` passes in full.
+AC6. Non-Canvas ECC hook ids remain enabled under the template env with the
+profile pinned to standard.
+AC7. The plugin caches and marketplace clone are byte-identical before and
+after the implementation and its tests, and `bin/dotfiles-tests` shows no new
+failures against the baseline recorded in the plan.
 AC8. CLAUDE.md documents the exclusion, why it exists, and the condition for
 removing it (upstream ECC scoping state by config dir).
+AC9. Human-verified, output recorded in the PR test plan: after `update`, a
+Bash tool call inside a live Claude session under each account runs ECC's
+`check-hook-enabled.js` for `stop:plan-canvas-pending` and prints `no`. This is
+the only check that proves the platform exports settings `env` to hook
+processes; no automated test can start a real session.
 
 ## Out of scope
 
@@ -165,8 +190,8 @@ removing it (upstream ECC scoping state by config dir).
   same mechanism the template already relies on for
   `ECC_CONTEXT_MONITOR_COST_WARNINGS` and is confirmed by ECC's own opt-out
   hint. The behavioral test injects the env directly, so the live-session
-  path is verified by a human check: from a Claude Bash tool call under each
-  account, `check-hook-enabled.js stop:plan-canvas-pending` prints `no`.
+  path rests on AC9 alone. Until AC9 is recorded, the fix is confirmed at the
+  file and hook-script level and inferred at the session level.
 - A future ECC release could rename the hook ids. The drift test pins the ids
   against the template only; the behavioral test resolves the installed ECC
   root and fails loudly if the scripts move, which is the desired signal.
