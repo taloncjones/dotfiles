@@ -107,8 +107,15 @@ Kinds and their per-kind rule addenda (table-driven, one row each):
 
 Exit codes are shared by both subcommands: `0` nothing to change, `1`
 findings or a rewrite proposed, `2` error (bad input, Codex failure,
-invariant violated). `--dry-run` prints the assembled prompt and exits
-`0` without invoking Codex.
+invariant violated). A run that produces more than one report (`--pr`
+gives two) exits with the maximum over its units: `2` dominates `1`
+dominates `0`. Empty input (zero non-whitespace characters) is a
+report of `empty`, exit `0`, and Codex is not invoked for that unit.
+`--range` requires `--kind code-comment`; any other kind is exit `2`.
+`--dry-run` prints the assembled prompt and exits `0` without invoking
+Codex; it still fetches the target text (`gh pr view` for `--pr`, the
+file and repository search for `--range`), so the no-network contract
+uses `--dry-run` only with `--file`.
 
 ### Layer 1: deterministic lint (no model)
 
@@ -122,17 +129,23 @@ prints one finding per line as `<rule>: <evidence>`. Rules:
   assistant or vendor, plus the "written by AI" and "AI-generated"
   phrasings. The exact pattern list lives in the script as one table.
 - `filler`: a word from a fixed list (`comprehensive`, `robust`,
-  `seamless`, `leverage`, `delve`, `streamline`, `ensure` as a verb
-  opener, `it is worth noting`, `in order to`).
+  `seamless`, `leverage`, `delve`, `streamline`, `it is worth noting`,
+  `in order to`), plus `Ensure`/`Ensures` when it begins a line or a
+  sentence (preceded by start of text, a newline, or `. `).
 - `empty-heading`: a markdown heading followed by another heading or
   end of text with no body.
 - `hedge`: `might`, `may want to`, `it seems`, `should probably`.
 - `title-shape` (jira-title only): more than 12 words, or fewer than
   4; contains a filename (`\w+\.(py|sh|rs|md|json|yml|yaml|toml|js|ts)`),
   a function call (`\w+\(\)`), a snake_case or `::` identifier, a hex
-  or `E\d{3,}` style code.
+  or `E\d{3,}` style code. The word bounds are deliberately looser
+  than the rule's "~6-10": lint is a floor that must never flag a good
+  11-word title; Codex enforces the 6-10 target in the rewrite.
 - `title-shape` (pr-title only): missing `<scope>: ` prefix, or 75 or
   more characters.
+
+The emoji table is written as code point ranges and `\u` escapes, never
+literal emoji, so the script itself stays ASCII (AC12).
 
 `lint` is the layer the fixture tests and the verification contract
 exercise fully. It is also what `rewrite` runs first, so the report can
@@ -152,27 +165,39 @@ codex exec - -m gpt-6-astra -c model_reasoning_effort="<effort>" \
 ```
 
 `$SCRATCH` is an empty temp directory; `$SCHEMA` is a JSON Schema
-written by the script requiring `{"rewritten": string, "changes":
-[{"before": string, "after": string, "rule": string}], "unchanged":
-bool}`. The binary comes from `VOICE_CODEX_BIN` (default `codex`); this
-is the test seam.
+written by the script. For the text kinds it requires `{"rewritten":
+string, "changes": [{"before": string, "after": string, "rule":
+string}]}`. For `code-comment` it requires `{"lines": [{"n": int,
+"text": string}], "changes": [...]}` with exactly one entry per input
+line number in the range, so the returned text maps back to source
+lines without guessing. The binary comes from `VOICE_CODEX_BIN`
+(default `codex`); this is the test seam.
 
 After the call the script:
 
-1. Parses `$LAST` as JSON against the schema; a parse failure is exit
-   `2` with the log path on stderr.
-2. Runs the invariant check: every fenced code block, inline code span,
-   URL, Jira key (`[A-Z]+-[0-9]+`), and the Jira link line from the
-   input must appear byte-identical in `rewritten`. A miss is exit `2`
-   with `invariant violated: <what>`; the rewrite is not shown as a
-   candidate.
-3. If `rewritten` equals the input after trailing-whitespace
-   normalisation, reports `unchanged` and exits `0`, regardless of the
-   `unchanged` flag the model set.
+1. Parses `$LAST` as JSON against the schema; a parse failure, or a
+   `lines` array whose line numbers are not exactly the input range, is
+   exit `2` with the log path on stderr.
+2. Runs the invariant check, scoped per kind:
+   - all kinds: every URL and every Jira key (`[A-Z]+-[0-9]+`) in the
+     input appears byte-identical in the output; fenced code blocks
+     appear byte-identical;
+   - `pr-body`, `jira-description`: every inline code span also
+     survives;
+   - `pr-comment`, `jira-comment`: inline spans may be dropped (a
+     tightened comment often loses a redundant mention);
+   - `code-comment`: every protected line and every code line is
+     byte-identical at its own line number.
+   A miss is exit `2` with `invariant violated: <what>`; the rewrite
+   is not shown as a candidate. The Jira link line needs no separate
+   clause: it is a URL plus a key, and either loss trips the check.
+3. If the output equals the input after trailing-whitespace
+   normalisation, reports `unchanged` and exits `0`. The script does
+   not ask the model whether it changed anything; equality decides.
 4. Otherwise prints the report and exits `1`.
 
-Report shape (plain text; `--json` emits the same fields as one
-object):
+Report shape (plain text; `--json` always emits a JSON array of report
+objects, one per unit, even for a single unit):
 
 ```
 VOICE <kind> <target>: <n> changes
@@ -192,8 +217,10 @@ Apply with:
 - `--stdin` / `--file F`: the whole text is the unit.
 - `--pr N`: `gh pr view N --json title,body` (binary from
   `VOICE_GH_BIN`, default `gh`). Title runs as `pr-title`, body as
-  `pr-body`, two reports. The script never calls `gh pr edit`; it
-  prints the command with the rewritten text for the human.
+  `pr-body`, two reports; a null or empty body is the `empty` report
+  for that unit. The `--kind` flag is ignored for `--pr` because the
+  kinds are implied. The script never calls `gh pr edit`; it prints the
+  command with the rewritten text for the human.
 - `--range F:A-B` with `--kind code-comment`: lines A through B of
   file F are the unit. Only comment lines (`#`, `//`, `/* */`, and
   docstring bodies) are candidates; code lines are passed through as
@@ -208,10 +235,14 @@ Apply with:
     with `__doc__`, `getdoc(`, or `.doc` (fixed-string search on
     `<name>.__doc__`, `getdoc(<name>` and `<name>.doc`).
   - `candidate` otherwise.
-  Protected lines are sent to Codex marked as such and re-verified
-  byte-identical on return; a change to one is an invariant violation
-  (exit `2`). This is the Code Cleanup rule made mechanical: grep
-  first, leave load-bearing strings alone.
+  The prompt lists every line in the range as `<n>|<status>|<text>`
+  where status is `code`, `protected`, or `candidate`; Codex returns
+  the per-line `lines` array described above. On return, `code` and
+  `protected` lines must be byte-identical at the same `n` (an
+  invariant violation, exit `2`, otherwise), and the report's diff and
+  `Apply with` block are expressed as line-numbered replacements for
+  the candidate lines that changed. This is the Code Cleanup rule made
+  mechanical: grep first, leave load-bearing strings alone.
 
 ### Skill prose (`SKILL.md`)
 
@@ -253,7 +284,8 @@ positive example (one short before/after pair per rule), not by
 ## Acceptance criteria
 
 - AC1: `lint --kind pr-body` on the generated-sounding fixture PR body
-  exits `1` and reports at least `filler` and `empty-heading`.
+  exits `1` and reports at least `filler`, `hedge`, and
+  `empty-heading`.
 - AC2: `lint --kind pr-body` on the clean human-written fixture exits
   `0` with no findings.
 - AC3: `lint --kind jira-title` on the generated fixture title (over
@@ -272,9 +304,15 @@ positive example (one short before/after pair per rule), not by
   the displayed docstring byte-identical and marks it `protected:
   docstring displayed`, while the sibling `#` comment in the same
   range is rewritten.
-- AC9: `rewrite --pr N` with the fake `gh` produces the two reports
-  and the fake records no `pr edit` call; the report ends with the
-  `gh pr edit` command for the human.
+- AC9: `rewrite --pr N` with the fake `gh` produces the two reports,
+  exits `1` when the body is rewritten and the title is unchanged (the
+  max rule), the fake records no `pr edit` call, and the report ends
+  with the `gh pr edit` command for the human. With `--json` the
+  output is an array of two objects.
+- AC9b: `rewrite --pr N` when the fake `gh` returns a null body yields
+  an `empty` body report and exit `0` for that unit.
+- AC9c: `rewrite --range` with a kind other than `code-comment` exits
+  `2` without invoking Codex.
 - AC10: `--dry-run` prints a prompt containing the full `rules.md`
   text and the input, exits `0`, and the fake Codex is never invoked.
 - AC11: a non-zero fake Codex exit yields exit `2` and a stderr line
@@ -305,9 +343,13 @@ positive example (one short before/after pair per rule), not by
 - `fake_codex.sh`: reads the prompt from stdin, extracts the `=== TEXT
   ===` block, applies a fixed substitution table (drops `comprehensive
   and robust`, `In order to`, the empty heading), writes the JSON to
-  the `-o` path. Env `FAKE_CODEX_MODE=drop-link|fail` produces the
-  invariant-violation and failure cases. Writes a marker file so tests
-  can assert it was or was not invoked.
+  the `-o` path in the text-kind or per-line shape depending on which
+  the prompt asks for. Env `FAKE_CODEX_MODE=drop-link|fail` produces
+  the invariant-violation and failure cases. Writes a marker file so
+  tests can assert it was or was not invoked. The generated fixtures
+  must contain the fake's trigger substrings, or the "rewrite
+  proposed" criteria (AC5, AC8) cannot fire; the test suite asserts
+  that coupling explicitly so a fixture edit fails loudly.
 - `fake_gh.sh`: serves canned `pr view` JSON; appends every argv to a
   call log.
 
@@ -321,6 +363,20 @@ positive example (one short before/after pair per rule), not by
 - Human-verify: one live `rewrite --kind pr-body --file <fixture>`
   with the real Codex; confirm schema-valid output and no command
   execution in the `--json` event log.
+
+## Review status
+
+- Codex spec review (`codex-spec-review`, `gpt-6-astra` at `high`)
+  was attempted on 2026-09-06 at 12:24 local and did not run: the
+  Codex account returned "You've hit your usage limit" with a reset at
+  23:08 local. The saved prompt is the skill's standard one with this
+  spec and the CLAUDE.md style excerpts inlined.
+- Fallback gate: the identical prompt was run through a fresh-context
+  reviewer on a different Claude model (Opus). It returned 14 findings
+  (2 high, 6 medium, 6 low), verdict minor-fixes; all 14 are folded in
+  above. This is a substitute, not the second-model pass the pipeline
+  calls for. Re-run `codex-spec-review` on this file once the limit
+  resets, before implementation starts.
 
 ## Risks and open points
 
