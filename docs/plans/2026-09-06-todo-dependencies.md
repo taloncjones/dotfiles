@@ -249,7 +249,7 @@ In the header usage comment (after the `todos.sh path` line) add nothing yet; Ta
 - [ ] **Step 5: Run the suite to see it pass**
 
 Run: `bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1 | grep -E 'FAIL|passed'`
-Expected: no `FAIL` lines; final line `87 passed, 0 failed` (60 baseline plus 8 parse-group and 19 normalize-group checks; count the `ok` lines if the total differs and reconcile before committing).
+Expected: no `FAIL` lines; final line `84 passed, 0 failed` (60 baseline plus 5 parse-group and 19 normalize-group checks; count the `ok` lines if the total differs and reconcile before committing).
 
 - [ ] **Step 6: Commit**
 
@@ -438,8 +438,9 @@ resolve_ref() {
       elif git show-ref --verify --quiet "refs/heads/$payload";          then bref="refs/heads/$payload"
       else bref=""; fi
       if [ -n "$bref" ]; then
-        # exit 0 ancestor, 1 not an ancestor, >1 git error.
-        git merge-base --is-ancestor "$bref" "$base" 2>/dev/null; rc=$?
+        # exit 0 ancestor, 1 not an ancestor, >1 git error. The `|| rc=$?`
+        # shape is required: a bare failing command would trip set -e.
+        rc=0; git merge-base --is-ancestor "$bref" "$base" 2>/dev/null || rc=$?
         [ "$rc" -eq 0 ] && { printf 'merged\n'; return 0; }
         [ "$rc" -le 1 ] || { printf 'unknown\n'; return 0; }
       fi
@@ -480,12 +481,12 @@ In `main`, after `_depends`:
     _resolve) if ref=$(normalize_ref "${1:-}"); then resolve_ref "$ref"; else printf 'invalid\n'; fi ;;
 ```
 
-and declare `local cmd="$1" ref` on the existing `local cmd="$1"; shift` line (keep the `shift`).
+and change the existing `local cmd="$1"; shift` line to `local cmd="$1" ref; shift`.
 
 - [ ] **Step 6: Run the suite to see it pass**
 
 Run: `bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1 | grep -E 'FAIL|passed'`
-Expected: no `FAIL`; total 87 plus 21 new checks (reconcile by counting `ok` lines if it differs).
+Expected: no `FAIL`; `109 passed, 0 failed` (84 plus 5 todo, 8 branch, and 12 PR checks; reconcile by counting `ok` lines if it differs).
 
 - [ ] **Step 7: Commit**
 
@@ -877,6 +878,16 @@ created: 2026-05-01
 title: Target bare
 ---
 EOF
+  mk_todo "$repo" 2026-05-01-target-four <<'EOF'
+---
+created: 2026-05-01
+title: Target list then files
+depends_on:
+  - pr:1
+files:
+  - keep/me.py
+---
+EOF
   local out
   out=$(cd "$repo" && bash "$TODOS" depend target-one '#2' branch:talon/x)
   assert_eq "depend: prints the path" "$out" "$repo/.todos/pending/2026-05-01-target-one.md"
@@ -906,6 +917,9 @@ EOF
   ( cd "$repo" && bash "$TODOS" depend 2026-05-01-target-three pr:4 >/dev/null )
   assert_contains "depend: key before closing --- when no files" \
     "$(cat "$repo/.todos/pending/2026-05-01-target-three.md")" "$(printf 'title: Target bare\ndepends_on:\n  - pr:4\n---')"
+  ( cd "$repo" && bash "$TODOS" depend target-four pr:6 >/dev/null )
+  assert_contains "depend: appends before files when list precedes files" \
+    "$(cat "$repo/.todos/pending/2026-05-01-target-four.md")" "$(printf 'depends_on:\n  - pr:1\n  - pr:6\nfiles:\n  - keep/me.py')"
   assert_contains "depend: index regenerated" "$(cat "$repo/.todos/TODO.md")" "[unverified: pr:2, branch:talon/x]"
   assert_status "depend: no refs exits 1"     1 bash -c '(cd "$1" && bash "$2" depend target-one)' _ "$repo" "$TODOS"
   assert_status "depend: ambiguous target"    1 bash -c '(cd "$1" && bash "$2" depend target pr:5)' _ "$repo" "$TODOS"
@@ -1022,18 +1036,19 @@ add_depends() {
   local f="$1"; shift
   local existing new="" ref raw
   existing=$(depends_list "$f" | while IFS= read -r raw; do normalize_ref "$raw" || printf '%s\n' "$raw"; done)
+  # Refs never contain spaces (branch names, todo ids, PR numbers), so the
+  # new items travel to awk space-joined: BSD awk rejects a newline in -v.
   for ref in "$@"; do
     printf '%s\n' "$existing" | grep -qxF -- "$ref" && continue
-    printf '%s\n' "$new"      | grep -qxF -- "$ref" && continue
-    new="${new:+$new
-}$ref"
+    case " $new " in *" $ref "*) continue ;; esac
+    new="${new:+$new }$ref"
   done
   [ -n "$new" ] || return 0
   local tmp="$f.tmp.$$"
   awk -v items="$new" '
-    BEGIN { cnt = split(items, arr, "\n") }
+    BEGIN { cnt = split(items, arr, " ") }
     function emit(   i) { for (i = 1; i <= cnt; i++) print "  - " arr[i]; done = 1 }
-    /^---$/ { n++; if (n == 2 && !done) emit(); print; next }
+    /^---$/ { n++; if (n == 2 && !done) { if (!have) print "depends_on:"; emit() } print; next }
     n == 1 && /^depends_on:/          { have = 1; inlist = 1; print; next }
     n == 1 && inlist && /^  - /       { print; next }
     n == 1 && inlist                  { inlist = 0; emit(); print; next }
@@ -1043,7 +1058,7 @@ add_depends() {
 }
 ```
 
-Note the literal newline inside `new="${new:+$new` ... `}$ref"`: bash 3.2 joins with a real newline; `$'\n'` in a parameter expansion default would also work but reads worse.
+The awk has three insertion paths and each prints the header exactly once: an existing key (header already there), no key but a `files:` line (header printed before `files:`), and no key and no `files:` (header printed before the closing `---`, guarded by `!have`).
 
 - [ ] **Step 4: Wire `new`, `depend`, `done`, `main`**
 
