@@ -357,6 +357,38 @@ def run_text_unit(kind, target, text, args, workdir, apply=None):
                        apply=apply or "paste the after block")
 
 
+def fetch_pr(number):
+    gh = os.environ.get("VOICE_GH_BIN", "gh")
+    cmd = [gh, "pr", "view", str(number), "--json", "title,body"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        raise VoiceError("gh pr view failed to start: %s" % e)
+    if proc.returncode != 0:
+        raise VoiceError("gh pr view %d failed: %s" % (number, proc.stderr.strip()))
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        raise VoiceError("gh pr view %d returned non-JSON output" % number)
+    return data.get("title") or "", data.get("body") or ""
+
+
+def pr_units(number, args, workdir):
+    title, body = fetch_pr(number)
+    body_path = os.path.join(workdir, "pr-%d-body.md" % number)
+    title_report = run_text_unit("pr-title", "PR #%d title" % number, title, args, workdir,
+                                 apply="gh pr edit %d --title <after>" % number)
+    if title_report["status"] == "changed":
+        title_report["apply"] = "gh pr edit %d --title %s" % (
+            number, shlex.quote(title_report["after"].strip()))
+    body_report = run_text_unit("pr-body", "PR #%d body" % number, body, args, workdir,
+                                apply="gh pr edit %d --body-file %s" % (number, body_path))
+    if body_report["status"] == "changed":
+        with open(body_path, "w", encoding="utf-8") as f:
+            f.write(body_report["after"])
+    return [title_report, body_report]
+
+
 STATUS_RC = {"dry-run": 0, "empty": 0, "unchanged": 0, "changed": 1}
 
 
@@ -373,7 +405,7 @@ def emit(reports, args):
 def cmd_rewrite(args):
     workdir = tempfile.mkdtemp(prefix="voice.")
     if args.pr is not None:
-        raise VoiceError("--pr is not implemented yet")
+        return emit(pr_units(args.pr, args, workdir), args)
     if args.line_range:
         raise VoiceError("--range is not implemented yet")
     check_kind(args.kind)

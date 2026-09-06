@@ -135,5 +135,43 @@ assert_eq "json exit 0" "$RC" 0
 python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and len(d)==1 and d[0]["status"]=="unchanged"' <<<"$OUT" \
   && ok "json is a one-element array" || bad "json is a one-element array" "$OUT"
 
+echo "== rewrite: --pr target (AC9)"
+export VOICE_GH_BIN="$HERE/fake_gh.sh"
+export FAKE_GH_LOG="$SANDBOX/gh.log"
+export FAKE_GH_PR_JSON="$SANDBOX/pr.json"
+python3 - "$FIX/pr_body_generated.md" "$FAKE_GH_PR_JSON" <<'PY'
+import json, sys
+body = open(sys.argv[1]).read()
+json.dump({"title": "skills: Add voice pass", "body": body}, open(sys.argv[2], "w"))
+PY
+: > "$FAKE_GH_LOG"
+run_voice rewrite --pr 17
+assert_eq "pr with rewritten body exits 1 (max rule)" "$RC" 1
+assert_contains "title report unchanged" "$OUT" "VOICE pr-title PR #17 title: unchanged"
+assert_contains "body report changed" "$OUT" "VOICE pr-body PR #17 body: 4 changes"
+assert_contains "apply hint is gh pr edit" "$OUT" "gh pr edit 17 --body-file "
+assert_eq "gh called exactly once" "$(wc -l < "$FAKE_GH_LOG" | tr -d ' ')" 1
+assert_contains "gh call was pr view" "$(cat "$FAKE_GH_LOG")" "pr view 17 --json title,body"
+assert_not_contains "no pr edit" "$(cat "$FAKE_GH_LOG")" "pr edit"
+BODYFILE=$(printf '%s\n' "$OUT" | sed -n 's/^  gh pr edit 17 --body-file //p')
+[ -f "$BODYFILE" ] && ok "body file written" || bad "body file written" "$BODYFILE"
+assert_contains "body file holds the rewrite" "$(cat "$BODYFILE")" "Adds a voice pass"
+
+run_voice rewrite --pr 17 --json
+python3 -c 'import json,sys; d=json.load(sys.stdin); assert [r["kind"] for r in d]==["pr-title","pr-body"]' <<<"$OUT" \
+  && ok "json array has title then body" || bad "json array has title then body" "$OUT"
+
+echo "== rewrite: --pr with null body (AC9b)"
+printf '{"title": "skills: Add voice pass", "body": null}\n' > "$FAKE_GH_PR_JSON"
+run_voice rewrite --pr 18
+assert_eq "null body exits 0" "$RC" 0
+assert_contains "body reported empty" "$OUT" "VOICE pr-body PR #18 body: empty"
+
+echo "== rewrite: --pr when gh fails"
+printf 'not json' > "$FAKE_GH_PR_JSON"
+run_voice rewrite --pr 19
+assert_eq "bad gh json exits 2" "$RC" 2
+assert_contains "names gh" "$ERR" "gh pr view"
+
 printf 'voice: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
