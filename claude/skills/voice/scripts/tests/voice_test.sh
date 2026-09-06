@@ -260,6 +260,47 @@ run_voice rewrite --kind code-comment --range "$REPO/docref.py:2-2"
 assert_eq "docstring referenced-elsewhere unchanged exits 0" "$RC" 0
 assert_contains "docstring fallback protection fires" "$OUT" "docref.py:2  protected: referenced elsewhere (docsearch.py)"
 
+echo "== rewrite: bare * is a comment only inside a /* */ block (F5)"
+printf '*ptr = f();\n/*\n * Javadoc-style note.\n */\nint x;\n' > "$REPO/pointer.c"
+F5_OUT=$(python3 - <<PY
+import sys
+sys.path.insert(0, "$HERE/..")
+import voice
+rows = voice.classify_range("$REPO/pointer.c", 1, 5)
+for n, status, line, _ in rows:
+    print("%d|%s|%s" % (n, status, line))
+PY
+)
+assert_contains "bare * pointer deref is code, not a comment" "$F5_OUT" "1|code|*ptr = f();"
+assert_not_contains "bare * pointer deref never candidate" "$F5_OUT" "1|candidate|*ptr = f();"
+
+echo "== rewrite: code-comment candidates carry url/inline invariants (F6)"
+printf '# In order to see https://example.com/spec#anchor for details\nx = 1\n' > "$REPO/urlref.py"
+FAKE_CODEX_MODE=mangle-url run_voice rewrite --kind code-comment --range "$REPO/urlref.py:1-1"
+assert_eq "url-mangling candidate exits 2" "$RC" 2
+assert_contains "names the url invariant" "$ERR" "invariant violated: url https://example.com/spec#anchor"
+
+echo "== rewrite: a transient grep failure is treated as protected, not unreferenced (F7)"
+F7_OUT=$(python3 - <<PY
+import sys
+sys.path.insert(0, "$HERE/..")
+import voice
+voice.grep_files = lambda needle, root, exclude_path: None
+print(voice.referenced_elsewhere("# some long enough comment text", "$REPO", "$REPO/other.py"))
+print(voice.docstring_displayed("foo", "$REPO", "$REPO/other.py"))
+PY
+)
+assert_contains "referenced_elsewhere treats grep error as protected" "$F7_OUT" "grep error (assumed referenced)"
+assert_contains "docstring_displayed treats grep error as protected" "$F7_OUT" "grep error (assumed referenced)"
+
+echo "== rewrite: --pr combined with --range or --file errors (F12)"
+run_voice rewrite --pr 17 --range "$REPO/widgets.py:1-6"
+assert_eq "pr with range exits 2" "$RC" 2
+assert_contains "names the rule" "$ERR" "--pr cannot be combined with --range or --file"
+run_voice rewrite --pr 17 --file "$FIX/pr_body_clean.md"
+assert_eq "pr with file exits 2" "$RC" 2
+assert_contains "names the rule" "$ERR" "--pr cannot be combined with --range or --file"
+
 echo "== rewrite: --range guards (AC9c)"
 rm -f "$FAKE_CODEX_MARKER"
 run_voice rewrite --kind pr-body --range "$REPO/widgets.py:1-6"

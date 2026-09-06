@@ -197,7 +197,7 @@ INVARIANTS_BY_KIND = {
     "jira-comment": ("url", "jira-key", "fence"),
     "pr-body": ("url", "jira-key", "fence", "inline"),
     "jira-description": ("url", "jira-key", "fence", "inline"),
-    "code-comment": (),
+    "code-comment": ("url", "inline"),
 }
 
 
@@ -399,7 +399,7 @@ def pr_units(number, args, workdir):
 
 RANGE_RE = re.compile(r"^(.+):(\d+)-(\d+)$")
 DEF_RE = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)")
-COMMENT_PREFIXES = ("#", "//", "/*", "*")
+COMMENT_PREFIXES = ("#", "//", "/*")
 MIN_REFERENCE_LEN = 12
 
 
@@ -424,9 +424,13 @@ def repo_root(path):
 
 
 def grep_files(needle, root, exclude_path):
-    """Fixed-string, recursive, file names only; drops exclude_path itself."""
+    """Fixed-string, recursive, file names only; drops exclude_path itself.
+    Returns None (distinct from []) on a grep error (rc 2): callers treat
+    that as referenced/protected rather than silently downgrading."""
     proc = subprocess.run(["grep", "-rIlF", "--exclude-dir=.git", "--", needle, root],
                           capture_output=True, text=True)
+    if proc.returncode == 2:
+        return None
     skip = os.path.realpath(exclude_path)
     hits = [h for h in proc.stdout.splitlines() if os.path.realpath(h) != skip]
     return sorted(hits)
@@ -437,6 +441,8 @@ def referenced_elsewhere(text, root, path):
     if len(needle) < MIN_REFERENCE_LEN:
         return None
     hits = grep_files(needle, root, path)
+    if hits is None:
+        return "grep error (assumed referenced)"
     if hits:
         return "referenced elsewhere (%s)" % os.path.relpath(hits[0], root)
     return None
@@ -447,6 +453,8 @@ def docstring_displayed(owner, root, path):
         return None
     for needle in (owner + ".__doc__", "getdoc(" + owner, owner + ".doc"):
         hits = grep_files(needle, root, path)
+        if hits is None:
+            return "grep error (assumed referenced)"
         if hits:
             return "docstring displayed (%s in %s)" % (needle, os.path.relpath(hits[0], root))
     return None
@@ -470,6 +478,7 @@ def classify_range(path, start, end):
     # leave the real code after it misclassified as a rewritable candidate.
     string_state = None
     owner = None
+    in_block_comment = False
     for n, line in enumerate(lines, 1):
         stripped = line.strip()
         m = DEF_RE.match(line)
@@ -490,6 +499,15 @@ def classify_range(path, start, end):
                 string_state = "other"
         else:
             is_doc = False
+        # A bare `*` prefix (Javadoc-style continuation) is a comment only
+        # while inside an unclosed /* */ block, not for arbitrary code that
+        # happens to start with `*` (e.g. a C pointer dereference).
+        was_in_block_comment = in_block_comment
+        open_at = stripped.find("/*")
+        if open_at != -1 and "*/" not in stripped[open_at + 2:]:
+            in_block_comment = True
+        elif "*/" in stripped:
+            in_block_comment = False
         if not (start <= n <= end):
             continue
         if is_doc:
@@ -497,7 +515,8 @@ def classify_range(path, start, end):
             # the file's module name rather than a def/class owner.
             reason = (docstring_displayed(owner or module_name, root, path)
                       or referenced_elsewhere(line, root, path))
-        elif stripped.startswith(COMMENT_PREFIXES):
+        elif stripped.startswith(COMMENT_PREFIXES) or (
+                was_in_block_comment and stripped.startswith("*")):
             reason = referenced_elsewhere(line, root, path)
         else:
             rows.append((n, "code", line, ""))
@@ -541,6 +560,9 @@ def run_range_unit(path, start, end, args, workdir):
             replacements.append("replace line %d with: %s" % (n, new))
         new_lines.append(new)
     after = "\n".join(new_lines) + "\n"
+    missing = check_invariants("code-comment", text, after)
+    if missing:
+        raise VoiceError("invariant violated: " + "; ".join(missing))
     return make_report("code-comment", target, text, lint, after, data["changes"],
                        protected=protected, apply="\n".join(replacements))
 
@@ -561,6 +583,8 @@ def emit(reports, args):
 def cmd_rewrite(args):
     workdir = tempfile.mkdtemp(prefix="voice.")
     if args.pr is not None:
+        if args.line_range or args.file:
+            raise VoiceError("--pr cannot be combined with --range or --file")
         return emit(pr_units(args.pr, args, workdir), args)
     if args.line_range:
         if args.kind != "code-comment":

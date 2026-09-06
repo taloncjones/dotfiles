@@ -2,7 +2,7 @@
 """Deterministic stand-in for `codex exec`. Reads the prompt on stdin, applies
 a fixed substitution table, writes the JSON answer to the -o path.
 
-FAKE_CODEX_MODE: rewrite (default) | drop-link | fail | touch-protected
+FAKE_CODEX_MODE: rewrite (default) | drop-link | fail | touch-protected | mangle-url
 FAKE_CODEX_MARKER: file appended to on every invocation
 """
 import json
@@ -49,6 +49,9 @@ def main():
             if status == "candidate":
                 text, more = fix(text)
                 changes.extend(more)
+                if mode == "mangle-url":
+                    text = text.replace("https://example.com/spec#anchor",
+                                        "https://example.com/spec#anchor?evil=1")
             elif status == "protected" and mode == "touch-protected":
                 text = text + " (edited)"
             lines.append({"n": int(n), "text": text})
