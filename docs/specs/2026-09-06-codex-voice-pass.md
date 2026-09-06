@@ -76,7 +76,7 @@ claude/skills/voice/
   rules.md                      the voice rubric sent verbatim to Codex
   scripts/voice.py              stdlib Python 3, the whole tool
   scripts/tests/voice_test.sh   bash suite, PASS/FAIL convention
-  scripts/tests/fake_codex.sh   deterministic stand-in for codex exec
+  scripts/tests/fake_codex.py   deterministic stand-in for codex exec
   scripts/tests/fake_gh.sh      records calls, serves canned PR JSON
   scripts/tests/fixtures/       inputs and expected outputs (below)
 ```
@@ -340,7 +340,7 @@ positive example (one short before/after pair per rule), not by
   a filler-laden `#` comment above it) and `gui_repo/gui.py` (displays
   `run_check.__doc__`). The test copies this tree into a temp git repo
   so the search is repo-local and deterministic.
-- `fake_codex.sh`: reads the prompt from stdin, extracts the `=== TEXT
+- `fake_codex.py`: reads the prompt from stdin, extracts the `=== TEXT
   ===` block, applies a fixed substitution table (drops `comprehensive
   and robust`, `In order to`, the empty heading), writes the JSON to
   the `-o` path in the text-kind or per-line shape depending on which
