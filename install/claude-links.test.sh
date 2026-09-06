@@ -158,6 +158,11 @@ if jget "$CFG/settings.json" "'permissions' in d and 'statusLine' in d"; then
 else
     fail "link path delivers template permissions/statusLine"
 fi
+if jget "$CFG/settings.json" "'Bash(rm * /)' in d['permissions']['deny'] and 'Bash(rm:*)' not in d['permissions']['ask']"; then
+    pass "link path delivers the rm deny floor and drops the rm ask rule"
+else
+    fail "link path delivers the rm deny floor and drops the rm ask rule"
+fi
 if jget "$CFG/settings.json" "d['model'] == 'claude-fable-5[1m]'"; then
     pass "link path pins the shared Claude default to Fable 5 1M"
 else

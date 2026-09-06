@@ -367,6 +367,127 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# Permissions floor: the template must not ask (or allow) for rm, so auto
+# mode's classifier decides scratch cleanup; must keep the force-push and
+# Jira-create ask rules; and must deny the literal root / home / .git
+# removal shapes, which block in every mode. Static: independent of live
+# machine state (the live drift check below covers reconciled machines).
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+sys.exit(0 if "Bash(rm:*)" not in p["ask"] and "Bash(rm:*)" not in p["allow"] else 1)
+PY
+then
+    printf 'PASS  permissions: template has no rm ask or allow rule\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template has no rm ask or allow rule\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+want = [
+    "Bash(git push --force:*)",
+    "Bash(git push -f:*)",
+    "Bash(git push --force-with-lease:*)",
+    "Bash(git push --mirror:*)",
+    "mcp__plugin_atlassian_atlassian__createJiraIssue",
+]
+sys.exit(0 if p["ask"] == want else 1)
+PY
+then
+    printf 'PASS  permissions: template ask list is exactly force-push plus Jira create\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template ask list is exactly force-push plus Jira create\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+targets = ["/", "~", "~/", "$HOME", "$HOME/", '"$HOME"', '"$HOME/"', "${HOME}", "${HOME}/",
+           ".git", ".git/", "./.git", "./.git/"]
+want = [r for t in targets for r in ("Bash(rm * %s)" % t, "Bash(rm * %s *)" % t)]
+sys.exit(0 if p["deny"] == want else 1)
+PY
+then
+    printf 'PASS  permissions: template deny floor is exactly the 26 root/home/.git rules\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template deny floor is exactly the 26 root/home/.git rules\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+# Rule model: the documented Bash rule matcher (`*` matches any text; a
+# trailing sole ` *` also matches the bare command; everything else is
+# literal and the pattern spans the whole subcommand). Harmless scratch
+# shapes must match no ask/deny rule; prohibited shapes must match a deny
+# rule. This checks the rule text against the documented semantics, not
+# the live matcher.
+if python3 - <<'PY'
+import json
+import re
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+
+
+def matches(rule, cmd):
+    pat = rule[len("Bash("):-1]
+    if pat.endswith(":*"):
+        pat = pat[:-2] + " *"
+    if pat.endswith(" *") and pat.count("*") == 1:
+        rx = "^" + re.escape(pat[:-2]) + "( .*)?$"
+    else:
+        rx = "^" + ".*".join(re.escape(x) for x in pat.split("*")) + "$"
+    return re.match(rx, cmd, re.DOTALL) is not None
+
+
+assert matches("Bash(ls *)", "ls") and not matches("Bash(ls *)", "lsof")
+assert matches("Bash(* --help *)", "npm --help x") and not matches("Bash(* --help *)", "npm --help")
+bash_rules = [r for r in p["deny"] + p["ask"] if r.startswith("Bash(")]
+harmless = [
+    "rm -f /tmp/scratch.txt",
+    "rm -rf /tmp/co-review-snap.x",
+    "rm -rf .git/index.lock",
+    "rm -rf build",
+    "rm -rf ~/proj/build",
+    "rm -rf $HOME/.cache/x",
+    "rm .gitignore",
+    "rm -rf ./.github",
+]
+prohibited = [
+    "rm -rf /",
+    "rm -r -f ~",
+    'rm -rf "$HOME"',
+    "rm -rf ${HOME}",
+    "rm -rf ${HOME}/",
+    "rm -f ~",
+    "rm -rf .git",
+    "rm -rf ./.git/",
+    "rm -rf / --no-preserve-root",
+    "rm --recursive --force ~/",
+]
+bad = [c for c in harmless if any(matches(r, c) for r in bash_rules)]
+bad += [c for c in prohibited if not any(matches(r, c) for r in p["deny"])]
+for c in bad:
+    print("  rule-model failure: " + c)
+sys.exit(1 if bad else 0)
+PY
+then
+    printf 'PASS  permissions: rule model leaves scratch cleanup unmatched and denies prohibited targets\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: rule model leaves scratch cleanup unmatched and denies prohibited targets\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
 GUARD_FIX=$(mktemp -d)
