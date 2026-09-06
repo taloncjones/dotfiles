@@ -250,7 +250,50 @@ for id in stop:session-end stop:cost-tracker pre:bash:dispatcher post:dispatcher
 done
 if [ "$ok" = 1 ]; then pass "flag gate: TDD, dispatcher, GateGuard, and scoped ids stay enabled"; else fail "flag gate: TDD, dispatcher, GateGuard, and scoped ids stay enabled"; fi
 
-# SCOPED_HOOKS_MARKER (Task 4 inserts the scoped-hook cases here)
+# --- scoped hooks: state lands under the account's own config dir ---
+
+# scoped_case <label> <id> <script> <profiles> <payload-json> <expected-relpath>
+# Under the template env: running as the work account creates the expected
+# file under .claude-work and nothing under .claude; running as the personal
+# account does the reverse. Control (env removed): the work account writes
+# under .claude, proving the env is what scopes it.
+scoped_case() {
+    printf '%s' "$5" >"$TMP/payload"
+    ok=1
+    h="$(fresh_home scoped-work)"
+    run_gated "$h/.claude-work" "$h" "$TMP/repo" template "$2" "$3" "$4"
+    [ -e "$h/.claude-work/$6" ] || ok=0
+    [ -z "$(files_under "$h/.claude")" ] || ok=0
+    h="$(fresh_home scoped-personal)"
+    run_gated "$h/.claude" "$h" "$TMP/repo" template "$2" "$3" "$4"
+    [ -e "$h/.claude/$6" ] || ok=0
+    [ -z "$(files_under "$h/.claude-work")" ] || ok=0
+    if [ "$ok" = 1 ]; then pass "scoped: $1"; else fail "scoped: $1"; fi
+
+    h="$(fresh_home scoped-control)"
+    run_gated "$h/.claude-work" "$h" "$TMP/repo" none "$2" "$3" "$4"
+    if [ -e "$h/.claude/$6" ] && [ -z "$(files_under "$h/.claude-work")" ]; then
+        pass "control: without the env a work session puts $1 under the personal dir"
+    else
+        fail "control: without the env a work session puts $1 under the personal dir"
+    fi
+}
+
+scoped_case "cost-tracker metrics" stop:cost-tracker scripts/hooks/cost-tracker.js minimal,standard,strict \
+    '{"hook_event_name":"Stop","session_id":"fixture-session","cwd":"'"$TMP/repo"'","stop_hook_active":false}' \
+    metrics/costs.jsonl
+scoped_case "session-activity metrics" post:session-activity-tracker scripts/hooks/session-activity-tracker.js standard,strict \
+    '{"hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":"'"$TMP/repo/fixture.txt"'"}}' \
+    metrics/tool-usage.jsonl
+scoped_case "session-end summary" stop:session-end scripts/hooks/session-end.js minimal,standard,strict \
+    '{"hook_event_name":"Stop","session_id":"fixture-session","cwd":"'"$TMP/repo"'","stop_hook_active":false}' \
+    session-data
+scoped_case "compaction log" pre:compact scripts/hooks/pre-compact.js standard,strict \
+    '{"hook_event_name":"PreCompact","trigger":"auto","session_id":"fixture-session"}' \
+    session-data/compaction-log.txt
+scoped_case "session-start data dir" session:start scripts/hooks/session-start.js minimal,standard,strict \
+    '{"hook_event_name":"SessionStart","source":"startup","session_id":"fixture-session","cwd":"'"$TMP/repo"'"}' \
+    session-data
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
