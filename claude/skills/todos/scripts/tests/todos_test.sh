@@ -466,5 +466,86 @@ test_index_undated_priority_order() {
 }
 test_index_undated_priority_order
 
+# --- dependencies ---
+
+test_depends_parse() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" nokey <<'EOF'
+---
+created: 2026-05-01
+title: No key
+---
+EOF
+  mk_todo "$repo" emptykey <<'EOF'
+---
+created: 2026-05-01
+title: Empty key
+depends_on:
+files:
+---
+EOF
+  mk_todo "$repo" three <<'EOF'
+---
+created: 2026-05-01
+title: Three items
+depends_on:
+  - todo:2026-05-01-first
+  - "branch:talon/second"
+  - 'pr:3'
+files:
+  - not/a/dep.py
+---
+
+## Problem
+
+  - todo:2026-05-01-body-item-not-a-dep
+EOF
+  mk_todo "$repo" lastkey <<'EOF'
+---
+created: 2026-05-01
+title: Last key
+depends_on:
+  - pr:9
+---
+  - pr:10
+EOF
+  local out
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/nokey.md)
+  assert_eq "parse: missing key yields nothing" "$out" ""
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/emptykey.md)
+  assert_eq "parse: empty key yields nothing" "$out" ""
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/three.md)
+  assert_eq "parse: three items in order, quotes stripped, stops at next key" \
+    "$out" "$(printf 'todo:2026-05-01-first\nbranch:talon/second\npr:3')"
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/lastkey.md)
+  assert_eq "parse: stops at closing ---" "$out" "pr:9"
+  ok "depends: parse block list"
+  rm -rf "$repo"
+}
+test_depends_parse
+
+test_depends_normalize() {
+  assert_eq "normalize: #85"        "$(bash "$TODOS" _normalize_ref '#85')"  "pr:85"
+  assert_eq "normalize: bare 85"    "$(bash "$TODOS" _normalize_ref 85)"     "pr:85"
+  assert_eq "normalize: pr:85"      "$(bash "$TODOS" _normalize_ref pr:85)"  "pr:85"
+  assert_eq "normalize: bare branch" "$(bash "$TODOS" _normalize_ref talon/x)"        "branch:talon/x"
+  assert_eq "normalize: branch:"     "$(bash "$TODOS" _normalize_ref branch:talon/x) " "branch:talon/x "
+  assert_eq "normalize: bare todo id" "$(bash "$TODOS" _normalize_ref 2026-05-01-some-slug)" "todo:2026-05-01-some-slug"
+  assert_eq "normalize: todo: with .md" "$(bash "$TODOS" _normalize_ref todo:2026-05-01-some-slug.md)" "todo:2026-05-01-some-slug"
+  assert_eq "normalize: bare id with .md" "$(bash "$TODOS" _normalize_ref 2026-05-01-some-slug.md)" "todo:2026-05-01-some-slug"
+  assert_eq "normalize: quoted and padded" "$(bash "$TODOS" _normalize_ref '  "pr:7" ')" "pr:7"
+  assert_status "normalize: pr:0 rejected"      1 bash "$TODOS" _normalize_ref pr:0
+  assert_status "normalize: pr:abc rejected"    1 bash "$TODOS" _normalize_ref pr:abc
+  assert_status "normalize: pr:007 rejected"    1 bash "$TODOS" _normalize_ref pr:007
+  assert_status "normalize: bad branch rejected" 1 bash "$TODOS" _normalize_ref 'branch:bad..name'
+  assert_status "normalize: leading dash rejected" 1 bash "$TODOS" _normalize_ref 'branch:-x'
+  assert_status "normalize: reflog form rejected"  1 bash "$TODOS" _normalize_ref 'branch:a@{1}'
+  assert_status "normalize: bare word rejected"  1 bash "$TODOS" _normalize_ref parity
+  assert_status "normalize: todo: bad slug rejected" 1 bash "$TODOS" _normalize_ref 'todo:Not-A-Slug'
+  assert_status "normalize: empty rejected"      1 bash "$TODOS" _normalize_ref ''
+  ok "depends: normalize refs"
+}
+test_depends_normalize
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

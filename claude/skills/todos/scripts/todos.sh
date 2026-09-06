@@ -95,6 +95,65 @@ problem_summary() {
   ' "$1" | cut -c1-140
 }
 
+# --- dependencies ---------------------------------------------------------
+#
+# A todo may declare `depends_on:` as a block list of refs in canonical form
+#   todo:<YYYY-MM-DD-slug>   branch:<git branch name>   pr:<number>
+# The normalizer also accepts the shorthands `#85`, `85`, `todo:<id>.md`, a
+# bare `YYYY-MM-DD-<slug>`, and a bare value containing `/` (a branch).
+
+TODO_ID_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]*[a-z0-9]$'
+
+strip_value() {
+  # stdin -> stdout: trim surrounding whitespace and one pair of quotes.
+  sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+      -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
+normalize_ref() {
+  # normalize_ref <input> -> canonical ref on stdout; exit 1 when invalid.
+  local in kind payload
+  in=$(printf '%s' "$1" | strip_value)
+  case "$in" in
+    todo:*)   kind=todo;   payload="${in#todo:}" ;;
+    branch:*) kind=branch; payload="${in#branch:}" ;;
+    pr:*)     kind=pr;     payload="${in#pr:}" ;;
+    '#'*)     kind=pr;     payload="${in#\#}" ;;
+    */*)      kind=branch; payload="$in" ;;
+    *)        kind="";     payload="$in" ;;
+  esac
+  if [ -z "$kind" ]; then
+    case "$payload" in
+      ''|*[!0-9]*) [[ "${payload%.md}" =~ $TODO_ID_RE ]] && kind=todo ;;
+      *) kind=pr ;;
+    esac
+  fi
+  [ -n "$kind" ] || return 1
+  case "$kind" in
+    todo)
+      payload="${payload%.md}"
+      [[ "$payload" =~ $TODO_ID_RE ]] || return 1 ;;
+    branch)
+      # git parses a leading dash as a flag and @{...} as reflog shorthand.
+      case "$payload" in ''|-*|*@\{*) return 1 ;; esac
+      git check-ref-format --branch "$payload" >/dev/null 2>&1 || return 1 ;;
+    pr)
+      case "$payload" in ''|*[!0-9]*|0*) return 1 ;; esac ;;
+  esac
+  printf '%s:%s\n' "$kind" "$payload"
+}
+
+depends_list() {
+  # depends_list <file> -> the depends_on block items, stripped, one per line.
+  # Reads only the first frontmatter block; stops at the first non-item line.
+  awk '
+    /^---$/                   { n++; if (n >= 2) exit; next }
+    n == 1 && /^depends_on:/  { f = 1; next }
+    n == 1 && f && /^  - /    { sub(/^  - /, ""); print; next }
+    n == 1 && f               { f = 0 }
+  ' "$1" | strip_value
+}
+
 ensure_init() {
   local root pending completed
   root=$(repo_root)
@@ -481,6 +540,8 @@ main() {
     brief)    cmd_brief "$@" ;;
     _validate_date) validate_date "${1:-}" ;;
     _date_shift) date_shift "${1:-}" "${2:-}" ;;
+    _normalize_ref) normalize_ref "${1:-}" ;;
+    _depends) depends_list "${1:-}" ;;
     *)        die "unknown command: $cmd" ;;
   esac
 }
