@@ -52,7 +52,7 @@ class VoiceError(Exception):
 # --- lint: table of mechanical rules, no model -----------------------------
 
 EMOJI_RE = re.compile(
-    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF️]")
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\uFE0F]")
 # The trailer pattern is built from two fragments so this file never holds
 # the phrase the repo's attribution guards look for.
 _TRAILER = "co-authored" + "-by:"
