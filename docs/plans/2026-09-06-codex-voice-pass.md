@@ -174,7 +174,7 @@ printf 'voice: %d passed, %d failed\n' "$PASS" "$FAIL"
 - [ ] **Step 3: Run the suite to verify it fails**
 
 Run: `bash claude/skills/voice/scripts/tests/voice_test.sh`
-Expected: every case FAIL (python3 cannot find `voice.py`), final line `voice: 0 passed, N failed`, exit 1.
+Expected: the suite is red (exit 1). Nearly every case FAILs because python3 cannot find `voice.py`; the three cases that expect exit `2` or empty output pass vacuously (a missing script also exits 2 with empty stdout). Final line `voice: 3 passed, 19 failed`.
 
 - [ ] **Step 4: Write `voice.py` with the lint layer and the CLI**
 
@@ -591,9 +591,11 @@ assert_contains "lint echoed" "$OUT" "hedge: might"
 assert_contains "diff marker" "$OUT" "+++ after"
 assert_contains "diff drops filler" "$OUT" "-This PR introduces a comprehensive and robust"
 assert_contains "changes list rule" "$OUT" "1. verdict-first:"
-assert_contains "jira link survives" "$OUT" "browse/DOT-42"
 assert_contains "apply hint" "$OUT" "Apply with:"
 assert_contains "codex called once" "$(cat "$FAKE_CODEX_MARKER")" "called"
+run_voice rewrite --kind pr-body --file "$FIX/pr_body_generated.md" --json
+python3 -c 'import json,sys; d=json.load(sys.stdin); assert "https://example.atlassian.net/browse/DOT-42)" in d[0]["after"]' <<<"$OUT" \
+  && ok "jira link survives in after" || bad "jira link survives in after" "$OUT"
 
 echo "== rewrite: clean PR body comes back unchanged (AC6)"
 run_voice rewrite --kind pr-body --file "$FIX/pr_body_clean.md"
@@ -693,7 +695,10 @@ def build_prompt(kind, text, rows=None):
         parts += ['Return JSON: {"rewritten": <the full text>, '
                   '"changes": [{"before": ..., "after": ..., "rule": ...}]}.', "",
                   "=== TEXT ===", text]
-    return "\n".join(parts) + "\n"
+    prompt = "\n".join(parts)
+    # Text ends the prompt; do not add a newline the input did not have, or
+    # the model's faithful copy diffs against the input at EOF.
+    return prompt if prompt.endswith("\n") else prompt + "\n"
 
 
 def schema_for(kind):
@@ -984,8 +989,8 @@ Replace the `--pr` stub line in `cmd_rewrite` with:
 
 - [ ] **Step 5: Run the suite to verify it passes**
 
-Run: `bash claude/skills/voice/scripts/tests/voice_test.sh`
-Expected: `voice: 69 passed, 0 failed` (55 plus 14 here), exit 0.
+Run: `chmod +x claude/skills/voice/scripts/tests/fake_gh.sh && bash claude/skills/voice/scripts/tests/voice_test.sh`
+Expected: `voice: 69 passed, 0 failed` (55 plus 14 here), exit 0. A `gh pr view failed to start` error means the fake is not executable.
 
 - [ ] **Step 6: Commit**
 
@@ -1104,20 +1109,24 @@ def parse_range(spec):
 
 
 def repo_root(path):
-    proc = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(path)),
+    # realpath everywhere: on macOS mktemp gives /var/... while git reports
+    # /private/var/..., and grep echoes whichever root it was handed. One
+    # canonical form keeps the self-exclusion below and the relpath in the
+    # reason strings consistent.
+    proc = subprocess.run(["git", "-C", os.path.dirname(os.path.realpath(path)),
                            "rev-parse", "--show-toplevel"],
                           capture_output=True, text=True)
     if proc.returncode == 0 and proc.stdout.strip():
-        return proc.stdout.strip()
-    return os.path.dirname(os.path.abspath(path))
+        return os.path.realpath(proc.stdout.strip())
+    return os.path.dirname(os.path.realpath(path))
 
 
 def grep_files(needle, root, exclude_path):
     """Fixed-string, recursive, file names only; drops exclude_path itself."""
     proc = subprocess.run(["grep", "-rIlF", "--exclude-dir=.git", "--", needle, root],
                           capture_output=True, text=True)
-    hits = [h for h in proc.stdout.splitlines()
-            if os.path.abspath(h) != os.path.abspath(exclude_path)]
+    skip = os.path.realpath(exclude_path)
+    hits = [h for h in proc.stdout.splitlines() if os.path.realpath(h) != skip]
     return sorted(hits)
 
 
@@ -1142,6 +1151,7 @@ def docstring_displayed(owner, root, path):
 
 
 def classify_range(path, start, end):
+    path = os.path.realpath(path)
     with open(path, encoding="utf-8") as f:
         lines = f.read().splitlines()
     if start < 1 or end > len(lines) or start > end:
@@ -1230,7 +1240,7 @@ Replace the `--range` stub in `cmd_rewrite` with:
 - [ ] **Step 5: Run the suite to verify it passes**
 
 Run: `bash claude/skills/voice/scripts/tests/voice_test.sh`
-Expected: `voice: 87 passed, 0 failed` (69 plus 18 here), exit 0. If the `docstring displayed` reason text mismatches, the `grep_files` relpath differs on this platform; print `hits` and align the assertion to the spec's shape (`<file>:<line>  <reason>`), never by weakening the byte-identical check.
+Expected: `voice: 87 passed, 0 failed` (69 plus 18 here), exit 0. If line 1 comes back `protected: referenced elsewhere (widgets.py)` instead of `candidate`, the self-exclusion in `grep_files` is comparing two spellings of the same path (macOS `/var` vs `/private/var`); the `realpath` calls above are the fix, never a weaker assertion.
 
 - [ ] **Step 6: Commit**
 
@@ -1329,6 +1339,10 @@ approval.
   path printed on failure (or `--json` event output) should show no
   command execution.
 - `lint` alone is deterministic and free; use it in a hurry.
+- Each `rewrite` keeps its prompt, schema, Codex log, and any body file
+  under a `$TMPDIR/voice.*` directory so the printed paths stay valid
+  after the run. Nothing cleans them up; `rm -rf "${TMPDIR:-/tmp}"/voice.*`
+  when they pile up.
 - Tests: `bash claude/skills/voice/scripts/tests/voice_test.sh` (fakes
   replace Codex and gh; no network).
 ```
@@ -1390,7 +1404,13 @@ Expected: exit `1`, a JSON array with one `changed` report, and no `exec_command
 
 - `codex-plan-review` was blocked on 2026-09-06 by the same Codex usage
   limit that blocked the spec review (reset 23:08 local). The fallback
-  reviewer (fresh-context Opus, identical prompt) was used instead; its
-  findings and their disposition are recorded in the commit that folds
-  them. Re-run `codex-plan-review` on this file when the limit resets,
-  before starting Task 1.
+  reviewer (fresh-context Opus, identical prompt) returned 5 findings,
+  verdict needs-rework: 1 critical (macOS `/var` vs `/private/var` path
+  mismatch in the range unit's self-exclusion, fixed with `realpath`),
+  1 medium (`fake_gh.sh` had no `chmod +x` step, added), 3 low (an
+  accidental diff-context assertion replaced with a `--json` check, the
+  Task 1 red-run expectation corrected, the temp-dir retention
+  documented in `SKILL.md`). All five are folded in. The lint regexes
+  were also smoke-run against the fixtures in a scratch dir and every
+  Task 1 assertion held. Re-run `codex-plan-review` on this file when
+  the limit resets, before starting Task 1.
