@@ -460,7 +460,7 @@ python3 -c 'import json; t=json.load(open("claude/settings.json.tmpl")); t["env"
 (cd "$d" && PLAN_CANVAS_TEST_REQUIRE_ECC=1 sh "$OLDPWD/claude/hooks/plan-canvas-isolation.test.sh"); echo "exit=$?"
 rm -rf "$d"
 ```
-Expected: the four "inert" Stop/SessionStart cases and the flag-gate `no` case print FAIL, `exit=1`.
+Expected: four FAIL lines (Stop in repo-a, Stop in repo-b, SessionStart, and the flag-gate `no` case; the unrelated-repo cases stay silent through the hook's own cwd scoping) and `exit=1`. Verified 2026-09-06 by running this script from a scratch repo root: 9 passed with the key, 4 FAIL without it.
 
 - [ ] **Step 4: Prove the SKIP and REQUIRE paths**
 
