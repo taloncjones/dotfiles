@@ -645,5 +645,151 @@ test_resolve_pr() {
 }
 test_resolve_pr
 
+test_list_blocked_on() {
+  local repo; repo=$(mk_branch_repo)
+  mk_todo "$repo" 2026-05-01-satisfied <<'EOF'
+---
+created: 2026-05-01
+title: Satisfied item
+depends_on:
+  - branch:merged-b
+---
+EOF
+  mk_todo "$repo" 2026-05-01-oneblock <<'EOF'
+---
+created: 2026-05-01
+title: One blocker
+depends_on:
+  - branch:open-b
+---
+EOF
+  mk_todo "$repo" 2026-05-01-twoblock <<'EOF'
+---
+created: 2026-05-01
+title: Two blockers
+depends_on:
+  - branch:merged-b
+  - todo:2026-05-01-oneblock
+  - pr:1
+---
+EOF
+  mkdir -p "$repo/.todos/completed"
+  printf -- '---\ncreated: 2026-05-01\ntitle: Done blocked\ndepends_on:\n  - pr:1\n---\n' >"$repo/.todos/completed/2026-05-01-doneblocked.md"
+  local out
+  out=$(cd "$repo" && bash "$TODOS" list --offline)
+  assert_contains "list: one unsatisfied ref annotated" "$out" "One blocker  [blocked-on: branch:open-b (open)]"
+  assert_contains "list: two unsatisfied refs in file order" "$out" \
+    "Two blockers  [blocked-on: todo:2026-05-01-oneblock (open), pr:1 (unknown)]"
+  case "$out" in *"Satisfied item  [blocked-on"*) bad "list: satisfied item plain" "annotated";; *) ok "list: satisfied item plain";; esac
+  out=$(cd "$repo" && bash "$TODOS" list --offline --all)
+  assert_contains "list: --offline --all lists completed" "$out" "completed:"
+  case "$out" in *"Done blocked  [blocked-on"*) bad "list: completed never annotated" "annotated";; *) ok "list: completed never annotated";; esac
+  out=$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" list --all --offline)
+  assert_contains "list: --all --offline also accepted" "$out" "One blocker  [blocked-on"
+  assert_status "list: unknown flag rejected" 1 bash -c '(cd "$1" && bash "$2" list --nope)' _ "$repo" "$TODOS"
+  # online: a failing gh never aborts list; a shared ref is resolved once
+  mk_todo "$repo" 2026-05-01-share-a <<'EOF'
+---
+created: 2026-05-01
+title: Share a
+depends_on:
+  - pr:1
+---
+EOF
+  mk_todo "$repo" 2026-05-01-share-b <<'EOF'
+---
+created: 2026-05-01
+title: Share b
+depends_on:
+  - pr:1
+---
+EOF
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  out=$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" list); local rc=$?
+  assert_eq "list: online exits 0" "$rc" "0"
+  case "$out" in *"Two blockers  [blocked-on: todo:2026-05-01-oneblock (open)]"*) ok "list: online pr:1 merged drops from annotation";; *) bad "list: online pr:1 merged drops from annotation" "$out";; esac
+  assert_eq "list: shared pr ref resolved once" "$(grep -c 'pr view 1 ' "$stub.calls")" "1"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$stub"
+  out=$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" list); rc=$?
+  assert_eq "list: failing gh still exits 0" "$rc" "0"
+  assert_contains "list: failing gh renders unknown" "$out" "Share a  [blocked-on: pr:1 (unknown)]"
+  ok "list: blocked-on annotation"
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls"
+}
+test_list_blocked_on
+
+test_index_blocked_marker() {
+  local repo; repo=$(mk_branch_repo)
+  local stub; stub=$(mktemp)
+  printf '#!/usr/bin/env bash\ntouch "%s.hit"\nexit 1\n' "$stub" >"$stub"; chmod +x "$stub"
+  mk_todo "$repo" 2026-05-01-blocked <<'EOF'
+---
+created: 2026-05-01
+title: Blocked item
+priority: high
+depends_on:
+  - branch:open-b
+  - pr:1
+---
+
+## Problem
+
+Needs the branch.
+EOF
+  mk_todo "$repo" 2026-05-01-free <<'EOF'
+---
+created: 2026-05-01
+title: Free item
+depends_on:
+  - branch:merged-b
+---
+EOF
+  ( cd "$repo" && TODOS_TODAY=2026-06-08 TODOS_GH="$stub" bash "$TODOS" new "Fresh one" --priority low >/dev/null )
+  local idx; idx=$(cat "$repo/.todos/TODO.md")
+  assert_contains "index: blocked and unverified markers after priority" "$idx" \
+    "[Blocked item](./pending/2026-05-01-blocked.md) [high] [blocked-on: branch:open-b] [unverified: pr:1] -- Needs the branch."
+  case "$idx" in *"Free item](./pending/2026-05-01-free.md) [blocked-on"*|*"Free item](./pending/2026-05-01-free.md) [unverified"*) bad "index: satisfied item unmarked" "marked";; *) ok "index: satisfied item unmarked";; esac
+  [ -e "$stub.hit" ] && bad "index: new never calls gh" "gh stub was invoked" || ok "index: new never calls gh"
+  mk_todo "$repo" 2026-05-01-badref <<'EOF'
+---
+created: 2026-05-01
+title: Bad ref elsewhere
+depends_on:
+  - parity
+---
+EOF
+  local errf; errf=$(mktemp)
+  ( cd "$repo" && bash "$TODOS" done 2026-05-01-free ) >/dev/null 2>"$errf"
+  assert_eq "index: done is quiet about another todo's bad ref" "$(cat "$errf")" ""
+  assert_contains "index: invalid ref still marked" "$(cat "$repo/.todos/TODO.md")" "[Bad ref elsewhere](./pending/2026-05-01-badref.md) [blocked-on: parity]"
+  ok "index: blocked marker, no network"
+  rm -rf "$repo"; rm -f "$stub" "$stub.hit" "$errf"
+}
+test_index_blocked_marker
+
+test_list_invalid_and_self() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-selfref <<'EOF'
+---
+created: 2026-05-01
+title: Self ref item
+depends_on:
+  - todo:2026-05-01-selfref
+  - parity
+---
+EOF
+  local errf; errf=$(mktemp)
+  local out; out=$(cd "$repo" && bash "$TODOS" list --offline 2>"$errf"); local rc=$?
+  local err; err=$(cat "$errf")
+  assert_eq "list: exits 0 with bad refs" "$rc" "0"
+  assert_contains "list: self rendered" "$out" "[blocked-on: todo:2026-05-01-selfref (self), parity (invalid)]"
+  assert_contains "list: self warned" "$err" "todos: 2026-05-01-selfref: depends on itself"
+  assert_contains "list: invalid warned" "$err" "todos: 2026-05-01-selfref: invalid dependency ref 'parity'"
+  assert_eq "list: each warning once" "$(grep -c 'todos: 2026-05-01-selfref' "$errf")" "2"
+  ok "list: invalid and self refs warn"
+  rm -rf "$repo"; rm -f "$errf"
+}
+test_list_invalid_and_self
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

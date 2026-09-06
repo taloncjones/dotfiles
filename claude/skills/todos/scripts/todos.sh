@@ -233,6 +233,39 @@ resolve_cached() {
   printf '%s\n' "$st"
 }
 
+blocked_refs() {
+  # blocked_refs <file> -> one "<ref>\t<state>" line per unsatisfied ref, in
+  # file order; nothing when every dependency is satisfied or there are none.
+  # Warns once per invalid/self ref on stderr unless DEPS_QUIET=1 (index).
+  local f="$1" base raw ref st
+  base=$(basename "$f" .md)
+  while IFS= read -r raw; do
+    [ -n "$raw" ] || continue
+    if ref=$(normalize_ref "$raw"); then
+      st=$(resolve_cached "$ref" "$base")
+    else
+      ref="$raw"; st=invalid
+    fi
+    if [ "${DEPS_QUIET:-0}" != 1 ]; then
+      case "$st" in
+        invalid) printf "todos: %s: invalid dependency ref '%s'\n" "$base" "$raw" >&2 ;;
+        self)    printf 'todos: %s: depends on itself\n' "$base" >&2 ;;
+      esac
+    fi
+    case "$st" in done|merged) continue ;; esac
+    printf '%s\t%s\n' "$ref" "$st"
+  done < <(depends_list "$f")
+}
+
+join_refs() {
+  # stdin "<ref>\t<state>" lines -> "ref (state), ref (state)" when $1 is 1,
+  # "ref, ref" when 0. No trailing newline; empty for empty input.
+  awk -F'\t' -v states="$1" '
+    { item = (states == 1) ? $1 " (" $2 ")" : $1
+      out = (NR == 1) ? item : out ", " item }
+    END { printf "%s", out }'
+}
+
 ensure_init() {
   local root pending completed
   root=$(repo_root)
@@ -317,7 +350,9 @@ cmd_new() {
 }
 
 list_dir() {
-  local dir="$1" label="$2" f title
+  # list_dir <dir> <label> <annotate 0|1>: annotate appends the blocked-on
+  # suffix (pending only; completed items never resolve their dependencies).
+  local dir="$1" label="$2" annotate="$3" f title blocked
   [ -d "$dir" ] || return 0
   local any=0
   for f in "$dir"/*.md; do
@@ -329,16 +364,32 @@ list_dir() {
   for f in "$dir"/*.md; do
     [ -e "$f" ] || continue
     title=$(frontmatter_value title "$f")
-    printf '  %-44s %s\n' "$(basename "$f")" "${title:-}"
+    blocked=""
+    [ "$annotate" = 1 ] && blocked=$(blocked_refs "$f" | join_refs 1)
+    if [ -n "$blocked" ]; then
+      printf '  %-44s %s  [blocked-on: %s]\n' "$(basename "$f")" "${title:-}" "$blocked"
+    else
+      printf '  %-44s %s\n' "$(basename "$f")" "${title:-}"
+    fi
   done
 }
 
 cmd_list() {
-  local all=0
-  [ "${1:-}" = "--all" ] && all=1
+  local all=0 DEPS_OFFLINE=0 DEPS_CACHE
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --all)     all=1; shift ;;
+      --offline) DEPS_OFFLINE=1; shift ;;
+      *) die "unknown flag for list: $1" ;;
+    esac
+  done
+  DEPS_CACHE=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$DEPS_CACHE'" RETURN
   local root; root=$(repo_root)
-  list_dir "$root/$TODOS_DIRNAME/pending" "pending"
-  [ "$all" -eq 1 ] && list_dir "$root/$TODOS_DIRNAME/completed" "completed"
+  list_dir "$root/$TODOS_DIRNAME/pending" "pending" 1
+  [ "$all" -eq 1 ] && list_dir "$root/$TODOS_DIRNAME/completed" "completed" 0
+  return 0
 }
 
 cmd_done() {
@@ -369,13 +420,16 @@ cmd_done() {
 }
 
 regenerate_index() {
-  local root pending index f title due priority created base summary key pw
+  local root pending index f title due priority created base summary key pw blocked unverified
+  local DEPS_OFFLINE=1 DEPS_QUIET=1 DEPS_CACHE
   root=$(repo_root)
   pending="$root/$TODOS_DIRNAME/pending"
   index="$root/$TODOS_DIRNAME/TODO.md"
   [ -d "$pending" ] || return 0
 
-  local data; data=$(mktemp); trap "rm -f '$data'" RETURN
+  local data; data=$(mktemp); DEPS_CACHE=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$data' '$DEPS_CACHE'" RETURN
   for f in "$pending"/*.md; do
     [ -e "$f" ] || continue
     base=$(basename "$f")
@@ -384,9 +438,11 @@ regenerate_index() {
     priority=$(frontmatter_value priority "$f")
     created=$(frontmatter_value created "$f")
     summary=$(problem_summary "$f")
+    blocked=$(blocked_refs "$f" | awk -F'\t' '$2 != "unknown"' | join_refs 0)
+    unverified=$(blocked_refs "$f" | awk -F'\t' '$2 == "unknown"' | join_refs 0)
     case "$priority" in high) pw=0;; med) pw=1;; low) pw=2;; *) pw=3;; esac
     if [ -n "$due" ]; then key="0$due$pw"; else key="1$pw${created:-9999-99-99}"; fi
-    printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$key" "$base" "$title" "$due" "$priority" "$summary" >>"$data"
+    printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$key" "$base" "$title" "$due" "$priority" "$blocked" "$unverified" "$summary" >>"$data"
   done
 
   local sep; sep=$(printf '\037')
@@ -398,11 +454,13 @@ regenerate_index() {
     if [ ! -s "$data" ]; then
       printf '_No open todos._\n'
     else
-      local k b t d p s meta
-      while IFS=$'\037' read -r k b t d p s; do
+      local k b t d p bl uv s meta
+      while IFS=$'\037' read -r k b t d p bl uv s; do
         meta=""
         [ -n "$d" ] && meta="$meta due $d"
         [ -n "$p" ] && meta="$meta [$p]"
+        [ -n "$bl" ] && meta="$meta [blocked-on: $bl]"
+        [ -n "$uv" ] && meta="$meta [unverified: $uv]"
         if [ -n "$s" ]; then
           printf -- '- [%s](./pending/%s)%s -- %s\n' "$t" "$b" "$meta" "$s"
         else
