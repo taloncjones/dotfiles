@@ -89,11 +89,15 @@ prefixed form:
 
 `normalize_ref <input>` maps an input to its canonical form or reports it
 invalid. It accepts the canonical forms plus these shorthands: `#85` and
-`85` become `pr:85`; `todo:<x>.md` drops the suffix; a bare value
-matching `^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+$` becomes `todo:`; a bare
-value containing `/` becomes `branch:`. Any other bare value is invalid.
-The same function runs on CLI input and on values read from files, so a
-hand-edited shorthand in a file behaves like the CLI form.
+`85` become `pr:85`; a `.md` suffix on a todo payload is dropped (both
+`todo:<x>.md` and a bare `<x>.md`); a bare value matching
+`^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+$` after that strip becomes
+`todo:`; a bare value containing `/` becomes `branch:`. Any other bare
+value is invalid. A branch payload that starts with `-` or contains `@{`
+is invalid before `git check-ref-format` runs (git would parse the first
+as a flag and the second as a reflog shorthand). The same function runs
+on CLI input and on values read from files, so a hand-edited shorthand
+in a file behaves like the CLI form.
 
 Whitespace is trimmed and surrounding single or double quotes are
 stripped before normalization, matching `frontmatter_value`.
@@ -110,22 +114,33 @@ depends_on:
 Parsing (`depends_list <file>`): inside the first frontmatter block
 (between the first two `---` lines), the items are the consecutive
 `  - <value>` lines directly under the `depends_on:` key, stopping at the
-first line that does not start with two spaces and a dash. A
-`depends_on:` key with no items means no dependencies. A missing key
-means no dependencies. Order is preserved; duplicates are kept as read
-(the writer dedupes, the reader does not).
+first line that does not start with two spaces and a dash. A blank line
+therefore ends the list: hand edits must keep the items contiguous (the
+writer always does). A `depends_on:` key with no items means no
+dependencies. A missing key means no dependencies. Order is preserved;
+duplicates are kept as read (the writer dedupes, the reader does not).
 
-Writing (`add_depends <file> <ref>...`): when `depends_on:` exists, new
-items are appended after its last item; otherwise the key and items are
-inserted directly before the `files:` line, or before the closing `---`
-when there is no `files:` line. Every other byte of the file is
-preserved. The write goes to a temp file in the same directory followed
-by `mv` (the pattern `regenerate_index` already uses). Refs already
-present in the list are not added again.
+Writing (`add_depends <file> <ref>...`): all edits are bounded to the
+first frontmatter block; `files:` or `---` lines in the body are never
+touched. When `depends_on:` exists in the block, new items are appended
+after its last item; otherwise the key and items are inserted directly
+before the first `files:` line in the block, or before the block's
+closing `---` when there is no `files:` line. Every other byte of the
+file is preserved. The write goes to a temp file in the same directory
+followed by `mv` (the pattern `regenerate_index` already uses). A ref
+already present (compared after normalizing the existing items) is not
+added again.
 
 ### D3. Resolver
 
-`resolve_ref <canonical-ref>` prints exactly one state token:
+A dependency reference ends in exactly one state token. `resolve_ref
+<canonical-ref>` produces `done`, `merged`, `open`, `closed`, `missing`,
+or `unknown` from a canonical ref alone. The two remaining tokens are
+assigned by the callers that have the context: `invalid` by the
+normalizer (the value did not parse) and `self` by the renderer (a
+`todo:` ref equal to the basename of the todo being rendered). The
+hidden `_resolve` verb has no current-todo context: it prints `invalid`
+for a value that does not normalize and never prints `self`.
 
 | State     | Meaning                                                 | Satisfied |
 |-----------|---------------------------------------------------------|-----------|
@@ -144,24 +159,35 @@ Sources, in order:
   Local only, always determinate.
 - `branch:` -- base ref is `${TODOS_BASE_REF:-origin/main}`. If the base
   ref does not exist the state is `unknown`. Otherwise the branch ref is
-  `refs/remotes/origin/<name>` if present, else `refs/heads/<name>`. When
-  a ref is found, `git merge-base --is-ancestor <ref> <base>` decides
-  `merged` versus `open` (equivalent to membership in
-  `git branch --merged <base>`, without parsing branch listings). When
-  no ref is found: offline gives `unknown`; online runs
-  `gh pr list --head <name> --state all --limit 1 --json state --jq '.[0].state'`
-  and maps MERGED/OPEN/CLOSED to `merged`/`open`/`closed`, anything else
-  (empty, non-zero exit) to `unknown`.
+  `refs/remotes/origin/<name>` if present, else `refs/heads/<name>`, else
+  absent. Steps, in order:
+  1. If a ref is found and `git merge-base --is-ancestor <ref> <base>`
+     exits 0, the state is `merged` (equivalent to membership in
+     `git branch --merged <base>`, without parsing branch listings). An
+     exit above 1 is a git error and gives `unknown`.
+  2. Otherwise, when online, run
+     `gh pr list --head <name> --state all --limit 1 --json state --jq '.[0].state'`
+     and map MERGED/OPEN/CLOSED to `merged`/`open`/`closed`. This is what
+     makes a squash-merged branch resolve: the branch commits are never
+     ancestors of the base, and after `post-merge` the ref is gone.
+  3. When `gh` gives nothing (offline, absent, failing, or no PR for that
+     head): `open` if the ref was found, `unknown` if it was absent.
 - `pr:` -- offline gives `unknown`; online runs
   `gh pr view <number> --json state --jq .state` and maps as above.
 
-Offline means `TODOS_OFFLINE=1` in the environment or `--offline` on the
-`list` command line. The `gh` binary is `${TODOS_GH:-gh}`; a value that
-does not resolve to an executable behaves as a failing `gh` (state
-`unknown`) with no error. `gh` stderr is discarded. No `gh` call blocks
-the command from completing: a failure of any kind is `unknown`. The
-script does not impose its own timeout on `gh`; `TODOS_OFFLINE=1` is the
-escape hatch for a hung network, and only `list` is exposed.
+Offline means `TODOS_OFFLINE` is set to a non-empty value in the
+environment or `--offline` is on the `list` command line. The `gh`
+binary is `${TODOS_GH:-gh}`; a value that does not resolve to an
+executable behaves as a failing `gh` with no error output. `gh` stderr
+is discarded. The script runs under `set -euo pipefail`, so every `gh`
+invocation must capture a non-zero exit explicitly (`out=$(...) ||
+out=""` shape); a failing `gh` never aborts `list`, which still exits 0
+with the affected refs rendered as `unknown` (or `open` for a present
+branch). The script does not impose its own timeout on `gh`;
+`--offline` is the escape hatch for a hung network. `list` stays online
+by default because it is the interactive command and the one place a
+PR ref can resolve at all; making it offline-by-default would leave
+every `pr:` ref permanently `unknown` unless the user remembers a flag.
 
 Within one `list` invocation each distinct canonical ref is resolved at
 most once (a per-invocation cache in a temp file keyed by ref, because
@@ -171,7 +197,7 @@ ref cost one `gh` call, not nine.
 `index` (and therefore `new`, `done`, `depend`) resolves in offline mode
 unconditionally: todo refs and locally-present branch refs resolve
 normally; PR refs and absent branch refs are `unknown`. The index never
-performs network I/O.
+performs network I/O and never emits dependency diagnostics (D4).
 
 ### D4. Rendering
 
@@ -188,15 +214,23 @@ none, print exactly as today. The completed section (`--all`) never
 annotates. `list` accepts `--all` and `--offline` in any order; an
 unknown flag is an error as for other commands.
 
-`TODO.md` (`regenerate_index`): the metadata run after the link gains
-` [blocked-on: <ref>, <ref>]` (refs only, no states, offline resolution)
-after the priority tag and before the ` -- summary`. Sorting is
+`TODO.md` (`regenerate_index`): the metadata run after the link gains,
+after the priority tag and before the ` -- summary`, up to two markers
+computed offline: ` [blocked-on: <ref>, <ref>]` listing the refs whose
+state is determinately unsatisfied (`open`, `closed`, `missing`,
+`invalid`, `self`), then ` [unverified: <ref>, <ref>]` listing the refs
+whose state is `unknown` (PR refs, absent branches). Either marker is
+omitted when its list is empty. The distinction keeps a todo whose only
+dependency is a merged PR from reading as blocked forever in the index;
+`todos.sh list` (online) is the authoritative view. Sorting is
 unchanged; a blocked item keeps its due/priority position.
 
-Diagnostics: an `invalid` ref and a `self` ref each produce one stderr
-line `todos: <basename>: invalid dependency ref '<value>'` or
-`todos: <basename>: depends on itself` during `list` and `index`; the
-command still exits 0 and the ref is rendered with its state.
+Diagnostics: during `list` only, an `invalid` ref and a `self` ref each
+produce one stderr line `todos: <basename>: invalid dependency ref
+'<value>'` or `todos: <basename>: depends on itself`; the command still
+exits 0 and the ref is rendered with its state. `index` is silent about
+dependency refs, so `new`, `done`, and `depend` on one todo never warn
+about another todo's frontmatter.
 
 ### D5. Commands
 
@@ -272,8 +306,11 @@ squash merge and branch deletion they show `unknown` offline and
 completes, and `pr:85` shows `unknown` offline and `merged` online.
 
 The `depend` invocations for the backfill are listed verbatim in the
-plan. The backfill is verified by reading `todos.sh list --offline`
-output, not by the task contract, because `.todos/` is machine-local.
+plan. Every `todo:` ref names a file that must exist under `pending/` or
+`completed/` at backfill time, or that `depend` call exits 1; the
+runbook says to skip and report such a row rather than invent a ref.
+The backfill is verified by reading `todos.sh list --offline` output,
+not by the task contract, because `.todos/` is machine-local.
 
 ## Acceptance criteria
 
@@ -285,16 +322,19 @@ the `ok` line the contract greps for.
   quotes, and stops at the next key and at the closing `---`
   (`depends: parse block list`).
 - AC2 normalize: `_normalize_ref` maps `#85`, `85`, `pr:85` to `pr:85`;
-  `talon/x` and `branch:talon/x` to `branch:talon/x`; a date-slug and
-  `todo:<slug>.md` to `todo:<slug>`; and exits 1 for `pr:0`, `pr:abc`,
-  `branch:bad..name`, and a bare word (`depends: normalize refs`).
+  `talon/x` and `branch:talon/x` to `branch:talon/x`; a date-slug,
+  `<slug>.md`, and `todo:<slug>.md` to `todo:<slug>`; and exits 1 for
+  `pr:0`, `pr:abc`, `branch:bad..name`, `branch:-x`, `branch:a@{1}`, and
+  a bare word (`depends: normalize refs`).
 - AC3 resolve todo: `done` for a completed basename, `open` for a
   pending one, `missing` for neither (`resolve: todo states`).
 - AC4 resolve branch: with a fixture repo where `origin/main` is created
-  by `git update-ref`, a branch at an ancestor commit is `merged`, a
-  branch with an extra commit is `open`, an absent branch is `unknown`
-  offline, and with `TODOS_BASE_REF` pointing at a nonexistent ref every
-  branch is `unknown` (`resolve: branch states`).
+  by `git update-ref`, offline: a branch at an ancestor commit is
+  `merged`, a branch with an extra commit is `open`, an absent branch is
+  `unknown`, and with `TODOS_BASE_REF` pointing at a nonexistent ref
+  every branch is `unknown`; online with the AC5 stub: the extra-commit
+  branch is `merged` when the stub answers MERGED for its head and
+  `open` when the stub knows no PR for it (`resolve: branch states`).
 - AC5 resolve PR: with `TODOS_GH` pointing at a stub script that answers
   MERGED for 1, OPEN for 2, CLOSED for 3 and exits 1 for 4, states are
   `merged`, `open`, `closed`, `unknown`; with `TODOS_OFFLINE=1` all are
@@ -306,12 +346,17 @@ the `ok` line the contract greps for.
   `[blocked-on: <ref> (<state>)]`; one with all refs satisfied shows no
   annotation; one with two unsatisfied refs lists both in file order;
   `--all` shows no annotation on completed items; `list --offline` works
-  with the flags in either order (`list: blocked-on annotation`).
+  with the flags in either order; online with a `TODOS_GH` stub that
+  exits 1 for every call, `list` still exits 0; with a counting stub and
+  three pending todos sharing one `pr:` ref, the stub runs exactly once
+  per `list` (`list: blocked-on annotation`).
 - AC7 index: `TODO.md` marks a blocked item with `[blocked-on: <ref>]`
-  after the priority tag, omits it for satisfied deps, and `new` never
+  after the priority tag, lists `unknown` refs under `[unverified:
+  <ref>]` instead, omits both for satisfied deps, and `new` never
   invokes `gh` even when `TODOS_GH` points at a script that would fail
-  the test by writing a sentinel file (`index: blocked marker, no
-  network`).
+  the test by writing a sentinel file; `done` on one todo writes nothing
+  to stderr when another pending todo carries an invalid ref (`index:
+  blocked marker, no network`).
 - AC8 new flag: `new --depends-on` writes the canonical list between
   `priority:` and `files:`, dedupes, resolves a unique substring to the
   exact basename, and exits 1 for an invalid ref, an unknown todo, and an
