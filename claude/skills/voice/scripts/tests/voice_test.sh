@@ -132,6 +132,33 @@ assert_contains "query-append flags url" "$F1_OUT" "query-append: ['url https://
 assert_contains "dedupe flags dropped copy" "$F1_OUT" "dedupe: ['url https://x.io/a']"
 assert_contains "unchanged multiset passes" "$F1_OUT" "survives: []"
 
+echo "== rewrite: invariant check tolerates url punctuation shift (R1)"
+python3 - <<PY > "$SANDBOX/r1.py"
+import sys
+sys.path.insert(0, "$HERE/..")
+import voice
+
+def show(label, missing):
+    print("%s: %s" % (label, missing))
+
+show("sentence-end-period", voice.check_invariants(
+    "code-comment", "# see https://example.com for details",
+    "# See details at https://example.com."))
+show("parenthesized", voice.check_invariants(
+    "code-comment", "# see https://example.com for details",
+    "# See details at (https://example.com)"))
+show("moved-and-parenthesized", voice.check_invariants(
+    "code-comment", "Docs at https://example.com are helpful",
+    "Docs are helpful (https://example.com)"))
+show("real-mutation-still-aborts", voice.check_invariants(
+    "pr-title", "See DOT-42.", "See DOT-420."))
+PY
+R1_OUT=$(cat "$SANDBOX/r1.py")
+assert_contains "sentence-end period no violation" "$R1_OUT" "sentence-end-period: []"
+assert_contains "parenthesized no violation" "$R1_OUT" "parenthesized: []"
+assert_contains "moved-and-parenthesized no violation" "$R1_OUT" "moved-and-parenthesized: []"
+assert_contains "real mutation still flagged" "$R1_OUT" "real-mutation-still-aborts: ['jira-key DOT-42']"
+
 echo "== rewrite: codex failure (AC11)"
 FAKE_CODEX_MODE=fail run_voice rewrite --kind pr-body --file "$FIX/pr_body_generated.md"
 assert_eq "codex failure exits 2" "$RC" 2

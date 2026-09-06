@@ -288,14 +288,28 @@ def run_codex(prompt, kind, effort, workdir):
     return data
 
 
+TRAILING_PUNCT = ".,;:!?)]\"'"
+
+
+def normalize_invariant_token(name, token):
+    """Strip trailing punctuation/closing quotes the greedy url and inline-code
+    extractors swallow when a rewrite moves the token to a sentence end or
+    wraps it in parens, so a byte-intact token doesn't register as missing."""
+    if name in ("url", "inline"):
+        return token.rstrip(TRAILING_PUNCT)
+    return token
+
+
 def check_invariants(kind, before, after):
     """Each protected token must survive with its exact multiset intact: same
     count, byte-identical text. A superstring (DOT-42 -> DOT-420) or a dropped
     duplicate both show up as the original token's count falling in `after`."""
     missing = []
     for name in INVARIANTS_BY_KIND[kind]:
-        before_counts = Counter(INVARIANT_EXTRACTORS[name].findall(before))
-        after_counts = Counter(INVARIANT_EXTRACTORS[name].findall(after))
+        before_counts = Counter(normalize_invariant_token(name, t)
+                                 for t in INVARIANT_EXTRACTORS[name].findall(before))
+        after_counts = Counter(normalize_invariant_token(name, t)
+                                for t in INVARIANT_EXTRACTORS[name].findall(after))
         for token, count in before_counts.items():
             if after_counts.get(token, 0) < count:
                 missing.append("%s %s" % (name, token))
