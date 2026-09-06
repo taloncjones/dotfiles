@@ -4,6 +4,10 @@ Date: 2026-09-06
 Branch: talon/td-2026-09-05-explore-cloudflared-tunnel-access-remote-access-to/cloudflared-access
 Source task: td-2026-09-05-explore-cloudflared-tunnel-access-remote-access-to
 Status: branch-only document; dropped before merge together with the plan.
+Review: Codex spec review could not run on 2026-09-06 (Codex usage limit,
+reset 23:08 local); a fresh-context independent reviewer stood in and its
+ten findings (IdentityFile form, AC5/AC6/AC8 testability, phase gating,
+token expiry, P5 limits) are folded in below.
 
 ## Problem
 
@@ -25,9 +29,13 @@ herdr-specific plumbing is needed. Claude Remote Control needs no tunnel
 at all (see D2). The one thing this repo cannot settle offline is
 whether the tunnel behaves under Proton on both ends and whether herdr's
 remote attach finds `herdr` on the host's SSH command path; those are
-the Phase 1 probe (Section "Phase 1"), human-verify, and they gate Phase
-2's runbook, not Phase 2's repo changes (which are inert until a real
-hostname is configured).
+the Phase 1 probe (Section "Phase 1"), human-verify. Phase 2's repo
+changes are inert until a real zone is configured and may merge before
+the probe runs; the README section carries a prominent `Status:` line
+that reads unverified until probe results are recorded, so a reader
+cannot mistake the runbook for a proven one. The human performs the D3
+host steps ad hoc during Phase 1 from this spec; Phase 2 codifies them
+in the README, amended by whatever the probe changed.
 
 ## Goal
 
@@ -100,7 +108,8 @@ hostname is configured).
   `cloudflared`, and `claude` are not on PATH there unless herdr's
   remote attach starts a login shell or the host adds Homebrew to PATH
   in `~/.zshenv.local`. Whether this bites `herdr --remote` is a probe
-  item (P5).
+  item (P5). The doctor cannot detect it: it reads the client's PATH,
+  not the host's non-login SSH PATH, so P5 stays human-verify.
 - `bin/dotfiles-tests` runs 20 POSIX `sh`/`bash` suites, also on
   Ubuntu in CI (`.github/workflows/tests.yml`), which also `bash -n`s
   every `bin/*` script except `*.test.sh`. `rg` is available in CI and
@@ -133,7 +142,14 @@ herdr --remote <host>.ssh.<zone>                                    herdr server
   --hostname %h`. `cloudflared` opens a browser once for the Access
   login and caches the token under `~/.cloudflared/`.
 - `herdr --remote <host>.ssh.<zone>` reuses the same SSH config; the
-  hostname is the ssh target.
+  hostname is the ssh target. No `herdr integration install` is needed
+  or allowed (CLAUDE.md standing rule); SSH is all herdr needs.
+- Access token expiry: `cloudflared access ssh` opens a browser when the
+  cached token is missing or expired (lifetime is the Access app's
+  session duration, default 24 hours). Interactive `ssh` tolerates that;
+  `herdr --remote` may hang waiting on a browser. The runbook says to run
+  `cloudflared access login https://<host>.ssh.<zone>` first when the
+  token may have expired, and P5 checks the expired-token attach.
 
 ### D2. Claude Remote Control needs no tunnel
 
@@ -167,7 +183,9 @@ Performed once per host by a human, never by the installer:
    owner's login identity.
 
 The runbook records the exact commands with `<host>` and `<zone>`
-placeholders and points at the doctor for the read-only checks.
+placeholders, the `cloudflared access login` pre-step for expired
+tokens, and points at the doctor for the read-only checks. The doctor
+does not detect host-side PATH or sshd state.
 
 ### D4. Client side (tracked template, machine-local values)
 
@@ -179,7 +197,7 @@ placeholders and points at the doctor for the read-only checks.
   # the template. The placeholder pattern matches nothing until edited.
   Host *.ssh.example.com
       ProxyCommand cloudflared access ssh --hostname %h
-      IdentityFile ~/.ssh/id_ed25519_personal.pub
+      IdentityFile ~/.ssh/id_ed25519_personal
       IdentitiesOnly yes
   ```
 
@@ -195,9 +213,12 @@ placeholders and points at the doctor for the read-only checks.
   override in `config_local` still wins, and the personal `github.com`
   block is unaffected (`*.ssh.<zone>` never matches it). ssh ignores a
   missing Include, so pre-seed machines are safe.
-- The 1Password agent supplies the private key; the pubkey-only
-  `IdentityFile` plus `IdentitiesOnly` is the existing repo pattern
-  (`config_personal`).
+- The 1Password agent supplies the private key. `IdentityFile
+  ~/.ssh/id_ed25519_personal` names the private-key path with no `.pub`
+  suffix, exactly as `config_personal` does: only the `.pub` exists on
+  disk, and OpenSSH appends `.pub`, reads it, and asks the agent for the
+  matching key. `IdentitiesOnly yes` stops the agent offering the work
+  key.
 
 ### D5. Read-only doctor
 
@@ -284,12 +305,13 @@ human's choice and never appears in the repo.
 | P2 | Access app created, `ssh <host>.ssh.<zone>` from the client opens the browser login once, then a shell | shell with no password prompt |
 | P3 | Client on Proton VPN, host off VPN | P2 still passes |
 | P4 | Host on Proton VPN | connector stays up for 10 minutes; if it flaps, `protocol: http2` fixes it |
-| P5 | `herdr --remote <host>.ssh.<zone>` attaches to the host's running session | herdr UI shows the remote panes; if `herdr: command not found`, adding Homebrew's bin to `~/.zshenv.local` on the host fixes it |
+| P5 | `herdr --remote <host>.ssh.<zone>` attaches to the host's running session; repeat after the Access token expires (or after deleting `~/.cloudflared/` token files) | herdr UI shows the remote panes; if `herdr: command not found`, adding Homebrew's bin to `~/.zshenv.local` on the host fixes it; the expired-token attach either opens the browser or fails fast after `cloudflared access login`, never hangs silently |
 | P6 | `claude remote-control` inside a herdr pane on the host, connect from the mobile app | session visible and steerable, no tunnel involved |
 | P7 | Remove the pubkey from `authorized_keys` | `ssh` is refused after the Access login (second gate proven) |
 
-Results go in the README Remote Access section as a dated "verified on"
-line per probe, or a dated "not verified" line if a probe was skipped.
+Results go in the README Remote Access section: the `**Status:**` line
+flips from `unverified` to a dated summary, and one dated line per probe
+records pass, fail, or skipped.
 If P1 to P3 fail for a structural reason (for example Access refusing
 the SSH app type on the free tier), the README records "do not" with the
 reason and the D4/D5 pieces stay inert; nothing needs removing.
@@ -315,29 +337,42 @@ reason and the D4/D5 pieces stay inert; nothing needs removing.
 - AC2 `ssh/configs/config_cloudflared.tmpl` exists, contains
   `ProxyCommand cloudflared access ssh --hostname %h`, and every `Host`
   line's pattern ends in `.ssh.example.com`.
-- AC3 The template and the tracked SSH config contain no token-like
-  string (no line longer than 120 chars, no `eyJ` JWT prefix) and no
-  hostname outside `example.com`.
+- AC3 The template contains no token-like string (no `eyJ` JWT prefix,
+  no run of 60 or more base64/url-safe characters) and no domain other
+  than `example.com`; the tracked SSH config contains no `eyJ` prefix
+  and no 60-character run either.
 - AC4 `install/common/link.sh` calls `seed_machine_local_file` with the
   template and `$HOME/.ssh/config_cloudflared`, never `ln -s` for it,
   and links `bin/remote-access-doctor` into `~/bin`.
 - AC5 `bin/remote-access-doctor` is executable, passes `bash -n`, and
-  contains no `sudo`, `launchctl load`, `launchctl bootstrap`,
-  `systemctl enable`, `systemctl start`, `cloudflared tunnel`, or
-  `cloudflared service` invocation.
-- AC6 With a temporary `HOME` and a stub `cloudflared` on `PATH`, the
-  doctor exits 0 on a fully seeded client and exits 1 when the Include
-  is missing; with the placeholder zone it prints a `[WARNING]` line
-  containing `not configured`.
+  has no non-comment line containing `sudo`, `launchctl load`,
+  `launchctl bootstrap`, `launchctl kickstart`, `systemctl enable`,
+  `systemctl start`, `systemctl restart`, `cloudflared tunnel`, or
+  `cloudflared service`. Comment lines (leading `#`) are exempt so the
+  header can point at the runbook.
+- AC6 With a temporary `HOME` (holding a real-file copy of the tracked
+  `ssh/configs/config` and of the template) and a stub `cloudflared` on
+  `PATH`: a seeded-but-unedited client exits 0 and prints a `[WARNING]`
+  line containing `not configured`; a client whose zone was edited to
+  `ssh.example.com.test` (the reserved `.test` TLD, never a real zone)
+  exits 0 with an `[OK]` line for the Include and no `[X]` line; a
+  client whose `~/.ssh/config` lacks the Include exits 1 with an `[X]`
+  line. No test ever writes a real zone.
 - AC7 `bin/remote-access-doctor.test.sh` is registered in
   `bin/dotfiles-tests` and passes; `install/install.test.sh` and
-  `install/claude-links.test.sh` pass; `git/hooks/public-safety.test.sh`
-  passes.
-- AC8 `README.md` has a `### Remote Access` section naming
-  `cloudflared access ssh`, `herdr --remote`, `claude remote-control`,
-  `remote-access-doctor`, and stating why WARP and Tailscale were not
-  chosen; `CLAUDE.md` names `config_cloudflared.tmpl` and
-  `remote-access-doctor`.
+  `install/claude-links.test.sh` pass; every file this branch adds or
+  changes outside `docs/` and `claude/contracts/` is free of `/Users/`
+  paths and high-confidence secret patterns (the public-safety suite's
+  own "no tracked planning artifacts" check fails by design while the
+  branch-only spec and plan are tracked, so the contract applies the
+  other two checks to the changed files directly).
+- AC8 `README.md` has a `### Remote Access` section that opens with a
+  `**Status:**` line (reading `unverified` until probe results replace
+  it), names `cloudflared access ssh`, `herdr --remote`,
+  `claude remote-control`, `remote-access-doctor`, `cloudflared access
+  login`, states why WARP and Tailscale were not chosen, and says
+  `herdr integration install` is not needed; `CLAUDE.md` names
+  `config_cloudflared.tmpl` and `remote-access-doctor`.
 - AC9 Changed files (excluding `docs/` and `claude/contracts/`) are
   within R8; added lines are ASCII.
 - AC10 Phase 1 probes P1 to P7: human-verify, recorded in the README.
