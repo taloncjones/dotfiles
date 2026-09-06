@@ -39,7 +39,7 @@
     },
     {
       "name": "claude-hooks-suite-has-rm-guard-checks",
-      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh 2>/dev/null | grep -c '^PASS  rmg: ' | grep -qx 21",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh 2>/dev/null | grep -c '^PASS  rmg: ' | grep -qx 57",
       "timeout_secs": 300
     },
     {
