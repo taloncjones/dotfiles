@@ -1,0 +1,136 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-06-scope-every-ecc-hook-that-reads-the-home-config-di",
+  "commands": [
+    {
+      "name": "template-excludes-exactly-seven-ids",
+      "run": "python3 -c \"import json,sys; env=json.load(open('claude/settings.json.tmpl')).get('env') or {}; ids={s.strip().lower() for s in env.get('ECC_DISABLED_HOOKS','').split(',') if s.strip()}; sys.exit(0 if ids=={'session-start:plan-canvas-sessions','stop:plan-canvas-pending','post:bash:command-log-audit','post:bash:command-log-cost','post:skill:track','pre:mcp-health-check','post:mcp-health-check'} else 1)\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "template-has-token-key",
+      "run": "python3 -c \"import json,sys; env=json.load(open('claude/settings.json.tmpl')).get('env') or {}; sys.exit(0 if env.get('ECC_AGENT_DATA_HOME')=='{{CLAUDE_CONFIG_DIR}}' and 'ECC_MCP_CONFIG_PATH' not in env and 'ECC_MCP_HEALTH_STATE_PATH' not in env else 1)\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "template-keeps-existing-env-keys",
+      "run": "python3 -c \"import json,sys; env=json.load(open('claude/settings.json.tmpl'))['env']; sys.exit(0 if env.get('ANTHROPIC_DEFAULT_OPUS_MODEL')=='claude-opus-4-8[1m]' and env.get('CLAUDE_CODE_DISABLE_TELEMETRY')=='1' and env.get('ECC_CONTEXT_MONITOR_COST_WARNINGS')=='0' else 1)\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "template-is-valid-json",
+      "run": "python3 -c \"import json; json.load(open('claude/settings.json.tmpl'))\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "links-suite",
+      "run": "sh install/claude-links.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "reconcile-leaves-no-token",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/cfg\"; DOTFILEDIR=\"$(pwd)\"; export DOTFILEDIR; . install/common/claude-links.sh; reconcile_claude_settings_file claude/settings.json.tmpl \"$d/cfg/settings.json\" >/dev/null 2>&1; ! grep -q 'CLAUDE_CONFIG_DIR}}' \"$d/cfg/settings.json\" && python3 -c \"import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d['env']['ECC_AGENT_DATA_HOME']==sys.argv[2] else 1)\" \"$d/cfg/settings.json\" \"$d/cfg\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "reconcile-converges",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/cfg\"; DOTFILEDIR=\"$(pwd)\"; export DOTFILEDIR; . install/common/claude-links.sh; reconcile_claude_settings_file claude/settings.json.tmpl \"$d/cfg/settings.json\" >/dev/null 2>&1; cp \"$d/cfg/settings.json\" \"$d/first.json\"; reconcile_claude_settings_file claude/settings.json.tmpl \"$d/cfg/settings.json\" >/dev/null 2>&1; cmp -s \"$d/cfg/settings.json\" \"$d/first.json\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "hooks-suite-sandboxed",
+      "run": "HOME=\"$(mktemp -d)\" sh claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "hooks-suite-passes-on-reconciled-dir",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/.claude\"; DOTFILEDIR=\"$(pwd)\"; export DOTFILEDIR; . install/common/claude-links.sh; reconcile_claude_settings_file claude/settings.json.tmpl \"$d/.claude/settings.json\" >/dev/null 2>&1; HOME=\"$d\" sh claude/hooks/claude-hooks.test.sh >\"$d/out\" 2>\"$d/err\" && grep -q 'scopes ECC state to this config dir' \"$d/out\" && grep -q 'excludes the account-leaking ECC hooks' \"$d/out\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "drift-fails-without-new-exclusion",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/.claude\"; python3 -c \"import json,sys; t=json.load(open('claude/settings.json.tmpl')); e=t['env']; e['ECC_DISABLED_HOOKS']=e['ECC_DISABLED_HOOKS'].replace(',post:skill:track',''); e['ECC_AGENT_DATA_HOME']=sys.argv[1]; json.dump(t, open(sys.argv[1]+'/settings.json','w'), indent=2)\" \"$d/.claude\"; if HOME=\"$d\" sh claude/hooks/claude-hooks.test.sh >\"$d/out\" 2>\"$d/err\"; then exit 1; fi; grep -q 'does not exclude the account-leaking ECC hooks' \"$d/err\" && ! grep -q 'does not scope ECC state' \"$d/err\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "drift-fails-on-foreign-data-home",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/.claude\"; python3 -c \"import json,sys; t=json.load(open('claude/settings.json.tmpl')); t['env']['ECC_AGENT_DATA_HOME']='/elsewhere/.claude'; json.dump(t, open(sys.argv[1]+'/settings.json','w'), indent=2)\" \"$d/.claude\"; if HOME=\"$d\" sh claude/hooks/claude-hooks.test.sh >\"$d/out\" 2>\"$d/err\"; then exit 1; fi; grep -q 'does not scope ECC state to this config dir' \"$d/err\" && ! grep -q 'does not exclude the account-leaking' \"$d/err\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "drift-fails-on-unsubstituted-token",
+      "run": "d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/.claude\"; cp claude/settings.json.tmpl \"$d/.claude/settings.json\"; if HOME=\"$d\" sh claude/hooks/claude-hooks.test.sh >\"$d/out\" 2>\"$d/err\"; then exit 1; fi; grep -q 'does not scope ECC state to this config dir' \"$d/err\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "new-suite-syntax",
+      "run": "sh -n claude/hooks/ecc-hook-isolation.test.sh && test -f claude/hooks/ecc-hook-isolation.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "isolation-suite",
+      "run": "ECC_HOOK_TEST_REQUIRE_ECC=1 sh claude/hooks/ecc-hook-isolation.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "isolation-suite-covers-every-planned-case",
+      "run": "out=\"$(ECC_HOOK_TEST_REQUIRE_ECC=1 sh claude/hooks/ecc-hook-isolation.test.sh 2>&1)\" && for s in 'excluded: command-log audit/cost' 'excluded: skill-run tracker' 'excluded: mcp-health-check' 'scoped: cost-tracker metrics' 'scoped: session-activity metrics' 'scoped: session-end summary' 'scoped: compaction log' 'scoped: session-start data dir' 'flag gate: the seven excluded ids answer no' 'flag gate: TDD, dispatcher, GateGuard, and scoped ids stay enabled'; do printf '%s\\n' \"$out\" | grep -q \"^PASS  $s\" || { echo \"missing: $s\"; exit 1; }; done && test \"$(printf '%s\\n' \"$out\" | grep -c '^PASS  control:')\" -ge 8",
+      "timeout_secs": 600
+    },
+    {
+      "name": "isolation-suite-skips-without-ecc",
+      "run": "out=\"$(ECC_PLUGIN_ROOT=/nonexistent sh claude/hooks/ecc-hook-isolation.test.sh)\" && printf '%s\\n' \"$out\" | grep -q '^SKIP: ' && ! ECC_PLUGIN_ROOT=/nonexistent ECC_HOOK_TEST_REQUIRE_ECC=1 sh claude/hooks/ecc-hook-isolation.test.sh >/dev/null 2>&1",
+      "timeout_secs": 600
+    },
+    {
+      "name": "isolation-suite-fails-without-template-value",
+      "run": "test -f claude/hooks/ecc-hook-isolation.test.sh || exit 1; d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/claude\"; python3 -c \"import json,sys; t=json.load(open('claude/settings.json.tmpl')); t['env'].pop('ECC_DISABLED_HOOKS', None); json.dump(t, open(sys.argv[1], 'w'), indent=2)\" \"$d/claude/settings.json.tmpl\"; if (cd \"$d\" && ECC_HOOK_TEST_REQUIRE_ECC=1 sh \"$OLDPWD/claude/hooks/ecc-hook-isolation.test.sh\" >\"$d/out\" 2>\"$d/err\"); then exit 1; fi; grep -q '^FAIL  excluded: command-log audit/cost' \"$d/err\" && grep -q '^FAIL  excluded: mcp-health-check' \"$d/err\" && grep -q '^FAIL  flag gate: the seven excluded ids answer no' \"$d/err\" && ! grep -q '^FAIL  scoped:' \"$d/err\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "isolation-suite-fails-without-data-home-key",
+      "run": "test -f claude/hooks/ecc-hook-isolation.test.sh || exit 1; d=\"$(mktemp -d)\"; trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/claude\"; python3 -c \"import json,sys; t=json.load(open('claude/settings.json.tmpl')); t['env'].pop('ECC_AGENT_DATA_HOME', None); json.dump(t, open(sys.argv[1], 'w'), indent=2)\" \"$d/claude/settings.json.tmpl\"; if (cd \"$d\" && ECC_HOOK_TEST_REQUIRE_ECC=1 sh \"$OLDPWD/claude/hooks/ecc-hook-isolation.test.sh\" >\"$d/out\" 2>\"$d/err\"); then exit 1; fi; grep -q '^FAIL  scoped: cost-tracker metrics' \"$d/err\" && ! grep -q '^FAIL  excluded:' \"$d/err\"",
+      "timeout_secs": 600
+    },
+    {
+      "name": "canvas-suite-still-passes",
+      "run": "PLAN_CANVAS_TEST_REQUIRE_ECC=1 sh claude/hooks/plan-canvas-isolation.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "runner-registers-suite",
+      "run": "grep -qx 'sh claude/hooks/ecc-hook-isolation.test.sh' bin/dotfiles-tests && grep -qx 'sh claude/hooks/plan-canvas-isolation.test.sh' bin/dotfiles-tests",
+      "timeout_secs": 600
+    },
+    {
+      "name": "claude-md-documents-isolation",
+      "run": "for s in ECC_DISABLED_HOOKS ecc-hook-isolation.test.sh plan-canvas-isolation.test.sh '{{CLAUDE_CONFIG_DIR}}' ECC_AGENT_DATA_HOME post:skill:track post:bash:command-log-audit post:bash:command-log-cost pre:mcp-health-check post:mcp-health-check session-start:plan-canvas-sessions stop:plan-canvas-pending; do grep -qF \"$s\" CLAUDE.md || { echo \"CLAUDE.md missing $s\"; exit 1; }; done",
+      "timeout_secs": 600
+    },
+    {
+      "name": "shell-syntax-of-touched-scripts",
+      "run": "bash -n install/common/claude-links.sh && sh -n install/claude-links.test.sh && sh -n claude/hooks/claude-hooks.test.sh && bash -n bin/dotfiles-tests",
+      "timeout_secs": 600
+    },
+    {
+      "name": "changed-files-within-scope",
+      "run": "git diff --name-only 682d9db093eb63609a72070d78444aa8bb403c06 HEAD | grep -v '^docs/' | grep -v '^claude/contracts/' | grep -vxE 'claude/settings.json.tmpl|install/common/claude-links.sh|install/claude-links.test.sh|claude/hooks/claude-hooks.test.sh|claude/hooks/ecc-hook-isolation.test.sh|bin/dotfiles-tests|CLAUDE.md' | { ! grep -q .; }",
+      "timeout_secs": 600
+    },
+    {
+      "name": "no-parallel-branch-edits",
+      "run": "! git diff --name-only 682d9db093eb63609a72070d78444aa8bb403c06 HEAD | grep -qE '^(claude/hooks/herdr_orch_core\\.py|claude/skills/herdr-orchestration/|claude/skills/co-review/|git/hooks/commit-msg$|install/common/codex-)'",
+      "timeout_secs": 600
+    },
+    {
+      "name": "canvas-suite-untouched",
+      "run": "git diff --quiet 682d9db093eb63609a72070d78444aa8bb403c06 HEAD -- claude/hooks/plan-canvas-isolation.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "no-emoji-in-changed-files",
+      "run": "git diff --name-only 682d9db093eb63609a72070d78444aa8bb403c06 HEAD | grep -v '^docs/' | while read -r f; do [ -f \"$f\" ] || continue; LC_ALL=C grep -nP '[\\x{1F300}-\\x{1FAFF}\\x{2600}-\\x{27BF}]' \"$f\" && exit 1; done; exit 0",
+      "timeout_secs": 600
+    }
+  ]
+}
