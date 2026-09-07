@@ -15,13 +15,15 @@
 ## Global Constraints
 
 - Files that may change or be created (spec Scope): `claude/skills/todos/scripts/todos.sh` (two added lines, none removed), `claude/skills/todos/scripts/todos_dashboard.py` (new), `claude/skills/todos/scripts/tests/todos_dashboard_test.sh` (new), `claude/skills/todos/SKILL.md`, `claude/skills/herdr-orchestration/SKILL.md` (exactly one added line, none removed), `bin/dotfiles-tests` (one `SUITES` line). The contract's `diff-scope`, `dispatch-thin`, and `orch-preflight-line` commands enforce this. `todos_test.sh` must not change.
-- Command surface, verbatim (spec D1): `todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]`; env overrides `TODOS_DASHBOARD_DIR`, `TODOS_STATE_ROOT`, `TODOS_DASHBOARD_NOW`, `TODOS_DASHBOARD_TODOS_SH`; existing `TODOS_TODAY`, `TODOS_BASE_REF`, `TODOS_GH` pass through.
+- Command surface, verbatim (spec D1): `todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]`; env overrides `TODOS_DASHBOARD_DIR`, `TODOS_STATE_ROOT`, `TODOS_DASHBOARD_NOW`, `TODOS_DASHBOARD_TODOS_SH`, `TODOS_DASHBOARD_OPENER`; existing `TODOS_TODAY`, `TODOS_BASE_REF`, `TODOS_GH` pass through.
 - Default output `${TODOS_DASHBOARD_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/dashboard}/<repo_slug>.html`; default state root `${TODOS_STATE_ROOT:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch}`; task id `td-<todo basename>`.
 - Never write under `.todos/` or the state root (guarded, exit 1); no `TODO.md` regeneration; no network unless `--online`; no JavaScript, no remote assets in the page.
 - In-flight statuses, verbatim (spec D2): `kickoff`, `in-progress`, `blocked`, `review-dispatched`, `changes-requested`, `reviewed`.
 - Design tokens verbatim from spec D5 (light `#f7f6f2 #1f2a24 #6b746e #2f6f5e #d9ddd7 #ebeae4`, semantic `#b3541e #3b6ea5 #8a6d1f`; dark `#171b19 #e8ece9 #9aa39d #7fbfa8 #2c332f #232927 #e0895a #7fa9d8 #d1b25a`).
 - No emojis, no AI attribution, ASCII only in added lines, LF endings, `#!/usr/bin/env bash` for bash, stdlib-only Python. Commit format `<scope>: <summary>`, imperative, under 75 chars.
-- Test baseline (spec, 2026-09-07 at `026f043`): `todos_test.sh` 162 passed, 0 failed. The new suite must report 0 failed with at least 85 checks (it reports 92 as written).
+- Test baseline (spec, 2026-09-07 at `026f043`): `todos_test.sh` 162 passed, 0 failed. The new suite must report 0 failed with at least 115 checks (it reports 121 as written).
+- Run the repo test runner as `bash bin/dotfiles-tests` (it is a bash script; `sh` is dash on Linux). Run the orchestration core from the worktree, `python3 claude/hooks/herdr_orch_core.py`, not from `~/.claude/hooks`.
+- `git/hooks/public-safety.test.sh` fails while `docs/plans/` or `docs/specs/` files are tracked; Task 4 drops them from the index as the final commit (spec, Branch-only documents).
 - Do not touch `.worktrees/claude-codex-parity`, `co-review`, the herdr brief template, or `claude/hooks/herdr_orch_core.py`.
 
 ## File Structure
@@ -30,7 +32,7 @@
 |---|---|
 | `claude/skills/todos/scripts/todos.sh` | Usage-comment line for `dashboard`; `main` case that execs the renderer. Nothing else. |
 | `claude/skills/todos/scripts/todos_dashboard.py` | Argument parsing and path guard; repo slug; frontmatter and body parsing; `Resolver` (subprocess calls into `todos.sh`); herdr record reading with staleness rules; research index; HTML rendering with the D5 tokens; atomic write; optional open. |
-| `claude/skills/todos/scripts/tests/todos_dashboard_test.sh` | Fixture board builder and thirteen test groups, one per acceptance area. |
+| `claude/skills/todos/scripts/tests/todos_dashboard_test.sh` | Env sanitisation, hardened fixture repos, the fixture board builder, and eighteen test groups. |
 | `claude/skills/todos/SKILL.md` | `dashboard` command row; new `## Dashboard` section; `## Research reports` convention section; `research/` line in the Layout block. |
 | `claude/skills/herdr-orchestration/SKILL.md` | One bullet in section 1 preflight. |
 | `bin/dotfiles-tests` | Register the suite. |
@@ -61,8 +63,13 @@ Suite labels are the `ok   <label>` lines the contract's `dashboard-suite` comma
 | AC15 docs | `skill-doc-pins`, `orch-preflight-line` |
 | AC16 registered suite | `suite-registered`, `dashboard-suite-size` |
 | AC17 link boundaries | `dashboard-suite` (`links: boundaries`) |
+| D1 opener failure is a warning, stdout stays the path | `dashboard-suite` (`opener: missing opener is a warning`) |
+| D1 output guard follows symlinks | `dashboard-suite` (`symlink guard: output path through a symlink into .todos`) |
+| D2 record shapes: empty review record, null fields, stale review, fresh done | `dashboard-suite` (`records: empty, null, and stale record shapes`) |
+| D2 frontmatter first occurrence wins | `dashboard-suite` (`frontmatter: first occurrence wins`) |
+| D4 attribute safety | `dashboard-suite` (`inject: frontmatter values never become attributes`), `render-smoke` (no `on*=` attribute) |
 | D3 visibility warning | `dashboard-suite` (`visibility: .todos exclusion warning`) |
-| D4 no script, no remote asset | `render-smoke` |
+| D4 no script, no remote asset, no event attribute | `render-smoke`, `dashboard-suite` (check `render: inert page`) |
 | Scope, ASCII, attribution, syntax, stdlib-only | `diff-scope`, `ascii-added-lines`, `no-attribution-in-added-lines`, `syntax`, `stdlib-only` |
 | D5 both colour schemes look right in a browser | human-verify (one look after Task 4) |
 | D6 the orchestrator runs the preflight step | human-verify on the next orchestrated turn after merge |
@@ -130,6 +137,12 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TODOS="$HERE/../todos.sh"
 CORE="$HERE/../../../../hooks/herdr_orch_core.py"
 
+# A developer's own overrides must not leak into the fixtures.
+unset TODOS_DASHBOARD_DIR TODOS_STATE_ROOT TODOS_DASHBOARD_TODOS_SH TODOS_DASHBOARD_OPENER \
+      TODOS_OFFLINE TODOS_GH TODOS_BASE_REF XDG_STATE_HOME
+# Fixture commits must not run the user's hooks, templates, or signing.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TEMPLATE_DIR=""
+
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "$2"; }
@@ -146,10 +159,12 @@ canon_helper() { /usr/bin/env realpath "$1" 2>/dev/null || printf '%s' "$1"; }
 mk_repo() {
   local d; d=$(mktemp -d); d=$(canon_helper "$d")
   ( cd "$d" && git init -q && git config user.email t@t && git config user.name t \
+    && git config commit.gpgsign false && git config core.hooksPath /dev/null \
     && git commit -q --allow-empty -m base \
     && git update-ref refs/remotes/origin/main HEAD \
     && git remote add origin git@github.com:Org/Repo.git \
-    && printf '.todos/\n' >>.git/info/exclude ) >/dev/null 2>&1
+    && mkdir -p .git/info && printf '.todos/\n' >>.git/info/exclude ) >/dev/null 2>&1 \
+    || { printf 'todos_dashboard_test: cannot build a fixture repo in %s\n' "$d" >&2; exit 2; }
   printf '%s' "$d"
 }
 mk_todo() { # mk_todo <repo> <pending|completed> <name>  (body on stdin)
@@ -270,7 +285,7 @@ err() { cat "$ERRF"; }
 
 test_render_fixture() {
   local repo sr f out
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
   out=$(render "$repo" "$sr" --out "$f")
   assert_eq "render: exit 0" "$(rc)" "0"
   assert_eq "render: prints the path" "$out" "$f"
@@ -292,6 +307,7 @@ test_render_fixture() {
   assert_file_has "render: title escaped" "$f" '&lt;script&gt;alert(1)&lt;/script&gt;'
   assert_file_lacks "render: no raw script tag" "$f" '<script'
   assert_file_has "render: stamp" "$f" 'generated 2026-05-07 09:00'
+  if grep -qiE '<link|<iframe|@import|url\(|<script| on[a-z]+="' "$f"; then bad "render: inert page" "script, link, iframe, import, url(), or on*= handler"; else ok "render: inert page"; fi
   ok "render: fixture board"
   rm -rf "$repo" "$sr"
 }
@@ -299,7 +315,7 @@ test_render_fixture
 
 test_research_index() {
   local repo sr f
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_file_has "research: notes entry" "$f" 'data-research="2026-05-06-notes.md"'
   assert_file_has "research: findings entry" "$f" 'data-research="td-x/review-findings.md"'
@@ -317,7 +333,7 @@ test_research_index
 
 test_default_path_slug() {
   local repo sr out slug
-  repo=$(mk_repo); sr=$(mktemp -d); slug=$(core_slug git@github.com:Org/Repo.git)
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); slug=$(core_slug git@github.com:Org/Repo.git)
   out=$(TODOS_DASHBOARD_DIR="$repo/dash" render "$repo" "$sr")
   assert_eq "slug: default path matches core repo_slug" "$out" "$repo/dash/$slug.html"
   [ -f "$repo/dash/$slug.html" ] && ok "slug: file written" || bad "slug: file written" "missing"
@@ -331,7 +347,7 @@ test_default_path_slug
 
 test_read_only() {
   local repo sr before after
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"
   before=$(cd "$sr" && find . -type f | sort | xargs shasum)
   render "$repo" "$sr" --out "$repo/out/board.html" >/dev/null
   after=$(cd "$sr" && find . -type f | sort | xargs shasum)
@@ -344,7 +360,7 @@ test_read_only
 
 test_empty_board() {
   local repo sr f
-  repo=$(mk_repo); sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_eq "empty: exit 0" "$(rc)" "0"
   assert_file_has "empty: open" "$f" 'No open todos.'
@@ -357,7 +373,7 @@ test_empty_board
 
 test_flags() {
   local repo sr f out
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
   mk_todo "$repo" completed 2026-05-09-newer <<'EOF'
 ---
 created: 2026-05-09
@@ -367,8 +383,9 @@ EOF
   render "$repo" "$sr" --out "$f" --completed 0 >/dev/null
   assert_file_lacks "flags: --completed 0 hides section" "$f" '<h2>Completed</h2>'
   render "$repo" "$sr" --out "$f" --completed 1 >/dev/null
-  assert_eq "flags: --completed 1 shows one row" "$(grep -c 'data-todo="2026-05-0[39]-' "$f")" "1"
+  assert_eq "flags: --completed 1 shows one row" "$(grep -o 'data-todo="2026-05-0[39]-[a-z-]*"' "$f" | wc -l | tr -d ' ')" "1"
   assert_file_has "flags: --completed 1 keeps newest" "$f" 'data-todo="2026-05-09-newer"'
+  assert_file_lacks "flags: --completed 1 drops older" "$f" 'data-todo="2026-05-03-merged"'
   out=$(render "$repo" "$sr" --out "$f" --completed -1)
   assert_eq "flags: negative completed exits 1" "$(rc)" "1"
   assert_eq "flags: negative completed prints nothing" "$out" ""
@@ -384,7 +401,7 @@ test_flags
 
 test_offline_precedence() {
   local repo sr gh
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"; gh="$repo/gh"; mk_gh_stub "$gh"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; gh="$repo/gh"; mk_gh_stub "$gh"
   TODOS_GH="$gh" render "$repo" "$sr" --out "$repo/out/a.html" >/dev/null
   [ -e "$gh.calls" ] && bad "offline: default makes no gh call" "$(cat "$gh.calls")" || ok "offline: default makes no gh call"
   TODOS_GH="$gh" render "$repo" "$sr" --out "$repo/out/b.html" --online >/dev/null
@@ -402,7 +419,7 @@ test_offline_precedence
 
 test_output_guard() {
   local repo sr slug out
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"; slug=$(core_slug git@github.com:Org/Repo.git)
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; slug=$(core_slug git@github.com:Org/Repo.git)
   out=$(render "$repo" "$sr" --out "$repo/.todos/x.html")
   assert_eq "guard: .todos exits 1" "$(rc)" "1"
   assert_contains "guard: .todos message" "$(err)" "refusing to write"
@@ -420,7 +437,7 @@ test_output_guard
 
 test_failed_write_preserves() {
   local repo sr f before after out
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
   render "$repo" "$sr" --out "$f" >/dev/null
   before=$(shasum "$f")
   if [ "$(id -u)" = 0 ]; then
@@ -443,7 +460,7 @@ test_failed_write_preserves
 
 test_unreadable_skipped() {
   local repo sr f
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
   if [ "$(id -u)" = 0 ]; then
     ok "unreadable: skipped as root"
   else
@@ -462,7 +479,7 @@ test_unreadable_skipped
 
 test_self_invalid_refs() {
   local repo sr f stub
-  repo=$(mk_repo); sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
   mk_todo "$repo" pending 2026-05-01-loop <<'EOF'
 ---
 created: 2026-05-01
@@ -494,7 +511,7 @@ test_self_invalid_refs
 
 test_link_boundaries() {
   local repo sr f
-  repo=$(mk_repo); sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
   mk_todo "$repo" pending 2026-05-01-links <<'EOF'
 ---
 created: 2026-05-01
@@ -517,7 +534,7 @@ test_link_boundaries
 
 test_visibility_warning() {
   local repo sr
-  repo=$(mk_repo); sr=$(mktemp -d); mk_board "$repo" "$sr"
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"
   render "$repo" "$sr" --out "$repo/out/a.html" >/dev/null
   assert_missing "visibility: excluded repo is quiet" "$(err)" "neither git-ignored nor tracked"
   : >"$repo/.git/info/exclude"
@@ -529,6 +546,116 @@ test_visibility_warning() {
 }
 test_visibility_warning
 
+test_attribute_injection() {
+  local repo sr f
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  mk_todo "$repo" pending 2026-05-01-inject <<'EOF'
+---
+created: 2026-05-01
+title: Inject
+priority: x" onclick="alert(1)
+area: y" onmouseover="alert(2)
+---
+EOF
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "inject: exit 0" "$(rc)" "0"
+  assert_file_lacks "inject: no onclick attribute" "$f" ' onclick="'
+  assert_file_lacks "inject: no onmouseover attribute" "$f" ' onmouseover="'
+  if grep -qE ' on[a-z]+="' "$f"; then bad "inject: no event attributes at all" "on*= attribute present"; else ok "inject: no event attributes at all"; fi
+  assert_file_has "inject: priority escaped as text" "$f" 'x&quot; onclick=&quot;alert(1)'
+  ok "inject: frontmatter values never become attributes"
+  rm -rf "$repo" "$sr"
+}
+test_attribute_injection
+
+test_symlink_guard() {
+  local repo sr out
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"
+  ln -s "$repo/.todos" "$repo/alias"
+  out=$(render "$repo" "$sr" --out "$repo/alias/x.html")
+  assert_eq "symlink guard: exits 1" "$(rc)" "1"
+  assert_contains "symlink guard: message" "$(err)" "refusing to write"
+  [ -e "$repo/.todos/x.html" ] && bad "symlink guard: nothing written" "written" || ok "symlink guard: nothing written"
+  ok "symlink guard: output path through a symlink into .todos"
+  rm -rf "$repo" "$sr"
+}
+test_symlink_guard
+
+test_opener_failure() {
+  local repo sr f out
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  out=$(TODOS_DASHBOARD_OPENER="$repo/no-such-opener" render "$repo" "$sr" --out "$f" --open)
+  assert_eq "opener: exit 0 when opener is missing" "$(rc)" "0"
+  assert_eq "opener: stdout is the path only" "$out" "$f"
+  assert_contains "opener: warning on stderr" "$(err)" "cannot open"
+  ok "opener: missing opener is a warning"
+  rm -rf "$repo" "$sr"
+}
+test_opener_failure
+
+test_record_shapes() {
+  local repo sr f slug tasks
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  slug=$(core_slug git@github.com:Org/Repo.git); tasks="$sr/$slug/tasks"; mkdir -p "$tasks"
+  mk_todo "$repo" pending 2026-05-01-empty-review <<'EOF'
+---
+created: 2026-05-01
+title: Empty review record
+---
+EOF
+  printf '{"status":"reviewed","review_outcome":"approved","review_head_sha":"abc","workers":[{"phase":"review","agent":"rev-a"}]}' >"$tasks/td-2026-05-01-empty-review.json"
+  printf '{}' >"$tasks/td-2026-05-01-empty-review.review.json"
+  mk_todo "$repo" pending 2026-05-02-null-fields <<'EOF'
+---
+created: 2026-05-02
+title: Null fields
+---
+EOF
+  printf '{"status":null,"workers":"nope","review_outcome":["x"]}' >"$tasks/td-2026-05-02-null-fields.json"
+  mk_todo "$repo" pending 2026-05-03-stale-review <<'EOF'
+---
+created: 2026-05-03
+title: Stale review
+---
+EOF
+  printf '{"status":"in-progress","review_head_sha":"new","workers":[{"phase":"implement","agent":"impl-a"}]}' >"$tasks/td-2026-05-03-stale-review.json"
+  printf '{"outcome":"approved","blocking_count":0,"reviewed_head_sha":"old"}' >"$tasks/td-2026-05-03-stale-review.review.json"
+  printf '{"outcome":"completed","phase":"implement","agent":"impl-a"}' >"$tasks/td-2026-05-03-stale-review.done.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "records: exit 0" "$(rc)" "0"
+  assert_file_has "records: empty review record shows unknown" "$f" 'review unknown'
+  assert_file_lacks "records: empty review record hides task review_outcome" "$f" 'review approved</div>'
+  assert_file_has "records: null status is recorded" "$f" 'data-todo="2026-05-02-null-fields" data-state="open" data-task-status=""'
+  assert_file_has "records: stale review tagged" "$f" 'review approved (0 blocking) (stale)'
+  assert_file_has "records: fresh done record untagged" "$f" 'done completed implement</div>'
+  assert_file_has "records: in-flight count ignores null status" "$f" 'data-count="in-flight">2<'
+  ok "records: empty, null, and stale record shapes"
+  rm -rf "$repo" "$sr"
+}
+test_record_shapes
+
+test_frontmatter_first_match() {
+  local repo sr f
+  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  mk_todo "$repo" pending 2026-05-01-dup <<'EOF'
+---
+created: 2026-05-01
+title:
+title: later
+area: first
+area: second
+---
+EOF
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_file_lacks "frontmatter: blank first title wins" "$f" '>later<'
+  assert_file_has "frontmatter: title falls back to basename" "$f" '<div class="name">2026-05-01-dup</div>'
+  assert_file_has "frontmatter: first area wins" "$f" '>first<'
+  assert_file_lacks "frontmatter: second area ignored" "$f" '>second<'
+  ok "frontmatter: first occurrence wins"
+  rm -rf "$repo" "$sr"
+}
+test_frontmatter_first_match
+
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
@@ -538,11 +665,11 @@ Then `chmod +x claude/skills/todos/scripts/tests/todos_dashboard_test.sh`.
 
 - [ ] **Step 4: Run the suite to see it fail**
 
-Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1 | tail -3`
-Expected: many `FAIL` lines (the renderer does not exist yet, so every render exits non-zero and no HTML is written) and a last line of the form `N passed, M failed` with `M > 0`; exit code 1.
+Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh >/tmp/dash.log 2>&1; echo rc=$?; tail -1 /tmp/dash.log`
+Expected: `rc=1` and a last line of the form `N passed, M failed` with `M > 0` (the renderer does not exist yet, so every render exits non-zero and no HTML is written).
 
-Run: `bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1 | tail -1`
-Expected: `162 passed, 0 failed` (the dispatch lines change nothing for existing verbs).
+Run: `bash claude/skills/todos/scripts/tests/todos_test.sh >/tmp/todos.log 2>&1; echo rc=$?; tail -1 /tmp/todos.log`
+Expected: `rc=0` and `162 passed, 0 failed` (the dispatch lines change nothing for existing verbs).
 
 - [ ] **Step 5: Commit**
 
@@ -661,6 +788,7 @@ def frontmatter(text):
     """
     lines = text.split("\n")
     scalars, lists, body_start = {}, {}, 0
+    seen = set()
     if lines and lines[0].strip() == "---":
         current = None
         i = 1
@@ -676,11 +804,17 @@ def frontmatter(text):
                 m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(.*)$", line)
                 if m:
                     key, val = m.group(1), m.group(2)
+                    first = key not in seen
+                    seen.add(key)
                     if val == "":
-                        current = key
-                        lists.setdefault(key, [])
-                    else:
-                        scalars.setdefault(key, unquote(val))
+                        # A blank first value claims the key (frontmatter_value
+                        # returns the first line, blank or not); its list items
+                        # are still collected only for the first occurrence.
+                        current = key if first else None
+                        if first:
+                            lists[key] = []
+                    elif first:
+                        scalars[key] = unquote(val)
             i += 1
         else:
             body_start = len(lines)
@@ -841,7 +975,7 @@ def herdr_status(tasks_dir, basename):
         st["status"] = "unreadable"
     rev, bad = read_json(tasks_dir / f"{task_id}.review.json")
     if rev is not None:
-        st["review"] = field(rev, "outcome")
+        st["review"] = field(rev, "outcome") or "unknown"
         st["blocking_count"] = field(rev, "blocking_count")
         st["findings_ref"] = field(rev, "findings_ref")
         st["review_stale"] = not st["review_head_sha"] or field(rev, "reviewed_head_sha") != st["review_head_sha"]
@@ -1007,7 +1141,8 @@ ul.research li { padding: 12px 0; border-bottom: 1px solid var(--rule); }
 
 
 def chip(text, cls=""):
-    return f'<span class="chip {cls}">{esc(text)}</span>' if text else ""
+    # cls is always a literal from this file, never user data; escaped anyway.
+    return f'<span class="chip {esc(cls)}">{esc(text)}</span>' if text else ""
 
 
 def render_herdr(h):
@@ -1043,7 +1178,8 @@ def render_links(links):
 
 
 def render_todo_cell(t):
-    chips = [chip(t["area"]), chip(t["priority"], f"prio-{t['priority']}"),
+    prio_cls = f"prio-{t['priority']}" if t["priority"] in PRIORITY_WEIGHT else ""
+    chips = [chip(t["area"]), chip(t["priority"], prio_cls),
              chip(t["maturity"]), chip(t["tier"])]
     chips = "".join(c for c in chips if c)
     out = [f'<div class="name">{esc(t["title"])}</div>',
@@ -1191,11 +1327,13 @@ def guard_out_path(out, protected):
 
 
 def open_file(path):
-    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    """Best-effort, detached: never waited on, never touches stdout."""
+    opener = os.environ.get("TODOS_DASHBOARD_OPENER") or ("open" if sys.platform == "darwin" else "xdg-open")
     try:
-        subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        warn(f"cannot open {path}: {opener} not available")
+        subprocess.Popen([opener, str(path)], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        warn(f"cannot open {path}: {opener}: {e.strerror or e}")
 
 
 USAGE = "usage: todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]"
@@ -1264,12 +1402,20 @@ def main(argv=None):
     stamp = os.environ.get("TODOS_DASHBOARD_NOW") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     page = render_page(root.name, branch, stamp, pending, completed, research, args.completed > 0)
 
+    tmp = out.with_name(out.name + f".tmp.{os.getpid()}")
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_name(out.name + f".tmp.{os.getpid()}")
-        tmp.write_text(page, encoding="utf-8")
+        # O_EXCL|O_NOFOLLOW: a planted file or symlink at the temp name fails
+        # here instead of being followed; nothing is written through it.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(page)
         os.replace(tmp, out)
     except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
         die(f"cannot write {out}: {e.strerror or e}")
     print(out)
     if args.open:
@@ -1283,14 +1429,36 @@ if __name__ == "__main__":
 
 Then `chmod +x claude/skills/todos/scripts/todos_dashboard.py`.
 
-- [ ] **Step 2: Run the suite to see it pass**
+- [ ] **Step 2: Smoke the pure functions before the suite**
 
-Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1 | grep -v '^  ok'`
-Expected: only the summary line `92 passed, 0 failed`; exit code 0.
+Run:
 
-If any check fails, fix the renderer, not the test: the test encodes the spec's acceptance strings verbatim.
+```bash
+python3 - <<'EOF'
+import importlib.util
+s = importlib.util.spec_from_file_location("d", "claude/skills/todos/scripts/todos_dashboard.py")
+d = importlib.util.module_from_spec(s); s.loader.exec_module(d)
+sc, ls, body = d.frontmatter("---\ntitle:\ntitle: later\narea: a\ndepends_on:\n  - pr:7\nfiles:\n---\n\n## Problem\n\nfirst line\n")
+assert sc == {"area": "a"} and ls == {"title": [], "depends_on": ["pr:7"], "files": []}, (sc, ls)
+assert d.problem_summary(body) == "first line"
+assert d.body_links("[PR](https://github.com/o/r/pull/12). x https://x.test/a.") == [("PR #12", "https://github.com/o/r/pull/12"), ("x.test", "https://x.test/a")]
+assert d.safe_href("javascript:alert(1)") == "" and d.safe_href("https://ok") == "https://ok"
+assert d.repo_slug("git@github.com:Org/Repo.git").startswith("github-com-org-repo-")
+assert d.open_sort_key({"priority": "high", "due": "", "created": "2026-01-01", "basename": "b"}) == ("102026-01-01", "b")
+print("smoke ok")
+EOF
+```
 
-- [ ] **Step 3: Confirm the invariants the contract checks**
+Expected: `smoke ok`. A failing assertion points at the parsing function to fix before running the whole suite.
+
+- [ ] **Step 3: Run the suite to see it pass**
+
+Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh >/tmp/dash.log 2>&1; echo rc=$?; grep -v '^  ok' /tmp/dash.log`
+Expected: `rc=0` and only the summary line `121 passed, 0 failed`.
+
+The renderer and suite above were run together before this plan was written (121 passed), so a failure here most likely means a paste slip; compare the file against the plan first. If the failure survives that comparison, fix whichever side is wrong against the spec and say so in the commit message: the spec is the authority, the embedded code is its best current rendering, not scripture.
+
+- [ ] **Step 4: Confirm the invariants the contract checks**
 
 Run: `python3 -m py_compile claude/skills/todos/scripts/todos_dashboard.py && bash -n claude/skills/todos/scripts/todos.sh && echo syntax-ok`
 Expected: `syntax-ok`.
@@ -1298,11 +1466,17 @@ Expected: `syntax-ok`.
 Run: `base=$(git merge-base origin/main HEAD); git diff "$base" --stat -- claude/skills/todos/scripts/todos.sh claude/skills/todos/scripts/tests/todos_test.sh`
 Expected: `todos.sh | 2 +` and no line for `todos_test.sh`.
 
-- [ ] **Step 4: One look at the page**
+- [ ] **Step 5: One look at the page**
 
-Run: `bash claude/skills/todos/scripts/todos.sh dashboard --open` from the worktree (this renders the real `.todos/` board to the default path and opens it). Look once in the browser, in both light and dark mode if the OS toggle is handy; expected: the header counts, the Open table with blocked rows striped, the Completed table, and the Research section (empty-state text unless `.todos/research/` exists). Do not iterate on visuals beyond a real defect (clipped column, unreadable text). Note in the commit message if anything was fixed from this look.
+Run from the worktree, so the look uses the real board but writes only to a temp path (the state root is read, never written):
 
-- [ ] **Step 5: Commit**
+```bash
+d=$(mktemp -d); bash claude/skills/todos/scripts/todos.sh dashboard --out "$d/board.html" --open
+```
+
+Look once in the browser, in both light and dark mode if the OS toggle is handy; expected: the header counts, the Open table with blocked rows striped, the Completed table, and the Research section (empty-state text unless `.todos/research/` exists). Do not iterate on visuals beyond a real defect (clipped column, unreadable text). Note in the commit message if anything was fixed from this look.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add claude/skills/todos/scripts/todos_dashboard.py
@@ -1433,8 +1607,8 @@ In `claude/skills/herdr-orchestration/SKILL.md` section 1, step 3 is a bullet li
 
 - [ ] **Step 5: Verify the doc pins**
 
-Run: `for s in 'todos.sh dashboard' '--completed' '.todos/research/' 'kind:' 'artifact:' 'task:' 'TODOS_DASHBOARD_DIR' 'TODOS_STATE_ROOT' 'todos.sh init' 'review-findings'; do grep -qF -- "$s" claude/skills/todos/SKILL.md || echo "missing $s"; done; echo pins-checked`
-Expected: only `pins-checked`.
+Run: `ok=1; for s in 'todos.sh dashboard' '--completed' '.todos/research/' 'kind:' 'artifact:' 'task:' 'TODOS_DASHBOARD_DIR' 'TODOS_STATE_ROOT' 'todos.sh init' 'review-findings'; do grep -qF -- "$s" claude/skills/todos/SKILL.md || { echo "missing $s"; ok=0; }; done; [ "$ok" = 1 ] && echo pins-ok`
+Expected: `pins-ok` and nothing else.
 
 Run: `base=$(git merge-base origin/main HEAD); git diff "$base" --numstat -- claude/skills/herdr-orchestration/SKILL.md`
 Expected: `1	0	claude/skills/herdr-orchestration/SKILL.md`.
@@ -1448,36 +1622,58 @@ git commit -m "todos: Document the dashboard and the research convention"
 
 ---
 
-### Task 4: Verification
+### Task 4: Verification and the branch-only docs drop
 
-**Files:** none modified (fix-forward commits only if something fails).
+**Files:** none modified except the index removal in step 5 (fix-forward commits only if something fails).
 
 - [ ] **Step 1: Run both todos suites and the registered runner entry**
 
-Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1 | tail -1; bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1 | tail -1; sh bin/dotfiles-tests --list | grep todos_dashboard`
-Expected: `92 passed, 0 failed`, `162 passed, 0 failed`, and the suite path.
+Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh >/tmp/dash.log 2>&1; echo dash=$?; tail -1 /tmp/dash.log; bash claude/skills/todos/scripts/tests/todos_test.sh >/tmp/todos.log 2>&1; echo todos=$?; tail -1 /tmp/todos.log; bash bin/dotfiles-tests --list | grep todos_dashboard`
+Expected: `dash=0`, `121 passed, 0 failed`, `todos=0`, `162 passed, 0 failed`, and the suite path.
 
-- [ ] **Step 2: Run the task contract**
+- [ ] **Step 2: Run the task contract with the worktree's own core**
 
 Run:
 
 ```bash
-python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py verify-contract --repo-slug git-personal-taloncjones-dotfiles-6c3f6099 --task-id td-2026-09-06-render-a-local-dashboard-of-open-todos-and-researc --worktree "$(pwd)" --contract claude/contracts/td-2026-09-06-render-a-local-dashboard-of-open-todos-and-researc-contract.json --allow-unpinned
+python3 claude/hooks/herdr_orch_core.py verify-contract --repo-slug git-personal-taloncjones-dotfiles-6c3f6099 --task-id td-2026-09-06-render-a-local-dashboard-of-open-todos-and-researc --worktree "$(pwd)" --contract claude/contracts/td-2026-09-06-render-a-local-dashboard-of-open-todos-and-researc-contract.json --allow-unpinned
 ```
 
-Expected: one `ok <name> exit=0` line per command and exit 0. A `FAIL` line names the command to fix; fix forward and rerun.
+Expected: thirteen `ok <name> exit=0` lines and exit 0. A `FAIL` line names the command to fix; fix forward and rerun.
 
-- [ ] **Step 3: Full runner**
+- [ ] **Step 3: Full runner, expecting exactly one known failure**
 
-Run: `sh bin/dotfiles-tests 2>&1 | tail -3`
-Expected: `dotfiles-tests: N suites passed, 0 failed` with N one higher than at the base commit.
+Run: `bash bin/dotfiles-tests >/tmp/all.log 2>&1; echo rc=$?; tail -3 /tmp/all.log`
+Expected: `rc=1` with `1 failed` and the failing suite named as `git/hooks/public-safety.test.sh` only (it rejects the still-tracked `docs/plans/` and `docs/specs/` files, spec "Branch-only documents"). Any other failing suite is a real regression to fix before continuing.
 
-- [ ] **Step 4: Human-verify items to name in the close**
+- [ ] **Step 4: Drop the branch-only docs from the index**
 
-State in the completion message: the one browser look from Task 2 step 4 (done or not, and what it showed), and that the orchestrator preflight step is unverified until the next orchestrated turn after merge.
+Run:
+
+```bash
+git rm -r -q --cached docs/plans/2026-09-07-todo-dashboard.md docs/specs/2026-09-07-todo-dashboard.md
+git commit -m "docs: Drop branch-only dashboard spec and plan before review"
+ls docs/plans/2026-09-07-todo-dashboard.md docs/specs/2026-09-07-todo-dashboard.md
+git ls-files docs | wc -l
+```
+
+Expected: both files still listed on disk (they are excluded, so the removal leaves them in place) and `0` tracked files under `docs/`. The contract file under `claude/contracts/` stays tracked.
+
+- [ ] **Step 5: Full runner, all green**
+
+Run: `bash bin/dotfiles-tests >/tmp/all.log 2>&1; echo rc=$?; tail -2 /tmp/all.log`
+Expected: `rc=0` and `dotfiles-tests: N suites passed, 0 failed` with N one higher than at the base commit.
+
+- [ ] **Step 6: Re-run the contract after the drop**
+
+Run the Step 2 command again. Expected: thirteen `ok` lines and exit 0 (the docs are excluded from every diff-based command, so nothing changes).
+
+- [ ] **Step 7: Human-verify items to name in the close**
+
+State in the completion message: the one browser look from Task 2 step 5 (done or not, and what it showed), and that the orchestrator preflight step is unverified until the next orchestrated turn after merge.
 
 ## Review notes
 
 - Spec review: Codex, two rounds (2026-09-07). Round 1 returned 12 findings, round 2 returned 5; all 17 were folded into the spec (see its "Decisions recorded"). Two rounds is the skill's cap; no usage limit was hit.
-- Plan review: see the entry appended below after `codex-plan-review` runs.
-- The renderer and the suite embedded above were exercised together in a scratchpad copy of the repo layout before this plan was written: 92 checks, 0 failed, on this machine (macOS, Python 3.14). They are pasted verbatim, so Task 2 step 2 is expected to be green on the first run; any divergence means a paste error, not a design gap.
+- Plan review: Codex, one round (2026-09-07), verdict needs-rework, 13 findings, no usage limit. Folded: priority-class allowlist plus an attribute-injection test (1); `O_EXCL|O_NOFOLLOW` temp file with cleanup and a symlink-guard test (2); the contract's attribution grep excludes `claude/contracts` (3, found and fixed before the review ran); an explicit index-drop step for the branch-only docs and the expected single public-safety failure before it (4); `bash bin/dotfiles-tests` everywhere (5); exit codes captured before `tail`/`grep` in the contract and in every plan step, and a doc-pin loop that fails (6); env sanitisation, isolated git config, and loud fixture failures in the suite (7); the worktree's own core and a temp output path for the visual look (8); completed-row counting by element (9); review-record presence tracked separately, `review unknown` for a present-but-empty record, plus a record-shapes test (10); blank-first-value frontmatter semantics plus a test (11); tests for the symlink guard, opener failure, record shapes, and a wider inert-page grep (12). Partially accepted: splitting Task 2 into four test-first tasks (13). The renderer is one 640-line file whose suite was run end to end before embedding; splitting a verified file across tasks for a cheaper worker adds paste risk without adding verification, so Task 2 instead gains a pure-function smoke step before the suite, and the "paste error" wording now allows evidence-backed corrections on either side with the spec as authority.
+- The renderer and the suite embedded above were exercised together in a scratchpad copy of the repo layout, and the contract was proven in a scratchpad clone: red at the plan commit (`dashboard-suite` fails, no suite file), then all thirteen commands green with the plan's Task 1-3 edits applied (2026-09-07, macOS, Python 3.14).

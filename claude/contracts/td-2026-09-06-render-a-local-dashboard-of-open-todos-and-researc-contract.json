@@ -5,22 +5,22 @@
     {
       "name": "dashboard-suite",
       "timeout_secs": 600,
-      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'render: fixture board' 'research: index' 'slug: default path and repo slug' 'read-only: state root and .todos untouched' 'empty: board without .todos' 'flags: completed and usage errors' 'offline: precedence' 'guard: output path' 'write: failed write preserves the previous page' 'unreadable: todo skipped' 'refs: self, invalid, and unreadable dependencies' 'links: boundaries' 'visibility: .todos exclusion warning'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done"
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'render: fixture board' 'research: index' 'slug: default path and repo slug' 'read-only: state root and .todos untouched' 'empty: board without .todos' 'flags: completed and usage errors' 'offline: precedence' 'guard: output path' 'write: failed write preserves the previous page' 'unreadable: todo skipped' 'refs: self, invalid, and unreadable dependencies' 'links: boundaries' 'visibility: .todos exclusion warning' 'inject: frontmatter values never become attributes' 'symlink guard: output path through a symlink into .todos' 'opener: missing opener is a warning' 'records: empty, null, and stale record shapes' 'frontmatter: first occurrence wins'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done"
     },
     {
       "name": "dashboard-suite-size",
       "timeout_secs": 600,
-      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1 | tail -1); printf '%s\\n' \"$out\"; printf '%s\\n' \"$out\" | awk '{ exit !($1 >= 85 && $3 == 0) }'"
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf '%s\\n' \"$last\"; [ \"$rc\" -eq 0 ] || { echo '[X] suite exited non-zero'; exit 1; }; printf '%s\\n' \"$last\" | awk '{ exit !(NF == 4 && $1 >= 115 && $2 == \"passed,\" && $3 == 0 && $4 == \"failed\") }'"
     },
     {
       "name": "todos-suite-baseline",
       "timeout_secs": 600,
-      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1 | tail -1); printf '%s\\n' \"$out\"; printf '%s\\n' \"$out\" | awk '{ exit !($1 >= 162 && $3 == 0) }'"
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_test.sh 2>&1); rc=$?; last=$(printf '%s\\n' \"$out\" | tail -1); printf '%s\\n' \"$last\"; [ \"$rc\" -eq 0 ] || { echo '[X] todos suite exited non-zero'; exit 1; }; printf '%s\\n' \"$last\" | awk '{ exit !(NF == 4 && $1 >= 162 && $2 == \"passed,\" && $3 == 0 && $4 == \"failed\") }'"
     },
     {
       "name": "render-smoke",
       "timeout_secs": 120,
-      "run": "set -e; here=$(pwd); d=$(mktemp -d); trap 'rm -rf \"$d\"' EXIT; sd=$(mktemp -d); trap 'rm -rf \"$d\" \"$sd\"' EXIT; (cd \"$d\" && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base && git update-ref refs/remotes/origin/main HEAD && git remote add origin git@github.com:Org/Repo.git && printf '.todos/\\n' >>.git/info/exclude); mkdir -p \"$d/.todos/pending\"; printf -- '---\\ncreated: 2026-05-01\\ntitle: A\\n---\\n' >\"$d/.todos/pending/2026-05-01-a.md\"; printf -- '---\\ncreated: 2026-05-02\\ntitle: B\\ndepends_on:\\n  - todo:2026-05-01-a\\n---\\n' >\"$d/.todos/pending/2026-05-02-b.md\"; out=$(cd \"$d\" && TODOS_STATE_ROOT=\"$sd\" TODOS_DASHBOARD_NOW='2026-05-03 00:00' bash \"$here/claude/skills/todos/scripts/todos.sh\" dashboard --out \"$d/o/x.html\"); [ \"$out\" = \"$d/o/x.html\" ] || { echo \"[X] stdout: $out\"; exit 1; }; f=\"$d/o/x.html\"; grep -q 'data-todo=\"2026-05-02-b\" data-state=\"blocked\"' \"$f\" || { echo '[X] no blocked row'; exit 1; }; grep -q 'todo:2026-05-01-a (open)' \"$f\" || { echo '[X] no dep state'; exit 1; }; grep -q 'data-count=\"open\">2<' \"$f\" || { echo '[X] open count'; exit 1; }; grep -q 'data-count=\"blocked\">1<' \"$f\" || { echo '[X] blocked count'; exit 1; }; if grep -qi '<script\\|<link\\|fonts.googleapis' \"$f\"; then echo '[X] script or remote asset in page'; exit 1; fi; [ -z \"$(ls -A \"$sd\")\" ] || { echo '[X] state root written'; exit 1; }; [ ! -e \"$d/.todos/TODO.md\" ] || { echo '[X] TODO.md written'; exit 1; }"
+      "run": "set -e; here=$(pwd); d=$(mktemp -d); trap 'rm -rf \"$d\"' EXIT; sd=$(mktemp -d); trap 'rm -rf \"$d\" \"$sd\"' EXIT; (cd \"$d\" && git init -q && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m base && git update-ref refs/remotes/origin/main HEAD && git remote add origin git@github.com:Org/Repo.git && printf '.todos/\\n' >>.git/info/exclude); mkdir -p \"$d/.todos/pending\"; printf -- '---\\ncreated: 2026-05-01\\ntitle: A\\n---\\n' >\"$d/.todos/pending/2026-05-01-a.md\"; printf -- '---\\ncreated: 2026-05-02\\ntitle: B\\ndepends_on:\\n  - todo:2026-05-01-a\\n---\\n' >\"$d/.todos/pending/2026-05-02-b.md\"; out=$(cd \"$d\" && TODOS_STATE_ROOT=\"$sd\" TODOS_DASHBOARD_NOW='2026-05-03 00:00' bash \"$here/claude/skills/todos/scripts/todos.sh\" dashboard --out \"$d/o/x.html\"); [ \"$out\" = \"$d/o/x.html\" ] || { echo \"[X] stdout: $out\"; exit 1; }; f=\"$d/o/x.html\"; grep -q 'data-todo=\"2026-05-02-b\" data-state=\"blocked\"' \"$f\" || { echo '[X] no blocked row'; exit 1; }; grep -q 'todo:2026-05-01-a (open)' \"$f\" || { echo '[X] no dep state'; exit 1; }; grep -q 'data-count=\"open\">2<' \"$f\" || { echo '[X] open count'; exit 1; }; grep -q 'data-count=\"blocked\">1<' \"$f\" || { echo '[X] blocked count'; exit 1; }; if grep -qiE '<script|<link|<iframe|@import|url\\(|fonts\\.googleapis| on[a-z]+=\"' \"$f\"; then echo '[X] script, remote asset, or event attribute in page'; exit 1; fi; [ -z \"$(ls -A \"$sd\")\" ] || { echo '[X] state root written'; exit 1; }; [ ! -e \"$d/.todos/TODO.md\" ] || { echo '[X] TODO.md written'; exit 1; }"
     },
     {
       "name": "syntax",
@@ -50,7 +50,7 @@
     {
       "name": "suite-registered",
       "timeout_secs": 60,
-      "run": "sh bin/dotfiles-tests --list | grep -qx 'bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh' || { echo '[X] suite not registered in bin/dotfiles-tests'; exit 1; }"
+      "run": "bash bin/dotfiles-tests --list | grep -qx 'bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh' || { echo '[X] suite not registered in bin/dotfiles-tests'; exit 1; }"
     },
     {
       "name": "diff-scope",
