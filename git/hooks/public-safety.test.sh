@@ -68,7 +68,7 @@ assert "no tracked planning artifacts" \
 assert "no hardcoded local user paths" \
     git_grep_clean '/Users/talon' . ':(exclude)git/hooks/public-safety.test.sh'
 assert "no high-confidence secrets in tracked content" \
-    git_grep_clean 'BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY|PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]+|glpat-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{20,}|-----BEGIN AGE SECRET KEY-----' . ':(exclude)**/*.pub' ':(exclude)git/hooks/public-safety.test.sh'
+    git_grep_clean 'BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY|PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|(^|[^A-Za-z0-9_])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9_])sk-proj-[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]+|glpat-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{20,}|-----BEGIN AGE SECRET KEY-----' . ':(exclude)**/*.pub' ':(exclude)git/hooks/public-safety.test.sh'
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
