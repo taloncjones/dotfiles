@@ -84,7 +84,7 @@
     },
     {
       "name": "no-attribution-in-added-lines",
-      "run": "base=$(git merge-base origin/main HEAD) || exit 1; if git diff \"$base\" -- . ':(exclude)docs' | grep '^+' | grep -v '^+++' | grep -iE 'co-authored-by|generated (by|with)'; then echo '[X] attribution text in added lines'; exit 1; fi; exit 0",
+      "run": "base=$(git merge-base origin/main HEAD) || exit 1; if git diff \"$base\" -- . ':(exclude)docs' ':(exclude)claude/contracts' | grep '^+' | grep -v '^+++' | grep -iE 'co-authored-by|generated (by|with)'; then echo '[X] attribution text in added lines'; exit 1; fi; exit 0",
       "timeout_secs": 60
     }
   ]
