@@ -18,8 +18,11 @@ assert_status() { # name expected_code cmd...
 canon_helper() { /usr/bin/env realpath "$1" 2>/dev/null || printf '%s' "$1"; }
 
 # Make a throwaway git repo with a .todos backlog; echoes its path.
+# Canonicalized so it matches what `git rev-parse --show-toplevel` reports
+# (macOS TMPDIR is a symlink into /private; git resolves it, mktemp doesn't).
 mk_repo() {
   local d; d=$(mktemp -d)
+  d=$(canon_helper "$d")
   ( cd "$d" && git init -q && git config user.email t@t && git config user.name t )
   printf '%s' "$d"
 }
@@ -28,6 +31,35 @@ mk_todo() {
   local repo="$1" name="$2"
   mkdir -p "$repo/.todos/pending"
   cat >"$repo/.todos/pending/$name.md"
+}
+
+# Repo with origin/main (via update-ref, no network), merged-b at an ancestor
+# commit, and open-b one commit ahead. Echoes its path.
+mk_branch_repo() {
+  local d; d=$(mk_repo)
+  ( cd "$d" \
+    && git commit -q --allow-empty -m base \
+    && git branch merged-b \
+    && git update-ref refs/remotes/origin/main HEAD \
+    && git checkout -q -b open-b \
+    && git commit -q --allow-empty -m extra \
+    && git checkout -q - ) >/dev/null 2>&1
+  printf '%s' "$d"
+}
+# Fake gh. mk_gh_stub <path>: pr view 1/2/3 -> MERGED/OPEN/CLOSED, else exit 1;
+# pr list --head merged-away or --head open-b -> MERGED, --head gone-open -> OPEN,
+# else exit 1. Every invocation appends one line to <path>.calls.
+mk_gh_stub() {
+  cat >"$1" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$1.calls"
+case "\$1 \$2" in
+  "pr view") case "\$3" in 1) echo MERGED ;; 2) echo OPEN ;; 3) echo CLOSED ;; *) exit 1 ;; esac ;;
+  "pr list") case " \$* " in *" --head merged-away "*|*" --head open-b "*) echo MERGED ;; *" --head gone-open "*) echo OPEN ;; *) exit 1 ;; esac ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$1"
 }
 
 # --- cases ---
@@ -465,6 +497,453 @@ test_index_undated_priority_order() {
   rm -rf "$repo"
 }
 test_index_undated_priority_order
+
+# --- dependencies ---
+
+test_depends_parse() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" nokey <<'EOF'
+---
+created: 2026-05-01
+title: No key
+---
+EOF
+  mk_todo "$repo" emptykey <<'EOF'
+---
+created: 2026-05-01
+title: Empty key
+depends_on:
+files:
+---
+EOF
+  mk_todo "$repo" three <<'EOF'
+---
+created: 2026-05-01
+title: Three items
+depends_on:
+  - todo:2026-05-01-first
+  - "branch:talon/second"
+  - 'pr:3'
+files:
+  - not/a/dep.py
+---
+
+## Problem
+
+  - todo:2026-05-01-body-item-not-a-dep
+EOF
+  mk_todo "$repo" lastkey <<'EOF'
+---
+created: 2026-05-01
+title: Last key
+depends_on:
+  - pr:9
+---
+  - pr:10
+EOF
+  local out
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/nokey.md)
+  assert_eq "parse: missing key yields nothing" "$out" ""
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/emptykey.md)
+  assert_eq "parse: empty key yields nothing" "$out" ""
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/three.md)
+  assert_eq "parse: three items in order, quotes stripped, stops at next key" \
+    "$out" "$(printf 'todo:2026-05-01-first\nbranch:talon/second\npr:3')"
+  out=$(cd "$repo" && bash "$TODOS" _depends .todos/pending/lastkey.md)
+  assert_eq "parse: stops at closing ---" "$out" "pr:9"
+  ok "depends: parse block list"
+  rm -rf "$repo"
+}
+test_depends_parse
+
+test_depends_normalize() {
+  assert_eq "normalize: #85"        "$(bash "$TODOS" _normalize_ref '#85')"  "pr:85"
+  assert_eq "normalize: bare 85"    "$(bash "$TODOS" _normalize_ref 85)"     "pr:85"
+  assert_eq "normalize: pr:85"      "$(bash "$TODOS" _normalize_ref pr:85)"  "pr:85"
+  assert_eq "normalize: bare branch" "$(bash "$TODOS" _normalize_ref talon/x)"        "branch:talon/x"
+  assert_eq "normalize: branch:"     "$(bash "$TODOS" _normalize_ref branch:talon/x) " "branch:talon/x "
+  assert_eq "normalize: bare todo id" "$(bash "$TODOS" _normalize_ref 2026-05-01-some-slug)" "todo:2026-05-01-some-slug"
+  assert_eq "normalize: todo: with .md" "$(bash "$TODOS" _normalize_ref todo:2026-05-01-some-slug.md)" "todo:2026-05-01-some-slug"
+  assert_eq "normalize: bare id with .md" "$(bash "$TODOS" _normalize_ref 2026-05-01-some-slug.md)" "todo:2026-05-01-some-slug"
+  assert_eq "normalize: quoted and padded" "$(bash "$TODOS" _normalize_ref '  "pr:7" ')" "pr:7"
+  assert_status "normalize: pr:0 rejected"      1 bash "$TODOS" _normalize_ref pr:0
+  assert_status "normalize: pr:abc rejected"    1 bash "$TODOS" _normalize_ref pr:abc
+  assert_status "normalize: pr:007 rejected"    1 bash "$TODOS" _normalize_ref pr:007
+  assert_status "normalize: bad branch rejected" 1 bash "$TODOS" _normalize_ref 'branch:bad..name'
+  assert_status "normalize: leading dash rejected" 1 bash "$TODOS" _normalize_ref 'branch:-x'
+  assert_status "normalize: reflog form rejected"  1 bash "$TODOS" _normalize_ref 'branch:a@{1}'
+  assert_status "normalize: bare word rejected"  1 bash "$TODOS" _normalize_ref parity
+  assert_status "normalize: todo: bad slug rejected" 1 bash "$TODOS" _normalize_ref 'todo:Not-A-Slug'
+  assert_status "normalize: empty rejected"      1 bash "$TODOS" _normalize_ref ''
+  ok "depends: normalize refs"
+}
+test_depends_normalize
+
+test_resolve_todo() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-open-item <<'EOF'
+---
+created: 2026-05-01
+title: Open item
+---
+EOF
+  mkdir -p "$repo/.todos/completed"
+  printf -- '---\ncreated: 2026-05-01\ntitle: Done item\n---\n' >"$repo/.todos/completed/2026-05-01-done-item.md"
+  assert_eq "resolve: completed todo is done" \
+    "$(cd "$repo" && bash "$TODOS" _resolve todo:2026-05-01-done-item)" "done"
+  assert_eq "resolve: pending todo is open" \
+    "$(cd "$repo" && bash "$TODOS" _resolve todo:2026-05-01-open-item)" "open"
+  assert_eq "resolve: absent todo is missing" \
+    "$(cd "$repo" && bash "$TODOS" _resolve todo:2026-05-01-nope)" "missing"
+  assert_eq "resolve: bad input is invalid" \
+    "$(cd "$repo" && bash "$TODOS" _resolve parity)" "invalid"
+  ok "resolve: todo states"
+  rm -rf "$repo"
+}
+test_resolve_todo
+
+test_resolve_branch() {
+  local repo; repo=$(mk_branch_repo)
+  assert_eq "resolve: ancestor branch is merged" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:merged-b)" "merged"
+  assert_eq "resolve: ahead branch is open" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:open-b)" "open"
+  assert_eq "resolve: absent branch offline is unknown" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:absent-b)" "unknown"
+  assert_eq "resolve: missing base ref is unknown" \
+    "$(cd "$repo" && TODOS_OFFLINE=1 TODOS_BASE_REF=origin/nope bash "$TODOS" _resolve branch:merged-b)" "unknown"
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  assert_eq "resolve: present branch merged via gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:open-b)" "merged"
+  assert_eq "resolve: present branch unknown to gh stays open" \
+    "$(cd "$repo" && git branch -q lonely-b open-b && TODOS_GH="$stub" bash "$TODOS" _resolve branch:lonely-b)" "open"
+  assert_eq "resolve: remote-tracking ref preferred" \
+    "$(cd "$repo" && git update-ref refs/remotes/origin/open-b refs/remotes/origin/main && TODOS_OFFLINE=1 bash "$TODOS" _resolve branch:open-b)" "merged"
+  ok "resolve: branch states"
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls"
+}
+test_resolve_branch
+
+test_resolve_pr() {
+  local repo; repo=$(mk_branch_repo)
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  assert_eq "resolve: pr MERGED" "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:1)" "merged"
+  assert_eq "resolve: pr OPEN"   "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:2)" "open"
+  assert_eq "resolve: pr CLOSED" "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:3)" "closed"
+  assert_eq "resolve: pr gh failure is unknown" "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve pr:4)" "unknown"
+  assert_eq "resolve: pr offline is unknown" "$(cd "$repo" && TODOS_OFFLINE=1 TODOS_GH="$stub" bash "$TODOS" _resolve pr:1)" "unknown"
+  local errf; errf=$(mktemp)
+  local out; out=$(cd "$repo" && TODOS_GH=/nonexistent/gh bash "$TODOS" _resolve pr:1 2>"$errf")
+  assert_eq "resolve: pr missing gh is unknown" "$out" "unknown"
+  assert_eq "resolve: pr missing gh is silent" "$(cat "$errf")" ""
+  ok "resolve: pr states via gh stub"
+  assert_eq "resolve: absent branch merged via gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:merged-away)" "merged"
+  assert_eq "resolve: absent branch open via gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:gone-open)" "open"
+  assert_eq "resolve: absent branch unknown to gh" \
+    "$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" _resolve branch:never-heard)" "unknown"
+  ok "resolve: absent branch via gh stub"
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls" "$errf"
+}
+test_resolve_pr
+
+test_list_blocked_on() {
+  local repo; repo=$(mk_branch_repo)
+  mk_todo "$repo" 2026-05-01-satisfied <<'EOF'
+---
+created: 2026-05-01
+title: Satisfied item
+depends_on:
+  - branch:merged-b
+---
+EOF
+  mk_todo "$repo" 2026-05-01-oneblock <<'EOF'
+---
+created: 2026-05-01
+title: One blocker
+depends_on:
+  - branch:open-b
+---
+EOF
+  mk_todo "$repo" 2026-05-01-twoblock <<'EOF'
+---
+created: 2026-05-01
+title: Two blockers
+depends_on:
+  - branch:merged-b
+  - todo:2026-05-01-oneblock
+  - pr:1
+---
+EOF
+  mkdir -p "$repo/.todos/completed"
+  printf -- '---\ncreated: 2026-05-01\ntitle: Done blocked\ndepends_on:\n  - pr:1\n---\n' >"$repo/.todos/completed/2026-05-01-doneblocked.md"
+  local out
+  out=$(cd "$repo" && bash "$TODOS" list --offline)
+  assert_contains "list: one unsatisfied ref annotated" "$out" "One blocker  [blocked-on: branch:open-b (open)]"
+  assert_contains "list: two unsatisfied refs in file order" "$out" \
+    "Two blockers  [blocked-on: todo:2026-05-01-oneblock (open), pr:1 (unknown)]"
+  case "$out" in *"Satisfied item  [blocked-on"*) bad "list: satisfied item plain" "annotated";; *) ok "list: satisfied item plain";; esac
+  out=$(cd "$repo" && bash "$TODOS" list --offline --all)
+  assert_contains "list: --offline --all lists completed" "$out" "completed:"
+  case "$out" in *"Done blocked  [blocked-on"*) bad "list: completed never annotated" "annotated";; *) ok "list: completed never annotated";; esac
+  out=$(cd "$repo" && TODOS_OFFLINE=1 bash "$TODOS" list --all --offline)
+  assert_contains "list: --all --offline also accepted" "$out" "One blocker  [blocked-on"
+  assert_status "list: unknown flag rejected" 1 bash -c '(cd "$1" && bash "$2" list --nope)' _ "$repo" "$TODOS"
+  # online: a failing gh never aborts list; a shared ref is resolved once
+  mk_todo "$repo" 2026-05-01-share-a <<'EOF'
+---
+created: 2026-05-01
+title: Share a
+depends_on:
+  - pr:1
+---
+EOF
+  mk_todo "$repo" 2026-05-01-share-b <<'EOF'
+---
+created: 2026-05-01
+title: Share b
+depends_on:
+  - pr:1
+---
+EOF
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  out=$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" list); local rc=$?
+  assert_eq "list: online exits 0" "$rc" "0"
+  case "$out" in *"Two blockers  [blocked-on: todo:2026-05-01-oneblock (open)]"*) ok "list: online pr:1 merged drops from annotation";; *) bad "list: online pr:1 merged drops from annotation" "$out";; esac
+  assert_eq "list: shared pr ref resolved once" "$(grep -c 'pr view 1 ' "$stub.calls")" "1"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$stub"
+  out=$(cd "$repo" && TODOS_GH="$stub" bash "$TODOS" list); rc=$?
+  assert_eq "list: failing gh still exits 0" "$rc" "0"
+  assert_contains "list: failing gh renders unknown" "$out" "Share a  [blocked-on: pr:1 (unknown)]"
+  ok "list: blocked-on annotation"
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls"
+}
+test_list_blocked_on
+
+test_index_blocked_marker() {
+  local repo; repo=$(mk_branch_repo)
+  local stub; stub=$(mktemp)
+  printf '#!/usr/bin/env bash\ntouch "%s.hit"\nexit 1\n' "$stub" >"$stub"; chmod +x "$stub"
+  mk_todo "$repo" 2026-05-01-blocked <<'EOF'
+---
+created: 2026-05-01
+title: Blocked item
+priority: high
+depends_on:
+  - branch:open-b
+  - pr:1
+---
+
+## Problem
+
+Needs the branch.
+EOF
+  mk_todo "$repo" 2026-05-01-free <<'EOF'
+---
+created: 2026-05-01
+title: Free item
+depends_on:
+  - branch:merged-b
+---
+EOF
+  ( cd "$repo" && TODOS_TODAY=2026-06-08 TODOS_GH="$stub" bash "$TODOS" new "Fresh one" --priority low >/dev/null )
+  local idx; idx=$(cat "$repo/.todos/TODO.md")
+  assert_contains "index: blocked and unverified markers after priority" "$idx" \
+    "[Blocked item](./pending/2026-05-01-blocked.md) [high] [blocked-on: branch:open-b] [unverified: pr:1] -- Needs the branch."
+  case "$idx" in *"Free item](./pending/2026-05-01-free.md) [blocked-on"*|*"Free item](./pending/2026-05-01-free.md) [unverified"*) bad "index: satisfied item unmarked" "marked";; *) ok "index: satisfied item unmarked";; esac
+  [ -e "$stub.hit" ] && bad "index: new never calls gh" "gh stub was invoked" || ok "index: new never calls gh"
+  mk_todo "$repo" 2026-05-01-badref <<'EOF'
+---
+created: 2026-05-01
+title: Bad ref elsewhere
+depends_on:
+  - parity
+---
+EOF
+  local errf; errf=$(mktemp)
+  ( cd "$repo" && bash "$TODOS" done 2026-05-01-free ) >/dev/null 2>"$errf"
+  assert_eq "index: done is quiet about another todo's bad ref" "$(cat "$errf")" ""
+  assert_contains "index: invalid ref still marked" "$(cat "$repo/.todos/TODO.md")" "[Bad ref elsewhere](./pending/2026-05-01-badref.md) [blocked-on: parity]"
+  ok "index: blocked marker, no network"
+  rm -rf "$repo"; rm -f "$stub" "$stub.hit" "$errf"
+}
+test_index_blocked_marker
+
+test_list_invalid_and_self() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-selfref <<'EOF'
+---
+created: 2026-05-01
+title: Self ref item
+depends_on:
+  - todo:2026-05-01-selfref
+  - parity
+---
+EOF
+  local errf; errf=$(mktemp)
+  local out; out=$(cd "$repo" && bash "$TODOS" list --offline 2>"$errf"); local rc=$?
+  local err; err=$(cat "$errf")
+  assert_eq "list: exits 0 with bad refs" "$rc" "0"
+  assert_contains "list: self rendered" "$out" "[blocked-on: todo:2026-05-01-selfref (self), parity (invalid)]"
+  assert_contains "list: self warned" "$err" "todos: 2026-05-01-selfref: depends on itself"
+  assert_contains "list: invalid warned" "$err" "todos: 2026-05-01-selfref: invalid dependency ref 'parity'"
+  assert_eq "list: each warning once" "$(grep -c 'todos: 2026-05-01-selfref' "$errf")" "2"
+  ok "list: invalid and self refs warn"
+  rm -rf "$repo"; rm -f "$errf"
+}
+test_list_invalid_and_self
+
+test_new_depends_on() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-let-auto-mode-decide <<'EOF'
+---
+created: 2026-05-01
+title: Existing dep
+---
+EOF
+  mk_todo "$repo" 2026-05-01-let-auto-mode-decide-2 <<'EOF'
+---
+created: 2026-05-01
+title: Existing dep twin
+---
+EOF
+  local f
+  f=$( (cd "$repo" && TODOS_TODAY=2026-06-08 bash "$TODOS" new "Needs things" --priority high \
+        --depends-on '#85' --depends-on todo:2026-05-01-let-auto-mode-decide-2 \
+        --depends-on talon/parity --depends-on pr:85 --file a.py) )
+  local body; body=$(cat "$f")
+  assert_contains "new: canonical list between priority and files" "$body" \
+    "$(printf 'priority: high\ndepends_on:\n  - pr:85\n  - todo:2026-05-01-let-auto-mode-decide-2\n  - branch:talon/parity\nfiles:\n  - a.py')"
+  assert_eq "new: refs deduped" "$(grep -c 'pr:85' "$f")" "1"
+  f=$( (cd "$repo" && TODOS_TODAY=2026-06-08 bash "$TODOS" new "Substring dep" --depends-on todo:decide-2) )
+  assert_contains "new: unique substring stored as exact basename" "$(cat "$f")" "  - todo:2026-05-01-let-auto-mode-decide-2"
+  local before; before=$(ls "$repo/.todos/pending" | wc -l | tr -d ' ')
+  assert_status "new: invalid ref exits 1"     1 bash -c '(cd "$1" && bash "$2" new x --depends-on parity)' _ "$repo" "$TODOS"
+  assert_status "new: unknown todo exits 1"    1 bash -c '(cd "$1" && bash "$2" new x --depends-on todo:2026-05-01-nope)' _ "$repo" "$TODOS"
+  assert_status "new: ambiguous todo exits 1"  1 bash -c '(cd "$1" && bash "$2" new x --depends-on todo:let-auto-mode)' _ "$repo" "$TODOS"
+  assert_status "new: dangling --depends-on"   1 bash -c '(cd "$1" && bash "$2" new x --depends-on)' _ "$repo" "$TODOS"
+  assert_eq "new: failures write no file" "$(ls "$repo/.todos/pending" | wc -l | tr -d ' ')" "$before"
+  ok "new: --depends-on"
+  rm -rf "$repo"
+}
+test_new_depends_on
+
+test_depend_add() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-target-one <<'EOF'
+---
+created: 2026-05-01
+title: Target with files
+area: x
+files:
+  - keep/me.py
+---
+
+## Problem
+
+Body stays.
+EOF
+  mk_todo "$repo" 2026-05-01-target-two <<'EOF'
+---
+created: 2026-05-01
+title: Target with list
+depends_on:
+  - pr:1
+---
+EOF
+  mk_todo "$repo" 2026-05-01-target-three <<'EOF'
+---
+created: 2026-05-01
+title: Target bare
+---
+EOF
+  mk_todo "$repo" 2026-05-01-target-four <<'EOF'
+---
+created: 2026-05-01
+title: Target list then files
+depends_on:
+  - pr:1
+files:
+  - keep/me.py
+---
+EOF
+  local out
+  out=$(cd "$repo" && bash "$TODOS" depend target-one '#2' branch:talon/x)
+  assert_eq "depend: prints the path" "$out" "$repo/.todos/pending/2026-05-01-target-one.md"
+  local want; want=$(mktemp)
+  cat >"$want" <<'EOF'
+---
+created: 2026-05-01
+title: Target with files
+area: x
+depends_on:
+  - pr:2
+  - branch:talon/x
+files:
+  - keep/me.py
+---
+
+## Problem
+
+Body stays.
+EOF
+  diff -u "$want" "$repo/.todos/pending/2026-05-01-target-one.md" >/dev/null \
+    && ok "depend: key inserted before files, rest byte-identical" \
+    || bad "depend: key inserted before files, rest byte-identical" "$(diff -u "$want" "$repo/.todos/pending/2026-05-01-target-one.md")"
+  ( cd "$repo" && bash "$TODOS" depend target-two pr:1 '#3' pr:3 >/dev/null )
+  assert_eq "depend: appends and dedupes" "$(cd "$repo" && bash "$TODOS" _depends .todos/pending/2026-05-01-target-two.md)" \
+    "$(printf 'pr:1\npr:3')"
+  ( cd "$repo" && bash "$TODOS" depend 2026-05-01-target-three pr:4 >/dev/null )
+  assert_contains "depend: key before closing --- when no files" \
+    "$(cat "$repo/.todos/pending/2026-05-01-target-three.md")" "$(printf 'title: Target bare\ndepends_on:\n  - pr:4\n---')"
+  ( cd "$repo" && bash "$TODOS" depend target-four pr:6 >/dev/null )
+  assert_contains "depend: appends before files when list precedes files" \
+    "$(cat "$repo/.todos/pending/2026-05-01-target-four.md")" "$(printf 'depends_on:\n  - pr:1\n  - pr:6\nfiles:\n  - keep/me.py')"
+  assert_contains "depend: index regenerated" "$(cat "$repo/.todos/TODO.md")" "[unverified: pr:2, branch:talon/x]"
+  assert_status "depend: no refs exits 1"     1 bash -c '(cd "$1" && bash "$2" depend target-one)' _ "$repo" "$TODOS"
+  assert_status "depend: ambiguous target"    1 bash -c '(cd "$1" && bash "$2" depend target pr:5)' _ "$repo" "$TODOS"
+  assert_status "depend: invalid ref"         1 bash -c '(cd "$1" && bash "$2" depend target-one parity)' _ "$repo" "$TODOS"
+  assert_status "depend: completed target refused" 1 bash -c '(mkdir -p "$1/.todos/completed" && printf -- "---\ncreated: 2026-05-01\ntitle: c\n---\n" >"$1/.todos/completed/2026-05-01-closed.md" && cd "$1" && bash "$2" depend closed pr:5)' _ "$repo" "$TODOS"
+  ok "depend: add refs"
+  rm -rf "$repo"; rm -f "$want"
+}
+test_depend_add
+
+test_depend_self() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-loop-me <<'EOF'
+---
+created: 2026-05-01
+title: Loop me
+---
+EOF
+  local errf; errf=$(mktemp)
+  ( cd "$repo" && bash "$TODOS" depend loop-me todo:2026-05-01-loop-me ) >/dev/null 2>"$errf"
+  assert_eq "depend: self by exact basename exits 1" "$?" "1"
+  assert_contains "depend: self message" "$(cat "$errf")" "todos: a todo cannot depend on itself"
+  assert_status "depend: self by substring exits 1" 1 bash -c '(cd "$1" && bash "$2" depend loop-me todo:loop)' _ "$repo" "$TODOS"
+  assert_status "depend: self by bare id exits 1"   1 bash -c '(cd "$1" && bash "$2" depend loop-me 2026-05-01-loop-me)' _ "$repo" "$TODOS"
+  case "$(cat "$repo/.todos/pending/2026-05-01-loop-me.md")" in *depends_on*) bad "depend: self writes nothing" "wrote";; *) ok "depend: self writes nothing";; esac
+  ok "depend: refuses self-dependency"
+  rm -rf "$repo"; rm -f "$errf"
+}
+test_depend_self
+
+test_done_still_matches() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-finish-me <<'EOF'
+---
+created: 2026-05-01
+title: Finish me
+---
+EOF
+  local out; out=$(cd "$repo" && bash "$TODOS" done finish)
+  assert_eq "done: substring still moves the todo" "$out" "done: 2026-05-01-finish-me.md"
+  [ -e "$repo/.todos/completed/2026-05-01-finish-me.md" ] && ok "done: file moved" || bad "done: file moved" "missing"
+  rm -rf "$repo"
+}
+test_done_still_matches
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
