@@ -34,11 +34,13 @@ initial claim.
 
 ## Non-goals
 
-- No server, no polling, no JavaScript data fetching. The page is inert
-  HTML; refresh means rerunning the command.
-- No writes anywhere except the output file (and its parent directory).
+- No server, no polling, no JavaScript. The page is inert HTML; refresh
+  means rerunning the command and reloading the browser tab (the page
+  says so in its header).
+- No writes anywhere except the output file and its parent directory.
   The herdr state root is read only; `.todos/` is never modified; no
-  `TODO.md` regeneration.
+  `TODO.md` regeneration. The output path is refused when it resolves
+  inside `.todos/` or inside the state root (D1).
 - No copying of review findings at merge time. That is `post-merge`
   territory (a skill outside this task's scope). This task defines where
   such copies go (`.todos/research/<task_id>/`) so the dashboard already
@@ -57,34 +59,62 @@ initial claim.
 - No Google Fonts or any remote asset: the page must render offline
   from `file://`.
 
+## Scope
+
+Files this task may change or create:
+
+| File | Change |
+|---|---|
+| `claude/skills/todos/scripts/todos.sh` | one usage-comment line, one `main` case line |
+| `claude/skills/todos/scripts/todos_dashboard.py` | new renderer |
+| `claude/skills/todos/scripts/tests/todos_dashboard_test.sh` | new suite |
+| `claude/skills/todos/SKILL.md` | `dashboard` row, Dashboard section, `.todos/research/` convention |
+| `claude/skills/herdr-orchestration/SKILL.md` | one preflight line (D6) |
+| `bin/dotfiles-tests` | one `SUITES` line registering the new suite |
+
+The `bin/dotfiles-tests` line is a deliberate one-line extension of the
+task brief's file list: the runner is the only way the suite runs in CI,
+and the parity branch does not touch that file. Nothing else changes.
+
 ## Confirmed facts (read 2026-09-07 at main `026f043`)
 
 - `todos.sh` already exposes hidden verbs `_depends <file>` (prints the
-  `depends_on` items one per line) and `_resolve <ref>` (prints one state
-  token: `done|open|missing|merged|closed|unknown|invalid`). `_resolve`
-  honours `TODOS_OFFLINE=1` (no `gh`), `TODOS_BASE_REF`, and `TODOS_GH`.
-  It never prints `self`; `resolve_cached` adds that in `list`/`index`.
+  `depends_on` items one per line, stripped), `_normalize_ref <input>`
+  (prints the canonical `todo:|branch:|pr:` ref, exit 1 when invalid),
+  and `_resolve <ref>` (prints one state token:
+  `done|open|missing|merged|closed|unknown|invalid`). `_resolve` honours
+  `TODOS_OFFLINE=1` (no `gh`), `TODOS_BASE_REF`, and `TODOS_GH`. It never
+  prints `self`; `resolve_cached` adds that in `list`/`index`.
 - Frontmatter reads are first-match `key: value` with one pair of
   surrounding quotes stripped (`frontmatter_value`). `depends_on` is a
-  block list of `  - ` items inside the first `---` block.
+  block list of `  - ` items inside the first `---` block; an inline
+  `[a, b]` list is not supported by `_depends`.
 - `TODO.md` sort key: dated todos first by `due` then priority weight;
   undated by priority weight then `created` (`regenerate_index`).
 - Herdr state root is `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch`;
-  per task: `tasks/<task_id>.json` (record), `.done.json` (completion),
-  `.review.json` (verdict with `outcome`, `blocking_count`,
-  `findings_ref`). A todo's task id is `td-` plus its basename
-  (`todo_task_id`, core line 501). Live records observed with `status`
-  in `in-progress|blocked|merged`, `workers[]` possibly absent on older
-  records, `review_outcome` null or `approved`.
+  per task: `tasks/<task_id>.json` (record, with `status`,
+  `review_head_sha`, `review_outcome`, `workers[]` each with `phase`,
+  `role`, `model`, `agent`, `workspace_id`), `.done.json` (`outcome`,
+  `phase`, `workspace_id`), `.review.json` (`outcome`, `blocking_count`,
+  `reviewed_head_sha`, `findings_ref`). A todo's task id is `td-` plus
+  its basename (`todo_task_id`, core line 501). Live records observed
+  with `status` in `in-progress|blocked|merged`, `workers[]` absent on
+  older records, `review_outcome` null or `approved`. The documented
+  status vocabulary is `kickoff|in-progress|blocked|completed|
+  review-dispatched|changes-requested|reviewed|failed|abandoned|merged`.
 - `repo_slug` (core line 484): remote URL with trailing `.git`, scheme,
   and `user@` stripped, lowercased, non-`[a-z0-9]` runs to `-`, trimmed,
   plus `-` and the first 8 hex of sha256 of the trimmed original URL;
   no remote gives `local-<8hex>` of the resolved common dir.
 - In a herdr worktree `.todos` is a symlink to the main checkout's
   `.todos` (observed here), so `.todos/research/` written from any
-  worktree lands in one place.
+  worktree lands in one place, and every worktree of a repo shares one
+  output file name (same remote, same slug).
+- `.todos/` is git-ignored only because `todos.sh init` (or the first
+  `new`) appended `.todos/` to `info/exclude`; a hand-made `.todos/`
+  has no such line.
 - `python3` is 3.14 on this machine and a hard dependency of the
-  orchestration core already; the renderer may use the stdlib only.
+  orchestration core already; the renderer uses the stdlib only.
 - Test baseline: `todos_test.sh` 162 passed, 0 failed.
 - The repo test runner `bin/dotfiles-tests` lists suites in a `SUITES`
   block; a new suite must be added there to run in CI.
@@ -95,7 +125,7 @@ initial claim.
 
 `todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]`
 
-`todos.sh` gains exactly two lines: the usage string entry and a
+`todos.sh` gains exactly two lines: the usage-comment entry and a
 dispatch case that execs the renderer with the same arguments:
 
 ```
@@ -103,15 +133,15 @@ dashboard) exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_dashboard.py" "$@"
 ```
 
 The renderer is `claude/skills/todos/scripts/todos_dashboard.py`,
-Python 3 stdlib only, executable directly as well (`python3
+Python 3 stdlib only, also runnable directly (`python3
 todos_dashboard.py ...`). It locates `todos.sh` as its sibling file.
 
 | Flag | Meaning |
 |---|---|
-| `--open` | After writing, open the file with `open` (Darwin) or `xdg-open` (else). A missing opener is a warning on stderr, exit stays 0. |
-| `--online` | Let dependency resolution call `gh` (clears the default `TODOS_OFFLINE=1`). Default is offline, matching `index`. |
-| `--out PATH` | Write to PATH instead of the default location. Parent directories are created. |
-| `--completed N` | Number of completed todos to show (default 10; 0 hides the section). |
+| `--open` | After writing, open the file with `open` (Darwin) or `xdg-open` (else). A missing opener is a `todos:` warning on stderr; exit stays 0. |
+| `--online` | Let dependency resolution call `gh`: the renderer removes `TODOS_OFFLINE` from the child environment even when the caller exported it. Without the flag the renderer sets `TODOS_OFFLINE=1` in the child environment regardless of the caller's value. The flag always wins. |
+| `--out PATH` | Write to PATH (relative to the current directory) instead of the default location. Parent directories are created. |
+| `--completed N` | Number of completed todos to show (default 10; 0 hides the section; negative is a usage error). |
 
 Environment overrides (tests and unusual setups):
 
@@ -120,69 +150,113 @@ Environment overrides (tests and unusual setups):
 | `TODOS_DASHBOARD_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/dashboard` | Output directory; file is `<repo_slug>.html` |
 | `TODOS_STATE_ROOT` | `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch` | Herdr state root to read task records from |
 | `TODOS_DASHBOARD_NOW` | current local time | `YYYY-MM-DD HH:MM` stamp printed in the header |
-| `TODOS_TODAY` | today | Passed through to `todos.sh` calls (existing) |
-| `TODOS_OFFLINE`, `TODOS_BASE_REF`, `TODOS_GH` | existing | Passed through to `todos.sh _resolve` |
+| `TODOS_TODAY`, `TODOS_BASE_REF`, `TODOS_GH` | existing | Passed through unchanged to the `todos.sh` calls |
 
-Exit codes: 0 rendered; 1 usage error, not inside a git repository, or
-the output file cannot be written. Unknown flags exit 1 with a `todos:`
-prefixed message on stderr (same shape as the rest of the script).
-On success stdout is exactly the absolute output path, one line.
+**Output path guard.** Before reading anything, the renderer resolves
+the output path (its parent when the file does not exist yet) with
+`realpath` and exits 1 with `todos: refusing to write the dashboard
+under <label>: <path>` when it lies inside `<repo>/.todos/` or inside
+the state root, symlinks included. `TODOS_DASHBOARD_DIR` goes through
+the same guard.
 
-A repo with no `.todos/` directory renders an empty board (every
-section shows its empty-state line) and exits 0.
+**Atomic write.** The page is written to `<out>.tmp.<pid>` in the
+output directory and renamed over `<out>` with `os.replace`. A reader
+never sees a partial file, a failed render leaves the previous page
+intact, and concurrent renders from two worktrees of one repo end with
+whichever finished last, complete. No lock is taken.
+
+**Failure handling.**
+
+| Condition | Behaviour |
+|---|---|
+| unknown flag, negative `--completed` | `todos:` message on stderr, exit 1, nothing written |
+| not inside a git repository | `todos: not inside a git repository`, exit 1 |
+| output path under `.todos/` or the state root | guard message, exit 1 |
+| output directory cannot be created or file cannot be written | `todos: cannot write <path>: <reason>`, exit 1, previous page untouched |
+| a todo or research file cannot be read (permissions, vanished mid-run) | `todos: skipping unreadable file: <path> (<reason>)` on stderr, entry omitted, exit 0 |
+| a todo file is not valid UTF-8 | decoded with replacement characters, no message |
+| a `todos.sh` resolver call fails or prints nothing | that ref shows `unknown` (`_resolve`) or `invalid` (`_normalize_ref`); a failed `_depends` means no dependencies for that todo; exit 0 |
+| a task, review, or done record is unreadable or not a JSON object | shown as `unreadable` for that record, exit 0 |
+| no `.todos/` directory | empty board, exit 0 |
+
+On success stdout is exactly the absolute output path, one line, and
+the exit code is 0. Nothing is printed to stdout on failure.
 
 ### D2. Data collection
 
 Repo root is `git rev-parse --show-toplevel` from the current directory.
 
 **Todos.** Every `*.md` under `.todos/pending/` and `.todos/completed/`,
-sorted by basename. Per file the renderer reads, with the same rules as
+sorted by basename. Per file the renderer reads, inside the first `---`
+block only and with the same first-match and quote-stripping rules as
 `frontmatter_value`: `created`, `title` (falls back to the basename),
 `area`, `priority`, `due`, `surface`, `maturity`, `tier`, and the
 `files:` list. `depends_on` items come from `todos.sh _depends <file>`
 so the list parser stays single-sourced. The body summary is the first
 non-empty line under `## Problem`, cut at 140 characters (same rule as
-`problem_summary`). Links are every `https?://` URL in the body,
-deduplicated in order, capped at 5, classified by host: `claude.ai`
-paths under `/code/artifacts/` or `/artifacts/` are labelled
-`artifact`, `github.com/.../pull/<n>` is labelled `PR #<n>`, anything
-else shows its host.
+`problem_summary`). Links are every `http://` or `https://` URL in the
+body, deduplicated in order, capped at 5, classified by host:
+`claude.ai` paths under `/code/artifacts/` or `/artifacts/` are labelled
+`artifact`, `github.com/<org>/<repo>/pull/<n>` is labelled `PR #<n>`,
+anything else shows its host. No other scheme is ever extracted.
 
-**Dependency state.** For pending todos only. Each ref is normalised
-and resolved by one `todos.sh _resolve <ref>` call with cwd at the repo
-root, memoised per ref for the run. A ref equal to `todo:<own
-basename>` is `self` without a call. A todo is **blocked** when any ref
-resolves to something other than `done` or `merged`; the row lists
-every unsatisfied ref as `<ref> (<state>)`. Satisfied refs are still
-shown, muted, so the reader sees the full graph. Completed todos never
+**Dependency state.** For pending todos only. Each raw item is passed
+to `todos.sh _normalize_ref`; a failure renders the raw text with state
+`invalid`. A canonical ref equal to `todo:<own basename>` is `self`
+without a resolver call (so `2026-05-01-x`, `todo:2026-05-01-x.md`, and
+`todo:2026-05-01-x` all detect self). Every other canonical ref is
+resolved by one `todos.sh _resolve <ref>` call with cwd at the repo
+root, memoised per canonical ref for the run. A todo is **blocked**
+when any ref resolves to something other than `done` or `merged`; the
+row lists every ref as `<canonical ref> (<state>)`, unsatisfied ones in
+the blocked colour and satisfied ones muted. Completed todos never
 resolve (as in `list --all`).
 
 **Herdr task status.** For every todo (pending and completed) the
 renderer looks for `<state_root>/<repo_slug>/tasks/td-<basename>.json`.
-Missing file: no status (shown as a blank cell, `data-task-status=""`).
-Present and valid JSON: `status`, the last `workers[]` entry's `phase`,
-`role`, `model`, and `agent` (blank when the list is absent or empty),
-`review_outcome`, `branch`. Then, if present and valid, `.review.json`
-adds `outcome` and `blocking_count` and `findings_ref`, and `.done.json`
-adds `outcome` and `phase`. A file that is present but unreadable or not
-valid JSON sets the status text to `unreadable` for that record and the
-run continues; nothing is ever written under the state root. Keys are
-read defensively: a missing key is blank, never an exception.
+
+- Missing record: no status (blank cell, `data-task-status=""`), and
+  the review and done records are not consulted.
+- Record present but unreadable or not a JSON object: status text
+  `unreadable`, the review and done records are still consulted.
+- Record valid: `status`, `branch`, `review_head_sha`, and
+  `review_outcome` from the record; `phase`, `role`, `model`, `agent`,
+  and `workspace_id` from the last `workers[]` entry when `workers` is a
+  non-empty list whose last element is an object, else blank. Every
+  field is read as a string or integer; `null`, booleans, lists, and
+  objects read as blank. A missing key is blank, never an exception.
+- Review record (`.review.json`), when present and valid: `outcome`,
+  `blocking_count`, `findings_ref`. It is **current** only when
+  `reviewed_head_sha` is non-blank and equals the task record's
+  `review_head_sha`; otherwise the cell shows it tagged `(stale)`. The
+  record's own `review_outcome` is shown only when there is no review
+  record.
+- Done record (`.done.json`), when present and valid: `outcome`,
+  `phase`. Current only when its `workspace_id` equals the live
+  worker's `workspace_id` (both non-blank); otherwise tagged `(stale)`.
+- **In-flight** is a pending todo whose readable record has `status`
+  in exactly `kickoff`, `in-progress`, `blocked`, `review-dispatched`,
+  `changes-requested`, `reviewed`. An unreadable record, an empty
+  object, or any other status (including `merged`, `completed`,
+  `failed`, `abandoned`, or an unknown token) is not in flight.
 
 `repo_slug` is computed in the renderer from `git remote get-url
-origin` (else the common dir) by the rule in the confirmed facts; a
-test pins it against `claude.hooks.herdr_orch_core.repo_slug` on fixed
-inputs so drift is caught.
+origin` (else the git common dir) by the rule in the confirmed facts; a
+test pins it against `claude/hooks/herdr_orch_core.py`'s `repo_slug`
+on fixed inputs so drift is caught.
 
 **Research.** Every `*.md` under `.todos/research/`, recursively, sorted
-by `created` descending then path. Frontmatter: `created` (required;
-files without it sort last and show `undated`), `title` (falls back to
-the filename), `kind` (free text, e.g. `field-notes`, `review-findings`,
-`report`), `task` (a task id or todo basename; rendered as a link to the
-todo row when that basename exists on the page), `artifact` (a URL). The
-summary is the first non-empty body line after the frontmatter, cut at
-200 characters. Each entry links to the file itself with a `file://`
-URL so it opens in the browser.
+by `created` descending, ties by relative path ascending; files without
+`created` follow, by relative path, and show `undated`. Frontmatter:
+`title` (falls back to the filename), `kind` (free text, e.g.
+`field-notes`, `review-findings`, `report`), `task` (a task id or todo
+basename; a `td-` prefix is stripped for matching; rendered as an
+in-page link when that basename is a row on the page, else as plain
+monospace text), `artifact` (rendered as a link only when it starts
+with `http://` or `https://`; any other value, `javascript:` included,
+is shown as escaped plain text). The summary is the first non-empty
+body line after the frontmatter, cut at 200 characters. Each entry's
+title links to the file itself with a `file://` URL.
 
 ### D3. The `.todos/research/` convention
 
@@ -196,7 +270,7 @@ index:
     review-findings.md
 ```
 
-Report frontmatter (all keys optional except `created` and `title`):
+Report frontmatter (`created` and `title` expected; the rest optional):
 
 ```markdown
 ---
@@ -210,9 +284,15 @@ artifact: https://claude.ai/code/artifacts/...
 One-paragraph summary, then the report body in markdown.
 ```
 
-The directory inherits the `.todos/` visibility rule (local by default,
-committed only after `todos.sh share`). Reports are hand-written or
-saved by whichever session produced them; the dashboard is the index.
+Visibility: the directory inherits the `.todos/` rule, which exists
+only after `todos.sh init` (or the first `new`) has written the
+`.todos/` exclude line. The skill doc says to run `todos.sh init`
+before saving research in a repo that has never used todos, and that a
+repo where `todos.sh share` was run commits research along with the
+backlog. The renderer warns once on stderr (`todos: .todos/ is neither
+git-ignored nor tracked; run todos.sh init before saving research
+there`) when `.todos/` exists but `git check-ignore` rejects it and
+`git ls-files .todos` is empty; the render still succeeds.
 
 ### D4. Page structure
 
@@ -221,29 +301,32 @@ order:
 
 1. **Header.** Repo name (basename of the repo root), the generated
    stamp, the output of `git rev-parse --abbrev-ref HEAD` for the
-   checkout the command ran in, and three counts: open, blocked, and
-   in-flight (open todos with a readable task record whose `status` is
-   not `merged`, `abandoned`, or `failed`; an unreadable record never
-   counts).
+   checkout the command ran in, the sentence `Static page: rerun
+   todos.sh dashboard and reload to refresh.`, and three counts: open,
+   blocked, and in-flight (D2), rendered as `<b data-count="open">N</b>`,
+   `data-count="blocked"`, `data-count="in-flight"`.
 2. **Open.** One table sorted with the `TODO.md` key. Columns: todo
-   (title, basename beneath it, area chip, priority chip, `maturity` /
-   `tier` chips when set), created / due, depends on (each ref with its
-   state; blocked rows carry a state stripe), herdr (status pill, phase
-   and worker line, review verdict with blocking count), links.
-   Empty state: `No open todos.`
+   (title, basename beneath it, problem summary, area chip, priority
+   chip, `maturity` / `tier` chips when set), created / due, depends on
+   (each ref with its state; blocked rows carry a state stripe), herdr
+   (status pill, then `phase role model` line, review verdict with
+   blocking count and `(stale)` tag, done outcome with `(stale)` tag),
+   links. Empty state: `No open todos.`
 3. **Completed.** The `--completed N` most recent by `created` desc then
    basename desc. Columns: todo, created, herdr (same as above), links.
-   Empty state: `Nothing completed yet.`
+   Empty state: `Nothing completed yet.` Omitted entirely at N = 0.
 4. **Research.** List sorted per D2. Each entry: title (linked to the
-   file), created, kind chip, task link, artifact link, summary.
-   Empty state: `No research reports. Save durable notes under
-   .todos/research/ (see the todos skill).`
+   file), created or `undated`, kind chip, task link or text, artifact
+   link or text, summary. Empty state: `No research reports. Save
+   durable notes under .todos/research/ (see the todos skill).`
 
-Machine-readable hooks for tests and tooling, on every row:
-`data-todo="<basename>"`, `data-state="open|blocked"` (pending rows),
-`data-task-status="<status or empty>"`, and on research entries
+Machine-readable hooks on every row: `id="todo-<basename>"`,
+`data-todo="<basename>"`, `data-state="open|blocked"` (pending rows
+only), `data-task-status="<status or empty>"`, and on research entries
 `data-research="<path relative to .todos/research>"`. All text content
-and attribute values pass through `html.escape(..., quote=True)`.
+and attribute values pass through `html.escape(..., quote=True)`; every
+`href` is either a `file://` URI built by `Path.as_uri()`, an in-page
+`#todo-` anchor, or an `http(s)` URL that passed the scheme check.
 
 ### D5. Visual design
 
@@ -256,37 +339,35 @@ on bare `:root` for light, redefined under
 
 - Palette (light): ground `#f7f6f2` (warm paper, hue-biased toward the
   accent), ink `#1f2a24`, muted `#6b746e`, accent `#2f6f5e` (deep
-  green, the todos skill's "open" colour), rule `#d9ddd7`. Semantic,
-  separate from the accent: blocked `#b3541e`, merged `#3b6ea5`,
-  in-flight `#8a6d1f`. Dark: ground `#171b19`, ink `#e8ece9`, muted
-  `#9aa39d`, accent `#7fbfa8`, rule `#2c332f`, semantic colours lifted
-  for contrast.
+  green), rule `#d9ddd7`, chip `#ebeae4`. Semantic, separate from the
+  accent: blocked `#b3541e`, merged `#3b6ea5`, in-flight `#8a6d1f`.
+  Dark: ground `#171b19`, ink `#e8ece9`, muted `#9aa39d`, accent
+  `#7fbfa8`, rule `#2c332f`, chip `#232927`, blocked `#e0895a`, merged
+  `#7fa9d8`, in-flight `#d1b25a`.
 - Type: a humanist sans for everything (`"Avenir Next", "Segoe UI",
   system-ui, sans-serif`) with a monospace utility face (`"SF Mono",
-  Menlo, Consolas, monospace`) for basenames, refs, and shas;
+  Menlo, Consolas, monospace`) for basenames, refs, and branch names;
   `tabular-nums` on dates and counts; uppercase letter-spaced section
-  eyebrows; headings `text-wrap: balance`.
+  headings; the title `text-wrap: balance`.
 - Layout: max width 1200px, one column of tables; the header counts are
   a flex row of three plain figures (no cards). Tables sit in an
-  `overflow-x: auto` wrapper. Chips are the only rounded element; the
-  blocked state also paints a 3px left stripe on the row so it reads
-  without colour.
-- Motion: none. `prefers-reduced-motion` needs nothing to respect.
+  `overflow-x: auto` wrapper. Chips and pills are the only rounded
+  elements; a blocked row also paints a 3px left stripe on its first
+  cell so it reads without colour.
+- Motion: none.
 
 The field notes artifact used the same warm-neutral ground and a
 restrained chip vocabulary; this page follows that so the two read as
-one system. The implementer loads the `artifact-design` skill for the
-fundamentals and keeps the tokens above verbatim.
+one system. The implementer keeps the tokens above verbatim.
 
 ### D6. Orchestrator preflight
 
-`claude/skills/herdr-orchestration/SKILL.md` section 1 gains one step
-after the ownership claim:
+`claude/skills/herdr-orchestration/SKILL.md` section 1 gains exactly one
+line, inserted after the ownership-claim bullet list (after the
+`check-fence` sentence) and before step 4:
 
 ```
-   - Regenerate the board: `bash ~/.claude/skills/todos/scripts/todos.sh dashboard`
-     (add `--open` on the initial claim only). Best-effort: a non-zero
-     exit is reported in the turn summary and never blocks the action.
+   - Regenerate the board with `bash ~/.claude/skills/todos/scripts/todos.sh dashboard` (add `--open` on the initial claim only); best-effort, a non-zero exit is noted in the turn summary and never blocks the action.
 ```
 
 Nothing else in that skill changes.
@@ -294,25 +375,40 @@ Nothing else in that skill changes.
 ### D7. Tests
 
 New suite `claude/skills/todos/scripts/tests/todos_dashboard_test.sh`,
-same helpers and output shape as `todos_test.sh` (`ok`/`bad` lines,
-final `N passed, M failed`), registered in `bin/dotfiles-tests`. Every
-test builds a throwaway git repo with `origin/main` set by
-`update-ref`, a `.todos/` fixture set, and a fake state root passed via
-`TODOS_STATE_ROOT`; `TODOS_OFFLINE=1`, `TODOS_TODAY`, and
-`TODOS_DASHBOARD_NOW` pin determinism. No test opens a browser.
+same helpers and output shape as `todos_test.sh` (`ok`/`FAIL` lines,
+final `N passed, M failed`, exit 1 on any failure), registered in
+`bin/dotfiles-tests`. Every test builds a throwaway git repo with
+`origin/main` set by `update-ref` and an `origin` remote URL set by
+`git remote add`, a `.todos/` fixture set, and a fake state root passed
+via `TODOS_STATE_ROOT`; `TODOS_TODAY` and `TODOS_DASHBOARD_NOW` pin
+determinism, `TODOS_GH` points at a stub that records calls. No test
+opens a browser or reaches the network.
 
 Fixture set (the "one blocked, one merged, one plain" of the task):
 
-- `2026-05-01-plain.md`: pending, no deps, no task record.
-- `2026-05-02-blocked.md`: pending, `depends_on: [todo:2026-05-01-plain, pr:7]`.
-- `2026-05-03-merged.md`: completed; state root has
-  `td-2026-05-03-merged.json` with `status: merged` and a `.review.json`
-  with `outcome: approved`, `blocking_count: 0`.
-- `2026-05-04-in-flight.md`: pending; record with `status: in-progress`,
-  `workers[-1].phase: implement`.
-- `2026-05-05-bad-record.md`: pending, title
+- `pending/2026-05-01-plain.md`: no deps, no task record; body links a
+  GitHub PR URL and a `claude.ai` artifact URL.
+- `pending/2026-05-02-blocked.md`: `priority: high` and a block list
+
+  ```
+  depends_on:
+    - todo:2026-05-01-plain
+    - pr:7
+  ```
+
+- `completed/2026-05-03-merged.md`; state root has
+  `td-2026-05-03-merged.json` with `status: merged`,
+  `review_head_sha: abc`, and a `.review.json` with `outcome: approved`,
+  `blocking_count: 0`, `reviewed_head_sha: abc`.
+- `pending/2026-05-04-in-flight.md`; record with `status: in-progress`,
+  `workers[-1]` `phase: implement`, `workspace_id: w1`; a `.done.json`
+  with `outcome: completed`, `phase: plan`, `workspace_id: w0` (stale).
+- `pending/2026-05-05-bad-record.md`, title
   `<script>alert(1)</script>`; record file containing `{not json`.
-- `research/2026-05-06-notes.md` and `research/td-x/review-findings.md`.
+- `research/2026-05-06-notes.md` (`kind: field-notes`, `task:
+  td-2026-05-01-plain`, `artifact: https://claude.ai/code/artifacts/x`)
+  and `research/td-x/review-findings.md` (`created: 2026-05-02`,
+  `artifact: javascript:alert(1)`).
 
 ## Acceptance criteria
 
@@ -320,55 +416,77 @@ Fixture set (the "one blocked, one merged, one plain" of the task):
   0, prints F, and F contains a row `data-todo="2026-05-02-blocked"
   data-state="blocked"` listing `todo:2026-05-01-plain (open)` and
   `pr:7 (unknown)`; a row for `2026-05-01-plain` with
-  `data-state="open"`; a completed row for `2026-05-03-merged` with
-  `data-task-status="merged"` and the text `approved`; an in-flight row
-  with `data-task-status="in-progress"` and the text `implement`; and
-  the header counts `open 4`, `blocked 1`, `in-flight 1`
-  (rendered as `<b data-count="open">4</b>` etc.).
+  `data-state="open"` and the link labels `PR #12` and `artifact`; a
+  completed row `data-todo="2026-05-03-merged"
+  data-task-status="merged"` with the text `review approved (0
+  blocking)` and no `(stale)` on that line; an in-flight row with
+  `data-task-status="in-progress"`, the text `implement`, and `done
+  completed plan (stale)`; and the counts `data-count="open">4`,
+  `data-count="blocked">1`, `data-count="in-flight">1`.
 - AC2 **Bad records do not abort.** The `2026-05-05-bad-record` row
-  renders with the text `unreadable`; exit stays 0.
-- AC3 **Research index.** Both research files appear with
-  `data-research="2026-05-06-notes.md"` and
-  `data-research="td-x/review-findings.md"`, the first carrying its
-  `kind` chip text and an `href` to its `artifact` URL, sorted newest
-  first.
+  renders with `data-task-status="unreadable"`; exit stays 0; the
+  in-flight count is still 1.
+- AC3 **Research index.** Both research files appear, `2026-05-06-notes.md`
+  before `td-x/review-findings.md`, the first with the chip text
+  `field-notes`, an `href="https://claude.ai/code/artifacts/x"`, and an
+  `href="#todo-2026-05-01-plain"`; the second shows
+  `artifact: javascript:alert(1)` as text and F contains no
+  `href="javascript:`.
 - AC4 **Escaping.** The `2026-05-05-bad-record` title appears only as
-  `&lt;script&gt;alert(1)&lt;/script&gt;`; the raw `<script` string is
+  `&lt;script&gt;alert(1)&lt;/script&gt;`; the string `<script` is
   absent from F.
 - AC5 **Default path and slug.** With `TODOS_DASHBOARD_DIR=D` and an
-  `origin` remote `git@github.com:Org/Repo.git`, the command writes
-  `D/github-com-org-repo-<8hex>.html` where `<8hex>` equals what
-  `herdr_orch_core.repo_slug` returns for the same URL; with no remote
-  the name starts with `local-`.
+  `origin` remote `git@github.com:Org/Repo.git`, the printed path is
+  `D/<slug>.html` where `<slug>` equals what
+  `herdr_orch_core.repo_slug("git@github.com:Org/Repo.git")` returns;
+  with no remote the name starts with `local-`.
 - AC6 **Read-only.** After a render the fixture state root's file list
-  and contents are byte-identical, and `.todos/` is unchanged (no
-  `TODO.md` created or modified).
+  and checksums are identical to before, and `.todos/` contains no
+  `TODO.md`.
 - AC7 **Empty board.** In a repo with no `.todos/`, exit 0 and F
-  contains `No open todos.`
-- AC8 **Flags.** `--completed 0` omits the completed table;
-  `--completed 1` shows exactly one completed row (the newest by
-  `created`); an unknown flag exits 1 with a `todos:` message on stderr.
-- AC9 **Offline default.** With a `TODOS_GH` stub that records calls,
-  a default render makes no `gh` call; `--online` makes at least one.
-- AC10 **Dispatch is thin.** `todos.sh` diff against base adds at most
-  four lines, all within the usage comment block and the `main` case;
-  `todos_test.sh` is untouched; `todos_test.sh` still reports 0 failed.
-- AC11 **Docs.** The todos skill documents the `dashboard` command row,
-  the `.todos/research/` convention with its frontmatter keys, and the
-  `TODOS_DASHBOARD_DIR` / `TODOS_STATE_ROOT` overrides; the
-  orchestration skill's section 1 contains `todos.sh dashboard`.
-- AC12 **Registered suite.** `bin/dotfiles-tests --list` includes the
+  contains `No open todos.` and `Nothing completed yet.` and
+  `No research reports.`
+- AC8 **Flags.** `--completed 0` omits the `Completed` heading;
+  `--completed 1` shows exactly one completed row, the newest by
+  `created`; `--completed -1` and an unknown flag exit 1 with a `todos:`
+  line on stderr and nothing on stdout.
+- AC9 **Offline precedence.** With the `TODOS_GH` stub: a default render
+  records no `gh` call; `--online` records at least one; `--online` with
+  `TODOS_OFFLINE=1` exported still records at least one; a default
+  render with `TODOS_OFFLINE` unset records none.
+- AC10 **Output guard.** `--out <repo>/.todos/x.html` and `--out
+  <state_root>/<slug>/x.html` exit 1 with `refusing to write` on stderr
+  and create no file; `TODOS_DASHBOARD_DIR=<repo>/.todos` likewise.
+- AC11 **Failed write preserves the previous page.** After one
+  successful render to F, a render with `--out <path whose parent is a
+  regular file>` exits 1 with `cannot write`, and F's checksum is
+  unchanged.
+- AC12 **Unreadable todo skipped.** A pending todo made unreadable
+  (`chmod 000`; the check is skipped when running as root) is omitted,
+  a `skipping unreadable file` line appears on stderr, exit 0, and the
+  other rows still render.
+- AC13 **Self and invalid refs.** A pending todo listing
+  `todo:<its own basename>.md` and `not a ref!` renders `(self)` and
+  `not a ref! (invalid)` and is blocked.
+- AC14 **Dispatch is thin.** The diff of `todos.sh` against the merge
+  base adds at most two lines and removes none; `todos_test.sh` has no
+  diff; `todos_test.sh` still reports 0 failed.
+- AC15 **Docs.** The todos skill documents the `dashboard` command row,
+  the `.todos/research/` convention with its frontmatter keys, the
+  `todos.sh init` visibility note, and the `TODOS_DASHBOARD_DIR` /
+  `TODOS_STATE_ROOT` overrides; the orchestration skill's section 1
+  contains `todos.sh dashboard` on exactly one added line.
+- AC16 **Registered suite.** `bin/dotfiles-tests --list` includes the
   new test file.
 
 ## Verification not covered by tests
 
 - Opening in a real browser on this machine and checking both colour
-  schemes: human-verify after implementation (one look, per the design
-  skill's rule).
+  schemes: human-verify after implementation (one look).
 - The orchestrator actually running the preflight step: human-verify on
   the next orchestrated turn after merge.
 
-## Open questions resolved here
+## Decisions recorded
 
 - Recency for completed todos uses `created`, not file mtime: `mv`
   preserves mtime and the completed record carries no completion date.
@@ -376,3 +494,10 @@ Fixture set (the "one blocked, one merged, one plain" of the task):
   JSON reading in bash are fragile, and the core already makes python3
   a hard dependency. Dependency resolution stays in `todos.sh` through
   the hidden verbs, so there is one resolver.
+- Review round 1 (Codex, 2026-09-07, verdict needs-rework, 12 findings)
+  folded in full: output-path guard, http(s)-only links, record
+  precedence and staleness tags, the `.todos/` visibility warning, the
+  block-list fixture, the explicit scope table, typed record fields and
+  the enumerated in-flight statuses, `--online` precedence, the failure
+  table, the atomic write, the reload sentence, and normalisation via
+  `_normalize_ref`.
