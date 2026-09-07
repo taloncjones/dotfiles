@@ -17,16 +17,19 @@ time (the last workers[] entry on this workspace with this role in
 tasks/<task_id>.json; unknown launch time skips the recency test). An
 accepted record allows the stop silently.
 
-Refusal: exit 2 with three stderr lines -- the marker line with the
-refusal number, the exact emit-done / emit-review command to run, and the
-release rule. Continuation cap: earlier refusals are counted read-only
-from the session transcript (<config dir>/projects/*/<session_id>.jsonl,
-lines containing the marker). With stop_hook_active true, a count of
-MAX_BLOCKS releases (cap reached); an unreadable, ambiguous, or
-marker-less transcript also releases, so the gate never refuses more than
-MAX_BLOCKS times in a row whatever the transcript does. A release is exit
-0 with a systemMessage JSON on stdout. A fresh stop cycle
-(stop_hook_active false) is always refused once.
+Refusal: exit 2 with three stderr lines -- the marker line, the exact
+emit-done / emit-review command to run, and a note to stop again. A fresh
+stop cycle (stop_hook_active false) is always refused, exactly once --
+this is a single nudge, not a counted budget.
+
+Anti-wedge release: stop_hook_active true means this hook already
+refused this same stop cycle once, so it releases unconditionally,
+self-contained -- it never refuses a second time under the active flag.
+The transcript (<config dir>/projects/*/<session_id>.jsonl, lines
+containing the marker) is consulted only to word the systemMessage: a
+confirmed prior refusal, an unreadable/ambiguous transcript, and a
+marker-less transcript each get their own reason string, but all three
+release. A release is exit 0 with a systemMessage JSON on stdout.
 
 Reads only; never writes under the config dir or anywhere else. Fails
 open on any exception (exit 0, silent), matching the other guards.
@@ -42,7 +45,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import herdr_orch_core as core  # after the path insert; read-only helpers only
 
-MAX_BLOCKS = 2
 GATED_ROLES = ("impl", "review")
 RECORD_SUFFIX = {"impl": ".done.json", "review": ".review.json"}
 CORE_CMD = "python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
@@ -192,12 +194,11 @@ def emit_command(rd, index, ws, task, entry):
             f"--head-sha \"$(git rev-parse HEAD)\" --base-sha {base}")
 
 
-def refuse(n, command):
-    print(f"{MARKER} ({n} of {MAX_BLOCKS}) -- emit-done (or emit-review) before "
-          "stopping; the orchestrator only recognizes the record.", file=sys.stderr)
+def refuse(command):
+    print(f"{MARKER} -- emit-done (or emit-review) before stopping; the "
+          "orchestrator only recognizes the record.", file=sys.stderr)
     print("Run: " + command, file=sys.stderr)
-    print(f"Then stop again. The gate releases after {MAX_BLOCKS} blocks even "
-          "without a record.", file=sys.stderr)
+    print("Then stop again; the gate releases on that attempt.", file=sys.stderr)
     return 2
 
 
@@ -230,19 +231,18 @@ def decide(payload):
     entry = launch_entry(task, ws, role)
     if record_accepted(rd, task_id, ws, role, launch_time(entry)):
         return 0
-    count = block_count(payload.get("session_id"))
     if payload.get("stop_hook_active") is True:
-        # Each release row below is a loop backstop: an active stop hook
-        # proves a refusal already happened, so no countable evidence means
-        # the transcript is not recording the marker and the cap can never
-        # be reached by counting. Never refuse more than MAX_BLOCKS in a row.
+        # An active stop hook proves this hook already refused this same
+        # stop cycle once. Release unconditionally -- never refuse a second
+        # time under the active flag -- and use the transcript only to pick
+        # the reason string for the systemMessage.
+        count = block_count(payload.get("session_id"))
         if count is None:
             return release("transcript unavailable", task_id)
         if count == 0:
             return release("transcript evidence missing", task_id)
-        if count >= MAX_BLOCKS:
-            return release("cap reached", task_id)
-    return refuse((count or 0) + 1, emit_command(rd, index, ws, task, entry))
+        return release("prior refusal recorded", task_id)
+    return refuse(emit_command(rd, index, ws, task, entry))
 
 
 def main():

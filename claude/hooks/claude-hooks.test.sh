@@ -865,8 +865,8 @@ gate_case() {
             [ "$rc" = 0 ] && [ ! -s "$gd/out" ] && [ ! -s "$gd/err" ] && ok=1 ;;
         block-*)
             [ "$rc" = 2 ] && [ ! -s "$gd/out" ] && [ "$(wc -l <"$gd/err" | tr -d ' ')" = 3 ] \
-                && head -n 1 "$gd/err" | grep -q "^herdr-stop-gate: blocked (${expect#block-} of 2) -- emit-done (or emit-review) before stopping; the orchestrator only recognizes the record\.$" \
-                && sed -n 3p "$gd/err" | grep -q '^Then stop again\. The gate releases after 2 blocks even without a record\.$' \
+                && head -n 1 "$gd/err" | grep -q "^herdr-stop-gate: blocked -- emit-done (or emit-review) before stopping; the orchestrator only recognizes the record\.$" \
+                && sed -n 3p "$gd/err" | grep -q '^Then stop again; the gate releases on that attempt\.$' \
                 && ok=1 ;;
         release-*)
             [ "$rc" = 0 ] && [ ! -s "$gd/err" ] && grep -q 'herdr-stop-gate: released' "$gd/out" \
@@ -944,8 +944,8 @@ else
 fi
 
 GATE_P_T='{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":true}'
-gate_case "second refusal counts the transcript" block-2 w1 impl none 1 "$GATE_P_T"
-gate_case "released after two refusals" "release-cap reached" w1 impl none 2 "$GATE_P_T"
+gate_case "active flag with exactly one marker releases" "release-prior refusal recorded" w1 impl none 1 "$GATE_P_T"
+gate_case "active flag releases even with two markers on record" "release-prior refusal recorded" w1 impl none 2 "$GATE_P_T"
 if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); m=d.get("systemMessage"); sys.exit(0 if isinstance(m, str) and "PROJ-1" in m and list(d) == ["systemMessage"] else 1)' "$GATE_LAST/out"; then
     printf 'PASS  gate: release is one systemMessage object naming the task\n'; PASS=$((PASS + 1))
 else
@@ -955,9 +955,9 @@ gate_case "released when transcript is missing" "release-transcript unavailable"
 gate_case "released when transcript has no marker" "release-transcript evidence missing" w1 impl none 0 "$GATE_P_T"
 gate_case "released when two transcripts match the session" "release-transcript unavailable" w1 impl none dup "$GATE_P_T"
 gate_case "released when the session id is unsafe" "release-transcript unavailable" w1 impl none 2 '{"hook_event_name":"Stop","session_id":"../x","stop_hook_active":true}'
-gate_case "fresh cycle is refused again after a release" block-3 w1 impl none 2 "$GATE_P_F"
+gate_case "fresh cycle is refused again after a release" block-1 w1 impl none 2 "$GATE_P_F"
 gate_case "active hook with a fresh record is allowed silently" allow w1 impl done:fresh:w1:PROJ-1 2 "$GATE_P_T"
-gate_case "stop_hook_active must be boolean true to release" block-3 w1 impl none 2 '{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":"true"}'
+gate_case "stop_hook_active must be boolean true to release" block-1 w1 impl none 2 '{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":"true"}'
 
 # Static registration: the template's Stop group is one `*` matcher listing
 # the status hook then the gate. Order is documentary (a group's hooks run
@@ -979,7 +979,7 @@ else
 fi
 
 # Read-only: a content hash of the whole fixture config dir is identical
-# after a refusal, a counted refusal, a release, and an allow.
+# after a refusal and two anti-wedge releases.
 gd=$(mktemp -d)
 gate_fixture "$gd" w1 impl done:stale:w1:PROJ-1 1
 gate_snapshot() {
@@ -1005,7 +1005,7 @@ rc1=$(gate_run "$GATE_P_F")
 rc2=$(gate_run "$GATE_P_T")
 rc3=$(gate_run "$GATE_P_T")
 after=$(gate_snapshot "$gd")
-if [ "$rc1" = 2 ] && [ "$rc2" = 2 ] && [ "$rc3" = 2 ] && [ -n "$before" ] && [ "$before" = "$after" ]; then
+if [ "$rc1" = 2 ] && [ "$rc2" = 0 ] && [ "$rc3" = 0 ] && [ -n "$before" ] && [ "$before" = "$after" ]; then
     printf 'PASS  gate: hook leaves the config dir byte-identical\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  gate: hook leaves the config dir byte-identical (rc=%s/%s/%s)\n' "$rc1" "$rc2" "$rc3" >&2; FAIL=$((FAIL + 1))
