@@ -152,6 +152,7 @@ Environment overrides (tests and unusual setups):
 | `TODOS_DASHBOARD_NOW` | current local time | `YYYY-MM-DD HH:MM` stamp printed in the header |
 | `TODOS_TODAY`, `TODOS_BASE_REF`, `TODOS_GH` | existing | Passed through unchanged to the `todos.sh` calls |
 | `TODOS_DASHBOARD_TODOS_SH` | sibling `todos.sh` | Path of the script used for `_depends` / `_normalize_ref` / `_resolve` (tests only) |
+| `TODOS_DASHBOARD_OPENER` | `open` / `xdg-open` | Command used by `--open` (tests only) |
 
 **Output path guard.** Before reading anything, the renderer resolves
 the output path (its parent when the file does not exist yet) with
@@ -161,10 +162,13 @@ the state root, symlinks included. `TODOS_DASHBOARD_DIR` goes through
 the same guard.
 
 **Atomic write.** The page is written to `<out>.tmp.<pid>` in the
-output directory and renamed over `<out>` with `os.replace`. A reader
-never sees a partial file, a failed render leaves the previous page
-intact, and concurrent renders from two worktrees of one repo end with
-whichever finished last, complete. No lock is taken.
+output directory, opened with `O_CREAT|O_EXCL|O_NOFOLLOW` so a planted
+file or symlink at that name fails the render instead of being followed,
+then renamed over `<out>` with `os.replace`. Any failure after the temp
+file exists unlinks it. A reader never sees a partial file, a failed
+render leaves the previous page intact, and concurrent renders from two
+worktrees of one repo end with whichever finished last, complete. No
+lock is taken.
 
 **Failure handling.**
 
@@ -191,7 +195,9 @@ Repo root is `git rev-parse --show-toplevel` from the current directory.
 **Todos.** Every `*.md` under `.todos/pending/` and `.todos/completed/`,
 sorted by basename. Per file the renderer reads, inside the first `---`
 block only and with the same first-match and quote-stripping rules as
-`frontmatter_value`: `created`, `title` (falls back to the basename),
+`frontmatter_value` (the first line for a key wins even when its value
+is blank, so `title:` followed by `title: later` yields a blank title
+and the basename fallback): `created`, `title` (falls back to the basename),
 `area`, `priority`, `due`, `surface`, `maturity`, `tier`, and the
 `files:` list. `depends_on` items come from `todos.sh _depends <file>`
 so the list parser stays single-sourced. The body summary is the first
@@ -232,12 +238,14 @@ renderer looks for `<state_root>/<repo_slug>/tasks/td-<basename>.json`.
   non-empty list whose last element is an object, else blank. Every
   field is read as a string or integer; `null`, booleans, lists, and
   objects read as blank. A missing key is blank, never an exception.
-- Review record (`.review.json`), when present and valid: `outcome`,
+- Review record (`.review.json`), when present and valid: `outcome`
+  (shown as `unknown` when blank or missing in a present record),
   `blocking_count`, `findings_ref`. It is **current** only when
   `reviewed_head_sha` is non-blank and equals the task record's
   `review_head_sha`; otherwise the cell shows it tagged `(stale)`. The
-  record's own `review_outcome` is shown only when there is no review
-  record.
+  task record's own `review_outcome` is shown only when the review file
+  does not exist; a present-but-empty review record never falls back to
+  it.
 - Done record (`.done.json`), when present and valid: `outcome`,
   `phase`. Current only when its `phase` equals the live worker's
   `phase` and its `agent` equals the live worker's `agent` (all four
@@ -328,6 +336,12 @@ order:
    file), created or `undated`, kind chip, task link or text, artifact
    link or text, summary. Empty state: `No research reports. Save
    durable notes under .todos/research/ (see the todos skill).`
+
+Attribute safety: every attribute value is escaped, and CSS class
+names are literals chosen by the renderer (the priority chip gets a
+`prio-<level>` class only when the level is one of `high`, `med`,
+`low`); no frontmatter value ever reaches an attribute unescaped, so a
+value like `x" onclick="..."` renders as text.
 
 Machine-readable hooks on every row: `id="todo-<basename>"`,
 `data-todo="<basename>"`, `data-state="open|blocked"` (pending rows
@@ -495,6 +509,16 @@ Fixture set (the "one blocked, one merged, one plain" of the task):
 - AC16 **Registered suite.** `bin/dotfiles-tests --list` includes the
   new test file.
 
+## Branch-only documents
+
+`git/hooks/public-safety.test.sh` rejects any tracked file under
+`docs/plans/` or `docs/specs/`, so this spec and its plan (tracked with
+`git add -f` for the plan and implement phases) make the full runner
+fail until they are dropped from tracking. The plan's last task removes
+them from the index (the cached-removal form of git rm) as the final
+commit before review; the files stay on disk because `docs/` is in
+`info/exclude`, and the review reads them by path or from history.
+
 ## Verification not covered by tests
 
 - Opening in a real browser on this machine and checking both colour
@@ -522,3 +546,9 @@ Fixture set (the "one blocked, one merged, one plain" of the task):
   dependency read counts as blocked, `--open` bounded and detached, URL
   boundary rules, and AC11 retargeted at the existing page. Two rounds
   is the review skill's cap; the plan review is the next gate.
+- Plan review (Codex, 2026-09-07, verdict needs-rework, 13 findings)
+  folded where they touched the spec: `O_EXCL|O_NOFOLLOW` temp file,
+  attribute-safety rule, review-record presence rule, blank-first-value
+  frontmatter rule, `TODOS_DASHBOARD_OPENER`, and this branch-only
+  documents section. The rest are plan-level (see the plan's review
+  notes).
