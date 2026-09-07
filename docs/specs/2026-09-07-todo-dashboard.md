@@ -138,7 +138,7 @@ todos_dashboard.py ...`). It locates `todos.sh` as its sibling file.
 
 | Flag | Meaning |
 |---|---|
-| `--open` | After writing, open the file with `open` (Darwin) or `xdg-open` (else). A missing opener is a `todos:` warning on stderr; exit stays 0. |
+| `--open` | After writing and after printing the path, spawn `open <file>` (Darwin) or `xdg-open <file>` (else) detached, with the child's stdout and stderr sent to `/dev/null`, never waited on. A spawn failure (missing opener) is a `todos:` warning on stderr; exit stays 0 and stdout stays the path alone. |
 | `--online` | Let dependency resolution call `gh`: the renderer removes `TODOS_OFFLINE` from the child environment even when the caller exported it. Without the flag the renderer sets `TODOS_OFFLINE=1` in the child environment regardless of the caller's value. The flag always wins. |
 | `--out PATH` | Write to PATH (relative to the current directory) instead of the default location. Parent directories are created. |
 | `--completed N` | Number of completed todos to show (default 10; 0 hides the section; negative is a usage error). |
@@ -151,6 +151,7 @@ Environment overrides (tests and unusual setups):
 | `TODOS_STATE_ROOT` | `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch` | Herdr state root to read task records from |
 | `TODOS_DASHBOARD_NOW` | current local time | `YYYY-MM-DD HH:MM` stamp printed in the header |
 | `TODOS_TODAY`, `TODOS_BASE_REF`, `TODOS_GH` | existing | Passed through unchanged to the `todos.sh` calls |
+| `TODOS_DASHBOARD_TODOS_SH` | sibling `todos.sh` | Path of the script used for `_depends` / `_normalize_ref` / `_resolve` (tests only) |
 
 **Output path guard.** Before reading anything, the renderer resolves
 the output path (its parent when the file does not exist yet) with
@@ -175,7 +176,8 @@ whichever finished last, complete. No lock is taken.
 | output directory cannot be created or file cannot be written | `todos: cannot write <path>: <reason>`, exit 1, previous page untouched |
 | a todo or research file cannot be read (permissions, vanished mid-run) | `todos: skipping unreadable file: <path> (<reason>)` on stderr, entry omitted, exit 0 |
 | a todo file is not valid UTF-8 | decoded with replacement characters, no message |
-| a `todos.sh` resolver call fails or prints nothing | that ref shows `unknown` (`_resolve`) or `invalid` (`_normalize_ref`); a failed `_depends` means no dependencies for that todo; exit 0 |
+| a `todos.sh` resolver call fails or prints nothing | that ref shows `unknown` (`_resolve`) or `invalid` (`_normalize_ref`); exit 0 |
+| `todos.sh _depends` exits non-zero for a todo | the row shows the single entry `depends_on (unreadable)` in the blocked colour and the todo counts as blocked; exit 0 |
 | a task, review, or done record is unreadable or not a JSON object | shown as `unreadable` for that record, exit 0 |
 | no `.todos/` directory | empty board, exit 0 |
 
@@ -195,7 +197,12 @@ block only and with the same first-match and quote-stripping rules as
 so the list parser stays single-sourced. The body summary is the first
 non-empty line under `## Problem`, cut at 140 characters (same rule as
 `problem_summary`). Links are every `http://` or `https://` URL in the
-body, deduplicated in order, capped at 5, classified by host:
+body, where a URL runs from the scheme to the first whitespace, `<`,
+`>`, `(`, `)`, `[`, `]`, `"`, or `'`, then loses any trailing `.`, `,`,
+or `;` (so `[PR](https://github.com/o/r/pull/12)` and `see
+https://x.test/a.` both yield the clean URL; a URL that itself contains
+parentheses is cut at the first one). Deduplicated in order, capped at
+5, classified by host:
 `claude.ai` paths under `/code/artifacts/` or `/artifacts/` are labelled
 `artifact`, `github.com/<org>/<repo>/pull/<n>` is labelled `PR #<n>`,
 anything else shows its host. No other scheme is ever extracted.
@@ -232,8 +239,10 @@ renderer looks for `<state_root>/<repo_slug>/tasks/td-<basename>.json`.
   record's own `review_outcome` is shown only when there is no review
   record.
 - Done record (`.done.json`), when present and valid: `outcome`,
-  `phase`. Current only when its `workspace_id` equals the live
-  worker's `workspace_id` (both non-blank); otherwise tagged `(stale)`.
+  `phase`. Current only when its `phase` equals the live worker's
+  `phase` and its `agent` equals the live worker's `agent` (all four
+  non-blank); otherwise tagged `(stale)`. Workspace ids are not used:
+  herdr reuses one workspace across plan, implement, and review.
 - **In-flight** is a pending todo whose readable record has `status`
   in exactly `kickoff`, `in-progress`, `blocked`, `review-dispatched`,
   `changes-requested`, `reviewed`. An unreadable record, an empty
@@ -401,8 +410,8 @@ Fixture set (the "one blocked, one merged, one plain" of the task):
   `review_head_sha: abc`, and a `.review.json` with `outcome: approved`,
   `blocking_count: 0`, `reviewed_head_sha: abc`.
 - `pending/2026-05-04-in-flight.md`; record with `status: in-progress`,
-  `workers[-1]` `phase: implement`, `workspace_id: w1`; a `.done.json`
-  with `outcome: completed`, `phase: plan`, `workspace_id: w0` (stale).
+  `workers[-1]` `phase: implement`, `agent: impl-a`; a `.done.json`
+  with `outcome: completed`, `phase: plan`, `agent: plan-a` (stale).
 - `pending/2026-05-05-bad-record.md`, title
   `<script>alert(1)</script>`; record file containing `{not json`.
 - `research/2026-05-06-notes.md` (`kind: field-notes`, `task:
@@ -458,16 +467,23 @@ Fixture set (the "one blocked, one merged, one plain" of the task):
   <state_root>/<slug>/x.html` exit 1 with `refusing to write` on stderr
   and create no file; `TODOS_DASHBOARD_DIR=<repo>/.todos` likewise.
 - AC11 **Failed write preserves the previous page.** After one
-  successful render to F, a render with `--out <path whose parent is a
-  regular file>` exits 1 with `cannot write`, and F's checksum is
-  unchanged.
+  successful render to F, F's directory is made non-writable
+  (`chmod 555`; skipped when running as root) and a second render to
+  the same F exits 1 with `cannot write`, prints nothing on stdout, and
+  leaves F's checksum unchanged and no `.tmp.` file beside it.
 - AC12 **Unreadable todo skipped.** A pending todo made unreadable
   (`chmod 000`; the check is skipped when running as root) is omitted,
   a `skipping unreadable file` line appears on stderr, exit 0, and the
   other rows still render.
 - AC13 **Self and invalid refs.** A pending todo listing
   `todo:<its own basename>.md` and `not a ref!` renders `(self)` and
-  `not a ref! (invalid)` and is blocked.
+  `not a ref! (invalid)` and is blocked. A pending todo whose
+  `_depends` read fails (simulated with a `TODOS_DASHBOARD_TODOS_SH`
+  override pointing at a stub that exits 1 for `_depends`) renders
+  `depends_on (unreadable)` and is blocked.
+- AC17 **Link boundaries.** A body line `[PR](https://github.com/o/r/pull/12).`
+  yields `href="https://github.com/o/r/pull/12"` and no `href` ending
+  in `)` or `.`.
 - AC14 **Dispatch is thin.** The diff of `todos.sh` against the merge
   base adds at most two lines and removes none; `todos_test.sh` has no
   diff; `todos_test.sh` still reports 0 failed.
@@ -501,3 +517,8 @@ Fixture set (the "one blocked, one merged, one plain" of the task):
   the enumerated in-flight statuses, `--online` precedence, the failure
   table, the atomic write, the reload sentence, and normalisation via
   `_normalize_ref`.
+- Review round 2 (Codex, 2026-09-07, verdict needs-rework, 5 findings)
+  folded in full: done-record freshness by phase and agent, a failed
+  dependency read counts as blocked, `--open` bounded and detached, URL
+  boundary rules, and AC11 retargeted at the existing page. Two rounds
+  is the review skill's cap; the plan review is the next gate.
