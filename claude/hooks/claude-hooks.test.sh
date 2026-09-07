@@ -339,6 +339,7 @@ want = [
     "~/.claude/hooks/no_ai_attribution_bash.py",
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
+    "~/.claude/hooks/rm_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
@@ -349,6 +350,273 @@ else
     printf 'FAIL  hwg: template lists the Bash guards in order, worktree guard last\n' >&2
     FAIL=$((FAIL + 1))
 fi
+
+# Account-leaking ECC hooks: ECC 2.2.1 resolves several hook state paths
+# through os.homedir() or $HOME/.claude, ignoring CLAUDE_CONFIG_DIR, so both
+# accounts would share them. Hooks with an upstream env knob are scoped per
+# config dir by the token key below; the seven ids here have no usable knob
+# and are switched off. Exact set: nothing else may ride along, none may be
+# missing.
+# See claude/hooks/ecc-hook-isolation.test.sh for the behavioural proof.
+if python3 - <<'PY'
+import json
+import sys
+
+env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
+ids = {s.strip().lower() for s in env.get("ECC_DISABLED_HOOKS", "").split(",") if s.strip()}
+want = {
+    "session-start:plan-canvas-sessions",
+    "stop:plan-canvas-pending",
+    "post:bash:command-log-audit",
+    "post:bash:command-log-cost",
+    "post:skill:track",
+    "pre:mcp-health-check",
+    "post:mcp-health-check",
+}
+sys.exit(0 if ids == want else 1)
+PY
+then
+    printf 'PASS  isolation: template excludes exactly the seven account-leaking ECC hook ids\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  isolation: template excludes exactly the seven account-leaking ECC hook ids\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# The per-account key must carry the literal token in the template;
+# reconcile_claude_settings_file resolves it per config dir.
+if python3 - <<'PY'
+import json
+import sys
+
+env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
+sys.exit(0 if env.get("ECC_AGENT_DATA_HOME") == "{{CLAUDE_CONFIG_DIR}}" else 1)
+PY
+then
+    printf 'PASS  isolation: template carries the config-dir token in ECC_AGENT_DATA_HOME\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  isolation: template carries the config-dir token in ECC_AGENT_DATA_HOME\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# Permissions floor: the template must not ask (or allow) for rm, so auto
+# mode's classifier decides scratch cleanup; must keep the force-push and
+# Jira-create ask rules; and must deny the literal root / home / .git
+# removal shapes, which block in every mode. Static: independent of live
+# machine state (the live drift check below covers reconciled machines).
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+sys.exit(0 if "Bash(rm:*)" not in p["ask"] and "Bash(rm:*)" not in p["allow"] else 1)
+PY
+then
+    printf 'PASS  permissions: template has no rm ask or allow rule\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template has no rm ask or allow rule\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+want = [
+    "Bash(git push --force:*)",
+    "Bash(git push -f:*)",
+    "Bash(git push --force-with-lease:*)",
+    "Bash(git push --mirror:*)",
+    "mcp__plugin_atlassian_atlassian__createJiraIssue",
+]
+sys.exit(0 if p["ask"] == want else 1)
+PY
+then
+    printf 'PASS  permissions: template ask list is exactly force-push plus Jira create\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template ask list is exactly force-push plus Jira create\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+if python3 - <<'PY'
+import json
+import sys
+
+p = json.load(open("claude/settings.json.tmpl"))["permissions"]
+sys.exit(0 if p["deny"] == [] else 1)
+PY
+then
+    printf 'PASS  permissions: template deny floor is empty (rm_guard.py replaces it)\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  permissions: template deny floor is empty (rm_guard.py replaces it)\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# rm_guard.py: runs the real hook (not a rule-model simulation) against the
+# catastrophic shapes a literal deny-floor pattern cannot express (finding
+# F1: glob-under-root/home/.git, system paths, compound commands, variable
+# targets) and against the harmless scratch-cleanup shapes it must not block.
+RMG=claude/hooks/rm_guard.py
+# Mostly-synthetic paths, not real directories -- the hook is pure string
+# logic for every check except the git-worktree-root branch (N3 below),
+# which stats `<cwd>/.git` and so needs a real temp directory. Deliberately
+# outside /tmp, /var, and /private so the fixture cwd itself does not
+# collide with the system-path denial.
+RMG_HOME="/Users/rmg-test-user"
+RMG_CWD="$RMG_HOME/proj"
+rmg_payload() {
+    printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$1" "$RMG_CWD"
+}
+rmg_payload_at() {
+    printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$1" "$2"
+}
+rmg_blocks() {
+    label="$1"
+    cmd="$2"
+    if printf '%s' "$(rmg_payload "$cmd")" | HOME="$RMG_HOME" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    else
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    fi
+}
+rmg_allows() {
+    label="$1"
+    cmd="$2"
+    if printf '%s' "$(rmg_payload "$cmd")" | HOME="$RMG_HOME" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+rmg_blocks_at() {
+    label="$1"
+    cmd="$2"
+    cwd="$3"
+    home="${4:-$RMG_HOME}"
+    if printf '%s' "$(rmg_payload_at "$cmd" "$cwd")" | HOME="$home" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    else
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    fi
+}
+rmg_allows_at() {
+    label="$1"
+    cmd="$2"
+    cwd="$3"
+    home="${4:-$RMG_HOME}"
+    if printf '%s' "$(rmg_payload_at "$cmd" "$cwd")" | HOME="$home" "$RMG" >/tmp/claude-hook-test.out 2>/tmp/claude-hook-test.err; then
+        printf 'PASS  rmg: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  rmg: %s\n' "$label" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# F1 bypass shapes: every one a literal deny-floor pattern cannot express.
+rmg_blocks "blocks rm -rf /*" 'rm -rf /*'
+rmg_blocks "blocks rm -rf ~/*" 'rm -rf ~/*'
+rmg_blocks "blocks rm -rf \$HOME/*" 'rm -rf $HOME/*'
+rmg_blocks "blocks rm -rf .git/*" 'rm -rf .git/*'
+rmg_blocks "blocks rm -rf /bin" 'rm -rf /bin'
+rmg_blocks "blocks rm -rf /etc" 'rm -rf /etc'
+rmg_blocks "blocks rm -rf /usr /bin" 'rm -rf /usr /bin'
+rmg_blocks "blocks rm -fr --no-preserve-root /*" 'rm -fr --no-preserve-root /*'
+rmg_blocks "blocks compound cd / && rm -rf *" 'cd / && rm -rf *'
+rmg_blocks 'blocks rm -rf $X with unexpanded variable target' 'rm -rf $X'
+rmg_blocks "blocks compound command split on ;" 'echo hi; rm -rf /*'
+rmg_blocks "blocks compound command split on |" 'true | rm -rf /*'
+
+# Harmless scratch-cleanup shapes must not be blocked.
+rmg_allows "allows rm -rf dist/ build/" 'rm -rf dist/ build/'
+rmg_allows "allows rm -rf ./.github" 'rm -rf ./.github'
+rmg_allows "allows rm ./file~" 'rm ./file~'
+rmg_allows "allows rm -rf node_modules" 'rm -rf node_modules'
+rmg_allows "allows rm -rf ~/proj/build" 'rm -rf ~/proj/build'
+rmg_allows 'allows rm -rf $HOME/.cache/x' 'rm -rf $HOME/.cache/x'
+rmg_allows "allows rm -rf .git/index.lock" 'rm -rf .git/index.lock'
+rmg_allows "allows non-rm command" 'echo rm -rf /'
+if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"notes.md"}}' \
+        | HOME="$RMG_HOME" "$RMG"; then
+    printf 'PASS  rmg: allows non-Bash tool\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  rmg: allows non-Bash tool\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# round-2 review BF1: shell-wrapper passthrough (sh/bash/zsh -c, and nested
+# wrappers) must be unwrapped and the inner script re-parsed.
+rmg_blocks "blocks rm -rf /* wrapped in sh -c" "sh -c 'rm -rf /*'"
+rmg_blocks "blocks rm -rf / wrapped in bash -c" "bash -c 'rm -rf /'"
+rmg_blocks "blocks rm -rf /etc wrapped in zsh -c" "zsh -c 'rm -rf /etc'"
+rmg_blocks "blocks sh -c rm wrapped in nohup" "nohup sh -c 'rm -rf /*'"
+rmg_blocks "blocks bash -c rm wrapped in time" "time bash -c 'rm -rf /etc'"
+rmg_blocks "blocks sh -c rm wrapped in env" "env sh -c 'rm -rf /'"
+rmg_blocks "blocks sh -c rm wrapped in nice" "nice sh -c 'rm -rf /'"
+rmg_blocks "blocks sh -c rm wrapped in nested env+nohup" "env nohup bash -c 'rm -rf /etc'"
+rmg_blocks "blocks compound command inside sh -c" "sh -c 'ls; rm -rf /'"
+rmg_allows "allows harmless sh -c command" "sh -c 'echo hi'"
+rmg_allows "allows narrow rm inside bash -c" "bash -c 'rm -rf ./build'"
+
+# round-2 review BF2: brace-expanded targets must expand before classifying.
+rmg_blocks "blocks rm -rf /{,bin} (brace includes root)" 'rm -rf /{,bin}'
+rmg_blocks "blocks rm -rf /{bin,etc,usr} (brace includes system path)" 'rm -rf /{bin,etc,usr,var,lib,opt}'
+rmg_blocks "blocks rm -rf /b{i,i}n (brace resolves to system path)" 'rm -rf /b{i,i}n'
+rmg_allows "allows rm -rf ~/{.ssh,Documents} (named subdirs, not catastrophic)" 'rm -rf ~/{.ssh,Documents}'
+
+# round-2 review BF3: `(` subshell groups and `cd ...;` must track cwd like
+# the unparenthesized `&&` form already does.
+rmg_blocks "blocks (cd / && rm -rf *) subshell" '(cd / && rm -rf *)'
+rmg_blocks "blocks ( cd /usr && rm -rf * ) with spaces" '( cd /usr && rm -rf * )'
+rmg_blocks "blocks (cd /etc && rm -rf *) subshell" '(cd /etc && rm -rf *)'
+rmg_blocks "blocks cd /; rm -rf * split on semicolon" 'cd /; rm -rf *'
+
+# round-2 review BF4: repeated slashes and .././. components must normalize
+# to reach the same root/system-path check as their canonical form.
+rmg_blocks "blocks rm -rf // (double-slash root)" 'rm -rf //'
+rmg_blocks "blocks rm -rf //* (double-slash root glob)" 'rm -rf //*'
+rmg_blocks "blocks rm -rf /./ (dot component)" 'rm -rf /./'
+rmg_blocks "blocks rm -rf /x/../ (dot-dot component)" 'rm -rf /x/../'
+
+# round-2 review N1: macOS aliases /tmp->/private/tmp and /var->/private/var,
+# so scratch/mktemp cleanup under either spelling must stay allowed while
+# real system paths under /var remain blocked.
+rmg_allows "allows \$TMPDIR-style /var/folders cleanup" 'rm -rf /var/folders/pk/xxxx/T/tmp.abc'
+rmg_allows "allows /private/tmp scratch cleanup" 'rm -rf /private/tmp/mybuild'
+rmg_allows "allows /tmp scratch cleanup" 'rm -rf /tmp/scratch'
+rmg_blocks "blocks /var/db (real system path, not scratch)" 'rm -rf /var/db'
+
+# round-2 review N2: previously-untested denial branches.
+rmg_blocks "blocks exact rm -rf / (no glob needed)" 'rm -rf /'
+rmg_blocks "blocks exact rm -rf ~ (no glob needed)" 'rm -rf ~'
+rmg_blocks 'blocks exact rm -rf $HOME (no glob needed)' 'rm -rf $HOME'
+rmg_blocks "blocks exact rm -rf .git (dir itself, no glob)" 'rm -rf .git'
+rmg_blocks_at "blocks rm -rf on a parent of a deeper cwd" \
+    "rm -rf $RMG_HOME/proj" "$RMG_HOME/proj/sub/deep"
+
+# round-2 review N3: `rm -rf .`/`rm -rf ./` at a git worktree root or home
+# must be denied; the same command elsewhere is an intentional allow.
+RMG_GITROOT=$(mktemp -d)
+trap 'rm -rf "$RMG_GITROOT"' EXIT
+: > "$RMG_GITROOT/.git"
+rmg_blocks_at "blocks rm -rf . at a git worktree root" 'rm -rf .' "$RMG_GITROOT"
+rmg_blocks_at "blocks rm -rf ./ at a git worktree root" 'rm -rf ./' "$RMG_GITROOT"
+rmg_blocks_at "blocks rm -rf . at HOME" 'rm -rf .' "$RMG_HOME" "$RMG_HOME"
+RMG_PLAIN=$(mktemp -d)
+trap 'rm -rf "$RMG_GITROOT" "$RMG_PLAIN"' EXIT
+rmg_allows_at "allows rm -rf . in a plain (non-git, non-home) scratch dir" 'rm -rf .' "$RMG_PLAIN"
+rm -rf "$RMG_GITROOT" "$RMG_PLAIN"
+trap - EXIT
 
 # account_guard.py account-aware routing. Fixtures use synthetic account tokens
 # in throwaway HOMEs -- no real credentials, no employer strings.
@@ -549,10 +817,290 @@ PY
             printf 'FAIL  settings: %s permissions drifted (update reconciles: template rules reassert, live-only grants are DROPPED -- commit intentional grants to the template)\n' "$settings_dir" >&2
             FAIL=$((FAIL + 1))
         fi
+
+        # Exclusion drift: env is template-owned, so a reconciled machine must
+        # carry all seven excluded ids. Superset check so a machine-local extra
+        # id does not fail here (the reconcile would drop it on the next
+        # update anyway).
+        if SETTINGS_PATH="$settings_dir/settings.json" python3 - <<'PY'
+import json
+import os
+import sys
+
+env = json.load(open(os.environ["SETTINGS_PATH"])).get("env") or {}
+ids = {s.strip().lower() for s in env.get("ECC_DISABLED_HOOKS", "").split(",") if s.strip()}
+want = {
+    "session-start:plan-canvas-sessions",
+    "stop:plan-canvas-pending",
+    "post:bash:command-log-audit",
+    "post:bash:command-log-cost",
+    "post:skill:track",
+    "pre:mcp-health-check",
+    "post:mcp-health-check",
+}
+for missing in sorted(want - ids):
+    print("  missing exclusion: " + missing)
+sys.exit(0 if want <= ids else 1)
+PY
+        then
+            printf 'PASS  settings: %s excludes the account-leaking ECC hooks\n' "$settings_dir"
+            PASS=$((PASS + 1))
+        else
+            printf 'FAIL  settings: %s does not exclude the account-leaking ECC hooks (run update to reconcile)\n' "$settings_dir" >&2
+            FAIL=$((FAIL + 1))
+        fi
+
+        # Scope drift: the per-account key must resolve to THIS config dir
+        # (abspath, not realpath -- reconcile uses abspath too), and no
+        # unsubstituted token may remain anywhere in env.
+        if SETTINGS_PATH="$settings_dir/settings.json" SETTINGS_DIR="$settings_dir" python3 - <<'PY'
+import json
+import os
+import sys
+
+env = json.load(open(os.environ["SETTINGS_PATH"])).get("env") or {}
+cfg = os.path.abspath(os.environ["SETTINGS_DIR"])
+tmpl_env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
+ok = True
+want = str(tmpl_env.get("ECC_AGENT_DATA_HOME", "")).replace("{{CLAUDE_CONFIG_DIR}}", cfg)
+got = env.get("ECC_AGENT_DATA_HOME")
+if got != want:
+    print("  ECC_AGENT_DATA_HOME: live=" + repr(got) + " want=" + repr(want))
+    ok = False
+for key, value in env.items():
+    if isinstance(value, str) and "{{CLAUDE_CONFIG_DIR}}" in value:
+        print("  unsubstituted token in " + key)
+        ok = False
+sys.exit(0 if ok else 1)
+PY
+        then
+            printf 'PASS  settings: %s scopes ECC state to this config dir\n' "$settings_dir"
+            PASS=$((PASS + 1))
+        else
+            printf 'FAIL  settings: %s does not scope ECC state to this config dir (run update to reconcile)\n' "$settings_dir" >&2
+            FAIL=$((FAIL + 1))
+        fi
     else
         printf 'SKIP  settings: no live %s/settings.json\n' "$settings_dir"
     fi
 done
+
+# herdr_stop_gate.py: exit 2 (refuse) when an orchestrated worker stops
+# without its completion record, 0 otherwise. Every fixture is a throwaway
+# config dir under mktemp with the documented herdr-orch layout; the hook
+# must never write into it (checked by the read-only case at the end).
+HSG=claude/hooks/herdr_stop_gate.py
+GATE_SID=11111111-1111-1111-1111-111111111111
+GATE_P_F='{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":false}'
+GATE_LAST=
+
+# gate_fixture DIR WS ROLE REC MARKERS
+#   ROLE    impl | review | mech | noindex (no workspaces/<ws>.json)
+#   REC     comma list: none | notask (no tasks/PROJ-1.json) | dirtask (a
+#           directory in its place) | mechentry (a later mech workers[]
+#           entry on the same workspace) | <done|review>:<fresh|stale|badts>:<ws>:<task>
+#   MARKERS nofile | dup (two transcripts) | N lines in projects/p/<sid>.jsonl
+gate_fixture() {
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json,os,sys
+root,ws,role,rec,markers=sys.argv[1:6]
+SID="11111111-1111-1111-1111-111111111111"
+rd=os.path.join(root,"herdr-orch","slug-x")
+os.makedirs(os.path.join(rd,"workspaces"));os.makedirs(os.path.join(rd,"tasks"))
+parts=rec.split(",")
+if role!="noindex":
+    json.dump({"task_id":"PROJ-1","repo_slug":"slug-x","role":role},open(os.path.join(rd,"workspaces",ws+".json"),"w"))
+if "dirtask" in parts:
+    os.makedirs(os.path.join(rd,"tasks","PROJ-1.json"))
+elif "notask" not in parts:
+    workers=[{"role":"impl","phase":"implement","workspace_id":ws,"agent":"impl-proj-1","ts":"2026-09-06T12:00:00Z"}]
+    if role=="review":
+        workers.append({"role":"review","phase":"review","workspace_id":ws,"agent":"rev-proj-1","ts":"2026-09-06T12:30:00Z"})
+    if "mechentry" in parts:
+        workers.append({"role":"mech","phase":"implement","workspace_id":ws,"agent":"mech-proj-1","launch_id":"mech-proj-1-20260906T140000Z","ts":"2026-09-06T14:00:00Z"})
+    json.dump({"v":1,"task_id":"PROJ-1","base_sha":"b"*40,"workers":workers},open(os.path.join(rd,"tasks","PROJ-1.json"),"w"))
+for spec in parts:
+    if spec in ("none","notask","dirtask","mechentry"):
+        continue
+    kind,when,who,tid=spec.split(":")
+    ts={"fresh":"2026-09-06T13:00:00Z","stale":"2026-09-06T11:00:00Z","badts":"2026-09-06 13:00:00"}[when]
+    json.dump({"v":1,"task_id":tid,"workspace_id":who,"phase":"implement","outcome":"completed","ts":ts},open(os.path.join(rd,"tasks","PROJ-1."+kind+".json"),"w"))
+if markers!="nofile":
+    line='{"type":"user","message":{"role":"user","content":"Stop hook feedback: herdr-stop-gate: blocked (1 of 2)"}}\n'
+    dirs=["p","q"] if markers=="dup" else ["p"]
+    n=1 if markers=="dup" else int(markers)
+    for d in dirs:
+        os.makedirs(os.path.join(root,"projects",d))
+        open(os.path.join(root,"projects",d,SID+".jsonl"),"w").write(line*n)
+PY
+}
+
+# gate_case LABEL EXPECT WS ROLE REC MARKERS PAYLOAD [NAME=VALUE ...]
+#   EXPECT  allow | block-N (refusal number N) | release-<text on stdout>
+#   Trailing NAME=VALUE pairs override the environment (HERDR_ENV= unsets
+#   the herdr flag for the hook's purposes). GATE_LAST keeps the fixture
+#   dir so a caller can inspect out/err afterwards.
+gate_case() {
+    label="$1"; expect="$2"; ws="$3"; role="$4"; rec="$5"; markers="$6"; payload="$7"; shift 7
+    gd=$(mktemp -d)
+    gate_fixture "$gd" "$ws" "$role" "$rec" "$markers"
+    # The suite runs under set -e: a refusing hook must sit inside an if.
+    if printf '%s' "$payload" | env CLAUDE_CONFIG_DIR="$gd" HERDR_ENV=1 HERDR_WORKSPACE_ID="$ws" "$@" "$HSG" >"$gd/out" 2>"$gd/err"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    ok=0
+    case "$expect" in
+        allow)
+            [ "$rc" = 0 ] && [ ! -s "$gd/out" ] && [ ! -s "$gd/err" ] && ok=1 ;;
+        block-*)
+            [ "$rc" = 2 ] && [ ! -s "$gd/out" ] && [ "$(wc -l <"$gd/err" | tr -d ' ')" = 3 ] \
+                && head -n 1 "$gd/err" | grep -q "^herdr-stop-gate: blocked -- emit-done (or emit-review) before stopping; the orchestrator only recognizes the record\.$" \
+                && sed -n 3p "$gd/err" | grep -q '^Then stop again; the gate releases on that attempt\.$' \
+                && ok=1 ;;
+        release-*)
+            [ "$rc" = 0 ] && [ ! -s "$gd/err" ] && grep -q 'herdr-stop-gate: released' "$gd/out" \
+                && grep -q "${expect#release-}" "$gd/out" && ok=1 ;;
+    esac
+    if [ "$ok" = 1 ]; then
+        printf 'PASS  gate: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  gate: %s (rc=%s out=%s err=%s)\n' "$label" "$rc" "$(cat "$gd/out")" "$(head -n 1 "$gd/err")" >&2
+        FAIL=$((FAIL + 1))
+    fi
+    GATE_LAST="$gd"
+}
+
+gate_case "impl worker without record is refused" block-1 w1 impl none nofile "$GATE_P_F"
+if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 --phase implement --outcome completed|failed|paused --head-sha "$(git rev-parse HEAD)" --base-sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; then
+    printf 'PASS  gate: refusal prints the filled emit-done line\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: refusal prints the filled emit-done line (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "impl worker with own fresh record is allowed" allow w1 impl done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record from another workspace is refused" block-1 w1 impl done:fresh:w9:PROJ-1 nofile "$GATE_P_F"
+gate_case "record for another task is refused" block-1 w1 impl done:fresh:w1:PROJ-2 nofile "$GATE_P_F"
+gate_case "review worker is refused by a done record" block-1 w1 review done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent rev-proj-1 --reviewed-head-sha "$(git rev-parse HEAD)" --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>'; then
+    printf 'PASS  gate: review refusal prints the filled emit-review line\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: review refusal prints the filled emit-review line (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "review worker with review record is allowed" allow w1 review review:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "impl worker is refused by a review record alone" block-1 w1 impl review:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "missing task record prints placeholders" block-1 w1 impl notask nofile "$GATE_P_F"
+if sed -n 2p "$GATE_LAST/err" | grep -Fq -- '--agent <agent> --phase <phase> --outcome completed|failed|paused --head-sha "$(git rev-parse HEAD)" --base-sha <base_sha>'; then
+    printf 'PASS  gate: placeholders stand in for missing task record fields\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: placeholders stand in for missing task record fields (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "no HERDR_ENV is allowed" allow w1 impl none nofile "$GATE_P_F" HERDR_ENV=
+gate_case "no index for the workspace is allowed" allow w1 noindex none nofile "$GATE_P_F"
+gate_case "invalid workspace id is allowed" allow ..x impl none nofile "$GATE_P_F"
+gate_case "mech role is allowed" allow w1 mech none nofile "$GATE_P_F"
+gate_case "non-Stop payload is allowed" allow w1 impl none nofile '{"hook_event_name":"Notification","notification_type":"permission_prompt"}'
+gate_case "non-JSON stdin is allowed" allow w1 impl none nofile 'not json'
+gate_case "JSON array stdin is allowed" allow w1 impl none nofile '[]'
+gate_case "stale record from before launch is refused" block-1 w1 impl done:stale:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record with unparseable ts is refused" block-1 w1 impl done:badts:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record accepted when launch time is unknown" allow w1 impl notask,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "unreadable task record makes launch unknown" allow w1 impl dirtask,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "unreadable task record still refuses without record" block-1 w1 impl dirtask nofile "$GATE_P_F"
+gate_case "later mech entry does not move the launch time" allow w1 impl mechentry,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+if python3 - <<'PY'
+import importlib.util
+from datetime import datetime, timezone
+spec = importlib.util.spec_from_file_location("g", "claude/hooks/herdr_stop_gate.py")
+g = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(g)
+utc = timezone.utc
+assert g.parse_ts("2026-09-06T18:38:51Z") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51.921Z") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51+02:00") == datetime(2026, 9, 6, 16, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51-0130") == datetime(2026, 9, 6, 20, 8, 51, tzinfo=utc)
+for bad in ("2026-09-06", "2026-09-06 18:38:51Z", "", None, 5, "2026-13-06T18:38:51Z", "2026-09-06T18:38:51Zx"):
+    assert g.parse_ts(bad) is None, bad
+assert g.launch_time({"started": "2026-09-06T12:00:00Z", "ts": "2026-09-06T13:00:00Z"}) == datetime(2026, 9, 6, 12, 0, 0, tzinfo=utc)
+assert g.launch_time({"started": "garbage", "ts": "2026-09-06T13:00:00Z"}) is None
+assert g.launch_time({"ts": "2026-09-06T13:00:00Z"}) == datetime(2026, 9, 6, 13, 0, 0, tzinfo=utc)
+assert g.launch_time({}) is None and g.launch_time(None) is None
+PY
+then
+    printf 'PASS  gate: parse_ts and launch_time follow the spec parser\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: parse_ts and launch_time follow the spec parser\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+GATE_P_T='{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":true}'
+gate_case "active flag with exactly one marker releases" "release-prior refusal recorded" w1 impl none 1 "$GATE_P_T"
+gate_case "active flag releases even with two markers on record" "release-prior refusal recorded" w1 impl none 2 "$GATE_P_T"
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); m=d.get("systemMessage"); sys.exit(0 if isinstance(m, str) and "PROJ-1" in m and list(d) == ["systemMessage"] else 1)' "$GATE_LAST/out"; then
+    printf 'PASS  gate: release is one systemMessage object naming the task\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: release is one systemMessage object naming the task (got: %s)\n' "$(cat "$GATE_LAST/out")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "released when transcript is missing" "release-transcript unavailable" w1 impl none nofile "$GATE_P_T"
+gate_case "released when transcript has no marker" "release-transcript evidence missing" w1 impl none 0 "$GATE_P_T"
+gate_case "released when two transcripts match the session" "release-transcript unavailable" w1 impl none dup "$GATE_P_T"
+gate_case "released when the session id is unsafe" "release-transcript unavailable" w1 impl none 2 '{"hook_event_name":"Stop","session_id":"../x","stop_hook_active":true}'
+gate_case "fresh cycle is refused again after a release" block-1 w1 impl none 2 "$GATE_P_F"
+gate_case "active hook with a fresh record is allowed silently" allow w1 impl done:fresh:w1:PROJ-1 2 "$GATE_P_T"
+gate_case "stop_hook_active must be boolean true to release" block-1 w1 impl none 2 '{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":"true"}'
+
+# Static registration: the template's Stop group is one `*` matcher listing
+# the status hook then the gate. Order is documentary (a group's hooks run
+# in parallel) but pinned so an edit cannot drop or reorder the pair.
+if python3 - <<'PY'
+import json
+import sys
+
+group = json.load(open("claude/settings.json.tmpl"))["hooks"]["Stop"]
+cmds = [h["command"] for e in group for h in e["hooks"]]
+sys.exit(0 if cmds == ["~/.claude/hooks/herdr_worker_status.py",
+                        "~/.claude/hooks/herdr_stop_gate.py"]
+         and [e.get("matcher") for e in group] == ["*"] else 1)
+PY
+then
+    printf 'PASS  gate: template lists the Stop hooks in order, gate last\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: template lists the Stop hooks in order, gate last\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+# Read-only: a content hash of the whole fixture config dir is identical
+# after a refusal and two anti-wedge releases.
+gd=$(mktemp -d)
+gate_fixture "$gd" w1 impl done:stale:w1:PROJ-1 1
+gate_snapshot() {
+    python3 - "$1" <<'PY'
+import hashlib,os,sys
+root=sys.argv[1]
+for dp,dn,fn in os.walk(root):
+    for f in sorted(fn):
+        if f in ("out","err"): continue
+        p=os.path.join(dp,f)
+        print(os.path.relpath(p,root), hashlib.sha256(open(p,"rb").read()).hexdigest())
+PY
+}
+before=$(gate_snapshot "$gd")
+gate_run() {   # payload -> exit status, without tripping set -e
+    if printf '%s' "$1" | env CLAUDE_CONFIG_DIR="$gd" HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 "$HSG" >"$gd/out" 2>"$gd/err"; then
+        echo 0
+    else
+        echo $?
+    fi
+}
+rc1=$(gate_run "$GATE_P_F")
+rc2=$(gate_run "$GATE_P_T")
+rc3=$(gate_run "$GATE_P_T")
+after=$(gate_snapshot "$gd")
+if [ "$rc1" = 2 ] && [ "$rc2" = 0 ] && [ "$rc3" = 0 ] && [ -n "$before" ] && [ "$before" = "$after" ]; then
+    printf 'PASS  gate: hook leaves the config dir byte-identical\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: hook leaves the config dir byte-identical (rc=%s/%s/%s)\n' "$rc1" "$rc2" "$rc3" >&2; FAIL=$((FAIL + 1))
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

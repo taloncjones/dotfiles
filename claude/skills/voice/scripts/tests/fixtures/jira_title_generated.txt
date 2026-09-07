@@ -1,0 +1,1 @@
+Update voice.py lint_text() to handle the comprehensive new edge cases in the parser module for titles

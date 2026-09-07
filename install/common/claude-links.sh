@@ -54,6 +54,8 @@ seed_machine_local_file() {
 # every install/update:
 #   - template-owned keys (hooks, statusLine, permissions, env, ...) come from
 #     the template -- template drift is reconciled away;
+#   - env string values have {{CLAUDE_CONFIG_DIR}} replaced by the absolute
+#     config dir the file lands in (per-account ECC state paths);
 #   - plugin-installer-owned keys (enabledPlugins, extraKnownMarketplaces) are
 #     unioned with live state winning on conflict, so nothing an installer
 #     wrote is lost;
@@ -104,19 +106,21 @@ for key in PLUGIN_KEYS:
         result[key] = merged
 
 # Keep account-local environment additions instead of dropping them whenever a
-# tracked template changes. ECC 2.2.1's two automatic Plan Canvas hooks ignore
-# CLAUDE_CONFIG_DIR and otherwise read the default account's state. Disable
-# only those IDs; manual Canvas state is explicitly stored beside the selected
-# settings.json, while unrelated existing hook opt-outs retain their order.
+# tracked template changes. Retain existing opt-outs and append every template
+# exclusion, including account-isolation additions introduced by later updates.
+# Manual Canvas state is stored beside the selected settings.json.
 env = {}
 existing_env = dest.get("env", {})
 if isinstance(existing_env, dict):
     env.update(existing_env)
 env.update(tmpl.get("env", {}))
-required_canvas_hooks = (
+required_hooks = [
     "session-start:plan-canvas-sessions",
     "stop:plan-canvas-pending",
-)
+]
+template_hooks = tmpl.get("env", {}).get("ECC_DISABLED_HOOKS", "")
+if isinstance(template_hooks, str):
+    required_hooks.extend(token.strip() for token in template_hooks.split(",") if token.strip())
 disabled_hooks = (
     existing_env.get("ECC_DISABLED_HOOKS", env.get("ECC_DISABLED_HOOKS", ""))
     if isinstance(existing_env, dict)
@@ -126,7 +130,7 @@ if isinstance(disabled_hooks, str):
     hook_tokens = [token.strip() for token in disabled_hooks.split(",") if token.strip()]
 else:
     hook_tokens = []
-for hook_id in required_canvas_hooks:
+for hook_id in required_hooks:
     if hook_id not in hook_tokens:
         hook_tokens.append(hook_id)
 env["ECC_DISABLED_HOOKS"] = ",".join(hook_tokens)
@@ -145,6 +149,20 @@ if os.path.abspath(dest_path) == os.path.abspath(personal_settings):
     result["enabledPlugins"] = {
         **result.get("enabledPlugins", {}),
         "atlassian@claude-plugins-official": False,
+    }
+
+# Per-config-dir values: the template is shared by ~/.claude and
+# ~/.claude-work, and Claude Code does not expand variables inside env
+# values, so a value that must differ per account carries this token and
+# is resolved here to the directory settings.json is written into. env
+# only: no other template key is substituted.
+CONFIG_DIR_TOKEN = "{{CLAUDE_CONFIG_DIR}}"
+config_dir = os.path.dirname(os.path.abspath(dest_path))
+env = result.get("env")
+if isinstance(env, dict):
+    result["env"] = {
+        k: (v.replace(CONFIG_DIR_TOKEN, config_dir) if isinstance(v, str) else v)
+        for k, v in env.items()
     }
 
 os.makedirs(os.path.dirname(dest_path), exist_ok=True)

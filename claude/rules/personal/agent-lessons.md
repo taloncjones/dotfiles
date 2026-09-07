@@ -19,3 +19,5 @@ is the staging tier, not an archive.
 
 - (2026-09) Headless workers and reviewers: preserve the intended account
   explicitly before entering temporary worktrees; verify launch readiness.
+- (2026-09) Check the actual shell: zsh does not split unquoted variables
+  and uses `pipestatus`; prefer arrays or explicit arguments.

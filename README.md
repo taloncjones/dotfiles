@@ -246,6 +246,82 @@ identity-setup   # writes ~/.gitconfig-work, ~/.ssh/id_ed25519_work.pub, ~/.ssh/
 identity-doctor  # verify the full chain (also available as: git identity)
 ```
 
+### Remote Access
+
+**Status:** unverified. The client stanza below is inert until a zone is
+edited in; the host runbook has not been exercised end to end. Replace
+this line with a dated summary once the probes at the end pass.
+
+Attach to a herdr session or an SSH shell on another machine through
+Cloudflare Tunnel + Access. Both ends speak only outbound HTTPS, so it
+coexists with Proton VPN (the default VPN) on either side.
+
+**Decision (2026-09):** Cloudflare WARP warp-to-warp was retired on
+2026-09-05 because its full-tunnel client conflicted with Proton VPN.
+Tailscale and similar mesh VPNs add a second tunnel interface and defeat
+Proton's exit-country routing, and router port-forwarding exposes sshd
+to the internet and fails behind CGNAT. Cloudflare Tunnel + Access needs
+no inbound port, adds an identity login in front of sshd, and uses the
+`cloudflared` binary already in the common Brewfile.
+
+**Claude sessions need no tunnel.** `claude remote-control` on the host
+dials out to Anthropic; connect from claude.ai/code or the mobile app.
+Run it inside a herdr pane so it survives terminal close and sleep.
+The tunnel is for `herdr --remote` (a full terminal workspace) and
+plain `ssh`. No `herdr integration install` is needed for any of this;
+that command stays off dotfiles machines (see CLAUDE.md).
+
+**Client (any machine running these dotfiles):**
+
+1. `link.sh` seeds `~/.ssh/config_cloudflared` from
+   `ssh/configs/config_cloudflared.tmpl` and `~/.ssh/config` includes it.
+   The seeded placeholder `*.ssh.example.com` matches nothing.
+2. Edit the zone in `~/.ssh/config_cloudflared` (never the template).
+3. `ssh <host>.ssh.<zone>` runs `cloudflared access ssh` as the
+   ProxyCommand, which opens the Access login in a browser once; the
+   token is cached under `~/.cloudflared/` for the Access app's session
+   length (default 24 hours). Then `herdr --remote <host>.ssh.<zone>`
+   attaches to the host's session.
+4. Before a `herdr --remote` attach when the token may have expired, run
+   `cloudflared access login https://<host>.ssh.<zone>` first; an expired
+   token inside the ProxyCommand can leave the attach waiting on a
+   browser.
+5. `remote-access-doctor` reports the client and host state (read-only).
+   It cannot see the host's SSH PATH or sshd state; those are runbook
+   checks.
+
+**Host (once per session host, manual, never run by the installer):**
+
+1. Enable Remote Login (macOS System Settings > General > Sharing; on
+   Linux, install and enable `sshd`). Optional hardening:
+   `ListenAddress 127.0.0.1` in `sshd_config` so sshd is reachable only
+   through the tunnel; skip it if LAN SSH is wanted.
+2. `cat ~/.ssh/id_ed25519_personal.pub >> ~/.ssh/authorized_keys`;
+   keep `PasswordAuthentication no`.
+3. `cloudflared tunnel login`, then `cloudflared tunnel create <host>`
+   and `cloudflared tunnel route dns <host> <host>.ssh.<zone>`.
+4. Ingress: public hostname `<host>.ssh.<zone>` -> `ssh://localhost:22`
+   (dashboard-managed tunnel, or `ingress:` in `~/.cloudflared/config.yml`).
+   Under a VPN that drops UDP, add `protocol: http2`.
+5. `cloudflared service install <token>` (launchd on macOS, systemd on
+   Linux). The token is a secret; it lives only in the unit.
+6. Zero Trust > Access > Applications: self-hosted app for
+   `<host>.ssh.<zone>` with an Allow policy on your login identity.
+7. If `herdr --remote` reports `herdr: command not found`, the SSH
+   command shell is non-login and lacks Homebrew's PATH; add
+   `export PATH="/opt/homebrew/bin:$PATH"` (or the Linuxbrew path) to
+   `~/.zshenv.local` on the host.
+
+Revocation: delete the Access session in the dashboard and remove the
+key from `authorized_keys`.
+
+**Probes:** record one dated pass/fail/skipped line per probe and update
+the Status line above: P1 tunnel connector up across sleep; P2 ssh
+through Access; P3 client on Proton; P4 host on Proton (http2 fallback
+if QUIC flaps); P5 herdr --remote attach, repeated after the Access
+token expires; P6 claude remote-control from the mobile app; P7 ssh
+refused after removing the pubkey (second gate).
+
 ### Worktree Hydration
 
 `git`'s `core.hooksPath` (set in `.gitconfig`) points at `~/.config/git/hooks`, which is symlinked to `git/hooks/` in this repo. The `post-checkout` hook fires on `git worktree add` and hydrates untracked directories into the new worktree:

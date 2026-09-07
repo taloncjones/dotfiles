@@ -20,11 +20,14 @@ cd "$DOTFILES"
 # *.test.sh or a skill test; grep -rl 'passed, .* failed' is a quick audit.
 SUITES="
 sh install/install.test.sh
+sh bin/remote-access-doctor.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
 sh zsh/claude-account.test.sh
 sh zsh/codex-account.test.sh
 sh claude/hooks/claude-hooks.test.sh
+sh claude/hooks/plan-canvas-isolation.test.sh
+sh claude/hooks/ecc-hook-isolation.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
 sh codex/hooks/codex-hooks.test.sh
@@ -38,6 +41,7 @@ sh git/hooks/public-safety.test.sh
 bash claude/skills/lib/test_work_state.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
 bash claude/skills/repo-recall/scripts/tests/recall_test.sh
+bash claude/skills/voice/scripts/tests/voice_test.sh
 sh install/claude-links.test.sh
 sh install/codex-surfaces.test.sh
 "
