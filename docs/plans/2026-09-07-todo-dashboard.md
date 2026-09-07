@@ -21,10 +21,11 @@
 - In-flight statuses, verbatim (spec D2): `kickoff`, `in-progress`, `blocked`, `review-dispatched`, `changes-requested`, `reviewed`.
 - Design tokens verbatim from spec D5 (light `#f7f6f2 #1f2a24 #6b746e #2f6f5e #d9ddd7 #ebeae4`, semantic `#b3541e #3b6ea5 #8a6d1f`; dark `#171b19 #e8ece9 #9aa39d #7fbfa8 #2c332f #232927 #e0895a #7fa9d8 #d1b25a`).
 - No emojis, no AI attribution, ASCII only in added lines, LF endings, `#!/usr/bin/env bash` for bash, stdlib-only Python. Commit format `<scope>: <summary>`, imperative, under 75 chars.
-- Test baseline (spec, 2026-09-07 at `026f043`): `todos_test.sh` 162 passed, 0 failed. The new suite must report 0 failed with at least 115 checks (it reports 121 as written).
+- Test baseline (spec, 2026-09-07 at `026f043`): `todos_test.sh` 162 passed, 0 failed. The new suite must report 0 failed with at least 115 checks (it reports 127 as written).
 - Run the repo test runner as `bash bin/dotfiles-tests` (it is a bash script; `sh` is dash on Linux). Run the orchestration core from the worktree, `python3 claude/hooks/herdr_orch_core.py`, not from `~/.claude/hooks`.
 - `git/hooks/public-safety.test.sh` fails while `docs/plans/` or `docs/specs/` files are tracked; Task 4 drops them from the index as the final commit (spec, Branch-only documents).
 - Do not touch `.worktrees/claude-codex-parity`, `co-review`, the herdr brief template, or `claude/hooks/herdr_orch_core.py`.
+- **Fixture safety (standing constraint).** Fixture mutations only under mktemp roots; never `cd` into a variable that may be empty. Every test helper that runs a mutating git, `rm`, `chmod`, `ln`, or redirect against a fixture calls `guard_fixture` first (non-empty, a real directory, under `${TMPDIR:-/tmp}`, never inside this checkout; exit 2 otherwise), every fixture git call uses `git -C <path>`, and the no-remote case is a separate fresh fixture (`mk_repo_no_remote`), never a mutation of an existing repo. Never run a `git remote` mutation outside a fixture. Background: on 2026-09-07 an earlier draft of this suite let an empty `$repo` fall through `cd ""` into the linked worktree, which shares the real `.git`, and removed the repo's origin remote.
 
 ## File Structure
 
@@ -32,7 +33,7 @@
 |---|---|
 | `claude/skills/todos/scripts/todos.sh` | Usage-comment line for `dashboard`; `main` case that execs the renderer. Nothing else. |
 | `claude/skills/todos/scripts/todos_dashboard.py` | Argument parsing and path guard; repo slug; frontmatter and body parsing; `Resolver` (subprocess calls into `todos.sh`); herdr record reading with staleness rules; research index; HTML rendering with the D5 tokens; atomic write; optional open. |
-| `claude/skills/todos/scripts/tests/todos_dashboard_test.sh` | Env sanitisation, hardened fixture repos, the fixture board builder, and eighteen test groups. |
+| `claude/skills/todos/scripts/tests/todos_dashboard_test.sh` | Env sanitisation, the `guard_fixture` path guard, hardened fixture repos built with `git -C` (with and without a remote), the fixture board builder, and nineteen test groups. |
 | `claude/skills/todos/SKILL.md` | `dashboard` command row; new `## Dashboard` section; `## Research reports` convention section; `research/` line in the Layout block. |
 | `claude/skills/herdr-orchestration/SKILL.md` | One bullet in section 1 preflight. |
 | `bin/dotfiles-tests` | Register the suite. |
@@ -50,7 +51,8 @@ Suite labels are the `ok   <label>` lines the contract's `dashboard-suite` comma
 | AC2 bad records do not abort | `dashboard-suite` (`render: fixture board`, checks `render: bad record unreadable`, `render: in-flight count`) |
 | AC3 research index | `dashboard-suite` (`research: index`) |
 | AC4 escaping | `dashboard-suite` (`render: fixture board`, checks `render: title escaped`, `render: no raw script tag`) |
-| AC5 default path and slug | `dashboard-suite` (`slug: default path and repo slug`) |
+| AC5 default path and slug | `dashboard-suite` (`slug: default path and repo slug`, whose no-remote case uses a fresh `mk_repo_no_remote` fixture) |
+| Fixture safety constraint | `dashboard-suite` (`guard: fixture paths`), `no-remote-mutation` |
 | AC6 read-only | `dashboard-suite` (`read-only: state root and .todos untouched`), `render-smoke` (empty state root, no `TODO.md`) |
 | AC7 empty board | `dashboard-suite` (`empty: board without .todos`) |
 | AC8 flags | `dashboard-suite` (`flags: completed and usage errors`) |
@@ -84,7 +86,7 @@ Suite labels are the `ok   <label>` lines the contract's `dashboard-suite` comma
 - Create: `claude/skills/todos/scripts/tests/todos_dashboard_test.sh`
 
 **Interfaces:**
-- Produces: `todos.sh dashboard ARGS...` execs `python3 <script dir>/todos_dashboard.py ARGS...`; the suite expects `claude/hooks/herdr_orch_core.py` four directories up from the tests dir (`$HERE/../../../../hooks/`) and reads exit code and stderr of each render through two temp files (`rc`, `err`).
+- Produces: `todos.sh dashboard ARGS...` execs `python3 <script dir>/todos_dashboard.py ARGS...`; the suite expects `claude/hooks/herdr_orch_core.py` four directories up from the tests dir (`$HERE/../../../../hooks/`), reads exit code and stderr of each render through two temp files (`rc`, `err`), and routes every fixture mutation through `guard_fixture` (Global Constraints, fixture safety). Run the suite only from a checkout whose `git remote -v` you have just read; it never needs network.
 
 - [ ] **Step 1: Add the two lines to `todos.sh`**
 
@@ -131,6 +133,13 @@ Write `claude/skills/todos/scripts/tests/todos_dashboard_test.sh` with exactly t
 # Test suite for `todos.sh dashboard` (todos_dashboard.py). Deterministic via
 # TODOS_STATE_ROOT / TODOS_DASHBOARD_DIR / TODOS_DASHBOARD_NOW / TODOS_GH;
 # never opens a browser or touches the network.
+#
+# Fixture safety (standing rule, see the plan's review notes): every helper
+# that mutates, removes, or cds into a fixture first passes the path through
+# guard_fixture, which refuses an empty value, a non-directory, anything
+# outside the temp root, and anything inside the checkout that holds this
+# suite. A bare `cd ""` succeeds in place, so an empty fixture variable once
+# ran a git mutation against the real repo; the guard makes that exit 2.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -143,6 +152,34 @@ unset TODOS_DASHBOARD_DIR TODOS_STATE_ROOT TODOS_DASHBOARD_TODOS_SH TODOS_DASHBO
 # Fixture commits must not run the user's hooks, templates, or signing.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TEMPLATE_DIR=""
 
+canon_helper() { /usr/bin/env realpath "$1" 2>/dev/null || printf '%s' "$1"; }
+
+FIXTURE_ROOT=$(canon_helper "${TMPDIR:-/tmp}")
+SUITE_REPO=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$HERE")
+SUITE_REPO=$(canon_helper "$SUITE_REPO")
+
+refuse() { printf 'todos_dashboard_test: %s\n' "$1" >&2; exit 2; }
+
+# guard_fixture <path>: non-empty, an existing directory, under the temp root
+# (or /tmp), and never inside the checkout that holds this suite.
+guard_fixture() {
+  local p="${1:-}" real
+  [ -n "$p" ] || refuse "empty fixture path"
+  [ -d "$p" ] || refuse "fixture is not a directory: $p"
+  real=$(canon_helper "$p")
+  case "$real" in
+    "$FIXTURE_ROOT"/*|/tmp/*|/private/tmp/*) ;;
+    *) refuse "fixture outside the temp root: $p" ;;
+  esac
+  case "$real" in
+    "$SUITE_REPO"|"$SUITE_REPO"/*) refuse "fixture inside the suite checkout: $p" ;;
+  esac
+}
+# rm_fixture <dir>...: guarded recursive removal of fixture directories.
+rm_fixture() { local p; for p in "$@"; do guard_fixture "$p"; rm -rf "$p"; done; }
+# mk_dir: a guarded fresh temp directory (state roots, output dirs).
+mk_dir() { local d; d=$(mktemp -d) || refuse "mktemp failed"; d=$(canon_helper "$d"); guard_fixture "$d"; printf '%s' "$d"; }
+
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     %s\n' "$1" "$2"; }
@@ -152,22 +189,32 @@ assert_missing()  { case "$2" in *"$3"*) bad "$1" "found [$3]";; *) ok "$1";; es
 assert_file_has() { grep -qF -- "$3" "$2" && ok "$1" || bad "$1" "$2 missing [$3]"; }
 assert_file_lacks() { grep -qF -- "$3" "$2" && bad "$1" "$2 has [$3]" || ok "$1"; }
 
-canon_helper() { /usr/bin/env realpath "$1" 2>/dev/null || printf '%s' "$1"; }
-
 # Throwaway repo: one commit, origin/main via update-ref (no network), an
-# origin remote URL (never fetched), .todos/ excluded like `init` does.
-mk_repo() {
-  local d; d=$(mktemp -d); d=$(canon_helper "$d")
-  ( cd "$d" && git init -q && git config user.email t@t && git config user.name t \
-    && git config commit.gpgsign false && git config core.hooksPath /dev/null \
-    && git commit -q --allow-empty -m base \
-    && git update-ref refs/remotes/origin/main HEAD \
-    && git remote add origin git@github.com:Org/Repo.git \
-    && mkdir -p .git/info && printf '.todos/\n' >>.git/info/exclude ) >/dev/null 2>&1 \
-    || { printf 'todos_dashboard_test: cannot build a fixture repo in %s\n' "$d" >&2; exit 2; }
+# origin remote URL (never fetched), .todos/ excluded like `init` does. Every
+# git call names the fixture with -C; nothing here cds anywhere.
+mk_repo_base() {
+  local d; d=$(mk_dir) || exit 2
+  { git -C "$d" init -q \
+    && git -C "$d" config user.email t@t && git -C "$d" config user.name t \
+    && git -C "$d" config commit.gpgsign false && git -C "$d" config core.hooksPath /dev/null \
+    && git -C "$d" commit -q --allow-empty -m base \
+    && git -C "$d" update-ref refs/remotes/origin/main HEAD \
+    && mkdir -p "$d/.git/info" && printf '.todos/\n' >>"$d/.git/info/exclude"; } >/dev/null 2>&1 \
+    || refuse "cannot build a fixture repo in $d"
   printf '%s' "$d"
 }
+mk_repo() {
+  local d; d=$(mk_repo_base) || exit 2
+  git -C "$d" remote add origin git@github.com:Org/Repo.git >/dev/null 2>&1 \
+    || refuse "cannot add the fixture remote in $d"
+  printf '%s' "$d"
+}
+# Same fixture without any remote: the no-remote case is a fresh repo, never a
+# mutation of an existing one.
+mk_repo_no_remote() { mk_repo_base; }
+
 mk_todo() { # mk_todo <repo> <pending|completed> <name>  (body on stdin)
+  guard_fixture "$1"
   mkdir -p "$1/.todos/$2"; cat >"$1/.todos/$2/$3.md"
 }
 core_slug() { # core_slug <remote-url> -> slug per herdr_orch_core.repo_slug
@@ -179,6 +226,7 @@ print(m.repo_slug(sys.argv[2]))' "$CORE" "$1"
 }
 # Fake gh: pr view 7 -> OPEN, else exit 1; appends every call to <path>.calls.
 mk_gh_stub() {
+  guard_fixture "$(dirname "$1")"
   cat >"$1" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$1.calls"
@@ -190,6 +238,7 @@ EOF
 # The spec's fixture set (D7). mk_board <repo> <state_root>
 mk_board() {
   local repo="$1" sr="$2" slug tasks
+  guard_fixture "$repo"; guard_fixture "$sr"
   slug=$(core_slug git@github.com:Org/Repo.git); tasks="$sr/$slug/tasks"; mkdir -p "$tasks"
   mk_todo "$repo" pending 2026-05-01-plain <<'EOF'
 ---
@@ -270,11 +319,14 @@ EOF
 
 # render <repo> <state_root> [args...] -> stdout of the command. Because a
 # caller captures it with $(...), exit code and stderr travel through files:
-# read them with `rc` and `err` after the capture.
+# read them with `rc` and `err` after the capture. The cd happens only after
+# the guard, inside a subshell, and fails the subshell rather than falling
+# through to the caller's directory.
 RCF=$(mktemp); ERRF=$(mktemp)
 render() {
   local repo="$1" sr="$2"; shift 2
-  ( cd "$repo" && TODOS_STATE_ROOT="$sr" TODOS_DASHBOARD_NOW="2026-05-07 09:00" \
+  guard_fixture "$repo"; guard_fixture "$sr"
+  ( cd "$repo" || exit 2; TODOS_STATE_ROOT="$sr" TODOS_DASHBOARD_NOW="2026-05-07 09:00" \
     TODOS_TODAY=2026-05-07 bash "$TODOS" dashboard "$@" 2>"$ERRF" )
   printf '%s' "$?" >"$RCF"
 }
@@ -283,9 +335,21 @@ err() { cat "$ERRF"; }
 
 # --- cases ---
 
+test_guard() {
+  local out
+  out=$(guard_fixture "" 2>&1); assert_eq "guard: empty path exits 2" "$?" "2"
+  out=$(guard_fixture "$SUITE_REPO" 2>&1); assert_eq "guard: suite checkout refused" "$?" "2"
+  out=$(guard_fixture "$HERE/no-such-dir" 2>&1); assert_eq "guard: missing dir refused" "$?" "2"
+  local d; d=$(mk_dir) || exit 2
+  out=$(guard_fixture "$d" 2>&1); assert_eq "guard: temp dir accepted" "$?" "0"
+  rm_fixture "$d"
+  ok "guard: fixture paths"
+}
+test_guard
+
 test_render_fixture() {
   local repo sr f out
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
   out=$(render "$repo" "$sr" --out "$f")
   assert_eq "render: exit 0" "$(rc)" "0"
   assert_eq "render: prints the path" "$out" "$f"
@@ -309,13 +373,13 @@ test_render_fixture() {
   assert_file_has "render: stamp" "$f" 'generated 2026-05-07 09:00'
   if grep -qiE '<link|<iframe|@import|url\(|<script| on[a-z]+="' "$f"; then bad "render: inert page" "script, link, iframe, import, url(), or on*= handler"; else ok "render: inert page"; fi
   ok "render: fixture board"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_render_fixture
 
 test_research_index() {
   local repo sr f
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_file_has "research: notes entry" "$f" 'data-research="2026-05-06-notes.md"'
   assert_file_has "research: findings entry" "$f" 'data-research="td-x/review-findings.md"'
@@ -327,53 +391,54 @@ test_research_index() {
   local first; first=$(grep -o 'data-research="[^"]*"' "$f" | head -1)
   assert_eq "research: newest first" "$first" 'data-research="2026-05-06-notes.md"'
   ok "research: index"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_research_index
 
 test_default_path_slug() {
-  local repo sr out slug
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); slug=$(core_slug git@github.com:Org/Repo.git)
+  local repo bare sr out slug
+  repo=$(mk_repo) || exit 2; bare=$(mk_repo_no_remote) || exit 2; sr=$(mk_dir) || exit 2
+  slug=$(core_slug git@github.com:Org/Repo.git)
   out=$(TODOS_DASHBOARD_DIR="$repo/dash" render "$repo" "$sr")
   assert_eq "slug: default path matches core repo_slug" "$out" "$repo/dash/$slug.html"
   [ -f "$repo/dash/$slug.html" ] && ok "slug: file written" || bad "slug: file written" "missing"
-  ( cd "$repo" && git remote remove origin ) >/dev/null 2>&1
-  out=$(TODOS_DASHBOARD_DIR="$repo/dash" render "$repo" "$sr")
+  assert_eq "slug: no-remote fixture really has no remote" "$(git -C "$bare" remote)" ""
+  out=$(TODOS_DASHBOARD_DIR="$bare/dash" render "$bare" "$sr")
   case "$(basename "$out")" in local-*.html) ok "slug: no remote gives local-";; *) bad "slug: no remote gives local-" "$out";; esac
   ok "slug: default path and repo slug"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$bare" "$sr"
 }
 test_default_path_slug
 
 test_read_only() {
   local repo sr before after
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"
   before=$(cd "$sr" && find . -type f | sort | xargs shasum)
   render "$repo" "$sr" --out "$repo/out/board.html" >/dev/null
   after=$(cd "$sr" && find . -type f | sort | xargs shasum)
   assert_eq "read-only: state root untouched" "$after" "$before"
   [ -e "$repo/.todos/TODO.md" ] && bad "read-only: no TODO.md" "created" || ok "read-only: no TODO.md"
   ok "read-only: state root and .todos untouched"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_read_only
 
 test_empty_board() {
   local repo sr f
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_eq "empty: exit 0" "$(rc)" "0"
   assert_file_has "empty: open" "$f" 'No open todos.'
   assert_file_has "empty: completed" "$f" 'Nothing completed yet.'
   assert_file_has "empty: research" "$f" 'No research reports.'
   ok "empty: board without .todos"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_empty_board
 
 test_flags() {
   local repo sr f out
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
   mk_todo "$repo" completed 2026-05-09-newer <<'EOF'
 ---
 created: 2026-05-09
@@ -395,31 +460,31 @@ EOF
   assert_eq "flags: unknown flag prints nothing" "$out" ""
   assert_contains "flags: unknown flag message" "$(err)" "todos: "
   ok "flags: completed and usage errors"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_flags
 
 test_offline_precedence() {
   local repo sr gh
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; gh="$repo/gh"; mk_gh_stub "$gh"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; gh="$repo/gh"; mk_gh_stub "$gh"
   TODOS_GH="$gh" render "$repo" "$sr" --out "$repo/out/a.html" >/dev/null
   [ -e "$gh.calls" ] && bad "offline: default makes no gh call" "$(cat "$gh.calls")" || ok "offline: default makes no gh call"
   TODOS_GH="$gh" render "$repo" "$sr" --out "$repo/out/b.html" --online >/dev/null
   [ -s "$gh.calls" ] && ok "offline: --online calls gh" || bad "offline: --online calls gh" "no calls"
-  rm -f "$gh.calls"
+  guard_fixture "$repo"; rm -f "$gh.calls"
   TODOS_OFFLINE=1 TODOS_GH="$gh" render "$repo" "$sr" --out "$repo/out/c.html" --online >/dev/null
   [ -s "$gh.calls" ] && ok "offline: --online beats exported TODOS_OFFLINE" || bad "offline: --online beats exported TODOS_OFFLINE" "no calls"
-  rm -f "$gh.calls"
+  guard_fixture "$repo"; rm -f "$gh.calls"
   ( unset TODOS_OFFLINE; TODOS_GH="$gh" render "$repo" "$sr" --out "$repo/out/d.html" >/dev/null )
   [ -e "$gh.calls" ] && bad "offline: unset env still offline" "$(cat "$gh.calls")" || ok "offline: unset env still offline"
   ok "offline: precedence"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_offline_precedence
 
 test_output_guard() {
   local repo sr slug out
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; slug=$(core_slug git@github.com:Org/Repo.git)
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; slug=$(core_slug git@github.com:Org/Repo.git)
   out=$(render "$repo" "$sr" --out "$repo/.todos/x.html")
   assert_eq "guard: .todos exits 1" "$(rc)" "1"
   assert_contains "guard: .todos message" "$(err)" "refusing to write"
@@ -431,19 +496,19 @@ test_output_guard() {
   assert_eq "guard: TODOS_DASHBOARD_DIR under .todos exits 1" "$(rc)" "1"
   assert_eq "guard: nothing on stdout" "$out" ""
   ok "guard: output path"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_output_guard
 
 test_failed_write_preserves() {
   local repo sr f before after out
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
   render "$repo" "$sr" --out "$f" >/dev/null
   before=$(shasum "$f")
   if [ "$(id -u)" = 0 ]; then
     ok "write: skipped as root"
   else
-    chmod 555 "$repo/out"
+    guard_fixture "$repo/out"; chmod 555 "$repo/out"
     out=$(render "$repo" "$sr" --out "$f")
     chmod 755 "$repo/out"
     assert_eq "write: failed render exits 1" "$(rc)" "1"
@@ -454,17 +519,17 @@ test_failed_write_preserves() {
     [ -n "$(ls "$repo/out" | grep '\.tmp\.')" ] && bad "write: no temp left" "temp file" || ok "write: no temp left"
   fi
   ok "write: failed write preserves the previous page"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_failed_write_preserves
 
 test_unreadable_skipped() {
   local repo sr f
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
   if [ "$(id -u)" = 0 ]; then
     ok "unreadable: skipped as root"
   else
-    chmod 000 "$repo/.todos/pending/2026-05-01-plain.md"
+    guard_fixture "$repo"; chmod 000 "$repo/.todos/pending/2026-05-01-plain.md"
     render "$repo" "$sr" --out "$f" >/dev/null
     chmod 644 "$repo/.todos/pending/2026-05-01-plain.md"
     assert_eq "unreadable: exit 0" "$(rc)" "0"
@@ -473,13 +538,13 @@ test_unreadable_skipped() {
     assert_file_has "unreadable: other rows render" "$f" 'data-todo="2026-05-02-blocked"'
   fi
   ok "unreadable: todo skipped"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_unreadable_skipped
 
 test_self_invalid_refs() {
   local repo sr f stub
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
   mk_todo "$repo" pending 2026-05-01-loop <<'EOF'
 ---
 created: 2026-05-01
@@ -494,6 +559,7 @@ EOF
   assert_file_has "refs: invalid" "$f" 'not a ref! (invalid)'
   assert_file_has "refs: blocked" "$f" 'data-todo="2026-05-01-loop" data-state="blocked"'
   stub="$repo/todos-stub.sh"
+  guard_fixture "$repo"
   cat >"$stub" <<EOF
 #!/usr/bin/env bash
 [ "\$1" = _depends ] && exit 1
@@ -505,13 +571,13 @@ EOF
   assert_file_has "refs: depends failure shown" "$f" 'depends_on (unreadable)'
   assert_file_has "refs: depends failure blocks" "$f" 'data-todo="2026-05-01-loop" data-state="blocked"'
   ok "refs: self, invalid, and unreadable dependencies"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_self_invalid_refs
 
 test_link_boundaries() {
   local repo sr f
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
   mk_todo "$repo" pending 2026-05-01-links <<'EOF'
 ---
 created: 2026-05-01
@@ -528,27 +594,27 @@ EOF
   assert_file_lacks "links: no trailing paren" "$f" 'pull/12)"'
   assert_file_lacks "links: no trailing dot" "$f" 'x.test/a."'
   ok "links: boundaries"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_link_boundaries
 
 test_visibility_warning() {
   local repo sr
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"
   render "$repo" "$sr" --out "$repo/out/a.html" >/dev/null
   assert_missing "visibility: excluded repo is quiet" "$(err)" "neither git-ignored nor tracked"
-  : >"$repo/.git/info/exclude"
+  guard_fixture "$repo"; : >"$repo/.git/info/exclude"
   render "$repo" "$sr" --out "$repo/out/b.html" >/dev/null
   assert_eq "visibility: still exit 0" "$(rc)" "0"
   assert_contains "visibility: warns when not ignored" "$(err)" "neither git-ignored nor tracked"
   ok "visibility: .todos exclusion warning"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_visibility_warning
 
 test_attribute_injection() {
   local repo sr f
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
   mk_todo "$repo" pending 2026-05-01-inject <<'EOF'
 ---
 created: 2026-05-01
@@ -564,38 +630,38 @@ EOF
   if grep -qE ' on[a-z]+="' "$f"; then bad "inject: no event attributes at all" "on*= attribute present"; else ok "inject: no event attributes at all"; fi
   assert_file_has "inject: priority escaped as text" "$f" 'x&quot; onclick=&quot;alert(1)'
   ok "inject: frontmatter values never become attributes"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_attribute_injection
 
 test_symlink_guard() {
   local repo sr out
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"
-  ln -s "$repo/.todos" "$repo/alias"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"
+  guard_fixture "$repo"; ln -s "$repo/.todos" "$repo/alias"
   out=$(render "$repo" "$sr" --out "$repo/alias/x.html")
   assert_eq "symlink guard: exits 1" "$(rc)" "1"
   assert_contains "symlink guard: message" "$(err)" "refusing to write"
   [ -e "$repo/.todos/x.html" ] && bad "symlink guard: nothing written" "written" || ok "symlink guard: nothing written"
   ok "symlink guard: output path through a symlink into .todos"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_symlink_guard
 
 test_opener_failure() {
   local repo sr f out
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); mk_board "$repo" "$sr"; f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
   out=$(TODOS_DASHBOARD_OPENER="$repo/no-such-opener" render "$repo" "$sr" --out "$f" --open)
   assert_eq "opener: exit 0 when opener is missing" "$(rc)" "0"
   assert_eq "opener: stdout is the path only" "$out" "$f"
   assert_contains "opener: warning on stderr" "$(err)" "cannot open"
   ok "opener: missing opener is a warning"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_opener_failure
 
 test_record_shapes() {
   local repo sr f slug tasks
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
   slug=$(core_slug git@github.com:Org/Repo.git); tasks="$sr/$slug/tasks"; mkdir -p "$tasks"
   mk_todo "$repo" pending 2026-05-01-empty-review <<'EOF'
 ---
@@ -630,13 +696,13 @@ EOF
   assert_file_has "records: fresh done record untagged" "$f" 'done completed implement</div>'
   assert_file_has "records: in-flight count ignores null status" "$f" 'data-count="in-flight">2<'
   ok "records: empty, null, and stale record shapes"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_record_shapes
 
 test_frontmatter_first_match() {
   local repo sr f
-  repo=$(mk_repo) || exit 2; sr=$(mktemp -d); f="$repo/out/board.html"
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
   mk_todo "$repo" pending 2026-05-01-dup <<'EOF'
 ---
 created: 2026-05-01
@@ -652,7 +718,7 @@ EOF
   assert_file_has "frontmatter: first area wins" "$f" '>first<'
   assert_file_lacks "frontmatter: second area ignored" "$f" '>second<'
   ok "frontmatter: first occurrence wins"
-  rm -rf "$repo" "$sr"
+  rm_fixture "$repo" "$sr"
 }
 test_frontmatter_first_match
 
@@ -1454,9 +1520,9 @@ Expected: `smoke ok`. A failing assertion points at the parsing function to fix 
 - [ ] **Step 3: Run the suite to see it pass**
 
 Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh >/tmp/dash.log 2>&1; echo rc=$?; grep -v '^  ok' /tmp/dash.log`
-Expected: `rc=0` and only the summary line `121 passed, 0 failed`.
+Expected: `rc=0` and only the summary line `127 passed, 0 failed`.
 
-The renderer and suite above were run together before this plan was written (121 passed), so a failure here most likely means a paste slip; compare the file against the plan first. If the failure survives that comparison, fix whichever side is wrong against the spec and say so in the commit message: the spec is the authority, the embedded code is its best current rendering, not scripture.
+The renderer and suite above were run together before this plan was written (127 passed), so a failure here most likely means a paste slip; compare the file against the plan first. If the failure survives that comparison, fix whichever side is wrong against the spec and say so in the commit message: the spec is the authority, the embedded code is its best current rendering, not scripture.
 
 - [ ] **Step 4: Confirm the invariants the contract checks**
 
@@ -1629,7 +1695,7 @@ git commit -m "todos: Document the dashboard and the research convention"
 - [ ] **Step 1: Run both todos suites and the registered runner entry**
 
 Run: `bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh >/tmp/dash.log 2>&1; echo dash=$?; tail -1 /tmp/dash.log; bash claude/skills/todos/scripts/tests/todos_test.sh >/tmp/todos.log 2>&1; echo todos=$?; tail -1 /tmp/todos.log; bash bin/dotfiles-tests --list | grep todos_dashboard`
-Expected: `dash=0`, `121 passed, 0 failed`, `todos=0`, `162 passed, 0 failed`, and the suite path.
+Expected: `dash=0`, `127 passed, 0 failed`, `todos=0`, `162 passed, 0 failed`, and the suite path.
 
 - [ ] **Step 2: Run the task contract with the worktree's own core**
 
@@ -1676,4 +1742,5 @@ State in the completion message: the one browser look from Task 2 step 5 (done o
 
 - Spec review: Codex, two rounds (2026-09-07). Round 1 returned 12 findings, round 2 returned 5; all 17 were folded into the spec (see its "Decisions recorded"). Two rounds is the skill's cap; no usage limit was hit.
 - Plan review: Codex, one round (2026-09-07), verdict needs-rework, 13 findings, no usage limit. Folded: priority-class allowlist plus an attribute-injection test (1); `O_EXCL|O_NOFOLLOW` temp file with cleanup and a symlink-guard test (2); the contract's attribution grep excludes `claude/contracts` (3, found and fixed before the review ran); an explicit index-drop step for the branch-only docs and the expected single public-safety failure before it (4); `bash bin/dotfiles-tests` everywhere (5); exit codes captured before `tail`/`grep` in the contract and in every plan step, and a doc-pin loop that fails (6); env sanitisation, isolated git config, and loud fixture failures in the suite (7); the worktree's own core and a temp output path for the visual look (8); completed-row counting by element (9); review-record presence tracked separately, `review unknown` for a present-but-empty record, plus a record-shapes test (10); blank-first-value frontmatter semantics plus a test (11); tests for the symlink guard, opener failure, record shapes, and a wider inert-page grep (12). Partially accepted: splitting Task 2 into four test-first tasks (13). The renderer is one 640-line file whose suite was run end to end before embedding; splitting a verified file across tasks for a cheaper worker adds paste risk without adding verification, so Task 2 instead gains a pure-function smoke step before the suite, and the "paste error" wording now allows evidence-backed corrections on either side with the spec as authority.
+- Incident and amendment (2026-09-07): an earlier embedded draft of the suite mutated a fixture with a subshell that cd'd into `$repo` and removed its origin remote. When a hardened fixture helper failed and left `$repo` empty, `cd ""` succeeded in place and the command ran in the linked worktree, removing the shared repo's origin remote (restored by the orchestrator). The amendment: the remote mutation is deleted; the no-remote case is a fresh `mk_repo_no_remote` fixture; `guard_fixture` gates every helper that mutates, removes, or cds into a fixture (empty, non-directory, outside `${TMPDIR:-/tmp}`, or inside this checkout all exit 2); fixture repos are built with `git -C` and no `cd`; recursive removal only happens through the guarded `rm_fixture`; a `guard: fixture paths` test pins the guard; and the contract's `no-remote-mutation` command fails the branch if any git remote mutation text appears under `claude/skills/todos/`. The amended suite was rerun from a non-repo scratch directory after confirming no real remote was reachable there: 127 passed, 0 failed, real remotes unchanged.
 - The renderer and the suite embedded above were exercised together in a scratchpad copy of the repo layout, and the contract was proven in a scratchpad clone: red at the plan commit (`dashboard-suite` fails, no suite file), then all thirteen commands green with the plan's Task 1-3 edits applied (2026-09-07, macOS, Python 3.14).

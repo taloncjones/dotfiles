@@ -5,7 +5,7 @@
     {
       "name": "dashboard-suite",
       "timeout_secs": 600,
-      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'render: fixture board' 'research: index' 'slug: default path and repo slug' 'read-only: state root and .todos untouched' 'empty: board without .todos' 'flags: completed and usage errors' 'offline: precedence' 'guard: output path' 'write: failed write preserves the previous page' 'unreadable: todo skipped' 'refs: self, invalid, and unreadable dependencies' 'links: boundaries' 'visibility: .todos exclusion warning' 'inject: frontmatter values never become attributes' 'symlink guard: output path through a symlink into .todos' 'opener: missing opener is a warning' 'records: empty, null, and stale record shapes' 'frontmatter: first occurrence wins'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done"
+      "run": "out=$(bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -1; [ \"$rc\" -eq 0 ] || exit 1; printf '%s\\n' \"$out\" | grep -q ' 0 failed$' || exit 1; for l in 'guard: fixture paths' 'render: fixture board' 'research: index' 'slug: default path and repo slug' 'read-only: state root and .todos untouched' 'empty: board without .todos' 'flags: completed and usage errors' 'offline: precedence' 'guard: output path' 'write: failed write preserves the previous page' 'unreadable: todo skipped' 'refs: self, invalid, and unreadable dependencies' 'links: boundaries' 'visibility: .todos exclusion warning' 'inject: frontmatter values never become attributes' 'symlink guard: output path through a symlink into .todos' 'opener: missing opener is a warning' 'records: empty, null, and stale record shapes' 'frontmatter: first occurrence wins'; do printf '%s\\n' \"$out\" | grep -qF \"ok   $l\" || { printf '[X] missing check: %s\\n' \"$l\"; exit 1; }; done"
     },
     {
       "name": "dashboard-suite-size",
@@ -66,6 +66,11 @@
       "name": "no-attribution-in-added-lines",
       "timeout_secs": 60,
       "run": "base=$(git merge-base origin/main HEAD) || exit 1; if git diff \"$base\" -- . ':(exclude)docs' ':(exclude)claude/contracts' | grep '^+' | grep -v '^+++' | grep -iE 'co-authored-by|generated (by|with)'; then echo '[X] attribution text in added lines'; exit 1; fi; exit 0"
+    },
+    {
+      "name": "no-remote-mutation",
+      "timeout_secs": 60,
+      "run": "if grep -rnE 'git( -C [^ ]+)? remote (remove|set-url|rename|rm)' claude/skills/todos/; then echo '[X] git remote mutation in the todos skill tree'; exit 1; fi; grep -q 'guard_fixture' claude/skills/todos/scripts/tests/todos_dashboard_test.sh || { echo '[X] suite lacks guard_fixture'; exit 1; }; grep -q 'mk_repo_no_remote' claude/skills/todos/scripts/tests/todos_dashboard_test.sh || { echo '[X] suite lacks mk_repo_no_remote'; exit 1; }"
     }
   ]
 }
