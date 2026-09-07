@@ -27,7 +27,10 @@ blocking the allow). Per `codex-spec-review`'s two-round cap the spec
 proceeds to planning on judgment after round 2; the plan review is
 recorded in the plan's review notes. Plan review round 1 fed three
 rule changes back into D2 (quoted operators refused, long-option
-allowlist, inspection errors yield no decision).
+allowlist, inspection errors yield no decision); round 2 fed four more
+(brackets and `~user`/quoted tildes refused, glob matches named like
+options refused, a relative `$TMPDIR` yields no R2 root, R2b never
+reaches under `$HOME`).
 
 ## Problem
 
@@ -243,13 +246,16 @@ it prints nothing and exits 0 ("no decision"):
    anywhere (substitution or variable in ANY token, option tokens
    included: `rm "-$(cmd)" S/x` executes the substitution before `rm`),
    `{` or `}` anywhere (brace expansion is not supported; quoted braces
-   are literal to the shell but not to the tokenizer), or a quote or
-   backslash together with any glob character (`*`, `?`, `[`) or any
-   operator character (`;`, `&`, `|`, `(`, `)`, newline) anywhere (a
-   quoted glob is literal to the shell but not to the expander; a
-   quoted operator such as `rm S/x ';' rm S/y` is a filename to the
-   shell but a separator to the tokenizer). Plain quoted literal paths,
-   e.g. `rm -rf "S/build dir"`, stay eligible. The command must then parse with `shlex.split` (posix)
+   are literal to the shell but not to the tokenizer), `[` or `]`
+   anywhere (bracket expressions, including POSIX classes such as
+   `[[:alpha:]]`, are not expanded the way the shell expands them; only
+   `*` and `?` are supported globs), or a quote or backslash together
+   with any glob character (`*`, `?`), a tilde, or any operator
+   character (`;`, `&`, `|`, `(`, `)`, newline) anywhere (a quoted glob
+   or tilde is literal to the shell but not to the expander; a quoted
+   operator such as `rm S/x ';' rm S/y` is a filename to the shell but
+   a separator to the tokenizer). Plain quoted literal paths, e.g.
+   `rm -rf "S/build dir"`, stay eligible. The command must then parse with `shlex.split` (posix)
    without a `ValueError`; unbalanced quoting yields no decision (so
    `rm_guard.tokenize`'s whitespace fallback is never the basis of an
    allow). The token stream from `rm_guard.tokenize` may contain, as
@@ -282,9 +288,11 @@ it prints nothing and exits 0 ("no decision"):
    `--no-preserve-root`; `rmdir` accepts only `--verbose` and
    `--ignore-fail-on-non-empty`; any other long option yields no
    decision.
-5. Resolution. Every target, after `rm_guard.expand_home` (no brace
-   expansion: braces were refused in step 3), contains no `..` path
-   component (lexical `..` collapse would disagree with the kernel when
+5. Resolution. A target of the form `~name...` (any tilde form other
+   than exactly `~` or a `~/` prefix) yields no decision: the shell
+   resolves another user's home, the hook does not. Every remaining
+   target, after `rm_guard.expand_home` (no brace expansion: braces were
+   refused in step 3), contains no `..` path component (lexical `..` collapse would disagree with the kernel when
    a symlink precedes it, e.g. `S/link/../victim`; no decision). It
    then resolves via `rm_guard.resolve(expanded, cwd)` with `cwd` from
    the payload and canonicalizes (D3) to a path that is a STRICT
@@ -302,9 +310,13 @@ it prints nothing and exits 0 ("no decision"):
    match fails by step 7). Zero matches: the literal must satisfy
    steps 5 and 7 (the non-glob prefix is what canonicalizes; `rm` on a
    non-matching glob merely errors). No glob component may start with
-   `.` (`rm -rf <root>/.*` yields no decision). A directory that cannot
-   be listed during expansion is an inspection error and yields no
-   decision: an incomplete listing never certifies a target. The
+   `.` (`rm -rf <root>/.*` yields no decision). Any match whose
+   basename starts with `-` yields no decision: the shell would hand it
+   to `rm` as an option (a file named `-rf` next to `rm *` turns the
+   removal recursive), and the flag rule of step 4 ran before
+   expansion. A directory that cannot be listed during expansion is an
+   inspection error and yields no decision: an incomplete listing never
+   certifies a target. The
    decision reflects the filesystem at decision time; a change between
    decision and execution is accepted as out of scope, as it is for
    every other guard in this repo.
@@ -342,12 +354,17 @@ Roots are computed per invocation and each canonicalized with
   scratch; the root survives unless it is `$HOME` itself.
 - R2b tmp fallback: when `$TMPDIR` is unset or empty, `/tmp`
   (realpath, `/private/tmp` on macOS). This is Linux `mktemp`'s default.
-  Consequence, by design: with `$TMPDIR` unset every non-excluded
-  descendant of `/tmp` is in scope, including this and other sessions'
-  scratchpads and the scratchpad root directory itself (it is a strict
-  descendant of `/tmp`). Repository checkouts under `/tmp` are still
-  refused by D2 step 7. Tests that assert "root itself" or "missing
-  `scratchpad_dir`" outcomes therefore run with `$TMPDIR` set.
+  A `$TMPDIR` that is set but not absolute is neither R2a nor R2b:
+  there is no R2 root and no R3 match at all. Consequence, by design:
+  with `$TMPDIR` unset every non-excluded descendant of `/tmp` is in
+  scope, including this and other sessions' scratchpads and the
+  scratchpad root directory itself (it is a strict descendant of
+  `/tmp`). Two exclusions hold under R2b: repository checkouts under
+  `/tmp` are refused by D2 step 7, and a target at or under `$HOME`
+  (realpath) is refused even when `$HOME` itself lives under `/tmp`
+  (the count-rule waiver never waives the home protection). Tests that
+  assert "root itself" or "missing `scratchpad_dir`" outcomes therefore
+  run with `$TMPDIR` set.
 - R3 mktemp under /tmp: when `$TMPDIR` is set, each entry directly under
   `<realpath /tmp>` whose name starts with `tmp.` (the default `mktemp`
   template `tmp.XXXXXXXXXX` on both BSD and GNU) is a root, provided the
@@ -482,7 +499,12 @@ other hook suites), hermetic:
   `rm S/x | cat`; `rm S/x || true`; `rm S/x &`; `(rm S/x)`;
   `rm S/x > /dev/null`; `rm S/x>/dev/null`; `rm S/x>R/file`;
   `rm 'S/x` (unbalanced quote); `rm S/x ';' rm S/-x` (quoted
-  separator); `rmdir --par S/build`, `rm --rec S/build`, and
+  separator); `rm *` with cwd `$T` containing a file named `-rf`
+  (glob-expanded option word); `rm S/[[:alpha:]]*/file` and
+  `rm S/[a-z]*` (brackets refused); `rm ~root/file` (named-user tilde)
+  and `rm "~/tmpdir/file"` (quoted tilde); `/tmp` descendants with
+  `TMPDIR=relative-tmp` (set but relative: no R2 root); `rm -rf $H/x`
+  with TMPDIR unset and `$H` under `/tmp` (R2b never reaches HOME); `rmdir --par S/build`, `rm --rec S/build`, and
   `rm --interactive=never S/x` (long options outside the allowlist;
   `rm --recursive --force --verbose S/build` is an allow case); a
   recursive removal and a glob over a `chmod 000` directory under the

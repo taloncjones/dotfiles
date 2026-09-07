@@ -12,7 +12,7 @@
 
 **Status:** branch-only document; dropped before merge together with the spec. The contract at `claude/contracts/td-2026-09-06-add-a-worker-side-permission-policy-hook-for-scrat-contract.json` stays and is what the orchestrator runs.
 
-**Review provenance:** Spec: Codex round 1 (12 findings) and round 2 (7 findings), both folded in, verdict needs-rework each time; proceeded on judgment per the review skill's two-round cap. Plan: Codex round 1 (8 findings, needs-rework) folded in, see "Review notes" at the end. The hook and suite listed below were smoke-tested in a scratch copy (outside the repo) against the prototype before being written into this plan: 92 of 92 cases pass, fixtures clean up; the two static cases that inspect the template and runner are skipped outside the repo and become live in Task 3. The contract's fixture-driven commands pass against that prototype and fail (6 of 8, and 3 of 8) against an always-allow and an always-silent hook. Defects found by the smoke run and the plan review are already fixed in the listings (HOME compared before `realpath`, a `VAR=x func` assignment persisting in POSIX `sh`, two fixture assumptions, quoted operators, GNU long-option abbreviations, silent inspection errors, byte-exact output checks).
+**Review provenance:** Spec: Codex round 1 (12 findings) and round 2 (7 findings), both folded in, verdict needs-rework each time; proceeded on judgment per the review skill's two-round cap. Plan: Codex round 1 (8 findings) and round 2 (6 findings), both folded in, verdict needs-rework each time, see "Review notes" at the end; proceeded on judgment after round 2 per the same cap. The hook and suite listed below were smoke-tested in a scratch copy (outside the repo) against the prototype before being written into this plan: 99 of 99 cases pass, fixtures clean up, no bytecode lands in `claude/hooks/`; the two static cases that inspect the template and runner are skipped outside the repo and become live in Task 3 (101 in-repo). The contract's fixture-driven commands pass against that prototype and fail (6 of 8, and 3 of 8) against an always-allow and an always-silent hook. Defects found by the smoke run and the two plan reviews are already fixed in the listings (HOME compared before `realpath`, a `VAR=x func` assignment persisting in POSIX `sh`, two fixture assumptions, quoted operators, GNU long-option abbreviations, silent inspection errors, byte-exact output checks, glob-expanded option words, bracket expressions, `~user` and quoted tildes, relative `TMPDIR`, R2b reaching under HOME).
 
 ## Global Constraints
 
@@ -108,6 +108,7 @@ mkdir -p "$S/build" "$S/clone/.git" "$S2/build" "$T/x" "$T/build/project/.git" \
 : > "$S/-x"
 : > "$R/file"
 : > "$T/file"
+: > "$T/-rf"
 ln -s "$R" "$S/link"
 # R3 fixtures: entries directly under /tmp named like mktemp's default template.
 M3=$(mktemp -d /tmp/tmp.XXXXXXXXXX)
@@ -232,6 +233,16 @@ none_case "ignores an abbreviated rmdir --parents" "rmdir --par $S/build"
 none_case "ignores an abbreviated rm --recursive" "rm --rec $S/build"
 none_case "ignores an unknown long option" "rm --interactive=never $S/build/x"
 none_case "ignores a quoted separator (a filename to the shell)" "rm $S/build/x ';' rm $S/-x"
+none_case "ignores a glob that expands to an option word" "rm *" "$T"
+none_case "ignores a POSIX bracket class (fnmatch cannot expand it)" "rm $S/[[:alpha:]]*/file"
+none_case "ignores a bracket range" "rm $S/[a-z]*"
+none_case "ignores a named-user tilde" "rm ~root/file" "$S"
+none_case "ignores a quoted tilde (literal to the shell)" "rm \"~/tmpdir/file\"" "$S"
+CASE_TMPDIR=relative-tmp
+none_case "ignores /tmp descendants when TMPDIR is set but relative" "rm -rf $M3/child"
+CASE_TMPDIR=unset
+none_case "R2b never reaches under HOME even when HOME is under /tmp" "rm -rf $H/x"
+unset CASE_TMPDIR
 none_case "ignores a non-standard rm executable path" "/repo/rm $S/build/x"
 none_case "ignores a relative rm executable" "./rm $S/build/x"
 none_case "ignores sudo rm" "sudo rm $S/build/x"
@@ -266,6 +277,9 @@ if [ "$(id -u)" != 0 ]; then
     none_case "ignores a recursive removal whose subtree cannot be inspected" "rm -rf $T/dark"
     none_case "ignores a glob over an unreadable directory" "rm $T/dark/*"
     chmod 700 "$T/dark"
+else
+    printf 'SKIP  ignores a recursive removal whose subtree cannot be inspected (root)\n'
+    printf 'SKIP  ignores a glob over an unreadable directory (root)\n'
 fi
 none_case "ignores a scratch target when scratchpad_dir is absent" "rm -rf $S/build" "$R" ""
 none_case "ignores a non-Bash tool" "rm -rf $S/build" "$R" "$S" "auto" "PermissionRequest" "Write"
@@ -429,7 +443,7 @@ printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 - [ ] **Step 2: Run the suite to verify it is red**
 
 Run: `chmod +x claude/hooks/scratch-policy.test.sh && bash -n claude/hooks/scratch-policy.test.sh && sh claude/hooks/scratch-policy.test.sh > /tmp/sp-red.$$ 2>&1; echo "rc=$?"; tail -n 1 /tmp/sp-red.$$; rm -f /tmp/sp-red.$$`
-Expected: `rc=1` and the summary line `3 passed, 91 failed`: every hook-driven case fails (the hook file does not exist, so `env ... "$HOOK"` exits 127), only the three `rm_guard` cases pass. The exit code is captured from the suite itself, not from `tail`. No `scratch-policy.*` or `tmp.link*` entries remain under `/tmp` afterwards (`ls /tmp | grep -c 'scratch-policy\.\|^tmp\.link'` prints `0`).
+Expected: `rc=1` and the summary line `3 passed, 98 failed` (as root: `3 passed, 96 failed` plus two `SKIP` lines): every hook-driven case fails (the hook file does not exist, so `env ... "$HOOK"` exits 127), only the three `rm_guard` cases pass. The exit code is captured from the suite itself, not from `tail`. No `scratch-policy.*` or `tmp.link*` entries remain under `/tmp` afterwards (`ls /tmp | grep -c 'scratch-policy\.\|^tmp\.link'` prints `0`).
 
 - [ ] **Step 3: Commit**
 
@@ -495,7 +509,10 @@ HEADS = {
     "rmdir": "rmdir", "/bin/rmdir": "rmdir", "/usr/bin/rmdir": "rmdir",
 }
 JOINERS = ("&&", ";", "\n")
-RAW_REFUSE = "#$`{}"
+# `[`/`]` are refused outright: fnmatch lacks POSIX classes ([[:alpha:]]),
+# so only `*` and `?` are expanded, and those match the shell's semantics
+# per path component.
+RAW_REFUSE = "#$`{}[]"
 QUOTE_CHARS = "'\"\\"
 OPERATOR_CHARS = ";&|()\n"
 # Long options are an exact allowlist: GNU accepts unambiguous
@@ -518,10 +535,11 @@ def raw_ok(command: str) -> bool:
     if "**" in command:
         return False
     if any(c in command for c in QUOTE_CHARS):
-        # A quoted glob is literal to the shell but not to the expander; a
-        # quoted operator (`rm S/x ';' rm S/y`) is a filename to the shell
-        # but a separator to the tokenizer. Either way: not our call.
-        if rm_guard.has_glob_chars(command) or any(c in command for c in OPERATOR_CHARS):
+        # A quoted glob or tilde is literal to the shell but not to the
+        # expander; a quoted operator (`rm S/x ';' rm S/y`) is a filename
+        # to the shell but a separator to the tokenizer. Not our call.
+        if rm_guard.has_glob_chars(command) or "~" in command \
+                or any(c in command for c in OPERATOR_CHARS):
             return False
     try:
         shlex.split(command)
@@ -579,22 +597,22 @@ def discard_root(rp: str, home_real: str) -> bool:
     return len([c for c in rp.split("/") if c]) < 2
 
 
-def compute_roots(payload: dict, home: str):
-    """[(realpath, kind)] with kind R1 (scratchpad) or R2 (tmpdir or /tmp)."""
+def compute_roots(payload: dict, home_real: str):
+    """[(realpath, kind)]: R1 scratchpad, R2 $TMPDIR, R2b /tmp fallback.
+    A set-but-relative TMPDIR is neither: no R2 root at all."""
     roots = []
-    home_real = os.path.realpath(home)
     sp = payload.get("scratchpad_dir")
     if isinstance(sp, str) and os.path.isabs(sp) and not os.path.islink(sp):
         rp = os.path.realpath(sp)
         if not discard_root(rp, home_real):
             roots.append((rp, "R1"))
     tmpdir = os.environ.get("TMPDIR") or ""
-    if tmpdir and os.path.isabs(tmpdir):
+    if not tmpdir:
+        roots.append((os.path.realpath("/tmp"), "R2b"))  # count rule waived
+    elif os.path.isabs(tmpdir):
         rp = os.path.realpath(tmpdir)
         if not discard_root(rp, home_real):
             roots.append((rp, "R2"))
-    else:
-        roots.append((os.path.realpath("/tmp"), "R2"))  # R2b: count rule waived
     return roots
 
 
@@ -675,8 +693,10 @@ def subtree_has_git(path: str) -> bool:
     return False
 
 
-def target_in_scope(tok: str, cwd: str, home: str, roots: list, recursive: bool,
-                    tmpdir_set: bool) -> bool:
+def target_in_scope(tok: str, cwd: str, home: str, home_real: str, roots: list,
+                    recursive: bool, tmpdir_set: bool) -> bool:
+    if tok.startswith("~") and tok != "~" and not tok.startswith("~/"):
+        return False  # ~user forms: the shell resolves them, we do not
     expanded = rm_guard.expand_home(tok, home)
     if ".." in expanded.split("/"):
         return False
@@ -684,8 +704,11 @@ def target_in_scope(tok: str, cwd: str, home: str, roots: list, recursive: bool,
     parts = resolved.split("/")
     if any(rm_guard.has_glob_chars(p) and p.startswith(".") for p in parts):
         return False
-    matches = expand_glob(resolved) if rm_guard.has_glob_chars(resolved) else [resolved]
-    if not matches:
+    if rm_guard.has_glob_chars(resolved):
+        matches = expand_glob(resolved) or [resolved]
+        if any(os.path.basename(m).startswith("-") for m in matches):
+            return False  # an expanded entry named like an option (`-rf`)
+    else:
         matches = [resolved]
     for m in matches:
         c = canon(m)
@@ -695,7 +718,9 @@ def target_in_scope(tok: str, cwd: str, home: str, roots: list, recursive: bool,
         root, kind = found
         if os.path.basename(c) == ".git":
             return False
-        if kind == "R2":
+        if kind == "R2b" and (c == home_real or c.startswith(home_real + "/")):
+            return False  # /tmp fallback never reaches into HOME
+        if kind in ("R2", "R2b"):
             if git_between(c, root):
                 return False
             if recursive and os.path.isdir(c) and not os.path.islink(c) and subtree_has_git(c):
@@ -725,7 +750,8 @@ def decide(payload: dict) -> bool:
         return False
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.getcwd()
     home = os.environ.get("HOME", os.path.expanduser("~"))
-    roots = compute_roots(payload, home)
+    home_real = os.path.realpath(home)
+    roots = compute_roots(payload, home_real)
     tmpdir_set = bool(os.environ.get("TMPDIR")) and os.path.isabs(os.environ.get("TMPDIR", ""))
     for tokens in segments:
         parsed = segment_targets(tokens)
@@ -733,7 +759,7 @@ def decide(payload: dict) -> bool:
             return False
         _, recursive, targets = parsed
         for tok in targets:
-            if not target_in_scope(tok, cwd, home, roots, recursive, tmpdir_set):
+            if not target_in_scope(tok, cwd, home, home_real, roots, recursive, tmpdir_set):
                 return False
     return True
 
@@ -803,12 +829,12 @@ if __name__ == "__main__":
         sys.exit(0)
 ```
 
-How the listing maps to the spec, for the reviewer: `raw_ok` is D2 step 3's raw-text refusals (including quoted operators and quoted globs); `operators_ok` is the operator and redirection rule of steps 3 and 4; `segment_targets` is the executable identity, `--`, and flag rule of steps 3 and 4 (long options are an exact allowlist so GNU abbreviations such as `--par`/`--rec` yield no decision, `rmdir -p` refused, `rm -r` noted for step 7); `compute_roots`/`discard_root` are D3 R1, R2a, R2b; `find_root` adds the lazy R3 match (entry directly under `/tmp` named `tmp.*`, not a symlink, dir or regular file); `canon` is D3's canonicalization; `expand_glob` is step 6 (hidden entries included, `**` already refused, an unreadable directory raises so the outer handler yields no decision); `target_in_scope` chains steps 5 to 7 (`..` refusal, dotglob, containment, `.git` basename, R2-only ancestor and subtree checks with the 20000-entry cap, walk errors raise); `log_allow` is D6.
+How the listing maps to the spec, for the reviewer: `raw_ok` is D2 step 3's raw-text refusals (brackets, braces, `#`, substitutions, and any quote combined with a glob, a tilde, or an operator); `operators_ok` is the operator and redirection rule of steps 3 and 4; `segment_targets` is the executable identity, `--`, and flag rule of steps 3 and 4 (long options are an exact allowlist so GNU abbreviations such as `--par`/`--rec` yield no decision, `rmdir -p` refused, `rm -r` noted for step 7); `compute_roots`/`discard_root` are D3 R1, R2a, R2b (a relative `TMPDIR` yields no R2 root); `find_root` adds the lazy R3 match (entry directly under `/tmp` named `tmp.*`, not a symlink, dir or regular file); `canon` is D3's canonicalization; `expand_glob` is step 6 (hidden entries included, `**` and `[` already refused, an unreadable directory raises so the outer handler yields no decision); `target_in_scope` chains steps 5 to 7 (`~user` refusal, `..` refusal, dotglob, matches named like options, containment, `.git` basename, R2b never under HOME, R2/R2b ancestor and subtree checks with the 20000-entry cap, walk errors raise); `log_allow` is D6.
 
 - [ ] **Step 2: Run the suite to verify it is green except the two static repo checks**
 
-Run: `chmod +x claude/hooks/scratch_policy.py && PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile claude/hooks/scratch_policy.py && sh claude/hooks/scratch-policy.test.sh 2>&1 | grep -v '^PASS'`
-Expected: exactly two `FAIL` lines, `static: template registers exactly this hook under PermissionRequest` and `static: suite is registered in bin/dotfiles-tests`, and the summary `92 passed, 2 failed`. Any other `FAIL` line means the listing was not copied exactly; diff against this plan before changing logic.
+Run: `chmod +x claude/hooks/scratch_policy.py && d="$(mktemp -d)" && PYTHONPYCACHEPREFIX="$d" python3 -m py_compile claude/hooks/scratch_policy.py && sh claude/hooks/scratch-policy.test.sh 2>&1 | grep -v '^PASS'`
+Expected: exactly two `FAIL` lines, `static: template registers exactly this hook under PermissionRequest` and `static: suite is registered in bin/dotfiles-tests`, and the summary `99 passed, 2 failed` (as root: `97 passed, 2 failed` plus two `SKIP` lines). Any other `FAIL` line means the listing was not copied exactly; diff against this plan before changing logic. `ls claude/hooks/__pycache__ | grep -c scratch_policy` prints `0`.
 
 - [ ] **Step 3: Confirm rm_guard.py is untouched and the hook never emits a deny**
 
@@ -886,7 +912,7 @@ Expected: `0` (the new line is pure ASCII; other lines in the file may carry non
 - [ ] **Step 4: Run the suite and the neighbouring suites**
 
 Run: `sh claude/hooks/scratch-policy.test.sh > /tmp/sp-a.$$ 2>&1; echo "a=$?"; tail -n 1 /tmp/sp-a.$$; h="$(mktemp -d)"; HOME="$h" PYTHONDONTWRITEBYTECODE=1 sh claude/hooks/claude-hooks.test.sh > /tmp/sp-b.$$ 2>&1; echo "b=$?"; grep -c '^PASS  rmg: ' /tmp/sp-b.$$; sh install/claude-links.test.sh > /tmp/sp-c.$$ 2>&1; echo "c=$?"; tail -n 1 /tmp/sp-c.$$; rm -f /tmp/sp-a.$$ /tmp/sp-b.$$ /tmp/sp-c.$$`
-Expected: `a=0` with `94 passed, 0 failed`; `b=0` with `57`; `c=0` with `26 passed, 0 failed`. The exit codes come from the suites themselves.
+Expected: `a=0` with `101 passed, 0 failed` (as root: `99 passed, 0 failed` plus two `SKIP` lines); `b=0` with `57`; `c=0` with `26 passed, 0 failed`. The exit codes come from the suites themselves.
 
 - [ ] **Step 5: Commit**
 
@@ -952,4 +978,15 @@ Codex plan review round 1 (2026-09-07, `model_reasoning_effort=high`, verdict ne
 7. The contract's quoted-substitution case sent malformed JSON: the contract's payload builder now uses `json.dumps` and asserts the decoded command round-trips.
 8. Allow output was compared after `$(...)` stripped trailing newlines: suite and contract now compare bytes against the allow line plus exactly one newline.
 
-Not changed on judgment: none; every finding was accepted. Round 2 of the plan review, if run, is recorded below this line.
+Not changed on judgment: none; every finding was accepted.
+
+Codex plan review round 2 (2026-09-07, `model_reasoning_effort=high`, verdict needs-rework, 6 findings), all folded in:
+
+1. A glob such as `rm *` in a directory holding a file named `-rf` expanded into an option word after flag parsing: any glob match whose basename starts with `-` now yields no decision; suite case `rm *` with cwd `$T` and a `$T/-rf` fixture; contract case `rm $f/s/*` with `$f/s/-rf`; spec D2 step 6.
+2. `fnmatch` cannot expand POSIX bracket classes (`[[:alpha:]]`), so the zero-match fallback certified a path Bash would have expanded through a symlink: `[` and `]` are refused outright (only `*` and `?` are globs); suite and contract cases; spec D2 step 3.
+3. `~user` forms resolved as relative paths and a quoted `~` was expanded by the hook but not by the shell: `~name...` targets and any quote combined with `~` yield no decision; suite cases; spec D2 steps 3 and 5.
+4. A relative `TMPDIR` fell through to the `/tmp` fallback, and the fallback could reach under a `HOME` that lives under `/tmp`: a set-but-relative `TMPDIR` now yields no R2 root and no R3 match, and R2b refuses targets at or under `HOME`; suite cases; spec D3.
+5. Bytecode isolation: `py_compile` in the plan steps now uses `PYTHONPYCACHEPREFIX` under a temp dir; the two contract commands that invoked the hook directly now pass `PYTHONDONTWRITEBYTECODE=1`; verified `claude/hooks/__pycache__` gains no `scratch_policy` entry.
+6. The two `chmod 000` cases are skipped as root, which would have dropped the suite below the contract's pass floor: the suite prints `SKIP` lines for them and the contract counts `PASS` plus `SKIP` lines with a floor of 101 (the in-repo total).
+
+Not changed on judgment: none; every finding was accepted. Per `codex-plan-review`'s two-round cap the plan proceeds to implementation after round 2; the implement worker should re-run `codex-plan-review` only if it changes the listings.
