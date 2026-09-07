@@ -21,6 +21,7 @@
 #   todos.sh index                      regenerate TODO.md
 #   todos.sh share                      stop ignoring .todos/ (commit in this repo)
 #   todos.sh path                       print the .todos/ directory path
+#   todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]   render the HTML board
 
 set -euo pipefail
 
@@ -777,6 +778,7 @@ main() {
     index)    cmd_index "$@" ;;
     share)    cmd_share "$@" ;;
     path)     cmd_path "$@" ;;
+    dashboard) exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_dashboard.py" "$@" ;;
     today)    today ;;
     register) cmd_register "$@" ;;
     repos)    cmd_repos "$@" ;;
