@@ -25,7 +25,9 @@ text, shell glob settings, repository protection at the root and inside
 recursively removed subtrees, `mktemp` regular files, a FIFO sidecar
 blocking the allow). Per `codex-spec-review`'s two-round cap the spec
 proceeds to planning on judgment after round 2; the plan review is
-recorded in the plan's review notes.
+recorded in the plan's review notes. Plan review round 1 fed three
+rule changes back into D2 (quoted operators refused, long-option
+allowlist, inspection errors yield no decision).
 
 ## Problem
 
@@ -242,10 +244,12 @@ it prints nothing and exits 0 ("no decision"):
    included: `rm "-$(cmd)" S/x` executes the substitution before `rm`),
    `{` or `}` anywhere (brace expansion is not supported; quoted braces
    are literal to the shell but not to the tokenizer), or a quote or
-   backslash together with any glob character (`*`, `?`, `[`) anywhere
-   (a quoted glob is literal to the shell but not to the expander).
-   Plain quoted literal paths, e.g. `rm -rf "S/build dir"`, stay
-   eligible. The command must then parse with `shlex.split` (posix)
+   backslash together with any glob character (`*`, `?`, `[`) or any
+   operator character (`;`, `&`, `|`, `(`, `)`, newline) anywhere (a
+   quoted glob is literal to the shell but not to the expander; a
+   quoted operator such as `rm S/x ';' rm S/y` is a filename to the
+   shell but a separator to the tokenizer). Plain quoted literal paths,
+   e.g. `rm -rf "S/build dir"`, stay eligible. The command must then parse with `shlex.split` (posix)
    without a `ValueError`; unbalanced quoting yields no decision (so
    `rm_guard.tokenize`'s whitespace fallback is never the basis of an
    allow). The token stream from `rm_guard.tokenize` may contain, as
@@ -267,11 +271,17 @@ it prints nothing and exits 0 ("no decision"):
    operand like `S/x>/repo/file`, yield no decision: the shell would
    split the operand and the tokenizer does not). Each segment has at
    least one target; targets are the non-flag tokens after the head,
-   honoring `--` as in `rm_guard.check_rm`. For `rm` every flag is
-   accepted (no `rm` option widens the set of removed paths beyond its
-   operands). For `rmdir`, `-p`, `--parents`, or a bundled short flag
-   group containing `p` yields no decision (it removes ancestors that
-   were never checked).
+   honoring `--` as in `rm_guard.check_rm`. Short flags: for `rm` every
+   short flag is accepted (no `rm` option widens the set of removed
+   paths beyond its operands); for `rmdir` a short flag group containing
+   `p` yields no decision (it removes ancestors that were never
+   checked). Long options are an exact allowlist, because GNU accepts
+   any unambiguous abbreviation (`--par`, `--rec`) that the rules above
+   would misread: `rm` accepts only `--recursive`, `--force`,
+   `--verbose`, `--dir`, `--one-file-system`, `--preserve-root`,
+   `--no-preserve-root`; `rmdir` accepts only `--verbose` and
+   `--ignore-fail-on-non-empty`; any other long option yields no
+   decision.
 5. Resolution. Every target, after `rm_guard.expand_home` (no brace
    expansion: braces were refused in step 3), contains no `..` path
    component (lexical `..` collapse would disagree with the kernel when
@@ -292,10 +302,12 @@ it prints nothing and exits 0 ("no decision"):
    match fails by step 7). Zero matches: the literal must satisfy
    steps 5 and 7 (the non-glob prefix is what canonicalizes; `rm` on a
    non-matching glob merely errors). No glob component may start with
-   `.` (`rm -rf <root>/.*` yields no decision). The decision reflects
-   the filesystem at decision time; a change between decision and
-   execution is accepted as out of scope, as it is for every other
-   guard in this repo.
+   `.` (`rm -rf <root>/.*` yields no decision). A directory that cannot
+   be listed during expansion is an inspection error and yields no
+   decision: an incomplete listing never certifies a target. The
+   decision reflects the filesystem at decision time; a change between
+   decision and execution is accepted as out of scope, as it is for
+   every other guard in this repo.
 7. Repository exclusions, applied after a target is found under a
    root: no decision when the canonical target's basename is `.git`
    (any root). For the shared roots R2a and R2b only (the session-owned
@@ -307,7 +319,8 @@ it prints nothing and exits 0 ("no decision"):
    short group containing `r`/`R`) and the target is a directory, the
    subtree is walked without following symlinks and any `.git` entry
    inside it yields no decision, with the walk capped at 20000 entries
-   (beyond the cap: no decision, the classifier decides). These
+   (beyond the cap: no decision, the classifier decides) and any
+   directory the walk cannot read also yielding no decision. These
    exclusions exist so the hook refuses the shapes independently of
    `rm_guard.py`'s upstream block.
 
@@ -468,7 +481,13 @@ other hook suites), hermetic:
   `sh -c 'rm S/x'`; `cd S && rm -rf build`; `rm S/x && ls`;
   `rm S/x | cat`; `rm S/x || true`; `rm S/x &`; `(rm S/x)`;
   `rm S/x > /dev/null`; `rm S/x>/dev/null`; `rm S/x>R/file`;
-  `rm 'S/x` (unbalanced quote); `rm S/x# R/file` (mid-token comment);
+  `rm 'S/x` (unbalanced quote); `rm S/x ';' rm S/-x` (quoted
+  separator); `rmdir --par S/build`, `rm --rec S/build`, and
+  `rm --interactive=never S/x` (long options outside the allowlist;
+  `rm --recursive --force --verbose S/build` is an allow case); a
+  recursive removal and a glob over a `chmod 000` directory under the
+  R2a root (inspection errors, skipped when running as root);
+  `rm S/x# R/file` (mid-token comment);
   `rm "-$(true)" S/x` and a backtick in an option token; `rm 'S/{a,b}/x'`
   and `rm S/{a,b}/x` (braces refused); `rm 'S/build/*'` (quoted glob);
   `rm -rf S/**/x` (recursive glob); `rm -rf $T/build/*` with

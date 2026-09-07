@@ -12,7 +12,7 @@
 
 **Status:** branch-only document; dropped before merge together with the spec. The contract at `claude/contracts/td-2026-09-06-add-a-worker-side-permission-policy-hook-for-scrat-contract.json` stays and is what the orchestrator runs.
 
-**Review provenance:** Spec: Codex round 1 (12 findings) and round 2 (7 findings), both folded in, verdict needs-rework each time; proceeded on judgment per the review skill's two-round cap. Plan: see "Review notes" at the end. The hook and suite listed below were smoke-tested in a scratch copy (outside the repo) against the prototype before being written into this plan: 85 of 85 cases pass, fixtures clean up; the two static cases that inspect the template and runner are skipped outside the repo and become live in Task 3. Three defects found by that smoke run are already fixed in the listings (HOME compared before `realpath`, a `VAR=x func` assignment persisting in POSIX `sh`, and two fixture assumptions).
+**Review provenance:** Spec: Codex round 1 (12 findings) and round 2 (7 findings), both folded in, verdict needs-rework each time; proceeded on judgment per the review skill's two-round cap. Plan: Codex round 1 (8 findings, needs-rework) folded in, see "Review notes" at the end. The hook and suite listed below were smoke-tested in a scratch copy (outside the repo) against the prototype before being written into this plan: 92 of 92 cases pass, fixtures clean up; the two static cases that inspect the template and runner are skipped outside the repo and become live in Task 3. The contract's fixture-driven commands pass against that prototype and fail (6 of 8, and 3 of 8) against an always-allow and an always-silent hook. Defects found by the smoke run and the plan review are already fixed in the listings (HOME compared before `realpath`, a `VAR=x func` assignment persisting in POSIX `sh`, two fixture assumptions, quoted operators, GNU long-option abbreviations, silent inspection errors, byte-exact output checks).
 
 ## Global Constraints
 
@@ -23,6 +23,7 @@
 - Files that may change (spec AC8): `claude/hooks/scratch_policy.py` (new), `claude/hooks/scratch-policy.test.sh` (new), `claude/settings.json.tmpl`, `bin/dotfiles-tests`, `CLAUDE.md`, the contract file, and the two branch-only docs. Nothing else: not `rm_guard.py`, not `herdr_orch_core.py`, not `claude-hooks.test.sh`, not `install/**`, not the herdr-orchestration skill, not `account_guard.py`.
 - No emojis, no AI attribution, ASCII only in added lines (use ` -- ` not an em dash in CLAUDE.md), LF endings. Commit format `<scope>: <summary>`, imperative, under 75 chars.
 - Test baseline (2026-09-07, this machine, base `026f043`): `bin/dotfiles-tests` 23 suites passed, 0 failed; `claude/hooks/claude-hooks.test.sh` 183 PASS lines, 57 of them `rmg:`. `git/hooks/public-safety.test.sh` fails exactly one check (`no tracked planning artifacts`) while the branch-only docs are tracked; that is expected until they are dropped before merge and is not a regression.
+- Verification runs under a fixture `HOME` (`HOME="$(mktemp -d)"`) and `PYTHONDONTWRITEBYTECODE=1`: `claude-hooks.test.sh` compares the live `~/.claude*/settings.json` against the template and would report `missing template hooks` on any machine that has not run `update` since this change; with a fixture `HOME` that check prints `SKIP` instead. The live-settings check belongs to Task 4 step 3, which is opt-in.
 - Workflow: `git add -f` is needed only for the docs; every other file is a normal add. Commit after each task.
 
 ## File Structure
@@ -79,6 +80,10 @@ Create `claude/hooks/scratch-policy.test.sh` with exactly this content, then `ch
 # Claude session is involved. The suite never runs an rm the hook approves.
 set -u
 
+# Never leave bytecode behind in claude/hooks/ (the hook imports siblings).
+PYTHONDONTWRITEBYTECODE=1
+export PYTHONDONTWRITEBYTECODE
+
 HOOK=${SCRATCH_POLICY_HOOK:-claude/hooks/scratch_policy.py}
 RMG=${RM_GUARD_HOOK:-claude/hooks/rm_guard.py}
 ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
@@ -98,7 +103,7 @@ H="$FIX/home"
 S2="$FIX/scratchpad2"
 T2="$FIX/tmpdir2"
 mkdir -p "$S/build" "$S/clone/.git" "$S2/build" "$T/x" "$T/build/project/.git" \
-    "$T2/.git" "$T2/src" "$R/.git" "$H"
+    "$T2/.git" "$T2/src" "$T/dark/inner" "$R/.git" "$H"
 : > "$S/build/x"
 : > "$S/-x"
 : > "$R/file"
@@ -110,7 +115,9 @@ mkdir -p "$M3/child" "$M3/clone/.git"
 MF=$(mktemp /tmp/tmp.XXXXXXXXXX)
 ML="/tmp/tmp.link$$"
 ln -s "$R" "$ML"
-trap 'rm -rf "$FIX" "$M3"; rm -f "$MF" "$ML"' EXIT
+# $T/dark is made unreadable for the inspection-error cases; the trap
+# restores it so the fixture tree can be removed.
+trap 'chmod 700 "$T/dark" 2>/dev/null; rm -rf "$FIX" "$M3"; rm -f "$MF" "$ML"' EXIT
 
 # pr_payload CMD CWD SCRATCH [MODE] [EVENT] [TOOL] -> PermissionRequest JSON on stdout
 pr_payload() {
@@ -150,7 +157,8 @@ check() {
     rc="$3"
     ok=0
     if [ "$rc" = 0 ] && [ ! -s "$FIX/err" ]; then
-        if [ "$expect" = allow ] && [ "$(cat "$FIX/out")" = "$ALLOW" ]; then
+        # Byte-exact: the allow line plus exactly one newline (spec D5).
+        if [ "$expect" = allow ] && printf '%s\n' "$ALLOW" | cmp -s - "$FIX/out"; then
             ok=1
         elif [ "$expect" = none ] && [ ! -s "$FIX/out" ]; then
             ok=1
@@ -195,6 +203,7 @@ allow_case "allows a child of a mktemp dir" "rm -rf $M3/child"
 allow_case "allows a mktemp regular file under /tmp" "rm $MF"
 allow_case "allows a scratch clone inside the scratchpad (R1 exempt from repo rule)" "rm -rf $S/clone"
 allow_case "allows a scratch clone inside a mktemp dir (R3 exempt from repo rule)" "rm -rf $M3/clone"
+allow_case "allows listed long options" "rm --recursive --force --verbose $S/build"
 # CASE_TMPDIR is set and unset explicitly around calls: POSIX sh keeps a
 # `VAR=x func` prefix assignment after the call returns.
 CASE_TMPDIR=unset
@@ -219,6 +228,10 @@ none_case "ignores a tmp.* symlink entry itself" "rm $ML"
 none_case "ignores a child of a tmp.* symlink entry" "rm $ML/file"
 none_case "ignores rmdir -p" "rmdir -p $S/build"
 none_case "ignores rmdir with a bundled p flag" "rmdir -pv $S/build"
+none_case "ignores an abbreviated rmdir --parents" "rmdir --par $S/build"
+none_case "ignores an abbreviated rm --recursive" "rm --rec $S/build"
+none_case "ignores an unknown long option" "rm --interactive=never $S/build/x"
+none_case "ignores a quoted separator (a filename to the shell)" "rm $S/build/x ';' rm $S/-x"
 none_case "ignores a non-standard rm executable path" "/repo/rm $S/build/x"
 none_case "ignores a relative rm executable" "./rm $S/build/x"
 none_case "ignores sudo rm" "sudo rm $S/build/x"
@@ -246,6 +259,14 @@ CASE_TMPDIR="$T2"
 none_case "ignores a checkout at the TMPDIR root level" "rm -rf $T2/src"
 unset CASE_TMPDIR
 none_case "ignores a nested checkout inside a recursive TMPDIR removal" "rm -rf $T/build"
+# Inspection errors must never certify a target. Skipped as root, who can
+# read anything.
+if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$T/dark"
+    none_case "ignores a recursive removal whose subtree cannot be inspected" "rm -rf $T/dark"
+    none_case "ignores a glob over an unreadable directory" "rm $T/dark/*"
+    chmod 700 "$T/dark"
+fi
 none_case "ignores a scratch target when scratchpad_dir is absent" "rm -rf $S/build" "$R" ""
 none_case "ignores a non-Bash tool" "rm -rf $S/build" "$R" "$S" "auto" "PermissionRequest" "Write"
 none_case "ignores a PreToolUse payload" "rm -rf $S/build" "$R" "$S" "auto" "PreToolUse"
@@ -358,7 +379,7 @@ done
 if kill -0 "$fifo_pid" 2>/dev/null; then
     kill "$fifo_pid" 2>/dev/null
     printf 'FAIL  audit: reader-less FIFO sidecar does not block the allow\n' >&2; FAIL=$((FAIL + 1))
-elif [ "$(cat "$FIX/fifo.out")" = "$ALLOW" ] && [ ! -s "$FIX/fifo.err" ]; then
+elif printf '%s\n' "$ALLOW" | cmp -s - "$FIX/fifo.out" && [ ! -s "$FIX/fifo.err" ]; then
     printf 'PASS  audit: reader-less FIFO sidecar does not block the allow\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  audit: reader-less FIFO sidecar does not block the allow (out=%s)\n' "$(cat "$FIX/fifo.out")" >&2; FAIL=$((FAIL + 1))
@@ -366,7 +387,8 @@ fi
 wait "$fifo_pid" 2>/dev/null
 
 # --- static checks (spec AC1, AC6, AC7) ---
-if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' && python3 -m py_compile "$HOOK"; then
+if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
+    && PYTHONPYCACHEPREFIX="$FIX/pyc" python3 -m py_compile "$HOOK"; then
     printf 'PASS  static: hook is executable, python3 shebang, compiles\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  static: hook is executable, python3 shebang, compiles\n' >&2; FAIL=$((FAIL + 1))
@@ -406,8 +428,8 @@ printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 
 - [ ] **Step 2: Run the suite to verify it is red**
 
-Run: `chmod +x claude/hooks/scratch-policy.test.sh && bash -n claude/hooks/scratch-policy.test.sh && sh claude/hooks/scratch-policy.test.sh 2>&1 | tail -n 3`
-Expected: every hook-driven case prints `FAIL` (the hook file does not exist, so `env ... "$HOOK"` exits 127), the three `rm_guard` cases print `PASS`, the summary line reads `3 passed, 84 failed`, exit 1. No `scratch-policy.*` or `tmp.link*` entries remain under `/tmp` afterwards (`ls /tmp | grep -c 'scratch-policy\.\|^tmp\.link'` prints `0`).
+Run: `chmod +x claude/hooks/scratch-policy.test.sh && bash -n claude/hooks/scratch-policy.test.sh && sh claude/hooks/scratch-policy.test.sh > /tmp/sp-red.$$ 2>&1; echo "rc=$?"; tail -n 1 /tmp/sp-red.$$; rm -f /tmp/sp-red.$$`
+Expected: `rc=1` and the summary line `3 passed, 91 failed`: every hook-driven case fails (the hook file does not exist, so `env ... "$HOOK"` exits 127), only the three `rm_guard` cases pass. The exit code is captured from the suite itself, not from `tail`. No `scratch-policy.*` or `tmp.link*` entries remain under `/tmp` afterwards (`ls /tmp | grep -c 'scratch-policy\.\|^tmp\.link'` prints `0`).
 
 - [ ] **Step 3: Commit**
 
@@ -475,6 +497,15 @@ HEADS = {
 JOINERS = ("&&", ";", "\n")
 RAW_REFUSE = "#$`{}"
 QUOTE_CHARS = "'\"\\"
+OPERATOR_CHARS = ";&|()\n"
+# Long options are an exact allowlist: GNU accepts unambiguous
+# abbreviations (`--par`, `--rec`), which the flag logic below would
+# otherwise misread, so anything not listed yields no decision.
+LONG_OK = {
+    "rm": ("--recursive", "--force", "--verbose", "--dir", "--one-file-system",
+           "--preserve-root", "--no-preserve-root"),
+    "rmdir": ("--verbose", "--ignore-fail-on-non-empty"),
+}
 WALK_CAP = 20000
 COMMAND_MAX = 300
 EVENT = "scratch-allow"
@@ -486,8 +517,12 @@ def raw_ok(command: str) -> bool:
         return False
     if "**" in command:
         return False
-    if any(c in command for c in QUOTE_CHARS) and rm_guard.has_glob_chars(command):
-        return False
+    if any(c in command for c in QUOTE_CHARS):
+        # A quoted glob is literal to the shell but not to the expander; a
+        # quoted operator (`rm S/x ';' rm S/y`) is a filename to the shell
+        # but a separator to the tokenizer. Either way: not our call.
+        if rm_guard.has_glob_chars(command) or any(c in command for c in OPERATOR_CHARS):
+            return False
     try:
         shlex.split(command)
     except ValueError:
@@ -519,11 +554,15 @@ def segment_targets(tokens: list):
             targets.append(tok)
         elif tok == "--":
             only_targets = True
-        elif tok.startswith("-") and tok != "-":
-            short = not tok.startswith("--")
-            if kind == "rmdir" and (tok in ("-p", "--parents") or (short and "p" in tok[1:])):
+        elif tok.startswith("--"):
+            if tok not in LONG_OK[kind]:
                 return None
-            if kind == "rm" and (tok == "--recursive" or (short and any(c in "rR" for c in tok[1:]))):
+            if tok == "--recursive":
+                recursive = True
+        elif tok.startswith("-") and tok != "-":
+            if kind == "rmdir" and "p" in tok[1:]:
+                return None  # -p removes ancestors that were never checked
+            if kind == "rm" and any(c in "rR" for c in tok[1:]):
                 recursive = True
         else:
             targets.append(tok)
@@ -569,17 +608,22 @@ def canon(path: str) -> str:
     return os.path.join(real, *reversed(rest)) if rest else real
 
 
+def _raise(err: OSError) -> None:
+    raise err
+
+
 def expand_glob(path: str) -> list:
-    """Existing paths matching an absolute glob, hidden entries included."""
+    """Existing paths matching an absolute glob, hidden entries included.
+    An unreadable directory raises: an incomplete listing must never
+    certify a target (the caller turns the exception into no decision)."""
     results = ["/"]
     for part in [p for p in path.split("/") if p]:
         nxt = []
         for base in results:
             if rm_guard.has_glob_chars(part):
-                try:
-                    names = sorted(os.listdir(base))
-                except OSError:
+                if not os.path.isdir(base):
                     continue
+                names = sorted(os.listdir(base))
                 nxt.extend(os.path.join(base, n) for n in names
                            if fnmatch.fnmatchcase(n, part))
             elif os.path.lexists(os.path.join(base, part)):
@@ -619,8 +663,10 @@ def git_between(c: str, root: str) -> bool:
 
 
 def subtree_has_git(path: str) -> bool:
+    """True when a .git entry exists anywhere below `path` or the walk
+    exceeds WALK_CAP. An unreadable directory raises (no decision)."""
     seen = 0
-    for _, dirnames, filenames in os.walk(path, followlinks=False):
+    for _, dirnames, filenames in os.walk(path, onerror=_raise, followlinks=False):
         if ".git" in dirnames or ".git" in filenames:
             return True
         seen += len(dirnames) + len(filenames)
@@ -757,12 +803,12 @@ if __name__ == "__main__":
         sys.exit(0)
 ```
 
-How the listing maps to the spec, for the reviewer: `raw_ok` is D2 step 3's raw-text refusals; `operators_ok` is the operator and redirection rule of steps 3 and 4; `segment_targets` is the executable identity, `--`, and flag rule of steps 3 and 4 (`rmdir -p` refused, `rm -r` noted for step 7); `compute_roots`/`discard_root` are D3 R1, R2a, R2b; `find_root` adds the lazy R3 match (entry directly under `/tmp` named `tmp.*`, not a symlink, dir or regular file); `canon` is D3's canonicalization; `expand_glob` is step 6 (hidden entries included, `**` already refused); `target_in_scope` chains steps 5 to 7 (`..` refusal, dotglob, containment, `.git` basename, R2-only ancestor and subtree checks with the 20000-entry cap); `log_allow` is D6.
+How the listing maps to the spec, for the reviewer: `raw_ok` is D2 step 3's raw-text refusals (including quoted operators and quoted globs); `operators_ok` is the operator and redirection rule of steps 3 and 4; `segment_targets` is the executable identity, `--`, and flag rule of steps 3 and 4 (long options are an exact allowlist so GNU abbreviations such as `--par`/`--rec` yield no decision, `rmdir -p` refused, `rm -r` noted for step 7); `compute_roots`/`discard_root` are D3 R1, R2a, R2b; `find_root` adds the lazy R3 match (entry directly under `/tmp` named `tmp.*`, not a symlink, dir or regular file); `canon` is D3's canonicalization; `expand_glob` is step 6 (hidden entries included, `**` already refused, an unreadable directory raises so the outer handler yields no decision); `target_in_scope` chains steps 5 to 7 (`..` refusal, dotglob, containment, `.git` basename, R2-only ancestor and subtree checks with the 20000-entry cap, walk errors raise); `log_allow` is D6.
 
 - [ ] **Step 2: Run the suite to verify it is green except the two static repo checks**
 
-Run: `chmod +x claude/hooks/scratch_policy.py && python3 -m py_compile claude/hooks/scratch_policy.py && sh claude/hooks/scratch-policy.test.sh 2>&1 | grep -v '^PASS'`
-Expected: exactly two `FAIL` lines, `static: template registers exactly this hook under PermissionRequest` and `static: suite is registered in bin/dotfiles-tests`, and the summary `85 passed, 2 failed`. Any other `FAIL` line means the listing was not copied exactly; diff against this plan before changing logic.
+Run: `chmod +x claude/hooks/scratch_policy.py && PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile claude/hooks/scratch_policy.py && sh claude/hooks/scratch-policy.test.sh 2>&1 | grep -v '^PASS'`
+Expected: exactly two `FAIL` lines, `static: template registers exactly this hook under PermissionRequest` and `static: suite is registered in bin/dotfiles-tests`, and the summary `92 passed, 2 failed`. Any other `FAIL` line means the listing was not copied exactly; diff against this plan before changing logic.
 
 - [ ] **Step 3: Confirm rm_guard.py is untouched and the hook never emits a deny**
 
@@ -839,8 +885,8 @@ Expected: `0` (the new line is pure ASCII; other lines in the file may carry non
 
 - [ ] **Step 4: Run the suite and the neighbouring suites**
 
-Run: `sh claude/hooks/scratch-policy.test.sh 2>&1 | tail -n 1 && HOME="$(mktemp -d)" sh claude/hooks/claude-hooks.test.sh 2>/dev/null | grep -c '^PASS  rmg: ' && sh install/claude-links.test.sh 2>&1 | tail -n 1`
-Expected: `87 passed, 0 failed`, then `57`, then `26 passed, 0 failed`.
+Run: `sh claude/hooks/scratch-policy.test.sh > /tmp/sp-a.$$ 2>&1; echo "a=$?"; tail -n 1 /tmp/sp-a.$$; h="$(mktemp -d)"; HOME="$h" PYTHONDONTWRITEBYTECODE=1 sh claude/hooks/claude-hooks.test.sh > /tmp/sp-b.$$ 2>&1; echo "b=$?"; grep -c '^PASS  rmg: ' /tmp/sp-b.$$; sh install/claude-links.test.sh > /tmp/sp-c.$$ 2>&1; echo "c=$?"; tail -n 1 /tmp/sp-c.$$; rm -f /tmp/sp-a.$$ /tmp/sp-b.$$ /tmp/sp-c.$$`
+Expected: `a=0` with `94 passed, 0 failed`; `b=0` with `57`; `c=0` with `26 passed, 0 failed`. The exit codes come from the suites themselves.
 
 - [ ] **Step 5: Commit**
 
@@ -858,8 +904,8 @@ git commit -m "claude: Register the scratch policy hook and its suite"
 
 - [ ] **Step 1: Run the full runner**
 
-Run: `bash bin/dotfiles-tests 2>&1 | tail -n 3`
-Expected: `24 suites passed, 0 failed` once the branch-only docs are dropped; while they are still tracked, expect `23 suites passed, 1 failed` with `git/hooks/public-safety.test.sh` as the only failing suite and `FAIL  no tracked planning artifacts` as its only failing check (verify with `sh git/hooks/public-safety.test.sh 2>&1 | grep '^FAIL'`). Any other failure is a regression to fix before continuing.
+Run: `h="$(mktemp -d)"; HOME="$h" PYTHONDONTWRITEBYTECODE=1 bash bin/dotfiles-tests > /tmp/sp-all.$$ 2>&1; echo "rc=$?"; tail -n 3 /tmp/sp-all.$$; grep '^\[X\]' /tmp/sp-all.$$; rm -f /tmp/sp-all.$$`
+Expected: `24 suites passed, 0 failed` and `rc=0` once the branch-only docs are dropped; while they are still tracked, expect `rc=1`, `23 suites passed, 1 failed`, with `git/hooks/public-safety.test.sh` as the only `[X] FAILED` suite and `FAIL  no tracked planning artifacts` as its only failing check (verify with `sh git/hooks/public-safety.test.sh 2>&1 | grep '^FAIL'`). Any other failure is a regression to fix before continuing. The fixture `HOME` keeps the live-settings drift check out of this step (see Global Constraints).
 
 - [ ] **Step 2: Run the contract**
 
@@ -895,4 +941,15 @@ Expected: `sh git/hooks/public-safety.test.sh` now passes in full and `bash bin/
 
 ## Review notes
 
-Filled in after `codex-plan-review`; see the commit that follows this plan's first commit.
+Codex plan review round 1 (2026-09-07, `model_reasoning_effort=high`, verdict needs-rework, 8 findings), all folded in:
+
+1. Quoted separators (`rm S/x ';' rm S/y`) reached allow: `raw_ok` now refuses any quote or backslash combined with an operator character; suite and contract gained the case. Spec D2 step 3 updated.
+2. GNU long-option abbreviations (`rmdir --par`, `rm --rec`) bypassed the flag rules: long options are now an exact allowlist per command; suite and contract gained the cases; spec D2 step 4 updated.
+3. Inspection errors (unreadable directory during glob expansion or the recursive `.git` walk) silently certified targets: both now raise and the outer handler yields no decision; suite gained two `chmod 000` cases (skipped as root); contract gained one; spec D2 steps 6 and 7 updated.
+4. Automated verification inherited the real `HOME`, so `claude-hooks.test.sh`'s live-settings drift check would fail on any unreconciled machine: Task 3 step 4, Task 4 step 1, and the contract's suite commands now run under a fixture `HOME` with `PYTHONDONTWRITEBYTECODE=1`; the live check stays in the opt-in Task 4 step 3.
+5. `py_compile` and sibling imports wrote bytecode into `claude/hooks/__pycache__` (gitignored, but still a write outside fixtures): the suite exports `PYTHONDONTWRITEBYTECODE=1` and compiles with `PYTHONPYCACHEPREFIX` under its fixture; contract commands do the same and clean their temp dirs with traps.
+6. Pipelines hid producer exit codes and empty enumerations passed vacuously: plan steps capture the suite's own `rc`; the contract requires at least 23 listed suites, a `passed, ... failed` summary line from the scratch suite, and a narrowly validated public-safety outcome (zero failures with exit 0, or exactly the expected failure while docs are tracked).
+7. The contract's quoted-substitution case sent malformed JSON: the contract's payload builder now uses `json.dumps` and asserts the decoded command round-trips.
+8. Allow output was compared after `$(...)` stripped trailing newlines: suite and contract now compare bytes against the allow line plus exactly one newline.
+
+Not changed on judgment: none; every finding was accepted. Round 2 of the plan review, if run, is recorded below this line.
