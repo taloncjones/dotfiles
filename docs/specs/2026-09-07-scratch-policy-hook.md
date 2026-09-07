@@ -18,7 +18,13 @@ needs-rework; all are folded in below (redirection tokens, lexical `..`
 before symlink resolution, globs through symlinks, `rmdir -p`,
 executable identity, symlinked `tmp.*` roots, R2b overlap with the
 scratchpad root, deny-rule precedence wording, shell grammar, layered
-safety claim, a controlled AC10 trigger, artifact lifecycle). Round 2 is
+safety claim, a controlled AC10 trigger, artifact lifecycle). Round 2
+returned 7 findings, verdict needs-rework; all are folded in (mid-token
+`#` comments, substitutions inside option tokens, quoted brace/glob
+text, shell glob settings, repository protection at the root and inside
+recursively removed subtrees, `mktemp` regular files, a FIFO sidecar
+blocking the allow). Per `codex-spec-review`'s two-round cap the spec
+proceeds to planning on judgment after round 2; the plan review is
 recorded in the plan's review notes.
 
 ## Problem
@@ -228,8 +234,19 @@ it prints nothing and exits 0 ("no decision"):
 2. `permission_mode` is absent or one of `default`, `auto`,
    `acceptEdits`. `plan`, `dontAsk`, and `bypassPermissions` yield no
    decision (plan mode must not delete; the other two never prompt).
-3. Grammar. The command must parse with `shlex.split` (posix) without a
-   `ValueError`; unbalanced quoting yields no decision (so
+3. Grammar. Raw-text refusals first, before any tokenizing: the command
+   yields no decision if it contains `#` (the tokenizer treats a
+   mid-word `#` as a comment while the shell does not, so
+   `rm S/x# /repo/file` would hide an operand), `$` or a backtick
+   anywhere (substitution or variable in ANY token, option tokens
+   included: `rm "-$(cmd)" S/x` executes the substitution before `rm`),
+   `{` or `}` anywhere (brace expansion is not supported; quoted braces
+   are literal to the shell but not to the tokenizer), or a quote or
+   backslash together with any glob character (`*`, `?`, `[`) anywhere
+   (a quoted glob is literal to the shell but not to the expander).
+   Plain quoted literal paths, e.g. `rm -rf "S/build dir"`, stay
+   eligible. The command must then parse with `shlex.split` (posix)
+   without a `ValueError`; unbalanced quoting yields no decision (so
    `rm_guard.tokenize`'s whitespace fallback is never the basis of an
    allow). The token stream from `rm_guard.tokenize` may contain, as
    operator tokens, only `&&`, `;`, and newline; any `|`, `||`, `&`,
@@ -255,32 +272,44 @@ it prints nothing and exits 0 ("no decision"):
    operands). For `rmdir`, `-p`, `--parents`, or a bundled short flag
    group containing `p` yields no decision (it removes ancestors that
    were never checked).
-5. Resolution. Every target, after `rm_guard.expand_braces` and
-   `rm_guard.expand_home`, contains no `$` and no backtick (unexpanded
-   variable or substitution: unresolvable, no decision) and no `..`
-   path component (lexical `..` collapse would disagree with the kernel
-   when a symlink precedes it, e.g. `S/link/../victim`; no decision).
-   It then resolves via `rm_guard.resolve(expanded, cwd)` with `cwd`
-   from the payload and canonicalizes (D3) to a path that is a STRICT
+5. Resolution. Every target, after `rm_guard.expand_home` (no brace
+   expansion: braces were refused in step 3), contains no `..` path
+   component (lexical `..` collapse would disagree with the kernel when
+   a symlink precedes it, e.g. `S/link/../victim`; no decision). It
+   then resolves via `rm_guard.resolve(expanded, cwd)` with `cwd` from
+   the payload and canonicalizes (D3) to a path that is a STRICT
    descendant of one of the throwaway roots: `canon.startswith(root + "/")`.
    The root itself is never in scope (one R3 exception, D3).
-6. Globs. A target containing glob characters is expanded at decision
-   time with `glob.glob` (no dotglob, no recursive `**`), and EVERY
-   match must individually satisfy step 5 after canonicalization (a
-   match reached through a symlink to outside a root fails). Zero
-   matches: the literal must satisfy step 5 (the non-glob prefix is
-   what canonicalizes; `rm` on a non-matching glob merely errors). No
-   glob component may start with `.` (`rm -rf <root>/.*` yields no
-   decision). The decision reflects the filesystem at decision time; a
-   change between decision and execution is accepted as out of scope,
-   as it is for every other guard in this repo.
-7. Exclusions, applied after a target is found under a root: no
-   decision when the canonical target's basename is `.git`, or when the
-   canonical target or any ancestor of it strictly below the root
-   contains a `.git` entry (a repository checkout that happens to live
-   under a throwaway root is not scratch). These exclusions exist so
-   the hook refuses the shapes independently of `rm_guard.py`'s
-   upstream block.
+6. Globs. `**` anywhere yields no decision (zsh, which the Bash tool
+   runs on this machine, treats it as recursive; Python does not). A
+   target containing glob characters is expanded at decision time
+   against the filesystem INCLUDING hidden entries (`fnmatch` over
+   `os.scandir` per component, or `glob.glob(include_hidden=True)`),
+   so the checked set is a superset of what the executing shell yields
+   under any `dotglob`/`GLOB_DOTS` setting, and EVERY match must
+   individually satisfy steps 5 and 7 after canonicalization (a match
+   reached through a symlink to outside a root fails; a hidden `.git`
+   match fails by step 7). Zero matches: the literal must satisfy
+   steps 5 and 7 (the non-glob prefix is what canonicalizes; `rm` on a
+   non-matching glob merely errors). No glob component may start with
+   `.` (`rm -rf <root>/.*` yields no decision). The decision reflects
+   the filesystem at decision time; a change between decision and
+   execution is accepted as out of scope, as it is for every other
+   guard in this repo.
+7. Repository exclusions, applied after a target is found under a
+   root: no decision when the canonical target's basename is `.git`
+   (any root). For the shared roots R2a and R2b only (the session-owned
+   R1 scratchpad and R3 `mktemp` entries are throwaway trees by
+   construction, and a scratch clone inside them is legitimately
+   scratch): no decision when the canonical target, any ancestor of it
+   up to AND including the root, contains a `.git` entry; and, when the
+   invocation is recursive (`-r`, `-R`, `--recursive`, or a bundled
+   short group containing `r`/`R`) and the target is a directory, the
+   subtree is walked without following symlinks and any `.git` entry
+   inside it yields no decision, with the walk capped at 20000 entries
+   (beyond the cap: no decision, the classifier decides). These
+   exclusions exist so the hook refuses the shapes independently of
+   `rm_guard.py`'s upstream block.
 
 The hook never emits `deny`. Command text is never echoed to stdout or
 stderr.
@@ -309,8 +338,9 @@ Roots are computed per invocation and each canonicalized with
 - R3 mktemp under /tmp: when `$TMPDIR` is set, each entry directly under
   `<realpath /tmp>` whose name starts with `tmp.` (the default `mktemp`
   template `tmp.XXXXXXXXXX` on both BSD and GNU) is a root, provided the
-  entry is a directory that is not a symlink and its realpath stays
-  under `<realpath /tmp>` (a `tmp.*` symlink into a repository can never
+  entry is a directory or a regular file (`mktemp /tmp/tmp.XXXXXXXXXX`
+  creates a file) that is not a symlink and its realpath stays under
+  `<realpath /tmp>` (a `tmp.*` symlink into a repository can never
   promote its destination into a root). The entry itself is in scope
   (the one exception to "root itself never in scope", because
   `rm -rf "$(mktemp -d)"`-style cleanup removes the entry). Provenance
@@ -331,10 +361,11 @@ touched.
 
 `scratch_policy.py` does `sys.path.insert(0, <its own dir>)` and
 `import rm_guard`, then uses `rm_guard.tokenize`, `split_segments`,
-`basename`, `is_env_assignment`, `PREFIX_WRAPPERS`, `SHELL_WRAPPERS`,
-`REMOVE_COMMANDS`, `expand_braces`, `expand_home`, `resolve`, and
-`has_glob_chars`. It defines no tokenizer, segment splitter, or brace
-expander of its own (AC6 greps for this). `rm_guard.py` is not modified.
+`is_env_assignment`, `PREFIX_WRAPPERS`, `SHELL_WRAPPERS`,
+`REMOVE_COMMANDS`, `expand_home`, `resolve`, and `has_glob_chars`. It
+defines no tokenizer, segment splitter, or brace expander of its own
+(AC6 greps for this); brace expansion is not used because braces are
+refused in D2 step 3. `rm_guard.py` is not modified.
 
 ### D5. Output
 
@@ -359,13 +390,19 @@ line to `<repo_dir>/tasks/<task_id>.policy.jsonl`:
 {"v":1,"ts":"2026-09-07T12:00:00Z","event":"scratch-allow","task_id":"td-...","workspace_id":"w11","tool_use_id":"toolu_...","command":"rm -rf /private/tmp/.../scratchpad/build"}
 ```
 
-`command` is truncated to 300 characters. The write uses `append_event`'s
-open flags (`O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW`, 0o600) on a path
-checked with `core.contained` against `core.state_root()`, `ts` from
-`core.now_iso()`; `tasks/` is not created (a missing dir means "not an
-orchestrated repo dir", so logging is skipped). The whole step is wrapped
-so any failure is swallowed: the allow is printed regardless, logging
-never changes the decision. The hook imports `herdr_orch_core` read-only
+`command` is truncated to 300 characters. Ordering: the allow line is
+written to stdout and flushed BEFORE the logging step, so a slow or
+blocked write can never withhold the decision. The write uses
+`append_event`'s open flags plus `O_NONBLOCK`
+(`O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW|O_NONBLOCK`, 0o600) on a path
+checked with `core.contained` against `core.state_root()`, only after an
+`os.lstat` shows the path absent or a regular file (a FIFO, socket,
+symlink, or directory at that path skips logging: a FIFO with no reader
+would otherwise block the open); `ts` from `core.now_iso()`; `tasks/`
+is not created (a missing dir means "not an orchestrated repo dir", so
+logging is skipped). The whole step is wrapped so any failure is
+swallowed: logging never changes the decision. The hook imports
+`herdr_orch_core` read-only
 for these helpers; the sidecar is outside `WATCH_DIRS`, so no
 orchestrator wake fires, and `events.jsonl` stays single-writer. Nothing
 is written when `HERDR_ENV` is not `1`, when the workspace id is unsafe,
@@ -431,10 +468,22 @@ other hook suites), hermetic:
   `sh -c 'rm S/x'`; `cd S && rm -rf build`; `rm S/x && ls`;
   `rm S/x | cat`; `rm S/x || true`; `rm S/x &`; `(rm S/x)`;
   `rm S/x > /dev/null`; `rm S/x>/dev/null`; `rm S/x>R/file`;
-  `rm 'S/x` (unbalanced quote); missing `scratchpad_dir` with a scratch
-  target (TMPDIR set); non-Bash tool; `PreToolUse` event;
+  `rm 'S/x` (unbalanced quote); `rm S/x# R/file` (mid-token comment);
+  `rm "-$(true)" S/x` and a backtick in an option token; `rm 'S/{a,b}/x'`
+  and `rm S/{a,b}/x` (braces refused); `rm 'S/build/*'` (quoted glob);
+  `rm -rf S/**/x` (recursive glob); `rm -rf $T/build/*` with
+  `$T/build/.git` present (hidden-inclusive expansion finds it under the
+  R2a root); `rm -rf $T/src` with `$T/.git` present (root-level checkout
+  under R2a); `rm -rf $T/build` with `$T/build/project/.git` present
+  (nested checkout in a recursive removal); missing `scratchpad_dir`
+  with a scratch target (TMPDIR set); non-Bash tool; `PreToolUse` event;
   `permission_mode: plan`; malformed JSON; empty command; TMPDIR set to
   `$HOME` with a `$HOME/x` target; TMPDIR set to `/` with a `/etc` target.
+- Allow cases that pin the R1/R3 exemption from step 7: `rm -rf S/clone`
+  with `S/clone/.git` present (session-owned scratchpad) and
+  `rm -rf /tmp/tmp.<id>/clone` with a `.git` inside it; and a regular
+  file `/tmp/tmp.<id3>` created by `mktemp /tmp/tmp.XXXXXXXXXX` with
+  TMPDIR set (R3 file entry).
 - Defense in depth: `rm -rf /` -> rm_guard exit 2 and scratch_policy
   none; `rm -rf S/.git` -> rm_guard exit 2 and scratch_policy none;
   `rm -rf S/build/*` -> rm_guard exit 0 and scratch_policy allow.
@@ -444,8 +493,10 @@ other hook suites), hermetic:
   line to `tasks/PROJ-1.policy.jsonl` with `v`, `ts`, `event`, `task_id`,
   `workspace_id`, `tool_use_id`, `command`; a no-decision appends
   nothing; without `HERDR_ENV` nothing is created under the fixture;
-  an unwritable `tasks/` still prints the allow; `events.jsonl` is never
-  created.
+  an unwritable `tasks/` still prints the allow; a FIFO (`mkfifo`) at
+  the sidecar path with no reader still prints the allow within the
+  suite's 10-second bound and leaves the FIFO untouched; a symlink at
+  the sidecar path is not followed; `events.jsonl` is never created.
 - Static: template registers exactly this hook under
   `PermissionRequest` with matcher `Bash`; PreToolUse Bash order
   unchanged; hook is executable, shebang `#!/usr/bin/env python3`,
@@ -477,12 +528,18 @@ No other tracked file changes (AC8).
   JSON line, stderr empty, exit 0.
 - AC3 No decision: for each out-of-scope shape in D8 (repo paths,
   `..` and symlink escapes including through globs, unresolvable
-  targets, `.git` targets and checkouts under a root, `rmdir -p`,
-  non-standard executables, wrappers, non-remove segments, pipelines,
-  background and subshell operators, redirections glued or standalone,
-  malformed quoting, root itself, dotglob, missing scratchpad_dir,
-  symlinked `tmp.*` roots, hostile `$TMPDIR`, non-Bash, other events,
-  plan mode, malformed input), stdout and stderr are empty and exit is 0.
+  targets, substitutions in any token, mid-token `#`, braces, quoted
+  globs, `**`, `.git` targets, checkouts at or under a shared root and
+  inside recursively removed subtrees, `rmdir -p`, non-standard
+  executables, wrappers, non-remove segments, pipelines, background and
+  subshell operators, redirections glued or standalone, malformed
+  quoting, root itself, dotglob, missing scratchpad_dir, symlinked
+  `tmp.*` roots, hostile `$TMPDIR`, non-Bash, other events, plan mode,
+  malformed input), stdout and stderr are empty and exit is 0.
+- AC3b Shared-root versus session-root distinction: a `.git` inside the
+  R1 scratchpad or an R3 `mktemp` entry does not block removal, a `.git`
+  at or under an R2 root does; a `mktemp` regular file under `/tmp` is
+  in scope with `$TMPDIR` set.
 - AC4 Defense in depth: `rm_guard.py` exits 2 on `rm -rf /` and on
   `rm -rf S/.git`, and the policy hook yields no decision on both
   payloads on its own; `rm_guard.py` exits 0 on the scratch shape the
@@ -491,7 +548,9 @@ No other tracked file changes (AC8).
   a resolving workspace index, one allow appends exactly one
   `scratch-allow` line to `tasks/<task_id>.policy.jsonl` with the fields
   in D6; a no-decision appends nothing; with `HERDR_ENV` unset nothing is
-  created; an unwritable `tasks/` still yields the allow; no
+  created; an unwritable `tasks/`, a reader-less FIFO at the sidecar
+  path, and a symlink at the sidecar path each still yield the allow
+  promptly (bounded by the suite's timeout) without writing through; no
   `*.events.jsonl` is ever created by the hook.
 - AC6 Parsing reuse: `scratch_policy.py` contains `import rm_guard` and
   no `def tokenize`, `def split_segments`, or `def expand_braces`;
