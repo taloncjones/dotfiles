@@ -34,6 +34,10 @@ surface: <optional YYYY-MM-DD; hide from the brief until this date>
 priority: <high|med|low; set at creation>
 files:
   - path/to/relevant.py:42
+depends_on:
+  - todo:<YYYY-MM-DD-slug>      another todo (exact basename, no .md)
+  - branch:<name>               a git branch, satisfied when merged into origin/main
+  - pr:<number>                 a GitHub PR, satisfied when merged
 ---
 
 ## Problem
@@ -70,19 +74,20 @@ normally on the next `git add`.
 
 ## Commands
 
-| Command                                                     | What it does                                                  |
-| ----------------------------------------------------------- | ------------------------------------------------------------- |
-| `todos.sh init`                                             | Create `.todos/{pending,completed}/`, set local-only exclude  |
-| `todos.sh new "<title>" [--area A] [--file P]...`           | Create a pending todo; prints the file path                   |
-| `todos.sh new "<t>" [--due D] [--surface D] [--priority L]` | Time/priority fields on a new todo                            |
-| `todos.sh register`                                         | Register the current repo for the cross-repo brief            |
-| `todos.sh repos`                                            | List registered repos (warns on missing paths)                |
-| `todos.sh brief [--soon N] [--stale M] [--stale-cap K]`     | Print time-relevant todos across all registered repos         |
-| `todos.sh list [--all]`                                     | List pending todos (`--all` also lists completed)             |
-| `todos.sh done <slug-or-substring>`                         | Move a todo `pending/ -> completed/`                          |
-| `todos.sh index`                                            | Regenerate `TODO.md`                                          |
-| `todos.sh share`                                            | Stop ignoring `.todos/` in this repo (opt into committing it) |
-| `todos.sh path`                                             | Print the `.todos/` directory path                            |
+| Command                                                                 | What it does                                                                                  |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `todos.sh init`                                                         | Create `.todos/{pending,completed}/`, set local-only exclude                                  |
+| `todos.sh new "<title>" [--area A] [--file P]... [--depends-on REF]...` | Create a pending todo; prints the file path                                                   |
+| `todos.sh new "<t>" [--due D] [--surface D] [--priority L]`             | Time/priority fields on a new todo                                                            |
+| `todos.sh register`                                                     | Register the current repo for the cross-repo brief                                            |
+| `todos.sh repos`                                                        | List registered repos (warns on missing paths)                                                |
+| `todos.sh brief [--soon N] [--stale M] [--stale-cap K]`                 | Print time-relevant todos across all registered repos                                         |
+| `todos.sh list [--all] [--offline]`                                     | List pending todos with blocked-on annotations (`--all` adds completed; `--offline` skips gh) |
+| `todos.sh done <slug-or-substring>`                                     | Move a todo `pending/ -> completed/`                                                          |
+| `todos.sh depend <slug-or-substring> REF...`                            | Add dependency refs to a pending todo (`todo:<id>`, `branch:<name>`, `pr:<n>`); re-indexes    |
+| `todos.sh index`                                                        | Regenerate `TODO.md`                                                                          |
+| `todos.sh share`                                                        | Stop ignoring `.todos/` in this repo (opt into committing it)                                 |
+| `todos.sh path`                                                         | Print the `.todos/` directory path                                                            |
 
 `new` and `done` regenerate `TODO.md` automatically, so the index never drifts.
 
@@ -96,6 +101,45 @@ normally on the next `git add`.
 - `todos.sh brief` reads the registry (`~/.claude/todos/repos.txt`) and scans
   every registered repo. Register each repo you want included with
   `todos.sh register`.
+
+## Dependencies
+
+`depends_on:` lists what must land before a todo is actionable. Each ref
+resolves to one state:
+
+| State     | Means                                                     | Satisfied |
+| --------- | --------------------------------------------------------- | --------- |
+| `done`    | the todo is in `completed/`                               | yes       |
+| `merged`  | branch is an ancestor of `origin/main`, or gh says MERGED | yes       |
+| `open`    | todo pending; branch not merged; PR open                  | no        |
+| `closed`  | PR closed without merging                                 | no        |
+| `missing` | no such todo                                              | no        |
+| `unknown` | offline, `gh` absent or failing, no local ref             | no        |
+| `invalid` | ref does not parse                                        | no        |
+| `self`    | a todo naming itself                                      | no        |
+
+`todos.sh list` shows unsatisfied refs as `[blocked-on: <ref> (<state>)]`.
+`TODO.md` is resolved offline (todos and local git refs only): refs that
+are determinately unsatisfied appear under `[blocked-on: ...]`, refs the
+index cannot verify (PRs, absent branches) under `[unverified: ...]`.
+
+Network rule: only `list` may call `gh`, and `list --offline` (or
+`TODOS_OFFLINE=1`) disables that. `new`, `done`, `depend`, and `index`
+never touch the network. There is no timeout on `gh`; if the network
+hangs, use `--offline`.
+
+Squash merges never make a branch an ancestor of `origin/main`, so a
+branch ref resolves `merged` only through `gh` (`gh pr list --head`),
+whether or not the branch still exists locally; offline it reads `open`
+while the local ref exists and `unknown` once `post-merge` deletes it.
+Prefer a `pr:` ref once the PR number is known. `TODOS_BASE_REF`
+(default `origin/main`) and `TODOS_GH` (default `gh`) are overrides for
+tests and unusual setups.
+
+The orchestrator does not read this field yet; a later task gates
+kickoff on it. Until then it is advisory: read the annotation before
+starting work on a blocked todo. Removing a dependency is a hand edit of
+the todo's frontmatter followed by `todos.sh index`.
 
 ## Workflow
 
@@ -119,6 +163,7 @@ lists the matches so you can disambiguate.
 | Hand-creating or `mv`-ing todo files       | `TODO.md` drifts out of sync                                    | Use `todos.sh new` / `todos.sh done` — they re-index         |
 | Running commands outside the repo          | `git rev-parse --show-toplevel` fails or targets the wrong repo | `cd` into the target repo first                              |
 | Leaving Problem/Solution blank after `new` | A future session has no context to act on                       | Fill in the prose immediately; `new` only stubs the sections |
+| Writing `#85` unquoted in `depends_on:`    | `#` starts a YAML comment; the item reads as empty              | Use `pr:85` (the script writes this form)                    |
 
 ## Notes
 
