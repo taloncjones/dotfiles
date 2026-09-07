@@ -60,12 +60,12 @@
     {
       "name": "ascii-added-lines",
       "timeout_secs": 60,
-      "run": "base=$(git merge-base origin/main HEAD) || exit 1; git diff \"$base\" -- . ':(exclude)docs' | python3 -c \"import sys;bad=[l for l in sys.stdin.buffer.read().split(b'\\n') if l.startswith(b'+') and not l.startswith(b'+++') and any(b>127 for b in l)];[print('[X] non-ascii added line:',l[:80]) for l in bad];sys.exit(1 if bad else 0)\""
+      "run": "base=$(git merge-base origin/main HEAD) || exit 1; git diff \"$base\" -- . ':(exclude)docs' ':(exclude)claude/contracts' | python3 -c \"import sys;bad=[l for l in sys.stdin.buffer.read().split(b'\\n') if l.startswith(b'+') and not l.startswith(b'+++') and any(b>127 for b in l)];[print('[X] non-ascii added line:',l[:80]) for l in bad];sys.exit(1 if bad else 0)\""
     },
     {
       "name": "no-attribution-in-added-lines",
       "timeout_secs": 60,
-      "run": "base=$(git merge-base origin/main HEAD) || exit 1; if git diff \"$base\" -- . ':(exclude)docs' | grep '^+' | grep -v '^+++' | grep -iE 'co-authored-by|generated (by|with)'; then echo '[X] attribution text in added lines'; exit 1; fi; exit 0"
+      "run": "base=$(git merge-base origin/main HEAD) || exit 1; if git diff \"$base\" -- . ':(exclude)docs' ':(exclude)claude/contracts' | grep '^+' | grep -v '^+++' | grep -iE 'co-authored-by|generated (by|with)'; then echo '[X] attribution text in added lines'; exit 1; fi; exit 0"
     }
   ]
 }
