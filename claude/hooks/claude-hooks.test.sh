@@ -794,5 +794,222 @@ PY
     fi
 done
 
+# herdr_stop_gate.py: exit 2 (refuse) when an orchestrated worker stops
+# without its completion record, 0 otherwise. Every fixture is a throwaway
+# config dir under mktemp with the documented herdr-orch layout; the hook
+# must never write into it (checked by the read-only case at the end).
+HSG=claude/hooks/herdr_stop_gate.py
+GATE_SID=11111111-1111-1111-1111-111111111111
+GATE_P_F='{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":false}'
+GATE_LAST=
+
+# gate_fixture DIR WS ROLE REC MARKERS
+#   ROLE    impl | review | mech | noindex (no workspaces/<ws>.json)
+#   REC     comma list: none | notask (no tasks/PROJ-1.json) | dirtask (a
+#           directory in its place) | mechentry (a later mech workers[]
+#           entry on the same workspace) | <done|review>:<fresh|stale|badts>:<ws>:<task>
+#   MARKERS nofile | dup (two transcripts) | N lines in projects/p/<sid>.jsonl
+gate_fixture() {
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json,os,sys
+root,ws,role,rec,markers=sys.argv[1:6]
+SID="11111111-1111-1111-1111-111111111111"
+rd=os.path.join(root,"herdr-orch","slug-x")
+os.makedirs(os.path.join(rd,"workspaces"));os.makedirs(os.path.join(rd,"tasks"))
+parts=rec.split(",")
+if role!="noindex":
+    json.dump({"task_id":"PROJ-1","repo_slug":"slug-x","role":role},open(os.path.join(rd,"workspaces",ws+".json"),"w"))
+if "dirtask" in parts:
+    os.makedirs(os.path.join(rd,"tasks","PROJ-1.json"))
+elif "notask" not in parts:
+    workers=[{"role":"impl","phase":"implement","workspace_id":ws,"agent":"impl-proj-1","ts":"2026-09-06T12:00:00Z"}]
+    if role=="review":
+        workers.append({"role":"review","phase":"review","workspace_id":ws,"agent":"rev-proj-1","ts":"2026-09-06T12:30:00Z"})
+    if "mechentry" in parts:
+        workers.append({"role":"mech","phase":"implement","workspace_id":ws,"agent":"mech-proj-1","launch_id":"mech-proj-1-20260906T140000Z","ts":"2026-09-06T14:00:00Z"})
+    json.dump({"v":1,"task_id":"PROJ-1","base_sha":"b"*40,"workers":workers},open(os.path.join(rd,"tasks","PROJ-1.json"),"w"))
+for spec in parts:
+    if spec in ("none","notask","dirtask","mechentry"):
+        continue
+    kind,when,who,tid=spec.split(":")
+    ts={"fresh":"2026-09-06T13:00:00Z","stale":"2026-09-06T11:00:00Z","badts":"2026-09-06 13:00:00"}[when]
+    json.dump({"v":1,"task_id":tid,"workspace_id":who,"phase":"implement","outcome":"completed","ts":ts},open(os.path.join(rd,"tasks","PROJ-1."+kind+".json"),"w"))
+if markers!="nofile":
+    line='{"type":"user","message":{"role":"user","content":"Stop hook feedback: herdr-stop-gate: blocked (1 of 2)"}}\n'
+    dirs=["p","q"] if markers=="dup" else ["p"]
+    n=1 if markers=="dup" else int(markers)
+    for d in dirs:
+        os.makedirs(os.path.join(root,"projects",d))
+        open(os.path.join(root,"projects",d,SID+".jsonl"),"w").write(line*n)
+PY
+}
+
+# gate_case LABEL EXPECT WS ROLE REC MARKERS PAYLOAD [NAME=VALUE ...]
+#   EXPECT  allow | block-N (refusal number N) | release-<text on stdout>
+#   Trailing NAME=VALUE pairs override the environment (HERDR_ENV= unsets
+#   the herdr flag for the hook's purposes). GATE_LAST keeps the fixture
+#   dir so a caller can inspect out/err afterwards.
+gate_case() {
+    label="$1"; expect="$2"; ws="$3"; role="$4"; rec="$5"; markers="$6"; payload="$7"; shift 7
+    gd=$(mktemp -d)
+    gate_fixture "$gd" "$ws" "$role" "$rec" "$markers"
+    # The suite runs under set -e: a refusing hook must sit inside an if.
+    if printf '%s' "$payload" | env CLAUDE_CONFIG_DIR="$gd" HERDR_ENV=1 HERDR_WORKSPACE_ID="$ws" "$@" "$HSG" >"$gd/out" 2>"$gd/err"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    ok=0
+    case "$expect" in
+        allow)
+            [ "$rc" = 0 ] && [ ! -s "$gd/out" ] && [ ! -s "$gd/err" ] && ok=1 ;;
+        block-*)
+            [ "$rc" = 2 ] && [ ! -s "$gd/out" ] && [ "$(wc -l <"$gd/err" | tr -d ' ')" = 3 ] \
+                && head -n 1 "$gd/err" | grep -q "^herdr-stop-gate: blocked -- emit-done (or emit-review) before stopping; the orchestrator only recognizes the record\.$" \
+                && sed -n 3p "$gd/err" | grep -q '^Then stop again; the gate releases on that attempt\.$' \
+                && ok=1 ;;
+        release-*)
+            [ "$rc" = 0 ] && [ ! -s "$gd/err" ] && grep -q 'herdr-stop-gate: released' "$gd/out" \
+                && grep -q "${expect#release-}" "$gd/out" && ok=1 ;;
+    esac
+    if [ "$ok" = 1 ]; then
+        printf 'PASS  gate: %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  gate: %s (rc=%s out=%s err=%s)\n' "$label" "$rc" "$(cat "$gd/out")" "$(head -n 1 "$gd/err")" >&2
+        FAIL=$((FAIL + 1))
+    fi
+    GATE_LAST="$gd"
+}
+
+gate_case "impl worker without record is refused" block-1 w1 impl none nofile "$GATE_P_F"
+if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 --phase implement --outcome completed|failed|paused --head-sha "$(git rev-parse HEAD)" --base-sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; then
+    printf 'PASS  gate: refusal prints the filled emit-done line\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: refusal prints the filled emit-done line (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "impl worker with own fresh record is allowed" allow w1 impl done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record from another workspace is refused" block-1 w1 impl done:fresh:w9:PROJ-1 nofile "$GATE_P_F"
+gate_case "record for another task is refused" block-1 w1 impl done:fresh:w1:PROJ-2 nofile "$GATE_P_F"
+gate_case "review worker is refused by a done record" block-1 w1 review done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent rev-proj-1 --reviewed-head-sha "$(git rev-parse HEAD)" --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>'; then
+    printf 'PASS  gate: review refusal prints the filled emit-review line\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: review refusal prints the filled emit-review line (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "review worker with review record is allowed" allow w1 review review:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "impl worker is refused by a review record alone" block-1 w1 impl review:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "missing task record prints placeholders" block-1 w1 impl notask nofile "$GATE_P_F"
+if sed -n 2p "$GATE_LAST/err" | grep -Fq -- '--agent <agent> --phase <phase> --outcome completed|failed|paused --head-sha "$(git rev-parse HEAD)" --base-sha <base_sha>'; then
+    printf 'PASS  gate: placeholders stand in for missing task record fields\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: placeholders stand in for missing task record fields (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "no HERDR_ENV is allowed" allow w1 impl none nofile "$GATE_P_F" HERDR_ENV=
+gate_case "no index for the workspace is allowed" allow w1 noindex none nofile "$GATE_P_F"
+gate_case "invalid workspace id is allowed" allow ..x impl none nofile "$GATE_P_F"
+gate_case "mech role is allowed" allow w1 mech none nofile "$GATE_P_F"
+gate_case "non-Stop payload is allowed" allow w1 impl none nofile '{"hook_event_name":"Notification","notification_type":"permission_prompt"}'
+gate_case "non-JSON stdin is allowed" allow w1 impl none nofile 'not json'
+gate_case "JSON array stdin is allowed" allow w1 impl none nofile '[]'
+gate_case "stale record from before launch is refused" block-1 w1 impl done:stale:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record with unparseable ts is refused" block-1 w1 impl done:badts:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "record accepted when launch time is unknown" allow w1 impl notask,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "unreadable task record makes launch unknown" allow w1 impl dirtask,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+gate_case "unreadable task record still refuses without record" block-1 w1 impl dirtask nofile "$GATE_P_F"
+gate_case "later mech entry does not move the launch time" allow w1 impl mechentry,done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
+if python3 - <<'PY'
+import importlib.util
+from datetime import datetime, timezone
+spec = importlib.util.spec_from_file_location("g", "claude/hooks/herdr_stop_gate.py")
+g = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(g)
+utc = timezone.utc
+assert g.parse_ts("2026-09-06T18:38:51Z") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51.921Z") == datetime(2026, 9, 6, 18, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51+02:00") == datetime(2026, 9, 6, 16, 38, 51, tzinfo=utc)
+assert g.parse_ts("2026-09-06T18:38:51-0130") == datetime(2026, 9, 6, 20, 8, 51, tzinfo=utc)
+for bad in ("2026-09-06", "2026-09-06 18:38:51Z", "", None, 5, "2026-13-06T18:38:51Z", "2026-09-06T18:38:51Zx"):
+    assert g.parse_ts(bad) is None, bad
+assert g.launch_time({"started": "2026-09-06T12:00:00Z", "ts": "2026-09-06T13:00:00Z"}) == datetime(2026, 9, 6, 12, 0, 0, tzinfo=utc)
+assert g.launch_time({"started": "garbage", "ts": "2026-09-06T13:00:00Z"}) is None
+assert g.launch_time({"ts": "2026-09-06T13:00:00Z"}) == datetime(2026, 9, 6, 13, 0, 0, tzinfo=utc)
+assert g.launch_time({}) is None and g.launch_time(None) is None
+PY
+then
+    printf 'PASS  gate: parse_ts and launch_time follow the spec parser\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: parse_ts and launch_time follow the spec parser\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+GATE_P_T='{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":true}'
+gate_case "active flag with exactly one marker releases" "release-prior refusal recorded" w1 impl none 1 "$GATE_P_T"
+gate_case "active flag releases even with two markers on record" "release-prior refusal recorded" w1 impl none 2 "$GATE_P_T"
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); m=d.get("systemMessage"); sys.exit(0 if isinstance(m, str) and "PROJ-1" in m and list(d) == ["systemMessage"] else 1)' "$GATE_LAST/out"; then
+    printf 'PASS  gate: release is one systemMessage object naming the task\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: release is one systemMessage object naming the task (got: %s)\n' "$(cat "$GATE_LAST/out")" >&2; FAIL=$((FAIL + 1))
+fi
+gate_case "released when transcript is missing" "release-transcript unavailable" w1 impl none nofile "$GATE_P_T"
+gate_case "released when transcript has no marker" "release-transcript evidence missing" w1 impl none 0 "$GATE_P_T"
+gate_case "released when two transcripts match the session" "release-transcript unavailable" w1 impl none dup "$GATE_P_T"
+gate_case "released when the session id is unsafe" "release-transcript unavailable" w1 impl none 2 '{"hook_event_name":"Stop","session_id":"../x","stop_hook_active":true}'
+gate_case "fresh cycle is refused again after a release" block-1 w1 impl none 2 "$GATE_P_F"
+gate_case "active hook with a fresh record is allowed silently" allow w1 impl done:fresh:w1:PROJ-1 2 "$GATE_P_T"
+gate_case "stop_hook_active must be boolean true to release" block-1 w1 impl none 2 '{"hook_event_name":"Stop","session_id":"11111111-1111-1111-1111-111111111111","stop_hook_active":"true"}'
+
+# Static registration: the template's Stop group is one `*` matcher listing
+# the status hook then the gate. Order is documentary (a group's hooks run
+# in parallel) but pinned so an edit cannot drop or reorder the pair.
+if python3 - <<'PY'
+import json
+import sys
+
+group = json.load(open("claude/settings.json.tmpl"))["hooks"]["Stop"]
+cmds = [h["command"] for e in group for h in e["hooks"]]
+sys.exit(0 if cmds == ["~/.claude/hooks/herdr_worker_status.py",
+                        "~/.claude/hooks/herdr_stop_gate.py"]
+         and [e.get("matcher") for e in group] == ["*"] else 1)
+PY
+then
+    printf 'PASS  gate: template lists the Stop hooks in order, gate last\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: template lists the Stop hooks in order, gate last\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+# Read-only: a content hash of the whole fixture config dir is identical
+# after a refusal and two anti-wedge releases.
+gd=$(mktemp -d)
+gate_fixture "$gd" w1 impl done:stale:w1:PROJ-1 1
+gate_snapshot() {
+    python3 - "$1" <<'PY'
+import hashlib,os,sys
+root=sys.argv[1]
+for dp,dn,fn in os.walk(root):
+    for f in sorted(fn):
+        if f in ("out","err"): continue
+        p=os.path.join(dp,f)
+        print(os.path.relpath(p,root), hashlib.sha256(open(p,"rb").read()).hexdigest())
+PY
+}
+before=$(gate_snapshot "$gd")
+gate_run() {   # payload -> exit status, without tripping set -e
+    if printf '%s' "$1" | env CLAUDE_CONFIG_DIR="$gd" HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 "$HSG" >"$gd/out" 2>"$gd/err"; then
+        echo 0
+    else
+        echo $?
+    fi
+}
+rc1=$(gate_run "$GATE_P_F")
+rc2=$(gate_run "$GATE_P_T")
+rc3=$(gate_run "$GATE_P_T")
+after=$(gate_snapshot "$gd")
+if [ "$rc1" = 2 ] && [ "$rc2" = 0 ] && [ "$rc3" = 0 ] && [ -n "$before" ] && [ "$before" = "$after" ]; then
+    printf 'PASS  gate: hook leaves the config dir byte-identical\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  gate: hook leaves the config dir byte-identical (rc=%s/%s/%s)\n' "$rc1" "$rc2" "$rc3" >&2; FAIL=$((FAIL + 1))
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
