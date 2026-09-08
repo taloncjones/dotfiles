@@ -18,6 +18,7 @@ ever written into any worktree.
 STATE_ROOT/
   <repo_slug>/
     owner.json                        # single-writer ownership claim
+    orch-edit-allow.json              # short-lived approved-edit marker (allow-edit; read by orch_edit_guard.py)
     config.json                       # machine-local config
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append from the section-1 probe step; safe to delete
     tasks/
@@ -26,6 +27,7 @@ STATE_ROOT/
       <task_id>.review.json           # review worker verdict (separate file)
       <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
       <task_id>.brief.md              # mech kickoff brief file (--brief-file)
+      orch-edits.jsonl                # orchestrator edit guard log: allow-edit mints, claims, allows, refusals
     think/
       <think_id>.question.md          # orchestrator-written brief (input contract)
       <think_id>.launch.json          # wrapper-written, create-exclusive, before launch (liveness)
@@ -114,6 +116,38 @@ STATE_ROOT/
   > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
   > orchestrator whose claim fails **yields** to read-only reporting and
   > offers an explicit takeover.
+
+### `orch-edit-allow.json` -- approved-edit marker
+
+Written only by `$CORE allow-edit --repo-slug <slug> --session <id> --fence <fence> --minutes N [--max-edits M] [--note TEXT]` under a live fence (a stale fence exits 2 and writes nothing); atomic replace. Honoured by `claude/hooks/orch_edit_guard.py` only when `session_id` equals the hook payload's session id, `fence` equals the current `owner.json.fence`, `expires_epoch` is in the future, and the write budget below has room; only for targets whose work tree resolves to this slug. Minutes are 1..15, `max_edits` 1..10 (default 3), `note` at most 200 characters. There is no revoke verb: delete the file or let it expire.
+
+```json
+{
+  "v": 1,
+  "marker_id": "3f9c2a7b1d4e8f60",
+  "session_id": "<id>",
+  "fence": 4,
+  "ts": "2026-09-08T18:00:00Z",
+  "minutes": 5,
+  "max_edits": 3,
+  "expires_epoch": 1788897900.0,
+  "expires": "2026-09-08T18:05:00Z",
+  "note": "fix the typo in SKILL.md section 2"
+}
+```
+
+### `tasks/orch-edits.jsonl` -- orchestrator edit guard log
+
+Append-only. `allow-edit` writes one `allow-edit` line per mint (creating `tasks/`). The hook appends `orch-edit-claim` lines BEFORE deciding (one per guarded target; the claim is the budget reservation, counted by `marker_id`, so parallel tool calls cannot overshoot `max_edits`), then `orch-edit-allowed` or `orch-edit-denied` lines after the decision. An unwritable log means no reservation, so a marker allows nothing until the log is a writable regular file. Lines record PreToolUse decisions, not completed writes.
+
+```json
+{"v": 1, "ts": "2026-09-08T18:00:00Z", "event": "allow-edit", "marker_id": "3f9c2a7b1d4e8f60", "session_id": "<id>", "fence": 4, "minutes": 5, "max_edits": 3, "expires": "2026-09-08T18:05:00Z", "note": "fix the typo"}
+{"v": 1, "ts": "2026-09-08T18:00:10Z", "event": "orch-edit-claim", "marker_id": "3f9c2a7b1d4e8f60", "claim_id": "9a1b2c3d", "session_id": "<id>", "tool_use_id": "toolu_x", "path": "/abs/repo/file"}
+{"v": 1, "ts": "2026-09-08T18:00:10Z", "event": "orch-edit-allowed", "session_id": "<id>", "tool_name": "Edit", "tool_use_id": "toolu_x", "path": "/abs/repo/file", "repo": "/abs/repo", "reason": "tracked", "marker_id": "3f9c2a7b1d4e8f60", "marker_expires": "2026-09-08T18:05:00Z"}
+{"v": 1, "ts": "2026-09-08T18:07:00Z", "event": "orch-edit-denied", "session_id": "<id>", "tool_name": "Bash", "tool_use_id": "toolu_y", "path": "/abs/repo/file", "repo": "/abs/repo", "reason": "untracked", "why": "expired"}
+```
+
+`why` is one of `no-marker`, `expired`, `fence`, `budget`, `scope`.
 
 ### `config.json`
 

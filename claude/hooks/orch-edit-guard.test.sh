@@ -565,6 +565,23 @@ PY
     else
         printf 'FAIL  static: suite is registered in bin/dotfiles-tests\n' >&2; FAIL=$((FAIL + 1))
     fi
+    if awk '/^## Safety/{f=1; next} f && /^- /{print; exit}' claude/skills/herdr-orchestration/SKILL.md | grep -q 'An orchestrator session dispatches; it does not edit' \
+            && grep -q 'allow-edit --repo-slug <slug> --session <id> --fence <fence> --minutes 5 --max-edits 3' claude/skills/herdr-orchestration/SKILL.md \
+            && grep -q 'CLAUDE_CODE_SESSION_ID' claude/skills/herdr-orchestration/SKILL.md; then
+        printf 'PASS  docs: SKILL.md Safety first bullet, allow-edit line, session-id sentence\n'; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  docs: SKILL.md Safety first bullet, allow-edit line, session-id sentence\n' >&2; FAIL=$((FAIL + 1))
+    fi
+    if grep -q 'orch-edit-allow.json' claude/skills/herdr-orchestration/references/state-layout.md \
+            && grep -q 'tasks/orch-edits.jsonl' claude/skills/herdr-orchestration/references/state-layout.md \
+            && grep -q 'orch_edit_guard.py' CLAUDE.md \
+            && grep -q '^- (2026-09) An orchestrator session dispatches' claude/rules/personal/agent-lessons.md \
+            && [ "$(wc -l < claude/rules/personal/agent-lessons.md | tr -d ' ')" -le 45 ] \
+            && [ "$(grep -c '^- (' claude/rules/personal/agent-lessons.md)" -le 20 ]; then
+        printf 'PASS  docs: state-layout, CLAUDE.md bullet, agent-lessons bullet within caps\n'; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  docs: state-layout, CLAUDE.md bullet, agent-lessons bullet within caps\n' >&2; FAIL=$((FAIL + 1))
+    fi
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

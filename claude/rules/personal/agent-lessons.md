@@ -22,3 +22,5 @@ is the staging tier, not an archive.
   interactive shell for account routing and fails auth without it.
 - (2026-09) The Bash tool runs zsh: unquoted $var never word-splits (use
   arrays or explicit args, not `set -- $p`), PIPESTATUS is `pipestatus`.
+- (2026-09) An orchestrator session dispatches; it edits repo files only for
+  a small change the human approved this turn. Larger: todo + kickoff.
