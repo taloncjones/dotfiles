@@ -428,6 +428,24 @@ def _existing(ops, cwd, home):
             if os.path.lexists(rm_guard.resolve(rm_guard.expand_home(w, home), cwd))]
 
 
+def shell_c_arg(words):
+    """Like rm_guard.extract_shell_c_arg, but a flag CLUSTER containing
+    `c` (`-lc`, `-ec`) is also a `-c <script>` invocation, not just a
+    standalone `-c` -- the ordinary login/exit-on-error spellings that
+    rm_guard's exact-token match misses (B1)."""
+    i = 1
+    while i < len(words):
+        tok = words[i]
+        if tok == "-c" or (tok.startswith("-") and not tok.startswith("--")
+                            and len(tok) > 1 and "c" in tok[1:]):
+            return words[i + 1] if i + 1 < len(words) else None
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break
+    return None
+
+
 def bash_targets(command, cwd, home, depth=0):
     """[(cwd, word)] write targets of one command string. cwd follows `cd`
     segments exactly as rm_guard.check_command does."""
@@ -462,7 +480,7 @@ def bash_targets(command, cwd, home, depth=0):
         elif head in ("cp", "install", "mv"):
             found.extend((cwd, w) for w in copy_targets(words, cwd, home, head == "mv"))
         elif head in SHELL_WRAPPERS:
-            inner = rm_guard.extract_shell_c_arg(words)
+            inner = shell_c_arg(words)
             if inner is not None:
                 found.extend(bash_targets(inner, cwd, home, depth + 1))
     return found

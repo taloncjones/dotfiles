@@ -226,6 +226,9 @@ hook_case "AC4 cp into repo dir denied (new untracked file)" deny Bash "cp $S/no
 hook_case "AC4 mv onto tracked denied" deny Bash "mv $S/note.txt $TR" "$R" "$SID_A"
 hook_case "AC4 mv tracked out of the repo denied (source)" deny Bash "mv $TR $S/saved.txt" "$R" "$SID_A"
 hook_case "AC4 sh -c redirect denied" deny Bash "sh -c 'echo x > $TR'" "$R" "$SID_A"
+hook_case "AC4 bash -ec redirect denied (combined flag cluster, B1)" deny Bash "bash -ec 'echo x > $TR'" "$R" "$SID_A"
+hook_case "AC4 bash -lc redirect denied (combined flag cluster, B1)" deny Bash "bash -lc 'echo x > $TR'" "$R" "$SID_A"
+hook_case "AC4 zsh -lc redirect denied (combined flag cluster, B1)" deny Bash "zsh -lc 'echo x > $TR'" "$R" "$SID_A"
 hook_case "AC4 cd then relative redirect denied" deny Bash "cd $R/dir && echo x > inner.txt" "$N" "$SID_A"
 hook_case "AC4 env prefix then tee denied" deny Bash "env FOO=1 tee $TR" "$R" "$SID_A"
 hook_case "AC4 redirect after a scratch heredoc denied" deny Bash "cat <<'EOF' > $S/n.txt
