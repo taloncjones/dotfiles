@@ -1056,21 +1056,25 @@ slug="github-com-org-repo-deadbeef"; rd=os.path.join(root,"herdr-orch",slug)
 os.makedirs(os.path.join(rd,"workspaces")); os.makedirs(os.path.join(rd,"tasks"))
 json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"impl"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
 sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+stop=threading.Event(); idle=threading.Event(); listener=None; srv=None
 try:
     path=f"{sockdir}/4242.sock"
-    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(4); srv.settimeout(2)
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(4); srv.settimeout(0.1)
     got=[]
     def acc():
-        while True:
+        while not stop.is_set():
             try: conn,_=srv.accept()
-            except (socket.timeout,OSError): return
+            except socket.timeout:
+                idle.set()
+                continue
+            except OSError: return
             buf=b""
             while not buf.endswith(b"\n"):
                 d=conn.recv(4096)
                 if not d: break
                 buf+=d
             got.append(buf); conn.close()
-    threading.Thread(target=acc,daemon=True).start()
+    listener=threading.Thread(target=acc,daemon=True); listener.start()
     def run(payload):
         sys.stdin=io.StringIO(json.dumps(payload)); return h.main()
     def wait_got(n,secs=2.0):   # bounded poll instead of fixed sleeps
@@ -1095,6 +1099,8 @@ try:
     assert run({"hook_event_name":"Stop"})==0
     assert wait_got(2,0.3)==1 and events()==3
     os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET")
+    # An idle accept timeout must not expire the fixture before the next wake.
+    idle.clear(); assert idle.wait(2) and listener.is_alive()
     # 4. blocking notification posts blocked; non-blocking posts nothing and appends nothing
     assert run({"hook_event_name":"Notification","notification_type":"permission_prompt"})==0
     assert wait_got(2)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
@@ -1118,9 +1124,14 @@ try:
     assert events()==before+1 and wait_got(5,0.3)==4
     core.post_wake=real_post
     # 7. server gone: exit 0 within 2.5s
-    srv.close(); os.unlink(path)
+    stop.set(); srv.close(); os.unlink(path)
     t0=time.monotonic(); assert run({"hook_event_name":"Stop"})==0; assert time.monotonic()-t0<2.5
 finally:
+    stop.set()
+    if srv is not None: srv.close()
+    if listener is not None:
+        listener.join(2)
+        assert not listener.is_alive(), "fake inbox listener did not stop"
     shutil.rmtree(sockdir,ignore_errors=True)
 sys.exit(0)
 PY
