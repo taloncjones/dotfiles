@@ -626,5 +626,30 @@ test_personal_checkout_path_protects_work_owned_worktree() {
 }
 test_personal_checkout_path_protects_work_owned_worktree
 
+test_external_linked_separate_metadata_fails_closed() {
+  setup_env; local primary metadata linked mem
+  primary="$HOME/Git/personal/separate-primary"
+  metadata="$SANDBOX/metadata/separate-primary.git"
+  linked="$SANDBOX/external-separate-linked"
+  mkdir -p "$primary" "$(dirname "$metadata")"
+  git init -q --separate-git-dir "$metadata" "$primary"
+  ( cd "$primary" && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m fixture )
+  ( cd "$primary" && git worktree add -q --detach "$linked" )
+  linked=$(/usr/bin/env realpath "$linked")
+  printf '# Linked\n\nExplicitpersonalneedle\n' > "$linked/README.md"
+  mem=$(mem_dir "$HOME/.claude" "$linked"); mkdir -p "$mem"
+  printf '# Personal\n\nExplicitpersonalmemoryneedle\n' > "$mem/personal.md"
+  CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$linked" search Explicitpersonalneedle
+  assert_eq "external linked separate metadata refuses inherited work route" "$RC" 6
+  assert_no_file "ambiguous route never creates work recall cache" "$HOME/.claude-work/recall"
+  CLAUDE_CONFIG_DIR="$SANDBOX/custom" recall "$linked" search Explicitpersonalneedle
+  assert_eq "external linked separate metadata refuses inherited custom route" "$RC" 6
+  assert_no_file "ambiguous route never creates custom recall cache" "$SANDBOX/custom/recall"
+  CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$linked" search Explicitpersonalmemoryneedle
+  assert_eq "explicit personal route searches linked checkout safely" "$RC" 0
+  assert_no_file "explicit personal route never creates work recall cache" "$HOME/.claude-work/recall"
+}
+test_external_linked_separate_metadata_fails_closed
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

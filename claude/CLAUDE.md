@@ -34,11 +34,13 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 - A checkout or canonical repository owner under `~/Git/personal` selects
   `~/.claude`, even with inherited work-account settings or an external
   linked worktree. Shared dotfiles never carry machine account credentials.
-- Work repositories default to the work account. `claude --personal` or
-  `CLAUDE_CONFIG_DIR="$HOME/.claude" claude` may use personal quota there;
-  account guards must allow this deliberate override.
-- Capture the intended account before moving to a temporary review directory
-  and pass it explicitly to headless workers and partner reviewers.
+- Work repositories default to the work account. `claude --personal` may use personal quota there; account guards must
+  allow this deliberate override. Default personal subprocesses unset
+  `CLAUDE_CONFIG_DIR`; an explicit `~/.claude` may select a different
+  authentication namespace.
+- Capture the intended account before moving to a temporary review directory.
+  Apply its explicit environment mapping to headless workers and partner
+  reviewers, including removal of `CLAUDE_CONFIG_DIR` for native personal auth.
 
 ## Response Style
 

@@ -112,6 +112,33 @@ run_case "personal checkout with metadata under work disables Atlassian" "$SEPAR
 run_case "personal checkout with external metadata disables Atlassian" "$SEPARATE_EXTERNAL" yes exec hi
 run_case "-C personal checkout with work metadata disables Atlassian" "$WORK" yes -C "$SEPARATE_WORK" exec hi
 
+SEPARATE_PRIMARY="$SBHOME/Git/personal/separate-primary"
+SEPARATE_METADATA="$TMP/metadata/separate-primary.git"
+SEPARATE_LINKED="$TMP/external-separate-linked"
+mkdir -p "$(dirname "$SEPARATE_METADATA")"
+git_fixture init -q --separate-git-dir "$SEPARATE_METADATA" "$SEPARATE_PRIMARY" || exit 2
+git_fixture -C "$SEPARATE_PRIMARY" commit -q --allow-empty -m fixture || exit 2
+git_fixture -C "$SEPARATE_PRIMARY" worktree add -q --detach "$SEPARATE_LINKED" || exit 2
+run_refusal() {
+    label="$1" cwd="$2"; shift 2
+    : > "$TMP/record"
+    out="$(RECORD="$TMP/record" HOME="$SBHOME" ZDOTDIR="$TMP/zdot" \
+        PATH="$TMP/bin:$PATH" CASE_CWD="$cwd" \
+        zsh -c 'cd -- "$CASE_CWD" && codex "$@"' zsh "$@" 2>&1)"
+    rc=$?
+    if [ "$rc" = 2 ] && [ ! -s "$TMP/record" ] && case "$out" in *ambiguous*) true;; *) false;; esac; then
+        pass "$label"
+    else
+        fail "$label (status $rc; output=$out)"
+    fi
+}
+run_refusal "external linked separate metadata refuses inherited work route" \
+    "$SEPARATE_LINKED" exec hi
+run_refusal "external linked separate metadata resolves effective -C before refusal" \
+    "$WORK" -C "$SEPARATE_LINKED" exec hi
+CLAUDE_PERSONAL_ONLY=1 run_case "external linked separate metadata accepts personal-only route" \
+    "$SEPARATE_LINKED" yes exec hi
+
 # A machine-wide personal decision must not depend on Git availability or probes.
 mkdir -p "$TMP/probe-bin"
 cat > "$TMP/probe-bin/git" <<'EOF'

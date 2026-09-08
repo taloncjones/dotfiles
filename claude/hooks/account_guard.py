@@ -13,9 +13,17 @@ fallback check. This also covers launchers that bypass the shell wrapper.
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+CONTEXT_LIB = Path(__file__).resolve().parents[1] / "skills" / "lib"
+if str(CONTEXT_LIB) not in sys.path:
+    sys.path.insert(0, str(CONTEXT_LIB))
+
+try:
+    from workflow_context import account_scope
+except Exception:  # noqa: BLE001
+    account_scope = None
 
 
 def real(p: str) -> str:
@@ -51,35 +59,6 @@ def account_of(
     return read_oauth_identity(metadata_root / ".claude.json")
 
 
-def repository_owner(cwd: str) -> str:
-    """Return the canonical Git common directory, or cwd outside a repository."""
-    clean_env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"}
-    }
-    try:
-        result = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
-            env=clean_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-            timeout=2,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return real(cwd)
-    common_dir = result.stdout.rstrip("\n")
-    if result.returncode or not common_dir:
-        return real(cwd)
-    return real(str(Path(cwd) / common_dir))
-
-
-def within(path: str, root: str) -> bool:
-    return path == root or path.startswith(root + os.sep)
-
-
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -88,20 +67,49 @@ def main() -> None:
 
     cwd = payload.get("cwd") or os.getcwd()
     home = str(Path.home())
-    work_tree = real(os.environ.get("CLAUDE_WORK_TREE", f"{home}/Git/work"))
     work_cfg = real(os.environ.get("CLAUDE_WORK_CONFIG_DIR", f"{home}/.claude-work"))
     personal_cfg = real(f"{home}/.claude")
 
-    if os.environ.get("CLAUDE_PERSONAL_ONLY") != "1":
-        checkout = real(cwd)
-        owner = repository_owner(checkout)
-        personal_tree = real(f"{home}/Git/personal")
-        if (
-            not within(checkout, personal_tree)
-            and not within(owner, personal_tree)
-            and (within(checkout, work_tree) or within(owner, work_tree))
-        ):
-            return
+    if account_scope is None:
+        message = (
+            "[WARNING] account_guard: account scope is unverified. "
+            "Verify the launch scope before sending repository context."
+        )
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": message,
+                    }
+                }
+            )
+        )
+        return
+
+    try:
+        scope = account_scope(cwd, "claude")
+    except ValueError:
+        message = (
+            "[WARNING] account_guard: canonical repository ownership is ambiguous. "
+            "Do not send repository context until relaunched with an explicit personal scope."
+        )
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": message,
+                    }
+                }
+            )
+        )
+        return
+    if scope["kind"] == "work" or (
+        not scope["personal_repository"]
+        and os.environ.get("CLAUDE_PERSONAL_ONLY") != "1"
+    ):
+        return
 
     actual = real(os.environ.get("CLAUDE_CONFIG_DIR") or personal_cfg)
     work_account = account_of(work_cfg, home)

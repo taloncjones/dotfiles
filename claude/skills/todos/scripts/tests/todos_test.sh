@@ -945,5 +945,179 @@ EOF
 }
 test_done_still_matches
 
+assert_ready() {
+  local name="$1" repo="$2" want_status="$3" want_json="$4"; shift 4
+  local out rc got want
+  out=$(cd "$repo" && bash "$TODOS" ready "$@" 2>/dev/null); rc=$?
+  assert_eq "$name: exit" "$rc" "$want_status"
+  got=$(printf '%s' "$out" | jq -ceS '{ready,task_id,dependencies}' 2>/dev/null)
+  want=$(printf '%s' "$want_json" | jq -ceS .)
+  assert_eq "$name: JSON" "$got" "$want"
+}
+
+test_ready_exact_and_readonly() {
+  local TODOS_REGISTRY DEPS_CACHE
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-exact <<'EOF'
+---
+created: 2026-05-01
+title: Exact
+---
+EOF
+  mk_todo "$repo" 2026-05-01-exact-other <<'EOF'
+---
+created: 2026-05-01
+title: Other
+depends_on:
+  - pr:1
+---
+EOF
+  local before after registry cache
+  registry="$repo/uncreated/repos.txt"; cache="$repo/cache"
+  printf 'cache sentinel\n' >"$cache"
+  before=$(find "$repo" -type f -exec shasum {} + | sort)
+  chmod -R a-w "$repo"
+  export TODOS_REGISTRY="$registry" DEPS_CACHE="$cache"
+  assert_ready 'ready: no dependencies and read-only' "$repo" 0 \
+    '{"ready":true,"task_id":"2026-05-01-exact","dependencies":[]}' 2026-05-01-exact
+  after=$(find "$repo" -type f -exec shasum {} + | sort)
+  assert_eq 'ready: leaves every fixture byte unchanged' "$after" "$before"
+  [ ! -e "$repo/.todos/TODO.md" ] && [ ! -e "$repo/uncreated" ] \
+    && ok 'ready: creates no index or registry directory' || bad 'ready: creates no index or registry directory' 'state created'
+  chmod -R u+w "$repo"
+  local query
+  for query in exact 2026-05-01-ex 2026-05-01-exact.md ../2026-05-01-exact 2026-02-30-bad; do
+    assert_status "ready: rejects nonexact/invalid ID $query" 2 bash -c 'cd "$1" && bash "$2" ready "$3"' _ "$repo" "$TODOS" "$query"
+  done
+  assert_status 'ready: missing ID argument' 2 bash -c 'cd "$1" && bash "$2" ready' _ "$repo" "$TODOS"
+  assert_status 'ready: unknown argument' 2 bash -c 'cd "$1" && bash "$2" ready 2026-05-01-exact --typo' _ "$repo" "$TODOS"
+  assert_status 'ready: missing exact target' 2 bash -c 'cd "$1" && bash "$2" ready 2026-05-01-missing' _ "$repo" "$TODOS"
+  mkdir -p "$repo/.todos/completed"
+  cp "$repo/.todos/pending/2026-05-01-exact.md" "$repo/.todos/completed/2026-05-01-exact.md"
+  assert_status 'ready: duplicate pending/completed target' 2 bash -c 'cd "$1" && bash "$2" ready 2026-05-01-exact' _ "$repo" "$TODOS"
+  rm "$repo/.todos/pending/2026-05-01-exact.md"
+  assert_status 'ready: completed target cannot dispatch' 2 bash -c 'cd "$1" && bash "$2" ready 2026-05-01-exact' _ "$repo" "$TODOS"
+  rm -rf "$repo"
+  repo=$(mk_repo)
+  assert_status 'ready: absent backlog' 2 bash -c 'cd "$1" && bash "$2" ready 2026-05-01-missing' _ "$repo" "$TODOS"
+  [ ! -e "$repo/.todos" ] && ok 'ready: absent backlog stays absent' || bad 'ready: absent backlog stays absent' 'created .todos'
+  rm -rf "$repo"
+}
+test_ready_exact_and_readonly
+
+test_ready_dependency_states() {
+  local TODOS_GH TODOS_BASE_REF
+  local repo; repo=$(mk_branch_repo)
+  mk_todo "$repo" 2026-05-01-gate <<'EOF'
+---
+created: 2026-05-01
+title: Gate
+depends_on:
+  - todo:2026-05-01-finished
+  - todo:2026-05-01-open
+  - todo:2026-05-01-missing
+  - todo:2026-05-01-gate
+  - 'bad"ref'
+  - pr:1
+  - branch:merged-b
+  - branch:open-b
+  - branch:--help
+  - branch:@{1}
+---
+EOF
+  mk_todo "$repo" 2026-05-01-open <<'EOF'
+---
+created: 2026-05-01
+title: Direct cycle
+depends_on:
+  - todo:2026-05-01-gate
+---
+EOF
+  mkdir -p "$repo/.todos/completed"
+  printf -- '---\ncreated: 2026-05-01\ntitle: Finished\n---\n' >"$repo/.todos/completed/2026-05-01-finished.md"
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  export TODOS_GH="$stub"
+  assert_ready 'ready: direct unsatisfied states block without recursion' "$repo" 3 \
+    '{"ready":false,"task_id":"2026-05-01-gate","dependencies":[{"ref":"todo:2026-05-01-finished","state":"done"},{"ref":"todo:2026-05-01-open","state":"open"},{"ref":"todo:2026-05-01-missing","state":"missing"},{"ref":"todo:2026-05-01-gate","state":"self"},{"ref":"bad\"ref","state":"invalid"},{"ref":"pr:1","state":"unknown"},{"ref":"branch:merged-b","state":"merged"},{"ref":"branch:open-b","state":"open"},{"ref":"branch:--help","state":"invalid"},{"ref":"branch:@{1}","state":"invalid"}]}' 2026-05-01-gate --offline
+  [ ! -e "$stub.calls" ] && ok 'ready: offline never invokes gh' || bad 'ready: offline never invokes gh' 'gh called'
+  mk_todo "$repo" 2026-05-01-satisfied <<'EOF'
+---
+created: 2026-05-01
+title: Satisfied
+depends_on:
+  - todo:2026-05-01-finished
+  - branch:merged-b
+---
+EOF
+  assert_ready 'ready: all dependencies satisfied' "$repo" 0 \
+    '{"ready":true,"task_id":"2026-05-01-satisfied","dependencies":[{"ref":"todo:2026-05-01-finished","state":"done"},{"ref":"branch:merged-b","state":"merged"}]}' 2026-05-01-satisfied
+  export TODOS_BASE_REF=--help
+  assert_ready 'ready: Git base option injection fails closed' "$repo" 3 \
+    '{"ready":false,"task_id":"2026-05-01-satisfied","dependencies":[{"ref":"todo:2026-05-01-finished","state":"done"},{"ref":"branch:merged-b","state":"unknown"}]}' 2026-05-01-satisfied
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls"
+}
+test_ready_dependency_states
+
+test_ready_online_bounded() {
+  local TODOS_GH
+  local repo; repo=$(mk_branch_repo)
+  mk_todo "$repo" 2026-05-01-network <<'EOF'
+---
+created: 2026-05-01
+title: Network
+depends_on:
+  - pr:1
+  - branch:open-b
+---
+EOF
+  local stub; stub=$(mktemp); mk_gh_stub "$stub"
+  export TODOS_GH="$stub"
+  assert_ready 'ready: default offline blocks unverified PR' "$repo" 3 \
+    '{"ready":false,"task_id":"2026-05-01-network","dependencies":[{"ref":"pr:1","state":"unknown"},{"ref":"branch:open-b","state":"open"}]}' 2026-05-01-network
+  assert_ready 'ready: online verifies PR and squash merge' "$repo" 0 \
+    '{"ready":true,"task_id":"2026-05-01-network","dependencies":[{"ref":"pr:1","state":"merged"},{"ref":"branch:open-b","state":"merged"}]}' 2026-05-01-network --online
+  printf '#!/usr/bin/env bash\nexec sleep 15\n' >"$stub"
+  local started=$SECONDS
+  assert_ready 'ready: hung gh stays unknown and respects shared deadline' "$repo" 3 \
+    '{"ready":false,"task_id":"2026-05-01-network","dependencies":[{"ref":"pr:1","state":"unknown"},{"ref":"branch:open-b","state":"open"}]}' 2026-05-01-network --online
+  [ "$((SECONDS - started))" -le 8 ] && ok 'ready: online completes within bounded budget' || bad 'ready: online completes within bounded budget' "elapsed $((SECONDS - started))"
+  rm -rf "$repo"; rm -f "$stub" "$stub.calls"
+}
+test_ready_online_bounded
+
+test_ready_malformed_dependencies() {
+  local repo; repo=$(mk_repo)
+  local value
+  for value in 'depends_on: [pr:1]' 'depends_on: pr:1' $'depends_on:\n  - ' $'depends_on:\n - pr:1'; do
+    printf -- '---\ncreated: 2026-05-01\ntitle: Bad dependency schema\n%s\n---\n' "$value" | mk_todo "$repo" 2026-05-01-malformed
+    assert_status 'ready: malformed dependency declaration fails closed' 2 bash -c 'cd "$1" && bash "$2" ready 2026-05-01-malformed' _ "$repo" "$TODOS"
+  done
+  rm -rf "$repo"
+}
+test_ready_malformed_dependencies
+
+test_ready_untrustworthy_todo_dependencies() {
+  local repo; repo=$(mk_repo)
+  mk_todo "$repo" 2026-05-01-gate <<'EOF'
+---
+created: 2026-05-01
+title: Gate
+depends_on:
+  - ""
+  - todo:2026-05-01-directory
+  - todo:2026-05-01-link
+  - todo:2026-05-01-duplicate
+---
+EOF
+  mkdir -p "$repo/.todos/completed/2026-05-01-directory.md"
+  printf -- '---\ncreated: 2026-05-01\ntitle: Done\n---\n' >"$repo/.todos/completed/2026-05-01-duplicate.md"
+  cp "$repo/.todos/completed/2026-05-01-duplicate.md" "$repo/.todos/pending/2026-05-01-duplicate.md"
+  ln -s 2026-05-01-duplicate.md "$repo/.todos/completed/2026-05-01-link.md"
+  assert_ready 'ready: invalid completed state never satisfies' "$repo" 3 \
+    '{"ready":false,"task_id":"2026-05-01-gate","dependencies":[{"ref":"","state":"invalid"},{"ref":"todo:2026-05-01-directory","state":"unknown"},{"ref":"todo:2026-05-01-link","state":"unknown"},{"ref":"todo:2026-05-01-duplicate","state":"unknown"}]}' 2026-05-01-gate
+  rm -rf "$repo"
+}
+test_ready_untrustworthy_todo_dependencies
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

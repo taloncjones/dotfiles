@@ -271,6 +271,19 @@ function _claude_plugin_installed() {
     [[ -f "$record" ]] && grep -q "$plugin_id" "$record"
 }
 
+# Run a Claude plugin operation in the selected account namespace. Native
+# personal Claude uses an unset variable; work and custom directories remain
+# explicit. The subshell keeps the caller's environment unchanged.
+function _claude_plugin_run() {
+    local cfg_dir="$1"
+    shift
+    if [[ "$cfg_dir" == "$HOME/.claude" ]]; then
+        ( unset CLAUDE_CONFIG_DIR; command claude "$@" )
+    else
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude "$@"
+    fi
+}
+
 # helper: true iff the marketplace's on-disk manifest declares the plugin --
 # the condition the install resolver actually checks, so waiting on it is
 # deterministic rather than a blind timer.
@@ -293,10 +306,10 @@ function _claude_ensure_plugin() {
 
     # Register the marketplace if missing (idempotent). A pre-registered one
     # (e.g. added by the platform or an earlier run) is left alone.
-    if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace list 2>/dev/null | grep -qiw "$marketplace"; then
+    if ! _claude_plugin_run "$cfg_dir" plugin marketplace list 2>/dev/null | grep -qiw "$marketplace"; then
         if [[ -n "$add_url" ]]; then
             echo "[INFO] Adding $marketplace marketplace ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace add "$add_url" \
+            _claude_plugin_run "$cfg_dir" plugin marketplace add "$add_url" \
                 || { echo "[X] marketplace add failed for $marketplace ($cfg_dir)"; return 1; }
         else
             echo "[WARNING] Marketplace $marketplace not registered and no add URL known ($cfg_dir)"
@@ -307,7 +320,7 @@ function _claude_ensure_plugin() {
     # the cache between checks.
     local attempt=1 delay=$CLAUDE_PLUGIN_RETRY_DELAY
     while ! _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace"; do
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
+        _claude_plugin_run "$cfg_dir" plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
         _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace" && break
         if [[ "$attempt" -ge "$CLAUDE_PLUGIN_RETRIES" ]]; then
             echo "[WARNING] $marketplace manifest never listed $plugin_name after $CLAUDE_PLUGIN_RETRIES refreshes; installing anyway ($cfg_dir)"
@@ -323,8 +336,8 @@ function _claude_ensure_plugin() {
     # Phase 2: install, then verify against installed_plugins.json.
     attempt=1; delay=$CLAUDE_PLUGIN_RETRY_DELAY
     while [[ "$attempt" -le "$CLAUDE_PLUGIN_RETRIES" ]]; do
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install "$plugin_id" >/dev/null 2>&1 || true
+        _claude_plugin_run "$cfg_dir" plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
+        _claude_plugin_run "$cfg_dir" plugins install "$plugin_id" >/dev/null 2>&1 || true
         if _claude_plugin_installed "$cfg_dir" "$plugin_id"; then
             echo "[OK] Installed $plugin_id ($cfg_dir, attempt $attempt/$CLAUDE_PLUGIN_RETRIES)"
             return 0
@@ -339,7 +352,11 @@ function _claude_ensure_plugin() {
     done
 
     echo "[X] $plugin_id not installed after $CLAUDE_PLUGIN_RETRIES attempts ($cfg_dir)."
-    echo "[X] Recover with: CLAUDE_CONFIG_DIR=$cfg_dir claude plugins install $plugin_id"
+    if [[ "$cfg_dir" == "$HOME/.claude" ]]; then
+        echo "[X] Recover with: env -u CLAUDE_CONFIG_DIR claude plugins install $plugin_id"
+    else
+        echo "[X] Recover with: CLAUDE_CONFIG_DIR=$cfg_dir claude plugins install $plugin_id"
+    fi
     return 1
 }
 
@@ -876,9 +893,9 @@ function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and
         for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
             [[ -d "$cfg_dir" ]] || continue
             _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || { update_status=1; continue; }
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update ecc >/dev/null 2>&1 \
+            _claude_plugin_run "$cfg_dir" plugin marketplace update ecc >/dev/null 2>&1 \
                 || { echo "[X] ECC marketplace refresh failed ($cfg_dir)"; update_status=1; continue; }
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update ecc@ecc \
+            _claude_plugin_run "$cfg_dir" plugins update ecc@ecc \
                 || { echo "[X] ECC update failed ($cfg_dir)"; update_status=1; }
         done
     fi
@@ -912,7 +929,7 @@ function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Code
         [[ -d "$cfg_dir" ]] || continue
         if _claude_plugin_installed "$cfg_dir" "ecc@ecc"; then
             echo "[INFO] Removing ECC plugin ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall ecc@ecc 2>/dev/null || uninstall_status=1
+            _claude_plugin_run "$cfg_dir" plugins uninstall ecc@ecc 2>/dev/null || uninstall_status=1
         fi
     done
 
@@ -1167,7 +1184,7 @@ function superpowers-update() {    # superpowers-update([--local]) will update t
             _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
                 "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || { update_status=1; continue; }
             echo "[INFO] Updating Superpowers plugin ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update superpowers@claude-plugins-official \
+            _claude_plugin_run "$cfg_dir" plugins update superpowers@claude-plugins-official \
                 || { echo "[X] update failed ($cfg_dir)"; update_status=1; }
         done
     fi
@@ -1199,7 +1216,7 @@ function superpowers-uninstall() {    # superpowers-uninstall() will remove the 
             continue
         fi
         echo "[INFO] Removing Superpowers plugin ($cfg_dir)..."
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall superpowers@claude-plugins-official 2>/dev/null || uninstall_status=1
+        _claude_plugin_run "$cfg_dir" plugins uninstall superpowers@claude-plugins-official 2>/dev/null || uninstall_status=1
         echo "[OK] Superpowers uninstalled ($cfg_dir)"
     done
     _codex_remove_plugin "superpowers@dotfiles-workflows" || uninstall_status=1

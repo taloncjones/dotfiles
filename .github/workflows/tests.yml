@@ -39,7 +39,8 @@ jobs:
       - name: python syntax check
         run: |
           python3 -m py_compile claude/hooks/*.py codex/hooks/*.py
-          python3 -m py_compile install/common/codex-surfaces.py
+          python3 -m py_compile install/common/codex-surfaces.py install/common/codex-roles.py
+          python3 -m py_compile claude/skills/lib/*.py claude/skills/co-review/scripts/*.py claude/skills/handoff/scripts/*.py
           echo "[OK] hook scripts compile"
 
       - name: Run all test suites

@@ -112,6 +112,14 @@ exit 1
 EOF
 chmod +x "$TMP"/stubs/*/claude
 
+mkdir -p "$TMP/stubs/env-capture"
+cat >"$TMP/stubs/env-capture/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${CLAUDE_CONFIG_DIR-unset}" >>"$CLAUDE_ENV_TRACE"
+exit 0
+EOF
+chmod +x "$TMP/stubs/env-capture/claude"
+
 # marketplace-fails: the marketplace refresh fails while the plugin update
 # reports success. ecc-update must report the partial failure and leave its
 # success epoch untouched.
@@ -216,6 +224,19 @@ run_codex_case() {
         $snippet
     " >"$TMP/out" 2>&1
 }
+
+: >"$TMP/claude-env-trace"
+if CLAUDE_ENV_TRACE="$TMP/claude-env-trace" run_case env-capture '
+    export CLAUDE_ENV_TRACE="'$TMP'/claude-env-trace"
+    export CLAUDE_CONFIG_DIR="'$TMP'/inherited-work"
+    _claude_plugin_run "$HOME/.claude" plugins install ecc@ecc
+    _claude_plugin_run "'$TMP'/work-config" plugins install ecc@ecc
+' && [ "$(sed -n '1p' "$TMP/claude-env-trace")" = unset ] &&
+   [ "$(sed -n '2p' "$TMP/claude-env-trace")" = "$TMP/work-config" ]; then
+    pass "plugin lifecycle unsets native personal config and preserves work config"
+else
+    fail "plugin lifecycle unsets native personal config and preserves work config"
+fi
 
 # 1. Pre-recorded install short-circuits without ever invoking the CLI.
 CFG="$TMP/cfg1"

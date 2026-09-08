@@ -168,8 +168,8 @@ worktree hydration via post-checkout) applies no matter who commits.
 Why it is fragile by design: anything that rewrites `core.hooksPath` orphans
 ALL of it silently. That is exactly what ECC's `sync-ecc-to-codex.sh` did
 pre-public (plus writing through the `~/.codex/AGENTS.md` symlink into the
-repo). Never run it directly; use the `codex-ecc-sync` wrapper in
-`zsh/functions.zsh`, which redirects via `ECC_GLOBAL_HOOKS_DIR`.
+repo). Both direct sync and its wrapper are retired. `ecc-install` and
+`ecc-update` stage self-contained native plugins without upstream global sync.
 `install/common/link.sh` sweeps leftover mirror artifacts on every `update`.
 
 Invariant: no tool may set `core.hooksPath`; hook additions go into
@@ -234,7 +234,7 @@ Before approving a structural change, confirm each still holds:
 | `claude/settings.json.tmpl` changes need MANUAL merge on existing machines (seed-once); only cloud runs `reconcile_claude_settings` automatically                                                                                                                                    | Open. Accepted cost of Decision 1; change-control skill has the merge protocol |
 | Machine-path plugin installs (`ecc-install`/`superpowers-install`) trust CLI output (grep of plugins list), not `installed_plugins.json`; `bootstrap-cloud.sh` `ensure_plugin` is the gold standard                                                                                  | Open. Candidate: port ensure_plugin to the zsh functions                       |
 | ECC-vendored git hooks `pre-commit`/`pre-push` are UNTESTED; `post-checkout` test is static-shape-only                                                                                                                                                                               | Open coverage gap                                                              |
-| `op-ssh-sign` path is macOS-only -- commit signing fails on Linux (bootstrap-cloud disables signing in containers); `install/common/zsh.sh` hardcodes the `/home/linuxbrew` path; `codex-ecc-sync` uses BSD-only `sed -i ''`; `defaults.sh` PlistBuddy `Set` lacks an `Add` fallback | Open portability debts                                                         |
+| `op-ssh-sign` path is macOS-only -- commit signing fails on Linux (bootstrap-cloud disables signing in containers); `install/common/zsh.sh` hardcodes the `/home/linuxbrew` path; `defaults.sh` PlistBuddy `Set` lacks an `Add` fallback | Open portability debts                                                         |
 | Cloud containers are personal-account only; no `~/.claude-work` story in cloud                                                                                                                                                                                                       | Open                                                                           |
 | Whether ECC rules vendoring is still needed at all                                                                                                                                                                                                                                   | Open question (Decision 4)                                                     |
 

@@ -22,8 +22,8 @@ exited N`, and returns that status. `$?` is trustworthy again.
   `~/.claude/plugins/installed_plugins.json` when it matters.
 - Never run ECC's `sync-ecc-to-codex.sh` directly -- it overwrites
   `core.hooksPath` and writes through the `~/.codex/AGENTS.md` symlink into
-  the repo. The `codex-ecc-sync` wrapper (zsh/functions.zsh) is the only safe
-  entry; `ecc-install`/`ecc-update` already call it.
+  the repo. Use `ecc-install`/`ecc-update`, which stage a self-contained native
+  Codex plugin. The old sync wrapper is retired; see repo CLAUDE.md.
 - The `claude` desktop app and IDE extensions bypass the `claude()` zsh
   wrapper and always land on `~/.claude` (personal), even under `~/Git/work`.
   The `account_guard.py` SessionStart hook warns inside the session.
@@ -55,7 +55,6 @@ bin scripts are symlinked into `~/bin` by install/common/link.sh.
 | `superpowers-install`   | zsh function | Register official marketplace by git URL if absent, install plugin in BOTH config dirs                                                |
 | `superpowers-update`    | zsh function | `claude plugins update` in each dir that has it                                                                                       |
 | `superpowers-uninstall` | zsh function | Uninstall from both config dirs                                                                                                       |
-| `codex-ecc-sync`        | zsh function | SAFE wrapper around ECC's codex sync (redirects hooks dir, restores hooksPath)                                                        |
 | `dotfiles-repair`       | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                         |
 | `setup-claude`          | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                                    |
 | `claude-account`        | zsh function | Print which account a launch from `$PWD` would use                                                                                    |
@@ -301,8 +300,8 @@ TODO.md` symlinked to main; `STATE.md config.json` copied per-worktree.
   `installed_plugins.json`; `bootstrap-cloud.sh` `ensure_plugin` is the gold
   standard not yet ported.
 - `settings.json.tmpl` changes need manual merge on existing machines.
-- `codex-ecc-sync` uses `sed -i ''` (functions.zsh:358) -- BSD/macOS-only; it
-  errors on GNU sed (Linux).
+- The old Codex sync and its BSD-only cleanup are retired; native plugin
+  staging is the supported lifecycle.
 - `dotfiles-repair` checks only `~/.claude/settings.json`, not the work dir's.
 - ECC rules vendoring necessity is an open question.
 

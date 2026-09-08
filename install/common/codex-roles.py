@@ -36,6 +36,13 @@ ROLES = {
         "gpt-5.6-terra",
     ),
 }
+# Native role files require name, description and developer_instructions:
+# https://learn.chatgpt.com/docs/agent-configuration/subagents
+ROLE_DESCRIPTIONS = {
+    "explorer": "Read repository code and report evidence without making changes.",
+    "reviewer": "Review changes for correctness, security, regressions, and missing tests.",
+    "docs_researcher": "Check APIs and release notes against primary documentation.",
+}
 OLD_MODEL = b'model = "gpt-5.4"'
 MAX_CONFIG_BYTES = 1 << 20
 
@@ -111,20 +118,34 @@ def classify_roles(root: int, agents: int, report: dict) -> tuple[bytes, list[di
         before, info = source
         parse_toml(before, filename)
         replacement = f'model = "{model}"'.encode()
-        if hashlib.sha256(before).hexdigest() == expected_hash:
+        description = mapping.get("description", ROLE_DESCRIPTIONS[role])
+        if not isinstance(description, str) or not description.strip():
+            report["preserved"][role] = "custom-config-mapping"
+            continue
+        metadata = (
+            f"name = {json.dumps(role)}\n"
+            f"description = {json.dumps(description, ensure_ascii=False)}\n"
+        ).encode()
+        original = before.replace(replacement, OLD_MODEL, 1)
+        if hashlib.sha256(original).hexdigest() == expected_hash:
+            after = metadata + original.replace(OLD_MODEL, replacement, 1)
+            parse_toml(after, filename)
             changes.append(
                 {
                     "role": role,
                     "filename": filename,
                     "before": before,
-                    "after": before.replace(OLD_MODEL, replacement, 1),
+                    "after": after,
                     "identity": identity(info),
                     "mode": stat.S_IMODE(info.st_mode),
                 }
             )
-        elif (
-            hashlib.sha256(before.replace(replacement, OLD_MODEL, 1)).hexdigest()
+        elif before.startswith(metadata) and (
+            hashlib.sha256(
+                before[len(metadata) :].replace(replacement, OLD_MODEL, 1)
+            ).hexdigest()
             == expected_hash
+            and replacement in before[len(metadata) :]
         ):
             report["preserved"][role] = "already-current"
         else:

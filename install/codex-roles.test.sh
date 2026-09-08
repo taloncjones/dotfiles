@@ -114,16 +114,61 @@ class RoleTests(unittest.TestCase):
         report = self.run_migration()
         self.assertTrue(report["changed"])
         self.assertEqual(set(report["updated"]), set(FIXTURES))
-        for _, name, replacement, _ in FIXTURES.values():
+        for role, (_, name, replacement, _) in FIXTURES.items():
             after = (self.agents / name).read_bytes()
+            payload = tomllib.loads(after.decode())
+            self.assertEqual(payload["name"], role)
+            self.assertIsInstance(payload["description"], str)
+            self.assertTrue(payload["description"].strip())
+            metadata = after.splitlines(keepends=True)[:2]
             self.assertEqual(
-                after, before[name].replace(b"gpt-5.4", replacement.encode(), 1)
+                after[len(b"".join(metadata)) :],
+                before[name].replace(b"gpt-5.4", replacement.encode(), 1),
             )
-            self.assertEqual(tomllib.loads(after.decode())["sandbox_mode"], "read-only")
+            self.assertEqual(payload["sandbox_mode"], "read-only")
         self.assertEqual(self.config.read_bytes(), config)
         self.assertEqual(
             stat.S_IMODE((self.agents / "reviewer.toml").stat().st_mode), 0o640
         )
+
+    def test_model_only_payloads_receive_native_schema_and_converge(self):
+        for role, (_, name, model, _) in FIXTURES.items():
+            (self.agents / name).write_bytes(
+                fixture(role).replace(b"gpt-5.4", model.encode(), 1)
+            )
+        first = self.run_migration()
+        self.assertEqual(set(first["updated"]), set(FIXTURES))
+        for role, (_, name, model, _) in FIXTURES.items():
+            value = tomllib.loads((self.agents / name).read_text())
+            for field in ("name", "description", "developer_instructions"):
+                self.assertIsInstance(value[field], str)
+                self.assertTrue(value[field].strip())
+            self.assertEqual(value["name"], role)
+            self.assertEqual(value["model"], model)
+        before = self.snapshot()
+        self.assertFalse(self.run_migration()["changed"])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_schema_repair_preserves_custom_config_description(self):
+        description = 'Custom review focus with a "quote" and ' + chr(0x10400)
+        self.config.write_text(
+            '[agents.reviewer]\nconfig_file = "agents/reviewer.toml"\n'
+            + f"description = {json.dumps(description, ensure_ascii=False)}\n"
+        )
+        before = self.config.read_bytes()
+        self.run_migration()
+        role = tomllib.loads((self.agents / "reviewer.toml").read_text())
+        self.assertEqual(role["description"], description)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertFalse(self.run_migration()["changed"])
+
+    def test_named_custom_role_payload_is_not_rewritten(self):
+        custom = b'name = "custom_explorer"\ndescription = "Keep me"\n' + fixture(
+            "explorer"
+        )
+        (self.agents / "explorer.toml").write_bytes(custom)
+        self.run_migration()
+        self.assertEqual((self.agents / "explorer.toml").read_bytes(), custom)
 
     def test_second_run_is_unchanged(self):
         self.run_migration()

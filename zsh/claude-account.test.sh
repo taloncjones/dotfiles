@@ -217,6 +217,36 @@ run_case "snapshot: personal checkout remains safe with separate work metadata" 
     "$SEPARATE_WORK" \
     "unfunction _claude_config_dir; CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
 
+# Git cannot recover the primary checkout path when it uses a separate Git
+# directory and this linked checkout is external. Inherited work and custom
+# routes must fail closed; an explicit personal request remains authorized.
+SEPARATE_PRIMARY="$SBHOME/Git/personal/separate-primary"
+SEPARATE_METADATA="$TMP/metadata/separate-primary.git"
+SEPARATE_LINKED="$TMP/external-separate-linked"
+mkdir -p "$(dirname "$SEPARATE_METADATA")"
+git_fixture init -q --separate-git-dir "$SEPARATE_METADATA" "$SEPARATE_PRIMARY" || exit 2
+git_fixture -C "$SEPARATE_PRIMARY" commit -q --allow-empty -m fixture || exit 2
+git_fixture -C "$SEPARATE_PRIMARY" worktree add -q --detach "$SEPARATE_LINKED" || exit 2
+run_refusal() {
+    label="$1" cwd="$2" body="$3"
+    rec="$TMP/rec"
+    : > "$rec"
+    out="$(RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+        zsh -c "cd '$cwd' && source '$REPO/$ACCT' && $body" 2>&1)"
+    rc=$?
+    if [ "$rc" = 2 ] && [ ! -s "$rec" ] && case "$out" in *ambiguous*) true;; *) false;; esac; then
+        pass "$label"
+    else
+        fail "$label (status=$rc output='$out')"
+    fi
+}
+run_refusal "external linked separate metadata refuses inherited work route" \
+    "$SEPARATE_LINKED" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude"
+run_refusal "external linked separate metadata refuses inherited custom route" \
+    "$SEPARATE_LINKED" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude"
+run_case "external linked separate metadata accepts explicit personal route" \
+    "$SEPARATE_LINKED" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude --personal" "UNSET"
+
 # Unsetting the child's config must not alter its parent shell's account.
 out="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
     zsh -c "cd '$PERSONAL' && source '$REPO/$ACCT' && export CLAUDE_CONFIG_DIR='$SBHOME/.claude-work'; claude; print -r -- \"\$CLAUDE_CONFIG_DIR\"")"

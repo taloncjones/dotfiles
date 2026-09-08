@@ -86,6 +86,7 @@ normally on the next `git add`.
 | `todos.sh repos`                                                        | List registered repos (warns on missing paths)                                                |
 | `todos.sh brief [--soon N] [--stale M] [--stale-cap K]`                 | Print time-relevant todos across all registered repos                                         |
 | `todos.sh list [--all] [--offline]`                                     | List pending todos with blocked-on annotations (`--all` adds completed; `--offline` skips gh) |
+| `todos.sh ready <exact-todo-id> [--offline|--online]`                     | Read-only JSON dependency verdict for one exact pending todo; offline by default             |
 | `todos.sh done <slug-or-substring>`                                     | Move a todo `pending/ -> completed/`                                                          |
 | `todos.sh depend <slug-or-substring> REF...`                            | Add dependency refs to a pending todo (`todo:<id>`, `branch:<name>`, `pr:<n>`); re-indexes    |
 | `todos.sh index`                                                        | Regenerate `TODO.md`                                                                          |
@@ -126,10 +127,13 @@ resolves to one state:
 are determinately unsatisfied appear under `[blocked-on: ...]`, refs the
 index cannot verify (PRs, absent branches) under `[unverified: ...]`.
 
-Network rule: only `list` may call `gh`, and `list --offline` (or
-`TODOS_OFFLINE=1`) disables that. `new`, `done`, `depend`, and `index`
-never touch the network. There is no timeout on `gh`; if the network
-hangs, use `--offline`.
+Network rule: `list` and explicit `ready --online` may call `gh`.
+`--offline` (or `TODOS_OFFLINE=1`) disables that. `new`, `done`, `depend`,
+and `index` never touch the network. `ready --online` shares a five-second
+budget across all `gh` calls, with up to one additional second to kill a
+stalled process. It uses coreutils `timeout` or `gtimeout`; if neither is
+available, network-dependent refs remain unverified. `list` retains its
+existing unbounded `gh` calls; use `list --offline` when needed.
 
 Squash merges never make a branch an ancestor of `origin/main`, so a
 branch ref resolves `merged` only through `gh` (`gh pr list --head`),
@@ -139,10 +143,28 @@ Prefer a `pr:` ref once the PR number is known. `TODOS_BASE_REF`
 (default `origin/main`) and `TODOS_GH` (default `gh`) are overrides for
 tests and unusual setups.
 
-The orchestrator does not read this field yet; a later task gates
-kickoff on it. Until then it is advisory: read the annotation before
-starting work on a blocked todo. Removing a dependency is a hand edit of
-the todo's frontmatter followed by `todos.sh index`.
+For controller dispatch, run `ready` from the source repository and pass
+the task's explicitly bound todo ID, such as `2026-09-06-fix-cache`.
+The command accepts the exact pending basename without `.md`; it never
+selects a substring, the newest item, or a task from another repository.
+Completed or duplicate pending/completed targets cannot dispatch.
+
+```json
+{"ready":false,"task_id":"2026-09-06-fix-cache","dependencies":[{"ref":"pr:85","state":"unknown"}]}
+```
+
+The JSON includes every direct dependency in file order, including satisfied
+ones. Exit status is `0` when every dependency is `done` or `merged`, `3`
+when any dependency is unsatisfied or unverified, and `2` for invalid input,
+a missing/ambiguous pending target, or malformed dependency frontmatter.
+Status `2` includes an `error` field. Unknown, invalid, missing, and self refs
+never count as satisfied. Direct cycles remain blocked by their pending
+dependency; the resolver does not recursively schedule work.
+
+`ready` requires `jq` and changes no todo, index, Git exclude, cache, or repo
+registry. It neither initializes a missing backlog nor starts any work.
+Removing a dependency is a hand edit of the todo's frontmatter followed by
+`todos.sh index`.
 
 ## Workflow
 

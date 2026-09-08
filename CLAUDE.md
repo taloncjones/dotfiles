@@ -97,6 +97,26 @@ Managed skill linking preserves existing real files and directories, including
 their contents, and warns instead of replacing them; inspect those destinations
 before moving custom content to make room for a managed symlink.
 
+Shared `handoff`, `kickoff`, `todos`, `repo-recall`, and `post-merge` skills link
+from `claude/skills` into Codex. Codex review and Herd entrypoints live in
+`codex/skills`. Helpers resolve paths from these installed sources, not the
+repository being worked on. `workflow_context.py` owns repository/account
+identity; handoff history is account/repository/task scoped. Never copy a
+personal handoff into a work account's state.
+
+`install/common/codex-roles.py` migrates only byte-exact historical managed ECC
+roles to Luna/medium explorer, Terra/medium documentation research, and
+Astra/high reviewer. Custom role files and model choices remain untouched;
+`--check --codex-home <path>` previews its decision. Repo-owned `codex/AGENTS.md`
+does not carry a copied upstream ECC instruction block.
+
+Plugin staging records upstream revision and payload digest independently of
+the wrapper version. A Codex ECC cache directory named `2.0.0` can contain a
+current upstream payload; verify installed bytes/provenance before declaring
+it stale. Automatic ECC Plan Canvas session/stop hooks are narrowly disabled.
+Managed hook state is account-scoped; a manually started Canvas server still
+needs its own account-specific state directory and port.
+
 Run the helper with `--check` to preview changes or `--apply` to write them.
 `--focus --apply` opts into the core ECC catalog in `codex/ecc-skills.txt`;
 subsequent updates retain that choice. Explicit skill overrides are preserved.

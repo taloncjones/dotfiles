@@ -1,23 +1,35 @@
 # State layout
 
-Account-scoped fixed state root:
+Account-private payload root (resolved by `workflow_context.py`):
 
 ```
-STATE_ROOT = "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch"
+STATE_ROOT = "<selected_account_root>/herdr-orch"
 ```
 
-Workers under `~/Git/work` run in the work account, so their state lands
-under `~/.claude-work`; orchestrator and workers for a repo share one
-account, hence one `STATE_ROOT`. Nothing under `STATE_ROOT` is ever
-git-tracked (it lives under the config dir, not the repo), and no marker is
-ever written into any worktree.
+Work repositories default to work scope but may explicitly use personal quota.
+Claude and Codex share the selected logical account's payload root; Codex's
+actual `CODEX_HOME` remains its authentication/configuration root. Do not set
+`CLAUDE_CONFIG_DIR` merely to point the core at payloads. Resolve the account
+from the original repository before dispatch and validate native context at
+each worker emission. Personal content never migrates into work payloads.
+
+Ownership metadata lives separately at
+`${XDG_STATE_HOME:-~/.local/state}/dotfiles/herdr-orch/coordination` (explicit
+override: `HERDR_COORDINATION_ROOT`). It contains identity bindings, fences,
+liveness, and account hashes, not plans, findings, or task text. Persistent
+locks serialize controllers across runtime/account payload roots. A different
+payload root does not grant a second owner for the same repository.
+
+All state remains machine-local and untracked. Private spec/plan copies live
+in the selected payload tree's `artifacts/<task>/<launch>/` and are referenced
+by immutable path/hash pairs.
 
 ## Layout
 
 ```
 STATE_ROOT/
   <repo_slug>/
-    owner.json                        # single-writer ownership claim
+    owner.json                        # compatibility mirror of shared owner
     config.json                       # machine-local config
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append from the section-1 probe step; safe to delete
     tasks/
@@ -71,9 +83,12 @@ STATE_ROOT/
 
 - Agent name (herdr-compliant): `plan-<t>` / `impl-<t>` / `rev-<t>` where `<t>`
   = `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
-  Verify uniqueness via `agent list`; on collision append `-2`, `-3`.
-- Display label (unconstrained): plan worker `plan:<task_id>`, implement worker
-  `<task_id>`, reviewer `review:<task_id>`, orchestrator `orch:<repo>`.
+  Verify uniqueness via `agent list`; each launch also gets a collision-resistant
+  launch ID. Names are transport handles, not task identity.
+- Display label: short task title, current role/runtime/model/status in separate
+  metadata fields; orchestrator `orch:<repo>`. Retain stable task and launch IDs
+  behind the label. Refresh pane and workspace metadata on every phase/retry so
+  a reused plan pane no longer displays a plan role during review.
 - **One workspace/worktree per task.** git allows only one worktree per branch,
   so a task's plan -> implement -> review phases all run in the SAME
   worktree-backed workspace (a fresh agent per phase, sequentially). The
@@ -96,14 +111,18 @@ STATE_ROOT/
 }
 ```
 
-- **Atomic claim:** ownership is acquired by an atomic filesystem operation
-  -- create-exclusive (`O_CREAT|O_EXCL`) of a lock file, or
-  write-temp-then-atomic-`rename` -- never a read-then-overwrite (which two
-  racing takeovers could both win). Each successful claim increments a
-  monotonic **fence** token.
-- **Fencing:** every state mutation re-reads `owner.json` and proceeds only
-  if the live `fence`/`session_id` still matches the one this session
-  claimed; a mutation under a stale fence aborts.
+- **Atomic claim:** shared persistent `flock` locks cover owner validation and
+  publication together. Locks are never unlinked. Atomic rename alone is not
+  mutual exclusion. Reclaim/takeover advances a monotonic fence; refresh of
+  the same runtime/thread/account owner retains it.
+- **Fencing:** each mutation validates the shared session/fence/account binding
+  under the same transaction as its write. Core code holds stable directory
+  descriptors and rejects corrupt, nonregular, replaced, or ambiguous state.
+  Lock order is owner then think; subprocesses run outside both, followed by
+  revalidation. Legacy account owner records are reconciled conservatively.
+- **Native owner identity:** records additionally distinguish runtime and the
+  Codex controller's exact thread UUID. A saved session string alone does not
+  permit another runtime/thread to reuse its fence.
 - **Inbox socket:** `messaging_socket` is the owner's Claude Code inbox
   socket (`CLAUDE_CODE_MESSAGING_SOCKET`), or `null`. Written by
   `claim-owner`/`refresh-owner --messaging-socket`; `pid` is taken from the
@@ -203,7 +222,7 @@ invalid config -> mutating actions refuse with a concrete message. This file
 holds the only employer/user identifiers; the shipped skill and fixtures
 never contain them.
 
-### `capabilities.json` -- session-stamped strong-model availability
+### `capabilities.json` -- legacy Claude strong-model availability
 
 Machine-local, per `repo_slug`, written by `write-capabilities` at preflight
 (section 1 step 5) and flipped downward by `disable-model` (section 8
@@ -279,12 +298,24 @@ Written only by the owning orchestrator, via `$CORE write-task`.
 `workers` is a list, not a single field -- phase advancement (implement ->
 review) appends a new entry rather than overwriting.
 
+The examples above include legacy rows. Every new native dispatch has
+`launch_id`, `phase`, `runtime`, `workspace_id`, `pane_id`, and
+`source_head_sha`. Both `emit-done` and `emit-review` must match the latest
+current-phase attempt's complete tuple. Partial native tuples are invalid;
+legacy fallback applies only to records that predate native attempts.
+
+Planning has a separate `plan_artifacts` list in both task and completion:
+exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.
+`confirm-plan` verifies hashes, selected payload containment, and current
+attempt identity. It does not require HEAD ahead of base. Implementation
+completion requires its own current HEAD/base/contract gates.
+
 `peer_name` is the worker's Claude Code session name as `ListAgents` showed
 it after launch (the target of `notify_when_idle` subscriptions), or `null`
 when discovery found zero or several candidates. The second `workers[]`
 entry above shows a `mech` dispatch: `peer_name` is always `null` (no
 `ListAgents` discovery for a headless worker; see SKILL.md section 8, Mech
-launch), and `launch_id`/`caps` are mech-only fields -- `launch_id` names
+launch), and `caps` is a legacy mech-specific field -- its `launch_id` names
 the live headless run (`<agent>-<YYYYMMDDTHHMMSSZ>`, also correlated in the
 spend ledger below) and `caps` is the resolved `mech-caps` output for that
 launch (`max_turns`/`max_budget_usd`/`timeout_secs`).
@@ -294,10 +325,9 @@ observed one) -- `null` means `inherit` (no `--effort` flag). **Legacy
 records:** an entry written before effort routing landed lacks the
 `effort` key entirely; readers treat a missing key as `effort: "unknown"`
 (distinct from the explicit `null` that means inherit), and a full-record
-rewrite carries such entries forward byte-for-byte -- the core adds no
-`workers[]` validation, matching the pre-existing `peer_name`/`model`
-carry-forward behavior. Every entry appended by a launch under effort
-routing MUST include the key.
+rewrite preserves their meaning. Native attempt validation is stricter than
+legacy carry-forward. Every new dispatch includes explicit requested effort;
+observed model/effort are separate fields or unknown when not exposed.
 
 `contract_path` (worktree-relative) and `contract_sha256` are the
 verification-contract pin, written by the orchestrator at implement dispatch

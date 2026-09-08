@@ -18,6 +18,12 @@ import time
 from collections import namedtuple
 from pathlib import Path
 
+CONTEXT_LIB = Path(__file__).resolve().parents[2] / "lib"
+if str(CONTEXT_LIB) not in sys.path:
+    sys.path.insert(0, str(CONTEXT_LIB))
+
+from workflow_context import account_scope, repository_context
+
 RECALL_VERSION = "1"
 SCHEMA_VERSION = "1"
 
@@ -150,6 +156,27 @@ def resolve_claude_config_dir(anchor, env=None, *, checkout=None):
         pass
     if anchor == work_tree or work_tree in anchor.parents:
         return Path(env.get("CLAUDE_WORK_CONFIG_DIR", str(home / ".claude-work"))).expanduser()
+    return home / ".claude"
+
+
+def config_dir_for_scope(scope, env=None):
+    """Render the provider-selected Claude route without changing its path spelling.
+
+    The shared provider decides the account policy. This adapter keeps the
+    configured spelling for compatibility with existing recall paths on
+    platforms where a temporary-directory alias resolves differently.
+    """
+    env = os.environ if env is None else env
+    explicit_storage = env.get("RECALL_CONFIG_DIR")
+    if explicit_storage:
+        return Path(explicit_storage).expanduser()
+    home = _home(env)
+    if scope["kind"] == "custom":
+        return Path(env["CLAUDE_CONFIG_DIR"]).expanduser()
+    if scope["kind"] == "work":
+        return Path(
+            env.get("CLAUDE_WORK_CONFIG_DIR", str(home / ".claude-work"))
+        ).expanduser()
     return home / ".claude"
 
 
@@ -412,17 +439,23 @@ class Context:
 
     def __init__(self, cwd=None):
         cwd = Path(cwd or os.getcwd())
-        paths = git_paths(cwd)
-        if paths is None:
+        try:
+            repository = repository_context(cwd)
+        except subprocess.CalledProcessError:
             raise SystemExit(_fail(EXIT_NOT_GIT, "not inside a git working tree"))
-        self.toplevel, self.canonical = paths
-        self.config_dir = resolve_config_dir(self.canonical, checkout=self.toplevel)
-        self.memory_config_dir = resolve_claude_config_dir(
-            self.canonical, checkout=self.toplevel
-        )
-        memory_scope = (
-            self.memory_config_dir if os.environ.get("RECALL_CONFIG_DIR") else None
-        )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise ConfigError("Git context is unavailable") from exc
+        try:
+            scope = account_scope(cwd, "claude")
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        self.toplevel = Path(repository["root"])
+        self.canonical = Path(repository["primary_root"] or repository["root"])
+        self.config_dir = config_dir_for_scope(scope)
+        memory_env = dict(os.environ)
+        memory_env.pop("RECALL_CONFIG_DIR", None)
+        self.memory_config_dir = config_dir_for_scope(scope, memory_env)
+        memory_scope = self.memory_config_dir if os.environ.get("RECALL_CONFIG_DIR") else None
         self.index_file = index_path(
             self.config_dir,
             self.toplevel,
@@ -880,10 +913,11 @@ def cmd_status(args):
 
 def status_all():
     cwd = Path(os.getcwd()).resolve()
-    paths = git_paths(cwd)
-    config_dir = resolve_config_dir(
-        paths[1] if paths else cwd, checkout=paths[0] if paths else cwd
-    )
+    try:
+        scope = account_scope(cwd, "claude")
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    config_dir = config_dir_for_scope(scope)
     root = config_dir / "recall"
     print(f"config dir: {config_dir}")
     if not root.is_dir():

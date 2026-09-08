@@ -29,6 +29,37 @@
 # OAuth login for the work account.
 CLAUDE_WORK_CONFIG_DIR="${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"
 CLAUDE_WORK_TREE="${CLAUDE_WORK_TREE:-$HOME/Git/work}"
+typeset -g WORKFLOW_CONTEXT_PY="${${(%):-%N}:A:h}/../claude/skills/lib/workflow_context.py"
+
+function workflow_account_scope() {
+    local target="$1" runtime="$2" personal="${3:-0}"
+    [[ -r "$WORKFLOW_CONTEXT_PY" ]] || return 127
+    command -v python3 >/dev/null 2>&1 || return 127
+    local -a args=(account-scope --cwd "$target" --runtime "$runtime")
+    [[ "$personal" == 1 ]] && args+=(--personal)
+    command python3 "$WORKFLOW_CONTEXT_PY" "${args[@]}"
+}
+
+function workflow_scope_field() {
+    command python3 -c '
+import json, sys
+scope = json.loads(sys.argv[1])
+value = scope.get(sys.argv[2])
+if not isinstance(value, str) or "\n" in value or "\0" in value:
+    raise SystemExit(2)
+print(value)
+' "$1" "$2"
+}
+
+function workflow_scope_bool() {
+    command python3 -c '
+import json, sys
+value = json.loads(sys.argv[1]).get(sys.argv[2])
+if not isinstance(value, bool):
+    raise SystemExit(2)
+print(1 if value else 0)
+' "$1" "$2"
+}
 
 # helper: resolve which config dir a claude launch would use from $PWD.
 # :A resolves symlinks on both sides so a symlinked path into ~/Git/work
@@ -39,34 +70,17 @@ CLAUDE_WORK_TREE="${CLAUDE_WORK_TREE:-$HOME/Git/work}"
 # CLAUDE_CONFIG_DIR and dumped a config tree into the cwd (2026-08-30).
 function _claude_config_dir() {
     emulate -L zsh
-    if [[ "${CLAUDE_PERSONAL_ONLY:-}" == 1 ]]; then
-        echo "$HOME/.claude"
-        return
-    fi
-    local owner="${PWD:A}" personal_tree="$HOME/Git/personal"
-    local work_tree="${CLAUDE_WORK_TREE:-$HOME/Git/work}" common_dir
-    common_dir="$(
-        unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE
-        command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null
-    )"
-    if [[ -n "$common_dir" ]]; then
-        [[ "$common_dir" == /* ]] || common_dir="$PWD/$common_dir"
-        owner="${common_dir:A}"
-    fi
-    if [[ "${PWD:A}/" == "${personal_tree:A}/"* || "$owner/" == "${personal_tree:A}/"* ]]; then
-        echo "$HOME/.claude"
-    elif [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
-        echo "$CLAUDE_CONFIG_DIR"
-    elif [[ "${PWD:A}/" == "${work_tree:A}/"* ]]; then
-        echo "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"
-    else
-        echo "$HOME/.claude"
-    fi
+    local scope
+    scope="$(workflow_account_scope "$PWD" claude)" || return $?
+    workflow_scope_field "$scope" root
 }
 
 function claude-account() {    # claude-account() prints which Claude account/config dir a launch from this directory would use. ex: $ claude-account
     local cfg
-    cfg="$(_claude_config_dir)"
+    cfg="$(_claude_config_dir)" || {
+        echo "[X] Claude account context is ambiguous; use --personal or CLAUDE_PERSONAL_ONLY=1."
+        return 2
+    }
     case "$cfg" in
         "$CLAUDE_WORK_CONFIG_DIR") echo "work ($cfg)" ;;
         "$HOME/.claude")           echo "personal ($cfg)" ;;
@@ -76,9 +90,7 @@ function claude-account() {    # claude-account() prints which Claude account/co
 
 function claude() {    # claude() will launch Claude Code with the work account inside ~/Git/work, personal elsewhere. Pass --personal to force the personal account. ex: $ claude --personal
     emulate -L zsh
-    local use_personal=0 arg cfg work_tree common_dir
-    local owner="${PWD:A}" personal_tree="$HOME/Git/personal"
-    local personal_cfg="$HOME/.claude"
+    local use_personal=0 arg cfg scope kind target="$PWD" take_cd=0 parse_cd=1
     local -a forwarded=()
     [[ "${CLAUDE_PERSONAL_ONLY:-}" == 1 ]] && use_personal=1
     for arg in "$@"; do
@@ -86,40 +98,27 @@ function claude() {    # claude() will launch Claude Code with the work account 
             --personal) use_personal=1 ;;
             *) forwarded+=("$arg") ;;
         esac
+        if (( take_cd )); then
+            target="$arg"
+            take_cd=0
+        elif (( parse_cd )); then
+            case "$arg" in
+                --) parse_cd=0 ;;
+                -C|--cd) take_cd=1 ;;
+                --cd=*) target="${arg#--cd=}" ;;
+                -C=*) target="${arg#-C=}" ;;
+                -C?*) target="${arg#-C}" ;;
+            esac
+        fi
     done
-    # Routing is inlined (see _claude_config_dir comment) with
-    # literal-default fallbacks so a partially restored environment --
-    # helper gone, CLAUDE_WORK_* unset -- still routes correctly. Resolve
-    # actual repository ownership before trusting inherited account state.
-    if (( ! use_personal )); then
-        common_dir="$(
-            unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE
-            command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null
-        )"
-        if [[ -n "$common_dir" ]]; then
-            [[ "$common_dir" == /* ]] || common_dir="$PWD/$common_dir"
-            owner="${common_dir:A}"
-        fi
-        [[ "${PWD:A}/" == "${personal_tree:A}/"* || "$owner/" == "${personal_tree:A}/"* ]] && use_personal=1
-    fi
-    if (( use_personal )); then
-        cfg="$HOME/.claude"
-    elif [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
-        cfg="$CLAUDE_CONFIG_DIR"
-    else
-        work_tree="${CLAUDE_WORK_TREE:-$HOME/Git/work}"
-        if [[ "${PWD:A}/" == "${work_tree:A}/"* ]]; then
-            cfg="${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"
-        else
-            cfg="$HOME/.claude"
-        fi
-    fi
-    # Hard floor: never launch with an empty config dir (an empty
-    # CLAUDE_CONFIG_DIR makes claude treat the cwd as its config root),
-    # and normalize explicit paths before handing them to the child.
-    cfg="${cfg:-$HOME/.claude}"
-    cfg="${cfg:A}"
-    if [[ "$cfg" == "${personal_cfg:A}" ]]; then
+    target="${target:A}"
+    scope="$(workflow_account_scope "$target" claude "$use_personal")" || {
+        echo "[X] Claude account context is ambiguous; relaunch with --personal or CLAUDE_PERSONAL_ONLY=1." >&2
+        return 2
+    }
+    kind="$(workflow_scope_field "$scope" kind)" || return 2
+    cfg="$(workflow_scope_field "$scope" root)" || return 2
+    if [[ "$kind" == personal ]]; then
         # Preserve the native personal login and the caller's environment.
         (
             unset CLAUDE_CONFIG_DIR

@@ -11,8 +11,8 @@ function codex() {
         command codex -c 'plugins."atlassian@claude-plugins-official".enabled=false' "$@"
         return $?
     fi
-    local target="$PWD" personal_tree="$HOME/Git/personal"
-    local arg common_dir owner take_cd=0
+    local target="$PWD" scope kind personal_repository
+    local arg take_cd=0
     for arg in "$@"; do
         if (( take_cd )); then
             target="$arg"
@@ -28,22 +28,13 @@ function codex() {
         esac
     done
     target="${target:A}"
-    owner="$target"
-
-    # A linked worktree can live outside its owner's directory convention.
-    # Resolve relative common-dir results from the effective launch target,
-    # ignoring Git variables inherited from a hook or another repository.
-    common_dir="$(
-        unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE
-        command git -C "$target" rev-parse --git-common-dir 2>/dev/null
-    )"
-    if [[ -n "$common_dir" ]]; then
-        [[ "$common_dir" == /* ]] || common_dir="$target/$common_dir"
-        owner="${common_dir:A}"
-    fi
-
-    # A personal checkout remains personal even when its Git metadata is elsewhere.
-    if [[ "$target/" == "${personal_tree:A}/"* || "$owner/" == "${personal_tree:A}/"* ]]; then
+    scope="$(workflow_account_scope "$target" codex)" || {
+        echo "[X] Codex account context is ambiguous; relaunch with CLAUDE_PERSONAL_ONLY=1 for a personal scope." >&2
+        return 2
+    }
+    kind="$(workflow_scope_field "$scope" kind)" || return 2
+    personal_repository="$(workflow_scope_bool "$scope" personal_repository)" || return 2
+    if [[ "$kind" == personal && "$personal_repository" == 1 ]]; then
         command codex -c 'plugins."atlassian@claude-plugins-official".enabled=false' "$@"
     else
         command codex "$@"

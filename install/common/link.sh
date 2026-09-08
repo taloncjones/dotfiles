@@ -135,6 +135,7 @@ ln -sf "$DOTFILEDIR"/codex/hooks/block_secrets.py "$HOME"/.codex/hooks/block_sec
 ln -sf "$DOTFILEDIR"/codex/hooks/emoji_guard.py "$HOME"/.codex/hooks/emoji_guard.py
 ln -sf "$DOTFILEDIR"/codex/hooks/no_ai_comments.py "$HOME"/.codex/hooks/no_ai_comments.py
 ln -sf "$DOTFILEDIR"/claude/hooks/herdr_worktree_guard.py "$HOME"/.codex/hooks/herdr_worktree_guard.py
+ln -sf "$DOTFILEDIR"/codex/hooks/herdr_stop_gate.py "$HOME"/.codex/hooks/herdr_stop_gate.py
 
 # These are repo-owned workflows, shared from one maintained source. Native
 # ECC and Superpowers plugin installations remain independent per runtime.
@@ -148,7 +149,7 @@ link_codex_skill() {
   ln -sfn "$source" "$destination"
 }
 
-for shared_skill in repo-recall post-merge todos; do
+for shared_skill in repo-recall post-merge todos handoff kickoff; do
   link_codex_skill "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
 done
 mkdir -p "$HOME/.codex/rules"
@@ -159,6 +160,19 @@ if [ -d "$DOTFILEDIR"/codex/skills ]; then
     [ -d "$codex_skill" ] || continue
     link_codex_skill "$codex_skill" "$HOME"/.codex/skills/"$(basename "$codex_skill")"
   done
+fi
+
+# Retired model migration is restricted to exact known role snapshots and
+# their existing config mappings. Custom roles and unconfigured files survive.
+if command -v uv >/dev/null 2>&1; then
+  uv run --python '>=3.11' --no-project --offline --no-cache python \
+    "$DOTFILEDIR/install/common/codex-roles.py" --codex-home "$HOME/.codex" ||
+    echo '[WARNING] Codex role migration failed; inspect existing role configuration.' >&2
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import tomllib' >/dev/null 2>&1; then
+  python3 "$DOTFILEDIR/install/common/codex-roles.py" --codex-home "$HOME/.codex" ||
+    echo '[WARNING] Codex role migration failed; inspect existing role configuration.' >&2
+else
+  echo '[WARNING] Codex role migration requires Python 3.11+ or uv.' >&2
 fi
 
 ensure_codex_hooks_feature() {
@@ -274,6 +288,17 @@ add_codex_hook \
   'herdr_worktree_guard.py' \
   'Bash|Shell|exec_command|shell_command|unified_exec' \
   "$HOME/.codex/hooks/herdr_worktree_guard.py"
+
+# Stop has its own native event/output contract, separate from PreToolUse.
+# Preserve any existing custom registration of this adapter.
+if ! grep -Fq 'herdr_stop_gate.py' "$HOME/.codex/config.toml"; then
+  {
+    printf '\n# Dotfiles-managed Herd completion gate\n'
+    printf '[[hooks.Stop]]\n\n[[hooks.Stop.hooks]]\n'
+    printf 'type = "command"\n'
+    printf 'command = "python3 \\"%s\\""\n' "$HOME/.codex/hooks/herdr_stop_gate.py"
+  } >>"$HOME/.codex/config.toml"
+fi
 
 # Shared with claude-plugins.sh, which re-runs the dedupe after the managed
 # installs so a first install closes the duplicate-provider window in the same
