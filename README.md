@@ -183,6 +183,20 @@ dotfiles/
 └── NOTICE            # Third-party attributions
 ```
 
+Two directory pairs in this tree differ only by a leading dot, and the dot
+means something specific: `claude/` is the SOURCE of the global Claude Code
+config, symlinked out to `~/.claude/` and `~/.claude-work/` (CLAUDE.md,
+hooks, skills, commands, rules, contracts) so every repo you open picks it
+up; `.claude/` is this repo's own PROJECT-level Claude config, read only
+when the dotfiles repo itself is open (the committed `settings.json` that
+pre-declares the ECC/Superpowers plugins for cloud sessions, `hooks/session-
+start.sh`, and the `dotfiles-*` skills, plus untracked session state).
+Likewise `vscode/` holds the global VS Code settings, keybindings, and
+extensions that `link.sh` installs into the user profile, while `.vscode/`
+holds workspace settings applied only when this repo is open in the editor.
+Rule of thumb: the dotted directory is config for tools working in this
+repo; the undotted directory is config this repo installs onto the machine.
+
 ## Key Commands
 
 ### Dotfiles Management
@@ -358,6 +372,10 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 **Skills** (`claude/skills/`, loaded on demand by trigger phrases):
 
 - `brief`, `todos`, `weekly` - daily/weekly planning built on the `.todos/` backlog
+  - `todos.sh dashboard [--open] [--out PATH]` renders pending, completed, and
+    `.todos/research/*.md` notes into a static HTML page at
+    `~/.local/state/dotfiles/dashboard/<repo_slug>.html`; it never writes into
+    the repo
 - `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) review gates
 - `ship`, `post-merge`, `reconcile`, `wrap` - delivery, teardown, Jira drift repair, session exit
 - `model-tuning` - per-model deltas and retirement playbook for current Claude models
