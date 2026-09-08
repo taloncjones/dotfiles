@@ -223,18 +223,23 @@ suggests `/init` (no CLAUDE.md yet) or `/refresh` (exists). It requires a
 Two Claude accounts, two config dirs, one asset source (see
 claude-code-platform-reference for mechanics):
 
-| Launch context                                                  | Config dir used                     |
-| --------------------------------------------------------------- | ----------------------------------- |
-| `claude` (wrapper) anywhere outside `~/Git/work`                | `~/.claude` (personal)              |
-| `claude` (wrapper) under `~/Git/work` (symlinks resolved)       | `~/.claude-work` (work)             |
-| `claude --personal` from a work dir                             | `~/.claude`                         |
-| Pre-set `CLAUDE_CONFIG_DIR`                                     | always wins                         |
-| Desktop app / IDE extension / `command claude` / scripts / cron | `~/.claude` regardless of directory |
+| Launch context                                                                                             | Config dir used                     |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `claude` (wrapper) anywhere outside `~/Git/work`                                                           | `~/.claude` (personal)              |
+| `claude` (wrapper) under `~/Git/work` (symlinks resolved)                                                  | `~/.claude-work` (work)             |
+| `claude` (wrapper) in a linked worktree of a repo under `~/Git/work` (herdr, EnterWorktree, `.worktrees/`) | `~/.claude-work` (work)             |
+| `claude --personal` from a work dir                                                                        | `~/.claude`                         |
+| Pre-set `CLAUDE_CONFIG_DIR`                                                                                | always wins                         |
+| Desktop app / IDE extension / `command claude` / scripts / cron                                            | `~/.claude` regardless of directory |
 
 ```bash
 claude-account        # prints: work (~/.claude-work) | personal (~/.claude) | custom (<dir>)
 claude --personal     # force personal from inside ~/Git/work
 ```
+
+Herdr worker launches do not rely on the wrapper: the orchestration skill
+prefixes every launch line with `CLAUDE_CONFIG_DIR=$CFG` (its own dir),
+because the pane shell is spawned by the herdr server and inherits nothing.
 
 The bypass row is the daily trap. `claude/hooks/account_guard.py`
 (SessionStart, registered in claude/settings.json.tmpl) fires in EVERY session

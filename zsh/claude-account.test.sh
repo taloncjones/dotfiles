@@ -9,6 +9,10 @@
 
 set -u
 
+# The wrapper's second rung honours an inherited CLAUDE_CONFIG_DIR, and every
+# Claude session exports one. Clear it so each case controls the variable.
+unset CLAUDE_CONFIG_DIR
+
 ACCT=zsh/claude-account.zsh
 if [ ! -f "$ACCT" ]; then
     echo "FAIL: $ACCT not found (run from repo root)" >&2
@@ -135,6 +139,109 @@ run_case "snapshot: helper+vars stripped, work cwd still routes" \
     "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; claude" \
     "$SBHOME/.claude-work"
 
+# 8b. Linked worktrees. A checkout of a work repo that lives OUTSIDE the
+# work tree (herdr ~/.herdr/worktrees/, EnterWorktree .claude/worktrees/,
+# .worktrees/) routes by the repo it belongs to. Two sandbox repos, each
+# with one linked worktree (git worktree add) under
+# $SBHOME/.herdr/worktrees/. GIT_CONFIG_GLOBAL=/dev/null keeps the
+# machine's hooksPath and signing config out of the fixture. Skipped when
+# git is not installed.
+LINKED_WORK=""
+LINKED_PERSONAL=""
+if command -v git >/dev/null 2>&1; then
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    for repo in "$SBHOME/Git/work/wrepo" "$SBHOME/elsewhere/prepo"; do
+        git -c init.defaultBranch=main init -q "$repo"
+        git -C "$repo" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+    done
+    git -C "$SBHOME/Git/work/wrepo" worktree add -q "$SBHOME/.herdr/worktrees/wrepo/wt" -b wt
+    git -C "$SBHOME/elsewhere/prepo" worktree add -q "$SBHOME/.herdr/worktrees/prepo/wt" -b wt
+    LINKED_WORK="$SBHOME/.herdr/worktrees/wrepo/wt"
+    LINKED_PERSONAL="$SBHOME/.herdr/worktrees/prepo/wt"
+    mkdir -p "$LINKED_WORK/sub"
+
+    run_case "linked worktree of a work repo routes to work" \
+        "$LINKED_WORK" "claude" "$SBHOME/.claude-work"
+    run_case "subdirectory of a linked work worktree routes to work" \
+        "$LINKED_WORK/sub" "claude" "$SBHOME/.claude-work"
+    run_case "linked worktree of a personal repo routes to personal" \
+        "$LINKED_PERSONAL" "claude" "$SBHOME/.claude"
+    run_case "main checkout outside the work tree routes to personal" \
+        "$SBHOME/elsewhere/prepo" "claude" "$SBHOME/.claude"
+    run_case "--personal beats the linked-worktree rung, flag filtered" \
+        "$LINKED_WORK" "claude --personal -p hi" "$SBHOME/.claude" "-p hi"
+    run_case "non-empty env beats the linked-worktree rung" \
+        "$LINKED_WORK" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
+    run_case "snapshot: helper+vars stripped, linked work worktree still routes" \
+        "$LINKED_WORK" \
+        "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; claude" \
+        "$SBHOME/.claude-work"
+
+    # git absent from PATH: the rung is skipped silently; personal as before.
+    ZSH_BIN="$(command -v zsh)"
+    : > "$TMP/rec"
+    err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin" \
+        "$ZSH_BIN" -c "cd '$LINKED_WORK' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
+    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+    if [ -z "$err" ] && [ "$got_cfg" = "$SBHOME/.claude" ]; then
+        pass "git absent: linked work worktree falls back to personal, silently"
+    else
+        fail "git absent: linked work worktree falls back to personal, silently (err='$err' cfg='$got_cfg')"
+    fi
+
+    # Not a repo: git's error is discarded, nothing reaches stderr.
+    : > "$TMP/rec"
+    err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+        zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
+    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+    if [ -z "$err" ] && [ "$got_cfg" = "$SBHOME/.claude" ]; then
+        pass "non-repo cwd: personal, no git noise on stderr"
+    else
+        fail "non-repo cwd: personal, no git noise on stderr (err='$err' cfg='$got_cfg')"
+    fi
+
+    # Non-git cwd under `set -e`: the git probe's nonzero exit must not
+    # trip errexit and abort the wrapper before claude launches. Headless
+    # callers (cron, `zsh -c`, orchestrator dispatches without
+    # CLAUDE_CONFIG_DIR set) run under this exact condition.
+    : > "$TMP/rec"
+    RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+        zsh -ec "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" >/dev/null 2>&1
+    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+    if [ "$got_cfg" = "$SBHOME/.claude" ]; then
+        pass "set -e: non-git cwd still reaches claude (git probe failure absorbed)"
+    else
+        fail "set -e: non-git cwd still reaches claude (git probe failure absorbed) (cfg='$got_cfg')"
+    fi
+
+    # A corrupt / hook-wrapped git that prints two lines for
+    # --git-common-dir must be treated as "no repo" (mirrors
+    # account_guard.py's `"\n" in common -> None`), not fed into :A
+    # resolution. The stub's first line is a real path under the work
+    # tree's .git -- without the newline guard, :h of the combined
+    # (single, embedded-newline) path string still resolves under the
+    # work tree, so this cwd would misroute to work.
+    MULTI="$TMP/bin-multiline"
+    mkdir -p "$MULTI"
+    cat >"$MULTI/git" <<MULTIEOF
+#!/bin/sh
+printf '%s\n%s\n' "$SBHOME/Git/work/proj/.git" "corrupted-second-line"
+exit 0
+MULTIEOF
+    chmod +x "$MULTI/git"
+    : > "$TMP/rec"
+    err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$MULTI:$TMP/bin:$PATH" \
+        zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
+    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+    if [ -z "$err" ] && [ "$got_cfg" = "$SBHOME/.claude" ]; then
+        pass "multiline git-common-dir output treated as no-repo, routes personal"
+    else
+        fail "multiline git-common-dir output treated as no-repo, routes personal (err='$err' cfg='$got_cfg')"
+    fi
+else
+    echo "SKIP: git not installed; linked-worktree cases not run"
+fi
+
 # 9. Wrapper exit status passes through.
 cat >"$TMP/bin/claude" <<'EOF'
 #!/bin/sh
@@ -174,6 +281,10 @@ acct_case() {
 acct_case "claude-account: personal label" "$SBHOME/elsewhere" "" "personal"
 acct_case "claude-account: work label" "$SBHOME/Git/work/proj" "" "work"
 acct_case "claude-account: custom label" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR=$SBHOME/custom" "custom"
+if [ -n "$LINKED_WORK" ]; then
+    acct_case "claude-account: linked work worktree shows work" "$LINKED_WORK" "" "work"
+    acct_case "claude-account: linked personal worktree shows personal" "$LINKED_PERSONAL" "" "personal"
+fi
 
 # --- shell-mode matrix: wrapper defined via .zshenv in -lc / -c / -ic ---
 # ZDOTDIR sandbox mirrors the installed layout: $ZDOTDIR/.zshenv is a
@@ -215,6 +326,10 @@ for mode in "-lc" "-c" "-ic"; do
         "$mode" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR= claude" "$SBHOME/.claude"
     run_mode "zsh $mode: --personal beats custom env" \
         "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude --personal" "$SBHOME/.claude"
+    if [ -n "$LINKED_WORK" ]; then
+        run_mode "zsh $mode: linked work worktree routes to work" \
+            "$mode" "$LINKED_WORK" "claude" "$SBHOME/.claude-work"
+    fi
 done
 
 # .zshenv contract: silent on success, no external commands.
