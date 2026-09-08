@@ -17,7 +17,8 @@ tracked, or untracked and not gitignored; paths with a `.todos` component
 and paths under STATE_ROOT are exempt. Edit/Write use tool_input.file_path;
 Bash targets are shell redirections (quote-aware raw scan, heredoc bodies
 dropped), `sed -i`/`perl -i` operands, `tee` operands, `cp`/`install`
-destinations, `mv` sources and destinations, and one level of `sh -c`.
+destinations, `mv` sources and destinations, `rm`/`rmdir` operands, and
+one level of `sh -c` (a combined flag cluster like `-lc`/`-ec` counts).
 
 Escape hatch: `herdr_orch_core.py allow-edit` mints
 STATE_ROOT/<slug>/orch-edit-allow.json under a live fence. The hook honours
@@ -480,6 +481,24 @@ def segment_groups(tokens):
         yield "seg", current
 
 
+def rm_operands(words):
+    """Positional operands of an `rm`/`rmdir` invocation: everything that
+    is not an option flag, honouring `--` as the end-of-options marker --
+    a removal deletes the path outright, same as a `mv` source, but was
+    the one unguarded shape in an otherwise removal-aware guard (B4)."""
+    ops, only_targets = [], False
+    for t in words[1:]:
+        if only_targets:
+            ops.append(t)
+        elif t == "--":
+            only_targets = True
+        elif t.startswith("-") and t != "-":
+            continue
+        else:
+            ops.append(t)
+    return ops
+
+
 def cd_target_candidates(words, cwd, home):
     """The set of cwds the shell might be in after a `cd`: one, when the
     target can be confirmed a real directory; {target, cwd} otherwise --
@@ -557,6 +576,9 @@ def bash_targets(command, cwd, home, depth=0):
         elif head in ("cp", "install", "mv"):
             for c in cwds:
                 found.extend((c, w) for w in copy_targets(words, c, home, head == "mv"))
+        elif head in ("rm", "rmdir"):
+            for c in cwds:
+                found.extend((c, w) for w in rm_operands(words))
         elif head in SHELL_WRAPPERS:
             inner = shell_c_arg(words)
             if inner is not None:
