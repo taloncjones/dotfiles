@@ -11,6 +11,7 @@ PYTHONDONTWRITEBYTECODE=1
 export PYTHONDONTWRITEBYTECODE
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
+REPO_ROOT=$(pwd)
 HOOK=${ORCH_EDIT_GUARD_HOOK:-claude/hooks/orch_edit_guard.py}
 CORE=claude/hooks/herdr_orch_core.py
 PASS=0
@@ -18,11 +19,45 @@ FAIL=0
 SID_A=11111111-1111-1111-1111-111111111111   # owns SLUG_A (fence 4) and aaa-first (fence 9)
 SID_B=22222222-2222-2222-2222-222222222222   # owns SLUG_2 only
 SID_C=33333333-3333-3333-3333-333333333333   # owns nothing: a worker or plain session
-FIX=$(mktemp -d /tmp/orch-edit-guard.XXXXXX)
-FIX=$(cd "$FIX" && pwd -P)
+
+# safe_mktemp_dir TEMPLATE: like `mktemp -d TEMPLATE`, but aborts instead of
+# returning an unusable path. `cd "" && pwd -P` succeeds in sh and silently
+# resolves to the CALLER's cwd, so a bare, unchecked `mktemp -d` failure
+# would flow FIX straight into `cd "$FIX" && pwd -P` and then into the EXIT
+# trap's `rm -rf "$FIX"` -- deleting whatever directory the suite was
+# invoked from (normally the repo checkout) instead of a throwaway (B5).
+safe_mktemp_dir() {
+    dir=$(mktemp -d "$1") || { printf 'mktemp failed\n' >&2; return 1; }
+    [ -n "$dir" ] && [ -d "$dir" ] || { printf 'mktemp returned no directory\n' >&2; return 1; }
+    dir=$(cd "$dir" && pwd -P) || { printf 'realpath of the mktemp dir failed\n' >&2; return 1; }
+    [ -n "$dir" ] && [ -d "$dir" ] || { printf 'mktemp realpath is empty\n' >&2; return 1; }
+    printf '%s\n' "$dir"
+}
+FIX=$(safe_mktemp_dir /tmp/orch-edit-guard.XXXXXX) || exit 1
 H="$FIX/home"; CFG="$FIX/cfg"; S="$FIX/scratch"; T="$FIX/tmpdir"; N="$FIX/plain"
 mkdir -p "$H" "$S" "$T" "$N"
 trap 'chmod -R u+w "$FIX" 2>/dev/null; rm -rf "$FIX"' EXIT
+
+# B5 regression: recursively run this same suite, with a stubbed `mktemp`
+# that always fails, from inside a disposable canary directory. Buggy code
+# resolves FIX to that canary cwd (the `cd "" && pwd -P` shape above) and
+# its EXIT trap then rm -rf's the canary; fixed code aborts before the trap
+# is ever installed, leaving the canary and its sentinel file untouched.
+b5_dir="$FIX/b5"; mkdir -p "$b5_dir/bin" "$b5_dir/canary"
+printf '#!/bin/sh\nexit 1\n' > "$b5_dir/bin/mktemp"
+chmod +x "$b5_dir/bin/mktemp"
+: > "$b5_dir/canary/sentinel"
+( cd "$b5_dir/canary" && PATH="$b5_dir/bin:$PATH" sh "$REPO_ROOT/claude/hooks/orch-edit-guard.test.sh" \
+    >"$b5_dir/out" 2>"$b5_dir/err" )
+b5_rc=$?
+if [ "$b5_rc" != 0 ] && [ -f "$b5_dir/canary/sentinel" ]; then
+    printf 'PASS  B5 a failed mktemp aborts before the EXIT trap can rm -rf the caller'"'"'s cwd\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  B5 a failed mktemp aborts before the EXIT trap can rm -rf the caller'"'"'s cwd (rc=%s sentinel=%s)\n' \
+        "$b5_rc" "$([ -f "$b5_dir/canary/sentinel" ] && echo present || echo GONE)" >&2
+    FAIL=$((FAIL + 1))
+fi
 
 # mkrepo DIR REMOTE: one-commit repo with tracked.txt, f2, dir/inner.txt,
 # an ignored/ dir, and an untracked .todos/pending/ dir.
