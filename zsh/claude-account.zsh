@@ -5,8 +5,10 @@
 # Sourced from zsh/.zshenv so account routing exists in interactive, login,
 # AND non-interactive shells (zsh -lc / zsh -c read .zshenv but never .zshrc;
 # headless probes, hooks, and orchestrator dispatches run there). Zero output
-# on success; builtins and parameter expansion only -- every zsh on the
-# machine pays this file's cost.
+# on success; SOURCING runs builtins and parameter expansion only -- every
+# zsh on the machine pays this file's cost. The one external command
+# (git, in the linked-worktree rung below) runs at claude launch time, and
+# only when the earlier rungs miss.
 #
 # Fable requires OAuth login (no API token), so work and personal need two
 # separate logins. CLAUDE_CONFIG_DIR is the supported isolation mechanism:
@@ -14,7 +16,12 @@
 # there); ~/.claude-work holds the work login. Routing precedence, highest
 # first:
 #   --personal > non-empty CLAUDE_CONFIG_DIR > cwd under $CLAUDE_WORK_TREE
-#   > $HOME/.claude
+#   > cwd inside a linked worktree (any checkout) of a repo under
+#     $CLAUDE_WORK_TREE > $HOME/.claude
+# The linked-worktree rung exists because herdr (~/.herdr/worktrees/),
+# EnterWorktree (.claude/worktrees/) and .worktrees/ checkouts of a work
+# repo live outside the work tree, so a path prefix alone routed every
+# orchestrated work-repo worker to the personal account (2026-09-08).
 # An exported-empty CLAUDE_CONFIG_DIR is treated as unset and is never
 # propagated: the wrapper always injects an explicit non-empty dir. If
 # ~/.claude-work does not exist yet, claude creates it and prompts a fresh
@@ -30,12 +37,19 @@ CLAUDE_WORK_TREE="${CLAUDE_WORK_TREE:-$HOME/Git/work}"
 # survived while this helper did not once exported an empty
 # CLAUDE_CONFIG_DIR and dumped a config tree into the cwd (2026-08-30).
 function _claude_config_dir() {
+    local repo_git
     if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
         echo "$CLAUDE_CONFIG_DIR"
     elif [[ "${PWD:A}/" == "${CLAUDE_WORK_TREE:A}/"* ]]; then
         echo "$CLAUDE_WORK_CONFIG_DIR"
     else
-        echo "$HOME/.claude"
+        repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)"
+        [[ -n "$repo_git" && "$repo_git" != /* ]] && repo_git="$PWD/$repo_git"
+        if [[ -n "$repo_git" && "${repo_git:A:h}/" == "${CLAUDE_WORK_TREE:A}/"* ]]; then
+            echo "$CLAUDE_WORK_CONFIG_DIR"
+        else
+            echo "$HOME/.claude"
+        fi
     fi
 }
 
@@ -50,7 +64,7 @@ function claude-account() {    # claude-account() prints which Claude account/co
 }
 
 function claude() {    # claude() will launch Claude Code with the work account inside ~/Git/work, personal elsewhere. Pass --personal to force the personal account. ex: $ claude --personal
-    local use_personal=0 arg cfg work_tree
+    local use_personal=0 arg cfg work_tree repo_git
     local -a forwarded=()
     for arg in "$@"; do
         case "$arg" in
@@ -70,7 +84,20 @@ function claude() {    # claude() will launch Claude Code with the work account 
         if [[ "${PWD:A}/" == "${work_tree:A}/"* ]]; then
             cfg="${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"
         else
-            cfg="$HOME/.claude"
+            # Linked worktrees of a work repo (herdr, EnterWorktree,
+            # .worktrees/) live outside the work tree: route by the repo
+            # the checkout belongs to. --git-common-dir is the shared
+            # .git of a linked worktree (absolute) or ".git" / "../.git"
+            # (relative) in a main checkout; :A resolves symlinks and
+            # "..", :h drops the .git segment. No git, or not a repo ->
+            # personal, as before.
+            repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)"
+            [[ -n "$repo_git" && "$repo_git" != /* ]] && repo_git="$PWD/$repo_git"
+            if [[ -n "$repo_git" && "${repo_git:A:h}/" == "${work_tree:A}/"* ]]; then
+                cfg="${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"
+            else
+                cfg="$HOME/.claude"
+            fi
         fi
     fi
     # Hard floor: never launch with an empty config dir (an empty
