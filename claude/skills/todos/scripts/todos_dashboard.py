@@ -32,8 +32,7 @@ MAX_LINKS = 5
 DEFAULT_COMPLETED = 10
 SATISFIED = ("done", "merged")
 IN_FLIGHT_STATUSES = ("kickoff", "in-progress", "blocked", "review-dispatched",
-                      "changes-requested", "reviewed", "completed",
-                      "phase-advanced", "paused")
+                      "changes-requested", "reviewed", "completed")
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 PR_URL_RE = re.compile(r"^https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 ARTIFACT_URL_RE = re.compile(r"^https?://claude\.ai/(code/)?artifacts/")
@@ -1155,21 +1154,40 @@ def default_state_root():
     return Path(cfg) / "herdr-orch"
 
 
+def _leaf_form(path):
+    """Resolve `path`'s containing directory but leave its own leaf name
+    literal -- the shape os.replace() actually acts on: it swaps whatever
+    name `path` refers to, never following a symlink AT that name. Applying
+    this identically to both `out` and each protected root normalizes any
+    ancestor-path aliasing (e.g. macOS's /var -> /private/var) on both sides
+    equally, so a plain string comparison afterward is not fooled by one
+    side happening to already be in resolved form and the other not.
+    """
+    return Path(os.path.realpath(path.parent)) / path.name
+
+
 def guard_out_path(out, protected):
     """Refuse to write under .todos/ or the state root, through symlinks too.
 
-    Resolves the containing directory (so a symlinked ancestor directory is
-    still caught) but leaves the leaf name itself unresolved: os.replace()
-    swaps the name `out` refers to, not whatever a pre-existing symlink at
-    that name currently points at, so a symlink planted AT `out` cannot
-    escape the guard by pointing somewhere else -- the write still lands on
-    `out`'s own name, wherever that name actually sits.
+    Three symlink shapes must all be caught, since no single realpath() call
+    covers all of them. (1) A symlinked ancestor directory earlier in the
+    path: `_leaf_form` resolves it. (2) A symlink placed AT `out` itself,
+    pointing outside a protected dir: `_leaf_form` leaves the leaf
+    unresolved, so the comparison uses the name the write actually lands on,
+    not wherever the symlink points. (3) A protected root that is ITSELF a
+    symlink (the routine worktree case, `.todos` or the state root pointing
+    at the main checkout) named directly via --out: comparing `_leaf_form`
+    on both sides catches this without resolving the root's own name away;
+    a separate check against the root's fully resolved target still catches
+    a write reaching the same real directory through an unrelated symlink.
     """
-    real_parent = Path(os.path.realpath(out.parent))
-    candidate = real_parent / out.name
+    out_leaf = _leaf_form(out)
     for label, p in protected:
+        p_leaf = _leaf_form(p)
         real_p = Path(os.path.realpath(p))
-        if candidate == real_p or real_p in candidate.parents:
+        if out_leaf == p_leaf or p_leaf in out_leaf.parents:
+            die(f"refusing to write the dashboard under {label}: {out}")
+        if out_leaf == real_p or real_p in out_leaf.parents:
             die(f"refusing to write the dashboard under {label}: {out}")
 
 

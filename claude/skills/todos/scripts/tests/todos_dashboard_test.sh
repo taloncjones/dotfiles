@@ -397,6 +397,46 @@ test_symlink_at_out() {
 }
 test_symlink_at_out
 
+test_symlinked_protected_root() {
+  local repo sr real out parent link_sr
+  # A protected root that is ITSELF a symlink (the routine worktree case):
+  # resolving it to its target and comparing only the resolved form misses
+  # the root's own unresolved name, which is exactly the name --out can
+  # target directly. Both .todos and the state root must refuse this.
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; real=$(mk_dir) || exit 2
+  guard_fixture "$repo"
+  ln -s "$real" "$repo/.todos"
+  out=$(render "$repo" "$sr" --out "$repo/.todos")
+  assert_eq "guard: --out naming a symlinked .todos exits 1" "$(rc)" "1"
+  assert_contains "guard: symlinked .todos message" "$(err)" "refusing to write"
+  [ -L "$repo/.todos" ] && ok "guard: symlinked .todos left in place" || bad "guard: symlinked .todos left in place" "symlink replaced"
+  [ -d "$real" ] && ok "guard: .todos symlink target untouched" || bad "guard: .todos symlink target untouched" "target removed"
+  rm_fixture "$repo" "$sr" "$real"
+
+  parent=$(mk_dir) || exit 2; real=$(mk_dir) || exit 2
+  guard_fixture "$parent"
+  ln -s "$real" "$parent/state"
+  link_sr="$parent/state"
+  repo=$(mk_repo) || exit 2
+  out=$(render "$repo" "$link_sr" --out "$link_sr")
+  assert_eq "guard: --out naming a symlinked state root exits 1" "$(rc)" "1"
+  assert_contains "guard: symlinked state root message" "$(err)" "refusing to write"
+  [ -L "$link_sr" ] && ok "guard: symlinked state root left in place" || bad "guard: symlinked state root left in place" "symlink replaced"
+  [ -d "$real" ] && ok "guard: state root symlink target untouched" || bad "guard: state root symlink target untouched" "target removed"
+  rm_fixture "$repo" "$parent" "$real"
+
+  # A normal, unprotected --out must still succeed -- the tightened guard
+  # must not overreach into ordinary writes.
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"
+  out=$(render "$repo" "$sr" --out "$repo/out/normal.html")
+  assert_eq "guard: normal --out still exits 0" "$(rc)" "0"
+  [ -f "$repo/out/normal.html" ] && ok "guard: normal --out still writes" || bad "guard: normal --out still writes" "missing"
+  rm_fixture "$repo" "$sr"
+
+  ok "guard: symlinked protected root named directly via --out"
+}
+test_symlinked_protected_root
+
 test_failed_write_preserves() {
   local repo sr f before after out
   repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
@@ -736,9 +776,12 @@ EOF
   ok "status: computed state overrides manual status"
   rm_fixture "$repo" "$sr"
 
-  # A herdr status of completed/phase-advanced/paused means implementation
-  # already happened (review/merge pending); such a todo must not be offered
-  # in Ready for fresh pickup, even if the author also marked it someday.
+  # A herdr status of completed means implementation already happened
+  # (review/merge pending); such a todo must not be offered in Ready for
+  # fresh pickup, even if the author also marked it someday. The second
+  # todo below uses in-progress -- the real persisted status herdr writes
+  # for a paused/phase-advanced task, per its transition table -- rather
+  # than a "paused" record herdr never actually produces.
   repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
   local slug tasks
   slug=$(core_slug git@github.com:Org/Repo.git); tasks="$sr/$slug/tasks"; mkdir -p "$tasks"
@@ -751,23 +794,24 @@ status: someday
 EOF
   printf '{"status":"completed","workers":[{"phase":"implement","agent":"impl-a"}]}' \
     >"$tasks/td-2026-05-01-completed-not-merged.json"
-  mk_todo "$repo" pending 2026-05-02-paused <<'EOF'
+  mk_todo "$repo" pending 2026-05-02-in-progress <<'EOF'
 ---
 created: 2026-05-02
-title: Paused
+title: In progress
+status: waiting
 ---
 EOF
-  printf '{"status":"paused","workers":[{"phase":"implement","agent":"impl-b"}]}' \
-    >"$tasks/td-2026-05-02-paused.json"
+  printf '{"status":"in-progress","workers":[{"phase":"implement","agent":"impl-b"}]}' \
+    >"$tasks/td-2026-05-02-in-progress.json"
   render "$repo" "$sr" --out "$f" >/dev/null
   assert_file_has "status: completed status sorts in-flight, not ready" "$f" \
     'data-todo="2026-05-01-completed-not-merged" data-state="open" data-task-status="completed"'
   assert_file_lacks "status: completed status is not someday despite the field" "$f" \
     '<details class="bucket"><summary><h3 data-bucket="someday">'
-  assert_file_has "status: paused status sorts in-flight" "$f" \
-    'data-todo="2026-05-02-paused" data-state="open" data-task-status="paused"'
+  assert_file_has "status: in-progress status sorts in-flight despite waiting field" "$f" \
+    'data-todo="2026-05-02-in-progress" data-state="open" data-task-status="in-progress"'
   assert_file_has "status: in-flight heading covers both" "$f" '<h3 data-bucket="in-flight">In flight <span class="bucket-count">2</span></h3>'
-  ok "status: herdr completed/paused status overrides Ready and Someday"
+  ok "status: herdr status overrides Ready and Someday/Waiting"
   rm_fixture "$repo" "$sr"
 }
 test_status_buckets
