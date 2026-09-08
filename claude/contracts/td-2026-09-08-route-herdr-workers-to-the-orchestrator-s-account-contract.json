@@ -1,0 +1,106 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-08-route-herdr-workers-to-the-orchestrator-s-account",
+  "commands": [
+    {
+      "name": "zsh-syntax",
+      "run": "zsh -n zsh/claude-account.zsh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "py-compile-hooks",
+      "run": "python3 -m py_compile claude/hooks/account_guard.py claude/hooks/herdr_orch_core.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "wrapper-self-contained",
+      "run": "! awk '/^function claude\\(\\)/,/^}/' zsh/claude-account.zsh | sed 's/#.*//' | grep -q '_claude_config_dir'",
+      "timeout_secs": 30
+    },
+    {
+      "name": "wrapper-rung-in-both-functions",
+      "run": "awk '/^function claude\\(\\)/,/^}/' zsh/claude-account.zsh | sed 's/#.*//' | grep -qF 'rev-parse --git-common-dir' && awk '/^function _claude_config_dir\\(\\)/,/^}/' zsh/claude-account.zsh | sed 's/#.*//' | grep -qF 'rev-parse --git-common-dir'",
+      "timeout_secs": 30
+    },
+    {
+      "name": "wrapper-routes-linked-worktrees",
+      "run": "unset CLAUDE_CONFIG_DIR; set -e; T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; T=$(cd \"$T\" && pwd -P); H=\"$T/home\"; mkdir -p \"$H/Git/work\" \"$H/elsewhere\" \"$T/bin\"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; for r in \"$H/Git/work/wrepo\" \"$H/elsewhere/prepo\"; do git -c init.defaultBranch=main init -q \"$r\"; git -C \"$r\" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; done; git -C \"$H/Git/work/wrepo\" worktree add -q \"$H/.herdr/worktrees/wrepo/wt\" -b wt; git -C \"$H/elsewhere/prepo\" worktree add -q \"$H/.herdr/worktrees/prepo/wt\" -b wt; mkdir -p \"$H/.herdr/worktrees/wrepo/wt/sub\"; printf '#!/bin/sh\\nprintf \"%%s\" \"${CLAUDE_CONFIG_DIR-UNSET}\" > \"$RECORD\"\\n' > \"$T/bin/claude\"; chmod +x \"$T/bin/claude\"; ZSH=$(command -v zsh); run() { : > \"$T/rec\"; RECORD=\"$T/rec\" HOME=\"$H\" PATH=\"$T/bin:$PATH\" \"$ZSH\" -c \"cd '$1' && source '$PWD/zsh/claude-account.zsh' && $2\" 2>\"$T/err\"; cat \"$T/rec\"; }; [ \"$(run \"$H/.herdr/worktrees/wrepo/wt\" claude)\" = \"$H/.claude-work\" ]; [ \"$(run \"$H/.herdr/worktrees/wrepo/wt/sub\" claude)\" = \"$H/.claude-work\" ]; [ \"$(run \"$H/.herdr/worktrees/prepo/wt\" claude)\" = \"$H/.claude\" ]; [ \"$(run \"$H/.herdr/worktrees/wrepo/wt\" \"claude --personal\")\" = \"$H/.claude\" ]; [ \"$(run \"$H/.herdr/worktrees/wrepo/wt\" \"CLAUDE_CONFIG_DIR=$H/custom claude\")\" = \"$H/custom\" ]; [ \"$(run \"$H/.herdr/worktrees/wrepo/wt\" \"unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; claude\")\" = \"$H/.claude-work\" ]; [ \"$(run \"$H/elsewhere\" claude)\" = \"$H/.claude\" ]; [ ! -s \"$T/err\" ]",
+      "timeout_secs": 120
+    },
+    {
+      "name": "wrapper-claude-account-labels-linked-worktrees",
+      "run": "unset CLAUDE_CONFIG_DIR; set -e; T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; T=$(cd \"$T\" && pwd -P); H=\"$T/home\"; mkdir -p \"$H/Git/work\" \"$H/elsewhere\" \"$T/bin\"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; for r in \"$H/Git/work/wrepo\" \"$H/elsewhere/prepo\"; do git -c init.defaultBranch=main init -q \"$r\"; git -C \"$r\" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; done; git -C \"$H/Git/work/wrepo\" worktree add -q \"$H/.herdr/worktrees/wrepo/wt\" -b wt; git -C \"$H/elsewhere/prepo\" worktree add -q \"$H/.herdr/worktrees/prepo/wt\" -b wt; mkdir -p \"$H/.herdr/worktrees/wrepo/wt/sub\"; printf '#!/bin/sh\\nprintf \"%%s\" \"${CLAUDE_CONFIG_DIR-UNSET}\" > \"$RECORD\"\\n' > \"$T/bin/claude\"; chmod +x \"$T/bin/claude\"; ZSH=$(command -v zsh); run() { : > \"$T/rec\"; RECORD=\"$T/rec\" HOME=\"$H\" PATH=\"$T/bin:$PATH\" \"$ZSH\" -c \"cd '$1' && source '$PWD/zsh/claude-account.zsh' && $2\" 2>\"$T/err\"; cat \"$T/rec\"; }; lab() { HOME=\"$H\" PATH=\"$T/bin:$PATH\" \"$ZSH\" -c \"cd '$1' && source '$PWD/zsh/claude-account.zsh' && claude-account\" 2>/dev/null; }; case \"$(lab \"$H/.herdr/worktrees/wrepo/wt\")\" in work*) ;; *) exit 1;; esac; case \"$(lab \"$H/.herdr/worktrees/prepo/wt\")\" in personal*) ;; *) exit 1;; esac",
+      "timeout_secs": 120
+    },
+    {
+      "name": "wrapper-degrades-without-git",
+      "run": "unset CLAUDE_CONFIG_DIR; set -e; T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; T=$(cd \"$T\" && pwd -P); H=\"$T/home\"; mkdir -p \"$H/Git/work\" \"$H/elsewhere\" \"$T/bin\"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; for r in \"$H/Git/work/wrepo\" \"$H/elsewhere/prepo\"; do git -c init.defaultBranch=main init -q \"$r\"; git -C \"$r\" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; done; git -C \"$H/Git/work/wrepo\" worktree add -q \"$H/.herdr/worktrees/wrepo/wt\" -b wt; git -C \"$H/elsewhere/prepo\" worktree add -q \"$H/.herdr/worktrees/prepo/wt\" -b wt; mkdir -p \"$H/.herdr/worktrees/wrepo/wt/sub\"; printf '#!/bin/sh\\nprintf \"%%s\" \"${CLAUDE_CONFIG_DIR-UNSET}\" > \"$RECORD\"\\n' > \"$T/bin/claude\"; chmod +x \"$T/bin/claude\"; ZSH=$(command -v zsh); run() { : > \"$T/rec\"; RECORD=\"$T/rec\" HOME=\"$H\" PATH=\"$T/bin:$PATH\" \"$ZSH\" -c \"cd '$1' && source '$PWD/zsh/claude-account.zsh' && $2\" 2>\"$T/err\"; cat \"$T/rec\"; }; : > \"$T/rec\"; RECORD=\"$T/rec\" HOME=\"$H\" PATH=\"$T/bin\" \"$ZSH\" -c \"cd '$H/.herdr/worktrees/wrepo/wt' && source '$PWD/zsh/claude-account.zsh' && claude\" 2>\"$T/err\"; [ \"$(cat \"$T/rec\")\" = \"$H/.claude\" ]; [ ! -s \"$T/err\" ]",
+      "timeout_secs": 120
+    },
+    {
+      "name": "wrapper-suite-covers-linked-worktrees",
+      "run": "grep -qF 'git worktree add' zsh/claude-account.test.sh && grep -qF 'LINKED_WORK' zsh/claude-account.test.sh && grep -qF 'LINKED_PERSONAL' zsh/claude-account.test.sh && grep -qF 'GIT_CONFIG_GLOBAL=/dev/null' zsh/claude-account.test.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "wrapper-suite",
+      "run": "CLAUDE_CONFIG_DIR=/nonexistent/inherited-cfg sh zsh/claude-account.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "skill-defines-cfg",
+      "run": "grep -qxF 'CFG=\"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"' claude/skills/herdr-orchestration/SKILL.md && grep -qF \"printf '%s' \\\"\\$CFG\\\" | grep -qE '^/[A-Za-z0-9_./+:@-]+\\$'\" claude/skills/herdr-orchestration/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "skill-launch-lines-carry-cfg",
+      "run": "! grep -F 'pane run <pane_id> \"' claude/skills/herdr-orchestration/SKILL.md | grep -vF 'pane run <pane_id> \"CLAUDE_CONFIG_DIR=$CFG ' | grep -q . && [ \"$(grep -cF 'pane run <pane_id> \"CLAUDE_CONFIG_DIR=$CFG ' claude/skills/herdr-orchestration/SKILL.md)\" -ge 3 ] && ! grep -qF -- '-> `claude --model' claude/skills/herdr-orchestration/SKILL.md && [ \"$(grep -cF -- '-> `CLAUDE_CONFIG_DIR=$CFG claude --model' claude/skills/herdr-orchestration/SKILL.md)\" -ge 2 ] && grep -qF 'CLAUDE_CONFIG_DIR=$CFG python3 $CORE run-mech' claude/skills/herdr-orchestration/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "contract-suite-fixtures-carry-cfg",
+      "run": "grep -qF 'CFG=\"${CLAUDE_CONFIG_DIR:-$HOME/.claude}\"' claude/hooks/herdr-orch-contract.test.sh && grep -qF 'CLAUDE_CONFIG_DIR=$CFG claude --model' claude/hooks/herdr-orch-contract.test.sh && grep -qF 'CLAUDE_CONFIG_DIR=$CFG $CMD' claude/hooks/herdr-orch-contract.test.sh && grep -qF 'every pane run line carries CLAUDE_CONFIG_DIR=' claude/hooks/herdr-orch-contract.test.sh && ! grep -qF 'pane run \"$PID\" \"claude' claude/hooks/herdr-orch-contract.test.sh && ! grep -qF 'pane run \"$PID\" \"$CMD\"' claude/hooks/herdr-orch-contract.test.sh && ! grep -qF 'pane run \"$PID\" \"python3' claude/hooks/herdr-orch-contract.test.sh && grep -qF 'mech worker and its state root follow the pinned config dir' claude/hooks/herdr-orch-contract.test.sh && grep -qF 'interactive launch payload replayed through the wrapper hands claude the pinned dir' claude/hooks/herdr-orch-contract.test.sh && grep -qF 'launch config dir rule accepts the fixture dir and rejects relative and unsafe values' claude/hooks/herdr-orch-contract.test.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "contract-suite",
+      "run": "sh claude/hooks/herdr-orch-contract.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "guard-account-aware-linked-worktrees",
+      "run": "set -e; T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; H=\"$T/home\"; mkdir -p \"$H/.claude\" \"$H/.claude-work\" \"$H/Git/work\" \"$H/Git/personal\"; printf '{\"oauthAccount\":{\"accountUuid\":\"work-uuid\"}}' > \"$H/.claude-work/.claude.json\"; printf '{\"oauthAccount\":{\"accountUuid\":\"personal-uuid\"}}' > \"$H/.claude.json\"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; for r in \"$H/Git/work/wrepo\" \"$H/Git/personal/prepo\"; do git -c init.defaultBranch=main init -q \"$r\"; git -C \"$r\" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; done; git -C \"$H/Git/work/wrepo\" worktree add -q \"$H/.herdr/worktrees/wrepo/wt\" -b wt; git -C \"$H/Git/personal/prepo\" worktree add -q \"$H/.herdr/worktrees/prepo/wt\" -b wt; g() { printf '{\"cwd\":\"%s\"}' \"$2\" | env -u CLAUDE_CONFIG_DIR HOME=\"$H\" CLAUDE_WORK_TREE=\"$H/Git/work\" CLAUDE_WORK_CONFIG_DIR=\"$H/.claude-work\" ${1:+CLAUDE_CONFIG_DIR=\"$1\"} python3 claude/hooks/account_guard.py 2>/dev/null; }; ! g \"$H/.claude-work\" \"$H/.herdr/worktrees/wrepo/wt\" | grep -q account_guard; g \"\" \"$H/.herdr/worktrees/wrepo/wt\" | grep -q account_guard; g \"$H/.claude-work\" \"$H/.herdr/worktrees/prepo/wt\" | grep -q account_guard; ! g \"\" \"$H/.herdr/worktrees/prepo/wt\" | grep -q account_guard",
+      "timeout_secs": 120
+    },
+    {
+      "name": "guard-path-fallback-linked-worktrees",
+      "run": "set -e; T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; H=\"$T/home\"; mkdir -p \"$H/.claude\" \"$H/Git/work\"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; git -c init.defaultBranch=main init -q \"$H/Git/work/wrepo\"; git -C \"$H/Git/work/wrepo\" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; git -C \"$H/Git/work/wrepo\" worktree add -q \"$H/.herdr/worktrees/wrepo/wt\" -b wt; g() { printf '{\"cwd\":\"%s\"}' \"$2\" | env -u CLAUDE_CONFIG_DIR HOME=\"$H\" CLAUDE_WORK_TREE=\"$H/Git/work\" CLAUDE_WORK_CONFIG_DIR=\"$H/.claude-work\" ${1:+CLAUDE_CONFIG_DIR=\"$1\"} python3 claude/hooks/account_guard.py 2>/dev/null; }; g \"\" \"$H/.herdr/worktrees/wrepo/wt\" | grep -q account_guard; ! g \"$H/.claude-work\" \"$H/.herdr/worktrees/wrepo/wt\" | grep -q account_guard",
+      "timeout_secs": 120
+    },
+    {
+      "name": "guard-degrades-without-git",
+      "run": "set -e; T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; H=\"$T/home\"; mkdir -p \"$H/.claude\" \"$H/Git/work\" \"$T/nogit\" \"$T/slowgit\" \"$T/badgit\"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; git -c init.defaultBranch=main init -q \"$H/Git/work/wrepo\"; git -C \"$H/Git/work/wrepo\" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; git -C \"$H/Git/work/wrepo\" worktree add -q \"$H/.herdr/worktrees/wrepo/wt\" -b wt; printf '#!/bin/sh\\nsleep 5\\n' > \"$T/slowgit/git\"; printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$HOME/Git/work/wrepo/.git\" extra\\n' > \"$T/badgit/git\"; chmod +x \"$T/slowgit/git\" \"$T/badgit/git\"; PY=$(command -v python3); for gp in \"$T/nogit\" \"$T/slowgit:$PATH\" \"$T/badgit:$PATH\"; do t0=$(date +%s); out=$(printf '{\"cwd\":\"%s\"}' \"$H/.herdr/worktrees/wrepo/wt\" | env -u CLAUDE_CONFIG_DIR HOME=\"$H\" PATH=\"$gp\" CLAUDE_WORK_TREE=\"$H/Git/work\" CLAUDE_WORK_CONFIG_DIR=\"$H/.claude-work\" \"$PY\" claude/hooks/account_guard.py 2>/dev/null); t1=$(date +%s); [ $((t1 - t0)) -le 3 ]; ! printf '%s' \"$out\" | grep -q account_guard; done",
+      "timeout_secs": 120
+    },
+    {
+      "name": "guard-suite-covers-linked-worktrees",
+      "run": "grep -qF 'guard: linked worktree' claude/hooks/claude-hooks.test.sh && grep -qF 'worktree add' claude/hooks/claude-hooks.test.sh && grep -qF 'slowgit' claude/hooks/claude-hooks.test.sh && grep -qF 'nogit' claude/hooks/claude-hooks.test.sh && grep -qF 'badgit' claude/hooks/claude-hooks.test.sh && grep -qF 'intree cwd with slowgit' claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "docs-mention-linked-worktree",
+      "run": "for f in CLAUDE.md README.md .claude/skills/dotfiles-run-and-operate/SKILL.md; do grep -qi 'linked worktree' \"$f\" && grep -qF 'CLAUDE_CONFIG_DIR=$CFG' \"$f\" || exit 1; done; grep -qi 'linked worktree' zsh/claude-account.zsh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "planning-artifacts-untracked",
+      "run": "! git ls-files docs/specs docs/plans docs/superpowers | grep -q .",
+      "timeout_secs": 30
+    },
+    {
+      "name": "public-safety-suite",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 300
+    }
+  ]
+}
