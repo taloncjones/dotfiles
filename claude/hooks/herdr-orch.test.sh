@@ -246,6 +246,94 @@ for sid,fence in winners:
 sys.exit(0)
 PY
 
+check "allow-edit: live fence mints marker, audit line, truncated note" <<PY
+$LOAD
+import time
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ae");rd.mkdir(parents=True)
+f=c.claim_owner(rd,"S","h",1)
+rc=c.main(["allow-edit","--repo-slug","slug-ae","--session","S","--fence",str(f),"--minutes","5","--max-edits","2","--note","x"*300])
+assert rc==0
+m=json.loads((rd/"orch-edit-allow.json").read_text())
+assert m["v"]==1 and re.match(r"[0-9a-f]{16}\$",m["marker_id"]) and m["session_id"]=="S" and m["fence"]==f
+assert m["minutes"]==5 and m["max_edits"]==2 and len(m["note"])==200
+assert time.time()+290<m["expires_epoch"]<=time.time()+300
+assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\$",m["expires"]) and re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\$",m["ts"])
+lines=(rd/"tasks"/"orch-edits.jsonl").read_text().splitlines();assert len(lines)==1
+a=json.loads(lines[0]);assert a["v"]==1 and a["event"]=="allow-edit" and a["marker_id"]==m["marker_id"] and a["max_edits"]==2 and a["fence"]==f
+sys.exit(0)
+PY
+
+check "allow-edit: two mints get distinct marker ids and default max_edits 3" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ae2");rd.mkdir(parents=True)
+f=c.claim_owner(rd,"S","h",1)
+assert c.main(["allow-edit","--repo-slug","slug-ae2","--session","S","--fence",str(f),"--minutes","1"])==0
+a=json.loads((rd/"orch-edit-allow.json").read_text())
+assert c.main(["allow-edit","--repo-slug","slug-ae2","--session","S","--fence",str(f),"--minutes","1"])==0
+b=json.loads((rd/"orch-edit-allow.json").read_text())
+assert a["marker_id"]!=b["marker_id"] and a["max_edits"]==3 and b["note"]==""
+assert len((rd/"tasks"/"orch-edits.jsonl").read_text().splitlines())==2
+sys.exit(0)
+PY
+
+check "allow-edit: stale fence exits 2 and writes nothing" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ae3");rd.mkdir(parents=True)
+f=c.claim_owner(rd,"S","h",1)
+try:
+    c.main(["allow-edit","--repo-slug","slug-ae3","--session","S","--fence",str(f+1),"--minutes","5"]);raise AssertionError("should exit 2")
+except SystemExit as e:
+    assert e.code==2
+try:
+    c.main(["allow-edit","--repo-slug","slug-ae3","--session","OTHER","--fence",str(f),"--minutes","5"]);raise AssertionError("should exit 2")
+except SystemExit as e:
+    assert e.code==2
+assert not (rd/"orch-edit-allow.json").exists() and not (rd/"tasks").exists()
+sys.exit(0)
+PY
+
+check "allow-edit: minutes and max-edits out of range exit 2 and write nothing" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ae4");rd.mkdir(parents=True)
+f=c.claim_owner(rd,"S","h",1)
+for extra in (["--minutes","0"],["--minutes","16"],["--minutes","5","--max-edits","0"],["--minutes","5","--max-edits","11"]):
+    try:
+        c.main(["allow-edit","--repo-slug","slug-ae4","--session","S","--fence",str(f)]+extra);raise AssertionError("should exit 2")
+    except SystemExit as e:
+        assert e.code==2
+assert not (rd/"orch-edit-allow.json").exists() and not (rd/"tasks").exists()
+sys.exit(0)
+PY
+
+check "allow-edit: symlinked audit log is not written through but the marker still lands" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ae5");rd.mkdir(parents=True);(rd/"tasks").mkdir()
+victim=os.path.join(root,"victim");(rd/"tasks"/"orch-edits.jsonl").symlink_to(victim)
+f=c.claim_owner(rd,"S","h",1)
+assert c.main(["allow-edit","--repo-slug","slug-ae5","--session","S","--fence",str(f),"--minutes","5"])==0
+assert (rd/"orch-edit-allow.json").exists() and not os.path.exists(victim)
+sys.exit(0)
+PY
+
+check "allow-edit: append_orch_edit treats a short os.write as failure" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ae6");rd.mkdir(parents=True)
+real=c.os.write
+c.os.write=lambda fd,data: real(fd,data[:3])
+try:
+    assert c.append_orch_edit(rd,{"v":1,"event":"allow-edit"}) is False
+finally:
+    c.os.write=real
+assert c.append_orch_edit(rd,{"v":1,"event":"allow-edit"}) is True
+sys.exit(0)
+PY
+
 CLI="python3 claude/hooks/herdr_orch_core.py"
 
 check "should_dispatch_review: once per HEAD, re-review on new HEAD" <<PY

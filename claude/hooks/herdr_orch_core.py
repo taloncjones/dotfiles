@@ -612,6 +612,65 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+ALLOW_EDIT_MAX_MINUTES = 15
+ALLOW_EDIT_MAX_EDITS = 10
+ALLOW_EDIT_NOTE_MAX = 200
+ORCH_EDITS_FILE = "orch-edits.jsonl"
+ORCH_MARKER_FILE = "orch-edit-allow.json"
+
+
+def _iso(epoch) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def allow_edit_marker(session_id, fence, minutes, max_edits, note, now=None) -> dict:
+    """The orch-edit-allow.json record (orch_edit_guard.py reads it). One
+    fresh marker_id per mint is the budget identity: two mints in the same
+    second still get separate budgets."""
+    now = time.time() if now is None else now
+    exp = now + 60 * minutes
+    return {
+        "v": 1,
+        "marker_id": secrets.token_hex(8),
+        "session_id": session_id,
+        "fence": int(fence),
+        "ts": _iso(now),
+        "minutes": int(minutes),
+        "max_edits": int(max_edits),
+        "expires_epoch": exp,
+        "expires": _iso(exp),
+        "note": (note or "")[:ALLOW_EDIT_NOTE_MAX],
+    }
+
+
+def append_orch_edit(rd, rec) -> bool:
+    """Append one line to <rd>/tasks/orch-edits.jsonl, creating tasks/.
+    False (never raises) when the file is a symlink, a FIFO, or cannot be
+    opened for append -- the guard hook refuses to reserve budget against
+    such a file, so the caller warns."""
+    tasks = Path(rd) / "tasks"
+    p = tasks / ORCH_EDITS_FILE
+    try:
+        tasks.mkdir(parents=True, exist_ok=True)
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            st = None
+        if st is not None and not stat.S_ISREG(st.st_mode):
+            return False
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK
+                 | getattr(os, "O_NOFOLLOW", 0))
+        data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
+        fd = os.open(p, flags, 0o600)
+        try:
+            written = os.write(fd, data)
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+    return written == len(data)  # a short write is not a record
+
+
 def write_json_atomic(path, data) -> None:
     path = Path(path)
     tmp = Path(f"{path}.tmp.{os.getpid()}")
@@ -1720,6 +1779,10 @@ def main(argv=None) -> int:
     add("resolve-effort", "--role")
     add("routing-table", "--session")
     add("disable-model", "--model", fenced=True)
+    ae = add("allow-edit", fenced=True)
+    ae.add_argument("--minutes", type=int, required=True)
+    ae.add_argument("--max-edits", type=int, default=3)
+    ae.add_argument("--note", default="")
     mc = add("mech-caps")
     mc.add_argument("--max-turns", type=int, default=None)
     mc.add_argument("--max-budget-usd", type=float, default=None)
@@ -1892,6 +1955,25 @@ def main(argv=None) -> int:
         rec = {"v": 1, "session_id": ns.session, "available": dict(available)}
         rec["available"][ns.model] = False
         write_json_atomic(rd / "capabilities.json", rec)
+        return 0
+    if ns.cmd == "allow-edit":
+        rd = _fenced(ns)
+        _require(1 <= ns.minutes <= ALLOW_EDIT_MAX_MINUTES,
+                 f"--minutes must be an integer in 1..{ALLOW_EDIT_MAX_MINUTES}")
+        _require(1 <= ns.max_edits <= ALLOW_EDIT_MAX_EDITS,
+                 f"--max-edits must be an integer in 1..{ALLOW_EDIT_MAX_EDITS}")
+        rec = allow_edit_marker(ns.session, ns.fence, ns.minutes, ns.max_edits, ns.note)
+        write_json_atomic(rd / ORCH_MARKER_FILE, rec)
+        audit = {"v": 1, "ts": rec["ts"], "event": "allow-edit",
+                 "marker_id": rec["marker_id"], "session_id": ns.session,
+                 "fence": rec["fence"], "minutes": rec["minutes"],
+                 "max_edits": rec["max_edits"], "expires": rec["expires"],
+                 "note": rec["note"]}
+        if not append_orch_edit(rd, audit):
+            print("[WARNING] could not append to tasks/orch-edits.jsonl; the "
+                  "edit guard cannot reserve budget until it is a writable "
+                  "regular file", file=sys.stderr)
+        print(f"expires {rec['expires']} marker {rec['marker_id']}")
         return 0
     if ns.cmd == "classify-probe":
         _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
