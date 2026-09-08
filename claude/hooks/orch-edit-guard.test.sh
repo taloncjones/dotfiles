@@ -532,5 +532,40 @@ else
     printf 'FAIL  AC9 hanging git returns within the budget (%ss)\n' "$elapsed" >&2; FAIL=$((FAIL + 1))
 fi
 
+# --- static: shebang, executable, compiles, registration -----------------
+if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
+        && PYTHONPYCACHEPREFIX="$FIX/pyc" python3 -m py_compile "$HOOK"; then
+    printf 'PASS  static: hook is executable, python3 shebang, compiles\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  static: hook is executable, python3 shebang, compiles\n' >&2; FAIL=$((FAIL + 1))
+fi
+if grep -q '^sys.dont_write_bytecode = True' "$HOOK" && grep -q '^import rm_guard' "$HOOK" && grep -q '^import herdr_orch_core as core' "$HOOK"; then
+    printf 'PASS  static: bytecode suppression precedes the sibling imports\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  static: bytecode suppression precedes the sibling imports\n' >&2; FAIL=$((FAIL + 1))
+fi
+if [ -z "${ORCH_EDIT_GUARD_HOOK:-}" ]; then
+    if python3 - <<'PY'
+import json, sys
+pre = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
+def cmds(matcher):
+    return [h["command"] for e in pre if e.get("matcher") == matcher for h in e["hooks"]]
+ok = cmds("Bash")[-1] == "~/.claude/hooks/orch_edit_guard.py" \
+    and cmds("Edit|Write") == ["~/.claude/hooks/protect_claude_md.py", "~/.claude/hooks/orch_edit_guard.py"] \
+    and sum(c == "~/.claude/hooks/orch_edit_guard.py" for m in ("Bash", "Edit|Write") for c in cmds(m)) == 2
+sys.exit(0 if ok else 1)
+PY
+    then
+        printf 'PASS  static: template registers the guard last in the Bash and Edit|Write groups\n'; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  static: template registers the guard last in the Bash and Edit|Write groups\n' >&2; FAIL=$((FAIL + 1))
+    fi
+    if grep -qx 'sh claude/hooks/orch-edit-guard.test.sh' bin/dotfiles-tests; then
+        printf 'PASS  static: suite is registered in bin/dotfiles-tests\n'; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  static: suite is registered in bin/dotfiles-tests\n' >&2; FAIL=$((FAIL + 1))
+    fi
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

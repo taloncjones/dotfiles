@@ -30,6 +30,7 @@ sh claude/hooks/ecc-hook-isolation.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
 sh claude/hooks/scratch-policy.test.sh
+sh claude/hooks/orch-edit-guard.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
 sh git/hooks/commit-msg.test.sh

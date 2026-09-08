@@ -335,14 +335,34 @@ want = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/orch_edit_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
 then
-    printf 'PASS  hwg: template lists the Bash guards in order, worktree guard last\n'
+    printf 'PASS  hwg: template lists the Bash guards in order, orch_edit_guard last\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  hwg: template lists the Bash guards in order, worktree guard last\n' >&2
+    printf 'FAIL  hwg: template lists the Bash guards in order, orch_edit_guard last\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# Static registration: the Edit|Write PreToolUse group is the warn-only
+# CLAUDE.md guard followed by the orchestrator edit guard, nothing else.
+if python3 - <<'PY'
+import json
+import sys
+
+tmpl = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
+cmds = [h["command"] for e in tmpl if e.get("matcher") == "Edit|Write" for h in e["hooks"]]
+sys.exit(0 if cmds == ["~/.claude/hooks/protect_claude_md.py",
+                        "~/.claude/hooks/orch_edit_guard.py"] else 1)
+PY
+then
+    printf 'PASS  template: Edit|Write PreToolUse group pins protect_claude_md then orch_edit_guard\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  template: Edit|Write PreToolUse group pins protect_claude_md then orch_edit_guard\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
