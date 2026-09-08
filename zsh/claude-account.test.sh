@@ -213,6 +213,31 @@ if command -v git >/dev/null 2>&1; then
     else
         fail "set -e: non-git cwd still reaches claude (git probe failure absorbed) (cfg='$got_cfg')"
     fi
+
+    # A corrupt / hook-wrapped git that prints two lines for
+    # --git-common-dir must be treated as "no repo" (mirrors
+    # account_guard.py's `"\n" in common -> None`), not fed into :A
+    # resolution. The stub's first line is a real path under the work
+    # tree's .git -- without the newline guard, :h of the combined
+    # (single, embedded-newline) path string still resolves under the
+    # work tree, so this cwd would misroute to work.
+    MULTI="$TMP/bin-multiline"
+    mkdir -p "$MULTI"
+    cat >"$MULTI/git" <<MULTIEOF
+#!/bin/sh
+printf '%s\n%s\n' "$SBHOME/Git/work/proj/.git" "corrupted-second-line"
+exit 0
+MULTIEOF
+    chmod +x "$MULTI/git"
+    : > "$TMP/rec"
+    err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$MULTI:$TMP/bin:$PATH" \
+        zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
+    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+    if [ -z "$err" ] && [ "$got_cfg" = "$SBHOME/.claude" ]; then
+        pass "multiline git-common-dir output treated as no-repo, routes personal"
+    else
+        fail "multiline git-common-dir output treated as no-repo, routes personal (err='$err' cfg='$got_cfg')"
+    fi
 else
     echo "SKIP: git not installed; linked-worktree cases not run"
 fi

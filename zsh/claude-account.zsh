@@ -46,6 +46,10 @@ function _claude_config_dir() {
         # || repo_git="" absorbs git's nonzero exit (e.g. "not a git
         # repository") so it can never trip errexit in a set -e caller.
         repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" || repo_git=""
+        # A corrupt / hook-wrapped git that prints multiple lines is not a
+        # valid --git-common-dir answer; treat it as no-repo, matching
+        # account_guard.py's "\n" in common -> None.
+        [[ "$repo_git" == *$'\n'* ]] && repo_git=""
         [[ -n "$repo_git" && "$repo_git" != /* ]] && repo_git="$PWD/$repo_git"
         if [[ -n "$repo_git" && "${repo_git:A:h}/" == "${CLAUDE_WORK_TREE:A}/"* ]]; then
             echo "$CLAUDE_WORK_CONFIG_DIR"
@@ -96,6 +100,10 @@ function claude() {    # claude() will launch Claude Code with the work account 
             # || repo_git="" absorbs git's nonzero exit (e.g. "not a git
             # repository") so it can never trip errexit in a set -e caller.
             repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" || repo_git=""
+            # A corrupt / hook-wrapped git that prints multiple lines is
+            # not a valid --git-common-dir answer; treat it as no-repo,
+            # matching account_guard.py's "\n" in common -> None.
+            [[ "$repo_git" == *$'\n'* ]] && repo_git=""
             [[ -n "$repo_git" && "$repo_git" != /* ]] && repo_git="$PWD/$repo_git"
             if [[ -n "$repo_git" && "${repo_git:A:h}/" == "${work_tree:A}/"* ]]; then
                 cfg="${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"
