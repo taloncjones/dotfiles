@@ -43,7 +43,9 @@ function _claude_config_dir() {
     elif [[ "${PWD:A}/" == "${CLAUDE_WORK_TREE:A}/"* ]]; then
         echo "$CLAUDE_WORK_CONFIG_DIR"
     else
-        repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)"
+        # || repo_git="" absorbs git's nonzero exit (e.g. "not a git
+        # repository") so it can never trip errexit in a set -e caller.
+        repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" || repo_git=""
         [[ -n "$repo_git" && "$repo_git" != /* ]] && repo_git="$PWD/$repo_git"
         if [[ -n "$repo_git" && "${repo_git:A:h}/" == "${CLAUDE_WORK_TREE:A}/"* ]]; then
             echo "$CLAUDE_WORK_CONFIG_DIR"
@@ -91,7 +93,9 @@ function claude() {    # claude() will launch Claude Code with the work account 
             # (relative) in a main checkout; :A resolves symlinks and
             # "..", :h drops the .git segment. No git, or not a repo ->
             # personal, as before.
-            repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)"
+            # || repo_git="" absorbs git's nonzero exit (e.g. "not a git
+            # repository") so it can never trip errexit in a set -e caller.
+            repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" || repo_git=""
             [[ -n "$repo_git" && "$repo_git" != /* ]] && repo_git="$PWD/$repo_git"
             if [[ -n "$repo_git" && "${repo_git:A:h}/" == "${work_tree:A}/"* ]]; then
                 cfg="${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"

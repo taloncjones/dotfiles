@@ -199,6 +199,20 @@ if command -v git >/dev/null 2>&1; then
     else
         fail "non-repo cwd: personal, no git noise on stderr (err='$err' cfg='$got_cfg')"
     fi
+
+    # Non-git cwd under `set -e`: the git probe's nonzero exit must not
+    # trip errexit and abort the wrapper before claude launches. Headless
+    # callers (cron, `zsh -c`, orchestrator dispatches without
+    # CLAUDE_CONFIG_DIR set) run under this exact condition.
+    : > "$TMP/rec"
+    RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+        zsh -ec "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" >/dev/null 2>&1
+    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+    if [ "$got_cfg" = "$SBHOME/.claude" ]; then
+        pass "set -e: non-git cwd still reaches claude (git probe failure absorbed)"
+    else
+        fail "set -e: non-git cwd still reaches claude (git probe failure absorbed) (cfg='$got_cfg')"
+    fi
 else
     echo "SKIP: git not installed; linked-worktree cases not run"
 fi
