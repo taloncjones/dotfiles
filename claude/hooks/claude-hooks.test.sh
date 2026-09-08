@@ -657,6 +657,83 @@ guard_case "guard: fallback path check, default dir on work repo -> warn" \
 guard_case "guard: fallback path check, default dir on personal repo -> silent" \
     silent "$GUARD_FIX/c" "" "$GUARD_FIX/c/Git/personal/repo"
 
+# Fixture D: linked worktrees. A herdr / EnterWorktree / .worktrees checkout
+# of a work repo lives outside the work tree; the guard judges it by the repo
+# it belongs to, exactly as the claude() wrapper does. Real repos are needed
+# for --git-common-dir; GIT_CONFIG_GLOBAL=/dev/null keeps the machine's
+# hooksPath and signing out. Reuses fixture B (accounts resolvable) and
+# fixture C (path-based fallback). Skipped when git is not installed.
+if command -v git >/dev/null 2>&1; then
+    for gh in b c; do
+        mkdir -p "$GUARD_FIX/$gh/Git/personal"
+        for repo in "$GUARD_FIX/$gh/Git/work/wrepo" "$GUARD_FIX/$gh/Git/personal/prepo"; do
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c init.defaultBranch=main init -q "$repo"
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$repo" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+        done
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$GUARD_FIX/$gh/Git/work/wrepo" worktree add -q "$GUARD_FIX/$gh/.herdr/worktrees/wrepo/wt" -b wt
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$GUARD_FIX/$gh/Git/personal/prepo" worktree add -q "$GUARD_FIX/$gh/.herdr/worktrees/prepo/wt" -b wt
+    done
+    guard_case "guard: linked worktree of a work repo, work account -> silent" \
+        silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/.herdr/worktrees/wrepo/wt"
+    guard_case "guard: linked worktree of a work repo, personal account -> warn" \
+        warn "$GUARD_FIX/b" "" "$GUARD_FIX/b/.herdr/worktrees/wrepo/wt"
+    guard_case "guard: linked worktree of a personal repo, work account -> warn" \
+        warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/.herdr/worktrees/prepo/wt"
+    guard_case "guard: linked worktree of a personal repo, personal account -> silent" \
+        silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/.herdr/worktrees/prepo/wt"
+    guard_case "guard: linked worktree, fallback path check, default dir on work repo -> warn" \
+        warn "$GUARD_FIX/c" "" "$GUARD_FIX/c/.herdr/worktrees/wrepo/wt"
+    guard_case "guard: linked worktree, fallback path check, work dir on work repo -> silent" \
+        silent "$GUARD_FIX/c" "$GUARD_FIX/c/.claude-work" "$GUARD_FIX/c/.herdr/worktrees/wrepo/wt"
+
+    # Degraded git: missing from PATH (nogit), hanging past the guard's 2 s
+    # subprocess timeout (slowgit), or printing two lines (badgit). All fall
+    # back to the path rule (cwd outside the work tree, default dir ->
+    # silent), exit 0, and must not stall SessionStart: 3 s wall clock.
+    mkdir -p "$GUARD_FIX/nogit" "$GUARD_FIX/slowgit" "$GUARD_FIX/badgit"
+    printf '#!/bin/sh\nsleep 5\n' > "$GUARD_FIX/slowgit/git"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$HOME/Git/work/wrepo/.git" "extra"\n' > "$GUARD_FIX/badgit/git"
+    chmod +x "$GUARD_FIX/slowgit/git" "$GUARD_FIX/badgit/git"
+    PY_BIN="$(command -v python3)"
+    for variant in nogit slowgit badgit; do
+        if [ "$variant" = nogit ]; then gpath="$GUARD_FIX/nogit"; else gpath="$GUARD_FIX/$variant:$PATH"; fi
+        t0=$(date +%s)
+        out=$(printf '{"cwd":"%s"}' "$GUARD_FIX/c/.herdr/worktrees/wrepo/wt" | env -u CLAUDE_CONFIG_DIR \
+            HOME="$GUARD_FIX/c" PATH="$gpath" \
+            CLAUDE_WORK_TREE="$GUARD_FIX/c/Git/work" CLAUDE_WORK_CONFIG_DIR="$GUARD_FIX/c/.claude-work" \
+            "$PY_BIN" claude/hooks/account_guard.py 2>/dev/null)
+        rc=$?
+        elapsed=$(( $(date +%s) - t0 ))
+        if [ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q account_guard && [ "$elapsed" -le 3 ]; then
+            printf 'PASS  guard: linked worktree, %s -> path rule, silent, exit 0, within 3s\n' "$variant"
+            PASS=$((PASS + 1))
+        else
+            printf 'FAIL  guard: linked worktree, %s -> path rule, silent, exit 0, within 3s (rc=%s elapsed=%s out=%s)\n' "$variant" "$rc" "$elapsed" "$out" >&2
+            FAIL=$((FAIL + 1))
+        fi
+    done
+
+    # Short circuit: an in-tree cwd never calls git, so the hanging git
+    # cannot slow it. Fixture C, default dir on a work-tree path -> warn,
+    # answered within 1 s.
+    t0=$(date +%s)
+    out=$(printf '{"cwd":"%s"}' "$GUARD_FIX/c/Git/work/repo" | env -u CLAUDE_CONFIG_DIR \
+        HOME="$GUARD_FIX/c" PATH="$GUARD_FIX/slowgit:$PATH" \
+        CLAUDE_WORK_TREE="$GUARD_FIX/c/Git/work" CLAUDE_WORK_CONFIG_DIR="$GUARD_FIX/c/.claude-work" \
+        "$PY_BIN" claude/hooks/account_guard.py 2>/dev/null)
+    rc=$?
+    elapsed=$(( $(date +%s) - t0 ))
+    if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q account_guard && [ "$elapsed" -le 1 ]; then
+        printf 'PASS  guard: linked worktree, intree cwd with slowgit -> path rule, warn, within 1s\n'
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  guard: linked worktree, intree cwd with slowgit -> path rule, warn, within 1s (rc=%s elapsed=%s out=%s)\n' "$rc" "$elapsed" "$out" >&2
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "SKIP: git not installed; linked-worktree guard cases not run"
+fi
+
 # Settings drift: hand-merged machines that missed a SessionStart hook
 # entry must fail visibly instead of silently lacking the account-mismatch
 # guard. Both account config dirs carry their own machine-local settings.json

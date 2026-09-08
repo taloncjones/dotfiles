@@ -13,6 +13,7 @@ into (never a hard-coded employer name -- this repo is public), then compares
 the running session's account against it:
 
   cwd under $CLAUDE_WORK_TREE (default ~/Git/work)  -> expects the work account
+  cwd in a linked worktree of a repo under it       -> expects the work account
   anywhere else                                     -> expects a non-work account
 
 A warning fires only on a true mismatch (work account in a personal directory,
@@ -29,6 +30,7 @@ when routing is correct.
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,6 +71,30 @@ def account_of(config_dir: str, personal_cfg: str, home: str) -> str | None:
     return None
 
 
+def repo_root_of(cwd: str) -> str | None:
+    """Main-checkout root of the repo that owns cwd (the parent of its shared
+    .git), or None when cwd is not in a git repo, git is missing, or the
+    lookup fails or hangs. Mirrors the linked-worktree rung of the claude()
+    zsh wrapper: a herdr / EnterWorktree / .worktrees checkout of a work repo
+    lives outside the work tree, and the account it should use is its repo's.
+    Never raises: the guard must stay fail-open at SessionStart."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    if proc.returncode != 0:
+        return None
+    common = proc.stdout.strip()
+    if not common or "\n" in common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.join(cwd, common)
+    return os.path.dirname(real(common))
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -83,7 +109,12 @@ def main() -> None:
 
     actual = real(os.environ.get("CLAUDE_CONFIG_DIR", personal_cfg))
     in_work_tree = real(cwd).startswith(work_tree + os.sep) or real(cwd) == work_tree
-    expected_is_work = in_work_tree
+    # Same short circuit as the wrapper: an in-tree cwd never pays for git.
+    repo_root = None if in_work_tree else repo_root_of(cwd)
+    repo_in_work_tree = repo_root is not None and (
+        repo_root.startswith(work_tree + os.sep) or repo_root == work_tree
+    )
+    expected_is_work = in_work_tree or repo_in_work_tree
 
     work_account = account_of(work_cfg, personal_cfg, home)
     active_account = account_of(actual, personal_cfg, home)
@@ -109,7 +140,7 @@ def main() -> None:
     else:
         # Fallback: account identity unavailable (work dir never logged in,
         # cloud container, malformed config). Use the original path-based check.
-        expected = work_cfg if in_work_tree else personal_cfg
+        expected = work_cfg if expected_is_work else personal_cfg
         if actual == expected:
             return
         if actual not in (work_cfg, personal_cfg):
