@@ -212,6 +212,9 @@ hook_case "AC4 append >> tracked denied" deny Bash "printf x >> $TR" "$R" "$SID_
 hook_case "AC4 clobber >| tracked denied" deny Bash "echo x >| $TR" "$R" "$SID_A"
 hook_case "AC4 fd redirect 2> tracked denied" deny Bash "echo x 2> $TR" "$R" "$SID_A"
 hook_case "AC4 &> tracked denied" deny Bash "echo x &> $TR" "$R" "$SID_A"
+hook_case "AC4 >& tracked denied (B2)" deny Bash "echo x >& $TR" "$R" "$SID_A"
+hook_case "AC4 glued >&tracked denied (B2)" deny Bash "echo x >&$TR" "$R" "$SID_A"
+hook_case "AC4 >>& tracked denied (B2)" deny Bash "echo x >>& $TR" "$R" "$SID_A"
 hook_case "AC4 glued >tracked denied" deny Bash "echo x >$TR" "$R" "$SID_A"
 hook_case "AC4 heredoc into tracked denied" deny Bash "cat <<'EOF' > $TR
 body > quoted

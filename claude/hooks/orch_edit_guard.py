@@ -321,11 +321,19 @@ def scan_raw(text):
             while m < n and text[m] in " \t":
                 m += 1
             del out[io_number_start(out):]        # 2> / &> prefix, if any
-            if m < n and text[m] == "&":          # dup: >&2, 2>&1
+            if m < n and text[m] == "&":
                 e = m + 1
                 while e < n and text[e].isdigit():
                     e += 1
-                out.append(" "); i = e; continue
+                if e > m + 1:                      # dup: >&2, 2>&1
+                    out.append(" "); i = e; continue
+                if e < n and text[e] == "-":        # close: >&-
+                    out.append(" "); i = e + 1; continue
+                # bare '&' with no digit/'-' after it: >&file / >>&file
+                # redirects stdout+stderr to a FILENAME, not a dup (B2).
+                m = e
+                while m < n and text[m] in " \t":
+                    m += 1
             if m < n and text[m] == "(":          # process substitution
                 out.append(" "); i = m; continue
             word, e = read_word(text, m)
