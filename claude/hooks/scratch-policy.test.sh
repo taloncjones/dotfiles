@@ -37,15 +37,22 @@ mkdir -p "$S/build" "$S/clone/.git" "$S2/build" "$T/x" "$T/build/project/.git" \
 : > "$T/file"
 : > "$T/-rf"
 ln -s "$R" "$S/link"
-# R3 fixtures: entries directly under /tmp named like mktemp's default template.
+# Outside-in: a symlink whose own location sits outside every root but
+# whose target resolves into the scratchpad (B1).
+ln -s "$S/build" "$R/link_to_scratch"
+# R3 fixtures: entries directly under /tmp named like mktemp's default
+# template. M3C is separate from M3 so the bare-root removal case does not
+# also carry a nested clone -- that shape is exercised on M3C instead.
 M3=$(mktemp -d /tmp/tmp.XXXXXXXXXX)
-mkdir -p "$M3/child" "$M3/clone/.git"
+mkdir -p "$M3/child"
+M3C=$(mktemp -d /tmp/tmp.XXXXXXXXXX)
+mkdir -p "$M3C/clone/.git"
 MF=$(mktemp /tmp/tmp.XXXXXXXXXX)
 ML="/tmp/tmp.link$$"
 ln -s "$R" "$ML"
 # $T/dark is made unreadable for the inspection-error cases; the trap
 # restores it so the fixture tree can be removed.
-trap 'chmod 700 "$T/dark" 2>/dev/null; rm -rf "$FIX" "$M3"; rm -f "$MF" "$ML"' EXIT
+trap 'chmod 700 "$T/dark" 2>/dev/null; rm -rf "$FIX" "$M3" "$M3C"; rm -f "$MF" "$ML"' EXIT
 
 # pr_payload CMD CWD SCRATCH [MODE] [EVENT] [TOOL] -> PermissionRequest JSON on stdout
 pr_payload() {
@@ -129,8 +136,6 @@ allow_case "allows a TMPDIR target" "rm $T/file"
 allow_case "allows a mktemp dir directly under /tmp" "rm -rf $M3"
 allow_case "allows a child of a mktemp dir" "rm -rf $M3/child"
 allow_case "allows a mktemp regular file under /tmp" "rm $MF"
-allow_case "allows a scratch clone inside the scratchpad (R1 exempt from repo rule)" "rm -rf $S/clone"
-allow_case "allows a scratch clone inside a mktemp dir (R3 exempt from repo rule)" "rm -rf $M3/clone"
 allow_case "allows listed long options" "rm --recursive --force --verbose $S/build"
 # CASE_TMPDIR is set and unset explicitly around calls: POSIX sh keeps a
 # `VAR=x func` prefix assignment after the call returns.
@@ -151,6 +156,16 @@ none_case "ignores a glob that matches through an escaping symlink" "rm $S/*/fil
 none_case "ignores an unexpanded variable target" "rm -rf \$TMPDIR/x"
 none_case "ignores a dotglob" "rm -rf $S/.*"
 none_case "ignores a .git target" "rm -rf $S/.git"
+# A2: the .git protection applies to every root kind, not only $TMPDIR//tmp
+# -- a checkout under the scratchpad or a /tmp/tmp.* mktemp root is still a
+# checkout.
+none_case "ignores a scratch clone inside the scratchpad (uniform .git protection)" "rm -rf $S/clone"
+none_case "ignores a scratch clone inside a mktemp dir (uniform .git protection)" "rm -rf $M3C/clone"
+# B1: an outside-in symlink is scoped by its own (unfollowed) location, not
+# by where it points -- so a link parked outside every root cannot certify
+# a target it does not itself occupy, even though its target resolves in.
+none_case "ignores an outside-in symlink whose target resolves into the scratchpad" "rm $R/link_to_scratch"
+none_case "ignores a recursive rm of that outside-in symlink" "rm -rf $R/link_to_scratch"
 none_case "ignores /tmp/other when TMPDIR is set" "rm -rf /tmp/other-$$"
 none_case "ignores a tmp.* symlink entry itself" "rm $ML"
 none_case "ignores a child of a tmp.* symlink entry" "rm $ML/file"
@@ -213,6 +228,20 @@ none_case "ignores a non-Bash tool" "rm -rf $S/build" "$R" "$S" "auto" "Permissi
 none_case "ignores a PreToolUse payload" "rm -rf $S/build" "$R" "$S" "auto" "PreToolUse"
 none_case "ignores plan mode" "rm -rf $S/build" "$R" "$S" "plan"
 none_case "ignores dontAsk mode" "rm -rf $S/build" "$R" "$S" "dontAsk"
+# A4: a payload with no permission_mode key at all must not proceed.
+no_mode_payload() {
+    PR_CMD="$1" PR_CWD="$2" PR_SCRATCH="$3" python3 - <<'PY'
+import json, os
+e = os.environ
+p = {"session_id": "11111111-1111-1111-1111-111111111111", "cwd": e["PR_CWD"],
+     "hook_event_name": "PermissionRequest", "tool_name": "Bash",
+     "tool_use_id": "toolu_test", "tool_input": {"command": e["PR_CMD"]},
+     "scratchpad_dir": e["PR_SCRATCH"]}
+print(json.dumps(p))
+PY
+}
+if run_hook "$(no_mode_payload "rm -rf $S/build" "$R" "$S")"; then rc=0; else rc=$?; fi
+check "ignores a payload with no permission_mode key" none "$rc"
 none_case "ignores an empty command" ""
 CASE_TMPDIR="$H"
 none_case "does not widen to HOME when TMPDIR is HOME" "rm -rf $H/x"

@@ -240,6 +240,23 @@ def target_in_scope(tok: str, cwd: str, home: str, home_real: str, roots: list,
     else:
         matches = [resolved]
     for m in matches:
+        # `rm`/`rmdir` unlink the directory entry named by the target, not
+        # whatever it resolves to: if the FINAL component is itself a
+        # symlink, the entry that disappears lives at the link's own
+        # (unfollowed) location, not at canon(m) below. Scope that location
+        # too, so a symlink parked outside every root that merely points
+        # inside one (or the reverse) cannot certify a target it does not
+        # itself occupy.
+        if os.path.islink(m):
+            own = os.path.join(canon(os.path.dirname(m)), os.path.basename(m))
+            if find_root(own, roots, tmpdir_set) is None:
+                return False
+        # TOCTOU: this check and the eventual exec are two different
+        # resolutions of the same path. An intermediate component swapped
+        # for a symlink in between could redirect a deeper deletion out of
+        # scope. Accepted: it needs an attacker with concurrent filesystem
+        # control racing this hook, the hook only ever allows (never
+        # denies), and every root is a throwaway scratch/tmp location.
         c = canon(m)
         found = find_root(c, roots, tmpdir_set)
         if found is None:
@@ -249,11 +266,14 @@ def target_in_scope(tok: str, cwd: str, home: str, home_real: str, roots: list,
             return False
         if kind == "R2b" and (c == home_real or c.startswith(home_real + "/")):
             return False  # /tmp fallback never reaches into HOME
-        if kind in ("R2", "R2b"):
-            if git_between(c, root):
-                return False
-            if recursive and os.path.isdir(c) and not os.path.islink(c) and subtree_has_git(c):
-                return False
+        # Applied uniformly across every root kind: a checkout parked under
+        # the scratchpad or a /tmp/tmp.* mktemp root is still a checkout,
+        # and this hook is the one place that would otherwise let it be
+        # auto-removed without a prompt.
+        if git_between(c, root):
+            return False
+        if recursive and os.path.isdir(c) and not os.path.islink(c) and subtree_has_git(c):
+            return False
     return True
 
 
@@ -263,7 +283,7 @@ def decide(payload: dict) -> bool:
     if payload.get("hook_event_name") != "PermissionRequest" or payload.get("tool_name") != "Bash":
         return False
     mode = payload.get("permission_mode")
-    if mode is not None and mode not in MODES:
+    if mode not in MODES:
         return False
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
@@ -300,6 +320,12 @@ def log_allow(payload: dict, command: str) -> None:
     if not core.valid_workspace_id(ws):
         return
     root = core.state_root()
+    # Sorted-first across repo slugs, deliberately: the payload's `cwd` is
+    # attacker-influenced input, and picking the audited repo by matching it
+    # against a git remote would mean untrusted data selects where the
+    # record lands. herdr_stop_gate.py's find_index() makes the same call
+    # for the same reason. Workspace ids are unique in practice, so a
+    # cross-slug collision misrouting the audit line is theoretical.
     for idx in sorted(root.glob(f"*/workspaces/{ws}.json")):
         rd = idx.parent.parent
         index = core.read_index(rd, ws)
