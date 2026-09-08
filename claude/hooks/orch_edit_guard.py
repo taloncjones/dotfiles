@@ -358,6 +358,10 @@ def scan_raw(text):
 # --- Bash: pass 2, per-segment operands -----------------------------------
 
 def has_inplace(words):
+    """Accepted gap (A7): a sed `w file` command or `s///w file` flag also
+    writes a file with no `-i` present; catching it needs parsing the sed
+    SCRIPT text itself, not just its own argv flags. Aligns with the
+    documented "sed without -i passes" hole."""
     for t in words[1:]:
         if t == "--in-place" or t.startswith("--in-place="):
             return True
@@ -408,7 +412,13 @@ def tee_operands(words):
 def copy_targets(words, cwd, home, include_sources):
     """cp/install: the destination (or dest/basename(src) per source when
     the destination is an existing directory). mv: the same plus every
-    source, because a move deletes the source path."""
+    source, because a move deletes the source path.
+
+    Accepted gap (A1): a source that is itself a tracked symlink is
+    resolved by resolve_targets/canon() through its final target, not as
+    the symlink entry mv actually removes; catching that needs a
+    dereference-mode flag threaded through every target tuple, not a
+    local fix here."""
     ops, tdir, skip = [], None, False
     for t in words[1:]:
         if skip:
