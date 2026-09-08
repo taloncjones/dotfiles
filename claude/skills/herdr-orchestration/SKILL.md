@@ -71,6 +71,7 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
      hook wake held behind a dialog and dropped after `dialogExpiry`, and a
      `-p` orchestrator drops them after 5 minutes. Not added to
      `settings.json.tmpl` (it would apply to every session of the account).
+   - Regenerate the board with `bash ~/.claude/skills/todos/scripts/todos.sh dashboard` (add `--open` on the initial claim only); best-effort, a non-zero exit is noted in the turn summary and never blocks the action.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
