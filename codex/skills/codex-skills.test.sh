@@ -263,15 +263,27 @@ links_shared_workflow_surfaces() (
     trap 'rm -rf "$tmp_home"' EXIT
     HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
     HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
-    for skill in repo-recall post-merge todos handoff kickoff; do
+    for skill in repo-recall post-merge todos handoff kickoff voice; do
         [ "$(readlink "$tmp_home/.codex/skills/$skill")" = "$PWD/claude/skills/$skill" ] || return 1
         [ -f "$tmp_home/.codex/skills/$skill/SKILL.md" ] || return 1
     done
     [ "$(readlink "$tmp_home/.codex/skills/herdr-orchestration")" = "$PWD/codex/skills/herdr-orchestration" ] || return 1
     [ -f "$tmp_home/.codex/skills/herdr-orchestration/SKILL.md" ] || return 1
+    printf 'A concrete fixture sentence.\n' >"$tmp_home/voice.txt"
+    voice_resolver=$(sed -n '/^V=/,/^fi$/p' "$PWD/claude/skills/voice/SKILL.md")
+    [ -n "$voice_resolver" ] || return 1
+    for voice_home in "$tmp_home/.codex" "$tmp_home/missing-codex"; do
+        HOME="$tmp_home" CODEX_HOME="$voice_home" CLAUDE_CONFIG_DIR="$tmp_home/.claude" \
+            bash -c "$voice_resolver"'
+                uv run --no-project --offline --no-cache python "$V" lint \
+                    --kind pr-body --file "$1" >/dev/null
+            ' _ "$tmp_home/voice.txt" || return 1
+    done
     [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
     [ "$(readlink "$tmp_home/.codex/hooks/herdr_worktree_guard.py")" = "$PWD/claude/hooks/herdr_worktree_guard.py" ] || return 1
     [ "$(rg -c 'command = .*herdr_worktree_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    [ "$(readlink "$tmp_home/.codex/hooks/rm_guard.py")" = "$PWD/claude/hooks/rm_guard.py" ] || return 1
+    [ "$(rg -c 'command = .*rm_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
     printf '%s\n' '{"tool_name":"exec_command","tool_input":{"cmd":"herdr worktree create task"}}' |
         "$tmp_home/.codex/hooks/herdr_worktree_guard.py" >/dev/null 2>&1 && return 1
     [ "$?" -eq 2 ]

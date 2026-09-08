@@ -135,6 +135,7 @@ ln -sf "$DOTFILEDIR"/codex/hooks/block_secrets.py "$HOME"/.codex/hooks/block_sec
 ln -sf "$DOTFILEDIR"/codex/hooks/emoji_guard.py "$HOME"/.codex/hooks/emoji_guard.py
 ln -sf "$DOTFILEDIR"/codex/hooks/no_ai_comments.py "$HOME"/.codex/hooks/no_ai_comments.py
 ln -sf "$DOTFILEDIR"/claude/hooks/herdr_worktree_guard.py "$HOME"/.codex/hooks/herdr_worktree_guard.py
+ln -sf "$DOTFILEDIR"/claude/hooks/rm_guard.py "$HOME"/.codex/hooks/rm_guard.py
 ln -sf "$DOTFILEDIR"/codex/hooks/herdr_stop_gate.py "$HOME"/.codex/hooks/herdr_stop_gate.py
 
 # These are repo-owned workflows, shared from one maintained source. Native
@@ -149,7 +150,7 @@ link_codex_skill() {
   ln -sfn "$source" "$destination"
 }
 
-for shared_skill in repo-recall post-merge todos handoff kickoff; do
+for shared_skill in repo-recall post-merge todos handoff kickoff voice; do
   link_codex_skill "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
 done
 mkdir -p "$HOME/.codex/rules"
@@ -288,6 +289,11 @@ add_codex_hook \
   'herdr_worktree_guard.py' \
   'Bash|Shell|exec_command|shell_command|unified_exec' \
   "$HOME/.codex/hooks/herdr_worktree_guard.py"
+
+add_codex_hook \
+  'rm_guard.py' \
+  'Bash|Shell|exec_command|shell_command|unified_exec' \
+  "$HOME/.codex/hooks/rm_guard.py"
 
 # Stop has its own native event/output contract, separate from PreToolUse.
 # Preserve any existing custom registration of this adapter.

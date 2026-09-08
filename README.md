@@ -361,17 +361,20 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `brief`, `todos`, `weekly` - daily/weekly planning built on the `.todos/` backlog
 - `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) review gates
 - `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection
+- `voice` - shared prose lint and independent rewrite with protected facts
 - `herdr-orchestration` - shared task lifecycle with a native Codex controller adapter
 - `lib/workflow_context.py` - canonical repository identity and account scope
 - `ship`, `post-merge`, `reconcile`, `wrap` - delivery, teardown, Jira drift repair, session exit
 - `model-tuning` - per-model deltas and retirement playbook for current Claude models
 - `lib/work-state.sh` - shared PR/worktree state gathering (tested by `lib/test_work_state.sh`)
 
-Codex discovers maintained handoff/kickoff skills directly, alongside its own
+Codex discovers maintained handoff/kickoff and voice skills directly, alongside its own
 `co-review`, `claude-plan-review`, `claude-spec-review`, and
 `herdr-orchestration` adapters. ECC and Superpowers remain independent native
 plugins. TDD, systematic debugging, and verification stay enabled; duplicate
 discovery and incompatible Claude imports are reconciled by the installer.
+The shared catastrophic-delete guard also checks both runtimes' shell calls;
+ordinary removals continue through each runtime's approval policy.
 
 Herd resolves model and effort together through `claude/hooks/agent_runtime.py`:
 Astra/high for Codex coordination, planning, and substantive review;
