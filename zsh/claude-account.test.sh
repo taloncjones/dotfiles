@@ -142,9 +142,10 @@ run_case "snapshot: helper+vars stripped, work cwd still routes" \
 # 8b. Linked worktrees. A checkout of a work repo that lives OUTSIDE the
 # work tree (herdr ~/.herdr/worktrees/, EnterWorktree .claude/worktrees/,
 # .worktrees/) routes by the repo it belongs to. Two sandbox repos, each
-# with one linked worktree under $SBHOME/.herdr/worktrees/.
-# GIT_CONFIG_GLOBAL=/dev/null keeps the machine's hooksPath and signing
-# config out of the fixture. Skipped when git is not installed.
+# with one linked worktree (git worktree add) under
+# $SBHOME/.herdr/worktrees/. GIT_CONFIG_GLOBAL=/dev/null keeps the
+# machine's hooksPath and signing config out of the fixture. Skipped when
+# git is not installed.
 LINKED_WORK=""
 LINKED_PERSONAL=""
 if command -v git >/dev/null 2>&1; then
