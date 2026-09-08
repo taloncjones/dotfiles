@@ -37,6 +37,13 @@ URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 PR_URL_RE = re.compile(r"^https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 ARTIFACT_URL_RE = re.compile(r"^https?://claude\.ai/(code/)?artifacts/")
 PRIORITY_WEIGHT = {"high": "0", "med": "1", "low": "2"}
+# Open-section grouping (D8): computed state (blocked-by-deps, in-flight-by-
+# herdr) always wins over the manual `status:` field, since it reflects
+# ground truth the field can go stale against. `status: waiting` / `someday`
+# only sort a todo that is neither blocked nor in-flight.
+BUCKET_ORDER = ("ready", "in-flight", "blocked", "waiting", "someday")
+BUCKET_LABELS = {"ready": "Ready", "in-flight": "In flight", "blocked": "Blocked",
+                  "waiting": "Waiting", "someday": "Someday"}
 
 
 def die(msg):
@@ -321,6 +328,7 @@ def load_todo(path, resolver, tasks_dir, pending):
         "surface": scalars.get("surface", ""),
         "maturity": scalars.get("maturity", ""),
         "tier": scalars.get("tier", ""),
+        "status": scalars.get("status", ""),
         "files": lists.get("files", []),
         "summary": problem_summary(body),
         "links": body_links(body),
@@ -385,61 +393,545 @@ def load_research(research_dir, known_basenames):
 
 CSS = """
 :root {
-  --ground: #f7f6f2; --ink: #1f2a24; --muted: #6b746e; --accent: #2f6f5e;
-  --rule: #d9ddd7; --blocked: #b3541e; --merged: #3b6ea5; --inflight: #8a6d1f;
-  --chip: #ebeae4;
+  color-scheme: light;
+  --ground: #f4f6f3;
+  --surface: #ffffff;
+  --surface-soft: #eef2ee;
+  --ink: #243128;
+  --muted: #5f6d63;
+  --accent: #285f4b;
+  --rule: #d5ddd5;
+  --chip: #edf1ec;
+  --blocked: #913e1c;
+  --blocked-soft: #fff3eb;
+  --blocked-rule: #e9b99e;
+  --merged: #285e8a;
+  --merged-soft: #eaf2fa;
+  --merged-rule: #b9cfdf;
+  --inflight: #745813;
+  --inflight-soft: #faf3db;
+  --inflight-rule: #ddca8d;
+  --shadow: 0 2px 6px rgb(22 38 28 / 0.04);
 }
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --ground: #171b19; --ink: #e8ece9; --muted: #9aa39d; --accent: #7fbfa8;
-    --rule: #2c332f; --blocked: #e0895a; --merged: #7fa9d8; --inflight: #d1b25a;
-    --chip: #232927;
+    color-scheme: dark;
+    --ground: #171d19;
+    --surface: #202823;
+    --surface-soft: #26302a;
+    --ink: #e8eee9;
+    --muted: #aab6ad;
+    --accent: #92ceb0;
+    --rule: #3b493f;
+    --chip: #2c362f;
+    --blocked: #f2b38e;
+    --blocked-soft: #332820;
+    --blocked-rule: #74503c;
+    --merged: #a6c9eb;
+    --merged-soft: #223140;
+    --merged-rule: #45617c;
+    --inflight: #e4cb84;
+    --inflight-soft: #332f20;
+    --inflight-rule: #6d5d34;
+    --shadow: 0 2px 6px rgb(0 0 0 / 0.12);
   }
 }
+
 :root[data-theme="dark"] {
-  --ground: #171b19; --ink: #e8ece9; --muted: #9aa39d; --accent: #7fbfa8;
-  --rule: #2c332f; --blocked: #e0895a; --merged: #7fa9d8; --inflight: #d1b25a;
-  --chip: #232927;
+  color-scheme: dark;
+  --ground: #171d19;
+  --surface: #202823;
+  --surface-soft: #26302a;
+  --ink: #e8eee9;
+  --muted: #aab6ad;
+  --accent: #92ceb0;
+  --rule: #3b493f;
+  --chip: #2c362f;
+  --blocked: #f2b38e;
+  --blocked-soft: #332820;
+  --blocked-rule: #74503c;
+  --merged: #a6c9eb;
+  --merged-soft: #223140;
+  --merged-rule: #45617c;
+  --inflight: #e4cb84;
+  --inflight-soft: #332f20;
+  --inflight-rule: #6d5d34;
+  --shadow: 0 2px 6px rgb(0 0 0 / 0.12);
 }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--ground); color: var(--ink);
-  font: 15px/1.45 "Avenir Next", "Segoe UI", system-ui, sans-serif; }
-main { max-width: 1200px; margin: 0 auto; padding: 32px 24px 64px; }
-h1 { font-size: 26px; font-weight: 600; margin: 0 0 4px; text-wrap: balance; }
-h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--muted); margin: 40px 0 12px; }
-.meta { color: var(--muted); font-variant-numeric: tabular-nums; }
-.counts { display: flex; gap: 32px; margin: 16px 0 0; }
-.counts b { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.counts span { display: block; color: var(--muted); font-size: 13px;
-  letter-spacing: 0.06em; text-transform: uppercase; }
-.wrap { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; }
-th { text-align: left; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--muted); font-weight: 600; padding: 8px 12px; border-bottom: 1px solid var(--rule); }
-td { padding: 10px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
-tr[data-state="blocked"] td:first-child { box-shadow: inset 3px 0 0 var(--blocked); }
-.name { font-weight: 600; }
-.mono { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
-.sub { color: var(--muted); font-size: 12.5px; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.chip { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 12px;
-  background: var(--chip); color: var(--ink); }
-.chip.prio-high { background: var(--blocked); color: var(--ground); }
-.pill { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 12px;
-  font-weight: 600; color: var(--ground); background: var(--muted); }
-.pill.merged { background: var(--merged); }
-.pill.in-flight { background: var(--inflight); }
-.pill.unreadable { background: var(--blocked); }
-.dep { display: block; white-space: nowrap; }
-.dep.ok { color: var(--muted); }
-.dep.bad { color: var(--blocked); }
-.dates { font-variant-numeric: tabular-nums; white-space: nowrap; }
-a { color: var(--accent); }
-a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.empty { color: var(--muted); font-style: italic; }
-ul.research { list-style: none; padding: 0; margin: 0; }
-ul.research li { padding: 12px 0; border-bottom: 1px solid var(--rule); }
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 15px/1.55 "Avenir Next", "Segoe UI", system-ui, sans-serif;
+}
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 24px 72px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: clamp(26px, 3vw, 34px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+h2 {
+  margin: 36px 0 12px;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+main > .meta {
+  max-width: 80ch;
+}
+
+/* One compact summary panel. */
+.counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  max-width: 760px;
+  margin: 24px 0 0;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.counts > div {
+  min-width: 0;
+  padding: 18px 22px;
+}
+
+.counts > div + div {
+  border-left: 1px solid var(--rule);
+}
+
+.counts b {
+  display: block;
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.counts b[data-count="open"] {
+  color: var(--accent);
+}
+
+.counts b[data-count="blocked"] {
+  color: var(--blocked);
+}
+
+.counts b[data-count="in-flight"] {
+  color: var(--inflight);
+}
+
+.counts b[data-count="waiting"] {
+  color: var(--merged);
+}
+
+.counts b[data-count="someday"] {
+  color: var(--muted);
+}
+
+.counts span {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+/* Open-section grouping: one heading + table per bucket (Ready, In flight,
+   Blocked, Waiting, Someday). Someday collapses via native <details>. */
+.bucket + .bucket,
+.bucket + details.bucket,
+details.bucket + .bucket,
+details.bucket + details.bucket {
+  margin-top: 28px;
+}
+
+.bucket h3,
+details.bucket summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+details.bucket summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+details.bucket summary::-webkit-details-marker {
+  display: none;
+}
+
+details.bucket summary::before {
+  content: "\25B8";
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+details.bucket[open] summary::before {
+  transform: rotate(90deg);
+}
+
+details.bucket summary h3 {
+  margin: 0;
+}
+
+.bucket-count {
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Preserve the table layout and contain horizontal scrolling. */
+.wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+table {
+  width: 100%;
+  min-width: 960px;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+th {
+  padding: 12px 16px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+th:first-child {
+  width: 38%;
+}
+
+th:nth-child(2) {
+  width: 14%;
+}
+
+th:last-child {
+  width: 12%;
+}
+
+/* Completed has four columns; give its title more room. */
+th:first-child:nth-last-child(4) {
+  width: 48%;
+}
+
+td {
+  padding: 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+
+tr[id] {
+  scroll-margin-top: 24px;
+}
+
+tr[data-state="blocked"] > td {
+  background: var(--blocked-soft);
+}
+
+tr[data-state="blocked"] > td:first-child {
+  box-shadow: inset 4px 0 0 var(--blocked);
+}
+
+/* Make research-to-todo anchor destinations easy to locate. */
+tr:target > td:first-child .name {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
+.name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.sub {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+td > .name + .sub,
+td > .sub + .sub,
+td > .pill + .sub {
+  margin-top: 4px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.chip,
+.pill {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--rule);
+  font-size: 12px;
+  line-height: 1.5;
+  vertical-align: middle;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.chip {
+  border-radius: 5px;
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.chip.prio-high {
+  background: var(--blocked-soft);
+  border-color: var(--blocked-rule);
+  color: var(--blocked);
+  font-weight: 600;
+}
+
+.pill {
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.pill.merged {
+  background: var(--merged-soft);
+  border-color: var(--merged-rule);
+  color: var(--merged);
+}
+
+.pill.in-flight {
+  background: var(--inflight-soft);
+  border-color: var(--inflight-rule);
+  color: var(--inflight);
+}
+
+.pill.unreadable {
+  background: var(--blocked-soft);
+  border-color: var(--blocked-rule);
+  color: var(--blocked);
+}
+
+.dep {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.dep + .dep {
+  margin-top: 8px;
+}
+
+.dep.ok {
+  color: var(--muted);
+}
+
+.dep.bad {
+  color: var(--blocked);
+  font-weight: 600;
+}
+
+.dates {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: auto;
+  overflow-wrap: anywhere;
+}
+
+a:focus-visible,
+.wrap:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+td:last-child > a {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  font-size: 13px;
+}
+
+td:last-child > a + a {
+  margin-top: 8px;
+}
+
+.empty {
+  margin: 0;
+  padding: 20px;
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px dashed var(--rule);
+  border-radius: 10px;
+  font-size: 14px;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Existing research children become title, metadata, and summary rows. */
+ul.research {
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+ul.research > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+}
+
+ul.research > li > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+ul.research > li > .name {
+  flex: 0 0 100%;
+  color: var(--ink);
+  font-size: 16px;
+  text-decoration-color: var(--rule);
+}
+
+ul.research > li > div.sub {
+  flex: 0 0 100%;
+  max-width: 80ch;
+  margin-top: 2px;
+  font-size: 14px;
+}
+
+ul.research > li > a:not(.name):not(.mono) {
+  font-size: 13px;
+}
+
+ul.research > li:focus-within {
+  border-color: var(--accent);
+}
+
+@media (hover: hover) {
+  a:hover {
+    color: var(--ink);
+    text-decoration-thickness: 2px;
+  }
+
+  ul.research > li > .name:hover {
+    color: var(--accent);
+    text-decoration-color: currentColor;
+  }
+}
+
+@media (max-width: 640px) {
+  main {
+    padding: 24px 16px 48px;
+  }
+
+  h2 {
+    margin-top: 28px;
+  }
+
+  .counts > div {
+    padding: 16px 12px;
+  }
+
+  .counts b {
+    font-size: 28px;
+  }
+
+  ul.research > li {
+    padding: 16px;
+  }
+}
 """
 
 
@@ -494,9 +986,25 @@ def render_todo_cell(t):
     return "".join(out)
 
 
-def render_open(todos):
-    if not todos:
-        return '<p class="empty">No open todos.</p>'
+def open_bucket(t):
+    """Which Open sub-section a todo sorts into (D8).
+
+    Computed state -- blocked-by-deps, in-flight-by-herdr -- always wins
+    over the manual `status:` field, since the field can go stale against
+    it. `status: waiting` / `someday` only place a todo that is neither.
+    """
+    if t["blocked"]:
+        return "blocked"
+    if t["in_flight"]:
+        return "in-flight"
+    if t["status"] == "waiting":
+        return "waiting"
+    if t["status"] == "someday":
+        return "someday"
+    return "ready"
+
+
+def render_open_table(todos):
     rows = []
     for t in todos:
         state = "blocked" if t["blocked"] else "open"
@@ -514,6 +1022,29 @@ def render_open(todos):
     return ('<div class="wrap"><table><thead><tr><th>Todo</th><th>Created / due</th>'
             '<th>Depends on</th><th>Herdr</th><th>Links</th></tr></thead><tbody>'
             + "".join(rows) + "</tbody></table></div>")
+
+
+def render_open(todos):
+    if not todos:
+        return '<p class="empty">No open todos.</p>'
+    grouped = {b: [] for b in BUCKET_ORDER}
+    for t in todos:
+        grouped[open_bucket(t)].append(t)
+    sections = []
+    for bucket in BUCKET_ORDER:
+        items = grouped[bucket]
+        if not items:
+            continue
+        heading = (f'<h3 data-bucket="{bucket}">{esc(BUCKET_LABELS[bucket])} '
+                   f'<span class="bucket-count">{len(items)}</span></h3>')
+        table = render_open_table(items)
+        if bucket == "someday":
+            # A native, JS-free collapse -- someday items are real but not
+            # meant to compete for attention with what is actionable now.
+            sections.append(f'<details class="bucket"><summary>{heading}</summary>{table}</details>')
+        else:
+            sections.append(f'<div class="bucket">{heading}{table}</div>')
+    return "".join(sections)
 
 
 def render_completed(todos):
@@ -538,7 +1069,10 @@ def render_research(entries):
                 '.todos/research/ (see the todos skill).</p>')
     items = []
     for e in entries:
-        bits = [f'<a href="{esc(e["path"].as_uri())}" class="name">{esc(e["title"])}</a>',
+        # Resolve through a symlinked .todos/ (maintenance worktrees) so the
+        # link points at the persistent main-checkout path, not an ephemeral
+        # worktree path that 404s once the worktree is torn down.
+        bits = [f'<a href="{esc(e["path"].resolve().as_uri())}" class="name">{esc(e["title"])}</a>',
                 f'<span class="meta"> {esc(e["created"] or "undated")}</span>']
         if e["kind"]:
             bits.append(" " + chip(e["kind"]))
@@ -562,6 +1096,8 @@ def render_page(repo_name, branch, stamp, open_todos, completed, research, show_
     n_open = len(open_todos)
     n_blocked = sum(1 for t in open_todos if t["blocked"])
     n_flight = sum(1 for t in open_todos if t["in_flight"])
+    n_waiting = sum(1 for t in open_todos if open_bucket(t) == "waiting")
+    n_someday = sum(1 for t in open_todos if open_bucket(t) == "someday")
     completed_html = ""
     if show_completed:
         completed_html = "<h2>Completed</h2>" + render_completed(completed)
@@ -582,6 +1118,8 @@ Static page: rerun <span class="mono">todos.sh dashboard</span> and reload to re
 <div><b data-count="open">{n_open}</b><span>open</span></div>
 <div><b data-count="blocked">{n_blocked}</b><span>blocked</span></div>
 <div><b data-count="in-flight">{n_flight}</b><span>in-flight</span></div>
+<div><b data-count="waiting">{n_waiting}</b><span>waiting</span></div>
+<div><b data-count="someday">{n_someday}</b><span>someday</span></div>
 </div>
 <h2>Open</h2>
 {render_open(open_todos)}
@@ -660,11 +1198,26 @@ def parse_args(argv):
 
 
 def visibility_warning(root):
-    """Warn when .todos/ is neither git-ignored nor tracked (research would commit)."""
-    rc, _ = git(["check-ignore", "-q", TODOS_DIRNAME], cwd=root)
+    """Warn when .todos/ is neither git-ignored nor tracked (research would commit).
+
+    A directory-only ignore pattern (`.todos/`) does not match a SYMLINK
+    named .todos (a maintenance worktree convention), so check-ignore and
+    ls-files both miss it on the symlink itself. Test the symlink's target
+    instead; a target outside the repo entirely can never be committed here,
+    so there is nothing to warn about.
+    """
+    path = root / TODOS_DIRNAME
+    check_name = TODOS_DIRNAME
+    if path.is_symlink():
+        target = path.resolve()
+        try:
+            check_name = str(target.relative_to(root.resolve()))
+        except ValueError:
+            return
+    rc, _ = git(["check-ignore", "-q", check_name], cwd=root)
     if rc == 0:
         return
-    rc, out = git(["ls-files", "--", TODOS_DIRNAME], cwd=root)
+    rc, out = git(["ls-files", "--", check_name], cwd=root)
     if rc == 0 and out:
         return
     warn(f"{TODOS_DIRNAME}/ is neither git-ignored nor tracked; run `todos.sh init` "

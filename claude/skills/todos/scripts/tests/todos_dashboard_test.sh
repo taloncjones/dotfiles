@@ -481,6 +481,46 @@ test_visibility_warning() {
 }
 test_visibility_warning
 
+test_symlinked_todos() {
+  local repo sr real f
+  # A whole-directory symlinked .todos/ (maintenance-worktree convention):
+  # research links must resolve through it to the persistent real path, and
+  # the visibility warning must not fire against the symlink name itself.
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; real=$(mk_dir) || exit 2
+  f="$repo/out/board.html"
+  mkdir -p "$real/research"
+  cat >"$real/research/2026-05-01-note.md" <<'EOF'
+---
+created: 2026-05-01
+title: Symlinked note
+---
+
+Summary.
+EOF
+  guard_fixture "$repo"
+  ln -s "$real" "$repo/.todos"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "symlinked-todos: exit 0" "$(rc)" "0"
+  assert_file_has "symlinked-todos: research entry present" "$f" 'data-research="2026-05-01-note.md"'
+  assert_file_lacks "symlinked-todos: link does not embed the worktree path" "$f" "$repo/.todos"
+  assert_file_has "symlinked-todos: link resolves to the real target" "$f" "href=\"file://$(cd "$real" && pwd -P)/research/2026-05-01-note.md\""
+  ok "symlinked-todos: research links resolve through the symlink"
+  rm_fixture "$repo" "$sr" "$real"
+
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2
+  # A target outside any repo entirely: nothing there can ever be committed,
+  # so the exclusion warning must stay silent regardless of exclude state.
+  real=$(mk_dir) || exit 2
+  guard_fixture "$repo"; rm -rf "$repo/.todos" 2>/dev/null; ln -s "$real" "$repo/.todos"
+  guard_fixture "$repo"; : >"$repo/.git/info/exclude"
+  render "$repo" "$sr" --out "$repo/out/c.html" >/dev/null
+  assert_eq "symlinked-todos: outside-repo exit 0" "$(rc)" "0"
+  assert_missing "symlinked-todos: outside-repo target is quiet" "$(err)" "neither git-ignored nor tracked"
+  ok "symlinked-todos: symlink target outside the repo suppresses the warning"
+  rm_fixture "$repo" "$sr" "$real"
+}
+test_symlinked_todos
+
 test_attribute_injection() {
   local repo sr f
   repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
@@ -590,6 +630,85 @@ EOF
   rm_fixture "$repo" "$sr"
 }
 test_frontmatter_first_match
+
+test_status_buckets() {
+  local repo sr f
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  mk_todo "$repo" pending 2026-05-01-ready <<'EOF'
+---
+created: 2026-05-01
+title: Ready item
+---
+EOF
+  mk_todo "$repo" pending 2026-05-02-waiting <<'EOF'
+---
+created: 2026-05-02
+title: Waiting item
+status: waiting
+---
+EOF
+  mk_todo "$repo" pending 2026-05-03-someday <<'EOF'
+---
+created: 2026-05-03
+title: Someday item
+status: someday
+---
+EOF
+  mk_todo "$repo" pending 2026-05-04-blocked-waiting <<'EOF'
+---
+created: 2026-05-04
+title: Blocked but marked waiting
+status: waiting
+depends_on:
+  - todo:2026-05-01-ready
+---
+EOF
+  mk_todo "$repo" pending 2026-05-05-bogus-status <<'EOF'
+---
+created: 2026-05-05
+title: Unrecognized status
+status: yolo
+---
+EOF
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_eq "status: exit 0" "$(rc)" "0"
+  assert_file_has "status: ready heading" "$f" '<h3 data-bucket="ready">Ready'
+  assert_file_has "status: waiting heading" "$f" '<h3 data-bucket="waiting">Waiting'
+  assert_file_has "status: someday heading" "$f" '<h3 data-bucket="someday">Someday'
+  assert_file_has "status: ready item in ready bucket" "$f" 'data-todo="2026-05-01-ready" data-state="open"'
+  assert_file_has "status: waiting item row" "$f" 'data-todo="2026-05-02-waiting" data-state="open"'
+  assert_file_has "status: someday item row" "$f" 'data-todo="2026-05-03-someday" data-state="open"'
+  assert_file_has "status: someday collapses via details" "$f" '<details class="bucket"><summary><h3 data-bucket="someday">'
+  assert_file_has "status: unrecognized status falls back to ready" "$f" 'data-todo="2026-05-05-bogus-status" data-state="open"'
+  assert_file_has "status: waiting count tile" "$f" 'data-count="waiting">1<'
+  assert_file_has "status: someday count tile" "$f" 'data-count="someday">1<'
+  ok "status: exit 0 and bucket headings"
+  rm_fixture "$repo" "$sr"
+
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  mk_todo "$repo" pending 2026-05-01-target <<'EOF'
+---
+created: 2026-05-01
+title: Target
+---
+EOF
+  mk_todo "$repo" pending 2026-05-02-precedence <<'EOF'
+---
+created: 2026-05-02
+title: Blocked wins over waiting
+status: waiting
+depends_on:
+  - todo:2026-05-01-target
+---
+EOF
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_file_has "status: blocked overrides waiting status" "$f" '<h3 data-bucket="blocked">Blocked'
+  assert_file_has "status: precedence row is blocked" "$f" 'data-todo="2026-05-02-precedence" data-state="blocked"'
+  assert_file_lacks "status: precedence row not also in waiting" "$f" 'data-bucket="waiting"'
+  ok "status: computed state overrides manual status"
+  rm_fixture "$repo" "$sr"
+}
+test_status_buckets
 
 rm -f "$RCF" "$ERRF"
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

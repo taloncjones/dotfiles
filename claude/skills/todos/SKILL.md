@@ -32,6 +32,7 @@ area: <optional tag, e.g. eol>
 due: <optional YYYY-MM-DD deadline>
 surface: <optional YYYY-MM-DD; hide from the brief until this date>
 priority: <high|med|low; set at creation>
+status: <optional; waiting|someday, see the dashboard's Open grouping>
 files:
   - path/to/relevant.py:42
 depends_on:
@@ -155,6 +156,19 @@ completed todos to show (default 10, 0 hides the section).
 The page is inert: no script, no remote assets, no server. Regenerate
 and reload the tab to refresh. For live refresh on a machine with
 `fswatch`: `herdr pane run <pane> "fswatch -o .todos | xargs -n1 -I{} ~/.claude/skills/todos/scripts/todos.sh dashboard"`.
+
+The Open section is grouped into sub-sections instead of one flat table,
+so the question "what can I pick up right now" doesn't get buried in a
+column: **Ready**, **In flight** (herdr is already working it),
+**Blocked** (an unsatisfied `depends_on`), **Waiting** (`status:
+waiting`), and **Someday** (`status: someday`, collapsed by default via
+a native `<details>` -- no JS). Computed state always wins: a todo that
+is blocked or in flight sorts there regardless of its `status:` field,
+since that field can go stale against the dependency graph or the live
+herdr record. Add `status: waiting` or `status: someday` by hand-editing
+a todo's frontmatter (the same pattern already used for `depends_on`);
+any other value, or none, defaults to Ready. The counts row mirrors the
+five buckets.
 
 What each row shows:
 
