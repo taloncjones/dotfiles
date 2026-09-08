@@ -48,6 +48,7 @@ sh claude/skills/lib/workflow-context.test.sh
 sh claude/skills/handoff/scripts/tests/handoff_test.sh
 sh claude/skills/co-review/scripts/tests/review_test.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
+bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh
 bash claude/skills/repo-recall/scripts/tests/recall_test.sh
 bash claude/skills/voice/scripts/tests/voice_test.sh
 sh install/claude-links.test.sh

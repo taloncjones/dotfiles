@@ -35,6 +35,7 @@ area: <optional tag, e.g. eol>
 due: <optional YYYY-MM-DD deadline>
 surface: <optional YYYY-MM-DD; hide from the brief until this date>
 priority: <high|med|low; set at creation>
+status: <optional; waiting|someday, see the dashboard's Open grouping>
 files:
   - path/to/relevant.py:42
 depends_on:
@@ -92,6 +93,7 @@ normally on the next `git add`.
 | `todos.sh index`                                                        | Regenerate `TODO.md`                                                                          |
 | `todos.sh share`                                                        | Stop ignoring `.todos/` in this repo (opt into committing it)                                 |
 | `todos.sh path`                                                         | Print the `.todos/` directory path                                                            |
+| `todos.sh dashboard [--runtime claude\|codex] [--personal] [--open] [--online] [--out PATH] [--completed N]` | Render the local HTML board in the selected account scope |
 
 `new` and `done` regenerate `TODO.md` automatically, so the index never drifts.
 
@@ -165,6 +167,89 @@ dependency; the resolver does not recursively schedule work.
 registry. It neither initializes a missing backlog nor starts any work.
 Removing a dependency is a hand edit of the todo's frontmatter followed by
 `todos.sh index`.
+
+## Dashboard
+
+`todos.sh dashboard` renders the whole board for the current repo into
+one static HTML file and prints its path:
+`${XDG_STATE_HOME:-~/.local/state}/dotfiles/dashboard/<account_id>/<repo_slug>.html`
+(`<repo_slug>` is the herdr repo slug, so worktrees share one page within
+the same account). Select the caller explicitly with `--runtime claude` or
+`--runtime codex`; retain `--personal` for personal quota in a work repo.
+`TODOS_DASHBOARD_DIR` explicitly overrides the output directory. `--open` opens it (`open` on macOS, `xdg-open`
+elsewhere); `--out PATH` writes elsewhere; `--completed N` sets how many
+completed todos to show (default 10, 0 hides the section).
+
+The page is inert: no script, no remote assets, no server. Regenerate
+and reload the tab to refresh. For repeated refresh, resolve `scripts/todos.sh` from this loaded skill
+and rerun `dashboard` with the same runtime/account options. Do not resolve
+it from another runtime's personal installation.
+
+The Open section is grouped into sub-sections instead of one flat table,
+so the question "what can I pick up right now" doesn't get buried in a
+column: **Ready**, **In flight** (herdr is already working it),
+**Blocked** (an unsatisfied `depends_on`), **Waiting** (`status:
+waiting`), and **Someday** (`status: someday`, collapsed by default via
+a native `<details>` -- no JS). Computed state always wins: a todo that
+is blocked or in flight sorts there regardless of its `status:` field,
+since that field can go stale against the dependency graph or the live
+herdr record. Add `status: waiting` or `status: someday` by hand-editing
+a todo's frontmatter (the same pattern already used for `depends_on`);
+any other value, or none, defaults to Ready. The counts row mirrors the
+five buckets.
+
+What each row shows:
+
+- **Depends on**: every `depends_on` ref with its state, resolved by the
+  same resolver as `list`. Offline by default (like `index`); `--online`
+  lets it call `gh` and overrides an exported `TODOS_OFFLINE`.
+- **Herdr**: the task record under
+  `<selected-account-root>/herdr-orch/<repo_slug>/tasks/td-<basename>.json`
+  (resolved by the shared workflow context; `TODOS_STATE_ROOT` is an explicit
+  test/development override)
+  when one exists: status pill, `phase role model`, the review verdict
+  (tagged `(stale)` unless its `reviewed_head_sha` matches the record),
+  and the done record (tagged `(stale)` unless its phase and agent match
+  the live worker). Records are read only, never written. An unreadable
+  record shows `unreadable`.
+- **Links**: `http(s)` URLs from the body, GitHub PRs as `PR #n`,
+  `claude.ai` artifacts as `artifact`.
+
+The renderer never writes under `.todos/` or the state root (it refuses
+such an output path), never regenerates `TODO.md`, and writes the page
+atomically so a half-written file is never seen.
+
+## Research reports
+
+`.todos/research/` holds durable research the board should keep:
+orchestrator field notes, studies, decision memos, and (future, written
+by `post-merge`) per-task review findings under
+`research/<task_id>/review-findings.md`. The dashboard indexes every
+`*.md` under it, newest `created` first.
+
+```markdown
+---
+created: 2026-09-06
+title: Orchestrator field notes, 2026-09-06
+kind: field-notes
+task: 2026-09-06-render-a-local-dashboard-of-open-todos-and-researc
+artifact: https://claude.ai/code/artifacts/...
+---
+
+One-paragraph summary, then the report body.
+```
+
+`created` and `title` are expected; `kind` (free text such as
+`field-notes`, `review-findings`, `report`), `task` (a task id or todo
+basename; links to that row when it is on the page), and `artifact`
+(an `http(s)` URL; anything else is shown as text, never linked) are
+optional. The first body line is the summary.
+
+Visibility follows `.todos/`: it is git-ignored only after `todos.sh init`
+(or the first `new`) has written the exclude line, so run `todos.sh init`
+before saving research in a repo that has never used todos. The
+dashboard warns when `.todos/` is neither ignored nor tracked. A repo
+where `todos.sh share` was run commits research with the backlog.
 
 ## Workflow
 

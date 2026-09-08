@@ -25,6 +25,8 @@ SKILL_DIR="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.ar
 CORE="$(cd "$SKILL_DIR/../../hooks" && pwd)/herdr_orch_core.py"
 RUNTIME="$(dirname "$CORE")/agent_runtime.py"
 DISPATCH="$(dirname "$CORE")/herdr_dispatch.py"
+TODOS="$SKILL_DIR/../todos/scripts/todos.sh"
+ORCH_RUNTIME=claude
 ```
 
 Every `$CORE` subcommand that mutates state (`write-task`, `write-index`)
@@ -97,6 +99,7 @@ pane's environment. Never retry through another account after an auth error.
      hook wake held behind a dialog and dropped after `dialogExpiry`, and a
      `-p` orchestrator drops them after 5 minutes. Not added to
      `settings.json.tmpl` (it would apply to every session of the account).
+   - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above, or the Codex adapter setup, supplies `$TODOS`; never borrow another runtime's personal installation path.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.

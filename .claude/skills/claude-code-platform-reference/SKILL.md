@@ -198,6 +198,7 @@ is warn-only: it only ever exits 0 with a warning payload.
 | PostToolUse  | `Edit\|Write`             | emoji_guard.py, no_ai_comments.py, format_files.py (prettier)              |
 | PostToolUse  | `mcp__plugin_atlassian`   | cache_jira_url.py                                                          |
 | SessionStart | `startup\|clear\|compact` | account_guard.py                                                           |
+| PermissionRequest | `Bash` | scratch_policy.py (scratch-only allow or no decision; Claude only) |
 
 2. PROJECT layer -- `.claude/settings.json`:
 

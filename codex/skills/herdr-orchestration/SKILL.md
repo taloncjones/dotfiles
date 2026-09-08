@@ -23,6 +23,8 @@ ORCH_SOURCE_ROOT="$(cd "$SKILL_DIR/../../.." && pwd)"
 CORE="$ORCH_SOURCE_ROOT/claude/hooks/herdr_orch_core.py"
 RUNTIME="$ORCH_SOURCE_ROOT/claude/hooks/agent_runtime.py"
 DISPATCH="$ORCH_SOURCE_ROOT/claude/hooks/herdr_dispatch.py"
+TODOS="$ORCH_SOURCE_ROOT/claude/skills/todos/scripts/todos.sh"
+ORCH_RUNTIME=codex
 ```
 
 Pass the selected `--repo-path` and `--runtime codex` on every core invocation;
