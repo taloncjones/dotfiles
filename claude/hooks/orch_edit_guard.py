@@ -31,9 +31,14 @@ that log, best effort, after the decision.
 Accepted holes (allow): scripts and functions, `python -c`, `git apply`/
 `checkout`/`stash`/`restore`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
 `rsync`, `dd`, editors, `xargs`, process substitution, targets built from
-`$VAR`/`$(...)`/globs, a heredoc with no terminator, more than 20 distinct
-targets, git calls past the 10-second budget, NotebookEdit/MultiEdit. This
-is a guard against drift, not evasion.
+`$VAR`/`$(...)`/globs, a heredoc with no terminator, git calls past the
+10-second budget, NotebookEdit/MultiEdit. This is a guard against drift,
+not evasion.
+
+Beyond TARGET_CAP (20) distinct targets, only the extra ones past the cap
+are unguarded (paths[:TARGET_CAP] keeps the first 20 seen and drops the
+rest) -- a single command mixing scratch and tracked targets is guarded
+or not per target, in first-seen order, not as a whole-command allow.
 
 Deny is exit 2 with three stderr lines; allow is exit 0 and silent. Fails
 open on any unexpected exception (exit 0), matching the other guards.
@@ -622,7 +627,11 @@ def resolve_targets(raw, home):
 def audit_append(slug, rec):
     """Append one JSON line to STATE_ROOT/<slug>/tasks/orch-edits.jsonl.
     True on success; False when tasks/ is missing or the file is not a
-    plain regular file (symlink, FIFO) or cannot be opened. Never raises."""
+    plain regular file (symlink, FIFO) or cannot be opened. Never raises.
+
+    Accepted gap (A5): near-identical to herdr_orch_core.append_orch_edit
+    (same O_APPEND|O_NOFOLLOW + short-write check); the two must stay
+    byte-compatible for the shared budget log but are not shared code."""
     p = core.repo_dir(slug) / "tasks" / AUDIT_FILE
     try:
         if not p.parent.is_dir() or not core.contained(p.parent, core.state_root()):
@@ -683,7 +692,11 @@ def claim_budget(slug, marker, session_id, tool_use_id, paths):
     last claim among all claims carrying this marker_id. None when an
     append fails or none of our claims is found on re-read -- the caller
     denies. Claims consume budget whether or not the allow follows, which
-    is what keeps parallel tool calls from overshooting max_edits."""
+    is what keeps parallel tool calls from overshooting max_edits.
+
+    Accepted gap (A3): the log is never rotated, so every claim re-reads
+    the slug's entire orch-edits.jsonl history; fine at today's budgets
+    (1-10) and short-lived markers, worth rotating if that changes."""
     claim_id = secrets.token_hex(4)
     for p in paths:
         rec = {"v": 1, "ts": core.now_iso(), "event": "orch-edit-claim",
@@ -727,6 +740,11 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget):
         slugs.setdefault(repo_slug_of(top, budget, cache), []).append(c)
     first = sorted(owned)[0]
     if len(slugs) != 1 or None in slugs or next(iter(slugs)) not in owned:
+        # When every slug in `slugs` IS owned (a single command writing
+        # tracked files in two repos this session owns), the generator
+        # below finds none and target_slug prints as "unknown" -- a safe
+        # deny either way, but the refusal wording is misleading for this
+        # one-command-two-repos shape (A4).
         target = next((s for s in slugs if s not in owned), None) or "unknown"
         return "deny", "scope", first, {"target_slug": target}
     slug = next(iter(slugs))
