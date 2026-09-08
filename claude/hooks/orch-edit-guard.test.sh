@@ -268,6 +268,208 @@ hook_case "AC4 3>&1 dup passes" allow Bash "cmd 3>&1" "$R" "$SID_A"
 many=$(i=1; while [ "$i" -le 24 ]; do printf 'echo x > %s/f%s; ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
 hook_case "AC4 25th distinct target is past the cap (fail open)" allow Bash "$many" "$R" "$SID_A"
 
+# --- AC5/AC6: marker and budget ----------------------------------------
+# marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
+marker() {
+    M_DIR="$1" M_SID="$2" M_FENCE="$3" M_DELTA="$4" M_MAX="$5" M_ID="${6:-0123456789abcdef}" python3 - <<'PY'
+import json, os, time
+e = os.environ
+rec = {"v": 1, "marker_id": e["M_ID"], "session_id": e["M_SID"], "fence": int(e["M_FENCE"]),
+       "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "minutes": 5,
+       "max_edits": int(e["M_MAX"]), "expires_epoch": time.time() + float(e["M_DELTA"]),
+       "expires": "2026-09-08T00:00:00Z", "note": "test"}
+open(os.path.join(e["M_DIR"], "orch-edit-allow.json"), "w").write(json.dumps(rec))
+PY
+}
+reset_log() { rm -rf "$RD_A/tasks"; mkdir -p "$RD_A/tasks"; : > "$AUDIT"; }
+second_line_has() {   # LABEL SUBSTRING: second stderr line of the last run
+    if sed -n 2p "$FIX/err" | grep -qF -- "$2"; then
+        printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s: %s\n' "$1" "$(sed -n 2p "$FIX/err")" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+
+reset_log; marker "$RD_A" "$SID_A" 4 300 10
+hook_case "AC5 valid marker allows Edit tracked" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+hook_case "AC5 valid marker allows Write new file" allow Write "$R/new.txt" "$R" "$SID_A"
+hook_case "AC5 valid marker allows Bash redirect" allow Bash "echo x > $TR" "$R" "$SID_A"
+hook_case "AC5 valid marker allows sed -i" allow Bash "sed -i s/a/b/ $TR" "$R" "$SID_A"
+if [ "$(audit_count orch-edit-claim)" = 4 ] && [ "$(audit_count orch-edit-allowed)" = 4 ] && AUDIT="$AUDIT" python3 - <<'PY'
+import json, os
+recs = [json.loads(l) for l in open(os.environ["AUDIT"]) if l.strip()]
+claims = [r for r in recs if r["event"] == "orch-edit-claim"]
+allows = [r for r in recs if r["event"] == "orch-edit-allowed"]
+assert all(r["marker_id"] == "0123456789abcdef" for r in claims + allows)
+assert all(len(r["claim_id"]) == 8 for r in claims) and len({r["claim_id"] for r in claims}) == 4
+assert all(r["reason"] in ("tracked", "untracked") and r["marker_expires"] for r in allows)
+PY
+then
+    printf 'PASS  AC5 one claim and one allowed line per guarded target\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC5 one claim and one allowed line per guarded target (claims=%s allowed=%s)\n' "$(audit_count orch-edit-claim)" "$(audit_count orch-edit-allowed)" >&2; FAIL=$((FAIL + 1))
+fi
+hook_case "AC5 marker does not allow an edit in a repo another session owns" deny Edit "$R2/tracked.txt" "$R2" "$SID_A"
+second_line_has "AC5 scope refusal names the target slug" "does not orchestrate $SLUG_2"
+if ! grep -q 'allow-edit' "$FIX/err"; then
+    printf 'PASS  AC5 scope refusal gives no allow-edit line\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC5 scope refusal gives no allow-edit line\n' >&2; FAIL=$((FAIL + 1))
+fi
+hook_case "AC5 marker does not allow an edit in an unowned repo (scratch clone)" deny Edit "$S/clone/tracked.txt" "$S" "$SID_A"
+reset_log; marker "$RD_A" "$SID_A" 4 -1 10
+hook_case "AC5 expired marker denies" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+if grep -q '"why":"expired"' "$AUDIT"; then printf 'PASS  AC5 expired marker audited as expired\n'; PASS=$((PASS + 1)); else printf 'FAIL  AC5 expired marker audited as expired\n' >&2; FAIL=$((FAIL + 1)); fi
+reset_log; marker "$RD_A" "$SID_B" 4 300 10
+hook_case "AC5 marker for another session denies" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+reset_log; marker "$RD_A" "$SID_A" 3 300 10
+hook_case "AC5 marker with a stale fence denies" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+if grep -q '"why":"fence"' "$AUDIT"; then printf 'PASS  AC5 stale-fence marker audited as fence\n'; PASS=$((PASS + 1)); else printf 'FAIL  AC5 stale-fence marker audited as fence\n' >&2; FAIL=$((FAIL + 1)); fi
+reset_log; marker "$RD_A" "$SID_A" 4 300 10 "not-hex"
+hook_case "AC5 marker without a valid marker_id denies" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+reset_log; printf 'not json' > "$RD_A/orch-edit-allow.json"
+hook_case "AC5 marker that is not JSON denies" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+reset_log; M_DIR="$RD_A" M_SID="$SID_A" python3 -c 'import json,os; e=os.environ; open(os.path.join(e["M_DIR"],"orch-edit-allow.json"),"w").write(json.dumps({"v":1,"marker_id":"0123456789abcdef","session_id":e["M_SID"],"fence":4,"ts":"x","minutes":5,"max_edits":3,"expires_epoch":10**400,"expires":"x","note":""}))'
+hook_case "AC5 marker with an overflowing expires_epoch denies (no fail-open)" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+if grep -q '"why":"expired"' "$AUDIT"; then printf 'PASS  AC5 overflowing expiry audited as expired\n'; PASS=$((PASS + 1)); else printf 'FAIL  AC5 overflowing expiry audited as expired\n' >&2; FAIL=$((FAIL + 1)); fi
+reset_log; rm -f "$RD_A/orch-edit-allow.json"; marker "$FIX" "$SID_A" 4 300 10; ln -s "$FIX/orch-edit-allow.json" "$RD_A/orch-edit-allow.json"
+hook_case "AC5 symlinked marker denies" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+rm -f "$RD_A/orch-edit-allow.json" "$FIX/orch-edit-allow.json"
+reset_log; mkdir -p "$RD_2/tasks"; marker "$RD_2" "$SID_A" 1 300 10
+hook_case "AC5 marker under a slug the session does not own denies" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+rm -f "$RD_2/orch-edit-allow.json"
+
+reset_log; marker "$RD_A" "$SID_A" 4 300 2 "aaaaaaaaaaaaaaaa"
+hook_case "AC6 budget 2: first write allowed" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+hook_case "AC6 budget 2: second write allowed" allow Edit "$R/dir/inner.txt" "$R" "$SID_A"
+hook_case "AC6 budget 2: third write denied with the budget variant" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+second_line_has "AC6 budget refusal names the marker and counts" "marker aaaaaaaaaaaaaaaa for $SLUG_A is exhausted (3 of 2 claims)"
+if [ "$(audit_count orch-edit-claim)" = 3 ] && [ "$(audit_count orch-edit-denied)" = 1 ]; then
+    printf 'PASS  AC6 the denied third attempt still left a claim\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC6 the denied third attempt still left a claim\n' >&2; FAIL=$((FAIL + 1))
+fi
+reset_log; marker "$RD_A" "$SID_A" 4 300 2 "bbbbbbbbbbbbbbbb"
+hook_case "AC6 three guarded targets under budget 2 denied outright" deny Bash "tee $TR $R/dir/inner.txt $R/new.txt" "$R" "$SID_A"
+reset_log; marker "$RD_A" "$SID_A" 4 300 1 "cccccccccccccccc"
+hook_case "AC6 budget 1: first allowed" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+hook_case "AC6 budget 1: second denied" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+marker "$RD_A" "$SID_A" 4 300 1 "dddddddddddddddd"
+hook_case "AC6 re-minted marker starts a fresh budget" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+reset_log; marker "$RD_A" "$SID_A" 4 300 2 "eeeeeeeeeeeeeeee"
+i=0
+while [ "$i" -lt 5 ]; do
+    ( payload Edit "$SID_A" "$R/tracked.txt" "$R" | env HOME="$H" TMPDIR="$T" CLAUDE_CONFIG_DIR="$CFG" HERDR_ENV=1 "$HOOK" >/dev/null 2>"$FIX/par.$i.err"; echo $? > "$FIX/par.$i.rc" ) &
+    i=$((i + 1))
+done
+wait
+allowed=0; denied=0; i=0
+while [ "$i" -lt 5 ]; do
+    case "$(cat "$FIX/par.$i.rc")" in
+        0) [ ! -s "$FIX/par.$i.err" ] && allowed=$((allowed + 1)) ;;
+        2) head -n 1 "$FIX/par.$i.err" | grep -q '^Blocked: orch-edit-guard' && denied=$((denied + 1)) ;;
+    esac
+    i=$((i + 1))
+done
+if [ "$allowed" = 2 ] && [ "$denied" = 3 ] && [ "$(audit_count orch-edit-claim)" = 5 ]; then
+    printf 'PASS  AC6 five concurrent attempts against budget 2: exactly two exit 0, three exit 2, five claims\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC6 five concurrent attempts against budget 2 (allowed=%s denied=%s claims=%s)\n' "$allowed" "$denied" "$(audit_count orch-edit-claim)" >&2; FAIL=$((FAIL + 1))
+fi
+reset_log; marker "$RD_A" "$SID_A" 4 300 10; rm -rf "$RD_A/tasks"
+hook_case "AC6 marker with no tasks dir cannot reserve: denied" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+second_line_has "AC6 unwritable log wording" "Cannot reserve budget"
+reset_log; marker "$RD_A" "$SID_A" 4 300 10; rm -f "$AUDIT"; ln -s "$FIX/victim2" "$AUDIT"
+hook_case "AC6 marker with a symlinked log cannot reserve: denied" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+if [ ! -e "$FIX/victim2" ]; then printf 'PASS  AC6 symlinked log not written through\n'; PASS=$((PASS + 1)); else printf 'FAIL  AC6 symlinked log not written through\n' >&2; FAIL=$((FAIL + 1)); fi
+# A claim of this invocation that does not survive on re-read (a concurrent
+# partial line spliced into ours) is an incomplete reservation: deny.
+reset_log; marker "$RD_A" "$SID_A" 4 300 5 "0000000000000002"
+if HOOK="$HOOK" CFG="$CFG" SLUG_A="$SLUG_A" SID_A="$SID_A" python3 - <<'PY'
+import importlib.util, json, os, sys
+sys.dont_write_bytecode = True
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+marker = json.load(open(os.path.join(os.environ["CFG"], "herdr-orch", os.environ["SLUG_A"], "orch-edit-allow.json")))
+real = g.audit_append
+calls = []
+def flaky(slug, rec):
+    calls.append(rec)
+    return True if len(calls) == 2 else real(slug, rec)   # second claim silently lost
+g.audit_append = flaky
+assert g.claim_budget(os.environ["SLUG_A"], marker, os.environ["SID_A"], "toolu_t", ["/a", "/b"]) is None
+g.audit_append = real
+assert g.claim_budget(os.environ["SLUG_A"], marker, os.environ["SID_A"], "toolu_t", ["/a", "/b"]) == 3
+PY
+then
+    printf 'PASS  AC6 a lost claim line makes the reservation incomplete (deny)\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC6 a lost claim line makes the reservation incomplete (deny)\n' >&2; FAIL=$((FAIL + 1))
+fi
+reset_log; marker "$RD_A" "$SID_A" 4 300 10; rm -f "$AUDIT"; mkfifo "$AUDIT"
+( payload Edit "$SID_A" "$R/tracked.txt" "$R" | env HOME="$H" TMPDIR="$T" CLAUDE_CONFIG_DIR="$CFG" HERDR_ENV=1 "$HOOK" >"$FIX/mfifo.out" 2>"$FIX/mfifo.err"; echo $? > "$FIX/mfifo.rc" ) &
+fifo_pid=$!
+i=0
+while kill -0 "$fifo_pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+if kill -0 "$fifo_pid" 2>/dev/null; then
+    kill "$fifo_pid" 2>/dev/null; printf 'FAIL  AC6 valid marker with a FIFO log denies without blocking\n' >&2; FAIL=$((FAIL + 1))
+elif [ "$(cat "$FIX/mfifo.rc")" = 2 ] && sed -n 2p "$FIX/mfifo.err" | grep -q 'Cannot reserve budget'; then
+    printf 'PASS  AC6 valid marker with a FIFO log denies without blocking\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC6 valid marker with a FIFO log denies without blocking (rc=%s)\n' "$(cat "$FIX/mfifo.rc")" >&2; FAIL=$((FAIL + 1))
+fi
+wait "$fifo_pid" 2>/dev/null
+rm -f "$AUDIT"
+
+# Marker-enabled coverage of the AC2/AC4 deny shapes (spec AC5): two
+# fresh markers of budget 10, every shape below must now exit 0.
+reset_log; marker "$RD_A" "$SID_A" 4 300 10 "ffffffffffffffff"
+hook_case "AC5m Write tracked allowed" allow Write "$R/tracked.txt" "$R" "$SID_A"
+hook_case "AC5m Edit nested tracked allowed" allow Edit "$R/dir/inner.txt" "$R" "$SID_A"
+hook_case "AC5m Write new file in new subdir allowed" allow Write "$R/newdir/deep/new.txt" "$R" "$SID_A"
+hook_case "AC5m relative file_path allowed" allow Edit "tracked.txt" "$R" "$SID_A"
+hook_case "AC5m symlink to tracked allowed" allow Edit "$FIX/link_to_tracked" "$N" "$SID_A"
+hook_case "AC5m append >> allowed" allow Bash "printf x >> $TR" "$R" "$SID_A"
+hook_case "AC5m 2> allowed" allow Bash "echo x 2> $TR" "$R" "$SID_A"
+hook_case "AC5m heredoc into tracked allowed" allow Bash "cat <<'EOF' > $TR
+body
+EOF" "$R" "$SID_A"
+hook_case "AC5m perl -pi allowed" allow Bash "perl -pi -e s/a/b/ $TR" "$R" "$SID_A"
+hook_case "AC5m tee -a allowed" allow Bash "echo x | tee -a $TR" "$R" "$SID_A"
+if [ "$(audit_count orch-edit-allowed)" = 10 ]; then printf 'PASS  AC5m ten allows under the first marker\n'; PASS=$((PASS + 1)); else printf 'FAIL  AC5m ten allows under the first marker (%s)\n' "$(audit_count orch-edit-allowed)" >&2; FAIL=$((FAIL + 1)); fi
+marker "$RD_A" "$SID_A" 4 300 10 "0000000000000001"
+hook_case "AC5m cp onto tracked allowed" allow Bash "cp $S/note.txt $TR" "$R" "$SID_A"
+hook_case "AC5m cp into repo dir allowed" allow Bash "cp $S/note.txt $R/dir" "$R" "$SID_A"
+hook_case "AC5m mv onto tracked allowed" allow Bash "mv $S/note.txt $TR" "$R" "$SID_A"
+hook_case "AC5m mv tracked out allowed (the source is the guarded target)" allow Bash "mv $TR $S/saved.txt" "$R" "$SID_A"
+hook_case "AC5m sh -c redirect allowed" allow Bash "sh -c 'echo x > $TR'" "$R" "$SID_A"
+hook_case "AC5m cd then relative redirect allowed" allow Bash "cd $R/dir && echo x > inner.txt" "$N" "$SID_A"
+hook_case "AC5m env prefix tee allowed" allow Bash "env FOO=1 tee $TR" "$R" "$SID_A"
+hook_case "AC5m cp with input redirect allowed" allow Bash "cp $S/note.txt $TR < $S/in" "$R" "$SID_A"
+hook_case "AC5m sed -i f2> allowed" allow Bash "sed -i s/a/b/ $R/f2> $S/log" "$R" "$SID_A"
+reset_log; rm -f "$RD_A/orch-edit-allow.json"
+
+# --- AC7 link: the real allow-edit CLI mints a marker the hook honours ---
+reset_log
+CLAIM=$(env CLAUDE_CONFIG_DIR="$CFG" python3 "$CORE" claim-owner --repo-slug "$SLUG_A" --session "$SID_A" --host h --pid 1 --stale-secs 0 2>/dev/null)
+if env CLAUDE_CONFIG_DIR="$CFG" python3 "$CORE" allow-edit --repo-slug "$SLUG_A" --session "$SID_A" --fence "$CLAIM" --minutes 5 --max-edits 1 --note approved > "$FIX/ae.out" 2>"$FIX/ae.err" \
+        && grep -q '^expires .* marker [0-9a-f]\{16\}$' "$FIX/ae.out"; then
+    printf 'PASS  AC7 allow-edit under the live fence prints expires and marker\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC7 allow-edit under the live fence prints expires and marker\n' >&2; FAIL=$((FAIL + 1))
+fi
+hook_case "AC7 hook honours the CLI-minted marker" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+hook_case "AC7 CLI-minted budget 1 is then exhausted" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+if env CLAUDE_CONFIG_DIR="$CFG" python3 "$CORE" allow-edit --repo-slug "$SLUG_A" --session "$SID_A" --fence "$((CLAIM + 1))" --minutes 5 >/dev/null 2>&1; then
+    printf 'FAIL  AC7 stale fence cannot mint\n' >&2; FAIL=$((FAIL + 1))
+else
+    printf 'PASS  AC7 stale fence cannot mint\n'; PASS=$((PASS + 1))
+fi
+# restore the fixture owner record for the static block below
+printf '{"session_id":"%s","host":"h","pid":1,"heartbeat_ts":0,"fence":4}' "$SID_A" > "$RD_A/owner.json"
+rm -f "$RD_A/orch-edit-allow.json"
+
 # --- AC8 (no-marker part) and AC9: audit and malformed input ------------
 : > "$AUDIT"
 hook_case "AC8 denied write appends one orch-edit-denied line" deny Edit "$R/tracked.txt" "$R" "$SID_A"

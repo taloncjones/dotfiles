@@ -527,12 +527,81 @@ def audit_append(slug, rec):
     return written == len(data)  # a short write is not a record
 
 
-# --- marker (Task 4 adds read_marker and claim_budget here) ---------------
+# --- marker and budget -----------------------------------------------------
+
+def read_marker(slug, session_id, fence):
+    """(marker, None) when the slug's marker is valid for this session and
+    fence and unexpired; else (None, why) with why in no-marker, fence,
+    expired. A malformed file is no marker, never an exception."""
+    m = read_state_json(core.repo_dir(slug) / MARKER_FILE)
+    if not m or m.get("v") != 1 or m.get("session_id") != session_id:
+        return None, "no-marker"
+    mid = m.get("marker_id")
+    if not isinstance(mid, str) or not MARKER_ID_RE.match(mid):
+        return None, "no-marker"
+    me = m.get("max_edits")
+    if isinstance(me, bool) or not isinstance(me, int) \
+            or not (MAX_EDITS_RANGE[0] <= me <= MAX_EDITS_RANGE[1]):
+        return None, "no-marker"
+    mf = m.get("fence")
+    if isinstance(mf, bool) or not isinstance(mf, int) or mf != fence:
+        return None, "fence"
+    exp = m.get("expires_epoch")
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None, "expired"
+    try:
+        exp = float(exp)  # a JSON integer too large for float raises here
+    except (OverflowError, ValueError):
+        return None, "expired"
+    if not math.isfinite(exp) or exp <= time.time():
+        return None, "expired"
+    return m, None
+
+
+def claim_budget(slug, marker, session_id, tool_use_id, paths):
+    """Reserve budget claim-then-count: append one claim line per path,
+    re-read the log, and return the 1-based ordinal of this invocation's
+    last claim among all claims carrying this marker_id. None when an
+    append fails or none of our claims is found on re-read -- the caller
+    denies. Claims consume budget whether or not the allow follows, which
+    is what keeps parallel tool calls from overshooting max_edits."""
+    claim_id = secrets.token_hex(4)
+    for p in paths:
+        rec = {"v": 1, "ts": core.now_iso(), "event": "orch-edit-claim",
+               "marker_id": marker["marker_id"], "claim_id": claim_id,
+               "session_id": session_id, "tool_use_id": tool_use_id,
+               "path": p[:PATH_MAX]}
+        if not audit_append(slug, rec):
+            return None
+    try:
+        with open(core.repo_dir(slug) / "tasks" / AUDIT_FILE, errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    ordinal, own, seen = 0, None, 0
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("event") != "orch-edit-claim" \
+                or rec.get("marker_id") != marker["marker_id"]:
+            continue
+        ordinal += 1
+        if rec.get("claim_id") == claim_id:
+            own = ordinal
+            seen += 1
+    # Every claim of this invocation must have survived as a parseable
+    # line; a lost or mangled one (a concurrent partial line spliced into
+    # ours) means the reservation is not complete, so deny.
+    return own if seen == len(paths) else None
+
 
 def marker_verdict(guarded, owned, session_id, tool_use_id, budget):
-    """('allow', slug, marker) or ('deny', why, slug, detail).
-    Task 2: no marker support yet -- always deny against the target's slug
-    when owned, else the sorted-first owned slug."""
+    """('allow', slug, marker) or ('deny', why, slug, detail). Every
+    guarded target must resolve to one slug this session owns; that
+    slug's marker must validate; then the budget claim must land within
+    max_edits."""
     cache = {}
     slugs = {}
     for c, top, _reason in guarded:
@@ -541,7 +610,17 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget):
     if len(slugs) != 1 or None in slugs or next(iter(slugs)) not in owned:
         target = next((s for s in slugs if s not in owned), None) or "unknown"
         return "deny", "scope", first, {"target_slug": target}
-    return "deny", "no-marker", next(iter(slugs)), {}
+    slug = next(iter(slugs))
+    marker, why = read_marker(slug, session_id, owned[slug])
+    if marker is None:
+        return "deny", why, slug, {}
+    ordinal = claim_budget(slug, marker, session_id, tool_use_id,
+                           [c for c, _top, _reason in guarded])
+    if ordinal is None:
+        return "deny", "budget", slug, {"unwritable": True, "marker": marker}
+    if ordinal > marker["max_edits"]:
+        return "deny", "budget", slug, {"ordinal": ordinal, "marker": marker}
+    return "allow", slug, marker
 
 
 # --- refusal ---------------------------------------------------------------
