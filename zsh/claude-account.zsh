@@ -97,6 +97,14 @@ function claude() {    # claude() will launch Claude Code with the work account 
             # (relative) in a main checkout; :A resolves symlinks and
             # "..", :h drops the .git segment. No git, or not a repo ->
             # personal, as before.
+            # Known, accepted, fail-open gaps (co-review A2/A3, not fixed
+            # here): no portable timeout wraps this call -- macOS ships no
+            # `timeout` -- so a hung/wedged git blocks the claude launch
+            # instead of racing a bound; and this fork runs on every
+            # non-work-tree launch inside any git repo, not gated by a
+            # cheap worktree-path marker pre-check (~/.herdr/worktrees/,
+            # .claude/worktrees/, .worktrees/) the way it could be. Both
+            # trade a rare stall / an extra per-launch fork for simplicity.
             # || repo_git="" absorbs git's nonzero exit (e.g. "not a git
             # repository") so it can never trip errexit in a set -e caller.
             repo_git="$(command git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" || repo_git=""
