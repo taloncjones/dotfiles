@@ -205,6 +205,69 @@ hook_case "AC3 TMPDIR file outside any repo passes" allow Write "$T/note.txt" "$
 hook_case "AC3 plain directory outside any repo passes" allow Write "$N/note.txt" "$R" "$SID_A"
 hook_case "AC3 home-relative path outside any repo passes" allow Write "~/note.txt" "$R" "$SID_A"
 
+# --- AC4: Bash write shapes ---------------------------------------------
+TR="$R/tracked.txt"
+hook_case "AC4 redirect > tracked denied" deny Bash "echo x > $TR" "$R" "$SID_A"
+hook_case "AC4 append >> tracked denied" deny Bash "printf x >> $TR" "$R" "$SID_A"
+hook_case "AC4 clobber >| tracked denied" deny Bash "echo x >| $TR" "$R" "$SID_A"
+hook_case "AC4 fd redirect 2> tracked denied" deny Bash "echo x 2> $TR" "$R" "$SID_A"
+hook_case "AC4 &> tracked denied" deny Bash "echo x &> $TR" "$R" "$SID_A"
+hook_case "AC4 glued >tracked denied" deny Bash "echo x >$TR" "$R" "$SID_A"
+hook_case "AC4 heredoc into tracked denied" deny Bash "cat <<'EOF' > $TR
+body > quoted
+EOF" "$R" "$SID_A"
+hook_case "AC4 sed -i tracked denied" deny Bash "sed -i s/a/b/ $TR" "$R" "$SID_A"
+hook_case "AC4 BSD sed -i '' tracked denied" deny Bash "sed -i '' s/a/b/ $TR" "$R" "$SID_A"
+hook_case "AC4 perl -pi -e tracked denied" deny Bash "perl -pi -e s/a/b/ $TR" "$R" "$SID_A"
+hook_case "AC4 tee tracked denied" deny Bash "echo x | tee $TR" "$R" "$SID_A"
+hook_case "AC4 tee -a tracked denied" deny Bash "echo x | tee -a $TR" "$R" "$SID_A"
+hook_case "AC4 cp onto tracked denied" deny Bash "cp $S/note.txt $TR" "$R" "$SID_A"
+hook_case "AC4 cp into repo dir denied (new untracked file)" deny Bash "cp $S/note.txt $R/dir" "$R" "$SID_A"
+hook_case "AC4 mv onto tracked denied" deny Bash "mv $S/note.txt $TR" "$R" "$SID_A"
+hook_case "AC4 mv tracked out of the repo denied (source)" deny Bash "mv $TR $S/saved.txt" "$R" "$SID_A"
+hook_case "AC4 sh -c redirect denied" deny Bash "sh -c 'echo x > $TR'" "$R" "$SID_A"
+hook_case "AC4 cd then relative redirect denied" deny Bash "cd $R/dir && echo x > inner.txt" "$N" "$SID_A"
+hook_case "AC4 env prefix then tee denied" deny Bash "env FOO=1 tee $TR" "$R" "$SID_A"
+hook_case "AC4 redirect after a scratch heredoc denied" deny Bash "cat <<'EOF' > $S/n.txt
+body
+EOF
+echo x > $TR" "$R" "$SID_A"
+hook_case "AC4 cp dest not masked by a trailing redirect" deny Bash "cp $S/note.txt $TR > $S/log" "$R" "$SID_A"
+: > "$S/in"
+hook_case "AC4 cp dest not masked by a trailing input redirect" deny Bash "cp $S/note.txt $TR < $S/in" "$R" "$SID_A"
+hook_case "AC4 cp dest not masked by a descriptor input dup" deny Bash "cp $S/note.txt $TR <&0" "$R" "$SID_A"
+hook_case "AC4 filename ending in a digit before > keeps its digit (sed -i f2)" deny Bash "sed -i s/a/b/ $R/f2> $S/log" "$R" "$SID_A"
+hook_case "AC4 1>tracked denied" deny Bash "echo x 1>$TR" "$R" "$SID_A"
+hook_case "AC4 cp dest not masked by a numbered heredoc (0<<EOF)" deny Bash "cp $S/note.txt $TR 0<<EOF
+body
+EOF" "$S" "$SID_A"
+hook_case "AC4 mv of the whole checkout denied (work tree root is guarded)" deny Bash "mv $R $S/moved" "$S" "$SID_A"
+hook_case "AC4 git status passes" allow Bash "git status" "$R" "$SID_A"
+hook_case "AC4 plain echo passes" allow Bash "echo x" "$R" "$SID_A"
+hook_case "AC4 sed without -i passes" allow Bash "sed s/a/b/ $TR" "$R" "$SID_A"
+hook_case "AC4 input redirect passes" allow Bash "cat < $TR" "$R" "$SID_A"
+hook_case "AC4 /dev/null passes" allow Bash "echo x > /dev/null" "$R" "$SID_A"
+hook_case "AC4 >&2 dup passes" allow Bash "echo x >&2" "$R" "$SID_A"
+hook_case "AC4 2>&1 dup passes" allow Bash "cmd 2>&1" "$R" "$SID_A"
+hook_case "AC4 quoted > is data" allow Bash "echo \">\" $TR" "$R" "$SID_A"
+hook_case "AC4 quoted << is data" allow Bash "echo \"<<EOF\" > $S/n.txt" "$R" "$SID_A"
+hook_case "AC4 redirect to the scratchpad passes" allow Bash "echo x > $S/n.txt" "$R" "$SID_A"
+hook_case "AC4 redirect to .todos passes" allow Bash "echo x > .todos/n" "$R" "$SID_A"
+hook_case "AC4 unexpanded variable target passes" allow Bash "echo x > \"\$F\"" "$R" "$SID_A"
+hook_case "AC4 redirect into an ignored dir passes" allow Bash "echo x > $R/ignored/n" "$R" "$SID_A"
+hook_case "AC4 cp tracked out to the scratchpad passes" allow Bash "cp $TR $S/copy.txt" "$R" "$SID_A"
+hook_case "AC4 heredoc body with > and a tracked redirect line passes" allow Bash "cat <<'EOF' > $S/n.txt
+> quoted
+echo x > $TR
+EOF" "$R" "$SID_A"
+hook_case "AC4 comment after # is not a redirect" allow Bash "echo x # > $TR" "$R" "$SID_A"
+hook_case "AC4 read-write <> is not a write target (spec 6.4)" allow Bash "cmd <> $TR" "$R" "$SID_A"
+hook_case "AC4 here-string then scratch redirect passes" allow Bash "cmd <<< word > $S/o" "$R" "$SID_A"
+hook_case "AC4 input from tracked, output to scratch passes" allow Bash "cat < $TR > $S/o" "$R" "$SID_A"
+hook_case "AC4 3>&1 dup passes" allow Bash "cmd 3>&1" "$R" "$SID_A"
+many=$(i=1; while [ "$i" -le 24 ]; do printf 'echo x > %s/f%s; ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
+hook_case "AC4 25th distinct target is past the cap (fail open)" allow Bash "$many" "$R" "$SID_A"
+
 # --- AC8 (no-marker part) and AC9: audit and malformed input ------------
 : > "$AUDIT"
 hook_case "AC8 denied write appends one orch-edit-denied line" deny Edit "$R/tracked.txt" "$R" "$SID_A"

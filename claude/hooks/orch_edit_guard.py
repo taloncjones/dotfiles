@@ -69,6 +69,9 @@ PATH_MAX = 300
 MAX_EDITS_RANGE = (1, 10)
 CORE_CMD = "python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
 BLOCKED = "Blocked: orch-edit-guard"
+SENTINEL_RE = re.compile(r"__ORCH_REDIR_(\d+)__\Z")
+WORD_STOP = " \t\n;&|()<>"
+SHELL_WRAPPERS = ("sh", "bash", "zsh", "dash")
 
 
 class Budget:
@@ -192,6 +195,279 @@ def repo_slug_of(top, budget, cache):
     return cache[top]
 
 
+# --- Bash: pass 1, raw scan ------------------------------------------------
+
+def read_word(text, j):
+    """Quote-aware word starting at text[j]: (word, end). Quotes are
+    removed and backslash escapes resolved; `$` and backticks are kept
+    verbatim so resolve_targets can skip what the shell would expand."""
+    n = len(text)
+    out = []
+    quote = None
+    while j < n:
+        c = text[j]
+        if quote:
+            if quote == '"' and c == "\\" and j + 1 < n:
+                out.append(text[j + 1]); j += 2; continue
+            if c == quote:
+                quote = None; j += 1; continue
+            out.append(c); j += 1; continue
+        if c in "'\"":
+            quote = c; j += 1; continue
+        if c == "\\" and j + 1 < n:
+            out.append(text[j + 1]); j += 2; continue
+        if c in WORD_STOP:
+            break
+        out.append(c); j += 1
+    return "".join(out), j
+
+
+def io_number_start(out):
+    """Index in `out` where an IO-number prefix of the operator at the end
+    begins: a run of digits that forms a whole word (`2>`), or a lone `&`
+    (`&>`); len(out) when there is no such prefix (`file2>` keeps its
+    digits -- they belong to the filename, bash only treats digits as a
+    descriptor when they are the entire preceding word)."""
+    k = len(out)
+    while k > 0 and len(out[k - 1]) == 1 and out[k - 1].isdigit():
+        k -= 1
+    if k < len(out) and (k == 0 or out[k - 1] in (" ", "\t", "\n", ";", "&", "|", "(", ")")):
+        return k
+    k = len(out)
+    if k > 0 and out[k - 1] == "&":
+        return k - 1
+    return k
+
+
+def scan_raw(text):
+    """(cleaned, redirs). One quote-aware pass: comments and heredoc bodies
+    are dropped; every OUTPUT redirection operator plus its target word is
+    replaced by a sentinel word so pass 2 sees it inside the right segment
+    but never as a command operand; redirs maps sentinel number -> target.
+    Input redirections (`<`, `<>`, `<<<`) and their operands are consumed
+    and blanked without producing a target, so they never become a
+    cp/mv/tee operand either. Only unquoted characters are operators: a
+    quoted `>` or `<<` is data. Descriptor dups (`>&2`, `2>&1`) and process
+    substitution yield no target. A heredoc with no terminator swallows
+    the rest (allow)."""
+    n = len(text)
+    out = []
+    redirs = {}
+    heredocs = []  # (word, strip_tabs) pending on the current line
+    i = 0
+    quote = None
+    while i < n:
+        c = text[i]
+        if quote:
+            if quote == '"' and c == "\\" and i + 1 < n:
+                out.append(text[i:i + 2]); i += 2; continue
+            if c == quote:
+                quote = None
+            out.append(c); i += 1; continue
+        if c in "'\"":
+            quote = c; out.append(c); i += 1; continue
+        if c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2]); i += 2; continue
+        if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if c == "\n":
+            out.append(c); i += 1
+            for word, strip_tabs in heredocs:
+                while i < n:
+                    j = text.find("\n", i)
+                    j = n if j < 0 else j
+                    line = text[i:j]
+                    i = j + 1 if j < n else n
+                    if (line.lstrip("\t") if strip_tabs else line) == word:
+                        break
+            heredocs = []
+            continue
+        if c == "<":
+            if text.startswith("<<<", i) or text.startswith("<>", i) \
+                    or not text.startswith("<<", i):
+                # input redirection (<, <>, <<<): consume the operator, an
+                # IO number before it, and the operand; never a target
+                j = i + (3 if text.startswith("<<<", i) else 2 if text.startswith("<>", i) else 1)
+                m = j
+                while m < n and text[m] in " \t":
+                    m += 1
+                del out[io_number_start(out):]
+                if m < n and text[m] == "&":
+                    e = m + 1
+                    while e < n and text[e].isdigit():
+                        e += 1
+                else:
+                    _w, e = read_word(text, m)
+                out.append(" "); i = e; continue
+            j = i + 2                              # heredoc
+            strip_tabs = False
+            if j < n and text[j] == "-":
+                strip_tabs = True; j += 1
+            while j < n and text[j] in " \t":
+                j += 1
+            word, j = read_word(text, j)
+            heredocs.append((word, strip_tabs))
+            del out[io_number_start(out):]        # 0<<EOF: the IO number goes too
+            out.append(" ")
+            i = j
+            continue
+        if c == ">":
+            j = i + 1
+            if j < n and text[j] in ">|":
+                j += 1
+            m = j
+            while m < n and text[m] in " \t":
+                m += 1
+            del out[io_number_start(out):]        # 2> / &> prefix, if any
+            if m < n and text[m] == "&":          # dup: >&2, 2>&1
+                e = m + 1
+                while e < n and text[e].isdigit():
+                    e += 1
+                out.append(" "); i = e; continue
+            if m < n and text[m] == "(":          # process substitution
+                out.append(" "); i = m; continue
+            word, e = read_word(text, m)
+            if word:
+                num = len(redirs)
+                redirs[num] = word
+                out.append(f" __ORCH_REDIR_{num}__ ")
+            else:
+                out.append(" ")
+            i = e
+            continue
+        out.append(c); i += 1
+    return "".join(out), redirs
+
+
+# --- Bash: pass 2, per-segment operands -----------------------------------
+
+def has_inplace(words):
+    for t in words[1:]:
+        if t == "--in-place" or t.startswith("--in-place="):
+            return True
+        if t.startswith("-") and not t.startswith("--") and "i" in t[1:]:
+            return True
+    return False
+
+
+def script_operands(words, value_opts, script_flags):
+    """Operands of a sed/perl segment that has an in-place flag, minus
+    option values; the first operand is the script unless an explicit
+    script option (-e/-f, or a bundled -ne/-pe cluster) is present."""
+    if not has_inplace(words):
+        return []
+    explicit = False
+    ops, skip = [], False
+    for t in words[1:]:
+        if skip:
+            skip = False; continue
+        if t in value_opts:
+            skip = True; explicit = True; continue
+        if any(t.startswith(v + "=") for v in value_opts if v.startswith("--")):
+            explicit = True; continue
+        if t.startswith("-") and not t.startswith("--") and len(t) > 1 \
+                and any(ch in t[1:] for ch in script_flags):
+            explicit = True
+            continue
+        if t.startswith("-") and len(t) > 1:
+            continue
+        if t == "":
+            continue
+        ops.append(t)
+    if not explicit and ops:
+        ops = ops[1:]
+    return ops
+
+
+def tee_operands(words):
+    ops, rest = [], False
+    for t in words[1:]:
+        if rest or t == "-" or not t.startswith("-"):
+            ops.append(t)
+        elif t == "--":
+            rest = True
+    return ops
+
+
+def copy_targets(words, cwd, home, include_sources):
+    """cp/install: the destination (or dest/basename(src) per source when
+    the destination is an existing directory). mv: the same plus every
+    source, because a move deletes the source path."""
+    ops, tdir, skip = [], None, False
+    for t in words[1:]:
+        if skip:
+            tdir = t; skip = False; continue
+        if t in ("-t", "--target-directory"):
+            skip = True; continue
+        if t.startswith("--target-directory="):
+            tdir = t.split("=", 1)[1]; continue
+        if t.startswith("-") and len(t) > 1:
+            continue
+        ops.append(t)
+    if tdir is None:
+        if len(ops) < 2:
+            return []
+        dest, srcs = ops[-1], ops[:-1]
+    else:
+        dest, srcs = tdir, ops
+    out = []
+    dpath = rm_guard.resolve(rm_guard.expand_home(dest, home), cwd)
+    if os.path.isdir(dpath):
+        out.extend(os.path.join(dpath, os.path.basename(s)) for s in srcs)
+    else:
+        out.append(dest)
+    if include_sources:
+        out.extend(srcs)
+    return out
+
+
+def _existing(ops, cwd, home):
+    return [w for w in ops
+            if os.path.lexists(rm_guard.resolve(rm_guard.expand_home(w, home), cwd))]
+
+
+def bash_targets(command, cwd, home, depth=0):
+    """[(cwd, word)] write targets of one command string. cwd follows `cd`
+    segments exactly as rm_guard.check_command does."""
+    if depth > 1:
+        return []
+    cleaned, redirs = scan_raw(command)
+    found = []
+    for tokens in rm_guard.split_segments(rm_guard.tokenize(cleaned)):
+        words = []
+        for t in tokens:
+            m = SENTINEL_RE.match(t)
+            if m:
+                w = redirs.get(int(m.group(1)))
+                if w:
+                    found.append((cwd, w))
+            else:
+                words.append(t)
+        words = rm_guard.strip_prefixes(words)
+        if not words:
+            continue
+        head = rm_guard.basename(words[0])
+        if head == "cd":
+            cwd = rm_guard.resolve_cd_target(words, cwd, home)
+        elif head in ("sed", "gsed"):
+            ops = script_operands(words, ("-e", "-f", "--expression", "--file"), "ef")
+            found.extend((cwd, w) for w in _existing(ops, cwd, home))
+        elif head == "perl":
+            ops = script_operands(words, ("-e", "-E"), "eE")
+            found.extend((cwd, w) for w in _existing(ops, cwd, home))
+        elif head == "tee":
+            found.extend((cwd, w) for w in tee_operands(words))
+        elif head in ("cp", "install", "mv"):
+            found.extend((cwd, w) for w in copy_targets(words, cwd, home, head == "mv"))
+        elif head in SHELL_WRAPPERS:
+            inner = rm_guard.extract_shell_c_arg(words)
+            if inner is not None:
+                found.extend(bash_targets(inner, cwd, home, depth + 1))
+    return found
+
+
 # --- targets ---------------------------------------------------------------
 
 def targets_for(payload, tool, cwd, home):
@@ -200,7 +476,10 @@ def targets_for(payload, tool, cwd, home):
     if not isinstance(ti, dict):
         return []
     if tool == "Bash":
-        return []  # Task 3 wires bash_targets here
+        cmd = ti.get("command")
+        if not isinstance(cmd, str) or not cmd.strip():
+            return []
+        return bash_targets(cmd, cwd, home)
     fp = ti.get("file_path")
     return [(cwd, fp)] if isinstance(fp, str) and fp.strip() else []
 
