@@ -32,7 +32,8 @@ MAX_LINKS = 5
 DEFAULT_COMPLETED = 10
 SATISFIED = ("done", "merged")
 IN_FLIGHT_STATUSES = ("kickoff", "in-progress", "blocked", "review-dispatched",
-                      "changes-requested", "reviewed")
+                      "changes-requested", "reviewed", "completed",
+                      "phase-advanced", "paused")
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 PR_URL_RE = re.compile(r"^https?://github\.com/[^/]+/[^/]+/pull/(\d+)")
 ARTIFACT_URL_RE = re.compile(r"^https?://claude\.ai/(code/)?artifacts/")
@@ -391,7 +392,7 @@ def load_research(research_dir, known_basenames):
 
 # --- rendering -------------------------------------------------------------
 
-CSS = """
+CSS = r"""
 :root {
   color-scheme: light;
   --ground: #f4f6f3;
@@ -1093,9 +1094,13 @@ def render_research(entries):
 
 
 def render_page(repo_name, branch, stamp, open_todos, completed, research, show_completed):
+    # Every tile derives from open_bucket, which is mutually exclusive per
+    # todo (blocked wins over in-flight): a todo that is both dependency-
+    # blocked and herdr-in-flight must count once, in Blocked, not in both
+    # tiles.
     n_open = len(open_todos)
-    n_blocked = sum(1 for t in open_todos if t["blocked"])
-    n_flight = sum(1 for t in open_todos if t["in_flight"])
+    n_blocked = sum(1 for t in open_todos if open_bucket(t) == "blocked")
+    n_flight = sum(1 for t in open_todos if open_bucket(t) == "in-flight")
     n_waiting = sum(1 for t in open_todos if open_bucket(t) == "waiting")
     n_someday = sum(1 for t in open_todos if open_bucket(t) == "someday")
     completed_html = ""
@@ -1150,20 +1155,21 @@ def default_state_root():
     return Path(cfg) / "herdr-orch"
 
 
-def is_within(path, parent):
-    """True when the real path of `path` is `parent` or inside it."""
-    try:
-        Path(os.path.realpath(path)).relative_to(Path(os.path.realpath(parent)))
-        return True
-    except ValueError:
-        return False
-
-
 def guard_out_path(out, protected):
-    """Refuse to write under .todos/ or the state root, through symlinks too."""
-    probe = out if out.exists() else out.parent
+    """Refuse to write under .todos/ or the state root, through symlinks too.
+
+    Resolves the containing directory (so a symlinked ancestor directory is
+    still caught) but leaves the leaf name itself unresolved: os.replace()
+    swaps the name `out` refers to, not whatever a pre-existing symlink at
+    that name currently points at, so a symlink planted AT `out` cannot
+    escape the guard by pointing somewhere else -- the write still lands on
+    `out`'s own name, wherever that name actually sits.
+    """
+    real_parent = Path(os.path.realpath(out.parent))
+    candidate = real_parent / out.name
     for label, p in protected:
-        if is_within(probe, p):
+        real_p = Path(os.path.realpath(p))
+        if candidate == real_p or real_p in candidate.parents:
             die(f"refusing to write the dashboard under {label}: {out}")
 
 

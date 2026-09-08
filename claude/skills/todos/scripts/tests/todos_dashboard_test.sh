@@ -93,6 +93,9 @@ s = importlib.util.spec_from_file_location("c", sys.argv[1])
 m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
 print(m.repo_slug(sys.argv[2]))' "$CORE" "$1"
 }
+path_uri() { # path_uri <path> -> file:// URI, percent-encoded like Path.as_uri()
+  python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).as_uri())' "$1"
+}
 # Fake gh: pr view 7 -> OPEN, else exit 1; appends every call to <path>.calls.
 mk_gh_stub() {
   guard_fixture "$(dirname "$1")"
@@ -369,6 +372,31 @@ test_output_guard() {
 }
 test_output_guard
 
+test_symlink_at_out() {
+  local repo sr outside out
+  # A symlink AT the --out path itself (not a symlinked directory earlier in
+  # the path): os.replace() swaps the name `out` refers to, not wherever the
+  # symlink currently points, so the guard must key off the name's own
+  # location, never the symlink's target.
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"
+  outside=$(mk_dir) || exit 2
+  printf 'pre-existing outside content\n' >"$outside/target.html"
+  mkdir -p "$repo/.todos"
+  guard_fixture "$repo/.todos"
+  ln -s "$outside/target.html" "$repo/.todos/board.html"
+  out=$(render "$repo" "$sr" --out "$repo/.todos/board.html")
+  assert_eq "guard: symlink at out exits 1" "$(rc)" "1"
+  assert_contains "guard: symlink at out message" "$(err)" "refusing to write"
+  assert_eq "guard: symlink at out outside target untouched" "$(cat "$outside/target.html")" "pre-existing outside content"
+  [ -L "$repo/.todos/board.html" ] && ok "guard: symlink at out left in place" || bad "guard: symlink at out left in place" "symlink replaced"
+  out=$(render "$repo" "$sr" --out "$repo/.todos")
+  assert_eq "guard: --out naming .todos itself exits 1" "$(rc)" "1"
+  [ -d "$repo/.todos" ] && ok "guard: .todos stays a directory" || bad "guard: .todos stays a directory" "clobbered"
+  ok "guard: symlink at the out path itself"
+  rm_fixture "$repo" "$sr" "$outside"
+}
+test_symlink_at_out
+
 test_failed_write_preserves() {
   local repo sr f before after out
   repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; mk_board "$repo" "$sr"; f="$repo/out/board.html"
@@ -503,7 +531,7 @@ EOF
   assert_eq "symlinked-todos: exit 0" "$(rc)" "0"
   assert_file_has "symlinked-todos: research entry present" "$f" 'data-research="2026-05-01-note.md"'
   assert_file_lacks "symlinked-todos: link does not embed the worktree path" "$f" "$repo/.todos"
-  assert_file_has "symlinked-todos: link resolves to the real target" "$f" "href=\"file://$(cd "$real" && pwd -P)/research/2026-05-01-note.md\""
+  assert_file_has "symlinked-todos: link resolves to the real target" "$f" "href=\"$(path_uri "$(cd "$real" && pwd -P)/research/2026-05-01-note.md")\""
   ok "symlinked-todos: research links resolve through the symlink"
   rm_fixture "$repo" "$sr" "$real"
 
@@ -706,6 +734,40 @@ EOF
   assert_file_has "status: precedence row is blocked" "$f" 'data-todo="2026-05-02-precedence" data-state="blocked"'
   assert_file_lacks "status: precedence row not also in waiting" "$f" 'data-bucket="waiting"'
   ok "status: computed state overrides manual status"
+  rm_fixture "$repo" "$sr"
+
+  # A herdr status of completed/phase-advanced/paused means implementation
+  # already happened (review/merge pending); such a todo must not be offered
+  # in Ready for fresh pickup, even if the author also marked it someday.
+  repo=$(mk_repo) || exit 2; sr=$(mk_dir) || exit 2; f="$repo/out/board.html"
+  local slug tasks
+  slug=$(core_slug git@github.com:Org/Repo.git); tasks="$sr/$slug/tasks"; mkdir -p "$tasks"
+  mk_todo "$repo" pending 2026-05-01-completed-not-merged <<'EOF'
+---
+created: 2026-05-01
+title: Completed, review pending
+status: someday
+---
+EOF
+  printf '{"status":"completed","workers":[{"phase":"implement","agent":"impl-a"}]}' \
+    >"$tasks/td-2026-05-01-completed-not-merged.json"
+  mk_todo "$repo" pending 2026-05-02-paused <<'EOF'
+---
+created: 2026-05-02
+title: Paused
+---
+EOF
+  printf '{"status":"paused","workers":[{"phase":"implement","agent":"impl-b"}]}' \
+    >"$tasks/td-2026-05-02-paused.json"
+  render "$repo" "$sr" --out "$f" >/dev/null
+  assert_file_has "status: completed status sorts in-flight, not ready" "$f" \
+    'data-todo="2026-05-01-completed-not-merged" data-state="open" data-task-status="completed"'
+  assert_file_lacks "status: completed status is not someday despite the field" "$f" \
+    '<details class="bucket"><summary><h3 data-bucket="someday">'
+  assert_file_has "status: paused status sorts in-flight" "$f" \
+    'data-todo="2026-05-02-paused" data-state="open" data-task-status="paused"'
+  assert_file_has "status: in-flight heading covers both" "$f" '<h3 data-bucket="in-flight">In flight <span class="bucket-count">2</span></h3>'
+  ok "status: herdr completed/paused status overrides Ready and Someday"
   rm_fixture "$repo" "$sr"
 }
 test_status_buckets
