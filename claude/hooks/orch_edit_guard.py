@@ -454,21 +454,84 @@ def shell_c_arg(words):
     return None
 
 
+def segment_groups(tokens):
+    """Yield ('seg', words) per `;`/`&`/`|`-separated segment, and
+    ('push', []) / ('pop', []) at `(`/`)` subshell boundaries -- a `cd`
+    inside a subshell must not persist past its closing `)` (B3)."""
+    current = []
+    for tok in tokens:
+        if tok and all(c in ";&|\n" for c in tok):
+            if current:
+                yield "seg", current
+                current = []
+        elif tok == "(":
+            if current:
+                yield "seg", current
+                current = []
+            yield "push", []
+        elif tok == ")":
+            if current:
+                yield "seg", current
+                current = []
+            yield "pop", []
+        else:
+            current.append(tok)
+    if current:
+        yield "seg", current
+
+
+def cd_target_candidates(words, cwd, home):
+    """The set of cwds the shell might be in after a `cd`: one, when the
+    target can be confirmed a real directory; {target, cwd} otherwise --
+    a `cd` to a nonexistent directory leaves the shell in `cwd`, and the
+    guard cannot know at scan time which it will be, so both are scanned
+    and a write is guarded if EITHER lands on a tracked path (B3). Option
+    flags (`-L`/`-P`/...) and a `--` marker are skipped to find the real
+    operand; bare `cd` and `cd -` are a no-op (HOME/OLDPWD are not
+    tracked), matching the existing accepted-hole simplification."""
+    operand, seen_dashdash = None, False
+    for t in words[1:]:
+        if not seen_dashdash and t == "--":
+            seen_dashdash = True
+            continue
+        if not seen_dashdash and t.startswith("-") and t != "-" and len(t) > 1:
+            continue
+        operand = t
+        break
+    if operand is None or operand == "-":
+        return {cwd}
+    if "$" in operand or "`" in operand or rm_guard.has_glob_chars(operand):
+        return {cwd}  # unexpanded target: accepted hole, same as other operands
+    target = rm_guard.resolve(rm_guard.expand_home(operand, home), cwd)
+    return {target} if os.path.isdir(target) else {target, cwd}
+
+
 def bash_targets(command, cwd, home, depth=0):
-    """[(cwd, word)] write targets of one command string. cwd follows `cd`
-    segments exactly as rm_guard.check_command does."""
+    """[(cwd, word)] write targets of one command string. `cwd` is tracked
+    as a SET of candidates rather than one string, so an uncertain `cd`
+    (a subshell, a failed cd, cd options) fails toward guarding rather
+    than away from it (B3)."""
     if depth > 1:
         return []
     cleaned, redirs = scan_raw(command)
     found = []
-    for tokens in rm_guard.split_segments(rm_guard.tokenize(cleaned)):
+    cwds = {cwd}
+    stack = []
+    for kind, tokens in segment_groups(rm_guard.tokenize(cleaned)):
+        if kind == "push":
+            stack.append(cwds)
+            continue
+        if kind == "pop":
+            if stack:
+                cwds = stack.pop()
+            continue
         words = []
         for t in tokens:
             m = SENTINEL_RE.match(t)
             if m:
                 w = redirs.get(int(m.group(1)))
                 if w:
-                    found.append((cwd, w))
+                    found.extend((c, w) for c in cwds)
             else:
                 words.append(t)
         words = rm_guard.strip_prefixes(words)
@@ -476,21 +539,29 @@ def bash_targets(command, cwd, home, depth=0):
             continue
         head = rm_guard.basename(words[0])
         if head == "cd":
-            cwd = rm_guard.resolve_cd_target(words, cwd, home)
+            new_cwds = set()
+            for c in cwds:
+                new_cwds |= cd_target_candidates(words, c, home)
+            cwds = new_cwds
         elif head in ("sed", "gsed"):
             ops = script_operands(words, ("-e", "-f", "--expression", "--file"), "ef")
-            found.extend((cwd, w) for w in _existing(ops, cwd, home))
+            for c in cwds:
+                found.extend((c, w) for w in _existing(ops, c, home))
         elif head == "perl":
             ops = script_operands(words, ("-e", "-E"), "eE")
-            found.extend((cwd, w) for w in _existing(ops, cwd, home))
+            for c in cwds:
+                found.extend((c, w) for w in _existing(ops, c, home))
         elif head == "tee":
-            found.extend((cwd, w) for w in tee_operands(words))
+            for c in cwds:
+                found.extend((c, w) for w in tee_operands(words))
         elif head in ("cp", "install", "mv"):
-            found.extend((cwd, w) for w in copy_targets(words, cwd, home, head == "mv"))
+            for c in cwds:
+                found.extend((c, w) for w in copy_targets(words, c, home, head == "mv"))
         elif head in SHELL_WRAPPERS:
             inner = shell_c_arg(words)
             if inner is not None:
-                found.extend(bash_targets(inner, cwd, home, depth + 1))
+                for c in cwds:
+                    found.extend(bash_targets(inner, c, home, depth + 1))
     return found
 
 

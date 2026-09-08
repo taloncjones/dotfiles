@@ -233,6 +233,10 @@ hook_case "AC4 bash -ec redirect denied (combined flag cluster, B1)" deny Bash "
 hook_case "AC4 bash -lc redirect denied (combined flag cluster, B1)" deny Bash "bash -lc 'echo x > $TR'" "$R" "$SID_A"
 hook_case "AC4 zsh -lc redirect denied (combined flag cluster, B1)" deny Bash "zsh -lc 'echo x > $TR'" "$R" "$SID_A"
 hook_case "AC4 cd then relative redirect denied" deny Bash "cd $R/dir && echo x > inner.txt" "$N" "$SID_A"
+hook_case "AC4 subshell cd does not persist past its ) (B3)" deny Bash "(cd $S) ; echo x > tracked.txt" "$R" "$SID_A"
+hook_case "AC4 failed cd leaves the shell in place (B3)" deny Bash "cd $FIX/no-such-dir ; echo x > tracked.txt" "$R" "$SID_A"
+hook_case "AC4 cd -- with an operand denied (B3)" deny Bash "cd -- $R/dir && echo x > inner.txt" "$N" "$SID_A"
+hook_case "AC4 cd -P with an operand denied (B3)" deny Bash "cd -P $R/dir && echo x > inner.txt" "$N" "$SID_A"
 hook_case "AC4 env prefix then tee denied" deny Bash "env FOO=1 tee $TR" "$R" "$SID_A"
 hook_case "AC4 redirect after a scratch heredoc denied" deny Bash "cat <<'EOF' > $S/n.txt
 body
