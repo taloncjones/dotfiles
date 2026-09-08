@@ -19,6 +19,11 @@ core CLI; the skill never hand-writes state JSON.
 # runs a command literally named "python3 .../herdr_orch_core.py" and fails.
 # Store only the PATH and always call it as: python3 "$CORE" <subcommand> ...
 CORE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
+# The account every worker inherits: this orchestrator's own config dir.
+# Validated once here (absolute, launch-line-safe); a nonzero exit is a
+# hard stop for every dispatch -- a worker is never silently mis-routed.
+CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+printf '%s' "$CFG" | grep -qE '^/[A-Za-z0-9_./+:@-]+$' || { echo "[X] unsafe CLAUDE_CONFIG_DIR for worker launches: $CFG"; false; }
 ```
 
 Every `$CORE` subcommand that mutates state (`write-task`, `write-index`)
@@ -757,8 +762,21 @@ pane:
    `models` or `effort` block aborts the whole call). `MODEL` empty for the
    dispatched role -> halt: "no available model for <role>" (as
    `resolve-model` exit 4). Then, depending on `$EFFORT`:
-   - `EFFORT == inherit` -> `claude --model $MODEL --permission-mode auto --name <agent-name>`
-   - otherwise -> `claude --model $MODEL --effort $EFFORT --permission-mode auto --name <agent-name>`
+   - `EFFORT == inherit` -> `CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL --permission-mode auto --name <agent-name>`
+   - otherwise -> `CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL --effort $EFFORT --permission-mode auto --name <agent-name>`
+
+   **Always carry `CLAUDE_CONFIG_DIR=$CFG` as the first word of the launch
+   line** (`CFG` from the preflight block: this orchestrator's own config
+   dir). The pane shell is spawned by the herdr server, not by this
+   session, so it inherits nothing from the orchestrator's environment;
+   without the explicit value the `claude()` zsh wrapper routes by cwd, and
+   a herdr worktree under `~/.herdr/worktrees/` is outside the work tree --
+   the 2026-09-08 incident: a work-repo worker launched on the personal
+   account. The wrapper now also routes linked worktrees by their repo, but
+   the explicit value is what makes the account a property of the dispatch
+   rather than of the pane's shell. `$CFG` must match the launch-line value
+   rule (`[A-Za-z0-9_./+:@-]+`) and start with `/`; otherwise refuse the
+   launch naming the value, as for any unsafe value.
 
    `$EFFORT` is shell-safe by construction (closed lowercase set: `low` /
    `medium` / `high` / `xhigh` / `max` / `inherit`). Use `--permission-mode
@@ -770,9 +788,9 @@ auto`, **not** `--dangerously-skip-permissions`: an auto-mode
    addressable for idle subscriptions. Two launch branches, chosen by a
    once-per-session check (`claude --help` lists `--name`; cache the answer
    for the session):
-   - check passed: `herdr pane run <pane_id> "claude --model $MODEL [--effort $EFFORT] --permission-mode auto --name <agent-name>"`
+   - check passed: `herdr pane run <pane_id> "CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL [--effort $EFFORT] --permission-mode auto --name <agent-name>"`
    - check failed (older CLI; an unknown flag would abort the launch):
-     `herdr pane run <pane_id> "claude --model $MODEL [--effort $EFFORT] --permission-mode auto"`,
+     `herdr pane run <pane_id> "CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL [--effort $EFFORT] --permission-mode auto"`,
      the worker keeps an auto-derived name, and the discovery below records
      `peer_name: null` without calling `ListAgents`.
 
@@ -1049,10 +1067,16 @@ calling session, not `STATE_ROOT`.
 **Mech launch (headless, wrapped).** Caps exist only in print mode, so a mech
 worker is launched through the core wrapper in the workspace's root pane:
 
-`herdr pane run <pane_id> "python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"`
+`herdr pane run <pane_id> "CLAUDE_CONFIG_DIR=$CFG python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"`
 
 Shell-safety: every value must match `[A-Za-z0-9_./+:@-]+`; refuse the launch
 naming the offending value otherwise (`run-mech` re-checks and exits 2).
+The `CLAUDE_CONFIG_DIR=$CFG` prefix is mandatory here too: `run-mech` calls
+the bare `claude` binary from Python (no zsh wrapper, no cwd routing), and
+its `state_root()` reads the same variable, so the one prefix puts both the
+mech worker's account and its ledger / completion record under this
+orchestrator's dir. `$CFG` is validated like every other value (and must
+start with `/`); it is not part of `run-mech`'s own argv re-check.
 `<agent>` = `agent_name("mech", task_id)`; `<launch_id>` =
 `<agent>-<YYYYMMDDTHHMMSSZ>` (UTC now), also placed in the brief. Write the
 brief (references/brief-template.md, mech variant) to the `--brief-file` path

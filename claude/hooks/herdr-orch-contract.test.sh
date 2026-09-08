@@ -8,6 +8,7 @@ PASS=0; FAIL=0
 ok() { if eval "$2"; then printf 'PASS  %s\n' "$1"; PASS=$((PASS+1)); else printf 'FAIL  %s\n' "$1" >&2; FAIL=$((FAIL+1)); fi; }
 
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
+CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"   # mirrors the skill's preflight block: the orchestrator's own dir
 CLI="python3 claude/hooks/herdr_orch_core.py"
 SLUG="github-com-org-repo-deadbeef"
 
@@ -20,7 +21,7 @@ echo "\$@" >> "$BIN/calls.log"
 case "\$1 \$2" in
   "worktree create") echo '{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"}}}';;
   "pane split") echo '{"result":{"pane":{"pane_id":"w1:p2"}}}';;
-  "pane run") echo '{"result":{}}';;
+  "pane run") echo "\$@" >> "$BIN/pane-runs.log"; echo '{"result":{}}';;
   "pane report-agent") echo '{"result":{}}';;
   "agent list") echo '{"result":{"agents":[]}}';;
   *) echo '{"result":{}}';;
@@ -120,7 +121,7 @@ ok "stale-fence write refused" \
 # command shape and proves the fake-CLI mechanics.
 : > "$BIN/calls.log"
 PID=$(herdr worktree create --cwd "$PWD" --branch talon/PROJ-1/x --base origin/main --label PROJ-1 | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
-herdr pane run "$PID" "claude --model sonnet --permission-mode auto"
+herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG claude --model sonnet --permission-mode auto"
 ok "launch runs claude in the worktree root pane in auto mode, no split, no skip-permissions, no agent start" "python3 - <<PY
 lines = open('$BIN/calls.log').read().splitlines()
 
@@ -131,7 +132,7 @@ def idx(prefix):
     return -1
 
 c = idx('worktree create')
-r = idx('pane run w1:p1 claude --model sonnet --permission-mode auto')
+r = idx('pane run w1:p1 CLAUDE_CONFIG_DIR=$CFG claude --model sonnet --permission-mode auto')
 assert c >= 0 and r >= 0 and c < r
 assert idx('pane split') == -1
 assert idx('agent start') == -1
@@ -268,6 +269,7 @@ cat > "$FAKE/claude" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$@" > "$FAKE_CLAUDE_LOG.argv"
 pwd > "$FAKE_CLAUDE_LOG.cwd"
+printf '%s\n' "${CLAUDE_CONFIG_DIR-UNSET}" > "$FAKE_CLAUDE_LOG.cfg"
 cat > "$FAKE_CLAUDE_LOG.stdin"
 echo $$ > "$FAKE_CLAUDE_LOG.pid"
 [ -n "$FAKE_CLAUDE_HOOK" ] && sh -c "$FAKE_CLAUDE_HOOK"
@@ -297,16 +299,28 @@ ok "generated contract validates and pins" "printf '%s' '$SHA' | grep -qE '^[0-9
 BRIEF="$RD/tasks/td-m.brief.md"; mkdir -p "$RD/tasks"; printf 'lint sweep\n' > "$BRIEF"
 LID="mech-td-m-20260901T000000Z"
 CMD="python3 claude/hooks/herdr_orch_core.py run-mech --repo-slug $SLUG --task-id td-m --workspace w1 --agent mech-td-m --launch-id $LID --model haiku --worktree $WT --base-sha $BASE --brief-file $BRIEF --max-turns 9 --max-budget-usd 1.0 --timeout-secs 1800"
+ok "the launch config dir is shell-safe and absolute" \
+  "python3 -c \"import re,sys;sys.exit(0 if re.fullmatch(r'/[A-Za-z0-9_./+:@-]+','$CFG') else 1)\""
+# The skill's preflight validation line, as a function, driven with accept
+# and reject values. Keep the grep identical to SKILL.md's.
+cfg_ok() { printf '%s' "$1" | grep -qE '^/[A-Za-z0-9_./+:@-]+$'; }
+ok "launch config dir rule accepts the fixture dir and rejects relative and unsafe values" \
+  "cfg_ok '$CFG' && ! cfg_ok relcfg && ! cfg_ok '' && ! cfg_ok '/x y' && ! cfg_ok \"/x'y\" && ! cfg_ok '/x;y' && ! cfg_ok '/x\$(id)'"
 ok "every launch value is shell-safe" "python3 -c \"import re,sys;sys.exit(0 if all(re.fullmatch(r'[A-Za-z0-9_./+:@-]+',w) for w in '$CMD'.split()) else 1)\""
 : > "$BIN/calls.log"
 PID=$(herdr worktree create --cwd "$PWD" --branch talon/td-m/x --base origin/main --label td-m | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
-herdr pane run "$PID" "$CMD"
-ok "mech launch goes through pane run in the root pane with run-mech, no claude argv" \
-  "grep -q '^pane run w1:p1 python3 claude/hooks/herdr_orch_core.py run-mech ' '$BIN/calls.log' && ! grep -q 'pane run w1:p1 claude' '$BIN/calls.log'"
+herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG $CMD"
+ok "mech launch goes through pane run in the root pane with run-mech under an explicit config dir, no claude argv" \
+  "grep -q '^pane run w1:p1 CLAUDE_CONFIG_DIR=$CFG python3 claude/hooks/herdr_orch_core.py run-mech ' '$BIN/calls.log' && ! grep -q 'pane run w1:p1 claude' '$BIN/calls.log'"
 # the fake herdr only logs; run the same command for real to land state
 printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.3,"modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
 export FAKE_CLAUDE_HOOK="$CLI emit-done --repo-slug $SLUG --task-id td-m --workspace w1 --agent mech-td-m --phase implement --outcome completed --head-sha $BASE --base-sha $BASE --launch-id $LID"
-$CMD
+# The pane shell inherits nothing from the orchestrator: run the exact
+# payload with CLAUDE_CONFIG_DIR removed from the environment, so only the
+# launch-line prefix can carry the dir into run-mech and its claude child.
+env -u CLAUDE_CONFIG_DIR sh -c "CLAUDE_CONFIG_DIR=$CFG $CMD"
+ok "mech worker and its state root follow the pinned config dir" \
+  "[ \"\$(cat '$FAKE_CLAUDE_LOG.cfg')\" = '$CFG' ] && [ -f '$RD/tasks/td-m.spend.jsonl' ] && [ -f '$RD/tasks/td-m.done.json' ]"
 $CLI write-task --repo-slug "$SLUG" --task-id td-m --session M --fence "$F" \
   --json "{\"task_id\":\"td-m\",\"base_sha\":\"$BASE\",\"status\":\"in-progress\",\"contract_path\":\"$REL\",\"contract_sha256\":\"$SHA\",\"workers\":[{\"role\":\"mech\",\"phase\":\"implement\",\"workspace_id\":\"w1\",\"agent\":\"mech-td-m\",\"launch_id\":\"$LID\",\"model\":\"haiku\",\"peer_name\":null,\"caps\":$CAPS,\"created_by_this_orch\":true,\"started\":\"t\"}]}"
 ok "the fake saw the brief on stdin and the worktree as cwd" \
@@ -344,14 +358,14 @@ IE=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.st
 ok "routing snapshot: plan fable/high, impl sonnet/inherit" "[ '$PM/$PE' = fable/high ] && [ '$IM/$IE' = sonnet/inherit ]"
 : > "$BIN/calls.log"
 PID=$(herdr worktree create --cwd "$PWD" --branch talon/PROJ-E/x --base origin/main --label PROJ-E | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
-herdr pane run "$PID" "claude --model $PM --effort $PE --permission-mode auto --name plan-proj-e"
-ok "plan launch line carries --effort high" "grep -q '^pane run w1:p1 claude --model fable --effort high --permission-mode auto --name plan-proj-e$' '$BIN/calls.log'"
+herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG claude --model $PM --effort $PE --permission-mode auto --name plan-proj-e"
+ok "plan launch line carries --effort high" "grep -q '^pane run w1:p1 CLAUDE_CONFIG_DIR=$CFG claude --model fable --effort high --permission-mode auto --name plan-proj-e$' '$BIN/calls.log'"
 # impl inherits: the snapshot says null, so the launch line has NO --effort; review is high
-if [ "$IE" = inherit ]; then herdr pane run "$PID" "claude --model $IM --permission-mode auto --name impl-proj-e"; else herdr pane run "$PID" "claude --model $IM --effort $IE --permission-mode auto --name impl-proj-e"; fi
-ok "impl launch line omits --effort when the snapshot says inherit" "grep -q '^pane run w1:p1 claude --model sonnet --permission-mode auto --name impl-proj-e$' '$BIN/calls.log'"
+if [ "$IE" = inherit ]; then herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG claude --model $IM --permission-mode auto --name impl-proj-e"; else herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG claude --model $IM --effort $IE --permission-mode auto --name impl-proj-e"; fi
+ok "impl launch line omits --effort when the snapshot says inherit" "grep -q '^pane run w1:p1 CLAUDE_CONFIG_DIR=$CFG claude --model sonnet --permission-mode auto --name impl-proj-e$' '$BIN/calls.log'"
 RM=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["review"]["model"])'); RE=$(printf '%s' "$ROUTING" | python3 -c 'import json,sys;print(json.load(sys.stdin)["review"]["effort"] or "inherit")')
-herdr pane run "$PID" "claude --model $RM --effort $RE --permission-mode auto --name rev-proj-e"
-ok "review launch line carries --effort high" "grep -q '^pane run w1:p1 claude --model opus --effort high --permission-mode auto --name rev-proj-e$' '$BIN/calls.log'"
+herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG claude --model $RM --effort $RE --permission-mode auto --name rev-proj-e"
+ok "review launch line carries --effort high" "grep -q '^pane run w1:p1 CLAUDE_CONFIG_DIR=$CFG claude --model opus --effort high --permission-mode auto --name rev-proj-e$' '$BIN/calls.log'"
 BANNER=$(mktemp); printf 'Claude Code v2.1.260\n  Fable 5.1 with high effort \302\267 Claude Max\n' > "$BANNER"
 ok "banner classifies ok for the requested pin" "[ \"\$($CLI classify-banner --repo-slug '$ESLUG' --model $PM --effort $PE --text-file '$BANNER')\" = ok ]"
 $CLI write-task --repo-slug "$ESLUG" --task-id PROJ-E --session E --fence "$EF" \
@@ -366,7 +380,7 @@ printf 'Claude Code v2.1.260\n  Sonnet 5 \302\267 Claude Max\n' > "$BANNER"
 CLS=$($CLI classify-banner --repo-slug "$ESLUG" --model sonnet --effort $IE2 --text-file "$BANNER" --json)
 ok "impl pinned high but banner shows none -> effort-mismatch with observed effort null" "[ '$CLS' = '{\"class\": \"effort-mismatch\", \"model\": \"Sonnet 5\", \"effort\": null}' ]"
 CAP_BEFORE=$(cat "$ERD/capabilities.json"); : > "$BIN/calls.log"
-herdr pane run "$PID" "claude --model sonnet --effort $IE2 --permission-mode auto --name impl-proj-e"
+herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG claude --model sonnet --effort $IE2 --permission-mode auto --name impl-proj-e"
 # the skill terminates the worker and publishes nothing; simulate exactly that and assert the invariants
 herdr agent prompt "$PID" "/exit"
 ok "effort-mismatch: capabilities unchanged, no disable-model, no workspace close, record unchanged" \
@@ -399,6 +413,32 @@ ok "a second run-think while one is live exits 4 and writes nothing" \
 python3 -c "import json;p='$TRD/think/$TID.launch.json';d=json.load(open(p));d['started']='2020-01-01T00:00:00Z';json.dump(d,open(p,'w'))"
 $CLI run-think --repo-slug $TSLUG --session E --fence $TF --think-id $TID2 --kind other --model fable --effort high --cwd $TWT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 900
 ok "explicit other-kind escalation succeeds once the first is no longer live" "[ -e '$TRD/think/$TID2.answer.json' ]"
+# Every worker launch this suite issued (plain, mech, effort-routed, relaunch)
+# carried the orchestrator's config dir: the pane shell is server-spawned and
+# inherits nothing, so the value must ride on the launch line itself.
+ok "every pane run line carries CLAUDE_CONFIG_DIR=" \
+  "[ \"\$(grep -c '^pane run ' '$BIN/pane-runs.log')\" -ge 6 ] && ! grep '^pane run ' '$BIN/pane-runs.log' | grep -v '^pane run [^ ]* CLAUDE_CONFIG_DIR=$CFG ' | grep -q ."
+# Replay the captured plan launch payload the way the server-spawned pane
+# runs it: CLAUDE_CONFIG_DIR removed from the environment, a zsh that has
+# sourced the real wrapper, the fake claude on PATH recording its env. The
+# wrapper's "non-empty env wins" rung must hand the child exactly $CFG.
+if command -v zsh >/dev/null 2>&1; then
+  PAYLOAD=$(grep -- '--name plan-proj-e$' "$BIN/pane-runs.log" | head -1 | sed 's/^pane run w1:p1 //')
+  : > "$FAKE_CLAUDE_LOG.cfg"
+  env -u CLAUDE_CONFIG_DIR FAKE_CLAUDE_HOOK= HOME="$FAKE" PATH="$FAKE:$PATH" \
+    zsh -c "source zsh/claude-account.zsh && $PAYLOAD" </dev/null >/dev/null 2>&1 || true
+  # Compare against the resolved path: the wrapper normalizes with zsh's :A
+  # (symlinks and ".."), and on macOS $CFG (a mktemp -d path under /var) is
+  # itself a symlink target (/var -> /private/var), so a literal string
+  # comparison against the unresolved $CFG is machine-dependent.
+  ok "interactive launch payload replayed through the wrapper hands claude the pinned dir" \
+    "[ \"\$(cat '$FAKE_CLAUDE_LOG.cfg')\" = \"\$(cd '$CFG' && pwd -P)\" ]"
+else
+  echo "SKIP: zsh not installed; launch payload replay not run"
+fi
+ok "skill defines CFG and prefixes every launch line with it" \
+  "grep -qxF 'CFG=\"\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}\"' claude/skills/herdr-orchestration/SKILL.md && ! grep -F 'pane run <pane_id> \"' claude/skills/herdr-orchestration/SKILL.md | grep -vF 'pane run <pane_id> \"CLAUDE_CONFIG_DIR=\$CFG ' | grep -q ."
+
 # brief rendering: Routing block equals the snapshot; opt-in line; helper rule; no-workflow variant
 render_brief() {   # $1 = ROUTING json, $2 = granted|withheld
   printf '%s' "$1" | python3 -c '
