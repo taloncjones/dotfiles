@@ -26,14 +26,14 @@
 - Never `cd "$var"` into a possibly-empty variable anywhere; address fixture repos with `git -C "<path>"`.
 - No emojis, no AI attribution, ASCII only in added lines, LF endings, stdlib Python only. Commit messages `<scope>: <summary>` (imperative, under 75 chars) and without the word "claude" outside the scope prefix (commit_guard blocks it): say "hooks", "settings template", "hook suite".
 - Baseline (spec, 2026-09-08 at base `9ae3daf`, sandboxed HOME): `bin/dotfiles-tests` 25 suites passed, 0 failed; `claude-hooks.test.sh` 185/0; `scratch-policy.test.sh` 104/0; `install/claude-links.test.sh` 26/0; `public-safety.test.sh` 5/0 (it reports 1 expected failure, "no tracked planning artifacts", while the spec and plan are tracked).
-- The hook and suite code below was executed during planning: the suite ran 155/155 against the hook (static checks skipped through `GIT_REMOTE_GUARD_HOOK`), and every behavioral contract command passed against the same hook. Copy them verbatim; the tests are the specification of behavior.
+- The hook and suite code below was executed during planning: the suite ran 165/165 against the hook (static checks skipped through `GIT_REMOTE_GUARD_HOOK`), and every behavioral contract command passed against the same hook. Copy them verbatim; the tests are the specification of behavior.
 
 ## File Structure
 
 | File | Responsibility |
 |---|---|
 | `claude/hooks/git_remote_guard.py` | The guard: gate, tokenizing walk with possible-cwd sets (spec D3), fixture proof (D4), rules R1-R3 (D5), override (D6), guarded files (D7), denial text (D9). |
-| `claude/hooks/git-remote-guard.test.sh` | Hermetic payload suite: fixtures under one mktemp root, 155 behavioral checks plus 4 static registration checks (D8). |
+| `claude/hooks/git-remote-guard.test.sh` | Hermetic payload suite: fixtures under one mktemp root, 165 behavioral checks plus 4 static registration checks (D8). |
 | `claude/settings.json.tmpl` | One appended PreToolUse entry with matcher `Bash|Edit|Write` (D2). |
 | `claude/hooks/claude-hooks.test.sh` | One appended static block, label `grg: template registers the git metadata guard under Bash|Edit|Write` (D12). |
 | `bin/dotfiles-tests` | One added line after the scratch-policy suite (D12). |
@@ -115,11 +115,25 @@ mkdir -p "$T/x" "$H" "$ESC" "$FIX/wt-t1" "$FIX/other" \
     "$CFG/herdr-orch/slug-x/tasks" "$CFG/herdr-orch/slug-x/workspaces" \
     "$CFG/herdr-orch/slug-y/tasks" "$CFG/herdr-orch/slug-y/workspaces"
 
-# g: every fixture git call, with an isolated environment (spec D8).
+# g: every fixture git call, with an isolated environment (spec D8). The
+# repository argument (-C <path>, or init's path) must sit under $FIX;
+# anything else aborts the suite before git runs.
 g() {
+    case "$1" in
+        -C) case "$2" in "$FIX"/*) ;; *) printf 'FAIL  fixture git outside FIX: %s\n' "$2" >&2; exit 1 ;; esac ;;
+        init) case "$3" in "$FIX"/*) ;; *) printf 'FAIL  fixture git init outside FIX: %s\n' "$3" >&2; exit 1 ;; esac ;;
+        *) printf 'FAIL  fixture git must use -C or init: %s\n' "$*" >&2; exit 1 ;;
+    esac
     env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
         GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"
 }
+# The guard on g() is itself exercised: a repository outside $FIX aborts
+# (inside a subshell, so the suite itself survives).
+if ( g -C "$NONTMP" status ) >/dev/null 2>&1; then
+    printf 'FAIL  g refuses a repository outside FIX\n' >&2; FAIL=$((FAIL + 1))
+else
+    printf 'PASS  g refuses a repository outside FIX\n'; PASS=$((PASS + 1))
+fi
 g init -q "$R"
 g -C "$R" remote add origin https://example.invalid/x.git
 g -C "$R" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
@@ -206,7 +220,7 @@ case_() {
 }
 # reason_has LABEL TEXT: the last denial's first line contains TEXT.
 reason_has() {
-    if head -n 1 "$FIX/err" | grep -qF "$2"; then
+    if head -n 1 "$FIX/err" | grep -qF -- "$2"; then
         printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1))
     else
         printf 'FAIL  %s (err=%s)\n' "$1" "$(head -n 1 "$FIX/err")" >&2; FAIL=$((FAIL + 1))
@@ -250,6 +264,7 @@ case_ "denies a bare cd (goes home)" deny "cd; git remote remove origin" "$R"
 case_ "denies cd - (unknown)" deny "cd -; git remote remove origin" "$R"
 case_ "denies a quoted operator fabricating a cd" deny "echo ';' cd $R; git remote remove origin"
 case_ "denies an escaped operator fabricating a cd" deny "echo \\; cd $R; git remote remove origin"
+case_ "denies a skipped cd preserved across a subshell boundary" deny "false && cd $R && (true); git remote remove origin"
 case_ "allows a literal cd && git" allow "cd $R && git remote remove origin"
 case_ "allows a literal cd ; git" allow "cd $R; git remote remove origin"
 case_ "allows a cd inside the same subshell" allow "( cd $R && git remote remove origin )"
@@ -282,6 +297,12 @@ case_ "denies --work-tree= form" deny "git --work-tree=$R remote remove origin"
 case_ "denies after ln in the same command (taint)" deny "ln -sfn $REAL $T/link; git -C $R remote remove origin"
 case_ "denies after git worktree add in the same command (taint)" deny "git -C $R worktree add $T/wt2 && git -C $R remote remove origin"
 case_ "allows a later ln (taint is forward only)" allow "git -C $R remote remove origin; ln -s a b"
+case_ "denies taint reaching a sh -c wrapper" deny "ln -sfn $REAL $T/link2; sh -c 'git -C $R remote remove origin'"
+case_ "denies taint raised inside a sh -c wrapper" deny "sh -c 'ln -sfn $REAL $T/link2'; git -C $R remote remove origin"
+case_ "denies a re-pointed config --file under the root" deny "ln -sfn $REAL/.git/config $T/cfg; git config --file $T/cfg remote.origin.url x"
+case_ "denies a re-pointed redirection under the root" deny "ln -sfn $REAL $T/link2; echo x >> $T/link2/.git/config"
+case_ "denies a re-pointed tee under the root" deny "ln -sfn $REAL $T/link2; tee $T/link2/.git/info/exclude"
+case_ "denies a location hint with a --file under the root" deny "git --git-dir=$NONTMP/.git config --file $T/cfg remote.origin.url x"
 
 # --- R2: config writes (spec D5) ---
 case_ "denies config --unset remote key" deny "git config --unset remote.origin.url"
@@ -347,6 +368,7 @@ case_ "denies Write to a relative .git/config" deny ".git/config" "$NONTMP" Writ
 case_ "denies Write to .git/config under HOME" deny "$REAL/.git/config" "$NONTMP" Write
 case_ "denies Write through a symlink alias" deny "$T/config-link" "$NONTMP" Write
 case_ "denies redirection into .git/config" deny "echo x >> .git/config"
+reason_has "redirection denial names the segment" "-- echo x >> .git/config"
 case_ "denies a glued redirection into .git/info/exclude" deny "printf 'x\\n' >>.git/info/exclude"
 case_ "denies >| spaced" deny "echo x >| .git/config"
 case_ "denies >| glued" deny "echo x >|.git/config"
@@ -376,6 +398,7 @@ case_ "allows the override on tee" allow "DOTFILES_ALLOW_GIT_META=1 tee .git/con
 case_ "denies the token as a config value" deny "git config remote.origin.url DOTFILES_ALLOW_GIT_META=1"
 case_ "denies the token as a trailing argument" deny "git remote remove origin DOTFILES_ALLOW_GIT_META=1"
 case_ "denies the token on an adjacent segment" deny "DOTFILES_ALLOW_GIT_META=1 true; git remote remove origin"
+case_ "denies an overridden cd that leaves the fixture" deny "DOTFILES_ALLOW_GIT_META=1 cd $REAL; git remote remove origin" "$R"
 
 # --- gate and malformed input (spec D1, D2) ---
 case_ "allows an empty command" allow ""
@@ -453,7 +476,7 @@ printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 - [ ] **Step 2: Run the suite to verify it fails**
 
 Run: `HOME="$(mktemp -d)" PYTHONDONTWRITEBYTECODE=1 sh claude/hooks/git-remote-guard.test.sh 2>&1 | tail -n 1`
-Expected: `0 passed, 159 failed` (every case fails because `claude/hooks/git_remote_guard.py` does not exist: the `run` helper exits 127, which is neither 2 nor 0; the four `static:` checks fail too).
+Expected: `1 passed, 168 failed` (the only pass is `g refuses a repository outside FIX`, which needs no hook; every other case fails because `claude/hooks/git_remote_guard.py` does not exist: the `run` helper exits 127, which is neither 2 nor 0; the four `static:` checks fail too).
 
 - [ ] **Step 3: Write the hook**
 
@@ -620,9 +643,12 @@ def fixture_dir(path: str, roots: list, home_real: str):
     return None
 
 
-def guarded_file(path: str, cwds: set, home: str, roots: list, home_real: str) -> bool:
+def guarded_file(path: str, cwds: set, home: str, roots: list, home_real: str,
+                 taint: bool = False) -> bool:
     """True when `path` names .git/config or .git/info/exclude (directly or
-    through a symlink) outside every temp root, for some possible cwd."""
+    through a symlink) outside every temp root, for some possible cwd. Under
+    taint (an earlier segment may re-point paths) the temp-root exemption is
+    withdrawn: any matching path is guarded."""
     if not literal(path):
         return False
     for cwd in cwds:
@@ -631,7 +657,7 @@ def guarded_file(path: str, cwds: set, home: str, roots: list, home_real: str) -
         c = canon(p)
         if not (GIT_FILE.search(p) or GIT_FILE.search(c)):
             continue
-        if under_root(c, roots, home_real) is None:
+        if taint or under_root(c, roots, home_real) is None:
             return True
     return False
 
@@ -893,6 +919,7 @@ def check_git(tokens: list, ctx: dict):
     cwds, home, roots, home_real = ctx["P"], ctx["home"], ctx["roots"], ctx["home_real"]
     sub, args, cdirs, hints = parse_git(tokens)
     seg = " ".join(tokens)[:SEGMENT_MAX]
+    fpath = None
     if sub == "remote":
         rargs = [a for a in args if not a.startswith("-")]
         if not rargs or rargs[0] not in REMOTE_DENY:
@@ -908,13 +935,9 @@ def check_git(tokens: list, ctx: dict):
         if outside:
             return f"git config --global/--system write to {key} edits the user's git config -- {seg}"
         if fpath is not None:
-            if literal(fpath):
-                dirs, _ = effective_dirs([], cwds, home)
-                if dirs and all(under_root(canon(rm_guard.resolve(rm_guard.expand_home(fpath, home), d)),
-                                           roots, home_real) for d in dirs):
-                    return None
-            return f"git config --file write to {key} targets a config outside the temp root -- {seg}"
-        what = f"git config write to {key} rewrites the shared .git/config of this checkout"
+            what = f"git config --file write to {key} targets a config outside the temp root"
+        else:
+            what = f"git config write to {key} rewrites the shared .git/config of this checkout"
     elif sub == "branch":
         if not branch_delete_flag(args):
             return None
@@ -938,6 +961,13 @@ def check_git(tokens: list, ctx: dict):
     if ctx["taint"]:
         return (f"{what} (an earlier segment can re-point the fixture path before git runs; "
                 f"run it as a separate call) -- {seg}")
+    if sub == "config" and fpath is not None:
+        if literal(fpath):
+            dirs, _ = effective_dirs([], cwds, home)
+            if dirs and all(under_root(canon(rm_guard.resolve(rm_guard.expand_home(fpath, home), d)),
+                                       roots, home_real) for d in dirs):
+                return None
+        return f"{what} -- {seg}"
     dirs, reason = effective_dirs(cdirs, cwds, home)
     if dirs is None:
         return f"{what} ({reason}) -- {seg}"
@@ -950,14 +980,18 @@ def check_git(tokens: list, ctx: dict):
 
 def check_redirects(tokens: list, ctx: dict):
     cwds, home, roots, home_real = ctx["P"], ctx["home"], ctx["roots"], ctx["home_real"]
+    taint = ctx["taint"]
+    seg = " ".join(tokens)[:SEGMENT_MAX]
     for i, tok in enumerate(tokens):
         if tok in REDIRECTS and i + 1 < len(tokens) \
-                and guarded_file(tokens[i + 1], cwds, home, roots, home_real):
-            return f"redirection into {tokens[i + 1]} edits git metadata shared by every linked worktree"
+                and guarded_file(tokens[i + 1], cwds, home, roots, home_real, taint):
+            return (f"redirection into {tokens[i + 1]} edits git metadata shared by every "
+                    f"linked worktree -- {seg}")
         for r in REDIRECTS:
             if tok.startswith(r) and len(tok) > len(r) \
-                    and guarded_file(tok[len(r):], cwds, home, roots, home_real):
-                return f"redirection into {tok[len(r):]} edits git metadata shared by every linked worktree"
+                    and guarded_file(tok[len(r):], cwds, home, roots, home_real, taint):
+                return (f"redirection into {tok[len(r):]} edits git metadata shared by every "
+                        f"linked worktree -- {seg}")
     return None
 
 
@@ -970,9 +1004,10 @@ def check_writers(tokens: list, ctx: dict):
             t == "--in-place" or t.startswith("--in-place=")
             or (t.startswith("-i") and not t.startswith("--")) for t in tokens[1:]):
         return None
+    seg = " ".join(tokens)[:SEGMENT_MAX]
     for tok in tokens[1:]:
-        if not tok.startswith("-") and guarded_file(tok, cwds, home, roots, home_real):
-            return f"{head} on {tok} edits git metadata shared by every linked worktree"
+        if not tok.startswith("-") and guarded_file(tok, cwds, home, roots, home_real, ctx["taint"]):
+            return f"{head} on {tok} edits git metadata shared by every linked worktree -- {seg}"
     return None
 
 
@@ -1030,65 +1065,84 @@ class Chain:
 
 
 def check_command(command: str, real_cwd: str, home: str, roots: list, home_real: str,
-                  cwds=None):
-    """Denial reason for `command`, or None."""
+                  cwds=None, taint_box=None):
+    """Denial reason for `command`, or None. `taint_box` is a one-element
+    list shared across wrapper recursion: taint set inside `sh -c` reaches
+    the caller and vice versa; cwd state stays scoped to each script."""
     start = set(cwds) if cwds is not None else {real_cwd}
     if quoted_operator(command):
         start = {UNTRUSTED}
+    if taint_box is None:
+        taint_box = [False]
     ctx = {"P": set(start), "home": home, "roots": roots, "home_real": home_real,
-           "taint": False}
+           "taint": taint_box[0]}
     tokens = normalize_operators(rm_guard.tokenize(command))
     chain = Chain(start)
     stack = []
     current = []
 
+    def set_taint():
+        taint_box[0] = True
+        ctx["taint"] = True
+
     def evaluate(raw: list, term: str):
+        """Shell-state effects (cd, taint) apply whatever the override says;
+        only the denial checks are suppressed by it."""
         ctx["P"] = chain.possible()
+        ctx["taint"] = taint_box[0]
         stripped = rm_guard.strip_prefixes(raw)
         overridden = OVERRIDE in raw[:len(raw) - len(stripped)]
         head = rm_guard.basename(stripped[0]) if stripped else ""
+        if head == "cd" and term not in ("|", "&"):
+            targets = {cd_target(stripped, cwd, home) if literal(cwd) else UNTRUSTED
+                       for cwd in ctx["P"]}
+            chain.record_cd(next(iter(targets)) if len(targets) == 1 else UNTRUSTED)
         reason = None
         if overridden:
             pass
         elif (reason := check_redirects(raw, ctx)) is not None:
             pass
-        elif not stripped:
+        elif not stripped or head == "cd":
             pass
-        elif head == "cd":
-            if term not in ("|", "&"):
-                targets = {cd_target(stripped, cwd, home) if literal(cwd) else UNTRUSTED
-                           for cwd in ctx["P"]}
-                chain.record_cd(next(iter(targets)) if len(targets) == 1 else UNTRUSTED)
         elif head in rm_guard.SHELL_WRAPPERS:
             inner = rm_guard.extract_shell_c_arg(stripped)
             if inner is not None:
-                reason = check_command(inner, real_cwd, home, roots, home_real, ctx["P"])
+                reason = check_command(inner, real_cwd, home, roots, home_real,
+                                       ctx["P"], taint_box)
         elif head == "git":
             reason = check_git(stripped, ctx)
         else:
             reason = check_writers(stripped, ctx)
         if stripped and is_taint(stripped):
-            ctx["taint"] = True
+            set_taint()
         chain.first = False
-        if term == "||":
-            chain.pure = False
         return reason
 
-    def flush(term: str):
+    def apply_term(term: str):
         nonlocal chain
-        if not current:
-            return None
-        raw = list(current)
-        current.clear()
-        reason = evaluate(raw, term)
         if term in (";", "\n", "", "&"):
             chain = Chain(chain.after())
+        elif term == "||":
+            chain.pure = False
+
+    def flush(term: str):
+        """Evaluate the pending segment (if any), then apply the terminator's
+        chain effect even when no segment was pending: the `;` after a `)`
+        must still end the chain."""
+        reason = None
+        if current:
+            raw = list(current)
+            current.clear()
+            reason = evaluate(raw, term)
+        apply_term(term)
         return reason
 
     for tok in tokens:
         if tok == "(":
-            if (reason := flush(";")) is not None:
-                return reason
+            if current:  # not valid shell; evaluate what is there without a reset
+                if (reason := evaluate(list(current), "&&")) is not None:
+                    return reason
+                current.clear()
             stack.append(chain)
             chain = Chain(chain.possible())
         elif tok == ")":
@@ -1163,7 +1217,7 @@ Notes for the implementer, all already reflected in the code above:
 - [ ] **Step 4: Run the suite to verify the behavioral cases pass**
 
 Run: `HOME="$(mktemp -d)" PYTHONDONTWRITEBYTECODE=1 sh claude/hooks/git-remote-guard.test.sh 2>&1 | grep -v '^PASS'`
-Expected: exactly two FAIL lines, `FAIL  static: template registers exactly this hook under Bash|Edit|Write` and `FAIL  static: suite is registered in bin/dotfiles-tests`, and the trailer `157 passed, 2 failed`. Any other FAIL means the hook text was not copied verbatim; diff it against this plan before changing logic.
+Expected: exactly two FAIL lines, `FAIL  static: template registers exactly this hook under Bash|Edit|Write` and `FAIL  static: suite is registered in bin/dotfiles-tests`, and the trailer `167 passed, 2 failed`. Any other FAIL means the hook text was not copied verbatim; diff it against this plan before changing logic.
 
 Also run: `python3 -m py_compile claude/hooks/git_remote_guard.py && test -x claude/hooks/git_remote_guard.py && test -z "$(git status --porcelain claude/hooks | grep -v 'git-remote-guard\|git_remote_guard')" && echo ok`
 Expected: `ok` (compiles, executable, and no bytecode or other stray files under `claude/hooks`).
@@ -1228,7 +1282,7 @@ Expected: the two lines, scratch-policy then git-remote-guard.
 - [ ] **Step 7: Run the suite to verify it is fully green**
 
 Run: `HOME="$(mktemp -d)" PYTHONDONTWRITEBYTECODE=1 sh claude/hooks/git-remote-guard.test.sh 2>&1 | tail -n 1`
-Expected: `159 passed, 0 failed`
+Expected: `169 passed, 0 failed`
 
 Also run: `HOME="$(mktemp -d)" PYTHONDONTWRITEBYTECODE=1 sh claude/hooks/scratch-policy.test.sh 2>&1 | tail -n 1`
 Expected: `104 passed, 0 failed` (its pinned Bash-group list is untouched because the new entry has its own matcher).
@@ -1387,16 +1441,19 @@ Run:
 
 ```bash
 python3 - <<'PY'
-import json, subprocess
+import json, subprocess, sys
 c = json.load(open("claude/contracts/td-2026-09-07-guard-git-remote-and-config-mutations-in-worker-se-contract.json"))
+failed = 0
 for name in ("claude-md-bullet", "post-merge-teardown-prefixed"):
     cmd = next(x for x in c["commands"] if x["name"] == name)
     rc = subprocess.run(["sh", "-c", cmd["run"]]).returncode
     print(name, "ok" if rc == 0 else f"FAIL exit={rc}")
+    failed += rc != 0
+sys.exit(1 if failed else 0)
 PY
 ```
 
-Expected: both lines end with `ok`.
+Expected: both lines end with `ok` and the script exits 0.
 
 - [ ] **Step 4: Commit**
 
@@ -1417,17 +1474,20 @@ Run:
 
 ```bash
 python3 - <<'PY'
-import json, subprocess
+import json, subprocess, sys
 c = json.load(open("claude/contracts/td-2026-09-07-guard-git-remote-and-config-mutations-in-worker-se-contract.json"))
+failed = 0
 for cmd in c["commands"]:
     if cmd["name"] == "all-suites-except-public-safety-green":
         continue
     rc = subprocess.run(["sh", "-c", cmd["run"]], timeout=cmd["timeout_secs"]).returncode
     print("ok  " if rc == 0 else "FAIL", cmd["name"], rc)
+    failed += rc != 0
+sys.exit(1 if failed else 0)
 PY
 ```
 
-Expected: every line starts with `ok`. A FAIL names the command; fix the cause in the task that owns it (see the mapping table) and rerun.
+Expected: every line starts with `ok` and the script exits 0. A FAIL names the command; fix the cause in the task that owns it (see the mapping table) and rerun.
 
 - [ ] **Step 2: Run the full test runner in the background**
 
@@ -1452,9 +1512,38 @@ Expected: no porcelain output; exactly these eight paths: `CLAUDE.md`, `bin/dotf
 
 - [ ] **Step 4: Hand back**
 
-Emit the completion record per the worker brief (`emit-done --phase implement`), citing the three commit hashes and the two suite trailers (`159 passed, 0 failed` and `186 passed, 0 failed`). Do not open a PR, do not merge, do not reconcile live settings.
+Emit the completion record per the worker brief (`emit-done --phase implement`), citing the three commit hashes and the two suite trailers (`169 passed, 0 failed` and `186 passed, 0 failed`). Do not open a PR, do not merge, do not reconcile live settings.
 
 ---
+
+## Review resolution (Codex plan review, 2026-09-08)
+
+The plan was frozen through the co-review helper (a temporary copy under
+`docs/superpowers/plans/`, the helper's required location; the canonical
+plan stays at `docs/plans/`) and reviewed by the Codex reviewer route of
+`agent_runtime.py`. Verdict needs-rework, 7 findings, all folded into the
+hook, suite, contract, and this plan before the plan was recommitted:
+
+1. An empty segment before `;` skipped the chain reset (`false && cd X &&
+   (true); git ...`): `flush()` now applies the terminator's chain effect
+   even with no pending segment (spec D3).
+2. Taint did not cross `sh -c` in either direction: a shared `taint_box`
+   travels through wrapper recursion (spec D3).
+3. The `--file` exemption returned before the hint and taint checks, and
+   redirections/writers ignored taint: hints and taint now precede every
+   exemption, and `guarded_file` withdraws the temp-root exemption under
+   taint (spec D4, D7).
+4. An overridden `cd` was not recorded: shell-state effects (cd, taint)
+   apply whatever the override says; only denial checks are suppressed
+   (spec D3, D6).
+5. Redirection and writer denials lacked `-- <segment>`: added (spec D9).
+6. The suite's `g()` did not validate its repository argument: it now
+   aborts on any `-C`/`init` path outside `$FIX`, the suite proves the
+   abort in a subshell, and the contract scan greps for the guard (D8).
+7. The plan's verification loops exited 0 after a FAIL: they now exit 1.
+
+Per the review skill, one review round plus this fold; no second Codex
+plan round was sought.
 
 ## Follow-ups (not in this task, from the spec)
 

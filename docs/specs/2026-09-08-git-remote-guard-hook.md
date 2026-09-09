@@ -132,9 +132,9 @@ hook under PermissionRequest`) pin that exact list, so a new hook
   `claude-hooks.test.sh` 185/0; `scratch-policy.test.sh` 104/0;
   `herdr-orch.test.sh` 106/0; `herdr-orch-contract.test.sh` 71/0;
   `install/claude-links.test.sh` 26/0; `public-safety.test.sh` 5/0.
-- Design prototype: every rule below was executed against the 148
-  payload cases of D8 in the session scratchpad (round 3, after two Codex
-  spec reviews); 148 passed. A deny costs about 30 ms including the
+- Design prototype: every rule below was executed against the D8 suite
+  in the session scratchpad (165 behavioral cases after two Codex spec
+  reviews and one Codex plan review); 165 passed. A deny costs about 30 ms including the
   `git rev-parse` in D4.
 
 ## Design
@@ -237,13 +237,22 @@ fixture (D4).
      segment can re-point the fixture path before git runs; run it as a
      separate call" (a same-command `ln -sfn <real> <fixture-link>` would
      otherwise invalidate a check that already passed). Taint is sticky
-     across `)` and chain boundaries.
+     across `)`, chain boundaries, and `sh -c` wrappers in both directions
+     (raised inside a wrapper it reaches the caller; raised before a
+     wrapper it reaches the script), and it is raised by an overridden
+     segment too. Under taint the temp-root exemption of D7 is withdrawn
+     as well: a redirection or writer into any path matching the guarded
+     pattern denies, even under a root.
 4. Per segment, in this order:
    a. `stripped = rm_guard.strip_prefixes(raw)`; the override (D6) is
       present only when `DOTFILES_ALLOW_GIT_META=1` is among the tokens
       strip_prefixes removed (the leading assignments and wrappers), never
-      after the head. Override present: the segment is allowed, including
-      its redirections, and a wrapper segment is not descended into.
+      after the head. A `cd` head records its target (step d) and a taint
+      head raises taint BEFORE the override is consulted: the override
+      suppresses denials, never shell-state tracking
+      (`DOTFILES_ALLOW_GIT_META=1 cd <real>; git remote remove origin`
+      denies). Override present: the segment is allowed, including its
+      redirections, and a wrapper segment is not descended into.
    b. Redirection scan (D7) on the raw tokens, whatever the head is
       (`git status > .git/config` and `sh -c true > .git/info/exclude`
       deny).
@@ -254,7 +263,10 @@ fixture (D4).
       inner script has its own segments, chains, and override positions.
    f. Head `git` (by basename, so `/usr/bin/git` counts): D4 and D5.
    g. Any other head: the writer check of D7.
-   The first denial wins.
+   The first denial wins. Chain bookkeeping applies to every terminator,
+   including one that follows `)` with no pending segment: the `;` in
+   `false && cd X && (true); git ...` ends the chain, so `git` sees both
+   the original cwd and `X` and denies.
 
 ### D4. Git invocation parsing and the fixture exemption
 
@@ -277,7 +289,8 @@ directory must pass `fixture_dir`; the first failure is the reason.
 A mutating shape (D5 R1, R2) that carries a location hint is denied with
 reason "--git-dir/--work-tree forms are not accepted; use git -C": the
 fixture idiom is `git -C`, and a hint can select metadata the cwd probe
-below would not see.
+below would not see. The hint check and the taint check (D3) run before
+every exemption, the `--file` exemption of R2 included.
 
 Temp roots: `realpath($TMPDIR)` when `TMPDIR` is set and absolute and not
 `/`, HOME, an ancestor of HOME, or shallower than two components; plus
@@ -475,9 +488,11 @@ scan:
   by a trap;
 - every fixture git call goes through one helper, `g()`, which runs
   `env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR
-GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"`, and every
-  such call names its repository with `-C "<path under $FIX>"` or, for
-  `init`, a path argument under `$FIX`;
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"` only after
+  checking its repository argument: `-C <path>` or `init [-q] <path>`
+  with the path under `$FIX`, anything else prints a FAIL line and exits
+  1 before git runs; the suite proves the abort once, in a subshell
+  (`( g -C /Users/grg-test-user/proj status )` fails);
 - no executed `cd` anywhere in the file: the two-character word `cd`
   followed by a space may appear only inside a payload string on a case
   line (a line starting with the case helper's name). The contract scan
@@ -565,7 +580,20 @@ $FIX/repo config -f<non-temp>/.git/config core.hooksPath /x` (glued);
 -D "$branch"`; `git worktree remove "$wt"`; `echo x >| .git/config` and
 the glued `>|.git/config`; `ln -sfn $FIX/home/proj $FIX/tmpdir/link; git
 -C $FIX/repo remote remove origin` (taint); `git -C $FIX/repo worktree
-add $FIX/tmpdir/wt2 && git -C $FIX/repo remote remove origin` (taint).
+add $FIX/tmpdir/wt2 && git -C $FIX/repo remote remove origin` (taint);
+`false && cd $FIX/repo && (true); git remote remove origin` (chain ends
+after the subshell); `ln -sfn $FIX/home/proj $FIX/tmpdir/link2; sh -c
+'git -C $FIX/repo remote remove origin'` and `sh -c 'ln -sfn ...'; git -C
+$FIX/repo remote remove origin` (taint across wrappers); `ln -sfn
+$FIX/home/proj/.git/config $FIX/tmpdir/cfg; git config --file
+$FIX/tmpdir/cfg remote.origin.url x`, `ln -sfn $FIX/home/proj
+$FIX/tmpdir/link2; echo x >> $FIX/tmpdir/link2/.git/config`, and the
+`tee` form (taint withdraws the temp-root exemption); `git
+--git-dir=<non-temp>/.git config --file $FIX/tmpdir/cfg remote.origin.url
+x` (hint before the file exemption); `DOTFILES_ALLOW_GIT_META=1 cd
+$FIX/home/proj; git remote remove origin` with cwd `$FIX/repo` (an
+overridden cd still moves); the first line of the `echo x >> .git/config`
+denial contains `-- echo x >> .git/config`.
 
 Allow cases: `git -C $FIX/repo remote remove origin`; `-C $FIX/repo remote
 set-url origin x`; `-C $FIX/wt remote remove origin` (linked worktree
@@ -641,7 +669,9 @@ orchestrated task T-1 (status in-progress)`, `redirection into
 to /x/.git/config edits git metadata shared by every linked worktree`.
 `<reason>` is the D4 reason when one applies (omitted with its
 parentheses otherwise). `<segment>` is the offending segment's tokens
-joined by spaces, truncated to 160 characters. The second line is constant
+joined by spaces, truncated to 160 characters, present on every Bash
+denial (redirections and writers included); a Write/Edit denial names the
+tool and path instead. The second line is constant
 so the fixture-path rule is always present.
 
 ### D10. Accepted holes (documented in the hook docstring)
@@ -736,7 +766,7 @@ Bash|Edit|Write`. The live drift check needs no edit (derived from the
    passes with the new `grg:` label and its diff is append-only;
    `scratch-policy.test.sh` still passes.
 9. AC9 Suite: `sh claude/hooks/git-remote-guard.test.sh` under a sandbox
-   `HOME` reports `N passed, 0 failed` with at least 150 PASS lines, is
+   `HOME` reports `N passed, 0 failed` with at least 160 PASS lines, is
    registered in `bin/dotfiles-tests` (one added line, no removed lines),
    has no executed `cd` (D8 scan), asserts the mktemp root before use,
    and routes every fixture git call through the env-isolating `g()`.
@@ -779,6 +809,17 @@ the residual narrowed in D10), 7 (`>|` tokenization, D3 step 2), 8
 (override covers redirections, D6/D3). Per the review skill's two-round
 cap, no third spec round was run; the plan review is the next external
 gate.
+
+## Review resolution (Codex plan review, 2026-09-08)
+
+The plan review (frozen artifact, Codex reviewer route) returned 7
+findings against the plan's embedded code; the design rules they exposed
+are now stated here so spec and code agree: chain bookkeeping on empty
+segments (D3), taint across `sh -c` wrappers and under override (D3),
+hint and taint checks before the `--file` exemption (D4), taint
+withdrawing the temp-root file exemption (D7), the segment suffix on
+every Bash denial (D9), and the `g()` argument guard (D8). The seventh
+finding (verification loops exiting 0) is plan-only.
 
 ## Follow-ups (not in this task)
 
