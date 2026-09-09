@@ -1,0 +1,51 @@
+{
+  "v": 1,
+  "task_id": "td-2026-09-08-route-herdr-workers-to-the-orchestrator-s-account",
+  "commands": [
+    {
+      "name": "zsh-syntax",
+      "run": "zsh -n zsh/claude-account.zsh && zsh -n zsh/codex-account.zsh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "py-compile-account-routing",
+      "run": "python3 -m py_compile claude/hooks/account_guard.py claude/hooks/herdr_dispatch.py claude/skills/lib/workflow_context.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "canonical-repository-and-account-context",
+      "run": "sh claude/skills/lib/workflow-context.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "claude-account-routing-and-nested-personal-quota",
+      "run": "sh zsh/claude-account.test.sh",
+      "timeout_secs": 180
+    },
+    {
+      "name": "codex-account-and-repository-plugin-policy",
+      "run": "sh zsh/codex-account.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "account-guard-and-hook-regressions",
+      "run": "sh claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 180
+    },
+    {
+      "name": "native-pane-account-binding",
+      "run": "bash claude/hooks/herdr-dispatch.test.sh",
+      "timeout_secs": 180
+    },
+    {
+      "name": "legacy-explicit-account-inheritance",
+      "run": "sh claude/hooks/herdr-orch-contract.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "public-safety-and-private-artifact-exclusion",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 120
+    }
+  ]
+}

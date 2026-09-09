@@ -171,6 +171,23 @@ class WorkflowContextTests(unittest.TestCase):
         self.assertEqual(scope["root"], str(self.home / ".claude"))
         self.assertIsNone(scope["launch_env"]["CLAUDE_CONFIG_DIR"])
 
+    def test_repository_context_rejects_malformed_head_identity(self):
+        repo = self.repository(self.tmp / "repo")
+        real_git = workflow_context.git
+        for invalid in ("not-a-sha", "a" * 40 + "\nextra", ""):
+            with self.subTest(head=invalid):
+
+                def malformed(cwd, *args, invalid=invalid):
+                    if args == ("rev-parse", "--verify", "HEAD"):
+                        return invalid
+                    return real_git(cwd, *args)
+
+                with (
+                    mock.patch.object(workflow_context, "git", side_effect=malformed),
+                    self.assertRaisesRegex(ValueError, "Git HEAD"),
+                ):
+                    workflow_context.repository_context(repo)
+
     def test_personal_path_checks_require_a_directory_boundary(self):
         work = self.repository(self.home / "Git" / "personal-other" / "project")
 

@@ -140,6 +140,13 @@ to `claude -p "/code-review"` and create a Claude -> Codex -> Claude loop.
 - Front-load critical information
 - Prefer examples over prose
 - Cite file paths with line numbers when discussing code
+- Write plain sentences. Avoid aphoristic fragment chains, "not X, but Y"
+  reversals, rule-of-three summaries, and labeled tradeoff callouts in chat,
+  tickets, PRs, and documentation.
+- Markdown-link every issue and PR reference in descriptions; do not rely on
+  the editor to auto-link plain text. Use the actual repository or issue URL.
+- When creating an authorized ticket, create its named dependency/context
+  links in the same batch: Blocks for ordering, Relates for context.
 
 ## Review
 

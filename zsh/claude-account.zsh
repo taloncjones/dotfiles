@@ -124,6 +124,7 @@ function claude() {    # claude() will launch Claude Code with the work account 
         # Preserve the native personal login and the caller's environment.
         (
             unset CLAUDE_CONFIG_DIR
+            export WORKFLOW_PERSONAL_ACCOUNT=1
             command claude "${forwarded[@]}"
         )
     else

@@ -222,24 +222,30 @@ suggests `/init` (no CLAUDE.md yet) or `/refresh` (exists). It requires a
 Two Claude accounts, two config dirs, one asset source (see
 claude-code-platform-reference for mechanics):
 
-| Launch context                                                  | Config dir used                     |
-| --------------------------------------------------------------- | ----------------------------------- |
-| `claude` (wrapper) anywhere outside `~/Git/work`                | `~/.claude` (personal)              |
-| `claude` (wrapper) under `~/Git/work` (symlinks resolved)       | `~/.claude-work` (work)             |
-| `claude --personal` from a work dir                             | `~/.claude`                         |
-| Pre-set `CLAUDE_CONFIG_DIR`                                     | always wins                         |
-| Desktop app / IDE extension / `command claude` / scripts / cron | `~/.claude` regardless of directory |
+| Launch context                                                                                             | Config dir used                     |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `claude` (wrapper) anywhere outside `~/Git/work`                                                           | `~/.claude` (personal)              |
+| `claude` (wrapper) under `~/Git/work` (symlinks resolved)                                                  | `~/.claude-work` (work)             |
+| `claude` (wrapper) in a linked worktree of a repo under `~/Git/work` (herdr, EnterWorktree, `.worktrees/`) | `~/.claude-work` (work)             |
+| `claude --personal` from a work dir                                                                        | `~/.claude`                         |
+| Pre-set `CLAUDE_CONFIG_DIR`                                                                                | applies except in known personal repositories or under personal overrides |
+| Desktop app / IDE extension / `command claude` / scripts / cron                                            | `~/.claude` regardless of directory |
 
 ```bash
 claude-account        # prints: work (~/.claude-work) | personal (~/.claude) | custom (<dir>)
 claude --personal     # force personal from inside ~/Git/work
 ```
 
+Herd dispatch binds the selected account and runtime environment to the actual
+pane. Its server-spawned shell does not inherit the controller's environment.
+Native personal Claude unsets `CLAUDE_CONFIG_DIR`; work/custom namespaces stay
+explicit. Personal quota remains allowed in work repositories.
+
 The bypass row is the daily trap. `claude/hooks/account_guard.py`
 (SessionStart, registered in claude/settings.json.tmpl) fires in EVERY session
-and injects a `[WARNING] account_guard: ...` context message when account and
-directory disagree (and an `[INFO]` breadcrumb for a deliberate custom
-`CLAUDE_CONFIG_DIR`). If you see that warning: relaunch via the wrapper, and
+and warns when personal repository context could reach a work account or the
+selected scope is unverified. Deliberate personal quota in a work repository
+is allowed. If you see that warning: relaunch via the wrapper, and
 avoid logins/plugin installs/billing-sensitive work until on the right
 account. `~/.claude-work` is created on first work-side launch (fresh OAuth
 login). Cloud containers are personal-account only -- there is no

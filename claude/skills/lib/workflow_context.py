@@ -20,6 +20,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -98,6 +99,8 @@ def repository_context(cwd: str | Path) -> dict:
     primary_root, primary_known = _primary_worktree(cwd, root, common_dir)
     try:
         head = git(cwd, "rev-parse", "--verify", "HEAD")
+        if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
+            raise ValueError("Git HEAD is not a valid object identity")
     except subprocess.CalledProcessError:
         # A newly initialized checkout still has useful ownership metadata.
         head = ""

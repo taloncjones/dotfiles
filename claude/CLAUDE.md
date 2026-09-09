@@ -54,6 +54,11 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
   not a paragraph. Cite evidence once and move on -- keep facts and verdicts,
   cut justifications.
 - Cite file paths with line numbers (e.g., `src/main.rs:42`)
+- No aphoristic fragment chains -- comma-spliced noun phrases used as a
+  punchline ("two PRs, one value, same flow"). Write the plain sentence.
+  Same for "not X, but Y" reversals, rule-of-three summaries, and
+  labeled tradeoff callouts ("Cost accepted:", "The catch:"); they
+  read as AI-generated. Applies everywhere: chat, tickets, PRs, docs.
 
 **Stand-alone messages:** the body of every message must read without the
 session in the reader's head -- paste-safe into Slack, a PR thread, or Jira.
@@ -114,6 +119,17 @@ AVOID:
   fault-code trace + sensor error at threshold
   flash race (component-A != component-B)
 ```
+
+**Descriptions link everything — no plain-text references.**
+
+- Markdown-link every issue key (`[PROJ-###]($JIRA_URL/browse/PROJ-###)`)
+  and every PR (`[repo #123](https://github.com/<org>/<repo>/pull/123)`,
+  org/repo from `git remote get-url origin`). The editor does not
+  auto-link plain text.
+- Every ticket named in a Related/blocks context also gets a real Jira
+  issue link, created in the same batch as the ticket: Blocks for
+  ordering dependencies (inward = blocker, outward = blocked), Relates
+  for context. At creation time, never as a fixup pass.
 
 ## Worktree Default
 

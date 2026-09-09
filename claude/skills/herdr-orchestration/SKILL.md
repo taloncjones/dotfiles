@@ -56,6 +56,9 @@ use explicit personal quota. Codex preserves actual `CODEX_HOME`. Resolve the
 selected scope before dispatch and bind it to the worker process, including
 when reusing a pane. The Herdr client's environment alone does not change the
 pane's environment. Never retry through another account after an auth error.
+The dispatcher's account binding implements the same parent-account intent
+for both runtimes; an explicit default personal directory is not a substitute
+for the provider's `launch_env` mapping.
 
 ## 1. Preflight (every orchestrator action)
 
@@ -945,7 +948,26 @@ calling session, not `STATE_ROOT`.
 **Mech launch (headless, wrapped).** Caps exist only in print mode, so a mech
 worker is launched through the core wrapper in the workspace's root pane:
 
-`herdr pane run <pane_id> "python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL [--effort $EFFORT] --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"`
+For this legacy Claude-only recipe, capture the controller's scope before
+leaving its repository. Include `--personal` on `account-scope` for a deliberate
+personal override. Render the environment as quoted shell arguments so a
+server-spawned pane receives the selected account, including required unsets:
+
+```bash
+ACCOUNT_SCOPE="$(python3 "$(dirname "$CORE")/../skills/lib/workflow_context.py" account-scope --cwd "$PWD" --runtime claude)" || exit 2
+ACCOUNT_PREFIX="$(printf '%s' "$ACCOUNT_SCOPE" | python3 -c '
+import json, shlex, sys
+mapping = json.load(sys.stdin)["launch_env"]
+args = ["env"]
+for key, value in mapping.items():
+    if value is None:
+        args.extend(["-u", key])
+args.extend(f"{key}={value}" for key, value in mapping.items() if value is not None)
+print(shlex.join(args))
+')" || exit 2
+```
+
+`herdr pane run <pane_id> "$ACCOUNT_PREFIX python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL [--effort $EFFORT] --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"`
 
 Include `--effort $EFFORT` when resolved effort is explicit; omit it only for
 legacy `inherit`. Render argv before quoting it; brackets above are notation.
@@ -955,6 +977,10 @@ them.
 
 Shell-safety: every value must match `[A-Za-z0-9_./+:@-]+`; refuse the launch
 naming the offending value otherwise (`run-mech` re-checks and exits 2).
+The quoted `ACCOUNT_PREFIX` is mandatory because `run-mech` calls the bare
+Claude binary without the shell wrapper. It preserves native personal auth
+and pins work/custom namespaces; never replace it with an explicit personal
+`CLAUDE_CONFIG_DIR` or rely on the server's ambient account.
 `<agent>` = `agent_name("mech", task_id)`; `<launch_id>` =
 `<agent>-<YYYYMMDDTHHMMSSZ>` (UTC now), also placed in the brief. Write the
 brief (references/brief-template.md, mech variant) to the `--brief-file` path
