@@ -275,7 +275,7 @@ links_shared_workflow_surfaces() (
     for voice_home in "$tmp_home/.codex" "$tmp_home/missing-codex"; do
         HOME="$tmp_home" CODEX_HOME="$voice_home" CLAUDE_CONFIG_DIR="$tmp_home/.claude" \
             bash -c "$voice_resolver"'
-                uv run --no-project --offline --no-cache python "$V" lint \
+                python3 "$V" lint \
                     --kind pr-body --file "$1" >/dev/null
             ' _ "$tmp_home/voice.txt" || return 1
     done

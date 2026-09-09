@@ -25,6 +25,11 @@ class WorkflowContextTests(unittest.TestCase):
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.git_env = {
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            },
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
         }
@@ -39,9 +44,22 @@ class WorkflowContextTests(unittest.TestCase):
 
     def run_git(self, *args, cwd=None):
         return subprocess.run(
-            ["git", *args],
+            [
+                "git",
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "user.useConfigOnly=true",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                *args,
+            ],
             cwd=cwd,
-            env={**os.environ, **self.git_env},
+            env=self.git_env,
             check=True,
             capture_output=True,
             text=True,
