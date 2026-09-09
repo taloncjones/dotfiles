@@ -2,7 +2,7 @@
 # Exercise the installed .zshenv route against a recording Codex binary.
 set -u
 # Cases declare their machine policy independently of the launching shell.
-unset CLAUDE_PERSONAL_ONLY
+unset CLAUDE_PERSONAL_ONLY WORKFLOW_PERSONAL_ACCOUNT CLAUDE_CONFIG_DIR
 
 if ! command -v zsh >/dev/null 2>&1; then
     echo "SKIP: zsh not installed"
@@ -104,6 +104,11 @@ run_case "external personal worktree gets personal policy" "$UNKNOWN/personal-wo
 run_case "external personal worktree subdirectory gets personal policy" "$UNKNOWN/personal-worktree/nested" yes exec hi
 run_case "-C external personal worktree gets personal policy" "$WORK" yes -C "$UNKNOWN/personal-worktree" exec hi
 run_case "work-owned worktree under personal gets personal policy" "$SBHOME/Git/personal/work-worktree" yes exec hi
+WORKFLOW_PERSONAL_ACCOUNT=1 run_case "personal quota keeps work repository plugin policy" "$WORK" no exec hi
+WORKFLOW_PERSONAL_ACCOUNT=1 CLAUDE_CONFIG_DIR="$SBHOME/.claude-work" \
+    run_case "personal quota preserves external personal repository plugin policy" "$UNKNOWN/personal-worktree" yes exec hi
+# POSIX sh retains assignments preceding a function call; isolate later cases.
+unset WORKFLOW_PERSONAL_ACCOUNT CLAUDE_CONFIG_DIR
 SEPARATE_WORK="$SBHOME/Git/personal/separate-work-metadata"
 SEPARATE_EXTERNAL="$SBHOME/Git/personal/separate-external-metadata"
 git_fixture init -q --separate-git-dir "$SBHOME/Git/work/personal-metadata.git" "$SEPARATE_WORK" || exit 2

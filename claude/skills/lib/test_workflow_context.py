@@ -61,6 +61,7 @@ class WorkflowContextTests(unittest.TestCase):
         account_variables = {
             "HOME",
             "CLAUDE_PERSONAL_ONLY",
+            "WORKFLOW_PERSONAL_ACCOUNT",
             "CLAUDE_CONFIG_DIR",
             "CLAUDE_WORK_TREE",
             "CLAUDE_WORK_CONFIG_DIR",
@@ -139,7 +140,7 @@ class WorkflowContextTests(unittest.TestCase):
                 workflow_context.account_scope(linked, "claude")
             forced = workflow_context.account_scope(linked, "claude", personal=True)
         self.assertEqual(forced["kind"], "personal")
-        self.assertEqual(forced["launch_env"], {"CLAUDE_CONFIG_DIR": None})
+        self.assertIsNone(forced["launch_env"]["CLAUDE_CONFIG_DIR"])
 
     def test_git_location_environment_cannot_retarget_a_probe(self):
         repo = self.repository(self.tmp / "safe repository")
@@ -168,7 +169,7 @@ class WorkflowContextTests(unittest.TestCase):
 
         self.assertEqual(scope["kind"], "personal")
         self.assertEqual(scope["root"], str(self.home / ".claude"))
-        self.assertEqual(scope["launch_env"], {"CLAUDE_CONFIG_DIR": None})
+        self.assertIsNone(scope["launch_env"]["CLAUDE_CONFIG_DIR"])
 
     def test_personal_path_checks_require_a_directory_boundary(self):
         work = self.repository(self.home / "Git" / "personal-other" / "project")
@@ -185,7 +186,7 @@ class WorkflowContextTests(unittest.TestCase):
             scope = workflow_context.account_scope(work, "claude")
 
         self.assertEqual(scope["kind"], "personal")
-        self.assertEqual(scope["launch_env"], {"CLAUDE_CONFIG_DIR": None})
+        self.assertIsNone(scope["launch_env"]["CLAUDE_CONFIG_DIR"])
 
     def test_custom_work_scope_preserves_explicit_config(self):
         work = self.repository(self.home / "Git" / "work" / "project")
@@ -195,7 +196,7 @@ class WorkflowContextTests(unittest.TestCase):
 
         self.assertEqual(scope["kind"], "custom")
         self.assertEqual(scope["root"], str(custom))
-        self.assertEqual(scope["launch_env"], {"CLAUDE_CONFIG_DIR": str(custom)})
+        self.assertEqual(scope["launch_env"]["CLAUDE_CONFIG_DIR"], str(custom))
 
     def test_codex_scope_has_a_distinct_stable_identity(self):
         repo = self.repository(self.tmp / "repo")
@@ -222,8 +223,82 @@ class WorkflowContextTests(unittest.TestCase):
 
         self.assertEqual(scope["kind"], "custom")
         self.assertEqual(scope["root"], str(codex_home))
-        self.assertEqual(scope["launch_env"], {"CODEX_HOME": str(codex_home)})
+        self.assertEqual(scope["launch_env"]["CODEX_HOME"], str(codex_home))
         self.assertEqual(scope["account_id"], claude_scope["account_id"])
+
+    def test_codex_reused_pane_reproduces_selected_account_and_home(self):
+        work = self.repository(self.home / "Git" / "work" / "project")
+        cases = (
+            ({}, False),
+            ({}, True),
+            ({"CLAUDE_CONFIG_DIR": str(self.home / ".claude")}, False),
+            (
+                {
+                    "CLAUDE_CONFIG_DIR": str(self.home / "custom-account"),
+                    "CODEX_HOME": str(self.home / "selected-codex"),
+                },
+                False,
+            ),
+        )
+        for selected, personal in cases:
+            with self.subTest(selected=selected, personal=personal):
+                with self.account_env(**selected):
+                    expected = workflow_context.account_scope(work, "codex", personal)
+                    pane = dict(os.environ)
+                pane.update(
+                    {
+                        "CODEX_HOME": str(self.home / "foreign-codex"),
+                        "CLAUDE_CONFIG_DIR": str(self.home / "foreign-account"),
+                        "CLAUDE_PERSONAL_ONLY": "1",
+                    }
+                )
+                for key, value in expected["launch_env"].items():
+                    if value is None:
+                        pane.pop(key, None)
+                    else:
+                        pane[key] = value
+                with mock.patch.dict(os.environ, pane, clear=True):
+                    observed = workflow_context.account_scope(work, "codex")
+                self.assertEqual(observed["root"], expected["root"])
+                self.assertEqual(observed["account_id"], expected["account_id"])
+                self.assertEqual(
+                    observed["personal_repository"], expected["personal_repository"]
+                )
+                if expected["kind"] == "personal":
+                    self.assertNotIn("CLAUDE_CONFIG_DIR", pane)
+
+    def test_personal_quota_preserves_repository_plugin_policy(self):
+        work = self.repository(self.home / "Git" / "work" / "project")
+        owner = self.repository(self.home / "Git" / "personal" / "project")
+        linked = self.tmp / "linked-personal"
+        self.run_git("-C", str(owner), "worktree", "add", "--detach", str(linked))
+        for repo, is_personal in ((work, False), (linked, True)):
+            for selected in ({}, {"CLAUDE_CONFIG_DIR": str(self.home / ".claude")}):
+                with self.subTest(repo=repo, selected=selected):
+                    with self.account_env(**selected):
+                        scope = workflow_context.account_scope(
+                            repo, "codex", personal=True
+                        )
+                    self.assertEqual(scope["kind"], "personal")
+                    self.assertEqual(scope["personal_repository"], is_personal)
+                    self.assertIsNone(scope["launch_env"]["CLAUDE_PERSONAL_ONLY"])
+
+    def test_work_claude_clears_previous_personal_codex_selection(self):
+        work = self.repository(self.home / "Git" / "work" / "project")
+        with self.account_env():
+            personal = workflow_context.account_scope(work, "codex", personal=True)
+            selected = workflow_context.account_scope(work, "claude")
+            pane = dict(os.environ)
+        for scope in (personal, selected):
+            for key, value in scope["launch_env"].items():
+                if value is None:
+                    pane.pop(key, None)
+                else:
+                    pane[key] = value
+        with mock.patch.dict(os.environ, pane, clear=True):
+            observed = workflow_context.account_scope(work, "claude")
+        self.assertEqual(observed["account_id"], selected["account_id"])
+        self.assertEqual(observed["kind"], "work")
 
     def test_atomic_json_exclusive_publishes_unique_task_records(self):
         target = self.tmp / "state" / "task-a.json"

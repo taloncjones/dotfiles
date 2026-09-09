@@ -47,13 +47,19 @@ def _bind_pane_environment(
     personal: bool = False,
 ) -> None:
     launch_env = scope.get("launch_env")
-    if not isinstance(launch_env, dict) or len(launch_env) > 1:
+    if not isinstance(launch_env, dict) or len(launch_env) > 4:
         raise DispatchError("account launch environment is invalid")
     account_id = scope.get("account_id")
     if not isinstance(account_id, str) or not account_id:
         raise DispatchError("account identity is invalid")
     if any(
-        key not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")
+        key
+        not in (
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "CLAUDE_PERSONAL_ONLY",
+            "WORKFLOW_PERSONAL_ACCOUNT",
+        )
         or value is not None
         and not isinstance(value, str)
         for key, value in launch_env.items()

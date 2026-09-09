@@ -163,6 +163,29 @@ class HandoffTests(unittest.TestCase):
         self.assertIn(self.load("shared")["record"]["record_id"], shared_ids)
         self.assertEqual(len(self.run_cli("list")["tasks"]), 6)
 
+    def test_task_lock_uses_exclusive_creation_and_reopens_same_inode(self):
+        parent = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        real_open = os.open
+
+        def checked_open(path, flags, mode=0o777, *, dir_fd=None):
+            if path == ".lock":
+                self.assertTrue(flags & os.O_NOFOLLOW)
+                if flags & os.O_CREAT:
+                    self.assertTrue(
+                        flags & os.O_EXCL,
+                        "Concurrent non-exclusive creation can fail with ENOENT",
+                    )
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        try:
+            with patch.object(handoff.os, "open", side_effect=checked_open):
+                with handoff.task_lock(parent):
+                    inode = (self.root / ".lock").stat().st_ino
+                with handoff.task_lock(parent):
+                    self.assertEqual((self.root / ".lock").stat().st_ino, inode)
+        finally:
+            os.close(parent)
+
     def test_work_and_personal_same_repo_do_not_share_task_pointers(self):
         work = self.home / "Git/work/project"
         self.init_repo(work)
@@ -465,7 +488,10 @@ class HandoffTests(unittest.TestCase):
         inherited = {**self.env, "CLAUDE_CONFIG_DIR": str(self.home / ".claude-work")}
         result = self.save(runtime="claude", env=inherited)
         self.assertEqual(result["scope"]["kind"], "personal")
-        self.assertEqual(result["scope"]["launch_env"], {"CLAUDE_CONFIG_DIR": None})
+        self.assertIsNone(result["scope"]["launch_env"]["CLAUDE_CONFIG_DIR"])
+        self.assertEqual(
+            result["scope"]["launch_env"]["WORKFLOW_PERSONAL_ACCOUNT"], "1"
+        )
 
     def test_linked_worktree_finds_same_task_and_reports_location_drift(self):
         self.save()

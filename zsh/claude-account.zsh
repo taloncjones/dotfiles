@@ -17,6 +17,8 @@
 #   > non-empty CLAUDE_CONFIG_DIR > cwd under $CLAUDE_WORK_TREE > $HOME/.claude
 # Set CLAUDE_PERSONAL_ONLY=1 in ~/.zshenv.local on personal-only machines;
 # leave it unset on machines that use both accounts by repository.
+# Workflow children bind WORKFLOW_PERSONAL_ACCOUNT=1 for personal quota in any
+# repository; unlike machine policy, it preserves work repository plugin choices.
 # Known personal repositories always use the personal account, even when
 # launched from a work session that exported its account configuration.
 # Either the checkout path or Git common-dir ownership marks a repository

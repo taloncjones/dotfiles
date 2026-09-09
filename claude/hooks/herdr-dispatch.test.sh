@@ -720,7 +720,12 @@ def test_target_shell_account_environment_is_applied_and_verified():
         herdr_dispatch._bind_pane_environment(
             str(fixture.bin), "w1:p1", "w1", fixture.repo,
             {
-                "launch_env": {"CODEX_HOME": str(codex_home)},
+                "launch_env": {
+                    "CODEX_HOME": str(codex_home),
+                    "CLAUDE_CONFIG_DIR": None,
+                    "CLAUDE_PERSONAL_ONLY": None,
+                    "WORKFLOW_PERSONAL_ACCOUNT": "1",
+                },
                 "account_id": "account-123",
             },
             fixture.env,
@@ -728,6 +733,9 @@ def test_target_shell_account_environment_is_applied_and_verified():
         )
         runs = [call for call in fixture.calls() if call[:2] == ["pane", "run"]]
         assert f"export CODEX_HOME={shlex.quote(str(codex_home))}" in runs[-1][3], runs[-1]
+        assert "unset CLAUDE_CONFIG_DIR" in runs[-1][3], runs[-1]
+        assert "unset CLAUDE_PERSONAL_ONLY" in runs[-1][3], runs[-1]
+        assert "export WORKFLOW_PERSONAL_ACCOUNT=1" in runs[-1][3], runs[-1]
         assert "export HERDR_PERSONAL=1" in runs[-1][3], runs[-1]
         assert "export HERDR_ACCOUNT_ID=account-123" in runs[-1][3], runs[-1]
         fixture.env["FAKE_HERDR_MODE"] = "wrong-shell-env"

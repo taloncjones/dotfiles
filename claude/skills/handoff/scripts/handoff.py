@@ -303,9 +303,14 @@ def load_at(
 
 @contextmanager
 def task_lock(parent: int):
-    descriptor = os.open(
-        ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent
-    )
+    flags = os.O_RDWR | os.O_NOFOLLOW
+    try:
+        # Concurrent non-exclusive creation can return ENOENT on macOS.
+        descriptor = os.open(
+            ".lock", flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent
+        )
+    except FileExistsError:
+        descriptor = os.open(".lock", flags, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise ValueError("Handoff task lock must be a regular file")

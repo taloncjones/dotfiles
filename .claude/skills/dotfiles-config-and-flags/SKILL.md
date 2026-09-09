@@ -63,6 +63,12 @@ clobbered when the shell starts. They are edit-in-file knobs. Marked
 | `JIRA_URL`                     | Referenced in `claude/CLAUDE.md` PR/plan templates; cached by `claude/hooks/cache_jira_url.py` from Atlassian MCP results                                                                                                                                     | unset                                     | Jira base URL for PR links and plan headers. The hook derives it from MCP traffic; not a var you export                                                                                                                                                                                                                                                                                                            | production (derived)  |
 | `ZSH_CUSTOM`                   | `install/install.sh` (oh-my-zsh plugin clones)                                                                                                                                                                                                                | fallback `~/.oh-my-zsh/custom`            | Where `zsh-autosuggestions` / `zsh-syntax-highlighting` get cloned during install. Set by oh-my-zsh, not by this repo; the installer supplies the fallback                                                                                                                                                                                                                                                         | production (external) |
 
+Workflow launchers also bind `WORKFLOW_PERSONAL_ACCOUNT=1` for a selected
+personal account. This internal selector is consumed by
+`claude/skills/lib/workflow_context.py` and unset when reusing a pane for a
+work/custom account. It preserves work repository plugin preferences, unlike
+the machine-wide `CLAUDE_PERSONAL_ONLY=1` policy. Do not set it globally.
+
 ## Environment variables -- platform-provided (cloud containers)
 
 Set by the claude.ai/code platform, never by you. Full platform semantics:

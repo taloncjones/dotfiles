@@ -128,9 +128,23 @@ def _claude_policy(cwd: str | Path, *, personal: bool) -> tuple[str, Path, dict,
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         raise ValueError("Git context is unavailable") from exc
     checkout = _resolved(context["root"] if context is not None else cwd)
-    force_personal = personal or os.environ.get("CLAUDE_PERSONAL_ONLY") == "1"
-    if force_personal or _inside(checkout, personal_root):
+    if os.environ.get("CLAUDE_PERSONAL_ONLY") == "1" or _inside(
+        checkout, personal_root
+    ):
         return "personal", personal_config, {"CLAUDE_CONFIG_DIR": None}, True
+
+    owners = (
+        tuple(_resolved(context[key]) for key in ("root", "primary_root", "common_dir"))
+        if context is not None and context["primary_known"]
+        else (checkout,)
+    )
+    if any(_inside(owner, personal_root) for owner in owners):
+        return "personal", personal_config, {"CLAUDE_CONFIG_DIR": None}, True
+
+    # A scoped personal account does not turn a work repository into a personal
+    # repository. Keep plugin policy independent from a quota/account override.
+    if personal or os.environ.get("WORKFLOW_PERSONAL_ACCOUNT") == "1":
+        return "personal", personal_config, {"CLAUDE_CONFIG_DIR": None}, False
 
     explicit = os.environ.get("CLAUDE_CONFIG_DIR")
     if explicit:
@@ -140,14 +154,6 @@ def _claude_policy(cwd: str | Path, *, personal: bool) -> tuple[str, Path, dict,
 
     if context is not None and not context["primary_known"]:
         raise ValueError("canonical repository owner is ambiguous")
-
-    owners = (
-        tuple(_resolved(context[key]) for key in ("root", "primary_root", "common_dir"))
-        if context is not None
-        else (checkout,)
-    )
-    if any(_inside(owner, personal_root) for owner in owners):
-        return "personal", personal_config, {"CLAUDE_CONFIG_DIR": None}, True
 
     if explicit:
         config = _resolved(explicit)
@@ -194,13 +200,19 @@ def account_scope(cwd: str | Path, runtime: str, personal: bool = False) -> dict
         cwd, personal=personal
     )
     home = _resolved(os.environ.get("HOME", str(Path.home())))
-    if runtime == "claude":
-        root = account_root
-        launch_env = claude_environment
-    else:
-        explicit = os.environ.get("CODEX_HOME")
-        root = _resolved(explicit) if explicit else _resolved(home / ".codex")
-        launch_env = {"CODEX_HOME": str(root)} if explicit else {}
+    explicit = os.environ.get("CODEX_HOME")
+    codex_root = _resolved(explicit) if explicit else _resolved(home / ".codex")
+    root = account_root if runtime == "claude" else codex_root
+    # A reused pane can retain another runtime home or account selector.
+    # Bind both runtimes so a later partner launch reproduces the same scope.
+    launch_env = {
+        **claude_environment,
+        "CODEX_HOME": str(codex_root),
+        "CLAUDE_PERSONAL_ONLY": (
+            "1" if os.environ.get("CLAUDE_PERSONAL_ONLY") == "1" else None
+        ),
+        "WORKFLOW_PERSONAL_ACCOUNT": "1" if kind == "personal" else None,
+    }
 
     return {
         "runtime": runtime,
