@@ -271,6 +271,19 @@ function _claude_plugin_installed() {
     [[ -f "$record" ]] && grep -q "$plugin_id" "$record"
 }
 
+# Run a Claude plugin operation in the selected account namespace. Native
+# personal Claude uses an unset variable; work and custom directories remain
+# explicit. The subshell keeps the caller's environment unchanged.
+function _claude_plugin_run() {
+    local cfg_dir="$1"
+    shift
+    if [[ "$cfg_dir" == "$HOME/.claude" ]]; then
+        ( unset CLAUDE_CONFIG_DIR; command claude "$@" )
+    else
+        CLAUDE_CONFIG_DIR="$cfg_dir" command claude "$@"
+    fi
+}
+
 # helper: true iff the marketplace's on-disk manifest declares the plugin --
 # the condition the install resolver actually checks, so waiting on it is
 # deterministic rather than a blind timer.
@@ -293,10 +306,10 @@ function _claude_ensure_plugin() {
 
     # Register the marketplace if missing (idempotent). A pre-registered one
     # (e.g. added by the platform or an earlier run) is left alone.
-    if ! CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace list 2>/dev/null | grep -qiw "$marketplace"; then
+    if ! _claude_plugin_run "$cfg_dir" plugin marketplace list 2>/dev/null | grep -qiw "$marketplace"; then
         if [[ -n "$add_url" ]]; then
             echo "[INFO] Adding $marketplace marketplace ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace add "$add_url" \
+            _claude_plugin_run "$cfg_dir" plugin marketplace add "$add_url" \
                 || { echo "[X] marketplace add failed for $marketplace ($cfg_dir)"; return 1; }
         else
             echo "[WARNING] Marketplace $marketplace not registered and no add URL known ($cfg_dir)"
@@ -307,7 +320,7 @@ function _claude_ensure_plugin() {
     # the cache between checks.
     local attempt=1 delay=$CLAUDE_PLUGIN_RETRY_DELAY
     while ! _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace"; do
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
+        _claude_plugin_run "$cfg_dir" plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
         _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace" && break
         if [[ "$attempt" -ge "$CLAUDE_PLUGIN_RETRIES" ]]; then
             echo "[WARNING] $marketplace manifest never listed $plugin_name after $CLAUDE_PLUGIN_RETRIES refreshes; installing anyway ($cfg_dir)"
@@ -323,8 +336,8 @@ function _claude_ensure_plugin() {
     # Phase 2: install, then verify against installed_plugins.json.
     attempt=1; delay=$CLAUDE_PLUGIN_RETRY_DELAY
     while [[ "$attempt" -le "$CLAUDE_PLUGIN_RETRIES" ]]; do
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins install "$plugin_id" >/dev/null 2>&1 || true
+        _claude_plugin_run "$cfg_dir" plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
+        _claude_plugin_run "$cfg_dir" plugins install "$plugin_id" >/dev/null 2>&1 || true
         if _claude_plugin_installed "$cfg_dir" "$plugin_id"; then
             echo "[OK] Installed $plugin_id ($cfg_dir, attempt $attempt/$CLAUDE_PLUGIN_RETRIES)"
             return 0
@@ -339,7 +352,11 @@ function _claude_ensure_plugin() {
     done
 
     echo "[X] $plugin_id not installed after $CLAUDE_PLUGIN_RETRIES attempts ($cfg_dir)."
-    echo "[X] Recover with: CLAUDE_CONFIG_DIR=$cfg_dir claude plugins install $plugin_id"
+    if [[ "$cfg_dir" == "$HOME/.claude" ]]; then
+        echo "[X] Recover with: env -u CLAUDE_CONFIG_DIR claude plugins install $plugin_id"
+    else
+        echo "[X] Recover with: CLAUDE_CONFIG_DIR=$cfg_dir claude plugins install $plugin_id"
+    fi
     return 1
 }
 
@@ -428,12 +445,229 @@ function _codex_reinstall_plugin() {
     _codex_ensure_plugin "$plugin_id" "$marketplace_source"
 }
 
+function _codex_reconcile_workflow_surfaces() {
+    local surface_policy="$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"
+    [[ -f "$surface_policy" ]] \
+        || { echo "[X] Codex surface reconciliation helper is missing: $surface_policy"; return 1; }
+    # Share the installer policy while keeping its shell helpers local to this
+    # invocation. The policy resolves the caller's selected CODEX_HOME.
+    (
+        source "$surface_policy" || return 1
+        dedupe_codex_workflow_plugins
+    )
+}
+
+# Verify the payload selected by Codex's native plugin registry. `source.path`
+# identifies the configured marketplace source, not the effective cache, so
+# derive the cache location from the selected plugin's registry identity and
+# version and hash its actual payload before accepting it.
+#
+# Return 3 only when a selected plugin has a missing, malformed, or stale cache
+# payload. Callers may then refresh that exact managed plugin through Codex's
+# native lifecycle. Registry and staged-payload failures return 1 and must not
+# trigger removal.
+function _codex_staged_plugin_is_effective() {
+    local plugin_id="$1" staged_dir="$2" listing cache_root
+    [[ -f "$staged_dir/.dotfiles-provenance.json" ]] \
+        || { echo "[X] staged $plugin_id lacks provenance metadata"; return 1; }
+    listing="$(command codex plugin list --json 2>/dev/null)" \
+        || { echo "[X] cannot inspect native Codex plugin state for $plugin_id"; return 1; }
+    command -v python3 &>/dev/null \
+        || { echo "[X] python3 is required to verify Codex plugin provenance"; return 1; }
+    cache_root="${CODEX_HOME:-$HOME/.codex}/plugins/cache"
+    CODEX_PLUGIN_LISTING="$listing" CODEX_CACHE_ROOT="$cache_root" python3 - "$plugin_id" "$staged_dir" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+plugin_id, staged_dir = sys.argv[1:]
+cache_root = Path(os.environ["CODEX_CACHE_ROOT"])
+
+
+def fail_cache(message):
+    print(f"effective native payload is not current: {message}", file=sys.stderr)
+    raise SystemExit(3)
+
+
+def payload_digest(root):
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"payload contains a symlink: {path}")
+        if not path.is_file() or path.name == ".dotfiles-provenance.json":
+            continue
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(relative + b"\0")
+        digest.update(f"{path.stat().st_mode & 0o777:o}".encode() + b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def valid_provenance(record):
+    if not isinstance(record, dict):
+        return False
+    if type(record.get("schemaVersion")) is not int or record["schemaVersion"] != 1:
+        return False
+    if not isinstance(record.get("wrapperVersion"), str) or not record["wrapperVersion"]:
+        return False
+    commit = record.get("upstreamCommit")
+    if not isinstance(commit, str) or not (commit == "unavailable" or re.fullmatch(r"[0-9a-f]{40,64}", commit)):
+        return False
+    if not isinstance(record.get("upstreamVersion"), str) or not record["upstreamVersion"]:
+        return False
+    return isinstance(record.get("payloadDigest"), str) and bool(
+        re.fullmatch(r"[0-9a-f]{64}", record["payloadDigest"])
+    )
+
+
+try:
+    plugins = json.loads(os.environ["CODEX_PLUGIN_LISTING"]).get("installed", [])
+    entry = next(
+        item for item in plugins
+        if item.get("pluginId") == plugin_id
+        and item.get("installed") is True
+        and item.get("enabled") is True
+    )
+    plugin_name, marketplace = plugin_id.split("@", 1)
+    if entry.get("name") != plugin_name or entry.get("marketplaceName") != marketplace:
+        raise ValueError("native registry identity does not match the requested plugin")
+    version = entry.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
+        raise ValueError("native registry did not expose a safe plugin version")
+    expected = json.loads((Path(staged_dir) / ".dotfiles-provenance.json").read_text())
+except (KeyError, OSError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as error:
+    raise SystemExit(f"cannot verify effective native payload: {error}")
+
+if not valid_provenance(expected):
+    raise SystemExit("cannot verify effective native payload: staged provenance is invalid")
+try:
+    staged_digest = payload_digest(Path(staged_dir))
+except (OSError, ValueError) as error:
+    raise SystemExit(f"cannot verify effective native payload: {error}")
+if staged_digest != expected["payloadDigest"]:
+    raise SystemExit("cannot verify effective native payload: staged payload digest differs from its provenance")
+
+effective_root = cache_root / marketplace / plugin_name / version
+if not effective_root.is_dir() or effective_root.is_symlink():
+    fail_cache(f"cache directory is unavailable for {plugin_id}@{version}")
+try:
+    effective = json.loads((effective_root / ".dotfiles-provenance.json").read_text())
+except (OSError, ValueError, json.JSONDecodeError) as error:
+    fail_cache(f"cache provenance is unreadable: {error}")
+if not valid_provenance(effective):
+    fail_cache("cache provenance has an unsupported schema or missing fields")
+fields = ("schemaVersion", "wrapperVersion", "upstreamCommit", "upstreamVersion", "payloadDigest")
+if any(expected.get(field) != effective.get(field) for field in fields):
+    fail_cache("cache provenance differs from the staged payload")
+try:
+    effective_digest = payload_digest(effective_root)
+except (OSError, ValueError) as error:
+    fail_cache(str(error))
+if effective_digest != expected["payloadDigest"]:
+    fail_cache("cache bytes differ from the staged payload digest")
+PY
+}
+
+# Refresh only an inspected stale managed plugin. This uses the native remove
+# and add operations; it never writes into Codex's cache or touches unrelated
+# plugin registrations.
+function _codex_verify_or_refresh_managed_plugin() {
+    local plugin_id="$1" staged_dir="$2" marketplace_source="$3" verify_status
+    _codex_staged_plugin_is_effective "$plugin_id" "$staged_dir"
+    verify_status=$?
+    if (( verify_status == 0 )); then
+        return 0
+    fi
+    if (( verify_status != 3 )); then
+        return "$verify_status"
+    fi
+    echo "[INFO] Refreshing stale $plugin_id cache through Codex..."
+    _codex_remove_plugin "$plugin_id" || return 1
+    _codex_ensure_plugin "$plugin_id" "$marketplace_source" || return 1
+    _codex_staged_plugin_is_effective "$plugin_id" "$staged_dir"
+}
+
 function _codex_normalize_skill_frontmatter() {
     local skills_dir="$1"
     command -v perl &>/dev/null \
         || { echo "[X] perl is required to normalize Codex skill frontmatter"; return 1; }
     find "$skills_dir" -name SKILL.md -exec perl -pi -e \
         'if (/^description: (?!["\x27|>])(.+)$/) { $_ = "description: >-\n  $1\n" }' {} +
+}
+
+# Write provenance next to a staged native plugin. The wrapper manifest version
+# is deliberately not used as a payload identity: it is fixed by this repo
+# while the source checkout can advance. No upstream manifest or hooks are
+# imported; the digest covers only the self-contained staged payload.
+function _codex_write_stage_provenance() {
+    local source_dir="$1" wrapper_manifest="$2" staged_dir="$3"
+    command -v python3 &>/dev/null \
+        || { echo "[X] python3 is required to record Codex plugin provenance"; return 1; }
+    SOURCE_DIR="$source_dir" WRAPPER_MANIFEST="$wrapper_manifest" STAGED_DIR="$staged_dir" python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+source = Path(os.environ["SOURCE_DIR"])
+manifest = Path(os.environ["WRAPPER_MANIFEST"])
+staged = Path(os.environ["STAGED_DIR"])
+
+try:
+    wrapper_version = json.loads(manifest.read_text())["version"]
+except (OSError, ValueError, KeyError, TypeError) as error:
+    raise SystemExit(f"invalid Codex wrapper manifest: {error}")
+
+upstream_version = "unavailable"
+for version_file in (source / "package.json", source / "VERSION"):
+    try:
+        if version_file.name == "package.json":
+            upstream_version = str(json.loads(version_file.read_text())["version"])
+        else:
+            upstream_version = version_file.read_text().strip()
+        if upstream_version:
+            break
+    except (OSError, ValueError, KeyError, TypeError):
+        continue
+
+commit = subprocess.run(
+    ["git", "-C", str(source), "rev-parse", "HEAD"],
+    capture_output=True,
+    text=True,
+    check=False,
+).stdout.strip() or "unavailable"
+
+digest = hashlib.sha256()
+for path in sorted(staged.rglob("*")):
+    if path.is_symlink():
+        raise SystemExit(f"staged plugin contains a symlink: {path}")
+    if not path.is_file() or path.name == ".dotfiles-provenance.json":
+        continue
+    relative = path.relative_to(staged).as_posix().encode()
+    digest.update(relative + b"\0")
+    digest.update(f"{path.stat().st_mode & 0o777:o}".encode() + b"\0")
+    digest.update(path.read_bytes())
+
+(staged / ".dotfiles-provenance.json").write_text(
+    json.dumps(
+        {
+            "schemaVersion": 1,
+            "wrapperVersion": str(wrapper_version),
+            "upstreamCommit": commit,
+            "upstreamVersion": upstream_version,
+            "payloadDigest": digest.hexdigest(),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
+)
+PY
 }
 
 function _codex_stage_ecc_plugin() {
@@ -465,6 +699,7 @@ function _codex_stage_ecc_plugin() {
     if [[ -d "$source_dir/assets" ]]; then
         cp -R "$source_dir/assets" "$plugin_dir/assets" || return 1
     fi
+    _codex_write_stage_provenance "$source_dir" "$template_dir/.codex-plugin/plugin.json" "$plugin_dir" || return 1
 
     rm -rf "$plugins_dir/ecc"
     mv "$staging" "$plugins_dir/ecc" || return 1
@@ -474,13 +709,17 @@ function _codex_stage_ecc_plugin() {
 function _codex_install_ecc_plugin() {
     command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
     _codex_stage_ecc_plugin || return 1
-    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_verify_or_refresh_managed_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 function _codex_update_ecc_plugin() {
     command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
     _codex_stage_ecc_plugin || return 1
-    _codex_reinstall_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_verify_or_refresh_managed_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 function _codex_stage_superpowers_plugin() {
@@ -514,6 +753,7 @@ function _codex_stage_superpowers_plugin() {
     if [[ -d "$source_dir/assets" ]]; then
         cp -R "$source_dir/assets" "$staging/assets" || return 1
     fi
+    _codex_write_stage_provenance "$source_dir" "$source_dir/.codex-plugin/plugin.json" "$staging" || return 1
 
     rm -rf "$plugins_dir/superpowers"
     mv "$staging" "$plugins_dir/superpowers" || return 1
@@ -525,13 +765,17 @@ function _codex_install_superpowers_plugin() {
     # Remove the account-provisioned variant before installing the managed
     # marketplace copy, preventing duplicate superpowers:* skill names.
     _codex_remove_plugin "superpowers@openai-curated" || return 1
-    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_verify_or_refresh_managed_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/superpowers" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 function _codex_update_superpowers_plugin() {
     _codex_stage_superpowers_plugin || return 1
     _codex_remove_plugin "superpowers@openai-curated" || return 1
-    _codex_reinstall_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR"
+    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_verify_or_refresh_managed_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/superpowers" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
+    _codex_reconcile_workflow_surfaces
 }
 
 # --- ECC (Everything Claude Code) ---
@@ -617,8 +861,8 @@ function ecc-install() {    # ecc-install([--local]) installs ECC independently 
 
     _codex_install_ecc_plugin || install_status=1
 
-    _claude_plugin_epoch_write ecc
     if (( install_status == 0 )); then
+        _claude_plugin_epoch_write ecc
         echo "[OK] ECC installed for available Claude and Codex runtimes"
     else
         echo "[X] ECC installation was incomplete; review the runtime-specific errors above"
@@ -649,16 +893,17 @@ function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and
         for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
             [[ -d "$cfg_dir" ]] || continue
             _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || { update_status=1; continue; }
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugin marketplace update ecc >/dev/null 2>&1 || true
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update ecc@ecc \
+            _claude_plugin_run "$cfg_dir" plugin marketplace update ecc >/dev/null 2>&1 \
+                || { echo "[X] ECC marketplace refresh failed ($cfg_dir)"; update_status=1; continue; }
+            _claude_plugin_run "$cfg_dir" plugins update ecc@ecc \
                 || { echo "[X] ECC update failed ($cfg_dir)"; update_status=1; }
         done
     fi
 
     _codex_update_ecc_plugin || update_status=1
 
-    _claude_plugin_epoch_write ecc
     if (( update_status == 0 )); then
+        _claude_plugin_epoch_write ecc
         echo "[OK] ECC updated for available Claude and Codex runtimes"
     else
         echo "[X] ECC update was incomplete; review the runtime-specific errors above"
@@ -684,7 +929,7 @@ function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Code
         [[ -d "$cfg_dir" ]] || continue
         if _claude_plugin_installed "$cfg_dir" "ecc@ecc"; then
             echo "[INFO] Removing ECC plugin ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall ecc@ecc 2>/dev/null || uninstall_status=1
+            _claude_plugin_run "$cfg_dir" plugins uninstall ecc@ecc 2>/dev/null || uninstall_status=1
         fi
     done
 
@@ -939,7 +1184,7 @@ function superpowers-update() {    # superpowers-update([--local]) will update t
             _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
                 "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || { update_status=1; continue; }
             echo "[INFO] Updating Superpowers plugin ($cfg_dir)..."
-            CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins update superpowers@claude-plugins-official \
+            _claude_plugin_run "$cfg_dir" plugins update superpowers@claude-plugins-official \
                 || { echo "[X] update failed ($cfg_dir)"; update_status=1; }
         done
     fi
@@ -971,7 +1216,7 @@ function superpowers-uninstall() {    # superpowers-uninstall() will remove the 
             continue
         fi
         echo "[INFO] Removing Superpowers plugin ($cfg_dir)..."
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude plugins uninstall superpowers@claude-plugins-official 2>/dev/null || uninstall_status=1
+        _claude_plugin_run "$cfg_dir" plugins uninstall superpowers@claude-plugins-official 2>/dev/null || uninstall_status=1
         echo "[OK] Superpowers uninstalled ($cfg_dir)"
     done
     _codex_remove_plugin "superpowers@dotfiles-workflows" || uninstall_status=1

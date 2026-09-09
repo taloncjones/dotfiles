@@ -1,104 +1,70 @@
 ---
 name: codex-spec-review
-description: Use after finalizing a spec/PRD (e.g. just after superpowers:brainstorming or plan-prd, before superpowers:writing-plans) to get an independent Codex (different-model) review of the requirements before any plan is written. Reviews docs/specs/*.md (or PRD), surfaces ambiguity/contradictions/missing-acceptance-criteria/scope/unstated-assumptions, and folds approved fixes back into the spec.
+description: Obtain a bounded independent Codex review of one explicit frozen specification.
 ---
 
 # Codex Spec Review
 
-Get a **second-model** review of a finalized spec/PRD, targeting the _requirements
-themselves_ rather than the approach. This is the highest-leverage review point:
-a spec defect is the cheapest to fix and the most expensive to miss, because it
-propagates through plan -> code -> tests. This runs on the spec _document_, before
-any plan is written.
+Set `REVIEW_SKILL_FILE` to this skill's absolute `SKILL.md` path supplied by
+the skill loader. Resolve installed symlinks before using a helper. If the
+loader supplies no path, the existing `DOTFILEDIR` is the fallback; never guess
+from the target checkout or another account's skill directory.
 
-The companion `codex-plan-review` skill anchors on the spec as fixed and judges
-the _plan_. This skill does the opposite: it interrogates the spec and assumes
-nothing is settled. Different artifact, different failure mode.
+```bash
+REVIEW_ROOT=$(uv run --no-project python - "${REVIEW_SKILL_FILE:-}" "${DOTFILEDIR:-}" <<'PYROOT'
+from pathlib import Path
+import sys
 
-## When to use
+source, fallback = sys.argv[1:]
+if source and (not Path(source).is_absolute() or Path(source).name != "SKILL.md"):
+    raise SystemExit("Use the absolute SKILL.md path supplied by the skill loader")
+root = Path(source).resolve(strict=True).parents[3] if source else (
+    Path(fallback).expanduser().resolve(strict=True) if fallback else None
+)
+required = ("claude/skills/co-review/scripts/review.py", "claude/hooks/agent_runtime.py")
+if root is None or not all((root / name).is_file() for name in required):
+    raise SystemExit("Installed review helpers are unavailable")
+print(root)
+PYROOT
+) || exit 2
+REVIEW_HELPER="$REVIEW_ROOT/claude/skills/co-review/scripts/review.py"
+RUNNER="$REVIEW_ROOT/claude/hooks/agent_runtime.py"
+```
 
-- Right after a spec/PRD is finalized (after `superpowers:brainstorming` or
-  `plan-prd`), before `superpowers:writing-plans`.
-- Whenever the user asks to "have Codex review the spec" or "second-opinion the
-  requirements".
+Use after a specification is complete and before planning. Require an explicit
+spec path under `docs/superpowers/specs/`; never select a newest file.
 
-Skip if there is no written spec artifact (informal in-chat requirements have
-nothing to bite on — sharpen the plan review instead), or the user explicitly
-declined an external review.
+```bash
+uv run --no-project python "$REVIEW_HELPER" artifact \
+  --repo "$REPO" --kind spec --path "$SPEC_PATH" --task-id "$TASK_ID" \
+  --runtime claude --output-dir "$OUTPUT_DIR"
+```
 
-## Steps
+Set `FROZEN_SPEC` and `FROZEN_SPEC_SHA256` from the returned path and
+SHA-256 fields after validating them. Apply any deliberate `--personal`
+override to both artifact freezing and partner launch.
 
-1. **Resolve the spec file.**
-   - If the user passed a path, use it.
-   - Else pick the newest `*.md` from the first directory that exists, in order:
-     `docs/specs/`, `docs/superpowers/specs/`, `docs/prd/`, `docs/requirements/`.
-   - Confirm the resolved path with the user in one line before spending tokens.
+Validate the returned absolute path and SHA-256 before dispatch. Review the
+frozen specification for ambiguity, contradictory requirements, missing
+acceptance criteria, boundary cases, scope, security, privacy, rollback, and
+external dependencies. Require bounded severity/location/problem/fix output
+and one verdict. Empty, malformed, or failed output is incomplete.
 
-2. **Gather optional sibling context** (only what exists — all path-optional, so
-   this stays project-agnostic):
-   - Any linked design/brainstorming doc under `docs/` (`design/`, `reference/`).
-   - The repo `docs/PLAN.md` or product brief, if present.
-   - The root `CLAUDE.md` for project conventions and constraints.
+Resolve the independent Codex reviewer model and effort with
+the shared runtime runner:
 
-3. **Run Codex non-interactively** from inside the repo (it must be a git/trusted
-   dir; `approval: never`, `sandbox: workspace-write` are already configured):
+```bash
+PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-spec-review.XXXXXX")
+printf '%s\n' "Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+uv run --no-project python "$RUNNER" run \
+  --runtime codex --role reviewer --risk normal --provisional \
+  --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$PROMPT_FILE"
+```
 
-   ```bash
-   codex exec "$(cat <<'PROMPT'
-   You are an expert staff engineer / product reviewer reviewing a SPEC (the
-   requirements) before any implementation plan is written. Do NOT propose an
-   architecture or rewrite the spec; interrogate the requirements. Be terse and
-   specific. Assume nothing in the spec is settled.
-
-   For each issue return: SEVERITY (critical|high|medium|low), the spec
-   section/line, the problem, and a concrete fix. Review for:
-   - Ambiguity: requirements open to more than one reading; vague terms with no
-     definition ("fast", "secure", "intuitive").
-   - Completeness: missing requirements, unhandled states, gaps a builder would
-     have to guess at.
-   - Testability / acceptance: requirements with no measurable acceptance
-     criteria; success conditions that cannot be verified.
-   - Contradiction: requirements that conflict with each other or with stated
-     constraints.
-   - Scope: in/out-of-scope not delimited; scope creep; gold-plating.
-   - Unstated assumptions and risks (data, privacy, migrations, irreversible ops,
-     external dependencies).
-   - Edge cases the spec never names (empty/null, limits, failure, concurrency,
-     permissions).
-   - Drift: contradictions with the project's CLAUDE.md / brief conventions.
-   End with a one-line VERDICT: ready-to-plan | minor-fixes | needs-rework.
-
-   === SPEC FILE: <path> ===
-   <spec contents>
-
-   === CONTEXT (optional, may be absent) ===
-   <design / brief / CLAUDE.md excerpts>
-   PROMPT
-   )" -c model_reasoning_effort="high" </dev/null 2>&1
-   ```
-
-   - Effort stays at `high`, not `xhigh`: an xhigh reviewer told to
-     interrogate a spec generates precision demands indefinitely and never
-     issues an approving verdict (observed live: four rounds, needs-rework every
-     time, rounds 3-4 pure test-procedure gold-plating). Expect 1-2 rounds
-     max, then triage and proceed on judgment -- do not loop for approval.
-   - Pass file contents inline in the prompt (Codex can also read the repo, but
-     inlining is deterministic).
-   - Redirect `</dev/null` so Codex does not block reading stdin.
-   - The useful output is the final `codex` message block (after the run header,
-     before `tokens used`). Ignore any MCP/network warning lines.
-
-4. **Present findings** as one deduped, severity-sorted list. Each item: severity,
-   spec location, problem, proposed fix.
-
-5. **Resolve (triage-first).** Ask which to apply; default is "all". Fold approved
-   fixes into the spec file with Edit. Re-state the Codex VERDICT so the user knows
-   whether to proceed to planning.
-
-## Notes
-
-- This is Codex-only by design, and it reviews the spec, not the plan or the code.
-  - For reviewing a finalized _plan_, use `codex-plan-review`.
-  - For reviewing _code changes_ with Claude **and** Codex in parallel, use
-    `co-review`.
-- Keep it cheap: one `codex exec` call. Do not loop unless the user asks.
+Use `--risk critical` only for explicit critical risk. For a Codex-led review,
+use the current session or a supported native child; never invoke another Codex
+CLI review recursively. Verify findings against the frozen document, retain
+uncertain findings as unresolved, and apply fixes within existing user
+authorization before asking to change source. Use no more than one skeptic
+verification round.

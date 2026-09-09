@@ -1,38 +1,29 @@
 #!/usr/bin/env python3
-"""SessionStart hook: warn loudly when the Claude account does not match the
-directory convention.
+"""Warn when a personal session uses the work Claude account or config.
 
-The claude() zsh wrapper routes launches under ~/Git/work to the work config
-dir (~/.claude-work), but plenty of launch paths bypass the wrapper entirely:
-the desktop app, IDE extensions, `command claude`, scripts, cron. Those all
-land on whatever CLAUDE_CONFIG_DIR says (usually the personal default).
+Work repositories allow either account, including deliberate personal-account
+overrides when work quota is exhausted. Personal repositories and machines with
+CLAUDE_PERSONAL_ONLY=1 must use the personal account. Canonical Git ownership
+preserves this boundary for linked worktrees outside their original directory.
 
-This hook checks the ACCOUNT actually in use, not just the config-directory
-path. It derives the work identity from the account ~/.claude-work is logged
-into (never a hard-coded employer name -- this repo is public), then compares
-the running session's account against it:
-
-  cwd under $CLAUDE_WORK_TREE (default ~/Git/work)  -> expects the work account
-  cwd in a linked worktree of a repo under it       -> expects the work account
-  anywhere else                                     -> expects a non-work account
-
-A warning fires only on a true mismatch (work account in a personal directory,
-or vice versa). This kills the false positive an IDE launch used to trigger --
-~/.claude logged into the work account, opened on a work repo, is correct even
-though the path is the "personal" dir -- while still catching the real error a
-path-only check missed: a personal repo opened while signed into work.
-
-When the account cannot be resolved (work dir never logged in, cloud container,
-malformed config), it falls back to the original path-based routing check so
-behavior is unchanged on those machines. Emits nothing (exit 0, no output)
-when routing is correct.
+The work identity comes from ~/.claude-work, so a work login stored in ~/.claude
+is still detected. When identities are unavailable, config paths provide the
+fallback check. This also covers launchers that bypass the shell wrapper.
 """
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+CONTEXT_LIB = Path(__file__).resolve().parents[1] / "skills" / "lib"
+if str(CONTEXT_LIB) not in sys.path:
+    sys.path.insert(0, str(CONTEXT_LIB))
+
+try:
+    from workflow_context import account_scope
+except Exception:  # noqa: BLE001
+    account_scope = None
 
 
 def real(p: str) -> str:
@@ -56,43 +47,16 @@ def read_oauth_identity(path: Path) -> str | None:
     return account.get("accountUuid") or account.get("emailAddress")
 
 
-def account_of(config_dir: str, personal_cfg: str, home: str) -> str | None:
-    """Resolve the logged-in account for a config dir. The per-dir
-    $config_dir/.claude.json wins; for the default ~/.claude dir the legacy
-    home-root ~/.claude.json is a fallback (that is where the default dir's
-    oauthAccount actually lives)."""
-    candidates = [Path(config_dir) / ".claude.json"]
-    if config_dir == personal_cfg:
-        candidates.append(Path(home) / ".claude.json")
-    for candidate in candidates:
-        identity = read_oauth_identity(candidate)
-        if identity:
-            return identity
-    return None
+def account_of(
+    config_dir: str, home: str, *, native_default: bool = False
+) -> str | None:
+    """Read only the active authentication namespace's account metadata.
 
-
-def repo_root_of(cwd: str) -> str | None:
-    """Main-checkout root of the repo that owns cwd (the parent of its shared
-    .git), or None when cwd is not in a git repo, git is missing, or the
-    lookup fails or hangs. Mirrors the linked-worktree rung of the claude()
-    zsh wrapper: a herdr / EnterWorktree / .worktrees checkout of a work repo
-    lives outside the work tree, and the account it should use is its repo's.
-    Never raises: the guard must stay fail-open at SessionStart."""
-    try:
-        proc = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=2, check=False,
-        )
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
-        return None
-    if proc.returncode != 0:
-        return None
-    common = proc.stdout.strip()
-    if not common or "\n" in common:
-        return None
-    if not os.path.isabs(common):
-        common = os.path.join(cwd, common)
-    return os.path.dirname(real(common))
+    An unset CLAUDE_CONFIG_DIR uses ~/.claude.json; an explicit config path
+    uses its own .claude.json even when that path is ~/.claude.
+    """
+    metadata_root = Path(home) if native_default else Path(config_dir)
+    return read_oauth_identity(metadata_root / ".claude.json")
 
 
 def main() -> None:
@@ -103,70 +67,86 @@ def main() -> None:
 
     cwd = payload.get("cwd") or os.getcwd()
     home = str(Path.home())
-    work_tree = real(os.environ.get("CLAUDE_WORK_TREE", f"{home}/Git/work"))
     work_cfg = real(os.environ.get("CLAUDE_WORK_CONFIG_DIR", f"{home}/.claude-work"))
     personal_cfg = real(f"{home}/.claude")
 
-    actual = real(os.environ.get("CLAUDE_CONFIG_DIR", personal_cfg))
-    in_work_tree = real(cwd).startswith(work_tree + os.sep) or real(cwd) == work_tree
-    # Same short circuit as the wrapper: an in-tree cwd never pays for git.
-    repo_root = None if in_work_tree else repo_root_of(cwd)
-    repo_in_work_tree = repo_root is not None and (
-        repo_root.startswith(work_tree + os.sep) or repo_root == work_tree
-    )
-    expected_is_work = in_work_tree or repo_in_work_tree
-
-    work_account = account_of(work_cfg, personal_cfg, home)
-    active_account = account_of(actual, personal_cfg, home)
-
-    message = None
-
-    if work_account is not None and active_account is not None:
-        # Account-aware path: classify by the account actually in use.
-        active_is_work = active_account == work_account
-        if active_is_work == expected_is_work:
-            return
-        actual_label = "WORK" if active_is_work else "PERSONAL"
-        expected_label = "work" if expected_is_work else "personal"
+    if account_scope is None:
         message = (
-            f"[WARNING] account_guard: this session is signed into the "
-            f"{actual_label} Claude account, but the directory ({cwd}) is a "
-            f"{expected_label} location. Likely cause: a launcher that bypasses "
-            "the claude() zsh wrapper (desktop app, IDE, script). Tell the user "
-            "at the first opportunity; suggest relaunching via the wrapper or "
-            "CLAUDE_CONFIG_DIR, and avoid account-specific actions (logins, "
-            "plugin installs, billing-sensitive work) until confirmed."
+            "[WARNING] account_guard: account scope is unverified. "
+            "Verify the launch scope before sending repository context."
         )
-    else:
-        # Fallback: account identity unavailable (work dir never logged in,
-        # cloud container, malformed config). Use the original path-based check.
-        expected = work_cfg if expected_is_work else personal_cfg
-        if actual == expected:
-            return
-        if actual not in (work_cfg, personal_cfg):
-            message = (
-                f"[INFO] account_guard: custom CLAUDE_CONFIG_DIR in use ({actual}); "
-                "directory-based personal/work routing is bypassed for this session."
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": message,
+                    }
+                }
             )
-        else:
-            actual_label = "WORK" if actual == work_cfg else "PERSONAL"
-            expected_label = "work" if expected == work_cfg else "personal"
-            message = (
-                f"[WARNING] account_guard: this session is running on the {actual_label} "
-                f"Claude account but the directory ({cwd}) routes to the {expected_label} "
-                f"account ({expected}). Likely cause: a launcher that bypasses the "
-                "claude() zsh wrapper (desktop app, IDE, script). Tell the user at the "
-                "first opportunity; suggest relaunching via the wrapper or "
-                "CLAUDE_CONFIG_DIR, and avoid account-specific actions (logins, "
-                "plugin installs, billing-sensitive work) until confirmed."
-            )
+        )
+        return
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": message,
-        }
-    }))
+    try:
+        scope = account_scope(cwd, "claude")
+    except ValueError:
+        message = (
+            "[WARNING] account_guard: canonical repository ownership is ambiguous. "
+            "Do not send repository context until relaunched with an explicit personal scope."
+        )
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": message,
+                    }
+                }
+            )
+        )
+        return
+    if scope["kind"] == "work" or (
+        not scope["personal_repository"]
+        and os.environ.get("CLAUDE_PERSONAL_ONLY") != "1"
+    ):
+        return
+
+    actual = real(os.environ.get("CLAUDE_CONFIG_DIR") or personal_cfg)
+    work_account = account_of(work_cfg, home)
+    active_account = account_of(
+        actual, home, native_default="CLAUDE_CONFIG_DIR" not in os.environ
+    )
+
+    if actual == work_cfg or (
+        work_account is not None and active_account == work_account
+    ):
+        message = (
+            "[WARNING] account_guard: this personal session is using a WORK "
+            f"Claude account or configuration ({actual}) in {cwd}. "
+            "Do not send personal repository content from this session. "
+            "Tell the user and relaunch using the verified personal login, "
+            "normally via claude --personal with CLAUDE_CONFIG_DIR unset."
+        )
+    elif (
+        work_account is not None and active_account is not None
+    ) or actual == personal_cfg:
+        return
+    else:
+        message = (
+            f"[INFO] account_guard: custom CLAUDE_CONFIG_DIR in use ({actual}); "
+            "the personal account identity could not be verified for this session."
+        )
+
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": message,
+                }
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

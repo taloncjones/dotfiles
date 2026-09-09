@@ -11,7 +11,10 @@ does not. Replaces GSD's `.planning/todos/` without the worktree/hook machinery.
 
 All mechanics go through the backing script — never hand-create or hand-move
 todo files, because the script also keeps `TODO.md` in sync. Call it by
-absolute path: `~/.claude/skills/todos/scripts/todos.sh`.
+absolute path: resolve `scripts/todos.sh` from the directory of this loaded
+skill. Both runtimes link this repo-owned source. The existing cross-repo
+registry remains shared at `~/.claude/todos/repos.txt`; `TODOS_REGISTRY`
+can override it explicitly without moving either runtime's plugin files.
 
 ## Layout
 
@@ -75,21 +78,22 @@ normally on the next `git add`.
 
 ## Commands
 
-| Command                                                                 | What it does                                                                                                    |
-| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `todos.sh init`                                                         | Create `.todos/{pending,completed}/`, set local-only exclude                                                    |
-| `todos.sh new "<title>" [--area A] [--file P]... [--depends-on REF]...` | Create a pending todo; prints the file path                                                                     |
-| `todos.sh new "<t>" [--due D] [--surface D] [--priority L]`             | Time/priority fields on a new todo                                                                              |
-| `todos.sh register`                                                     | Register the current repo for the cross-repo brief                                                              |
-| `todos.sh repos`                                                        | List registered repos (warns on missing paths)                                                                  |
-| `todos.sh brief [--soon N] [--stale M] [--stale-cap K]`                 | Print time-relevant todos across all registered repos                                                           |
-| `todos.sh list [--all] [--offline]`                                     | List pending todos with blocked-on annotations (`--all` adds completed; `--offline` skips gh)                   |
-| `todos.sh done <slug-or-substring>`                                     | Move a todo `pending/ -> completed/`                                                                            |
-| `todos.sh depend <slug-or-substring> REF...`                            | Add dependency refs to a pending todo (`todo:<id>`, `branch:<name>`, `pr:<n>`); re-indexes                      |
-| `todos.sh index`                                                        | Regenerate `TODO.md`                                                                                            |
-| `todos.sh share`                                                        | Stop ignoring `.todos/` in this repo (opt into committing it)                                                   |
-| `todos.sh path`                                                         | Print the `.todos/` directory path                                                                              |
-| `todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]`   | Render the HTML board (open todos, blocked-on state, herdr status, completed, research) to a machine-local file |
+| Command                                                                 | What it does                                                                                  |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `todos.sh init`                                                         | Create `.todos/{pending,completed}/`, set local-only exclude                                  |
+| `todos.sh new "<title>" [--area A] [--file P]... [--depends-on REF]...` | Create a pending todo; prints the file path                                                   |
+| `todos.sh new "<t>" [--due D] [--surface D] [--priority L]`             | Time/priority fields on a new todo                                                            |
+| `todos.sh register`                                                     | Register the current repo for the cross-repo brief                                            |
+| `todos.sh repos`                                                        | List registered repos (warns on missing paths)                                                |
+| `todos.sh brief [--soon N] [--stale M] [--stale-cap K]`                 | Print time-relevant todos across all registered repos                                         |
+| `todos.sh list [--all] [--offline]`                                     | List pending todos with blocked-on annotations (`--all` adds completed; `--offline` skips gh) |
+| `todos.sh ready <exact-todo-id> [--offline|--online]`                     | Read-only JSON dependency verdict for one exact pending todo; offline by default             |
+| `todos.sh done <slug-or-substring>`                                     | Move a todo `pending/ -> completed/`                                                          |
+| `todos.sh depend <slug-or-substring> REF...`                            | Add dependency refs to a pending todo (`todo:<id>`, `branch:<name>`, `pr:<n>`); re-indexes    |
+| `todos.sh index`                                                        | Regenerate `TODO.md`                                                                          |
+| `todos.sh share`                                                        | Stop ignoring `.todos/` in this repo (opt into committing it)                                 |
+| `todos.sh path`                                                         | Print the `.todos/` directory path                                                            |
+| `todos.sh dashboard [--runtime claude\|codex] [--personal] [--open] [--online] [--out PATH] [--completed N]` | Render the local HTML board in the selected account scope |
 
 `new` and `done` regenerate `TODO.md` automatically, so the index never drifts.
 
@@ -125,10 +129,13 @@ resolves to one state:
 are determinately unsatisfied appear under `[blocked-on: ...]`, refs the
 index cannot verify (PRs, absent branches) under `[unverified: ...]`.
 
-Network rule: only `list` may call `gh`, and `list --offline` (or
-`TODOS_OFFLINE=1`) disables that. `new`, `done`, `depend`, and `index`
-never touch the network. There is no timeout on `gh`; if the network
-hangs, use `--offline`.
+Network rule: `list` and explicit `ready --online` may call `gh`.
+`--offline` (or `TODOS_OFFLINE=1`) disables that. `new`, `done`, `depend`,
+and `index` never touch the network. `ready --online` shares a five-second
+budget across all `gh` calls, with up to one additional second to kill a
+stalled process. It uses coreutils `timeout` or `gtimeout`; if neither is
+available, network-dependent refs remain unverified. `list` retains its
+existing unbounded `gh` calls; use `list --offline` when needed.
 
 Squash merges never make a branch an ancestor of `origin/main`, so a
 branch ref resolves `merged` only through `gh` (`gh pr list --head`),
@@ -138,24 +145,45 @@ Prefer a `pr:` ref once the PR number is known. `TODOS_BASE_REF`
 (default `origin/main`) and `TODOS_GH` (default `gh`) are overrides for
 tests and unusual setups.
 
-The orchestrator does not read this field yet; a later task gates
-kickoff on it. Until then it is advisory: read the annotation before
-starting work on a blocked todo. Removing a dependency is a hand edit of
-the todo's frontmatter followed by `todos.sh index`.
+For controller dispatch, run `ready` from the source repository and pass
+the task's explicitly bound todo ID, such as `2026-09-06-fix-cache`.
+The command accepts the exact pending basename without `.md`; it never
+selects a substring, the newest item, or a task from another repository.
+Completed or duplicate pending/completed targets cannot dispatch.
+
+```json
+{"ready":false,"task_id":"2026-09-06-fix-cache","dependencies":[{"ref":"pr:85","state":"unknown"}]}
+```
+
+The JSON includes every direct dependency in file order, including satisfied
+ones. Exit status is `0` when every dependency is `done` or `merged`, `3`
+when any dependency is unsatisfied or unverified, and `2` for invalid input,
+a missing/ambiguous pending target, or malformed dependency frontmatter.
+Status `2` includes an `error` field. Unknown, invalid, missing, and self refs
+never count as satisfied. Direct cycles remain blocked by their pending
+dependency; the resolver does not recursively schedule work.
+
+`ready` requires `jq` and changes no todo, index, Git exclude, cache, or repo
+registry. It neither initializes a missing backlog nor starts any work.
+Removing a dependency is a hand edit of the todo's frontmatter followed by
+`todos.sh index`.
 
 ## Dashboard
 
 `todos.sh dashboard` renders the whole board for the current repo into
 one static HTML file and prints its path:
-`${TODOS_DASHBOARD_DIR:-${XDG_STATE_HOME:-~/.local/state}/dotfiles/dashboard}/<repo_slug>.html`
-(`<repo_slug>` is the herdr repo slug, so every worktree of a repo
-shares one page). `--open` opens it (`open` on macOS, `xdg-open`
+`${XDG_STATE_HOME:-~/.local/state}/dotfiles/dashboard/<account_id>/<repo_slug>.html`
+(`<repo_slug>` is the herdr repo slug, so worktrees share one page within
+the same account). Select the caller explicitly with `--runtime claude` or
+`--runtime codex`; retain `--personal` for personal quota in a work repo.
+`TODOS_DASHBOARD_DIR` explicitly overrides the output directory. `--open` opens it (`open` on macOS, `xdg-open`
 elsewhere); `--out PATH` writes elsewhere; `--completed N` sets how many
 completed todos to show (default 10, 0 hides the section).
 
 The page is inert: no script, no remote assets, no server. Regenerate
-and reload the tab to refresh. For live refresh on a machine with
-`fswatch`: `herdr pane run <pane> "fswatch -o .todos | xargs -n1 -I{} ~/.claude/skills/todos/scripts/todos.sh dashboard"`.
+and reload the tab to refresh. For repeated refresh, resolve `scripts/todos.sh` from this loaded skill
+and rerun `dashboard` with the same runtime/account options. Do not resolve
+it from another runtime's personal installation.
 
 The Open section is grouped into sub-sections instead of one flat table,
 so the question "what can I pick up right now" doesn't get buried in a
@@ -176,7 +204,9 @@ What each row shows:
   same resolver as `list`. Offline by default (like `index`); `--online`
   lets it call `gh` and overrides an exported `TODOS_OFFLINE`.
 - **Herdr**: the task record under
-  `${TODOS_STATE_ROOT:-${CLAUDE_CONFIG_DIR:-~/.claude}/herdr-orch}/<repo_slug>/tasks/td-<basename>.json`
+  `<selected-account-root>/herdr-orch/<repo_slug>/tasks/td-<basename>.json`
+  (resolved by the shared workflow context; `TODOS_STATE_ROOT` is an explicit
+  test/development override)
   when one exists: status pill, `phase role model`, the review verdict
   (tagged `(stale)` unless its `reviewed_head_sha` matches the record),
   and the done record (tagged `(stale)` unless its phase and agent match

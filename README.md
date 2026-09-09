@@ -177,8 +177,9 @@ dotfiles/
 │   ├── commands/           # Custom slash commands
 │   └── hooks/              # Pre/post tool hooks
 ├── codex/            # Codex (OpenAI CLI) configuration
-│   ├── AGENTS.md     # Codex project memory
-│   └── hooks/        # Codex PreToolUse hooks
+│   ├── AGENTS.md     # Repo-owned Codex workflow policy
+│   ├── hooks/        # Codex PreToolUse hooks
+│   └── skills/       # Native review and Herd adapters
 ├── LICENSE           # MIT license
 └── NOTICE            # Third-party attributions
 ```
@@ -251,7 +252,7 @@ Git and SSH identity is split between a tracked personal config and machine-loca
 - `url.insteadOf` in each include rewrites `git@github.com:` remotes to the correct SSH alias (`Git-Personal` or `Git-work`) automatically — no manual `update-remote` needed.
 - SSH: `~/.ssh/config` includes `~/.ssh/config_local` (machine-local hosts) first, then `config_personal` and `config_work`. The personal key is pinned for `github.com` and `Git-Personal`. The work key (`~/.ssh/id_ed25519_work.pub`) is machine-local and pinned via `config_work`.
 - 1Password agent config (`~/.config/1Password/ssh/agent.toml`) is seeded from `ssh/configs/agent.toml` on first install — real vault/item names stay off the repo.
-- The `claude()` ZSH wrapper selects `~/.claude-work` when launching under `~/Git/work`, `~/.claude` otherwise. `claude-account` shows the active routing. Defined in `zsh/claude-account.zsh`, sourced from `~/.zshenv`, so routing works in non-interactive and login shells (headless probes, orchestrator dispatches) -- the launched process always gets an explicit non-empty `CLAUDE_CONFIG_DIR`. A linked worktree of a work repo (herdr, EnterWorktree, `.worktrees/`) routes to work as well, resolved through the repo's shared `.git`; herdr worker launches do not depend on this and pin the orchestrator's own dir with an explicit `CLAUDE_CONFIG_DIR=$CFG` prefix on the launch line.
+- The `claude()` ZSH wrapper selects the work account under `~/Git/work`, including external linked worktrees whose canonical owner is there, and the native personal account otherwise; `--personal` permits personal quota in a work repo. `claude-account` shows the routing. Defined in `zsh/claude-account.zsh` and sourced from `~/.zshenv`, it also covers non-interactive and login shells. Native personal launches unset `CLAUDE_CONFIG_DIR`; work and custom accounts use an explicit non-empty directory. Herd dispatch binds the selected account and runtime environment to the actual pane before launching a worker.
 
 **Setting up work identity on a new machine:**
 
@@ -355,9 +356,9 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `/commit` - Create a commit with auto-detected scope
 - `/done` - Finish work and clean up
 - `/explain` - Deep dive explanation
-- `/handoff` - Save a next-slice kickoff brief to `.claude/handoffs/`
+- `/handoff` - Save an immutable brief keyed by account, repository, and task
 - `/jira` - Interact with linked Jira ticket
-- `/kickoff` - Resume the next slice from the saved handoff
+- `/kickoff` - Resume an explicit saved task after checking live Git state
 - `/lint` - Run linters and formatters
 - `/pr` - Create a pull request
 - `/ready` - Verify and finalize for review
@@ -374,12 +375,41 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `brief`, `todos`, `weekly` - daily/weekly planning built on the `.todos/` backlog
   - `todos.sh dashboard [--open] [--out PATH]` renders pending, completed, and
     `.todos/research/*.md` notes into a static HTML page at
-    `~/.local/state/dotfiles/dashboard/<repo_slug>.html`; it never writes into
-    the repo
+    `~/.local/state/dotfiles/dashboard/<account_id>/<repo_slug>.html` by
+    default; task and TODO state remain read-only. Use `--runtime codex`
+    for Codex and retain `--personal` for a personal account in a work repo
 - `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) review gates
+- `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection
+- `voice` - shared prose lint and independent rewrite with protected facts
+- `herdr-orchestration` - shared task lifecycle with a native Codex controller adapter
+- `lib/workflow_context.py` - canonical repository identity and account scope
 - `ship`, `post-merge`, `reconcile`, `wrap` - delivery, teardown, Jira drift repair, session exit
 - `model-tuning` - per-model deltas and retirement playbook for current Claude models
 - `lib/work-state.sh` - shared PR/worktree state gathering (tested by `lib/test_work_state.sh`)
+
+Codex discovers maintained handoff/kickoff and voice skills directly, alongside its own
+`co-review`, `claude-plan-review`, `claude-spec-review`, and
+`herdr-orchestration` adapters. ECC and Superpowers remain independent native
+plugins. TDD, systematic debugging, and verification stay enabled; duplicate
+discovery and incompatible Claude imports are reconciled by the installer.
+The shared catastrophic-delete guard also checks both runtimes' shell calls;
+ordinary removals continue through each runtime's approval policy.
+
+Herd resolves model and effort together through `claude/hooks/agent_runtime.py`:
+Astra/high for Codex coordination, planning, and substantive review;
+Terra/high for implementation; Luna/medium for bounded reads; Sol/high for a
+configured skeptic or routine alternative. Critical review uses xhigh explicitly.
+A running controller keeps its actual launch model/effort until restarted.
+Requested settings and observed runtime evidence are reported separately.
+
+Handoff history lives under
+`${XDG_STATE_HOME:-~/.local/state}/dotfiles/workflows/handoffs`, partitioned by
+account, canonical repository, and task. `handoff list` presents candidates;
+`kickoff` requires a selected task. Personal Claude use remains supported in
+work repositories through `claude --personal`. Default personal subprocesses
+unset `CLAUDE_CONFIG_DIR`; Codex preserves the user's actual `CODEX_HOME`.
+Ambiguous external worktrees require an explicit personal choice instead of
+inheriting an unverified work account.
 
 **Hooks** (pre/post tool execution):
 
@@ -392,6 +422,8 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `no_ai_attribution_bash.py` - Block AI attribution phrases in shell command bodies
 - `no_ai_comments.py` - Block tool-generated comments in code
 - `protect_claude_md.py` - Warn before editing global CLAUDE.md
+- `rm_guard.py` - Reject catastrophic removal commands in Claude and native Codex shell events
+- `scratch_policy.py` - Answer Claude residual permission prompts for verified scratch-only cleanup; Codex retains its native approval flow
 
 ## Configuration
 
@@ -428,19 +460,20 @@ work identity run `identity-setup` or edit `~/.gitconfig-work` directly.
 ### Global Git Hooks
 
 `.gitconfig` sets `core.hooksPath` to `~/.config/git/hooks`, which the installer
-symlinks to `git/hooks/` in this repo. Two hooks live there. The `post-checkout` hook is a no-op
-for repos that do not use `.todos/` or `.planning/`, and `commit-msg` only edits or
-rejects agent attribution, so both are safe to leave globally enabled.
+symlinks to `git/hooks/` in this repo. Two hooks are described below. The `post-checkout` hook is a no-op
+for repos that do not use `.todos/` or `.planning/`, and `commit-msg` enforces
+attribution and emoji policy, so both are safe to leave globally enabled.
 
 **`commit-msg`** — runs on every commit before the message is recorded. Two
 layers, in order:
 
 - **Strip** (no `rg` needed): removes agent attribution lines from line 2 onward
-  and writes every other line back byte-for-byte: `Co-Authored-By` trailers
+  while preserving other line content: `Co-Authored-By` trailers
   naming an agent (Claude, Anthropic, Copilot, ChatGPT, GPT, Codex); session
   trailers (`Claude-Session:` with any value, or any `*Session*:` key whose value
   is a URL); and `Generated with|by <agent>` footer lines, emoji prefix included.
-  A message with nothing to strip is not rewritten. When it strips, the hook
+  Rewriting adds LF to an unterminated retained final line. A message with
+  nothing to strip is not rewritten. When it strips, the hook
   prints `commit-msg: stripped N agent attribution line(s).` on stderr. A missing
   `awk`/`grep`/`sed`/`mktemp` fails closed (the commit is refused).
 - **Block** (needs `rg`; warns and skips without it): rejects inline attribution

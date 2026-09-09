@@ -12,8 +12,9 @@ exit 0 with empty output, so the normal prompt flow continues. Never
 denies. See docs/specs/2026-09-07-scratch-policy-hook.md (branch-only)
 for the full rule set; the CLAUDE.md bullet is the durable summary.
 
-When HERDR_ENV=1 and HERDR_WORKSPACE_ID resolves to a workspace index,
-each allow is audited to <repo dir>/tasks/<task_id>.policy.jsonl. The
+When HERDR_ENV=1 and HERDR_WORKSPACE_ID resolves to a validated index in
+the selected repository/account, each allow is audited to
+<repo dir>/tasks/<task_id>.policy.jsonl. Unbound legacy indexes must be unique. The
 allow is printed and flushed before logging; logging failures never
 change the decision.
 """
@@ -23,12 +24,14 @@ import json
 import os
 import shlex
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import herdr_orch_core as core  # noqa: E402  read-only helpers
-import rm_guard  # noqa: E402  parsing helpers, unchanged
+import herdr_orch_core as core  # shared state helpers
+import herdr_stop_gate as lifecycle  # shared scope/index validators
+import rm_guard  # parsing helpers, unchanged
 
 ALLOW = ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest",'
          '"decision":{"behavior":"allow"}}}')
@@ -313,48 +316,98 @@ def decide(payload: dict) -> bool:
     return True
 
 
+def audit_target(payload: dict, ws: str):
+    """Resolve a selected native binding or one unambiguous legacy index."""
+    root = core.state_root()
+    context = scope = slug = personal = None
+    account_id = os.environ.get("HERDR_ACCOUNT_ID")
+    bound = "HERDR_PERSONAL" in os.environ or "HERDR_ACCOUNT_ID" in os.environ
+    if bound:
+        if os.environ.get("HERDR_PERSONAL") not in ("0", "1") or not account_id:
+            return None
+        personal = os.environ["HERDR_PERSONAL"] == "1"
+    cwd = payload.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        try:
+            context = core.repository_context(cwd)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    if context is not None:
+        # Account ambiguity fails closed; never fall back to a different root.
+        scope = core.account_scope(context["root"], "claude", personal=personal is True)
+        if bound and account_id != scope["account_id"]:
+            return None
+        root = core.account_payload_root(scope) / "herdr-orch"
+        try:
+            remote = core.context_git(context["root"], "remote", "get-url", "origin")
+        except subprocess.CalledProcessError:
+            remote = ""
+        slug = core.repo_slug(remote, context["common_dir"])
+    elif bound:
+        return None
+    rd, index = lifecycle.find_index(ws, root, slug)
+    if index is None or index.get("repo_slug") != rd.name:
+        return None
+    task_id, role = index.get("task_id"), index.get("role")
+    if not core.valid_task_id(task_id) or role not in lifecycle.GATED_ROLES:
+        return None
+    task_names = core.payload_names(rd / "tasks")
+    task = lifecycle.read_json_object(rd / "tasks" / f"{task_id}.json", root)
+    if task is None and f"{task_id}.json" in task_names:
+        return None  # corrupt or unreadable is not an absent legacy task
+    workers = task.get("workers", []) if task else []
+    strict = (
+        bound
+        or isinstance(workers, list)
+        and any(isinstance(worker, dict) and "runtime" in worker for worker in workers)
+    )
+    if strict:
+        entry = workers[-1] if isinstance(workers, list) and workers else None
+        if (
+            context is None
+            or task is None
+            or task.get("task_id") != task_id
+            or task.get("repo_slug") != rd.name
+            or not isinstance(entry, dict)
+            or entry.get("task_id", task_id) != task_id
+            or entry.get("repo_slug", rd.name) != rd.name
+            or entry.get("worktree", context["root"]) != context["root"]
+            or entry.get("role") not in lifecycle.ROLE_NAMES[role]
+            or not core.attempt_matches(task, entry, entry.get("phase"), ws)
+            or lifecycle.native_scope(
+                task, entry, scope, root, "claude", context, personal
+            )
+            is None
+        ):
+            return None
+    elif task and (
+        task.get("task_id", task_id) != task_id
+        or task.get("repo_slug", rd.name) != rd.name
+    ):
+        return None
+    return rd / "tasks" / f"{task_id}.policy.jsonl", task_id
+
+
 def log_allow(payload: dict, command: str) -> None:
     if os.environ.get("HERDR_ENV") != "1":
         return
     ws = os.environ.get("HERDR_WORKSPACE_ID", "")
     if not core.valid_workspace_id(ws):
         return
-    root = core.state_root()
-    # Sorted-first across repo slugs, deliberately: the payload's `cwd` is
-    # attacker-influenced input, and picking the audited repo by matching it
-    # against a git remote would mean untrusted data selects where the
-    # record lands. herdr_stop_gate.py's find_index() makes the same call
-    # for the same reason. Workspace ids are unique in practice, so a
-    # cross-slug collision misrouting the audit line is theoretical.
-    for idx in sorted(root.glob(f"*/workspaces/{ws}.json")):
-        rd = idx.parent.parent
-        index = core.read_index(rd, ws)
-        if not index:
-            continue
-        task_id = index.get("task_id")
-        if not isinstance(task_id, str) or not core.valid_task_id(task_id):
-            return
-        tasks = rd / "tasks"
-        p = tasks / f"{task_id}.policy.jsonl"
-        if not tasks.is_dir() or not core.contained(p, root):
-            return
-        try:
-            st = os.lstat(p)
-        except FileNotFoundError:
-            st = None
-        if st is not None and not stat.S_ISREG(st.st_mode):
-            return
-        rec = {"v": 1, "ts": core.now_iso(), "event": EVENT, "task_id": task_id,
-               "workspace_id": ws, "tool_use_id": payload.get("tool_use_id"),
-               "command": command[:COMMAND_MAX]}
-        flags = (os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK
-                 | getattr(os, "O_NOFOLLOW", 0))
-        fd = os.open(p, flags, 0o600)
-        try:
-            os.write(fd, (json.dumps(rec, separators=(",", ":")) + "\n").encode())
-        finally:
-            os.close(fd)
+    target = audit_target(payload, ws)
+    if target is None:
         return
+    path, task_id = target
+    rec = {
+        "v": 1,
+        "ts": core.now_iso(),
+        "event": EVENT,
+        "task_id": task_id,
+        "workspace_id": ws,
+        "tool_use_id": payload.get("tool_use_id"),
+        "command": command[:COMMAND_MAX],
+    }
+    core.append_payload(path, (json.dumps(rec, separators=(",", ":")) + "\n").encode())
 
 
 def main() -> int:

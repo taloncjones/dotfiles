@@ -81,7 +81,8 @@ run_hook() {
         tmpargs="TMPDIR=${CASE_TMPDIR:-$T}"
     fi
     # shellcheck disable=SC2086 -- tmpargs is one env option or one assignment
-    printf '%s' "$payload" | env -u HERDR_ENV -u HERDR_WORKSPACE_ID $tmpargs \
+    printf '%s' "$payload" | env -u HERDR_ENV -u HERDR_WORKSPACE_ID \
+        -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID $tmpargs \
         HOME="$H" CLAUDE_CONFIG_DIR="$FIX/nocfg" "$@" "$HOOK" >"$FIX/out" 2>"$FIX/err"
 }
 
@@ -338,7 +339,7 @@ fi
 CFG5="$FIX/cfg5"
 cfg_fixture "$CFG5"
 mkfifo "$CFG5/herdr-orch/slug-x/tasks/PROJ-1.policy.jsonl"
-pr_payload "rm -rf $S/build" "$R" "$S" | env TMPDIR="$T" HOME="$H" \
+pr_payload "rm -rf $S/build" "$R" "$S" | env -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID TMPDIR="$T" HOME="$H" \
     HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 CLAUDE_CONFIG_DIR="$CFG5" "$HOOK" >"$FIX/fifo.out" 2>"$FIX/fifo.err" &
 fifo_pid=$!
 i=0
@@ -355,6 +356,148 @@ else
     printf 'FAIL  audit: reader-less FIFO sidecar does not block the allow (out=%s)\n' "$(cat "$FIX/fifo.out")" >&2; FAIL=$((FAIL + 1))
 fi
 wait "$fifo_pid" 2>/dev/null
+
+# Audit routing uses real Git/account fixtures; allowed rm commands are never run.
+if HOOK_PATH="$HOOK" FIX="$FIX" python3 - <<'PY'
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+hook = Path(os.environ["HOOK_PATH"]).resolve()
+sys.path.insert(0, str(hook.parent))
+import herdr_orch_core as core
+
+class AuditRouting(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ["FIX"])
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("GIT_", "CLAUDE_", "HERDR_"))}
+        self.env.update(HOME=str(self.root / "home"), TMPDIR=str(self.root / "scratch"),
+                        HERDR_ENV="1", HERDR_WORKSPACE_ID="w1")
+        (self.root / "scratch").mkdir()
+        (self.root / "scratch/x").touch()
+
+    def fixture(self, kind="personal"):
+        repo = self.root / "home/Git" / kind / "active"
+        repo.mkdir(parents=True)
+        for args in (("init", "-q"),
+                     ("-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+                      "-c", "user.email=test@example.invalid", "commit", "-qm", "base", "--allow-empty"),
+                     ("remote", "add", "origin", "https://zz.example/org/active.git")):
+            subprocess.run(["git", "-C", str(repo), *args], env=self.env, check=True)
+        with patch.dict(os.environ, self.env, clear=True):
+            context = core.repository_context(repo)
+            scope = core.account_scope(repo, "claude")
+            payload_root = core.account_payload_root(scope) / "herdr-orch"
+        slug = core.repo_slug("https://zz.example/org/active.git", context["common_dir"])
+        rd = payload_root / slug
+        (rd / "workspaces").mkdir(parents=True)
+        (rd / "tasks").mkdir()
+        index = {"task_id": "td-current", "repo_slug": slug, "role": "impl"}
+        (rd / "workspaces/w1.json").write_text(json.dumps(index))
+        worker = {"task_id": "td-current", "repo_slug": slug, "phase": "implement",
+                  "runtime": "claude", "role": "implementation", "workspace_id": "w1",
+                  "pane_id": "pane1", "launch_id": "current", "source_head_sha": context["head"],
+                  "worktree": str(repo), "account_id": scope["account_id"], "personal": False}
+        task = {"task_id": "td-current", "repo_slug": slug, "worktree": str(repo),
+                "base_sha": context["head"], "workers": [worker]}
+        (rd / "tasks/td-current.json").write_text(json.dumps(task))
+        self.env.update(HERDR_PERSONAL="0", HERDR_ACCOUNT_ID=scope["account_id"])
+        return repo, rd, task
+
+    def allow(self, cwd):
+        payload = {"hook_event_name": "PermissionRequest", "tool_name": "Bash",
+                   "permission_mode": "auto", "cwd": str(cwd), "tool_use_id": "audit-test",
+                   "scratchpad_dir": str(self.root / "scratch"),
+                   "tool_input": {"command": "rm " + str(self.root / "scratch/x")}}
+        result = subprocess.run([sys.executable, str(hook)], input=json.dumps(payload),
+                                env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["decision"]["behavior"], "allow")
+
+    def test_colliding_workspace_uses_selected_repository(self):
+        repo, rd, _ = self.fixture()
+        stale = rd.parent / "aa-stale"
+        (stale / "workspaces").mkdir(parents=True)
+        (stale / "tasks").mkdir()
+        (stale / "workspaces/w1.json").write_text(json.dumps(
+            {"task_id": "td-stale", "repo_slug": "aa-stale", "role": "impl"}))
+        self.allow(repo)
+        self.assertFalse((stale / "tasks/td-stale.policy.jsonl").exists(), "command disclosed to stale repository audit")
+        self.assertEqual(len((rd / "tasks/td-current.policy.jsonl").read_text().splitlines()), 1)
+
+    def test_work_scope_without_auth_override(self):
+        repo, rd, _ = self.fixture("work")
+        self.allow(repo)
+        self.assertTrue((rd / "tasks/td-current.policy.jsonl").exists())
+        self.assertFalse((self.root / "home/.claude/herdr-orch").exists())
+
+    def test_rejects_stale_and_malformed_native_bindings(self):
+        repo, rd, task = self.fixture()
+        wrong_root = {**task, "worktree": str(self.root / "elsewhere")}
+        wrong_id = {**task, "task_id": "td-foreign"}
+        wrong_account = {**task, "workers": [{**task["workers"][0], "account_id": "foreign"}]}
+        wrong_phase = {**task, "workers": [{**task["workers"][0], "phase": "review", "role": "reviewer"}]}
+        for bad in (wrong_root, wrong_id, wrong_account, wrong_phase,
+                    {**task, "workers": [*task["workers"], None]},
+                    {**task, "workers": [*task["workers"], {"phase": "plan"}]},
+                    {**task, "workers": [{**task["workers"][0], "task_id": "td-foreign"}]},
+                    {**task, "workers": [{**task["workers"][0], "repo_slug": "aa-foreign"}]},
+                    {**task, "workers": [{**task["workers"][0], "worktree": str(self.root)}]}):
+            with self.subTest(binding=bad):
+                (rd / "tasks/td-current.json").write_text(json.dumps(bad))
+                self.allow(repo)
+                self.assertFalse((rd / "tasks/td-current.policy.jsonl").exists())
+
+    def test_rejects_account_marker_mismatch_without_changing_allow(self):
+        repo, rd, _ = self.fixture()
+        self.env["HERDR_ACCOUNT_ID"] = "foreign"
+        self.allow(repo)
+        self.assertFalse((rd / "tasks/td-current.policy.jsonl").exists())
+
+    def test_corrupt_existing_task_is_not_an_absent_legacy_task(self):
+        repo, rd, _ = self.fixture()
+        self.env.pop("HERDR_PERSONAL")
+        self.env.pop("HERDR_ACCOUNT_ID")
+        (rd / "tasks/td-current.json").write_text("{broken")
+        self.allow(repo)
+        self.assertFalse((rd / "tasks/td-current.policy.jsonl").exists())
+
+    def test_ambiguous_legacy_indexes_do_not_choose_sorted_first(self):
+        cfg = self.root / "legacy"
+        self.env["CLAUDE_CONFIG_DIR"] = str(cfg)
+        for slug in ("aa-old", "zz-current"):
+            rd = cfg / "herdr-orch" / slug
+            (rd / "workspaces").mkdir(parents=True)
+            (rd / "tasks").mkdir()
+            (rd / "workspaces/w1.json").write_text(json.dumps({"task_id": "td-a", "repo_slug": slug, "role": "impl"}))
+        self.allow(self.root)
+        self.assertEqual(list(cfg.glob("*/**/*.policy.jsonl")), [])
+
+    def test_rejects_symlinked_payload_parent(self):
+        repo, rd, _ = self.fixture()
+        tasks = rd / "tasks"
+        external = self.root / "foreign-tasks"
+        tasks.rename(external)
+        tasks.symlink_to(external, target_is_directory=True)
+        self.allow(repo)
+        self.assertFalse((external / "td-current.policy.jsonl").exists())
+
+unittest.main(argv=["scratch-audit"])
+PY
+then
+    printf 'PASS  audit: selected repository/account, current native attempt, and safe append\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  audit: selected repository/account, current native attempt, and safe append\n' >&2; FAIL=$((FAIL + 1))
+fi
 
 # --- static checks (spec AC1, AC6, AC7) ---
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \

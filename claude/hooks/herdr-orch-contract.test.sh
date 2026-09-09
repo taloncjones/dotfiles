@@ -4,12 +4,15 @@
 # herdr, no network. Fake herdr/jira just emit canned JSON to prove command
 # shape and state transitions.
 set -e
+# Use physical macOS temp paths so strict no-follow state traversal is tested.
+TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))'); export TMPDIR
 PASS=0; FAIL=0
 ok() { if eval "$2"; then printf 'PASS  %s\n' "$1"; PASS=$((PASS+1)); else printf 'FAIL  %s\n' "$1" >&2; FAIL=$((FAIL+1)); fi; }
 
-ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
-CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"   # mirrors the skill's preflight block: the orchestrator's own dir
-CLI="python3 claude/hooks/herdr_orch_core.py"
+ROOT=$(mktemp -d); ROOT=$(cd "$ROOT" && pwd -P); export CLAUDE_CONFIG_DIR="$ROOT"
+HERDR_COORDINATION_ROOT=$(mktemp -d); export HERDR_COORDINATION_ROOT
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+CFG="$CLAUDE_CONFIG_DIR"   # this fixture uses an explicit custom account
 SLUG="github-com-org-repo-deadbeef"
 
 # fake herdr/jira on PATH (canned JSON; asserts only that the skill's command
@@ -181,10 +184,10 @@ ok "watch --once emits signal for recorded task state" "[ '$WOUT' = 'signal' ]"
 SKILL="claude/skills/herdr-orchestration/SKILL.md"
 ok "skill: claim/refresh pass the orchestrator inbox socket" \
   "grep -Fq -- '--messaging-socket \"\$CLAUDE_CODE_MESSAGING_SOCKET\"' $SKILL"
-ok "skill: worker launch names the session" \
-  "grep -Fq -- 'claude --model \$MODEL --permission-mode auto --name <agent-name>' $SKILL"
-ok "skill: --name gated on a once-per-session capability check" \
-  "grep -Fq -- 'claude --help' $SKILL && grep -Fq -- 'lists \`--name\`' $SKILL"
+ok "skill: native adapter owns named worker launch" \
+  "grep -Fq -- 'herdr_dispatch.py launch' $SKILL && grep -Fq -- 'unique agent name' $SKILL"
+ok "skill: native launch checks route readiness and availability" \
+  "grep -Fq -- 'returned readiness, availability reason, model, and effort' $SKILL"
 ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
   "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $SKILL"
 ok "skill: watch armed at relaxed cadence when messaging is live, default otherwise" \
@@ -193,8 +196,8 @@ ok "skill: re-subscription eligible only for working/blocked workers" \
   "grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
 ok "skill: no-lost-wake rule, capped at three passes" \
   "grep -Fq 'capped at three passes per turn' $SKILL"
-ok "skill: discovery fails closed on zero or several candidates" \
-  "grep -Fq 'Zero or more than one candidate' $SKILL && grep -Fq 'peer_name' $SKILL"
+ok "skill: transport readiness never grants task completion" \
+  "grep -Fq 'are transport evidence' $SKILL && grep -Fq 'milestone/contract/review gates advance' $SKILL"
 ok "skill: safety names cross-session messages as wake-only" \
   "grep -Fq 'Every inbound cross-session message' $SKILL"
 
@@ -298,11 +301,11 @@ SHA=$($CLI verify-contract --repo-slug "$SLUG" --task-id td-m --worktree "$WT" -
 ok "generated contract validates and pins" "printf '%s' '$SHA' | grep -qE '^[0-9a-f]{64}$'"
 BRIEF="$RD/tasks/td-m.brief.md"; mkdir -p "$RD/tasks"; printf 'lint sweep\n' > "$BRIEF"
 LID="mech-td-m-20260901T000000Z"
-CMD="python3 claude/hooks/herdr_orch_core.py run-mech --repo-slug $SLUG --task-id td-m --workspace w1 --agent mech-td-m --launch-id $LID --model haiku --worktree $WT --base-sha $BASE --brief-file $BRIEF --max-turns 9 --max-budget-usd 1.0 --timeout-secs 1800"
+CMD="python3 claude/hooks/herdr_legacy_fixture.py run-mech --repo-slug $SLUG --task-id td-m --workspace w1 --agent mech-td-m --launch-id $LID --model haiku --worktree $WT --base-sha $BASE --brief-file $BRIEF --max-turns 9 --max-budget-usd 1.0 --timeout-secs 1800"
 ok "the launch config dir is shell-safe and absolute" \
   "python3 -c \"import re,sys;sys.exit(0 if re.fullmatch(r'/[A-Za-z0-9_./+:@-]+','$CFG') else 1)\""
-# The skill's preflight validation line, as a function, driven with accept
-# and reject values. Keep the grep identical to SKILL.md's.
+# Legacy fixture launch values remain deliberately restricted; native dispatch
+# uses structured argv and explicit account bindings instead.
 cfg_ok() { printf '%s' "$1" | grep -qE '^/[A-Za-z0-9_./+:@-]+$'; }
 ok "launch config dir rule accepts the fixture dir and rejects relative and unsafe values" \
   "cfg_ok '$CFG' && ! cfg_ok relcfg && ! cfg_ok '' && ! cfg_ok '/x y' && ! cfg_ok \"/x'y\" && ! cfg_ok '/x;y' && ! cfg_ok '/x\$(id)'"
@@ -311,7 +314,7 @@ ok "every launch value is shell-safe" "python3 -c \"import re,sys;sys.exit(0 if 
 PID=$(herdr worktree create --cwd "$PWD" --branch talon/td-m/x --base origin/main --label td-m | python3 -c "import json,sys;print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
 herdr pane run "$PID" "CLAUDE_CONFIG_DIR=$CFG $CMD"
 ok "mech launch goes through pane run in the root pane with run-mech under an explicit config dir, no claude argv" \
-  "grep -q '^pane run w1:p1 CLAUDE_CONFIG_DIR=$CFG python3 claude/hooks/herdr_orch_core.py run-mech ' '$BIN/calls.log' && ! grep -q 'pane run w1:p1 claude' '$BIN/calls.log'"
+  "grep -q '^pane run w1:p1 CLAUDE_CONFIG_DIR=$CFG python3 claude/hooks/herdr_legacy_fixture.py run-mech ' '$BIN/calls.log' && ! grep -q 'pane run w1:p1 claude' '$BIN/calls.log'"
 # the fake herdr only logs; run the same command for real to land state
 printf '{"type":"result","subtype":"success","is_error":false,"num_turns":4,"total_cost_usd":0.3,"modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
 export FAKE_CLAUDE_HOOK="$CLI emit-done --repo-slug $SLUG --task-id td-m --workspace w1 --agent mech-td-m --phase implement --outcome completed --head-sha $BASE --base-sha $BASE --launch-id $LID"
@@ -398,7 +401,7 @@ TID=think-triage-20260904170000
 printf 'You are %s ...\n## Question\nWhich of the three todos first?\n' "$TID" > "$TRD/think/$TID.question.md"
 export FAKE_CLAUDE_LOG="$FAKE/tlog" FAKE_CLAUDE_JSON="$FAKE/tres.json"
 printf '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":1.1,"modelUsage":{"claude-fable-5-1":{}},"structured_output":{"recommendation":"todo B first","rationale":"unblocks A and C","options":[{"label":"B first","summary":"s","tradeoffs":"t","risk":"low"},{"label":"A first","summary":"s","tradeoffs":"t","risk":"medium"}],"confidence":"high"}}' > "$FAKE_CLAUDE_JSON"
-TCMD="python3 claude/hooks/herdr_orch_core.py run-think --repo-slug $TSLUG --session E --fence $TF --think-id $TID --kind triage --model fable --effort high --cwd $TWT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 900 --add-dir tasks"
+TCMD="python3 claude/hooks/herdr_legacy_fixture.py run-think --repo-slug $TSLUG --session E --fence $TF --think-id $TID --kind triage --model fable --effort high --cwd $TWT --max-turns 15 --max-budget-usd 3.0 --timeout-secs 900 --add-dir tasks"
 ok "every think launch value is shell-safe" "python3 -c \"import re,sys;sys.exit(0 if all(re.fullmatch(r'[A-Za-z0-9_./+:@-]+',w) for w in '$TCMD'.split()) else 1)\""
 $TCMD
 ok "think launch record then answer landed, answered" \
@@ -436,8 +439,8 @@ if command -v zsh >/dev/null 2>&1; then
 else
   echo "SKIP: zsh not installed; launch payload replay not run"
 fi
-ok "skill defines CFG and prefixes every launch line with it" \
-  "grep -qxF 'CFG=\"\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}\"' claude/skills/herdr-orchestration/SKILL.md && ! grep -F 'pane run <pane_id> \"' claude/skills/herdr-orchestration/SKILL.md | grep -vF 'pane run <pane_id> \"CLAUDE_CONFIG_DIR=\$CFG ' | grep -q ."
+ok "skill binds native account scope and quotes legacy launch environment" \
+  "grep -q 'herdr_dispatch.py' claude/skills/herdr-orchestration/SKILL.md && grep -q 'ACCOUNT_PREFIX' claude/skills/herdr-orchestration/SKILL.md && grep -q 'launch_env' claude/skills/herdr-orchestration/SKILL.md"
 
 # brief rendering: Routing block equals the snapshot; opt-in line; helper rule; no-workflow variant
 render_brief() {   # $1 = ROUTING json, $2 = granted|withheld

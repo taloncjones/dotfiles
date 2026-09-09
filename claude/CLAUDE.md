@@ -22,6 +22,26 @@ These rules are enforced by hooks in Claude Code. Follow them in all tools.
 - Never write API keys, tokens, passwords, or credentials to files
 - Use environment variables or secret managers
 
+## Account Routing
+
+- Standing user authorization: using the personal Claude account for
+  task-related planning, coding, and review is allowed, including relevant
+  code, diffs, specs, and plans from personal or work repositories. Do not
+  ask for account-use approval again. This does not authorize sending
+  personal context through a work account or unrelated external actions.
+- Set `export CLAUDE_PERSONAL_ONLY=1` in `~/.zshenv.local` on a personal-only
+  machine. Leave it unset on a work machine that uses both Claude accounts.
+- A checkout or canonical repository owner under `~/Git/personal` selects
+  `~/.claude`, even with inherited work-account settings or an external
+  linked worktree. Shared dotfiles never carry machine account credentials.
+- Work repositories default to the work account. `claude --personal` may use personal quota there; account guards must
+  allow this deliberate override. Default personal subprocesses unset
+  `CLAUDE_CONFIG_DIR`; an explicit `~/.claude` may select a different
+  authentication namespace.
+- Capture the intended account before moving to a temporary review directory.
+  Apply its explicit environment mapping to headless workers and partner
+  reviewers, including removal of `CLAUDE_CONFIG_DIR` for native personal auth.
+
 ## Response Style
 
 - Extremely concise - engineers scan, not read. Assume technical competence.

@@ -21,7 +21,7 @@ setup_env() {
   mkdir -p "$HOME/Git/work" "$HOME/Git/personal"
   export CLAUDE_WORK_TREE="$HOME/Git/work"
   export CLAUDE_WORK_CONFIG_DIR="$HOME/.claude-work"
-  unset CLAUDE_CONFIG_DIR RECALL_EXTRA_GLOBS RECALL_FORCE_NO_FTS5
+  unset CLAUDE_CONFIG_DIR CLAUDE_PERSONAL_ONLY RECALL_CONFIG_DIR RECALL_EXTRA_GLOBS RECALL_FORCE_NO_FTS5
 }
 # mk_repo <dir>: git init a repo at dir; echoes resolved path.
 mk_repo() {
@@ -100,8 +100,20 @@ test_routing_override() {
   CLAUDE_CONFIG_DIR="$SANDBOX/custom" recall "$r" status
   assert_contains "CLAUDE_CONFIG_DIR overrides" "$OUT" "$SANDBOX/custom"
 }
+test_routing_recall_override() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/work/r")
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/account" recall "$r" status
+  assert_eq "shared recall override succeeds" "$RC" 0
+  assert_contains "RECALL_CONFIG_DIR overrides Claude and work routing" "$OUT" "config dir: $SANDBOX/shared"
+  assert_file "shared index root created" "$SANDBOX/shared/recall"
+  assert_no_file "storage override never writes account index" "$SANDBOX/account/recall"
+  RECALL_CONFIG_DIR="$SANDBOX/shared" recall "$r" status --all
+  assert_contains "status all lists shared index" "$OUT" "$r (present"
+  RECALL_CONFIG_DIR="$r/.codex" recall "$r" status
+  assert_eq "shared storage inside repo is rejected" "$RC" 6
+}
 test_index_inside_repo_exits_6() {
-  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r")
+  setup_env; local r; r=$(mk_repo "$HOME/Git/work/r")
   CLAUDE_CONFIG_DIR="$r/.claude" recall "$r" status
   assert_eq "index inside repo exits 6" "$RC" 6
 }
@@ -121,6 +133,7 @@ test_no_fts5_exits_5
 test_routing_personal
 test_routing_work_creates_dir
 test_routing_override
+test_routing_recall_override
 test_index_inside_repo_exits_6
 test_usage_and_help
 
@@ -434,6 +447,209 @@ test_cli_kinds_extra_and_findings() {
   assert_contains "escaping extra glob rejected with warning" "$ERR" "rejected"
 }
 test_cli_kinds_extra_and_findings
+
+test_cli_codex_artifacts_and_scope() {
+  setup_env; local r; r=$(mk_repo "$HOME/Git/personal/r")
+  mkdir -p "$r/.codex/handoffs" "$r/.codex/findings/nested" "$r/.codex/worktrees/other/docs" "$HOME/.codex/memories"
+  printf '# Handoff\n\nCodexhandoffneedle\n' > "$r/.codex/handoffs/latest.md"
+  printf 'Codexfindingneedle\n' > "$r/.codex/findings/nested/report.txt"
+  printf '# Excluded\n\nCrossrepoprivateneedle\n' > "$r/.codex/worktrees/other/docs/private.md"
+  printf '# Memory\n\nGlobalmemoryprivateneedle\n' > "$HOME/.codex/memories/private.md"
+  recall "$r" search --json Codexhandoffneedle
+  assert_eq "Codex handoff is searchable" "$RC" 0
+  assert_contains "Codex handoff has handoffs kind" "$OUT" '"kind": "handoffs"'
+  assert_contains "Codex handoff keeps repo path" "$OUT" '.codex/handoffs/latest.md'
+  recall "$r" search --json Codexfindingneedle
+  assert_eq "nested Codex finding is searchable" "$RC" 0
+  assert_contains "Codex finding has findings kind" "$OUT" '"kind": "findings"'
+  RECALL_EXTRA_GLOBS=".codex/**/*.md" recall "$r" search Crossrepoprivateneedle
+  assert_eq "Codex nested worktree stays excluded from extra globs" "$RC" 1
+  RECALL_CONFIG_DIR="$HOME/.codex" recall "$r" search Globalmemoryprivateneedle
+  assert_eq "Codex global memory stays outside the index" "$RC" 1
+}
+test_recall_storage_override_preserves_memory_routing() {
+  setup_env; local r mem; r=$(mk_repo "$HOME/Git/work/r")
+  mem=$(mem_dir "$HOME/.claude-work" "$r"); mkdir -p "$mem"
+  printf '# Memory\n\nWorkaccountmemoryneedle\n' > "$mem/work.md"
+  RECALL_CONFIG_DIR="$SANDBOX/shared" recall "$r" search --json Workaccountmemoryneedle
+  assert_eq "shared storage retains work-account memory" "$RC" 0
+  assert_contains "work-account memory keeps its kind" "$OUT" '"kind": "memory"'
+  RECALL_CONFIG_DIR="$SANDBOX/shared" recall "$r" status
+  local index; index=$(printf '%s\n' "$OUT" | sed -n 's/^index: //p')
+  assert_contains "memory result index is stored in shared root" "$index" "$SANDBOX/shared/recall/"
+  assert_file "shared memory index exists" "$index"
+  assert_no_file "shared storage never writes work-account index" "$HOME/.claude-work/recall"
+  mem=$(mem_dir "$SANDBOX/explicit-account" "$r"); mkdir -p "$mem"
+  printf '# Memory\n\nExplicitaccountmemoryneedle\n' > "$mem/explicit.md"
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/explicit-account" recall "$r" search --json Explicitaccountmemoryneedle
+  assert_eq "shared storage retains explicit Claude memory routing" "$RC" 0
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/explicit-account" recall "$r" search Workaccountmemoryneedle
+  assert_eq "account switch drops previous account memory" "$RC" 1
+}
+test_cli_codex_artifacts_and_scope
+test_recall_storage_override_preserves_memory_routing
+
+test_shared_storage_isolates_account_caches() {
+  setup_env; local r mem account_index; r=$(mk_repo "$SANDBOX/unclassified-repo")
+  printf '# Public\n\nPublicreponeedle\n' > "$r/README.md"
+  mem=$(mem_dir "$SANDBOX/account-a" "$r"); mkdir -p "$mem"
+  printf '# Private\n\nAccountaprivateneedle\n' > "$mem/private.md"
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/account-a" recall "$r" search Accountaprivateneedle
+  assert_eq "first account memory is indexed" "$RC" 0
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/account-a" recall "$r" status
+  account_index=$(printf '%s\n' "$OUT" | sed -n 's/^index: //p')
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/account-b" recall "$r" search --no-refresh Accountaprivateneedle
+  assert_eq "new account cannot reuse a previous account cache" "$RC" 7
+  assert_not_contains "no-refresh never exposes previous account memory" "$OUT" Accountaprivateneedle
+  hold_lock "$account_index" 15
+  RECALL_BUSY_TIMEOUT_MS=100 RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/account-b" recall "$r" search Accountaprivateneedle
+  assert_eq "previous account lock does not block isolated account refresh" "$RC" 1
+  assert_not_contains "lock fallback never exposes previous account memory" "$OUT" Accountaprivateneedle
+  kill "$LOCK_PID" 2>/dev/null; wait "$LOCK_PID" 2>/dev/null || true
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/account-a" recall "$r" search --no-refresh Accountaprivateneedle
+  assert_eq "switching back retains the original account cache" "$RC" 0
+  ln -s "$SANDBOX/account-a" "$SANDBOX/account-alias"
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/account-alias" recall "$r" search --no-refresh Accountaprivateneedle
+  assert_eq "equivalent account paths share the same cache" "$RC" 0
+}
+test_shared_storage_isolates_account_caches
+
+test_personal_owner_overrides_inherited_work_account() {
+  setup_env; local r mem wt target; r=$(mk_repo "$HOME/Git/personal/r")
+  printf '# Personal plan\n\nPersonalplanneedle\n' > "$r/README.md"
+  mem=$(mem_dir "$HOME/.claude" "$r"); mkdir -p "$mem"
+  printf '# Personal memory\n\nPersonalmemoryneedle\n' > "$mem/personal.md"
+  mem=$(mem_dir "$HOME/.claude-work" "$r"); mkdir -p "$mem"
+  printf '# Work memory\n\nWorkaccountprivateneedle\n' > "$mem/work.md"
+  wt="$HOME/Git/work/external-personal-worktree"
+  ( cd "$r" && git add README.md && git commit -qm init && git worktree add -q "$wt" -b personal-wt )
+  wt=$(/usr/bin/env realpath "$wt")
+  for target in "$r" "$wt"; do
+    CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$target" search --json Personalmemoryneedle
+    assert_eq "personal owner uses personal memory: $target" "$RC" 0
+    CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$target" search Workaccountprivateneedle
+    assert_eq "personal owner never discovers inherited work memory: $target" "$RC" 1
+    assert_file "personal index remains under personal account: $target" "$(db_path "$HOME/.claude" "$target")"
+    assert_no_file "personal artifacts never create work recall storage: $target" "$HOME/.claude-work/recall"
+    CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$target" status --all
+    assert_contains "status all follows personal canonical owner: $target" "$OUT" "config dir: $HOME/.claude"$'\n'
+    RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$target" search Personalmemoryneedle
+    assert_eq "neutral storage override preserves personal memory owner: $target" "$RC" 0
+    RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_CONFIG_DIR="$SANDBOX/another-account" recall "$target" search --no-refresh Personalmemoryneedle
+    assert_eq "personal identity stays fixed across inherited account changes: $target" "$RC" 0
+  done
+}
+test_personal_owner_overrides_inherited_work_account
+
+test_personal_only_machine_overrides_work_account() {
+  setup_env; local r mem; r=$(mk_repo "$HOME/Git/work/r")
+  printf '# Plan\n\nPlancontentneedle\n' > "$r/README.md"
+  mem=$(mem_dir "$HOME/.claude" "$r"); mkdir -p "$mem"
+  printf '# Personal\n\nPersonalonlymemoryneedle\n' > "$mem/personal.md"
+  mem=$(mem_dir "$HOME/.claude-work" "$r"); mkdir -p "$mem"
+  printf '# Work\n\nWorkonlymemoryneedle\n' > "$mem/work.md"
+  CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Personalonlymemoryneedle
+  assert_eq "personal-only machine uses personal memory from work repo" "$RC" 0
+  assert_file "personal-only machine stores work-repo index under personal account" "$(db_path "$HOME/.claude" "$r")"
+  assert_no_file "personal-only machine never creates work index" "$HOME/.claude-work/recall"
+  CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Workonlymemoryneedle
+  assert_eq "personal-only machine never discovers inherited work memory" "$RC" 1
+  RECALL_CONFIG_DIR="$SANDBOX/shared" CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Personalonlymemoryneedle
+  assert_eq "personal-only machine preserves neutral storage override" "$RC" 0
+  assert_file "personal-only machine uses explicit shared storage" "$SANDBOX/shared/recall"
+  CLAUDE_PERSONAL_ONLY=0 CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Workonlymemoryneedle
+  assert_eq "flag-off machine retains work account routing" "$RC" 0
+}
+test_personal_only_machine_overrides_work_account
+
+test_personal_ownership_ignores_inherited_git_context() {
+  setup_env; local r w injected; r=$(mk_repo "$HOME/Git/personal/r")
+  w=$(mk_repo "$HOME/Git/work/other")
+  printf '# Personal\n\nPersonalboundaryneedle\n' > "$r/README.md"
+  printf '# Work\n\nWorkboundaryneedle\n' > "$w/README.md"
+  for injected in common-dir git-dir work-tree; do
+    case "$injected" in
+      common-dir) GIT_COMMON_DIR="$w/.git" CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Personalboundaryneedle ;;
+      git-dir) GIT_DIR="$w/.git" CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Personalboundaryneedle ;;
+      work-tree) GIT_WORK_TREE="$w" CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Personalboundaryneedle ;;
+    esac
+    assert_eq "personal source is selected despite inherited $injected" "$RC" 0
+    assert_file "personal index remains personal despite inherited $injected" "$(db_path "$HOME/.claude" "$r")"
+    assert_no_file "inherited $injected never writes personal content into work index" "$HOME/.claude-work/recall"
+  done
+}
+test_personal_ownership_ignores_inherited_git_context
+
+test_personal_checkout_owns_separate_git_metadata() {
+  setup_env; local r metadata layout mem
+  for layout in work-metadata work-dotgit external-metadata; do
+    r="$HOME/Git/personal/$layout"
+    case "$layout" in
+      work-metadata) metadata="$HOME/Git/work/personal-metadata" ;;
+      work-dotgit) metadata="$HOME/Git/work/storage/.git" ;;
+      external-metadata) metadata="$SANDBOX/git-storage/personal.git" ;;
+    esac
+    mkdir -p "$r" "$(dirname "$metadata")"
+    git init -q --separate-git-dir "$metadata" "$r"
+    r=$(/usr/bin/env realpath "$r")
+    printf '# Personal plan\n\nSeparatecheckoutneedle\n' > "$r/README.md"
+    mem=$(mem_dir "$HOME/.claude" "$r"); mkdir -p "$mem"
+    printf '# Personal memory\n\nSeparatememoryneedle\n' > "$mem/personal.md"
+    CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" search Separatememoryneedle
+    assert_eq "separate $layout keeps actual personal checkout memory" "$RC" 0
+    assert_file "separate $layout stores index under personal account" "$(db_path "$HOME/.claude" "$r")"
+    assert_no_file "separate $layout never indexes personal content under work" "$HOME/.claude-work/recall"
+    CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$r" status --all
+    assert_contains "separate $layout status follows checkout owner" "$OUT" "config dir: $HOME/.claude"$'\n'
+  done
+}
+test_personal_checkout_owns_separate_git_metadata
+
+test_personal_checkout_path_protects_work_owned_worktree() {
+  setup_env; local r wt mem; r=$(mk_repo "$HOME/Git/work/r")
+  printf '# Plan\n\nCheckoutplanneedle\n' > "$r/README.md"
+  mem=$(mem_dir "$HOME/.claude" "$r"); mkdir -p "$mem"
+  printf '# Personal\n\nPersonalcheckoutmemoryneedle\n' > "$mem/personal.md"
+  mem=$(mem_dir "$HOME/.claude-work" "$r"); mkdir -p "$mem"
+  printf '# Work\n\nWorkcheckoutmemoryneedle\n' > "$mem/work.md"
+  wt="$HOME/Git/personal/work-owned-worktree"
+  ( cd "$r" && git add README.md && git commit -qm init && git worktree add -q "$wt" -b personal-checkout )
+  wt=$(/usr/bin/env realpath "$wt")
+  CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$wt" search Personalcheckoutmemoryneedle
+  assert_eq "personal checkout path overrides work canonical owner" "$RC" 0
+  assert_file "personal checkout path keeps personal cache" "$(db_path "$HOME/.claude" "$wt")"
+  assert_no_file "personal checkout path never creates work cache" "$HOME/.claude-work/recall"
+  CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$wt" search Workcheckoutmemoryneedle
+  assert_eq "personal checkout path excludes work memory" "$RC" 1
+  CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$wt" status --all
+  assert_contains "personal checkout status overrides work owner" "$OUT" "config dir: $HOME/.claude"$'\n'
+}
+test_personal_checkout_path_protects_work_owned_worktree
+
+test_external_linked_separate_metadata_fails_closed() {
+  setup_env; local primary metadata linked mem
+  primary="$HOME/Git/personal/separate-primary"
+  metadata="$SANDBOX/metadata/separate-primary.git"
+  linked="$SANDBOX/external-separate-linked"
+  mkdir -p "$primary" "$(dirname "$metadata")"
+  git init -q --separate-git-dir "$metadata" "$primary"
+  ( cd "$primary" && git config user.email t@t && git config user.name t && git commit -q --allow-empty -m fixture )
+  ( cd "$primary" && git worktree add -q --detach "$linked" )
+  linked=$(/usr/bin/env realpath "$linked")
+  printf '# Linked\n\nExplicitpersonalneedle\n' > "$linked/README.md"
+  mem=$(mem_dir "$HOME/.claude" "$linked"); mkdir -p "$mem"
+  printf '# Personal\n\nExplicitpersonalmemoryneedle\n' > "$mem/personal.md"
+  CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$linked" search Explicitpersonalneedle
+  assert_eq "external linked separate metadata refuses inherited work route" "$RC" 6
+  assert_no_file "ambiguous route never creates work recall cache" "$HOME/.claude-work/recall"
+  CLAUDE_CONFIG_DIR="$SANDBOX/custom" recall "$linked" search Explicitpersonalneedle
+  assert_eq "external linked separate metadata refuses inherited custom route" "$RC" 6
+  assert_no_file "ambiguous route never creates custom recall cache" "$SANDBOX/custom/recall"
+  CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR="$HOME/.claude-work" recall "$linked" search Explicitpersonalmemoryneedle
+  assert_eq "explicit personal route searches linked checkout safely" "$RC" 0
+  assert_no_file "explicit personal route never creates work recall cache" "$HOME/.claude-work/recall"
+}
+test_external_linked_separate_metadata_fails_closed
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

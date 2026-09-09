@@ -1,83 +1,73 @@
 ---
 name: codex-plan-review
-description: Use after finalizing an implementation plan (e.g. just after superpowers:writing-plans, before executing-plans) to get an independent Codex (different-model) review of the plan file before any code is written. Reviews docs/plans/*.md, surfaces gaps/ordering/missing-tests/risks, and folds approved fixes back into the plan.
+description: Obtain a bounded independent Codex review of one explicit frozen implementation plan.
 ---
 
 # Codex Plan Review
 
-Get a **second-model** review of a finalized implementation plan. The Superpowers
-`writing-plans` flow already ran a Claude review pass, so this adds the only thing
-missing: an independent reviewer (Codex / a non-Claude model) that catches what
-Claude's own blind spots miss. This runs on the plan _document_, before any code.
+Set `REVIEW_SKILL_FILE` to this skill's absolute `SKILL.md` path supplied by
+the skill loader. Resolve installed symlinks before using a helper. If the
+loader supplies no path, the existing `DOTFILEDIR` is the fallback; never guess
+from the target checkout or another account's skill directory.
 
-## When to use
+```bash
+REVIEW_ROOT=$(uv run --no-project python - "${REVIEW_SKILL_FILE:-}" "${DOTFILEDIR:-}" <<'PYROOT'
+from pathlib import Path
+import sys
 
-- Right after a plan is written (after `superpowers:writing-plans`), before
-  `superpowers:executing-plans`.
-- Whenever the user asks to "have Codex review the plan" or "second-opinion the plan".
+source, fallback = sys.argv[1:]
+if source and (not Path(source).is_absolute() or Path(source).name != "SKILL.md"):
+    raise SystemExit("Use the absolute SKILL.md path supplied by the skill loader")
+root = Path(source).resolve(strict=True).parents[3] if source else (
+    Path(fallback).expanduser().resolve(strict=True) if fallback else None
+)
+required = ("claude/skills/co-review/scripts/review.py", "claude/hooks/agent_runtime.py")
+if root is None or not all((root / name).is_file() for name in required):
+    raise SystemExit("Installed review helpers are unavailable")
+print(root)
+PYROOT
+) || exit 2
+REVIEW_HELPER="$REVIEW_ROOT/claude/skills/co-review/scripts/review.py"
+RUNNER="$REVIEW_ROOT/claude/hooks/agent_runtime.py"
+```
 
-Skip if there is no plan file, or the user explicitly declined an external review.
+Use after a plan is complete and before implementation. Require an explicit
+plan path under `docs/superpowers/plans/`; never select a newest file.
 
-## Steps
+Freeze it before dispatch:
 
-1. **Resolve the plan file.**
-   - If the user passed a path, use it.
-   - Else pick the newest `*.md` from the first directory that exists, in order:
-     `docs/plans/`, `docs/superpowers/specs/`, `~/.claude/plans/`.
-   - Confirm the resolved path with the user in one line before spending tokens.
+```bash
+uv run --no-project python "$REVIEW_HELPER" artifact \
+  --repo "$REPO" --kind plan --path "$PLAN_PATH" --task-id "$TASK_ID" \
+  --runtime claude --output-dir "$OUTPUT_DIR"
+```
 
-2. **Gather optional sibling context** (only what exists — all path-optional, so
-   this stays project-agnostic):
-   - The repo `docs/PLAN.md` (the living plan, if present).
-   - Any spec the plan links to under `docs/` (`reference/`, `design/`, `specs/`).
-   - The root `CLAUDE.md` for project conventions.
+Set `FROZEN_PLAN` and `FROZEN_PLAN_SHA256` from the returned path and
+SHA-256 fields after validating them. Apply any deliberate `--personal`
+override to both artifact freezing and partner launch.
 
-3. **Run Codex non-interactively** from inside the repo (it must be a git/trusted
-   dir; `approval: never`, `sandbox: workspace-write` are already configured):
+Validate the returned absolute path and SHA-256, then give Codex only that
+frozen file and bounded optional repository context. Request severity, location,
+failure scenario, concrete fix, and one verdict. Empty output, an execution
+error, or a response without the required verdict is incomplete, never approval.
 
-   ```bash
-   codex exec "$(cat <<'PROMPT'
-   You are an expert staff engineer reviewing an IMPLEMENTATION PLAN before any
-   code is written. Be terse and specific. Do NOT rewrite the plan; list issues.
+Resolve the independent Codex reviewer model and effort with
+the shared runtime runner:
 
-   For each issue return: SEVERITY (critical|high|medium|low), the plan
-   section/line, the problem, and a concrete fix. Review for:
-   - Gaps: steps that are missing, hand-waved, or assume work not in the plan.
-   - Ordering / dependencies: steps that depend on later steps; unsafe sequencing.
-   - Test coverage: missing tests, untestable steps, steps not written test-first.
-   - Bite-size: steps too large to implement+verify in one pass.
-   - Unstated assumptions and risks (data loss, migrations, irreversible ops).
-   - Drift: contradictions with the project's PLAN.md / CLAUDE.md conventions.
-   End with a one-line VERDICT: ship-as-is | minor-fixes | needs-rework.
+```bash
+PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-plan-review.XXXXXX")
+printf '%s\n' "Review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Return severity, location, failure scenario, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+uv run --no-project python "$RUNNER" run \
+  --runtime codex --role reviewer --risk normal --provisional \
+  --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$PROMPT_FILE"
+```
 
-   === PLAN FILE: <path> ===
-   <plan contents>
+Use `--risk critical` only for explicit critical risk. A Codex-led skill uses
+its current session or a native child and never invokes another Codex CLI review
+recursively. Record requested route separately from unknown observed metadata.
 
-   === CONTEXT (optional, may be absent) ===
-   <PLAN.md / spec / CLAUDE.md excerpts>
-   PROMPT
-   )" -c model_reasoning_effort="high" </dev/null 2>&1
-   ```
-
-   - Effort stays at `high`, not `xhigh`: xhigh reviewers generate precision
-     demands indefinitely and never issue an approving verdict (see
-     codex-spec-review's note; learned on a work ticket). Expect 1-2 rounds max,
-     then triage and proceed on judgment -- do not loop for approval.
-   - Pass file contents inline in the prompt (Codex can also read the repo, but
-     inlining is deterministic).
-   - Redirect `</dev/null` so Codex does not block reading stdin.
-   - The useful output is the final `codex` message block (after the run header,
-     before `tokens used`). Ignore any MCP/network warning lines.
-
-4. **Present findings** as one deduped, severity-sorted list. Each item: severity,
-   plan location, problem, proposed fix.
-
-5. **Resolve (triage-first).** Ask which to apply; default is "all". Fold approved
-   fixes into the plan file with Edit. Re-state the Codex VERDICT so the user knows
-   whether to proceed to execution.
-
-## Notes
-
-- This is Codex-only by design. For reviewing _code changes_ with Claude **and**
-  Codex in parallel, use the `co-review` skill instead.
-- Keep it cheap: one `codex exec` call. Do not loop unless the user asks.
+Verify findings against the frozen plan, merge duplicates, and retain uncertain
+findings as unresolved. Apply fixes within existing user authorization;
+otherwise ask before editing the live document. Keep one review and at most one
+skeptic verification round; do not seek recursive review approval.

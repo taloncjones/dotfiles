@@ -105,10 +105,51 @@ for key in PLUGIN_KEYS:
     if merged:
         result[key] = merged
 
+# Keep account-local environment additions instead of dropping them whenever a
+# tracked template changes. Retain existing opt-outs and append every template
+# exclusion, including account-isolation additions introduced by later updates.
+# Manual Canvas state is stored beside the selected settings.json.
+env = {}
+existing_env = dest.get("env", {})
+if isinstance(existing_env, dict):
+    env.update(existing_env)
+env.update(tmpl.get("env", {}))
+required_hooks = [
+    "session-start:plan-canvas-sessions",
+    "stop:plan-canvas-pending",
+]
+template_hooks = tmpl.get("env", {}).get("ECC_DISABLED_HOOKS", "")
+if isinstance(template_hooks, str):
+    required_hooks.extend(token.strip() for token in template_hooks.split(",") if token.strip())
+disabled_hooks = (
+    existing_env.get("ECC_DISABLED_HOOKS", env.get("ECC_DISABLED_HOOKS", ""))
+    if isinstance(existing_env, dict)
+    else env.get("ECC_DISABLED_HOOKS", "")
+)
+if isinstance(disabled_hooks, str):
+    hook_tokens = [token.strip() for token in disabled_hooks.split(",") if token.strip()]
+else:
+    hook_tokens = []
+for hook_id in required_hooks:
+    if hook_id not in hook_tokens:
+        hook_tokens.append(hook_id)
+env["ECC_DISABLED_HOOKS"] = ",".join(hook_tokens)
+env["ECC_PLAN_CANVAS_STATE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plan-canvas")
+result["env"] = env
+
 # Preserve any platform/installer keys the template does not define.
 for key, value in dest.items():
     if key not in result:
         result[key] = value
+
+# Personal sessions do not use Jira/Confluence. Scope this policy to the
+# personal account; work and custom config directories keep their own choice.
+personal_settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+if os.path.abspath(dest_path) == os.path.abspath(personal_settings):
+    result["enabledPlugins"] = {
+        **result.get("enabledPlugins", {}),
+        "atlassian@claude-plugins-official": False,
+    }
 
 # Per-config-dir values: the template is shared by ~/.claude and
 # ~/.claude-work, and Claude Code does not expand variables inside env

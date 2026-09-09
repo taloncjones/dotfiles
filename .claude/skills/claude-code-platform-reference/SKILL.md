@@ -51,13 +51,23 @@ runs TWO config dirs off one asset source:
 | `~/.claude`      | personal (default; desktop app, unwrapped launches) | nothing -- the fallback                                  |
 | `~/.claude-work` | work                                                | `claude()` zsh wrapper when `$PWD` is under `~/Git/work` |
 
-Resolution logic lives in `_claude_config_dir` in `zsh/claude-account.zsh`
-(near line 32): a pre-set `CLAUDE_CONFIG_DIR` always wins; `claude --personal`
-forces `~/.claude` from a work dir; `claude-account` prints which dir a launch
-from the cwd would use. Launch paths that bypass the wrapper (desktop app, IDE
-extensions, `command claude`) land on the default -- `account_guard.py`
-(SessionStart hook) warns when account and directory disagree
-(claude/hooks/account_guard.py).
+Resolution logic lives in `zsh/claude-account.zsh`: `CLAUDE_PERSONAL_ONLY=1`,
+`claude --personal`, a personal checkout, or canonical personal ownership take
+precedence over inherited work settings. Work repositories allow an explicit
+personal override; otherwise they default to the work configuration.
+`claude-account` prints the selected configuration.
+
+For the default personal account, launch with `CLAUDE_CONFIG_DIR` unset,
+never empty. Claude Code 2.1.261 on macOS resolves the existing default login
+differently when `~/.claude` is supplied explicitly (verified with read-only
+`claude auth status`); work/custom namespaces still use explicit absolute
+paths. Preserve that distinction when dispatching headless reviewers.
+
+Launch paths that bypass the wrapper (desktop app, IDE extensions,
+`command claude`) use their own inherited configuration. `account_guard.py`
+warns about work credentials in personal scope; personal credentials in a
+work repository are allowed. A SessionStart warning is detection, not a
+pre-launch credential firewall.
 
 Both dirs are populated by `link_claude_config_dir` in
 `install/common/claude-links.sh` -- symlinks into the repo for everything
@@ -188,6 +198,7 @@ is warn-only: it only ever exits 0 with a warning payload.
 | PostToolUse  | `Edit\|Write`             | emoji_guard.py, no_ai_comments.py, format_files.py (prettier)              |
 | PostToolUse  | `mcp__plugin_atlassian`   | cache_jira_url.py                                                          |
 | SessionStart | `startup\|clear\|compact` | account_guard.py                                                           |
+| PermissionRequest | `Bash` | scratch_policy.py (scratch-only allow or no decision; Claude only) |
 
 2. PROJECT layer -- `.claude/settings.json`:
 

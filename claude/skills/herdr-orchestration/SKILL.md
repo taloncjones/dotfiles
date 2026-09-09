@@ -1,6 +1,6 @@
 ---
 name: herdr-orchestration
-description: Use to run a standing per-repo orchestrator over Herdr that turns a designated Jira ticket or repo todo into a briefed worker session in a worktree workspace, tracks it through a hook-fed event log, and dispatches an independent reviewer before handing back for merge. Trigger when the user says "kick off <TASK>", "what's queued", "status", or asks the orchestrator to supervise delegated work. Requires HERDR_ENV=1.
+description: Use to run a standing per-repo orchestrator over Herdr that turns a designated Jira ticket or repo todo into a briefed worker session in a worktree workspace, tracks it through a hook-fed event log, and dispatches an independent reviewer before handing back for merge. Trigger when the user says "kick off <TASK>", "what's queued", "status", or asks the orchestrator to supervise delegated work. Works with Claude or Codex; requires HERDR_ENV=1.
 ---
 
 # herdr-orchestration
@@ -14,16 +14,19 @@ back to the human for merge. One standing orchestrator per repo.
 This skill is a **thin caller**. All state mutation goes through the tested
 core CLI; the skill never hand-writes state JSON.
 
-```
-# zsh does NOT word-split an unquoted variable, so a bare `python3 "$CORE" claim-owner`
-# runs a command literally named "python3 .../herdr_orch_core.py" and fails.
-# Store only the PATH and always call it as: python3 "$CORE" <subcommand> ...
-CORE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"
-# The account every worker inherits: this orchestrator's own config dir.
-# Validated once here (absolute, launch-line-safe); a nonzero exit is a
-# hard stop for every dispatch -- a worker is never silently mis-routed.
-CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-printf '%s' "$CFG" | grep -qE '^/[A-Za-z0-9_./+:@-]+$' || { echo "[X] unsafe CLAUDE_CONFIG_DIR for worker launches: $CFG"; false; }
+For a Claude entrypoint, resolve the installed source first. A Codex entrypoint
+uses the setup block in its native adapter instead.
+
+```bash
+# Store the core PATH, not a command string. Use explicit arguments in any shell.
+# Do not resolve helpers relative to the user's current project.
+SKILL_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/herdr-orchestration/SKILL.md"
+SKILL_DIR="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True).parent)' "$SKILL_FILE")" || exit 2
+CORE="$(cd "$SKILL_DIR/../../hooks" && pwd)/herdr_orch_core.py"
+RUNTIME="$(dirname "$CORE")/agent_runtime.py"
+DISPATCH="$(dirname "$CORE")/herdr_dispatch.py"
+TODOS="$SKILL_DIR/../todos/scripts/todos.sh"
+ORCH_RUNTIME=claude
 ```
 
 Every `$CORE` subcommand that mutates state (`write-task`, `write-index`)
@@ -34,6 +37,29 @@ aborts if the fence is stale. `emit-done`/`emit-review` are called by
 Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
 `references/event-schema.md`. Kickoff brief template: `references/brief-template.md`.
 
+## Runtime boundary
+
+The task identity, private plan milestone, verification contract, completion,
+review, and merge gates below are shared. Resolve repository/account context
+with `claude/skills/lib/workflow_context.py` from this skill's canonical source.
+Never infer the primary repository from the parent of a Git metadata directory.
+Keep the existing repo slug; the shared registry binds it to canonical Git
+identity and serializes owners across runtimes and account payload roots.
+
+For Codex, also read the native adapter at
+`codex/skills/herdr-orchestration/SKILL.md` in the same dotfiles checkout.
+Claude socket, Monitor, SendMessage, and Workflow instructions apply only when
+those native Claude capabilities exist. They are not Codex APIs.
+
+Personal Claude subprocesses unset `CLAUDE_CONFIG_DIR`; work repositories may
+use explicit personal quota. Codex preserves actual `CODEX_HOME`. Resolve the
+selected scope before dispatch and bind it to the worker process, including
+when reusing a pane. The Herdr client's environment alone does not change the
+pane's environment. Never retry through another account after an auth error.
+The dispatcher's account binding implements the same parent-account intent
+for both runtimes; an explicit default personal directory is not a substitute
+for the provider's `launch_env` mapping.
+
 ## 1. Preflight (every orchestrator action)
 
 1. Assert `HERDR_ENV=1` is set in the environment; if not, stop -- this skill
@@ -42,7 +68,7 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
    references/state-layout.md for the normalization rule); ensure
    `STATE_ROOT/<repo_slug>/` exists.
 3. Claim/refresh ownership:
-   - `python3 "$CORE" claim-owner --repo-slug <slug> --session <id> --host <host> --pid <pid> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
+   - `python3 "$CORE" claim-owner --repo-path <repo_root> --runtime <claude|codex> --repo-slug <slug> --session <id> --host <host> --pid <pid> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
      -> prints a `fence` token on success, or `BUSY` (exit 1) if another
      session holds a live claim. On `BUSY`, yield to read-only status/triage
      and offer the user an explicit takeover; do not mutate state.
@@ -76,12 +102,24 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
      hook wake held behind a dialog and dropped after `dialogExpiry`, and a
      `-p` orchestrator drops them after 5 minutes. Not added to
      `settings.json.tmpl` (it would apply to every session of the account).
-   - Regenerate the board with `bash ~/.claude/skills/todos/scripts/todos.sh dashboard` (add `--open` on the initial claim only); best-effort, a non-zero exit is noted in the turn summary and never blocks the action.
+   - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above, or the Codex adapter setup, supplies `$TODOS`; never borrow another runtime's personal installation path.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
-5. **Strong-model availability (startup discovery, after config validation).**
-   Model selection for every worker launch is deterministic (`resolve-model`,
+5. **Selected-runtime readiness (owner only, after config validation).**
+   New native Claude and Codex dispatches use the selected runtime's resolver:
+   `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|read_only|mechanical|think> --risk <normal|critical>`.
+   Inspect the returned readiness and capability evidence before dispatch;
+   retain unknown availability as unknown and block an unready route. Use
+   explicit policy/capability inputs when needed, as described under Model
+   launch in section 8. Neither native adapter requires the opposite CLI or
+   the legacy Fable probe below. A `BUSY` non-owner performs no discovery,
+   probe, or capability write.
+
+   **Legacy Claude wrapper availability only (`run-mech` / `run-think`).**
+   The remainder of this step applies only when launching those legacy Claude
+   wrappers. Skip it entirely for native Claude or Codex adapter dispatches.
+   Model selection for each legacy wrapper launch is deterministic (`resolve-model`,
    section 8), driven by a session-stamped `capabilities.json`. Refresh it only
    when stale: if `resolve-model` exits 3 (map absent, or its `session_id` !=
    this session -- i.e. a restart or `/clear`) for a role this turn, re-probe
@@ -100,13 +138,15 @@ Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
      `python3 "$CORE" write-capabilities --repo-slug <slug> --session <id> --fence <fence> --json '{"v":1,"session_id":"<id>","available":{"fable":<true|false>,"opus":true,"sonnet":true,"haiku":true}}'`
    - `indeterminate` (no `claude`, network error, transient 429 rate limit,
      other status, unparseable) ->
-     write NO map; ABORT launches this turn and surface it -- never assume.
+     write NO map; ABORT the affected legacy Claude wrapper launches this
+     turn and surface it -- never assume. Native dispatch readiness is
+     evaluated independently by its selected-runtime resolver.
      A non-owner (claim returned `BUSY`) never probes or writes -- it is
      read-only. The map is machine-local (`references/state-layout.md`), never
      committed.
-   - This map is the input, not the launch itself: every worker launch
+   - This map is the input, not the launch itself: each legacy wrapper launch
      resolves its model AND effort through one `routing-table --repo-slug`
-     snapshot (section 8, Model launch) built from this map plus
+     snapshot (section 8, Legacy Claude wrapper routing) built from this map plus
      `config.json`'s `effort` block -- never a separate `resolve-model` call
      per role at dispatch time.
 
@@ -159,21 +199,22 @@ Kickoff dispatches a worker whose **phase and model depend on plan-maturity**,
 so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
 
 - **Plan-ready item** -- a refined Jira ticket, or a task that already has a
-  committed `docs/specs/` spec and `docs/plans/` plan: dispatch an `implement`
+  reviewed, frozen private spec and plan with recorded hashes: dispatch an `implement`
   worker directly (only after the contract pinning steps at the end of this
   section; a plan-ready item without a committed contract is treated as raw),
-  on the model `resolve-model --role impl` returns (default
-  `sonnet -> opus`; section 8).
+  using `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
+  and the native adapter (section 8). An unready route blocks this dispatch.
 - **Raw item** -- a bare todo/handoff with no spec/plan: dispatch a `plan`
-  worker on the model `resolve-model --role plan` returns (the **strong**
-  planning model, default `fable -> opus`; section 8) first. It runs the
-  repo's brainstorm -> spec -> codex-spec-review -> plan -> codex-plan-review
-  pipeline, commits the spec + plan, and emits completion as phase `plan`. On
+  worker using `python3 "$RUNTIME" route --runtime <claude|codex> --role planner --risk normal`
+  and the native adapter first. It runs the repo's brainstorm -> spec ->
+  independent spec review -> plan -> independent plan review pipeline;
+  Claude uses the Codex review skills and Codex uses the Claude review skills.
+  It freezes private spec/plan artifacts and emits completion as phase `plan`. On
   confirmed plan completion the orchestrator advances the same task/branch to
-  its `implement` phase (impl-role model, section 2a).
+  its `implement` phase (native implementation route, section 2a).
 
-Maturity check: a Jira ticket in a refined/ready state, or an existing committed
-spec+plan for the task, is plan-ready; anything else is raw. When unsure, treat
+Maturity check: a Jira ticket in a refined/ready state, or verified private
+spec+plan artifacts for the task, is plan-ready; anything else is raw. When unsure, treat
 it as raw -- an extra plan phase is cheap insurance against a cheap model making
 design decisions.
 
@@ -182,9 +223,13 @@ mech [max-turns <int>] [budget <number>]`, or todo frontmatter `tier: mech`
   with optional `mech_max_turns` / `mech_max_budget_usd`; instruction values
   override frontmatter field by field; any other form is not a mech kickoff).
   Never raw: it skips the plan phase and dispatches `phase: implement`,
-  `role: mech` on the model `resolve-model --role mech` returns (default
-  `haiku -> sonnet`), headless and capped (section 8, Mech launch). Caps come
-  from `python3 "$CORE" mech-caps --repo-slug <slug> [--max-turns N]
+  `role: mech`. Native Claude/Codex dispatches resolve
+  `python3 "$RUNTIME" route --runtime <claude|codex> --role mechanical --risk normal`
+  and use the bounded runtime runner with supported limits; an unready route
+  or unsupported limit blocks launch. Codex does not accept Claude turn/USD
+  caps. Only an explicitly selected legacy Claude `run-mech` launch uses
+  the legacy `routing-table` mech entry and caps from
+  `python3 "$CORE" mech-caps --repo-slug <slug> [--max-turns N]
 [--max-budget-usd X]` (exit 5 refuses the kickoff with its message; never
   clamp by hand). Contract source, in order: (1) committed at HEAD -> use it;
   (2) `config.mech.contract_commands` present, worktree clean, and the branch
@@ -239,10 +284,12 @@ phase-appropriate brief (references/brief-template.md) and model.
    (every herdr workspace) `git rev-parse --show-toplevel` on `<path-in-repo>`
    returns that worktree's own checkout path, not the shared root -- a
    `--show-toplevel` comparison false-flags every correctly anchored create.
-   Instead resolve `COMMON_DIR="$(git -C <path-in-repo> rev-parse
---git-common-dir)"` and confirm `.result...repo_root` matches the repo root
-   implied by `COMMON_DIR` (its parent when `COMMON_DIR` ends in `/.git`, else
-   `COMMON_DIR` itself) and `.result...repo_name` matches that root's basename.
+   Resolve `repository_context` for the selected original checkout and returned
+   worktree. Their canonical `repo_id`/`common_dir` must agree. Use a proven
+   `primary_root` when comparing Herdr's reported repository root. Git metadata
+   may live elsewhere, so never derive primary_root from the common-dir parent.
+   If the primary root is unknown, preserve that uncertainty and require the
+   selected account/worktree to be explicitly verified before launching.
    On a mismatch the create mis-anchored -- do NOT launch a worker.
    **Unwind, but only for a resource this orchestrator created**
    (`created_by_this_orch: true` from step 4 -- mirrors the failure-cleanup
@@ -254,43 +301,26 @@ phase-appropriate brief (references/brief-template.md) and model.
    untouched (no `worktree remove`, no `branch -D`) and just surface the
    mismatch. Either way, stop after surfacing the mismatch. Only a
    verified-correct anchor proceeds. Label the workspace `<task_id>`.
-6. **Launch the worker on its pinned model and effort** into the new
-   workspace's own pane -- see section 8, Model launch, whose single
-   `routing-table` snapshot (Design 1/2 of the effort-routing spec) supplies
-   both. Send the kickoff brief (template in references/brief-template.md),
-   filled with `task_id`, worktree path, branch, phase (`plan` for a raw
-   item, else `implement`), and the `## Routing` block rendered from that
-   same snapshot.
-7. **Publish state only after the worker is launched** -- so a failed launch
-   leaves no stale task/index to unwind (no rollback verb needed). Write
-   through the core CLI, not by hand:
-   - `python3 "$CORE" write-task --repo-slug <slug> --session <id> --fence <fence> --task-id <task_id> --json '<task record, status "in-progress">'` --
-     for an `implement` dispatch, include `contract_path`/`contract_sha256`
-     in this JSON from the pre-launch pin computed under "Contract pinning"
-     below (a `plan` kickoff has no contract yet and carries neither field).
-   - `python3 "$CORE" write-index --repo-slug <slug> --session <id> --fence <fence> --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "impl"}'`
-     The task record's `status` field is the authoritative kickoff record;
-     `events.jsonl` is hook-owned (worker lifecycle hints only, see
-     references/event-schema.md) -- the orchestrator does not write to it.
-     The new `workers[]` entry carries `peer_name`: the worker's session
-     name as `ListAgents` showed it (section 8 step 4, discovery), or
-     `null`. Discovery completes inside step 6 (it ends with the second
-     `ListAgents` call right after `agent prompt --until working`), so the
-     value is known before this first `write-task`; no later read-modify-
-     write is needed. For a `mech` dispatch the `workers[]` entry carries
-     `role: "mech"`, `launch_id`, `caps`, and `peer_name: null`. Every
-     `workers[]` entry gains `"effort": "<level>"|null`, the value passed on
-     the launch line (never the observed one); a legacy entry written before
-     this change lacks the key and reads as `effort: "unknown"`.
-8. **Jira writeback** (kind == `"jira"` only): transition the ticket to In
-   Progress -- see section 10.
-9. **Partial-failure/crash:** on any failure during steps 3-6, clean up only
-   resources this attempt created (`created_by_this_orch: true`); never
-   delete adopted/pre-existing resources. A launch that fails at step 6 has
-   published no task/index, so nothing needs unwinding there; a crash in the
-   narrow launch-to-publish gap leaves a running worker with no record, which
-   the next status/triage poll surfaces via live `herdr agent list` for
-   cleanup -- preferred over a stale record that would block re-kickoff.
+6. **Publish the task before launch under the owner fence.** Preserve the
+   pinned contract, branch, base, worktree, and account binding. New records
+   start with `workers: []` and `status: in-progress`; a failed launch remains
+   visibly retryable. Write the workspace index through `write-index`.
+   For a repo TODO, persist its exact filename stem as `todo_id`; do not infer
+   this field from a display label. Run the installed `todos.sh ready <id>
+   --offline` before dispatch. Exit 0 permits launch; blocked, missing, invalid,
+   or unknown dependencies keep the task queued. The adapter checks this
+   persisted binding again outside the owner lock. An old record without a
+   binding needs explicit source reconciliation before a new TODO kickoff.
+7. **Resolve and launch through the adapter** (section 8). The adapter reserves
+   a unique attempt under the owner transaction before contacting Herdr, then
+   rechecks the fence on return. The attempt binds `launch_id`, runtime, phase,
+   workspace, pane, source HEAD, requested model/effort, and account. A failed
+   launch is recorded as failed; never erase it to make the task look unstarted.
+8. **Jira writeback**, only for a Jira task with existing user authorization:
+   transition to In Progress (section 10). Personal todos do not use Atlassian.
+9. **Partial failure:** leave adopted resources untouched. Stop or clean only
+   resources proven to belong to this launch, after checking no worker remains
+   active. Never delete a task/worktree because a prompt wait timed out.
 
 **Contract pinning (implement dispatch, both paths).** Before launching any
 `implement` worker (plan-ready kickoff here, or phase advancement in section
@@ -302,49 +332,33 @@ HEAD:claude/contracts/<task_id>-contract.json`); then run
 --allow-unpinned --validate-only` -- it prints the sha256. A missing or
 invalid contract blocks the dispatch exactly like a missing plan.
 
-Where the pin gets _written_ differs by path, to preserve "publish only
-after launch" (step 7): on a **plan-ready kickoff**, no task record exists
-yet at this point, so there is nothing to `write-task` into -- carry
-`contract_path`/`contract_sha256` as fields on step 7's first `write-task`
-call (the initial `in-progress` record) instead of writing a separate
-pre-launch record just to hold the pin. On **phase advancement** (section
-2a), a task record already exists, so `write-task` it with the pin set
-before the implement launch, same as before. Either way the pin is written
-once; the orchestrator never re-pins on its own -- a later hash mismatch is
-an integrity halt surfaced to the human, and only an explicit human
-instruction (after a deliberate committed contract change) re-runs these
-pinning steps.
+Write the validated pin with the task before dispatch. Preserve it on every
+status update. A later hash mismatch is an integrity halt; never silently
+re-pin. A deliberate contract change requires the user's task authorization
+and a fresh reviewed pin.
 
 ## 2a. Phase advancement (plan -> implement) -- raw items only
 
 A `plan` worker's confirmed completion advances the SAME task to its implement
 phase; it never marks the task `completed` and never dispatches review.
 
-1. **Plan completion is not task completion.** When a `done.json` correlates
-   (via `confirm-completion`, section 4) AND its `phase` is `plan`, that is a
-   plan milestone. Never set status `completed` off a `phase: plan` record --
-   task completion and review dispatch (sections 4-5) fire ONLY on a
-   `phase: implement` record. The orchestrator knows which phase is live from
-   the task record's latest `workers[]` entry; the `done.json.phase` must match
-   it.
-2. **Verify the plan landed:** spec + plan committed on the branch (HEAD ahead
-   of `base_sha`), worktree clean, including `claude/contracts/<task_id>-contract.json`
-   -- then run the section-2 contract pinning steps now, before the implement
-   launch in step 3.
-3. **Advance in place.** Reuse the same worktree/branch (the committed spec+plan
-   live there). After the plan worker hands off (idle/exited), launch an
-   `implement` worker in that workspace's own pane on the model and effort a
-   fresh `routing-table` snapshot returns (section 8 launch; impl default
-   `sonnet -> opus`, effort `inherit` by default) with the implement brief
-   (including its `## Routing` block). Append a new `workers[]` entry
-   (`role: impl`, `phase: implement`, `model` = that resolved alias,
-   `effort` = that resolved level (or `null` for inherit),
-   `created_by_this_orch: true`) via `write-task`; status stays `in-progress`.
-   The plan worker's
-   `done.json` is later overwritten by the implement worker's -- expected; only
-   the implement record drives completion.
-4. A plan phase that emits `outcome: failed`/`paused` is handled exactly like an
-   implement-phase failure/pause (section 9) -- no implement worker is launched.
+1. Run `confirm-plan` with the selected account payload root, task, workspace,
+   and current HEAD. It validates the current plan attempt and exactly one
+   spec and one plan artifact (regular files, contained paths, SHA-256 hashes).
+   Use the `co-review` artifact helper to freeze reviewed documents under
+   `<account_payload>/artifacts/<task>/<launch>`. Record the same artifact
+   references in the task and plan completion. Never commit private plans.
+2. A plan-only milestone may have HEAD equal to base. If a public verification
+   contract was authored, commit only that contract and validate/pin it before
+   implementation. Final HEAD may differ from the launch's source HEAD; both
+   are recorded for different checks.
+3. Reuse the task's branch/workspace after the plan worker is idle or exited.
+   Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
+   again, require readiness, append a new strict attempt through
+   the adapter, update the display role, and give the worker the exact frozen
+   plan paths and hashes. Status remains `in-progress`.
+4. Failed/paused planning never launches implementation. `confirm-completion`
+   is the separate final implementation gate and rejects a plan milestone.
 
 ## 3. Triage (advisory only -- read-only)
 
@@ -365,7 +379,8 @@ Creates no task/worktree/agent/index/record.
 ("which should we do first and why", conflicting priorities), or the
 deterministic ranking above has no usable inputs (Jira unreachable AND more
 eligible todos than `config.soft_cap`). The orchestrator may launch one
-`run-think` escalation (kind `triage`) per turn; a second eligible trigger
+bounded think escalation (kind `triage`) per turn through the selected runtime
+path in section 8; `run-think` is the legacy Claude wrapper only. A second eligible trigger
 in the same turn is reported as "escalation deferred: already launched this
 turn". The answer is advisory data only -- it reorders or annotates the
 ranked list above; this section stays read-only, so nothing here ever
@@ -403,7 +418,9 @@ per-task status. Reconcile that against a live `herdr agent list` /
 | `unknown`                         | report unknown; do not advance status                                                                                                      |
 | absent (agent+worktree both gone) | `abandoned`, if never completed                                                                                                            |
 
-**Mech workers (`role: mech`) use the ledger, not the agent poll.** The live
+**Legacy Claude `run-mech` workers use the ledger, not the agent poll.** Native
+mechanical dispatches use their adapter attempt/result and the normal completion
+gate; they do not depend on this legacy spend ledger or fallback resolver. The live
 launch is the latest `workers[]` entry's `launch_id`; read
 `tasks/<task_id>.spend.jsonl`:
 
@@ -423,7 +440,7 @@ with next actions in order: relaunch as mech with raised caps, or resume on
 `impl`; `failed` -> `failed`. No mech transition depends on a Stop hint.
 The `abandoned` rule (workspace AND worktree gone) is unchanged.
 
-**Within-role fallback (right after `run-mech` returns).** An `end` line
+**Legacy within-role fallback (right after `run-mech` returns).** An `end` line
 with `model_attributable: true` (computed by the wrapper: `downgrade`, or
 `subtype: error_during_execution` whose `errors` text names the requested
 alias or "model") is model-attributable:
@@ -431,7 +448,7 @@ alias or "model") is model-attributable:
 mech`, relaunch once with a fresh `launch_id` (new `workers[]` entry; the
 old launch's ledger lines stay). Cap 2 attempts per dispatch, then surface.
 
-**Mech relaunch** is the "record exists + worker gone -> resume" path: allowed
+**Legacy mech relaunch** is the "record exists + worker gone -> resume" path: allowed
 only when the live launch has an `end` line (or is wrapper lost) and status
 is `in-progress`/`blocked`; mint a new `launch_id`, append a `workers[]`
 entry (caps via `mech-caps` from the new instruction/frontmatter), launch
@@ -472,9 +489,8 @@ Correlate these independent facts, all keyed to the same `task_id`/
 4. Live `herdr agent` state consistent with a finished worker.
 5. **Phase gate:** the correlated `done.json`'s `phase` is `implement` (the
    final phase). A `phase: plan` record is a plan milestone -- run section 2a
-   phase advancement, never `completed`/review. `confirm-completion` does not
-   itself check phase; the orchestrator gates on it here, matching the live
-   worker's `workers[]` phase.
+   phase advancement, never `completed`/review. `confirm-completion` also enforces the implementation phase. Use
+   `confirm-plan` for planning, matching the current attempt.
 6. **Contract gate:** the task worktree is clean (`git status --porcelain`
    empty), `python3 "$CORE" verify-contract --repo-slug <slug> --task-id
 <task_id> --worktree <path>` exits 0, and `git rev-parse HEAD` afterwards
@@ -516,14 +532,9 @@ would wrongly suppress the re-dispatch). This recovers every "branch advanced"
 case from whichever review state the task was in, so no review state is ever
 permanently stranded -- the next check-in corrects it.
 
-Because review runs in the task's own workspace (section 5), stopping the review
-agent leaves the workspace and its `role: review` index entry intact for the
-re-dispatch -- nothing is orphaned. Known limitation (single-user-unreachable):
-two review agents alive at once in one workspace would race the unfenced
-`tasks/<task_id>.review.json` write (last-writer-wins); stopping the prior agent
-on every reset, plus section 5's dispatch preflight, removes the only extra
-writer this loop creates, and the merge gate's provenance + three-SHA
-correlation (section 6) is the backstop.
+Review runs in the task workspace, but each revision gets a fresh agent and
+strict launch identity. Late emissions from superseded attempts are rejected
+under the owner transaction. Never infer a valid verdict from an idle pane.
 
 Report per-task status, workspace, latest note, and recommended next action.
 
@@ -548,9 +559,8 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
 already running in it (exit/kill the agent -- do **not** `herdr workspace close`,
 which would tear down the shared task worktree). There must be zero live review
-agents before you start one. Because `emit-review` is unfenced (last-writer-wins
-on `tasks/<task_id>.review.json`), a single live review agent is the invariant
-that keeps the recorded verdict trustworthy.
+agents before you start one. Strict attempt validation rejects late writes; stopping the old reviewer
+also avoids wasting work and preserves one live reviewer per task.
 
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture the
    HEAD SHA as the intended `review_head_sha`.
@@ -562,30 +572,21 @@ that keeps the recorded verdict trustworthy.
    it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
    repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
    applies to every `worktree create`/`open`, no exceptions.)
-3. Start a unique `rev-<...>` agent on the reviewer model and effort from a
-   fresh `routing-table` snapshot (section 8 launch; review default `high`)
-   in the task workspace, briefed with the same snapshot's `## Routing`
-   block. **Only after the agent successfully starts**, publish state under
-   the fence, both writes together:
-   `python3 "$CORE" write-index ... --workspace <ws_id> --json '{"task_id": "<task_id>", "repo_slug": "<slug>", "role": "review"}'`
-   (this overwrites the same workspace's `role: impl` entry -- expected; the impl
-   `done.json` completion was already confirmed, and the role now reflects the
-   live phase so the monitoring hook classes a review Stop as `review-stopped`)
-   and
-   `python3 "$CORE" write-task ... --json '<record with review_head_sha, status "review-dispatched">'`.
-   The task-record `status` transition is the authoritative dispatch record. On
-   start failure, nothing was published: leave the task at `completed`
-   (retryable).
+3. Reserve and launch a fresh review attempt through the adapter. Set the
+   workspace index to `role: review`; preserve implementation completion and
+   record `review_head_sha`. Set `review-dispatched` only when dispatch is
+   accepted. A failed attempt is visible and retryable. Refresh both agent
+   and workspace display metadata, including when reusing the implement pane.
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
 5. Prompt the review agent to run **`co-review` in report-only mode** against the
-   branch -- both finders (Claude `/code-review` + Codex `codex exec review`)
+   branch -- both finders (Claude and Codex native finders over the same frozen inputs)
    plus the adversarial-verify stage, but **no fix application**: report only, so
    the gate never edits the branch it reviews and cannot trigger a fix ->
    re-review loop. (`co-review` stays herdr-agnostic -- the herdr-specific
    `emit-review` call lives in this brief, not in the skill; if invoked outside a
    Herdr session the review agent just runs co-review and reports.) Then
-   `python3 "$CORE" emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>`
+   `python3 "$CORE" emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path> --launch-id <launch_id> --runtime <runtime> --pane-id <pane_id> --source-head-sha <launch_source_head>`
    (`<n>` = count of blocking findings; the merge gate rejects any non-zero
    count even under `approved`), then the review agent goes idle and hands
    back -- it does NOT run `/handoff`; `emit-review` is its only signal. Review
@@ -693,11 +694,15 @@ subagent.
 
 ## 8. Model routing
 
+**Legacy Claude wrapper routing (`run-mech` / `run-think` only).** Native
+Claude and Codex dispatches use Model launch below, not this alias table or
+its Fable capability probe.
+
 Each role has an ordered model preference, resolved against the models the
 current account actually offers, AND an effort level, both deterministically
 via `python3 "$CORE" routing-table --repo-slug <slug> --session <id>` (one
-JSON object keyed by role, one snapshot per dispatch -- see Model launch
-below; `resolve-model --role <role>` and `resolve-effort --role <role>`
+JSON object keyed by role, one snapshot per legacy wrapper dispatch;
+`resolve-model --role <role>` and `resolve-effort --role <role>`
 remain for single-role checks and tests). Canonical model/effort defaults
 live in the core; `config.json`'s `models` block may override any role's
 model list under the `plan`/`impl`/`review`/`mech`/`think` keys, and its
@@ -730,180 +735,58 @@ for every Fable role (safety classifiers can trip on benign work); never
 prompt Fable to transcribe its own reasoning (status/triage and design docs
 are work product / external state, which is safe).
 
-**Model launch** (validated live against herdr 0.8.2). Launch into the new
-workspace's OWN pane -- `worktree create`/`worktree open` returns it at
-`.result.root_pane.pane_id`, already in the new workspace with the worktree as
-its cwd (the result also carries `.result.workspace.workspace_id` and
-`.result.tab`). Do **not** `herdr pane split`: a split defaults to the CURRENT
-(orchestrator's) workspace, so the worker would inherit the wrong
-`HERDR_WORKSPACE_ID` and its hook events would never match the published index.
+**Model launch (shared native adapter).** For all new interactive workers,
+resolve model and effort together through `agent_runtime.py`. The older Claude
+`routing-table --repo-slug` remains for existing `run-mech`/`run-think` wrappers;
+do not pass its Claude-only aliases to Codex.
 
-Launch the worker -- always pinning its model and effort -- in that root
-pane:
+One snapshot per dispatch: use `route --runtime <claude|codex> --role
+<planner|implementation|reviewer|read_only|mechanical|think> --risk
+<normal|critical>` and optional explicit policy/capability files. Inspect the
+returned readiness, availability reason, model, and effort before launch.
+Catalog presence is not proof that the selected account can run a model.
+Unknown availability is reported; no silent downgrade of a critical route.
 
-1. `<pane_id>` = `.result.root_pane.pane_id` from the create/open result.
-2. **Resolve the role's model AND effort together, from one snapshot --
-   never pick either by judgment, never use `--fallback-model`:**
+Use `herdr_dispatch.py launch` with the existing shell pane/workspace,
+canonical repo path, task, session/fence, phase, unique agent name, resolved
+route JSON, sandbox, and prompt file. Read its `--help` for the exact current
+flags. The adapter owns argv quoting, environment binding, attempt reservation,
+readiness inspection, and presentation updates. It never creates a worktree
+or chooses a different account for the caller.
 
-   ```
-   ROUTING="$(python3 "$CORE" routing-table --repo-slug <slug> --session <id>)"   # once per dispatch
-   MODEL="$(printf '%s' "$ROUTING" | python3 -c 'import json,sys; print(json.load(sys.stdin)["<role>"]["model"] or "")')"
-   EFFORT="$(printf '%s' "$ROUTING" | python3 -c 'import json,sys; print(json.load(sys.stdin)["<role>"]["effort"] or "inherit")')"
-   ```
+- Implementation uses `workspace-write`; read/review uses `read-only`.
+- A read-only Codex reviewer may request normal automatic approval for the
+  exact lifecycle record and findings-output paths authorized by its brief.
+  `approvals_reviewer="auto_review"` does not change its sandbox. An approval
+  rejection means blocked; it is never proof of completed review. Do not use
+  `--approve-for-me` here because it changes the sandbox to workspace-write.
+- Requested model/effort is not observed model/effort. Record unknown when the
+  native metadata does not expose a value. In-session reviewers report their
+  actual current effort; the policy does not change an already running model.
+- Herdr startup/readiness and `agent prompt --wait` are transport evidence,
+  never completion. Only the core's milestone/contract/review gates advance.
+- Banner evidence must follow a unique current-launch boundary. The legacy
+  `classify-banner --model <alias> --effort <level|inherit> --text-file <path>`
+  requires `--after <marker>` or an independently fresh `--fresh-capture`.
+  A changed whole-screen hash alone does not make old scrollback fresh.
+- `effort-mismatch` is not availability data. Do not disable a model or evade
+  account caps because a requested effort was refused. Stop the owned worker,
+  report requested versus observed settings, and resolve an authorized route.
+- Route fallback never switches authentication. After an unavailable model,
+  choose only an explicitly configured same-account fallback and record it.
 
-   `<role>` is `plan`/`impl`/`review`/`mech`/`think`. **One snapshot per dispatch:**
-   every dispatch (kickoff, phase advance, review dispatch,
-   escalation) calls `routing-table` once and takes its model, its effort,
-   the `workers[]` fields, and the brief's `## Routing` block from that
-   single output, so a config or capability change between steps cannot
-   produce an inconsistent launch. Treat a nonzero `routing-table` exit as a
-   hard stop, not a default: exit 3 -> re-probe (section 1 step 5) then
-   retry; exit 5 -> surface the config/role error and halt (a malformed
-   `models` or `effort` block aborts the whole call). `MODEL` empty for the
-   dispatched role -> halt: "no available model for <role>" (as
-   `resolve-model` exit 4). Then, depending on `$EFFORT`:
-   - `EFFORT == inherit` -> `CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL --permission-mode auto --name <agent-name>`
-   - otherwise -> `CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL --effort $EFFORT --permission-mode auto --name <agent-name>`
+Compact presentation uses a stable task ID behind a short title. Show current
+role, runtime/model, and status separately; update them for plan -> implement
+-> review and every retry. Presentation failure is visible but never changes
+completion state. Launch IDs, not labels, are the provenance keys.
 
-   **Always carry `CLAUDE_CONFIG_DIR=$CFG` as the first word of the launch
-   line** (`CFG` from the preflight block: this orchestrator's own config
-   dir). The pane shell is spawned by the herdr server, not by this
-   session, so it inherits nothing from the orchestrator's environment;
-   without the explicit value the `claude()` zsh wrapper routes by cwd, and
-   a herdr worktree under `~/.herdr/worktrees/` is outside the work tree --
-   the 2026-09-08 incident: a work-repo worker launched on the personal
-   account. The wrapper now also routes linked worktrees by their repo, but
-   the explicit value is what makes the account a property of the dispatch
-   rather than of the pane's shell. `$CFG` must match the launch-line value
-   rule (`[A-Za-z0-9_./+:@-]+`) and start with `/`; otherwise refuse the
-   launch naming the value, as for any unsafe value.
+**Deep-think escalation.** Native Claude/Codex advisors resolve the `think`
+role through the selected-runtime resolver and bounded runner, with only its
+supported limits. They do not require the legacy capabilities map, spend
+ledger, or Claude USD/turn caps. The `run-think` recipe and core budget rules
+below apply only to the legacy Claude wrapper.
 
-   `$EFFORT` is shell-safe by construction (closed lowercase set: `low` /
-   `medium` / `high` / `xhigh` / `max` / `inherit`). Use `--permission-mode
-auto`, **not** `--dangerously-skip-permissions`: an auto-mode
-   orchestrator's classifier BLOCKS spawning a skip-permissions worker. Keep
-   it a plain `claude` invocation with no shell metacharacters.
-   `--name <agent-name>` is the worker's herdr agent name (`plan-<t>` /
-   `impl-<t>` / `rev-<t>`, `[a-z0-9-]` only) and makes the session
-   addressable for idle subscriptions. Two launch branches, chosen by a
-   once-per-session check (`claude --help` lists `--name`; cache the answer
-   for the session):
-   - check passed: `herdr pane run <pane_id> "CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL [--effort $EFFORT] --permission-mode auto --name <agent-name>"`
-   - check failed (older CLI; an unknown flag would abort the launch):
-     `herdr pane run <pane_id> "CLAUDE_CONFIG_DIR=$CFG claude --model $MODEL [--effort $EFFORT] --permission-mode auto"`,
-     the worker keeps an auto-derived name, and the discovery below records
-     `peer_name: null` without calling `ListAgents`.
-
-   **Never** `claude --model fable --fallback-model opus`: `--fallback-model`
-   fires only on overload, not on an account restriction, and silently lands on
-   the account default (Sonnet) -- the rw-bess incident, 2026-08-28. The
-   persisted `workers[]` `model` and `effort` fields record this resolved
-   `$MODEL`/`$EFFORT` (`null` for `inherit`), never a hard-coded constant.
-   Legacy `workers[]` entries written before effort routing lack the
-   `effort` key; readers treat a missing key as `effort: "unknown"`, and a
-   full-record rewrite carries such entries forward byte-for-byte.
-
-3. Registration is normally automatic -- `pane run "claude ..."` lets herdr
-   natively detect the agent (it appears in `herdr agent list` within a second
-   or two). If it does not, `herdr pane report-agent <pane_id>` registers it --
-   this verb takes **no** `--kind` flag (`--kind` belongs to `agent start`).
-4. **Discovery and subscription (bounded, fails closed).** Call `ListAgents`
-   at most twice: once right after `pane run` returns and the D4 banner read
-   is done (registration takes about a second), and, only if that found
-   nothing, once more right after `agent prompt ... --until working` returns
-   (that wait is the registration window; no sleeps). Candidates are the
-   local-session rows named exactly `<agent-name>` or `<agent-name>-<1 to 3
-alphanumerics>` (the variant Claude Code appends when the name is taken).
-   Exactly one candidate -> record it as `peer_name` in the `workers[]`
-   entry (section 2 step 7) and subscribe:
-   `SendMessage(to=<peer_name>, notify_when_idle=true)`, no `message`.
-   Zero or more than one candidate -> `peer_name: null`, one status line
-   saying so, no subscription; the hook push and the watch still wake.
-   Never pick among several: herdr's own agent-name uniqueness gives a
-   second live worker of the same task a `-2` name, so two candidates mean
-   a stale worker is still alive.
-
-Do **not** use `herdr agent start` to launch the worker: its `-- <argv>`
-passthrough for pinning a model is unreliable across herdr versions (0.7.5+
-made `--kind` a closed whitelist), and unlike `pane run` in the worktree's root
-pane it does not create or target the correct pane.
-
-Submit the brief and confirm the worker started working in one call:
-`herdr agent prompt <pane_id> "<brief>" --wait --until working --timeout 60000`
-(`working` is a valid `--until` status; `--timeout` guards the 5s
-`agent_prompt_stalled` and indefinite-wait edges).
-
-**Verify-after-launch (D4 self-heal, best-effort backstop -- fails safe).** The
-PRIMARY availability guarantee is the section-1 headless probe (`claude -p
---output-format json` -> reliable structured JSON). This D4 backstop only tries
-to catch an interactive pane that silently DOWNGRADED after a clean probe; when
-it cannot read the running model it does NOT guess -- it fails closed (abort +
-surface), so a weak read never advances a launch on inference.
-
-Read the running model as early as possible, before the banner scrolls off:
-immediately after `pane run "claude ..."`, and no later than right after
-`agent prompt --until working`, via `herdr agent read` / `herdr pane read`,
-capturing the `Claude Code v...` banner line that names the model. Retry the
-read within a short bounded window (a few reads over a few seconds); the banner
-is transient, so a single late read is unreliable -- that unreliability is the
-incident this section fixes (2026-08-28, BESS-2334: the banner had scrolled off,
-the model line was unreadable, and the launch wrongly PROCEEDED ON INFERENCE).
-herdr 0.8.2 exposes NO structural model field on `agent list` / `agent get`
-(verified 2026-08-28: the agent record carries `agent` / `agent_status` / `cwd`
-/ `pane_id` / `terminal_title` and no model), so the banner is the only source;
-if a future herdr adds a launched-model field to `agent get` / `agent list`,
-prefer that structured field over scraping the banner.
-
-Classify the read deterministically, through a core verb -- never parse the
-raw capture by hand:
-
-`python3 "$CORE" classify-banner --model <alias> --effort <level|inherit> --text-file <path>`
-(or `--text '<captured text>'`) prints exactly one of `ok | downgrade |
-effort-mismatch | unreadable`, exit 0 for all four; add `--json` to get
-`{"class": "<word>", "model": "<display>|null", "effort": "<level>|null"}`
-so the report can quote the OBSERVED model/effort without re-parsing the
-capture.
-
-| Condition                                                                                               | Result            |
-| ------------------------------------------------------------------------------------------------------- | ----------------- |
-| banner not parseable (no `Claude Code v...` line, or the model line names no recognized family)         | `unreadable`      |
-| model display name lacks the requested alias family (`fable`/`opus`/`sonnet`/`haiku`, case-insensitive) | `downgrade`       |
-| requested effort is a level and observed effort is absent or different                                  | `effort-mismatch` |
-| otherwise (including requested `inherit` with any observed value)                                       | `ok`              |
-
-- **`downgrade`** (or a model-attributable launch failure) -> mark the
-  REQUESTED alias unavailable (never the observed one, never re-enable
-  another) with an atomic downward-only flip:
-  `python3 "$CORE" disable-model --repo-slug <slug> --session <id> --fence <fence> --model <requested-alias>`.
-  Confirm the wrong worker is terminated, then re-run `routing-table` and
-  relaunch on the next survivor. Cap relaunch attempts per dispatch at 2,
-  then surface failure -- do not loop.
-- **`effort-mismatch`** is **not availability data**: never `disable-model`,
-  never relaunch automatically. Terminate the worker's process in its pane
-  (`/exit`, else kill the pane process; do not close the pane/workspace for
-  an adopted resource) and surface `effort pin refused for <role>: requested
-<level>, observed <observed|none>; check the account's effort limit or
-lower config.effort.<role>` -- an organization effort cap is policy a
-  retry cannot change, the human decides. **Lifecycle:** the banner read
-  happens before any state is published (kickoff step 7, phase-advance step
-  3, review-dispatch step 3 all publish only after a successful launch), so
-  nothing needs unwinding: a fresh kickoff leaves no task record, a phase
-  advancement leaves the task `in-progress` with the plan worker's entry
-  still latest, a review dispatch leaves the task `completed` with no
-  `review_head_sha`.
-- **`unreadable`** (pane didn't start, herdr error, or the banner is not
-  readable within the bounded window -- no model signal) -> do NOT disable
-  any model and NEVER infer the model ("the probe fell back to Sonnet, so
-  it's probably Sonnet" is exactly the forbidden inference); abort and
-  surface. This is not availability data either.
-
-Downward-only within a session; upward recovery waits for the next startup
-re-probe (section 1 step 5). Headless `-p` (the probe) errors on an unavailable
-model, but an interactive pane launch can silently DOWNGRADE to Sonnet, or pin
-an effort the account refuses -- which is exactly what this backstop catches
-when the banner is readable, and fails closed (abort) when it is not.
-
-**Deep-think escalation.** A **deep-think escalation** is one bounded,
+A legacy Claude **deep-think escalation** is one bounded,
 headless run of the strong model (`think` role: `fable -> opus`, effort
 `high`/`xhigh`/`max`) that answers ONE question with a structured
 recommendation. The orchestrator launches it, reads the answer as advisory
@@ -966,7 +849,7 @@ the orchestrator's OWN workspace, section 7) so the orchestrator does not
 block. `run-think` writes `<think_id>.launch.json` (the durable live
 record) before the run and `<think_id>.answer.json` (the output contract)
 after; both are watch wakes. `$MODEL`/`$EFFORT` come from the same
-`routing-table` snapshot as any other dispatch (`think` role). A
+`routing-table` snapshot as another legacy wrapper dispatch (`think` role). A
 model-attributable failure (`downgrade`, or an execution error naming the
 alias/"model"): `disable-model` on the requested alias, `routing-table`
 again, copy the question to `<think_id>-2.question.md`, relaunch once as
@@ -1018,7 +901,7 @@ nothing.
 the Workflow tool directly (planner/reviewer on the stronger model, workers
 on cheaper models, per-task review). That order governs how a session
 implements a multi-task PLAN; this skill governs the herdr task LIFECYCLE.
-They compose: an `implement` worker executing its committed plan may fan
+They compose: an `implement` worker executing its reviewed private plan may fan
 the plan's tasks out over a Workflow (mutations under `isolation:
 'worktree'`, results merged into its own branch by the worker), and that is
 the standing order in action inside one herdr task. What the Workflow never
@@ -1026,18 +909,16 @@ does is stand in for the herdr worker itself: no branch, record, contract
 gate, or review of its own. Where the two documents seem to disagree, this
 precedence rule wins.
 
-Models and efforts inside a script are resolved BEFORE the script is
-authored, never hard-coded, never picked by judgment: the orchestrator runs
-`routing-table` once and maps script tiers to roles (planner/judge/
-synthesizer -> `plan`; reviewer/verifier -> `review`; implementer -> `impl`;
-mechanical -> `mech`; a single deep judge stage -> `think`); each `agent()`
-call passes `model: <alias from the table>` and `effort: <level>` (omitted
-where the table says `null`). A role with `"model": null` may not appear in
-a script the orchestrator authors. A worker has no capabilities map of its
-own, so its brief carries a `## Routing` block rendered from the same
-`routing-table` snapshot at kickoff (references/brief-template.md); a
-worker authoring a Workflow copies aliases and efforts from that block, and
-a role absent from it is unavailable to the worker. The size guideline
+Models and efforts inside a script are resolved BEFORE it is authored through
+the native runtime policy, not the legacy wrapper table. Map planner/judge/
+synthesizer to `planner`, reviewer/verifier to `reviewer`, implementer to
+`implementation`, mechanical helpers to `mechanical`, and a deep judge to
+`think`. Resolve each needed role for the selected runtime and retain its
+readiness, model and effort in the brief's `## Routing` block. Claude Workflow
+uses the supplied Claude aliases and effort fields; Codex native children use
+Codex model and reasoning-effort fields. Do not run legacy `resolve-model`
+or build a legacy capability map for native workers. An absent or unready role
+is unavailable to the worker. The size guideline
 (under 15 agents by default) holds unless the human raised it in the
 instruction that opted in.
 
@@ -1067,16 +948,39 @@ calling session, not `STATE_ROOT`.
 **Mech launch (headless, wrapped).** Caps exist only in print mode, so a mech
 worker is launched through the core wrapper in the workspace's root pane:
 
-`herdr pane run <pane_id> "CLAUDE_CONFIG_DIR=$CFG python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"`
+For this legacy Claude-only recipe, capture the controller's scope before
+leaving its repository. Include `--personal` on `account-scope` for a deliberate
+personal override. Render the environment as quoted shell arguments so a
+server-spawned pane receives the selected account, including required unsets:
+
+```bash
+ACCOUNT_SCOPE="$(python3 "$(dirname "$CORE")/../skills/lib/workflow_context.py" account-scope --cwd "$PWD" --runtime claude)" || exit 2
+ACCOUNT_PREFIX="$(printf '%s' "$ACCOUNT_SCOPE" | python3 -c '
+import json, shlex, sys
+mapping = json.load(sys.stdin)["launch_env"]
+args = ["env"]
+for key, value in mapping.items():
+    if value is None:
+        args.extend(["-u", key])
+args.extend(f"{key}={value}" for key, value in mapping.items() if value is not None)
+print(shlex.join(args))
+')" || exit 2
+```
+
+`herdr pane run <pane_id> "$ACCOUNT_PREFIX python3 $CORE run-mech --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent <agent> --launch-id <launch_id> --model $MODEL [--effort $EFFORT] --worktree <worktree_path> --base-sha <base_sha> --brief-file <STATE_ROOT>/<slug>/tasks/<task_id>.brief.md --max-turns <N> --max-budget-usd <X> --timeout-secs <T>"`
+
+Include `--effort $EFFORT` when resolved effort is explicit; omit it only for
+legacy `inherit`. Render argv before quoting it; brackets above are notation.
+This wrapper is Claude-only: Codex uses the bounded runtime runner with a wall
+timeout and rejects unsupported USD/turn caps instead of pretending to enforce
+them.
 
 Shell-safety: every value must match `[A-Za-z0-9_./+:@-]+`; refuse the launch
 naming the offending value otherwise (`run-mech` re-checks and exits 2).
-The `CLAUDE_CONFIG_DIR=$CFG` prefix is mandatory here too: `run-mech` calls
-the bare `claude` binary from Python (no zsh wrapper, no cwd routing), and
-its `state_root()` reads the same variable, so the one prefix puts both the
-mech worker's account and its ledger / completion record under this
-orchestrator's dir. `$CFG` is validated like every other value (and must
-start with `/`); it is not part of `run-mech`'s own argv re-check.
+The quoted `ACCOUNT_PREFIX` is mandatory because `run-mech` calls the bare
+Claude binary without the shell wrapper. It preserves native personal auth
+and pins work/custom namespaces; never replace it with an explicit personal
+`CLAUDE_CONFIG_DIR` or rely on the server's ambient account.
 `<agent>` = `agent_name("mech", task_id)`; `<launch_id>` =
 `<agent>-<YYYYMMDDTHHMMSSZ>` (UTC now), also placed in the brief. Write the
 brief (references/brief-template.md, mech variant) to the `--brief-file` path
@@ -1097,7 +1001,7 @@ the new `status`; that write is the authoritative record.
 | (none)                                       | kickoff (raw item -> plan phase; plan-ready -> implement)                      | `kickoff`                                      | in-progress             | no        |
 | in-progress                                  | hook `blocked` + live `blocked`                                                | `blocked`                                      | blocked                 | no        |
 | blocked                                      | live no longer blocked                                                         | (recheck)                                      | in-progress             | no        |
-| in-progress (plan phase)                     | correlated `done.json` `phase: plan` completed + git ahead                     | `phase-advance` (launch implement, section 2a) | in-progress (implement) | no        |
+| in-progress (plan phase)                     | `confirm-plan` + private artifact hashes + current attempt                     | `phase-advance` (launch implement, section 2a) | in-progress (implement) | no        |
 | in-progress/blocked (implement)              | correlated `done.json` `phase: implement` completed + git ahead                | `completed`                                    | completed               | no        |
 | in-progress (mech)                           | ledger `end` + `done.json` `paused` for the live launch                        | `paused`                                       | in-progress             | no        |
 | in-progress (mech)                           | ledger `end` + `done.json` `failed` (branch not usable)                        | `failed`                                       | failed                  | yes       |
@@ -1135,6 +1039,8 @@ tail:
 
 Rules (these are outward-facing writes, so treat them carefully):
 
+- **Existing authorization required.** A local task designation does not by itself
+  authorize third-party writes; preserve any standing authorization already given.
 - **Jira-kind only.** Bare repo todos (`td-...`) have no Jira status --
   skip.
 - **Resolve the transition dynamically.** Names/IDs like "In Progress"/"In

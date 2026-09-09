@@ -16,6 +16,7 @@
 #   todos.sh init                       set up .todos/ (local-only)
 #   todos.sh new "<title>" [--area A] [--file P]... [--depends-on REF]...   create a pending todo
 #   todos.sh list [--all] [--offline]   list pending (--all adds completed; --offline skips gh)
+#   todos.sh ready <exact-id> [--offline|--online]   read-only dependency verdict as JSON
 #   todos.sh done <slug-or-substring>   move a todo pending -> completed
 #   todos.sh depend <slug> REF...        add dependency refs (todo:<id> | branch:<name> | pr:<n>)
 #   todos.sh index                      regenerate TODO.md
@@ -165,10 +166,19 @@ deps_offline() {
 gh_state() {
   # gh_state <gh args...> -> MERGED|OPEN|CLOSED on stdout, or nothing.
   # Never fails: a missing binary, non-zero exit, or odd output all print nothing.
-  local gh="${TODOS_GH:-gh}" out
+  local gh="${TODOS_GH:-gh}" out remaining
   deps_offline && return 0
   command -v "$gh" >/dev/null 2>&1 || return 0
-  out=$("$gh" "$@" 2>/dev/null) || return 0
+  if [ -n "${DEPS_GH_DEADLINE:-}" ]; then
+    # ready shares one bounded budget across all calls. Never fall back to an
+    # unbounded call when coreutils timeout is absent (macOS uses gtimeout).
+    [ -n "${DEPS_TIMEOUT:-}" ] || return 0
+    remaining=$((DEPS_GH_DEADLINE - SECONDS))
+    [ "$remaining" -gt 0 ] || return 0
+    out=$("$DEPS_TIMEOUT" --kill-after=1 "${remaining}s" "$gh" "$@" 2>/dev/null) || return 0
+  else
+    out=$("$gh" "$@" 2>/dev/null) || return 0
+  fi
   case "$out" in MERGED|OPEN|CLOSED) printf '%s\n' "$out" ;; esac
   return 0
 }
@@ -184,17 +194,32 @@ map_gh_state() {
 
 resolve_ref() {
   # resolve_ref <canonical-ref> -> state token (never `self`; see resolve_cached).
-  local ref="$1" root kind payload base bref st rc
+  local ref="$1" root kind payload base bref st rc pending completed candidate
   root=$(repo_root)
   kind="${ref%%:*}"; payload="${ref#*:}"
   case "$kind" in
     todo)
+      if [ "${DEPS_STRICT:-0}" = 1 ]; then
+        pending="$root/$TODOS_DIRNAME/pending/$payload.md"
+        completed="$root/$TODOS_DIRNAME/completed/$payload.md"
+        for candidate in "$pending" "$completed"; do
+          if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+            if [ ! -f "$candidate" ] || [ ! -r "$candidate" ] || [ -L "$candidate" ]; then
+              printf 'unknown\n'; return 0
+            fi
+          fi
+        done
+        if [ -e "$pending" ] && [ -e "$completed" ]; then
+          printf 'unknown\n'; return 0
+        fi
+      fi
       if   [ -e "$root/$TODOS_DIRNAME/completed/$payload.md" ]; then printf 'done\n'
       elif [ -e "$root/$TODOS_DIRNAME/pending/$payload.md" ];   then printf 'open\n'
       else printf 'missing\n'; fi ;;
     branch)
       base="${TODOS_BASE_REF:-origin/main}"
-      if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
+      case "$base" in ''|-*|*@\{*) printf 'unknown\n'; return 0 ;; esac
+      if ! git rev-parse --verify --quiet --end-of-options "$base^{commit}" >/dev/null 2>&1; then
         printf 'unknown\n'; return 0
       fi
       if   git show-ref --verify --quiet "refs/remotes/origin/$payload"; then bref="refs/remotes/origin/$payload"
@@ -492,6 +517,75 @@ cmd_list() {
   return 0
 }
 
+ready_error() {
+  jq -cn --arg task_id "$1" --arg error "$2" \
+    '{ready:false,task_id:$task_id,dependencies:[],error:$error}'
+  return 2
+}
+
+ready_frontmatter_valid() {
+  # The existing resolver reads a contiguous block list. Reject shapes that
+  # it would silently skip, rather than treating malformed dependencies as [].
+  awk '
+    NR == 1 && $0 != "---" { bad = 1; exit }
+    /^---$/ { n++; if (n == 2) exit; next }
+    n == 1 && /^depends_on:/ {
+      if (seen++ || $0 !~ /^depends_on:[[:space:]]*(\[\])?[[:space:]]*$/) bad = 1
+      f = 1; next
+    }
+    n == 1 && f && /^  - / {
+      if ($0 ~ /^  - [[:space:]]*$/) bad = 1
+      next
+    }
+    n == 1 && f {
+      if ($0 !~ /^[a-zA-Z_][a-zA-Z_0-9]*:/) bad = 1
+      f = 0
+    }
+    END { exit (bad || n != 2) }
+  ' "$1"
+}
+
+cmd_ready() {
+  # No initialization, index/registry access, temporary cache, or locks.
+  local task_id="${1:-}" root target raw ref st result=0 dependencies='[]'
+  local DEPS_OFFLINE=1 DEPS_STRICT=1 DEPS_CACHE='' DEPS_GH_DEADLINE='' DEPS_TIMEOUT=''
+  command -v jq >/dev/null 2>&1 || {
+    printf '%s\n' '{"ready":false,"task_id":null,"dependencies":[],"error":"jq_required"}'
+    return 2
+  }
+  [[ "$task_id" =~ $TODO_ID_RE ]] && validate_date "${task_id:0:10}" \
+    || { ready_error "$task_id" invalid_task_id; return 2; }
+  shift
+  if [ "$#" -gt 1 ]; then ready_error "$task_id" invalid_arguments; return 2; fi
+  case "${1:---offline}" in
+    --offline) ;;
+    --online)
+      DEPS_OFFLINE=0
+      DEPS_GH_DEADLINE=$((SECONDS + 5))
+      DEPS_TIMEOUT=$(command -v timeout || command -v gtimeout || true) ;;
+    *) ready_error "$task_id" invalid_arguments; return 2 ;;
+  esac
+  root=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || { ready_error "$task_id" missing_repository; return 2; }
+  target="$root/$TODOS_DIRNAME/pending/$task_id.md"
+  if [ ! -f "$target" ] || [ ! -r "$target" ] || [ -L "$target" ] \
+    || [ -e "$root/$TODOS_DIRNAME/completed/$task_id.md" ]; then
+    ready_error "$task_id" missing_or_ambiguous_pending_task; return 2
+  fi
+  ready_frontmatter_valid "$target" \
+    || { ready_error "$task_id" invalid_dependencies; return 2; }
+  while IFS= read -r raw; do
+    if ref=$(normalize_ref "$raw"); then st=$(resolve_cached "$ref" "$task_id")
+    else ref="$raw"; st=invalid; fi
+    case "$st" in done|merged) ;; *) result=3 ;; esac
+    dependencies=$(jq -cn --argjson prior "$dependencies" --arg ref "$ref" --arg state "$st" \
+      '$prior + [{ref:$ref,state:$state}]')
+  done < <(depends_list "$target")
+  jq -cn --arg task_id "$task_id" --argjson dependencies "$dependencies" --argjson status "$result" \
+    '{ready:($status == 0),task_id:$task_id,dependencies:$dependencies}'
+  return "$result"
+}
+
 cmd_done() {
   [ "$#" -ge 1 ] || die "done requires a slug or substring"
   local query="$1"
@@ -767,12 +861,13 @@ cmd_repos() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|done|depend|index|share|path|register|repos|brief|today} ..."
+  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|ready|done|depend|index|share|path|register|repos|brief|today} ..."
   local cmd="$1" ref; shift
   case "$cmd" in
     init)     cmd_init "$@" ;;
     new)      cmd_new "$@" ;;
     list)     cmd_list "$@" ;;
+    ready)    cmd_ready "$@" ;;
     done)     cmd_done "$@" ;;
     depend)   cmd_depend "$@" ;;
     index)    cmd_index "$@" ;;

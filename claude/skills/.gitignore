@@ -9,6 +9,8 @@
 !/.gitignore
 !/co-review/
 !/herdr-orchestration/
+!/handoff/
+!/kickoff/
 !/codex-plan-review/
 !/codex-spec-review/
 !/brief/

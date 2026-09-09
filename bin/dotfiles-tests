@@ -24,11 +24,16 @@ sh bin/remote-access-doctor.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
 sh zsh/claude-account.test.sh
+sh zsh/codex-account.test.sh
 sh claude/hooks/claude-hooks.test.sh
 sh claude/hooks/plan-canvas-isolation.test.sh
 sh claude/hooks/ecc-hook-isolation.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
+sh claude/hooks/herdr-coordination.test.sh
+sh claude/hooks/herdr-stop-gate.test.sh
+bash claude/hooks/agent-runtime.test.sh
+bash claude/hooks/herdr-dispatch.test.sh
 sh claude/hooks/scratch-policy.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
@@ -39,11 +44,17 @@ sh git/hooks/pre-commit.test.sh
 sh git/hooks/pre-push.test.sh
 sh git/hooks/public-safety.test.sh
 bash claude/skills/lib/test_work_state.sh
+sh claude/skills/lib/workflow-context.test.sh
+sh claude/skills/handoff/scripts/tests/handoff_test.sh
+sh claude/skills/co-review/scripts/tests/review_test.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
 bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh
 bash claude/skills/repo-recall/scripts/tests/recall_test.sh
 bash claude/skills/voice/scripts/tests/voice_test.sh
 sh install/claude-links.test.sh
+sh install/codex-surfaces.test.sh
+sh install/codex-roles.test.sh
+sh install/codex-stop-hook.test.sh
 "
 
 if [ "${1:-}" = "--list" ]; then

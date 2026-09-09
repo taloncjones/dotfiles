@@ -14,12 +14,9 @@ Rule one: always edit the REPO file, never the live symlinked copy under
 
 ## Warnings first
 
-- [WARNING] `codex/AGENTS.md` contains an upstream-owned block between
-  `<!-- BEGIN ECC -->` (codex/AGENTS.md:143) and `<!-- END ECC -->` (last line).
-  NEVER hand-edit inside it -- it is overwritten wholesale by `codex-ecc-sync`
-  (zsh/functions.zsh, run by `ecc-install`/`ecc-update`), which writes through
-  the `~/.codex/AGENTS.md` symlink into this repo. Hand-maintained content goes
-  ABOVE the sentinel only.
+- [WARNING] `codex/AGENTS.md` is repo-owned policy. Native plugins own
+  upstream guidance. The copied ECC instruction block and global sync wrapper
+  are retired; never regenerate them.
 - [WARNING] `claude/CLAUDE.md` is symlinked to `~/.claude/CLAUDE.md` and
   `~/.claude-work/CLAUDE.md` and loads in EVERY session in EVERY repo. A bad
   edit propagates globally on the next session start. The
@@ -56,13 +53,12 @@ updated when it changes.
 | `CLAUDE.md` (repo root)          | Claude-session guidance for THIS repo: architecture, symlink targets, cloud restore mechanics, plugin model, commit format                     | The doc Claude reads first; keep terse, keep the symlink-targets list authoritative             |
 | `claude/CLAUDE.md`               | Global cross-repo rules: strict rules, response style, commit/branch/Jira conventions, skill routing, plan-mode rules                          | Symlinked to `~/.claude*/CLAUDE.md`; edit the repo file only                                    |
 | `claude/operating-principles.md` | Model-agnostic engineering discipline (verify-before-claim, scope/safety, judgment, comms)                                                     | `@import`ed by the last line of `claude/CLAUDE.md`; also symlinked into both config dirs        |
-| `codex/AGENTS.md`                | Codex global instructions (lines 1-142); ECC upstream block below the sentinel                                                                 | Hand-edit above `<!-- BEGIN ECC -->` only; refresh the block via `codex-ecc-sync`               |
+| `codex/AGENTS.md`                | Codex global policy and runtime skill routing                                                                 | Edit owned policy; native plugins supply upstream guidance               |
 | `NOTICE`                         | Third-party attribution: ECC rules + pre-commit/pre-push hooks, GSD-redux-derived statusline; MIT notices                                      | Add an entry (paths, upstream URL, license, copyright) whenever anything is vendored or adapted |
 
 Jargon, defined once: "ECC" = Everything Claude Code, a third-party Claude Code
 plugin (github.com/affaan-m/ECC). "GSD" = Get Shit Done, a retired third-party
-tool whose statusline this repo ported (see NOTICE). "Sentinel block" = the
-machine-managed region between `BEGIN ECC`/`END ECC` HTML comments.
+tool whose statusline this repo ported (see NOTICE).
 
 ## House writing style (hook-enforced)
 
@@ -147,7 +143,6 @@ Run this after ANY surface change. Each row is a required same-PR update.
 | Vendored or adapted third-party content                    | `NOTICE` entry: paths, upstream URL, license, copyright                                                                                                                                                                                          |
 | Changed cloud restore mechanics                            | Repo `CLAUDE.md` "Cloud sessions" section (the doc of record for that flow)                                                                                                                                                                      |
 | Changed a global behavior rule                             | `claude/CLAUDE.md` (repo file) -- and expect it to reach every session in every repo                                                                                                                                                             |
-| ECC upstream moved (counts/versions in the sentinel block) | Run `codex-ecc-sync`; never hand-edit the block                                                                                                                                                                                                  |
 
 Quick audit commands:
 
@@ -169,11 +164,8 @@ grep -rl 'passed, .* failed' "$HOME/dotfiles" --include='*.sh'   #   (runner's o
    supply-chain history: the ORIGINAL `get-shit-done-cc` npm package is
    compromised (token rug-pull, publish access retained) and must never be
    reinstalled; the redux fork is retired as well.
-2. ECC sentinel block ages independently -- OPEN by design. The counts inside
-   it ("67 specialized agents, 271 skills, 92 commands", "Version: 2.0.0",
-   codex/AGENTS.md:146-148) are upstream facts frozen at the last
-   `codex-ecc-sync`. Known trap in the refresher: the gitconfig-restore
-   `sed -i ''` at zsh/functions.zsh:358 is BSD/macOS-only and fails on Linux.
+2. ECC copied instruction block -- CLOSED. Native plugins now own upstream
+   guidance; repo-owned global policy remains concise and independently managed.
 3. `templates/` (added 8ae7009; contains `templates/python/pyproject.toml`)
    is missing from the README Directory Structure tree.
 4. README.md:13 claims a "CLAUDE.md template system" -- CANDIDATE stale:
@@ -197,7 +189,6 @@ runner and CI at 465ee17, same day). Re-verify before trusting:
 
 ```bash
 git -C "$HOME/dotfiles" log --oneline -3                           # has the repo moved past 26eae6d?
-grep -n 'BEGIN ECC\|END ECC' codex/AGENTS.md                       # sentinel bounds (143 / last line today)
 grep -n 'GSD is retired' zsh/functions.zsh                         # drift item 1 anchor (line 760 today)
 grep -n "sed -i ''" zsh/functions.zsh                              # drift item 2 anchor (line 358 today)
 head -3 claude/commands/*.md | grep -c '^description:'             # YAML-style command count (2 today)
@@ -207,7 +198,7 @@ grep -n 'reconcile_claude_settings' bootstrap-cloud.sh             # cloud setti
 grep -rn 'prettier' claude/hooks/format_files.py                   # formatter hook still prettier-based
 ```
 
-Volatile facts date-stamped above: sentinel line numbers, function line
+Volatile facts date-stamped above: function line
 numbers, command/suite counts, the 20/22 legacy-frontmatter split, and every
 entry in "Residual known drift". Line numbers WILL drift -- trust the grep
 anchors, not the numbers.
