@@ -209,6 +209,15 @@
             "command": "~/.claude/hooks/protect_claude_md.py"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/git_remote_guard.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [
