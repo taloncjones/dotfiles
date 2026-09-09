@@ -260,6 +260,8 @@ def scan_raw(text):
     out = []
     redirs = {}
     heredocs = []  # (word, strip_tabs) pending on the current line
+    arith_paren = 0    # open '(' still needed to close a $(( ... )) we're in
+    arith_bracket = 0  # open '[' still needed to close a $[ ... ] we're in
     i = 0
     quote = None
     while i < n:
@@ -290,6 +292,28 @@ def scan_raw(text):
                         break
             heredocs = []
             continue
+        # $(( ... )) / $[ ... ] (B-1): a '<<' inside arithmetic is a shift
+        # operator, not a heredoc. Paren/bracket balance alone locates the
+        # close, since any nested $(...)/[...] inside is itself balanced.
+        if arith_paren == 0 and arith_bracket == 0:
+            if c == "$" and text.startswith("$((", i):
+                arith_paren = 2
+                out.append("$(("); i += 3; continue
+            if c == "$" and text.startswith("$[", i):
+                arith_bracket = 1
+                out.append("$["); i += 2; continue
+        elif arith_paren > 0:
+            if c == "(":
+                arith_paren += 1
+            elif c == ")":
+                arith_paren -= 1
+            out.append(c); i += 1; continue
+        elif arith_bracket > 0:
+            if c == "[":
+                arith_bracket += 1
+            elif c == "]":
+                arith_bracket -= 1
+            out.append(c); i += 1; continue
         if c == "<":
             if text.startswith("<<<", i) or text.startswith("<>", i) \
                     or not text.startswith("<<", i):

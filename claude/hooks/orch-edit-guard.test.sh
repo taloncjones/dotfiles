@@ -316,6 +316,12 @@ hook_case "AC4 3>&1 dup passes" allow Bash "cmd 3>&1" "$R" "$SID_A"
 many=$(i=1; while [ "$i" -le 24 ]; do printf 'echo x > %s/f%s; ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
 hook_case "AC4 25th distinct target is past the cap (fail open)" allow Bash "$many" "$R" "$SID_A"
 
+# --- AC4 cycle-3 regressions (co-review c3 B-1) -------------------------
+hook_case "AC4 arithmetic << before a write is not a heredoc, paren form (B-1)" deny Bash "n=\$((1 << 8))
+echo x > $TR" "$R" "$SID_A"
+hook_case "AC4 arithmetic << before a write is not a heredoc, bracket form (B-1)" deny Bash "n=\$[1 << 8]
+echo x > $TR" "$R" "$SID_A"
+
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
 marker() {
