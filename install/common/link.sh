@@ -140,26 +140,26 @@ ln -sf "$DOTFILEDIR"/codex/hooks/herdr_stop_gate.py "$HOME"/.codex/hooks/herdr_s
 
 # These are repo-owned workflows, shared from one maintained source. Native
 # ECC and Superpowers plugin installations remain independent per runtime.
-link_codex_skill() {
+link_codex_path() {
   local source="$1"
   local destination="$2"
   if [ -e "$destination" ] && [ ! -L "$destination" ]; then
-    echo "[WARNING] Preserving existing Codex skill: $destination; skipping managed symlink." >&2
+    echo "[WARNING] Preserving existing Codex path: $destination; skipping managed symlink." >&2
     return 0
   fi
   ln -sfn "$source" "$destination"
 }
 
 for shared_skill in repo-recall post-merge todos handoff kickoff voice; do
-  link_codex_skill "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
+  link_codex_path "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
 done
 mkdir -p "$HOME/.codex/rules"
-ln -sf "$DOTFILEDIR/claude/rules/personal/agent-lessons.md" "$HOME/.codex/rules/agent-lessons.md"
+link_codex_path "$DOTFILEDIR/claude/rules/personal/agent-lessons.md" "$HOME/.codex/rules/agent-lessons.md"
 
 if [ -d "$DOTFILEDIR"/codex/skills ]; then
   for codex_skill in "$DOTFILEDIR"/codex/skills/*; do
     [ -d "$codex_skill" ] || continue
-    link_codex_skill "$codex_skill" "$HOME"/.codex/skills/"$(basename "$codex_skill")"
+    link_codex_path "$codex_skill" "$HOME"/.codex/skills/"$(basename "$codex_skill")"
   done
 fi
 

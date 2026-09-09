@@ -119,46 +119,6 @@ def _home(env):
     return Path(env.get("HOME", str(Path.home())))
 
 
-def resolve_config_dir(anchor, env=None, *, checkout=None):
-    """Shared index storage override, otherwise the existing account route."""
-    env = os.environ if env is None else env
-    explicit = env.get("RECALL_CONFIG_DIR")
-    if explicit:
-        return Path(explicit).expanduser()
-    return resolve_claude_config_dir(anchor, env, checkout=checkout)
-
-
-def resolve_claude_config_dir(anchor, env=None, *, checkout=None):
-    """Account route with known personal ownership taking precedence.
-
-    anchor: resolved canonical repo owner, or cwd outside a git tree.
-    checkout: resolved checkout root, also protected when it is personal.
-    An inherited account override must never send personal artifacts to work.
-    """
-    env = os.environ if env is None else env
-    home = _home(env)
-    if env.get("CLAUDE_PERSONAL_ONLY") == "1":
-        return home / ".claude"
-    anchor = Path(anchor)
-    personal_tree = (home / "Git" / "personal").resolve()
-    owners = (anchor,) if checkout is None else (anchor, Path(checkout))
-    if any(
-        owner == personal_tree or personal_tree in owner.parents for owner in owners
-    ):
-        return home / ".claude"
-    explicit = env.get("CLAUDE_CONFIG_DIR")
-    if explicit:
-        return Path(explicit).expanduser()
-    work_tree = Path(env.get("CLAUDE_WORK_TREE", str(home / "Git" / "work"))).expanduser()
-    try:
-        work_tree = work_tree.resolve()
-    except OSError:
-        pass
-    if anchor == work_tree or work_tree in anchor.parents:
-        return Path(env.get("CLAUDE_WORK_CONFIG_DIR", str(home / ".claude-work"))).expanduser()
-    return home / ".claude"
-
-
 def config_dir_for_scope(scope, env=None):
     """Render the provider-selected Claude route without changing its path spelling.
 

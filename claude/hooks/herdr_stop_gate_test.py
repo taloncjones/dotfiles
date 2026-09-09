@@ -27,6 +27,7 @@ class StopGateTests(unittest.TestCase):
         for key in (
             "CLAUDE_CONFIG_DIR",
             "CLAUDE_PERSONAL_ONLY",
+            "WORKFLOW_PERSONAL_ACCOUNT",
             "CLAUDE_WORK_TREE",
             "CLAUDE_WORK_CONFIG_DIR",
             "HERDR_PERSONAL",

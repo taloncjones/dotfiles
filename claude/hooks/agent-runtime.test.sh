@@ -23,6 +23,12 @@ from pathlib import Path
 import agent_runtime as runtime
 
 
+# Fixtures choose their account scope explicitly; inherited selectors must not
+# turn a neutral test repository into a machine-policy personal repository.
+os.environ.pop("WORKFLOW_PERSONAL_ACCOUNT", None)
+os.environ.pop("CLAUDE_PERSONAL_ONLY", None)
+
+
 PASS = 0
 FAIL = 0
 
@@ -195,7 +201,12 @@ def test_aliases_efforts_and_diff_size_risk_are_rejected():
     forged = runtime.resolve_route("codex", "reviewer", capabilities=caps)
     raises(
         runtime.RouteError,
-        lambda: runtime.launch_argv({**forged, "model": "astra"}, "/tmp/repo", "read-only"),
+        lambda: runtime.launch_argv(
+            {**forged, "model": "astra"},
+            "/tmp/repo",
+            "read-only",
+            scope={"personal_repository": False},
+        ),
         "full model ID",
     )
 
@@ -291,7 +302,11 @@ def test_native_argv_mappings_are_exact():
     caps = codex_capabilities()
     codex_route = runtime.resolve_route("codex", "implementation", capabilities=caps)
     assert runtime.launch_argv(
-        codex_route, "/tmp/work tree", "workspace-write", mode="interactive"
+        codex_route,
+        "/tmp/work tree",
+        "workspace-write",
+        mode="interactive",
+        scope={"personal_repository": False},
     ) == [
         "codex",
         "-m",
@@ -304,7 +319,11 @@ def test_native_argv_mappings_are_exact():
         "workspace-write",
     ]
     assert runtime.launch_argv(
-        codex_route, "/tmp/work tree", "read-only", mode="headless"
+        codex_route,
+        "/tmp/work tree",
+        "read-only",
+        mode="headless",
+        scope={"personal_repository": False},
     ) == [
         "codex",
         "exec",
@@ -323,7 +342,11 @@ def test_native_argv_mappings_are_exact():
     claude_caps = {"models": {"fable": model()}}
     claude_route = runtime.resolve_route("claude", "planner", capabilities=claude_caps)
     assert runtime.launch_argv(
-        claude_route, "/tmp/work tree", "workspace-write", mode="headless"
+        claude_route,
+        "/tmp/work tree",
+        "workspace-write",
+        mode="headless",
+        scope={"personal_repository": False},
     ) == [
         "claude",
         "--model",
@@ -338,6 +361,53 @@ def test_native_argv_mappings_are_exact():
     ]
 
 
+def test_personal_repository_codex_argv_disables_atlassian_plugin():
+    route = runtime.resolve_route(
+        "codex", "implementation", capabilities=codex_capabilities()
+    )
+    argv = runtime.launch_argv(
+        route,
+        "/tmp/personal-repository",
+        "workspace-write",
+        scope={"personal_repository": True},
+    )
+    assert argv == [
+        "codex",
+        "-m",
+        "gpt-5.6-terra",
+        "-c",
+        'model_reasoning_effort="high"',
+        "-c",
+        'plugins."atlassian@claude-plugins-official".enabled=false',
+        "-C",
+        "/tmp/personal-repository",
+        "--sandbox",
+        "workspace-write",
+    ], argv
+    raises(
+        TypeError,
+        lambda: runtime.launch_argv(route, "/tmp/repository", "workspace-write"),
+        "scope",
+    )
+    raises(
+        runtime.RouteError,
+        lambda: runtime.launch_argv(
+            route, "/tmp/repository", "workspace-write", scope=None
+        ),
+        "account scope",
+    )
+    raises(
+        runtime.RouteError,
+        lambda: runtime.launch_argv(
+            route,
+            "/tmp/repository",
+            "workspace-write",
+            scope={"personal_repository": "yes"},
+        ),
+        "personal_repository",
+    )
+
+
 def test_codex_lifecycle_roots_require_workspace_write():
     base_route = runtime.resolve_route(
         "codex", "reviewer", capabilities=codex_capabilities()
@@ -348,10 +418,17 @@ def test_codex_lifecycle_roots_require_workspace_write():
     }
     raises(
         runtime.RouteError,
-        lambda: runtime.launch_argv(route, "/tmp/worktree", "read-only"),
+        lambda: runtime.launch_argv(
+            route,
+            "/tmp/worktree",
+            "read-only",
+            scope={"personal_repository": False},
+        ),
         "cannot make lifecycle roots writable",
     )
-    argv = runtime.launch_argv(route, "/tmp/worktree", "workspace-write")
+    argv = runtime.launch_argv(
+        route, "/tmp/worktree", "workspace-write", scope={"personal_repository": False}
+    )
     assert argv[-4:] == [
         "--add-dir",
         str(Path("/tmp/task-payload").resolve()),
@@ -360,7 +437,10 @@ def test_codex_lifecycle_roots_require_workspace_write():
     ], argv
     approval_route = {**base_route, "lifecycle_approval": "auto-review"}
     approval_argv = runtime.launch_argv(
-        approval_route, "/tmp/worktree", "read-only"
+        approval_route,
+        "/tmp/worktree",
+        "read-only",
+        scope={"personal_repository": False},
     )
     assert approval_argv[-4:] == [
         "-c",
@@ -371,7 +451,10 @@ def test_codex_lifecycle_roots_require_workspace_write():
     raises(
         runtime.RouteError,
         lambda: runtime.launch_argv(
-            approval_route, "/tmp/worktree", "workspace-write"
+            approval_route,
+            "/tmp/worktree",
+            "workspace-write",
+            scope={"personal_repository": False},
         ),
         "read-only Codex",
     )
@@ -380,7 +463,10 @@ def test_codex_lifecycle_roots_require_workspace_write():
         raises(
             runtime.RouteError,
             lambda candidate=candidate: runtime.launch_argv(
-                candidate, "/tmp/worktree", "workspace-write"
+                candidate,
+                "/tmp/worktree",
+                "workspace-write",
+                scope={"personal_repository": False},
             ),
             "add_dirs",
         )
@@ -510,7 +596,11 @@ def test_run_uses_argv_and_unsets_default_claude_config():
         assert call["config"] == "UNSET", call
         assert os.path.samefile(call["cwd"], repo), call
         assert call["argv"] == runtime.launch_argv(
-            route, repo, "workspace-write", mode="headless"
+            route,
+            repo,
+            "workspace-write",
+            mode="headless",
+            scope={"personal_repository": False},
         )[1:], call
         assert result["status"] == "success", result
 
@@ -558,6 +648,80 @@ def test_run_consumes_shared_work_account_scope():
             os.environ.update(old)
         assert Path(log.read_text()).resolve() == (root / ".claude-work").resolve(), log.read_text()
         assert result["account_kind"] == "work", result
+
+
+def test_bounded_codex_plugin_policy_uses_resolved_repository_scope():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        log = root / "argv"
+        executable(
+            bindir / "codex",
+            "printf '%s\\n' \"$@\" > \"$RUN_LOG\"\n"
+            "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+        )
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        old = dict(os.environ)
+        try:
+            os.environ.update(
+                {
+                    "HOME": str(root),
+                    "CLAUDE_WORK_TREE": str(root / "Git" / "work"),
+                    "CLAUDE_WORK_CONFIG_DIR": str(root / ".claude-work"),
+                }
+            )
+            for name, repository, selectors, expect_disabled in (
+                (
+                    "personal repository",
+                    root / "Git" / "personal" / "project",
+                    {},
+                    True,
+                ),
+                ("work repository", root / "Git" / "work" / "project", {}, False),
+                (
+                    "custom account",
+                    root / "Git" / "work" / "custom-project",
+                    {"CLAUDE_CONFIG_DIR": str(root / ".claude-custom")},
+                    False,
+                ),
+                (
+                    "explicit personal quota",
+                    root / "Git" / "work" / "quota-project",
+                    {"WORKFLOW_PERSONAL_ACCOUNT": "1"},
+                    False,
+                ),
+            ):
+                init_repo(repository)
+                for key in (
+                    "CLAUDE_CONFIG_DIR",
+                    "WORKFLOW_PERSONAL_ACCOUNT",
+                    "CLAUDE_PERSONAL_ONLY",
+                ):
+                    os.environ.pop(key, None)
+                os.environ.update(selectors)
+                env = {
+                    **os.environ,
+                    "PATH": f"{bindir}:{os.environ['PATH']}",
+                    "RUN_LOG": str(log),
+                }
+                result = runtime.run_bounded(
+                    route,
+                    "prompt",
+                    repository,
+                    "workspace-write",
+                    timeout_secs=5,
+                    env=env,
+                )
+                argv = log.read_text().splitlines()
+                disabled = 'plugins."atlassian@claude-plugins-official".enabled=false'
+                assert (disabled in argv) is expect_disabled, (name, argv)
+                assert result["status"] == "success", (name, result)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
 
 
 def test_codex_caps_reject_before_invocation():
@@ -684,6 +848,44 @@ def test_route_and_launch_plan_cli_emit_json_contracts():
     }, plan
 
 
+def test_launch_plan_applies_personal_repository_plugin_policy():
+    caps = json.dumps(codex_capabilities())
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        repo = root / "Git" / "personal" / "project"
+        init_repo(repo)
+        environment = {
+            **os.environ,
+            "HOME": str(root),
+            "CLAUDE_WORK_TREE": str(root / "Git" / "work"),
+        }
+        environment.pop("WORKFLOW_PERSONAL_ACCOUNT", None)
+        environment.pop("CLAUDE_PERSONAL_ONLY", None)
+        plan_process = subprocess.run(
+            [
+                sys.executable,
+                runtime.__file__,
+                "launch-plan",
+                "--runtime",
+                "codex",
+                "--role",
+                "implementation",
+                "--capabilities-json",
+                caps,
+                "--cwd",
+                str(repo),
+                "--sandbox",
+                "workspace-write",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    plan = json.loads(plan_process.stdout)
+    assert 'plugins."atlassian@claude-plugins-official".enabled=false' in plan["argv"], plan
+
+
 for name, test in (
     ("model catalog separates effort support from availability", test_model_catalog_discovers_effort_without_claiming_availability),
     ("Codex role table uses Astra, Terra and Luna", test_codex_role_table),
@@ -697,14 +899,17 @@ for name, test in (
     ("unsupported effort is never silently lowered", test_unsupported_effort_is_never_lowered),
     ("explicit provisional launch preserves unknown capability", test_explicit_provisional_launch_preserves_unknown_capability),
     ("native Claude and Codex argv are exact", test_native_argv_mappings_are_exact),
+    ("personal Codex argv requires valid scope", test_personal_repository_codex_argv_disables_atlassian_plugin),
     ("Codex lifecycle roots require workspace-write", test_codex_lifecycle_roots_require_workspace_write),
     ("Codex JSONL reports tokens and unknown observations", test_codex_result_reports_tokens_and_unknown_observations),
     ("error and malformed runtime output fail closed", test_result_errors_and_malformed_output_fail_closed),
     ("bounded run uses argv and native personal Claude env", test_run_uses_argv_and_unsets_default_claude_config),
     ("bounded run consumes the shared work account scope", test_run_consumes_shared_work_account_scope),
+    ("bounded Codex launch applies repository plugin policy", test_bounded_codex_plugin_policy_uses_resolved_repository_scope),
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
     ("bounded run kills the process group on timeout", test_timeout_kills_the_process_group),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
+    ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
 ):
     check(name, test)
 

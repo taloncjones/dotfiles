@@ -338,6 +338,8 @@ def test_launch_records_attempt_before_native_start():
             "gpt-5.6-terra",
             "-c",
             'model_reasoning_effort="high"',
+            "-c",
+            'plugins."atlassian@claude-plugins-official".enabled=false',
             "-C",
             str(fixture.repo),
             "--sandbox",
@@ -954,7 +956,7 @@ def test_dispatch_entrypoint_preserves_machine_readable_cli_contract():
 
 
 for name, test in (
-    ("launch records an attempt before native agent start", test_launch_records_attempt_before_native_start),
+    ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),

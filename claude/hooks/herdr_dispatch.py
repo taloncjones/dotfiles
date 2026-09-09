@@ -490,7 +490,7 @@ def launch(
         elif runtime == "codex" and sandbox == "read-only":
             launch_route = {**route, "lifecycle_approval": "auto-review"}
         native = agent_runtime.launch_argv(
-            launch_route, cwd, sandbox, mode="interactive"
+            launch_route, cwd, sandbox, mode="interactive", scope=scope
         )
         start_result = _run_herdr(
             herdr_cli,
