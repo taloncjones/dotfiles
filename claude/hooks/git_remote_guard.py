@@ -60,7 +60,8 @@ OVERRIDE = "DOTFILES_ALLOW_GIT_META=1"
 UNTRUSTED = "$UNTRUSTED_CWD"  # non-literal sentinel: cwd cannot be established
 OPERATOR_CHARS = ";&|()\n"
 REMOTE_DENY = ("remove", "rm", "set-url", "rename", "prune")
-GIT_OPTS_WITH_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env")
+GIT_OPTS_WITH_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+                     "--attr-source", "--super-prefix")
 LOCATION_OPTS = ("--git-dir", "--work-tree")
 LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 TAINT_HEADS = ("ln", "mv", "cp", "rsync")
@@ -242,7 +243,15 @@ def is_operator(tok: str) -> bool:
 # --- git parsing -----------------------------------------------------------
 
 def parse_git(tokens: list):
-    """(subcommand, args, -C values in order, location-hint flag)."""
+    """(subcommand, args, -C values in order, location-hint flag, unknown-option flag).
+
+    A `-`-prefixed global option with its value embedded via `=` cannot shift
+    which token is the subcommand, so it is skipped like any other flag. One
+    given as a separate argument can -- an unrecognized instance is
+    indistinguishable from a value-taking option whose value would otherwise
+    be misread as the subcommand (git --attr-source HEAD remote remove
+    origin), so `unknown` comes back True and the caller fails closed instead
+    of trusting `subcommand`."""
     i = 1
     cdirs = []
     hints = False
@@ -258,11 +267,13 @@ def parse_git(tokens: list):
         if tok in GIT_OPTS_WITH_ARG:
             i += 2
             continue
+        if tok.startswith("-") and "=" not in tok:
+            return None, tokens[i + 1:], cdirs, hints, True
         if tok.startswith("-"):
             i += 1
             continue
-        return tok, tokens[i + 1:], cdirs, hints
-    return None, [], cdirs, hints
+        return tok, tokens[i + 1:], cdirs, hints, False
+    return None, [], cdirs, hints, False
 
 
 def effective_dirs(cdirs: list, cwds: set, home: str):
@@ -432,8 +443,10 @@ def protected_worktree(tok: str, cwds: set, home: str):
 
 def check_git(tokens: list, ctx: dict):
     cwds, home, roots, home_real = ctx["P"], ctx["home"], ctx["roots"], ctx["home_real"]
-    sub, args, cdirs, hints = parse_git(tokens)
+    sub, args, cdirs, hints, unknown_opt = parse_git(tokens)
     seg = " ".join(tokens)[:SEGMENT_MAX]
+    if unknown_opt:
+        return f"an unrecognized global git option precedes the subcommand, so it cannot be verified as unguarded -- {seg}"
     fpath = None
     if sub == "remote":
         rargs = [a for a in args if not a.startswith("-")]
@@ -531,7 +544,7 @@ def is_taint(tokens: list) -> bool:
     if head in TAINT_HEADS:
         return True
     if head == "git":
-        sub, args, _, _ = parse_git(tokens)
+        sub, args, _, _, _ = parse_git(tokens)
         return sub == "worktree" and bool(args) and args[0] in TAINT_GIT_WORKTREE
     return False
 
