@@ -39,8 +39,8 @@ behavior change outside herdr sessions.
 
 - No change to plain (non-herdr) sessions. See D1 for the gate and why.
 - No guard on `git remote add`, `set-head`, `set-branches`, `update`,
-  `show`, `get-url`, or `-v`: they do not delete or rewrite an existing
-  remote, and `remote add` is the documented recovery step.
+  `show`, `get-url`, or `-v`: they do not delete the remote or its URL,
+  and `remote add` is the documented recovery step.
 - No guard on `git push --delete` / `git push origin :branch`: that is
   push_guard territory (a follow-up if wanted).
 - No guard on `git update-ref -d`, `git branch -m/-M` (rename), `git
