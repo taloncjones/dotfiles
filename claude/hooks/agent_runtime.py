@@ -399,11 +399,22 @@ def _codex_add_dirs(route: dict[str, Any], cwd: str) -> list[str]:
     return selected
 
 
+def _personal_repository(scope: dict) -> bool:
+    if not isinstance(scope, dict):
+        raise RouteError("account scope must be an object")
+    personal_repository = scope.get("personal_repository")
+    if not isinstance(personal_repository, bool):
+        raise RouteError("account scope lacks a boolean personal_repository")
+    return personal_repository
+
+
 def launch_argv(
     route: dict[str, Any],
     cwd: str | os.PathLike[str],
     sandbox: str,
     mode: str = "interactive",
+    *,
+    scope: dict,
 ) -> list[str]:
     if not isinstance(route, dict):
         raise RouteError("route must be an object")
@@ -426,6 +437,7 @@ def launch_argv(
     if mode not in ("interactive", "headless"):
         raise RouteError(f"unsupported launch mode: {mode}")
     selected_cwd = _checked_cwd(cwd)
+    personal_repository = _personal_repository(scope)
 
     if runtime == "codex":
         add_dirs = _codex_add_dirs(route, selected_cwd)
@@ -445,6 +457,14 @@ def launch_argv(
                 model,
                 "-c",
                 f'model_reasoning_effort="{effort}"',
+                *(
+                    [
+                        "-c",
+                        'plugins."atlassian@claude-plugins-official".enabled=false',
+                    ]
+                    if personal_repository
+                    else []
+                ),
                 "-C",
                 selected_cwd,
                 "--sandbox",
@@ -679,7 +699,8 @@ def run_bounded(
     if runtime == "codex" and max_budget_usd is not None:
         raise UnsupportedLimitError("Codex cannot enforce max_budget_usd")
 
-    argv = launch_argv(route, cwd, sandbox, mode="headless")
+    _repository, scope = execution_context(cwd, runtime, personal)
+    argv = launch_argv(route, cwd, sandbox, mode="headless", scope=scope)
     if runtime == "claude":
         if max_turns is not None:
             if (
@@ -700,7 +721,6 @@ def run_bounded(
             argv.extend(["--max-budget-usd", str(max_budget_usd)])
 
     child_env = dict(os.environ if env is None else env)
-    _repository, scope = execution_context(cwd, runtime, personal)
     _apply_launch_environment(child_env, scope)
     process = subprocess.Popen(
         argv,

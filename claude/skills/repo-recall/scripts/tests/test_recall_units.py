@@ -35,29 +35,36 @@ class Routing(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.home = self.tmp / "home"
-        self.work_tree = self.home / "Git" / "work"
-        (self.work_tree / "repo").mkdir(parents=True)
-        (self.home / "Git" / "personal" / "repo").mkdir(parents=True)
         self.env = {"HOME": str(self.home)}
 
-    def test_explicit_config_dir_wins(self):
-        env = dict(self.env, CLAUDE_CONFIG_DIR=str(self.tmp / "cfg"))
-        got = recall.resolve_config_dir(self.work_tree / "repo", env)
-        self.assertEqual(got, self.tmp / "cfg")
+    def test_personal_scope_routes_to_personal_config_dir(self):
+        got = recall.config_dir_for_scope({"kind": "personal"}, self.env)
+        self.assertEqual(got, self.home / ".claude")
 
-    def test_work_tree_routes_to_work_config_dir(self):
-        got = recall.resolve_config_dir((self.work_tree / "repo").resolve(), self.env)
+    def test_work_scope_routes_to_work_config_dir(self):
+        got = recall.config_dir_for_scope({"kind": "work"}, self.env)
         self.assertEqual(got, self.home / ".claude-work")
 
-    def test_work_config_dir_env_override(self):
+    def test_work_scope_honors_work_config_dir_override(self):
         env = dict(self.env, CLAUDE_WORK_CONFIG_DIR=str(self.tmp / "w"))
-        got = recall.resolve_config_dir((self.work_tree / "repo").resolve(), env)
+        got = recall.config_dir_for_scope({"kind": "work"}, env)
         self.assertEqual(got, self.tmp / "w")
 
-    def test_personal_tree_routes_to_personal(self):
-        got = recall.resolve_config_dir(
-            (self.home / "Git" / "personal" / "repo").resolve(), self.env)
-        self.assertEqual(got, self.home / ".claude")
+    def test_custom_scope_routes_to_explicit_claude_config_dir(self):
+        env = dict(self.env, CLAUDE_CONFIG_DIR=str(self.tmp / "custom"))
+        got = recall.config_dir_for_scope({"kind": "custom"}, env)
+        self.assertEqual(got, self.tmp / "custom")
+
+    def test_recall_config_dir_override_wins_for_every_scope(self):
+        env = dict(
+            self.env,
+            CLAUDE_CONFIG_DIR=str(self.tmp / "custom"),
+            RECALL_CONFIG_DIR=str(self.tmp / "shared"),
+        )
+        for kind in ("personal", "work", "custom"):
+            with self.subTest(kind=kind):
+                got = recall.config_dir_for_scope({"kind": kind}, env)
+                self.assertEqual(got, self.tmp / "shared")
 
     def test_index_path_inside_repo_raises(self):
         top = (self.home / "Git" / "personal" / "repo").resolve()

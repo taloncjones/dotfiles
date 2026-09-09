@@ -328,7 +328,7 @@ def runtime_main(argv: list[str] | None = None) -> int:
             output = {
                 "route": route,
                 "argv": agent_runtime.launch_argv(
-                    route, args.cwd, args.sandbox, args.mode
+                    route, args.cwd, args.sandbox, args.mode, scope=scope
                 ),
                 "cwd": args.cwd,
                 "limits": {

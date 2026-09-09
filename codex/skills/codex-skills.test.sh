@@ -292,6 +292,38 @@ links_shared_workflow_surfaces() (
 assert "installer shares maintained workflows and Herd guard with Codex" \
     links_shared_workflow_surfaces
 
+preserves_custom_codex_lesson_destinations() (
+    tmp_root="$(mktemp -d)"
+    trap 'rm -rf "$tmp_root"' EXIT
+    tmp_home="$tmp_root/absent-home"
+
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
+
+    file_home="$tmp_root/file-home"
+    mkdir -p "$file_home/.codex/rules"
+    printf 'custom lesson file\n' >"$file_home/.codex/rules/agent-lessons.md"
+    HOME="$file_home" DOTFILEDIR="$PWD" bash install/common/link.sh >"$file_home/install.out" 2>"$file_home/install.err"
+    [ ! -L "$file_home/.codex/rules/agent-lessons.md" ] || return 1
+    [ "$(cat "$file_home/.codex/rules/agent-lessons.md")" = 'custom lesson file' ] || return 1
+    rg -q -F "Preserving existing Codex path: $file_home/.codex/rules/agent-lessons.md" "$file_home/install.err" || return 1
+
+    directory_home="$tmp_root/directory-home"
+    mkdir -p "$directory_home/.codex/rules/agent-lessons.md"
+    printf 'custom lesson directory\n' >"$directory_home/.codex/rules/agent-lessons.md/keep.txt"
+    HOME="$directory_home" DOTFILEDIR="$PWD" bash install/common/link.sh >"$directory_home/install.out" 2>"$directory_home/install.err"
+    [ -d "$directory_home/.codex/rules/agent-lessons.md" ] || return 1
+    [ "$(cat "$directory_home/.codex/rules/agent-lessons.md/keep.txt")" = 'custom lesson directory' ] || return 1
+    [ ! -e "$directory_home/.codex/rules/agent-lessons.md/agent-lessons.md" ] || return 1
+    rg -q -F "Preserving existing Codex path: $directory_home/.codex/rules/agent-lessons.md" "$directory_home/install.err" || return 1
+
+)
+
+assert "installer preserves custom Codex lesson files and directories" \
+    preserves_custom_codex_lesson_destinations
+
 preserves_custom_codex_skill_destinations() (
     tmp_home="$(mktemp -d)"
     trap 'rm -rf "$tmp_home"' EXIT
@@ -311,12 +343,12 @@ preserves_custom_codex_skill_destinations() (
         [ ! -L "$tmp_home/.codex/skills/$skill" ] || return 1
         [ "$(cat "$tmp_home/.codex/skills/$skill/SKILL.md")" = 'custom skill' ] || return 1
         [ ! -e "$tmp_home/.codex/skills/$skill/$skill" ] || return 1
-        rg -q -F "Preserving existing Codex skill: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
+        rg -q -F "Preserving existing Codex path: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
     done
     for skill in todos co-review; do
         [ ! -L "$tmp_home/.codex/skills/$skill" ] || return 1
         [ "$(cat "$tmp_home/.codex/skills/$skill")" = 'custom file' ] || return 1
-        rg -q -F "Preserving existing Codex skill: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
+        rg -q -F "Preserving existing Codex path: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
     done
     [ "$(readlink "$tmp_home/.codex/skills/post-merge")" = "$PWD/claude/skills/post-merge" ] || return 1
     [ "$(readlink "$tmp_home/.codex/skills/claude-spec-review")" = "$PWD/codex/skills/claude-spec-review" ] || return 1

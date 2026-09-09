@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_runtime
 import herdr_coordination as coordination
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
@@ -1277,17 +1278,34 @@ def wrapper_outcome(subtype, head_sha, base_sha, dirty):
     return ("paused" if usable else "failed"), "error"
 
 
+def _selected_headless_environment(cwd):
+    selection = _PAYLOAD_SELECTION.get()
+    if selection is None:
+        return None
+    actual = repository_context(cwd)
+    if actual["repo_id"] != selection["context"]["repo_id"]:
+        raise ValueError("headless launch repository does not match selected repository")
+    scope = selection["scope"]
+    actual_scope = account_scope(cwd, "claude", personal=scope["kind"] == "personal")
+    if actual_scope["account_id"] != scope["account_id"]:
+        raise ValueError("headless launch account does not match the actual checkout")
+    child_env = dict(os.environ)
+    agent_runtime._apply_launch_environment(child_env, scope)
+    return child_env
+
+
 def run_headless(argv, cwd, stdin_text, timeout_secs):
     """Run `claude -p` with the text on stdin in its own process group; kill
     the group on timeout. (subtype, result, exit_code) where subtype is
     'timeout', 'unparseable', or the result's subtype."""
     if coordination.locks_held():
         raise RuntimeError("model subprocess cannot run under coordination locks")
+    child_env = _selected_headless_environment(cwd)
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
+                                text=True, start_new_session=True, env=child_env)
     except OSError as e:
         sys.stderr.write(f"[X] cannot launch claude: {e}\n")
         return subtype, result, exit_code
@@ -1311,6 +1329,7 @@ def run_mech(rd, a, brief, timeout_secs) -> int:
     """Launch a headless capped worker; write start/end ledger lines and a
     guaranteed completion record. Exit 0 all writes ok; 2 nothing written;
     3 a post-start step failed (git lookup, record write, or end line)."""
+    _selected_headless_environment(a.worktree)
     start_ts = now_iso()
     caps = {"max_turns": a.max_turns, "max_budget_usd": a.max_budget_usd,
             "timeout_secs": a.timeout_secs}
@@ -2463,6 +2482,7 @@ def _main(argv=None) -> int:
             pass  # run_mech's first append reports the unwritable ledger as exit 2
         return run_mech(rd, ns, brief, ns.timeout_secs)
     if ns.cmd == "run-think":
+        _selected_headless_environment(ns.cwd)
         rd = repo_dir(ns.repo_slug)
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_think_id(ns.think_id), "invalid think-id")

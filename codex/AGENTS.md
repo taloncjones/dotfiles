@@ -90,7 +90,7 @@ Use these skills by default when the task matches:
 - `ecc:workspace-surface-audit` for setup, plugin, MCP, connector, repo-surface, or
   "what are we missing?" audits.
 - `superpowers:brainstorming`, `superpowers:writing-plans`,
-  `claude-plan-review` or `codex-plan-review`, and
+  `claude-spec-review`, `claude-plan-review`, and
   `superpowers:executing-plans` for substantial implementation work.
 - `ecc:tdd-workflow` or `superpowers:test-driven-development` for new behavior,
   regression fixes, and risky refactors.
@@ -119,14 +119,18 @@ Use these skills by default when the task matches:
 
 ## Superpowers Flow
 
-For substantial work, follow the same shape as Claude:
+For substantial Codex-led work:
 
 1. `superpowers:brainstorming`
-2. `superpowers:writing-plans`
-3. `claude-plan-review` for a second-model plan review
-4. `superpowers:executing-plans`
-5. `co-review` for Claude + Codex code/PR review
-6. `superpowers:verification-before-completion`
+2. `claude-spec-review` for the completed specification
+3. `superpowers:writing-plans`
+4. `claude-plan-review` for the completed implementation plan
+5. `superpowers:executing-plans`
+6. `co-review` for Claude + Codex code/PR review
+7. `superpowers:verification-before-completion`
+
+Merge requires completed Claude and Codex code reviews and any required
+adversarial verification. Approval to merge preserves these gates.
 
 The `co-review` step is for top-level sessions where you orchestrate the review.
 When you were launched _as Claude's reviewer_ (a plain "review this" request

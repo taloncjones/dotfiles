@@ -19,6 +19,11 @@ import herdr_orch_core as core
 
 class ReviewRegressions(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("WORKFLOW_PERSONAL_ACCOUNT", None)
+        os.environ.pop("CLAUDE_PERSONAL_ONLY", None)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
         self.previous = os.environ.get("HERDR_COORDINATION_ROOT")
