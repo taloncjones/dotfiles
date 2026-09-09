@@ -59,10 +59,12 @@ worktree move`, or `herdr worktree remove --workspace <id>`: none of them
 - No edits to `claude/skills/herdr-orchestration/`,
   `references/brief-template.md`, `claude/hooks/rm_guard.py`,
   `claude/hooks/scratch_policy.py`, or `claude/hooks/herdr_orch_core.py`.
-- No shared-parser refactor. The hook imports rm_guard's tokenizer,
-  segment splitter, prefix stripper, cd tracker, and shell-wrapper
-  extractor as-is (the same reuse `scratch_policy.py` does); nothing in
-  rm_guard moves.
+- No shared-parser refactor. The hook imports rm_guard's tokenizer, prefix
+  stripper, cd resolver, shell-wrapper extractor, and path helpers as-is
+  (the same reuse `scratch_policy.py` does); nothing in rm_guard moves.
+  The hook's own segment walk (D3) exists because rm_guard's
+  `split_segments` drops parentheses and treats `);` as a word, which is
+  exactly the scope bug this guard must not inherit.
 
 ## Confirmed facts (read at base `9ae3daf`, 2026-09-08)
 
@@ -70,8 +72,11 @@ worktree move`, or `herdr worktree remove --workspace <id>`: none of them
   `basename`, `expand_home`, `resolve`, `resolve_cd_target`,
   `extract_shell_c_arg`, `has_glob_chars`, `SHELL_WRAPPERS`; its
   tokenizer keeps quoted text as one token (`"$repo"` becomes `$repo`,
-  `""` becomes an empty token) and splits on `;`, `&`, `|`, `(`, `)`, and
-  newline. `scratch_policy.py` already imports it this way.
+  `""` becomes an empty token) and emits runs of `;&|()` and newline as
+  operator tokens, so `(cd /x); git ...` tokenizes to `cd`, `/x`, `);`,
+  `git`, ... and `split_segments` (which only recognizes tokens made solely
+  of `;&|` plus bare `(`/`)`) keeps `);` as a word inside the `cd`
+  segment. `scratch_policy.py` already imports rm_guard this way.
 - `herdr_orch_core.py` exposes `state_root()` (`$CLAUDE_CONFIG_DIR` or
   `~/.claude`, plus `herdr-orch`), `valid_workspace_id`, `valid_task_id`
   (`[A-Za-z0-9][A-Za-z0-9_-]*`, so no dots), `read_index(rd, ws)`, and
@@ -106,11 +111,13 @@ hook under PermissionRequest`) pin that exact list, so a new hook
   drift check in `claude-hooks.test.sh` is derived from the template and
   covers any new entry without edits.
 - `git -C<path>` (glued) is rejected by git 2.55 ("unknown option"); only
-  `-C <path>` exists. `git worktree remove <worktree>` accepts a path or a
-  unique trailing-component suffix of the path (git-worktree(1)).
-- `git config` accepts both the option grammar (`--unset`, `--add`,
-  `--remove-section`, ...) and, since 2.46, subcommands (`set`, `unset`,
-  `get`, `list`, `remove-section`, `rename-section`, `edit`).
+  `-C <path>` exists. `git remote` accepts `-v`/`--verbose` before its
+  subcommand. `git worktree remove <worktree>` accepts a path or a unique
+  trailing-component suffix of the path (git-worktree(1)). `git config`
+  accepts both the option grammar (`--unset`, `--add`, `--remove-section`,
+  ...) and, since 2.46, subcommands (`set`, `unset`, `get`, `list`,
+  `remove-section`, `rename-section`, `edit`); subsection names may
+  contain dots (`branch.release.1.remote`).
 - Docs under `docs/specs/` and `docs/plans/` are gitignored and excluded
   (`.git/info/exclude`); prior planning branches committed them with
   `git add -f` and dropped them before merge. The public-safety suite's
@@ -125,9 +132,10 @@ hook under PermissionRequest`) pin that exact list, so a new hook
   `claude-hooks.test.sh` 185/0; `scratch-policy.test.sh` 104/0;
   `herdr-orch.test.sh` 106/0; `herdr-orch-contract.test.sh` 71/0;
   `install/claude-links.test.sh` 26/0; `public-safety.test.sh` 5/0.
-- Design prototype: every rule below was executed against 83 payload
-  cases (the D8 list) in the session scratchpad; 83 passed. A deny costs
-  about 30 ms including the `git rev-parse` in D4.
+- Design prototype: every rule below was executed against the 117
+  payload cases of D8 in the session scratchpad (round 2, after the Codex
+  spec review); 117 passed. A deny costs about 30 ms including the
+  `git rev-parse` in D4.
 
 ## Design
 
@@ -163,7 +171,7 @@ One new template entry, appended to `hooks.PreToolUse` in
 A separate entry with a combined matcher, not an append to the existing
 Bash group, because the two suites above pin the Bash group's exact list
 and hooks in a group run in parallel anyway. The hook reads the PreToolUse
-JSON on stdin and dispatches on `tool_name`: `Bash` runs D3 to D6 on
+JSON on stdin and dispatches on `tool_name`: `Bash` runs D3 to D7 on
 `tool_input.command`; `Write` and `Edit` run D7 on `tool_input.file_path`;
 every other tool exits 0. Deny is exit 2 with two stderr lines (D9); allow
 is exit 0 with no output. Any exception exits 0 (fail open, the guard
@@ -172,125 +180,159 @@ convention in this directory). Malformed JSON, a missing or non-dict
 
 ### D3. Command walk (Bash)
 
-`check_command(command, real_cwd, home, roots, cwd=None)`, modelled on
-rm_guard's: `split_segments(tokenize(command))`, then per segment:
+`check_command(command, real_cwd, home, roots, home_real, cwd=None)`:
 
-1. `overridden = "DOTFILES_ALLOW_GIT_META=1" in tokens` (checked before
-   prefix stripping, so the token must lead the segment among its env
-   assignments, exactly like push_guard's `DOTFILES_ALLOW_FORCE_PUSH=1`).
-2. `tokens = strip_prefixes(tokens)`; empty: next segment.
-3. Head `cd`: `cwd = resolve_cd_target(tokens, cwd, home)`; next segment.
-   `cd ""` resolves to the current cwd; `cd "$repo"` resolves to the
-   literal `<cwd>/$repo`, which later fails the literal test (D4).
-4. Head in `SHELL_WRAPPERS` (`sh`, `bash`, `zsh`): recurse into the `-c`
-   argument with the tracked cwd; next segment.
-5. `overridden`: next segment (the override covers one segment only).
-6. Head `git` (by basename, so `/usr/bin/git` counts): D4 to D6.
-7. Any other head: D7's Bash writer check.
-
-The first denial wins; no denial means allow.
+1. `tokens = normalize_operators(rm_guard.tokenize(command))`: a token
+   made only of characters from `;&|()` and newline is split into bare
+   `(` and `)` tokens and maximal runs of `;&|` or newline (so `);`
+   becomes `)`, `;`; `&&` and `||` stay whole). Every other token is
+   untouched.
+2. Walk the tokens with a current segment, a tracked cwd, and a cwd
+   stack. `(` flushes the current segment and pushes the tracked cwd; `)`
+   flushes and pops it (a subshell's `cd` never leaks out); an operator
+   token flushes with that operator as the segment's terminator; end of
+   input flushes with an empty terminator. Flushing evaluates the segment
+   (step 3) and may update the tracked cwd. The first denial wins.
+3. Per segment, in this order:
+   a. Redirection scan (D7) on the raw tokens, before anything else and
+   whatever the head is (`git status > .git/config` denies).
+   b. `stripped = rm_guard.strip_prefixes(raw)`; empty: done. The
+   override (D6) is present only when `DOTFILES_ALLOW_GIT_META=1` is
+   among the tokens strip_prefixes removed (the leading assignments
+   and wrappers), never when it appears after the head.
+   c. Head `cd`: the tracked cwd becomes `resolve_cd_target(stripped,
+   cwd, home)` only when the terminator is `;`, `&&`, `||`, newline,
+   or end of input. A `cd` ended by `|` or `&` runs in its own subshell
+   and changes nothing. `cd ""` resolves to the current cwd; `cd
+   "$repo"` resolves to the literal `<cwd>/$repo`, which fails the
+   literal test in D4.
+   d. Override present: done (that segment is allowed; a wrapper segment
+   led by the override is not descended into).
+   e. Head in `SHELL_WRAPPERS` (`sh`, `bash`, `zsh`): recurse into the
+   `-c` argument with the tracked cwd; the inner script has its own
+   segments and override positions.
+   f. Head `git` (by basename, so `/usr/bin/git` counts): D4 and D5.
+   g. Any other head: the writer check of D7.
 
 ### D4. Git invocation parsing and the fixture exemption
 
 `parse_git(tokens)` skips git's global options to find the subcommand:
 `-C <path>` values are collected in order; `-c`, `--namespace`,
-`--config-env` consume one value; `--git-dir <x>`, `--work-tree <x>`,
-`--git-dir=<x>`, `--work-tree=<x>` are collected as location hints; any
-other `-`-prefixed token is skipped. The first non-option token is the
-subcommand; the rest are its args.
+`--config-env` consume one value; `--git-dir`, `--work-tree` (separate or
+`=` form) set a location-hint flag; any other `-`-prefixed token is
+skipped. The first non-option token is the subcommand; the rest are its
+args.
 
 Effective directory: start from the tracked cwd, apply each `-C` value in
 order with `resolve(expand_home(value, home), current)`; an empty `-C ""`
 is a no-op (as in git). A value or the resulting path containing `$`, a
-backtick, or a glob character is not literal.
+backtick, or a glob character is not literal: reason "working directory
+contains an unexpanded variable or glob".
 
-`fixture_dir(path, roots)` returns None (fixture) or a reason string:
+A mutating shape (D5 R1, R2) that carries a location hint is denied with
+reason "--git-dir/--work-tree forms are not accepted; use git -C": the
+fixture idiom is `git -C`, and a hint can select metadata the cwd probe
+below would not see.
+
+Temp roots: `realpath($TMPDIR)` when `TMPDIR` is set and absolute and not
+`/`, HOME, an ancestor of HOME, or shallower than two components; plus
+`realpath("/tmp")` always. `under_root(c)` returns the matching root when
+`c` starts with `root + "/"`, except that a path equal to or under
+`realpath(HOME)` is never under a root, whatever the roots are: a checkout
+under HOME is real by definition (`~/Git/...`), and this is also what lets
+the suite build a "real" repository hermetically (D8).
+
+`fixture_dir(path)` returns None (fixture) or a reason string:
 
 1. `c = canon(path)` (realpath of the longest existing ancestor joined
    with the rest, as in scratch_policy).
-2. `c` must be strictly under a temp root (`root + "/"` prefix). Roots:
-   `realpath($TMPDIR)` when `TMPDIR` is set and absolute and not `/`,
-   HOME, an ancestor of HOME, or shallower than two components; plus
-   `realpath("/tmp")` always. Not under any root: reason "targets a
-   checkout outside every temp root".
-3. `c` must exist as a directory: reason "fixture path does not exist yet
-   (resolve mktemp -d in a separate call)". This is deliberate: a path
-   that does not exist at hook time cannot be proven a fixture, and the
-   alternative (allow non-existent paths) opens
-   `git worktree add /tmp/wt && git -C /tmp/wt remote remove origin`,
-   which would mutate the real repo's shared config through a linked
+2. `c` must be under a root: else reason "targets a checkout outside every
+   temp root".
+3. `c` must exist as a directory: else reason "fixture path does not exist
+   yet (resolve mktemp -d in a separate call)". Deliberate: a path that
+   does not exist at hook time cannot be proven a fixture, and allowing it
+   would open `git worktree add /tmp/wt && git -C /tmp/wt remote remove
+origin`, which mutates the real repo's shared config through a linked
    worktree created moments earlier.
 4. `git -C <c> rev-parse --path-format=absolute --git-common-dir`, run
    with `GIT_CEILING_DIRECTORIES=<the matched root>`,
    `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, and `GIT_DIR`,
    `GIT_WORK_TREE`, `GIT_COMMON_DIR` removed from the environment, 5 s
-   timeout. Non-zero exit or timeout: reason "fixture path is not inside
-   a repository under the temp root". The printed common dir, canonicalized,
-   must also be strictly under a temp root: otherwise reason "fixture path
-   is a linked worktree whose .git lives outside the temp root". This is
-   the check that closes the linked-worktree escape (a `.git` file under
-   `/tmp` whose `gitdir:` points at a real checkout).
-
-Location hints (`--git-dir`, `--work-tree`, and their `=` forms) must each
-be literal and canonicalize strictly under a temp root; otherwise the
-mutation is denied with reason "--git-dir/--work-tree outside the temp
-root". `GIT_DIR=`-style env assignments are stripped by `strip_prefixes`
-and not interpreted (accepted hole, listed in D10).
+   timeout. Non-zero exit, timeout, or launch failure: reason "fixture
+   path is not inside a repository under the temp root". The printed
+   common dir, canonicalized, must also be under a root: else reason
+   "fixture path is a linked worktree whose .git lives outside the temp
+   root". This closes the linked-worktree escape (a gitfile under a root
+   whose `gitdir:` resolves into a real checkout).
 
 The exemption is evaluated only for the mutating shapes in D5; reads and
 unguarded subcommands never reach it, so they never pay the rev-parse.
 
 ### D5. Mutating git shapes
 
-Rule R1, remotes. Subcommand `remote` whose first arg is one of `remove`,
-`rm`, `set-url`, `rename`, `prune`: mutation. Deny unless the effective
-directory is a fixture (D4). The remote name is irrelevant (an unexpanded
-`"$r"` still denies).
+Rule R1, remotes. Subcommand `remote`; skip leading `-`-prefixed args
+(`-v`, `--verbose`); the first remaining arg is the remote subcommand.
+`remove`, `rm`, `set-url`, `rename`, `prune`: mutation. Deny unless the
+effective directory is a fixture (D4). The remote name is irrelevant (an
+unexpanded `"$r"` still denies).
 
-Rule R2, config writes. Subcommand `config`. Classify with
-`config_action(args)`:
+Rule R2, config writes. Subcommand `config`. `config_action(args)`
+returns `(kind, keys, section_level, scope_outside, file_path)`:
 
 - value-taking options consumed with their value: `--file`/`-f`,
   `--blob`, `--type`, `--default`, `--comment`; `--file=<x>` also sets
   the file path;
 - `--global` or `--system`: scope outside the repo;
 - write options: `--add`, `--replace-all`, `--unset`, `--unset-all`,
-  `--remove-section`, `--rename-section`, `--edit`, `-e`;
+  `--remove-section`, `--rename-section`, `--edit`, `-e`; the two
+  section options also set section_level;
 - read options: `--get`, `--get-all`, `--get-regexp`, `--get-urlmatch`,
   `--list`, `-l`, `--get-colorbool`, `--get-color`;
 - positionals collected in order; a leading positional `set`, `unset`,
-  `remove-section`, `rename-section`, or `edit` makes it a write and is
-  dropped; a leading `get` or `list` makes it a read and is dropped;
+  `remove-section`, `rename-section`, or `edit` makes it a write (the two
+  section verbs set section_level) and is dropped; a leading `get` or
+  `list` makes it a read and is dropped;
 - with no explicit action: two or more positionals is a write (`git config
-<key> <value>`), otherwise a read.
+<key> <value>`), otherwise a read;
+- keys: the first two positionals for a section-level action (rename
+  names old and new), else the first positional.
 
-The key is the first remaining positional. A write is guarded when the
-key is not literal (unexpanded variable) or matches, case-insensitively,
-`^(remote(\..*)?|branch\.[^.]+(\.(remote|merge|pushremote))?|core(\..*)?)$`:
-every `remote.*` key and the `remote` section, `branch.<name>` as a
-section (for `--remove-section` / `--rename-section`) plus its `remote`,
-`merge`, and `pushremote` keys (the upstream is the pair; the incident
-wiped both), and every `core.*` key. Other keys (`user.name`,
-`branch.x.description`, ...) are never guarded.
+A write is guarded when it has no key at all (`--edit`, `-e`, `edit`: a
+whole-file write), or any key is not literal (unexpanded variable), or any
+key matches, case-insensitively:
+
+- key-level: `^(remote(\..*)?|core(\..*)?|branch\..+\.(remote|merge|pushremote))$`
+  (every `remote.*` key, every `core.*` key, and a branch's `remote`,
+  `merge`, or `pushremote` for any branch name, dots included);
+- section-level: `^(remote(\..*)?|core|branch\..+)$` (removing or renaming
+  a remote, core, or any branch section).
+
+Other keys (`user.name`, `branch.x.description`, ...) are never guarded.
 
 For a guarded write: `--global`/`--system` denies always (reason "edits
 the user's git config"); a `--file` path denies unless literal and
-canonicalized strictly under a temp root; otherwise the effective
-directory rule of D4 applies (`--local`, `--worktree`, and the default
-scope all mean "this checkout").
+canonicalized under a root (D4's `under_root`, so a file under HOME
+denies); otherwise the effective directory rule of D4 applies (`--local`,
+`--worktree`, and the default scope all mean "this checkout"). The
+key-less `--edit` forms follow the same three branches.
 
 `git -c key=value <cmd>` is a per-invocation override, not a write, and is
 never guarded.
 
 Rule R3, another task's branch or worktree. Read-only lookup over
-`STATE_ROOT/*/tasks/<task_id>.json` (basename minus `.json` must satisfy
-`valid_task_id`, which excludes every sidecar; symlinks and non-object
-JSON skipped; any read error skips the record). A record is _protected_
-when its `status` is not in `{"merged", "failed", "abandoned"}` and its
-`task_id` (the filename stem) is not the session's own task. The own task
-resolves from `HERDR_WORKSPACE_ID` through `read_index` across slugs,
-sorted-first, exactly as scratch_policy's `log_allow` does; no index means
-no own-task exemption.
+`STATE_ROOT/<slug>/tasks/<task_id>.json` for every slug (basename minus
+`.json` must satisfy `valid_task_id`, which excludes every sidecar;
+symlinks and non-object JSON skipped; any read error skips the record).
+The session's own task is the pair `(repo_slug, task_id)` read from the
+workspace index that `HERDR_WORKSPACE_ID` resolves to (`read_index`
+across slugs, sorted-first, exactly as scratch_policy's `log_allow`);
+no index means no own-task exemption. A record is _protected_ when its
+`status` is not in `{"merged", "failed", "abandoned"}` and `(slug,
+task_id)` is not the own pair. Protection is deliberately cross-slug: a
+branch name in flight in any orchestrated repo is protected everywhere
+(the false positive is a same-named branch in an unrelated repo, which
+the override covers), while the exemption is slug-scoped so a same-named
+task id in another repo never exempts.
 
 - `git branch` with a delete flag (`-d`, `-D`, `--delete`, or a bundled
   short group containing `d` or `D`): every positional is a branch name;
@@ -309,35 +351,42 @@ Rule R4 is D7 (files). Every other git subcommand allows.
 
 ### D6. Override
 
-`DOTFILES_ALLOW_GIT_META=1` as a leading env assignment on the same
-segment allows that segment through every rule (R1 to R4). The denial
-names it and states the condition: explicit user confirmation in
-conversation, never added by the model on its own. Consumers:
-`/post-merge` Step 3 under herdr (the record may still read `reviewed`),
-and a human-confirmed `git remote set-url` in an orchestrator session.
-Precedent: push_guard's `DOTFILES_ALLOW_FORCE_PUSH=1`.
+`DOTFILES_ALLOW_GIT_META=1` as a leading env assignment of a segment
+(among the tokens `strip_prefixes` removes: before the head, possibly
+after `env`) allows that segment through every rule. It is not an
+override when it appears after the head (a config value, a trailing
+argument), and it does not carry to an adjacent segment. A wrapper
+segment led by the override is allowed without descending into its
+script; a script inside `sh -c` may carry its own override on its own
+segments. The denial names the token and states the condition: explicit
+user confirmation in conversation, never added by the model on its own.
+Consumers: `/post-merge` Step 3 under herdr (the record may still read
+`reviewed`), and a human-confirmed `git remote set-url` in an
+orchestrator session. Precedent: push_guard's `DOTFILES_ALLOW_FORCE_PUSH=1`.
 
 ### D7. Guarded files (Write, Edit, and Bash writers)
 
 A path is a guarded file when, after `expand_home` and `resolve` against
 the effective cwd, it matches `(^|/)\.git/(config|info/exclude)$` and its
-canonical form is not strictly under a temp root. Non-literal paths are
-never matched (an unexpanded variable in a file path cannot be resolved,
-and Write/Edit paths are literal by construction).
+canonical form is not under a root (D4's `under_root`, HOME excluded).
+Non-literal paths are never matched (an unexpanded variable in a file path
+cannot be resolved, and Write/Edit paths are literal by construction).
 
 - Tools `Write` and `Edit`: deny when `tool_input.file_path` is a guarded
   file. `Read`, `NotebookEdit`, and everything else: exit 0. The documented
   flows that touch `.git/info/exclude` (`bin/setup-claude`, the todos
   script `todos.sh`) are shell scripts invoked by name, never Write/Edit
   calls, so nothing legitimate is caught.
-- Bash, per segment (any head): a redirection token (`>`, `>>`, `>|`,
-  `1>`, `2>`, `1>>`, `2>>`, `&>`, `&>>`) followed by a guarded file, or a
-  token gluing one of those to a guarded file (`>>.git/config`); and for
-  heads `tee`, `cp`, `mv`, `truncate`, or `sed` with an in-place flag
-  (`-i...` short, `--in-place[=...]`), any non-option token that is a
-  guarded file. The tokenizer does not split on `>`, so the glued form is
-  one token and the spaced form is two adjacent tokens; `&>` splits at
-  `&` and the `>` starts the next segment, which the same scan catches.
+- Bash, every segment, before head dispatch (D3 step 3a): a redirection
+  token (`>`, `>>`, `>|`, `1>`, `2>`, `1>>`, `2>>`, `&>`, `&>>`) followed
+  by a guarded file, or a token gluing one of those to a guarded file
+  (`>>.git/config`). The tokenizer does not split on `>`, so the glued
+  form is one token and the spaced form is two adjacent tokens; `&>`
+  splits at `&` and the `>` starts the next segment, which the same scan
+  catches.
+- Bash, heads `tee`, `cp`, `mv`, `truncate`, or `sed` with an in-place
+  flag (`-i...` short, `--in-place[=...]`): any non-option token that is a
+  guarded file.
 
 ### D8. Test suite: `claude/hooks/git-remote-guard.test.sh`
 
@@ -347,73 +396,113 @@ failure, `PYTHONDONTWRITEBYTECODE=1`, the hook path overridable through
 `GIT_REMOTE_GUARD_HOOK` (static checks skip when it is overridden).
 
 Fixture safety, enforced by the suite's own shape and by a contract text
-scan: one mktemp root `FIX=$(mktemp -d /tmp/git-remote-guard.XXXXXX)`
-asserted with `[ -n "$FIX" ] && [ -d "$FIX" ]` before any use; every
-fixture git call is `env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-git -C "<path under FIX>" ...`; no `cd` anywhere in the file; no
-`git remote` or `git config` mutation outside `$FIX`; a trap removes
-`$FIX`. Fixtures: `$FIX/repo` (a real repo with an `origin` remote and one
-commit), `$FIX/wt` (a linked worktree of `$FIX/repo`, created with
-`git -C "$FIX/repo" worktree add`), `$FIX/esc` (a directory whose `.git`
-is a file reading `gitdir: /Users/grg-test-user/proj/.git/worktrees/esc`,
-the escape shape), `$FIX/tmpdir` (the per-case `TMPDIR`), `$FIX/home` (the
-hook's `HOME`), `$FIX/cfg` (a throwaway `CLAUDE_CONFIG_DIR` holding
-`herdr-orch/slug-x/tasks/T-1.json` in-progress with branch `talon/T-1/x`
-and worktree `$FIX/wt-t1`, `T-2.json` merged, `T-3.json` reviewed, and
-`workspaces/w1.json` for `T-1`), `$FIX/wt-t1` and `$FIX/other` (plain
-directories). The synthetic non-temp cwd is `/Users/grg-test-user/proj`
-(non-existent, outside every root, the same idiom rm_guard's cases use).
+scan:
+
+- one mktemp root `FIX=$(mktemp -d /tmp/git-remote-guard.XXXXXX)`
+  asserted with `[ -n "$FIX" ] && [ -d "$FIX" ]` before any use, removed
+  by a trap;
+- every fixture git call goes through one helper, `g()`, which runs
+  `env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"`, and every
+  such call names its repository with `-C "<path under $FIX>"` or, for
+  `init`, a path argument under `$FIX`;
+- no executed `cd` anywhere in the file: the two-character word `cd`
+  followed by a space may appear only inside a payload string on a case
+  line (a line starting with the case helper's name). The contract scan
+  is: every line matching `(^|[;&|(]|[[:space:]])cd[[:space:]]` must start
+  with the case helper name;
+- no `git remote` or `git config` mutation outside `$FIX`.
+
+Fixtures: `$FIX/repo` (a real repo with an `origin` remote and one
+commit), `$FIX/wt` (a linked worktree of `$FIX/repo`), `$FIX/esc` (a
+directory whose `.git` is a gitfile reading
+`gitdir: /Users/grg-test-user/proj/.git/worktrees/esc`, the
+discovery-failure shape), `$FIX/tmpdir` (the per-case `TMPDIR`),
+`$FIX/home` (the hook's `HOME`), `$FIX/home/proj` (a real repo with a
+remote and one commit; under HOME, so outside every root by D4) and
+`$FIX/tmpdir/wt-esc` (a linked worktree of `$FIX/home/proj`: under a root
+while its common dir is not, the true containment escape), `$FIX/cfg` (a
+throwaway `CLAUDE_CONFIG_DIR` holding `herdr-orch/slug-x/tasks/T-1.json`
+in-progress with branch `talon/T-1/x` and worktree `$FIX/wt-t1`,
+`T-2.json` merged, `T-3.json` reviewed, `herdr-orch/slug-y/tasks/T-1.json`
+in-progress with branch `talon/T-1/y`, and `slug-x/workspaces/w1.json`
+for `T-1`), `$FIX/wt-t1` and `$FIX/other` (plain directories). The
+synthetic non-temp cwd is `/Users/grg-test-user/proj` (non-existent,
+outside every root, the idiom rm_guard's cases use).
 
 Drive: `printf '%s' "$payload" | env -u HERDR_WORKSPACE_ID HERDR_ENV=1
 TMPDIR="$FIX/tmpdir" HOME="$FIX/home" CLAUDE_CONFIG_DIR="$FIX/cfg" [extra]
 "$HOOK"`; a deny is exit 2, stdout empty, stderr exactly two lines, the
 first starting `Blocked: `; an allow is exit 0 with empty stdout and
-stderr. Gate cases use a separate runner that omits `HERDR_ENV=1`.
+stderr. Gate cases use a second runner that unsets `HERDR_ENV` instead of
+setting it.
 
 Deny cases (cwd `/Users/grg-test-user/proj` unless noted): bare
 `git remote remove origin`; `remote rm`, `set-url`, `rename`, `prune`;
+`remote -v remove origin`; `remote --verbose remove origin`;
 `( cd "" && git remote remove origin )`; `( cd "$repo" && git remote
-remove origin )`; `git -C "$d" remote remove origin`; `-C` to a
-non-existent temp path; `-C $FIX/tmpdir` (not a repo); `-C $FIX/esc`
-(escape); `-C /Users/grg-test-user/proj`; `-C ""`; `sh -c 'git remote
-remove origin'`; `env FOO=1 git remote remove origin`; `/usr/bin/git
-remote remove origin`; `ls && git remote remove origin`; `git config
---unset remote.origin.url`; `git config remote.origin.url https://x`;
-`--remove-section branch.main`; `--unset branch.main.remote`; `git config
-core.hooksPath /x`; `--global core.sshCommand ssh`; `git config set
-remote.origin.url x`; `git config unset core.hooksPath`; `--file
+remove origin )`; `( cd $FIX/repo ); git remote remove origin` and the
+glued `(cd $FIX/repo); ...` (subshell scope); `cd $FIX/repo | git remote
+remove origin` (pipeline); `cd $FIX/repo & git remote remove origin`
+(background); `cd $FIX/tmpdir/missing; git remote remove origin`; `git -C
+"$d" remote remove origin`; `-C` to a non-existent temp path; `-C
+$FIX/tmpdir` (not a repo); `-C $FIX/esc` (discovery failure); `-C
+$FIX/tmpdir/wt-esc` (containment escape, and the first stderr line
+contains `linked worktree whose .git lives outside the temp root`); `-C
+$FIX/home/proj` (under HOME); `-C /Users/grg-test-user/proj`; `-C ""`;
+`sh -c 'git remote remove origin'`; `env FOO=1 git remote remove origin`;
+`/usr/bin/git remote remove origin`; `ls && git remote remove origin`;
+`git config remote.origin.url DOTFILES_ALLOW_GIT_META=1` (token as a
+value); `git remote remove origin DOTFILES_ALLOW_GIT_META=1` (trailing);
+`DOTFILES_ALLOW_GIT_META=1 true; git remote remove origin` (adjacent
+segment); `git config --unset remote.origin.url`; `git config
+remote.origin.url https://x`; `--remove-section branch.main`;
+`--remove-section branch.release.1`; `--rename-section foo branch.main`;
+`--unset branch.main.remote`; `--unset branch.release.1.remote`; `git
+config core.hooksPath /x`; `--global core.sshCommand ssh`; `git config set
+remote.origin.url x`; `git config unset core.hooksPath`; `git config
+--edit`; `git config -e --global`; `git config edit`; `--file
 <non-temp>/.git/config remote.origin.url x`; `--unset "$key"`; `--local
 remote.origin.url x`; `--git-dir=<non-temp>/.git remote remove origin`;
-`git branch -D talon/T-1/x`; `--delete --force talon/T-1/x`; `-D
-talon/T-3/x` (reviewed, unmerged); `-D refs/heads/talon/T-1/x`; `git
-worktree remove $FIX/wt-t1`; `--force $FIX/wt-t1`; `remove wt-t1`
-(suffix); `echo x >> .git/config`; `printf 'x\n' >>.git/info/exclude`;
+`-C $FIX/repo --git-dir $FIX/wt/.git remote remove origin` (hint under a
+root still denies); `--work-tree=$FIX/repo remote remove origin`; `git
+branch -D talon/T-1/x`; `--delete --force talon/T-1/x`; `-D talon/T-3/x`
+(reviewed, unmerged); `-D refs/heads/talon/T-1/x`; `-D talon/T-1/y` with
+`HERDR_WORKSPACE_ID=w1` (same task id, other slug); `git worktree remove
+$FIX/wt-t1`; `--force $FIX/wt-t1`; `remove wt-t1` (suffix); `echo x >>
+.git/config`; `printf 'x\n' >>.git/info/exclude`; `git status >
+.git/config`; `cd . > .git/config`; `sh -c true > .git/info/exclude`;
 `tee -a .git/config`; `sed -i '' 's/a/b/' .git/config`; `cp x
 .git/config`; `echo x > <non-temp>/.git/config`; Write
 `<non-temp>/.git/config`; Edit `<non-temp>/.git/info/exclude`; Write
-`.git/config` (relative).
+`.git/config` (relative); Write `$FIX/home/proj/.git/config`.
 
 Allow cases: `git -C $FIX/repo remote remove origin`; `-C $FIX/repo remote
 set-url origin x`; `-C $FIX/wt remote remove origin` (linked worktree
-inside the root); `-C $FIX/repo/.git remote remove origin` (subdir of a
-fixture); `cd $FIX/repo && git remote remove origin` (literal cd); bare
-`git remote remove origin` with payload cwd `$FIX/repo`; `-C $FIX/repo
-config remote.origin.url x`; `git config --file $FIX/tmpdir/cfg
-remote.origin.url x`; `git remote add origin x`; `remote -v`; `remote
-get-url origin`; `config --get remote.origin.url`; `config
-remote.origin.url` (single positional read); `config --list`; `config get
-remote.origin.url`; `config user.name x`; `git -c remote.origin.url=x
-fetch --dry-run`; `branch --list`; `branch -D feature/other`; `branch -D
-talon/T-2/x` (merged); `branch -D talon/T-1/x` with
-`HERDR_WORKSPACE_ID=w1` (own task); `worktree remove --force $FIX/other`;
-`worktree remove $FIX/wt-t1` with `HERDR_WORKSPACE_ID=w1`; `worktree
-list`; `worktree prune`; `DOTFILES_ALLOW_GIT_META=1 git remote remove
-origin`; `git commit -m 'docs: git remote remove origin'` (mention);
-`grep -rn 'git remote remove' claude/`; `echo x >> .gitignore`; `echo x >>
-$FIX/tmpdir/.git/config`; `sed -n 1p .git/config`; Write `$FIX/home/.gitconfig`;
-Write `$FIX/tmpdir/r/.git/config`; Read `<non-temp>/.git/config`; an
-empty command; `HERDR_ENV` unset; `HERDR_ENV=0`; malformed JSON (`not
-json`); a payload whose `tool_input` is a string.
+inside the root); `-C $FIX/repo/.git remote remove origin`; `cd $FIX/repo
+&& git remote remove origin`; `cd $FIX/repo; git remote remove origin`;
+`( cd $FIX/repo && git remote remove origin )`; bare `git remote remove
+origin` with payload cwd `$FIX/repo`; `-C $FIX/repo config
+remote.origin.url x`; `git config --file $FIX/tmpdir/cfg remote.origin.url
+x`; `git remote add origin x`; `remote -v`; `remote get-url origin`;
+`config --get remote.origin.url`; `config remote.origin.url` (single
+positional read); `config --list`; `config get remote.origin.url`;
+`config user.name x`; `config branch.main.description x`; `git -c
+remote.origin.url=x fetch --dry-run`; `branch --list`; `branch -D
+feature/other`; `branch -D talon/T-2/x` (merged); `branch -D talon/T-1/x`
+with `HERDR_WORKSPACE_ID=w1` (own task); `worktree remove --force
+$FIX/other`; `worktree remove $FIX/wt-t1` with `HERDR_WORKSPACE_ID=w1`;
+`worktree list`; `worktree prune`; `DOTFILES_ALLOW_GIT_META=1 git remote
+remove origin`; `env DOTFILES_ALLOW_GIT_META=1 git remote remove origin`;
+`sh -c 'DOTFILES_ALLOW_GIT_META=1 git remote remove origin'`;
+`DOTFILES_ALLOW_GIT_META=1 sh -c 'git remote remove origin'`; `git commit
+-m 'docs: git remote remove origin'` (mention); `grep -rn 'git remote
+remove' claude/`; `echo x >> .gitignore`; `echo x >>
+$FIX/tmpdir/.git/config`; `sed -n 1p .git/config`; Write
+`$FIX/home/.gitconfig`; Write `$FIX/tmpdir/r/.git/config`; Read
+`<non-temp>/.git/config`; an empty command; `HERDR_ENV` unset;
+`HERDR_ENV=0`; malformed JSON (`not json`); a payload whose `tool_input`
+is a string.
 
 Read-only proof: a sha256 listing of every file under `$FIX/cfg` is
 identical before and after a denied `git branch -D talon/T-1/x` and an
@@ -441,18 +530,20 @@ Fixture repos only: pass a literal, existing path under ${TMPDIR:-/tmp} to git -
 
 `<what>` names the rule and command: `git remote remove rewrites the
 shared .git/config of this checkout`, `git config write to
-remote.origin.url rewrites the shared .git/config of this checkout`,
-`git config --global/--system write to core.sshCommand edits the user's
-git config`, `git branch delete of talon/T-1/x targets the branch of
-orchestrated task T-1 (status in-progress)`, `git worktree remove of
-wt-t1 targets the worktree of orchestrated task T-1 (status
-in-progress)`, `redirection into .git/config edits git metadata shared by
-every linked worktree`, `tee on .git/config edits git metadata shared by
-every linked worktree`, `Write to /x/.git/config edits git metadata shared
-by every linked worktree`. `<reason>` is the D4 reason when one applies.
-`<segment>` is the offending segment's tokens joined by spaces, truncated
-to 160 characters. The second line is constant so the fixture-path rule
-is always present.
+remote.origin.url rewrites the shared .git/config of this checkout` (key
+`(whole file)` for the edit forms), `git config --global/--system write to
+core.sshCommand edits the user's git config`, `git config --file write to
+<key> targets a config outside the temp root`, `git branch delete of
+talon/T-1/x targets the branch of orchestrated task T-1 (status
+in-progress)`, `git worktree remove of wt-t1 targets the worktree of
+orchestrated task T-1 (status in-progress)`, `redirection into
+.git/config edits git metadata shared by every linked worktree`, `tee on
+.git/config edits git metadata shared by every linked worktree`, `Write
+to /x/.git/config edits git metadata shared by every linked worktree`.
+`<reason>` is the D4 reason when one applies (omitted with its
+parentheses otherwise). `<segment>` is the offending segment's tokens
+joined by spaces, truncated to 160 characters. The second line is constant
+so the fixture-path rule is always present.
 
 ### D10. Accepted holes (documented in the hook docstring)
 
@@ -460,29 +551,33 @@ Aliases, functions, and script files; `eval`; `$(...)` and heredoc bodies
 (a heredoc line that starts with `git remote remove origin` IS scanned as
 a segment, the same way rm_guard scans heredoc lines, so prose containing
 that command at line start in a Bash heredoc denies; write such prose with
-the Write tool); `GIT_DIR=`/`GIT_WORK_TREE=` env assignments (stripped,
-not interpreted); `xargs git ...` (the `xargs` prefix is stripped, so the
-git invocation IS checked, but its stdin-fed arguments are not visible);
-`git -C <dir>` where `<dir>` is a symlink into a real checkout is caught
-by canonicalization, but a bind mount is not; TOCTOU between the
-rev-parse and the executed command (needs a concurrent attacker with
-filesystem control; every fixture root is throwaway); `cp`/`mv` source
-detection (only the destination position matters and every non-option
-token is checked, so a guarded file anywhere in the args denies, which is
-a false positive only for `cp .git/config /tmp/backup`, itself a read).
+the Write tool); `GIT_DIR=`/`GIT_WORK_TREE=` env assignments (stripped by
+`strip_prefixes`, not interpreted); `xargs git ...` (the `xargs` prefix is
+stripped, so the git invocation IS checked, but its stdin-fed arguments
+are not visible); shell control-flow keywords (`if`, `for`, `{ }`) are
+plain words to the walk, so a `cd` inside a `{ ...; }` group leaks like a
+plain `cd` (groups run in the current shell, so that is also the shell's
+behavior); a bind mount into a real checkout (symlinks are caught by
+canonicalization); TOCTOU between the rev-parse and the executed command
+(needs a concurrent attacker with filesystem control; every fixture root
+is throwaway); `cp`/`mv` source detection (every non-option token is
+checked, so `cp .git/config /tmp/backup`, itself a read, denies).
 
 ### D11. Docs
 
 - Repo `CLAUDE.md`, Architecture symlink list: one bullet for
   `claude/hooks/git_remote_guard.py` directly after the `scratch_policy.py`
-  bullet, in the same shape (PreToolUse, matcher, what it denies, the
-  fixture rule, the override, registered in the template, tested by the
-  new suite, drift-checked by `claude-hooks.test.sh`).
-- `claude/skills/post-merge/SKILL.md`, Step 3 code block: a two-line
-  comment before `git worktree remove` stating that under herdr the guard
-  denies these two teardown commands until the record reads `merged`, and
-  that the confirmed teardown runs them with the `DOTFILES_ALLOW_GIT_META=1`
-  prefix. No other post-merge change.
+  bullet, in the same shape (PreToolUse, matcher `Bash|Edit|Write`, the
+  HERDR_ENV gate, what it denies, the fixture rule, the override
+  `DOTFILES_ALLOW_GIT_META=1`, registered in the template, tested by
+  `git-remote-guard.test.sh`, drift-checked by `claude-hooks.test.sh`).
+- `claude/skills/post-merge/SKILL.md`, Step 3 code block: the two
+  teardown commands become `DOTFILES_ALLOW_GIT_META=1 git worktree remove
+"<wt>" 2>/dev/null \` and `DOTFILES_ALLOW_GIT_META=1 git branch -D
+"<headRefName>"`, preceded by a two-line comment: in a herdr session the
+  git metadata guard denies deleting a task's worktree or branch while its
+  record is not yet `merged`; the Step 2 confirmation is the explicit
+  confirmation the override requires. No other post-merge change.
 
 ### D12. Suite registration and drift check
 
@@ -519,35 +614,54 @@ Bash|Edit|Write`. The live drift check needs no edit (derived from the
    non-temp cwd exits 2 with the two-line D9 message naming
    `git remote remove origin` and `git -C`.
 3. AC3 Incident shapes: `( cd "" && git remote remove origin )` and
-   `( cd "$repo" && git remote remove origin )` deny; `git -C
-<fixture repo> remote remove origin` allows; the linked-worktree escape
-   denies.
+   `( cd "$repo" && git remote remove origin )` deny; `( cd <fixture> );
+git remote remove origin` denies; `git -C <fixture repo> remote remove
+origin` allows; the containment escape (`$FIX/tmpdir/wt-esc`) denies
+   with the linked-worktree reason.
 4. AC4 Config: every D8 config deny and allow case behaves as listed.
 5. AC5 Task records: every D8 branch/worktree case behaves as listed and
    the throwaway state root is byte-identical afterwards.
 6. AC6 Files: every D8 Write/Edit/redirection/writer case behaves as
    listed; non-Bash, non-Write/Edit tools exit 0.
-7. AC7 Override: `DOTFILES_ALLOW_GIT_META=1 git remote remove origin`
-   allows; the deny message names the token.
+7. AC7 Override: the D8 override allow cases allow and the override deny
+   cases (value, trailing, adjacent segment) deny; the deny message names
+   the token.
 8. AC8 Registration: the template carries the D2 entry and nothing else
    changed in `hooks`, `permissions`, or `env`; `reconcile_claude_settings_file`
    delivers the entry to a fresh settings file; `claude-hooks.test.sh`
    passes with the new `grg:` label and its diff is append-only;
    `scratch-policy.test.sh` still passes.
 9. AC9 Suite: `sh claude/hooks/git-remote-guard.test.sh` under a sandbox
-   `HOME` reports `N passed, 0 failed` with at least 90 PASS lines, is
+   `HOME` reports `N passed, 0 failed` with at least 120 PASS lines, is
    registered in `bin/dotfiles-tests` (one added line, no removed lines),
-   contains no `cd`, asserts the mktemp root before use, and sets
-   `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` on fixture git
-   calls.
+   has no executed `cd` (D8 scan), asserts the mktemp root before use,
+   and routes every fixture git call through the env-isolating `g()`.
 10. AC10 Docs: `CLAUDE.md` names the hook, `PreToolUse`, `Bash|Edit|Write`,
-    `DOTFILES_ALLOW_GIT_META`, and `git-remote-guard.test.sh`;
-    `post-merge/SKILL.md` names `DOTFILES_ALLOW_GIT_META=1`.
+    `HERDR_ENV`, `DOTFILES_ALLOW_GIT_META`, and `git-remote-guard.test.sh`;
+    `post-merge/SKILL.md` Step 3 contains both prefixed teardown commands.
 11. AC11 Scope: the non-docs diff against `origin/main` touches exactly
     the files listed above; added lines are ASCII with no attribution
     strings (scan excludes `docs/` and `claude/contracts/`); every suite
     except public-safety is green and public-safety's only failure is the
     tracked-planning-artifacts one.
+
+## Review resolution (Codex spec review, round 1, 2026-09-08)
+
+Verdict was needs-rework with 13 findings. Applied: 1 (subshell and
+pipeline cwd scope, D3), 2 (override position and wrapper semantics, D3
+and D6), 3 (redirection scan on every head, D3/D7), 4 (location hints,
+resolved by denying `--git-dir`/`--work-tree` mutations outright, D4), 5
+(`git remote -v remove`, R1), 6 (dotted branch names, R2), 7 (key-less
+`--edit`, R2), 8 (fixture env isolation, D8), 9 (slug-scoped own-task
+exemption, R3), 10 (a true containment escape fixture through the HOME
+exclusion, D4/D8), 11 (executed-`cd` scan definition, D8), 12 (executable
+post-merge teardown lines, D11). Not applied: 13 (untracked planning
+artifacts): branch-only tracked specs and plans are this repo's
+established orchestration convention and the task instruction requires
+committing them; the public-safety failure is the documented expected
+one. Side finding from Codex's probe: rm_guard's `split_segments` treats
+`);` as a word, so `(cd /x); rm -rf /` hides the `rm` from rm_guard; filed
+under Follow-ups, not fixed here.
 
 ## Follow-ups (not in this task)
 
@@ -555,6 +669,8 @@ Bash|Edit|Write`. The live drift check needs no edit (derived from the
   an asserted mktemp root; never `cd "$var"` into a possibly-empty
   variable" (one line each) lives on `talon/claude-codex-parity`; add it
   when parity lands.
+- rm_guard: normalize operator runs (`);`) before segment splitting so a
+  subshell close cannot hide an `rm`; D3's walk is the reference.
 - Widen the gate to `permission_mode == auto` plain sessions if the
   incident class recurs outside herdr.
 - `git push --delete` of a task branch (push_guard).
