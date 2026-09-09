@@ -32,8 +32,9 @@ Accepted holes (allow): scripts and functions, `python -c`, `git apply`/
 `checkout`/`stash`/`restore`, `patch`, `truncate`, `touch`, `mkdir`, `ln`,
 `rsync`, `dd`, editors, `xargs`, process substitution, targets built from
 `$VAR`/`$(...)`/globs, a heredoc with no terminator, git calls past the
-10-second budget, NotebookEdit/MultiEdit. This is a guard against drift,
-not evasion.
+10-second budget, NotebookEdit/MultiEdit, `awk`/`gawk -i inplace` (cycle-3
+A-1; only sed/gsed/perl are modeled as in-place editors). This is a guard
+against drift, not evasion.
 
 Beyond TARGET_CAP (20) distinct targets, only the extra ones past the cap
 are unguarded (paths[:TARGET_CAP] keeps the first 20 seen and drops the
@@ -397,7 +398,14 @@ def has_inplace(words):
 def script_operands(words, value_opts, script_flags):
     """Operands of a sed/perl segment that has an in-place flag, minus
     option values; the first operand is the script unless an explicit
-    script option (-e/-f, or a bundled -ne/-pe cluster) is present."""
+    script option (-e/-f, or a bundled -ne/-pe cluster) is present.
+
+    Accepted gap (cycle-3 A-6): a clustered script flag (`perl -i -pe
+    's/x/y/' file`) sets explicit=True but doesn't skip the script string
+    itself, so it lands in `ops` alongside the real file. _existing()
+    drops it (it's not an existing path), so the real file is still
+    guarded -- no live miss, only a spurious over-guard if the script
+    text ever equalled an existing filename."""
     if not has_inplace(words):
         return []
     explicit = False
@@ -442,7 +450,13 @@ def copy_targets(words, cwd, home, include_sources):
     resolved by resolve_targets/canon() through its final target, not as
     the symlink entry mv actually removes; catching that needs a
     dereference-mode flag threaded through every target tuple, not a
-    local fix here."""
+    local fix here.
+
+    Accepted gap (cycle-3 A-5): `cp -r a/ /destdir/` computes dest as
+    basename('/destdir/') == '' -> '/destdir' rather than '/destdir/a'.
+    Harmless: '/destdir' is a parent of the real target, so it is guarded
+    whenever the real target would be -- no live miss, latent imprecision
+    only."""
     ops, tdir, skip = [], None, False
     for t in words[1:]:
         if skip:
@@ -546,7 +560,12 @@ def cd_target_candidates(words, cwd, home):
     and a write is guarded if EITHER lands on a tracked path (B3). Option
     flags (`-L`/`-P`/...) and a `--` marker are skipped to find the real
     operand; bare `cd` and `cd -` are a no-op (HOME/OLDPWD are not
-    tracked), matching the existing accepted-hole simplification."""
+    tracked), matching the existing accepted-hole simplification.
+
+    Accepted gap (cycle-3 A-3): the same {target, cwd} conservatism means
+    `mkdir -p /tmp/x && cd /tmp/x && echo hi > out.txt` can be denied even
+    though /tmp/x exists by the time the shell actually runs `cd` -- a
+    false-positive deny, never a missed guard."""
     operand, seen_dashdash = None, False
     for t in words[1:]:
         if not seen_dashdash and t == "--":
@@ -597,6 +616,14 @@ def bash_targets(command, cwd, home, depth=0):
                     found.extend((c, w) for c in cwds)
             else:
                 words.append(t)
+        # Accepted gap (cycle-3 A-2): rm_guard.strip_prefixes only skips a
+        # wrapper name, not its own flag argument (`nice -n 10 sed -i ...`,
+        # `time -p ...`, `env -i ...`, `sudo -u x ...`), so the loop below
+        # breaks on the flag token and the wrapped sed/perl/tee/cp/mv/rm
+        # operand is never inspected. Redirects are unaffected (the
+        # sentinel scan above is head-independent); only operand-writers
+        # behind a flagged wrapper are missed, a rare shape for an
+        # orchestrator edit.
         words = rm_guard.strip_prefixes(words)
         if not words:
             continue
@@ -786,7 +813,12 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget):
         # tracked files in two repos this session owns), the generator
         # below finds none and target_slug prints as "unknown" -- a safe
         # deny either way, but the refusal wording is misleading for this
-        # one-command-two-repos shape (A4).
+        # one-command-two-repos shape (A4). Same misleading-wording family,
+        # different trigger (cycle-3 A-4): if the git budget drains mid
+        # classify(), a later repo_slug_of returns None, "unknown" prints,
+        # and this denies scope for a target the session actually owns a
+        # valid marker for -- fails safe (denies); a retry with a fresh
+        # budget succeeds.
         target = next((s for s in slugs if s not in owned), None) or "unknown"
         return "deny", "scope", first, {"target_slug": target}
     slug = next(iter(slugs))
