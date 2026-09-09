@@ -132,9 +132,9 @@ hook under PermissionRequest`) pin that exact list, so a new hook
   `claude-hooks.test.sh` 185/0; `scratch-policy.test.sh` 104/0;
   `herdr-orch.test.sh` 106/0; `herdr-orch-contract.test.sh` 71/0;
   `install/claude-links.test.sh` 26/0; `public-safety.test.sh` 5/0.
-- Design prototype: every rule below was executed against the 117
-  payload cases of D8 in the session scratchpad (round 2, after the Codex
-  spec review); 117 passed. A deny costs about 30 ms including the
+- Design prototype: every rule below was executed against the 148
+  payload cases of D8 in the session scratchpad (round 3, after two Codex
+  spec reviews); 148 passed. A deny costs about 30 ms including the
   `git rev-parse` in D4.
 
 ## Design
@@ -180,39 +180,81 @@ convention in this directory). Malformed JSON, a missing or non-dict
 
 ### D3. Command walk (Bash)
 
-`check_command(command, real_cwd, home, roots, home_real, cwd=None)`:
+`check_command(command, real_cwd, home, roots, home_real, cwds=None)`
+tracks a SET of possible working directories, never a single one, because
+a `cd` may be skipped, undone by a subshell, or fabricated by the
+tokenizer. A mutation is allowed only when every possible directory is a
+fixture (D4).
 
-1. `tokens = normalize_operators(rm_guard.tokenize(command))`: a token
+1. Quoted-operator rule. Scan the raw command text with a quote-aware
+   state machine (single quotes, double quotes, backslash). If any
+   character from `;&|()` or a newline appears inside quotes or after a
+   backslash, the tokenizer would turn it into a fake segment boundary
+   (`echo ';' cd /tmp/f; git ...` would fabricate a `cd` segment), so the
+   possible-cwd set becomes the single non-literal sentinel
+   `$UNTRUSTED_CWD`: every cd-derived exemption fails, explicit `git -C`
+   still works, and the segment scan still runs.
+2. `tokens = normalize_operators(rm_guard.tokenize(command))`: a token
    made only of characters from `;&|()` and newline is split into bare
    `(` and `)` tokens and maximal runs of `;&|` or newline (so `);`
-   becomes `)`, `;`; `&&` and `||` stay whole). Every other token is
-   untouched.
-2. Walk the tokens with a current segment, a tracked cwd, and a cwd
-   stack. `(` flushes the current segment and pushes the tracked cwd; `)`
-   flushes and pops it (a subshell's `cd` never leaks out); an operator
-   token flushes with that operator as the segment's terminator; end of
-   input flushes with an empty terminator. Flushing evaluates the segment
-   (step 3) and may update the tracked cwd. The first denial wins.
-3. Per segment, in this order:
-   a. Redirection scan (D7) on the raw tokens, before anything else and
-   whatever the head is (`git status > .git/config` denies).
-   b. `stripped = rm_guard.strip_prefixes(raw)`; empty: done. The
-   override (D6) is present only when `DOTFILES_ALLOW_GIT_META=1` is
-   among the tokens strip_prefixes removed (the leading assignments
-   and wrappers), never when it appears after the head.
-   c. Head `cd`: the tracked cwd becomes `resolve_cd_target(stripped,
-   cwd, home)` only when the terminator is `;`, `&&`, `||`, newline,
-   or end of input. A `cd` ended by `|` or `&` runs in its own subshell
-   and changes nothing. `cd ""` resolves to the current cwd; `cd
-   "$repo"` resolves to the literal `<cwd>/$repo`, which fails the
-   literal test in D4.
-   d. Override present: done (that segment is allowed; a wrapper segment
-   led by the override is not descended into).
+   becomes `)`, `;`; `&&` and `||` stay whole); then a `|` operator that
+   directly follows a word token `>` is merged back into the word `>|`
+   (the tokenizer splits the clobber redirection at the pipe). Every other
+   token is untouched.
+3. Walk the tokens into segments. Operators (`;`, newline, `&&`, `||`,
+   `|`, `&`) terminate a segment; `(` and `)` open and close a subshell
+   scope; end of input terminates the last segment. Chains: a chain is
+   the run of segments between unconditional boundaries (`;`, newline,
+   `&`, `(`, `)`, start, end); inside a chain, segments are joined by
+   `&&`, `||`, or `|`. Per chain keep: `start` (the possible-cwd set when
+   the chain began), `first_cd` (the target of a `cd` that is the chain's
+   first segment, which always runs), `cds` (targets of later `cd`s in
+   the chain, which may be skipped), and `pure` (true while every joiner
+   seen so far in the chain is `&&`).
+   - The possible-cwd set for a segment is: if `pure`, the single latest
+     `cd` target in the chain (`cds[-1]`, else `first_cd`, else `start`);
+     if not `pure`, `start` (or `{first_cd}` when the chain opened with a
+     cd) united with every target in `cds`. Rationale: in a pure `&&`
+     chain a segment that runs implies every earlier segment ran; after
+     any `||`, earlier `cd`s may have been skipped.
+   - At an unconditional boundary the next chain's `start` is the
+     not-pure formula (`false && cd X; git ...` leaves both the original
+     cwd and `X` possible; `cd X; git ...` leaves only `X`).
+   - `(` saves the chain state and opens a new chain whose `start` is the
+     current segment's possible set; `)` restores the saved chain (a
+     subshell's `cd` never leaks; the subshell counts as one non-first
+     segment of the outer chain).
+   - A `cd` segment records its target only when its terminator is not
+     `|` or `&` (a `cd` in a pipeline or a background job runs in its own
+     subshell). Target: `resolve_cd_target` for an argument (so `cd ""`
+     resolves to the current directory and `cd "$repo"` to the literal
+     `<cwd>/$repo`, non-literal), HOME for a bare `cd`, the sentinel for
+     `cd -`. When the segment's possible set has more than one member or
+     a non-literal member, the target is the sentinel.
+   - Taint: once any segment's head is `ln`, `mv`, `cp`, or `rsync`, or
+     is `git` with subcommand `worktree add|move|repair`, every later
+     mutation in the same command is denied with reason "an earlier
+     segment can re-point the fixture path before git runs; run it as a
+     separate call" (a same-command `ln -sfn <real> <fixture-link>` would
+     otherwise invalidate a check that already passed). Taint is sticky
+     across `)` and chain boundaries.
+4. Per segment, in this order:
+   a. `stripped = rm_guard.strip_prefixes(raw)`; the override (D6) is
+      present only when `DOTFILES_ALLOW_GIT_META=1` is among the tokens
+      strip_prefixes removed (the leading assignments and wrappers), never
+      after the head. Override present: the segment is allowed, including
+      its redirections, and a wrapper segment is not descended into.
+   b. Redirection scan (D7) on the raw tokens, whatever the head is
+      (`git status > .git/config` and `sh -c true > .git/info/exclude`
+      deny).
+   c. Empty `stripped`: done.
+   d. Head `cd`: record the target as above; done.
    e. Head in `SHELL_WRAPPERS` (`sh`, `bash`, `zsh`): recurse into the
-   `-c` argument with the tracked cwd; the inner script has its own
-   segments and override positions.
+      `-c` argument with the current possible set as its initial set; the
+      inner script has its own segments, chains, and override positions.
    f. Head `git` (by basename, so `/usr/bin/git` counts): D4 and D5.
    g. Any other head: the writer check of D7.
+   The first denial wins.
 
 ### D4. Git invocation parsing and the fixture exemption
 
@@ -223,11 +265,14 @@ convention in this directory). Malformed JSON, a missing or non-dict
 skipped. The first non-option token is the subcommand; the rest are its
 args.
 
-Effective directory: start from the tracked cwd, apply each `-C` value in
-order with `resolve(expand_home(value, home), current)`; an empty `-C ""`
-is a no-op (as in git). A value or the resulting path containing `$`, a
-backtick, or a glob character is not literal: reason "working directory
-contains an unexpanded variable or glob".
+Effective directories: for every member of the segment's possible-cwd
+set, apply each `-C` value in order with `resolve(expand_home(value,
+home), current)`; an empty `-C ""` is a no-op (as in git). A `-C` value
+containing `$`, a backtick, or a glob character: reason "working
+directory contains an unexpanded variable or glob"; a non-literal member
+(the sentinel): reason "working directory cannot be established
+(unexpanded variable, quoted operator, or cd -)". Every effective
+directory must pass `fixture_dir`; the first failure is the reason.
 
 A mutating shape (D5 R1, R2) that carries a location hint is denied with
 reason "--git-dir/--work-tree forms are not accepted; use git -C": the
@@ -277,29 +322,41 @@ effective directory is a fixture (D4). The remote name is irrelevant (an
 unexpanded `"$r"` still denies).
 
 Rule R2, config writes. Subcommand `config`. `config_action(args)`
-returns `(kind, keys, section_level, scope_outside, file_path)`:
+walks the args against fixed option tables and returns `(kind, keys,
+section_level, scope_outside, file_path, unknown_option)`:
 
-- value-taking options consumed with their value: `--file`/`-f`,
-  `--blob`, `--type`, `--default`, `--comment`; `--file=<x>` also sets
-  the file path;
+- value-taking long options, consumed with their value in both the
+  `--opt value` and `--opt=value` spellings: `--file`, `--blob`, `--type`,
+  `--default`, `--comment`, `--value`, `--url`; `--file` in either
+  spelling sets the file path;
+- short `-f`, as `-f value` or glued `-fvalue`: sets the file path;
+- read options that take one value: `--get-color`, `--get-colorbool`;
 - `--global` or `--system`: scope outside the repo;
 - write options: `--add`, `--replace-all`, `--unset`, `--unset-all`,
   `--remove-section`, `--rename-section`, `--edit`, `-e`; the two
   section options also set section_level;
 - read options: `--get`, `--get-all`, `--get-regexp`, `--get-urlmatch`,
-  `--list`, `-l`, `--get-colorbool`, `--get-color`;
+  `--list`, `-l`;
+- known flags, skipped: `--local`, `--worktree`, `--bool`, `--int`,
+  `--bool-or-int`, `--bool-or-str`, `--path`, `--expiry-date`,
+  `--fixed-value`, `--all`, `--append`, `--includes`, `--no-includes`,
+  `--null`, `-z`, `--name-only`, `--show-origin`, `--show-scope`,
+  `--show-names`, `--no-show-names`, `--`;
+- any other `-`-prefixed token sets unknown_option (fail closed: an
+  option the tables do not know could be consuming the token the walk
+  would otherwise take as the key);
 - positionals collected in order; a leading positional `set`, `unset`,
   `remove-section`, `rename-section`, or `edit` makes it a write (the two
   section verbs set section_level) and is dropped; a leading `get` or
   `list` makes it a read and is dropped;
 - with no explicit action: two or more positionals is a write (`git config
-<key> <value>`), otherwise a read;
+  <key> <value>`), otherwise a read;
 - keys: the first two positionals for a section-level action (rename
   names old and new), else the first positional.
 
-A write is guarded when it has no key at all (`--edit`, `-e`, `edit`: a
-whole-file write), or any key is not literal (unexpanded variable), or any
-key matches, case-insensitively:
+A write is guarded when unknown_option is set, or it has no key at all
+(`--edit`, `-e`, `edit`: a whole-file write), or any key is not literal
+(unexpanded variable), or any key matches, case-insensitively:
 
 - key-level: `^(remote(\..*)?|core(\..*)?|branch\..+\.(remote|merge|pushremote))$`
   (every `remote.*` key, every `core.*` key, and a branch's `remote`,
@@ -307,14 +364,15 @@ key matches, case-insensitively:
 - section-level: `^(remote(\..*)?|core|branch\..+)$` (removing or renaming
   a remote, core, or any branch section).
 
-Other keys (`user.name`, `branch.x.description`, ...) are never guarded.
+Other keys (`user.name`, `branch.x.description`, ...) with only known
+options are never guarded.
 
 For a guarded write: `--global`/`--system` denies always (reason "edits
-the user's git config"); a `--file` path denies unless literal and
-canonicalized under a root (D4's `under_root`, so a file under HOME
-denies); otherwise the effective directory rule of D4 applies (`--local`,
-`--worktree`, and the default scope all mean "this checkout"). The
-key-less `--edit` forms follow the same three branches.
+the user's git config"); a `--file` path denies unless literal and, for
+every possible cwd, canonicalized under a root (D4's `under_root`, so a
+file under HOME denies); otherwise the effective-directory rule of D4
+applies (`--local`, `--worktree`, and the default scope all mean "this
+checkout"). The key-less `--edit` forms follow the same three branches.
 
 `git -c key=value <cmd>` is a per-invocation override, not a write, and is
 never guarded.
@@ -337,12 +395,17 @@ task id in another repo never exempts.
 - `git branch` with a delete flag (`-d`, `-D`, `--delete`, or a bundled
   short group containing `d` or `D`): every positional is a branch name;
   strip a `refs/heads/` prefix; deny when it equals a protected record's
-  `branch`.
+  `branch`. A non-literal name (`"$branch"`) denies whenever at least one
+  protected record carries a branch (reason names the count), since it
+  could be any of them.
 - `git worktree remove [--force ...] <worktree>`: every positional is a
-  target; deny when its canonical path equals a protected record's
-  canonical `worktree`, or when the token is relative and the record's
-  canonical worktree ends with `/<token>` (git's trailing-component
-  form).
+  target; deny when its canonical path (resolved against any possible
+  cwd) equals a protected record's canonical `worktree`, or when the
+  token is relative and the record's canonical worktree ends with
+  `/<token>` (git's trailing-component form), or when the token is
+  relative and the possible-cwd set contains the sentinel. A non-literal
+  token denies whenever at least one protected record carries a
+  worktree.
 
 R3 never consults D4: a task worktree under `/tmp` is still another
 task's worktree.
@@ -353,7 +416,9 @@ Rule R4 is D7 (files). Every other git subcommand allows.
 
 `DOTFILES_ALLOW_GIT_META=1` as a leading env assignment of a segment
 (among the tokens `strip_prefixes` removes: before the head, possibly
-after `env`) allows that segment through every rule. It is not an
+after `env`) allows that segment through every rule, redirections
+included (`DOTFILES_ALLOW_GIT_META=1 echo x > .git/config` and
+`DOTFILES_ALLOW_GIT_META=1 tee .git/config` are treated alike). It is not an
 override when it appears after the head (a config value, a trailing
 argument), and it does not carry to an adjacent segment. A wrapper
 segment led by the override is allowed without descending into its
@@ -366,11 +431,18 @@ orchestrator session. Precedent: push_guard's `DOTFILES_ALLOW_FORCE_PUSH=1`.
 
 ### D7. Guarded files (Write, Edit, and Bash writers)
 
-A path is a guarded file when, after `expand_home` and `resolve` against
-the effective cwd, it matches `(^|/)\.git/(config|info/exclude)$` and its
-canonical form is not under a root (D4's `under_root`, HOME excluded).
-Non-literal paths are never matched (an unexpanded variable in a file path
-cannot be resolved, and Write/Edit paths are literal by construction).
+A path is a guarded file when, for some member of the possible-cwd set
+(the payload cwd for Write/Edit), after `expand_home` and `resolve`
+against it, EITHER the resolved path OR its canonical form (`canon`, which
+follows symlinks in every existing component, the final one included)
+matches `(^|/)\.git/(config|info/exclude)$`, and the canonical form is not
+under a root (D4's `under_root`, HOME excluded). So `/tmp/config-link`
+symlinked to a real checkout's `.git/config`, and `/tmp/repo-link/.git/
+config` through a symlinked directory, are both guarded. Non-literal
+paths are never matched (an unexpanded variable in a file path cannot be
+resolved, and Write/Edit paths are literal by construction); a resolution
+against the sentinel cwd uses `/` as the base, which only matters for
+relative paths.
 
 - Tools `Write` and `Edit`: deny when `tool_input.file_path` is a guarded
   file. `Read`, `NotebookEdit`, and everything else: exit 0. The documented
@@ -419,9 +491,11 @@ directory whose `.git` is a gitfile reading
 `gitdir: /Users/grg-test-user/proj/.git/worktrees/esc`, the
 discovery-failure shape), `$FIX/tmpdir` (the per-case `TMPDIR`),
 `$FIX/home` (the hook's `HOME`), `$FIX/home/proj` (a real repo with a
-remote and one commit; under HOME, so outside every root by D4) and
+remote and one commit; under HOME, so outside every root by D4),
 `$FIX/tmpdir/wt-esc` (a linked worktree of `$FIX/home/proj`: under a root
-while its common dir is not, the true containment escape), `$FIX/cfg` (a
+while its common dir is not, the true containment escape),
+`$FIX/tmpdir/config-link` (a symlink to `$FIX/home/proj/.git/config`) and
+`$FIX/tmpdir/repo-link` (a symlink to `$FIX/home/proj`), `$FIX/cfg` (a
 throwaway `CLAUDE_CONFIG_DIR` holding `herdr-orch/slug-x/tasks/T-1.json`
 in-progress with branch `talon/T-1/x` and worktree `$FIX/wt-t1`,
 `T-2.json` merged, `T-3.json` reviewed, `herdr-orch/slug-y/tasks/T-1.json`
@@ -475,7 +549,23 @@ $FIX/wt-t1`; `--force $FIX/wt-t1`; `remove wt-t1` (suffix); `echo x >>
 `tee -a .git/config`; `sed -i '' 's/a/b/' .git/config`; `cp x
 .git/config`; `echo x > <non-temp>/.git/config`; Write
 `<non-temp>/.git/config`; Edit `<non-temp>/.git/info/exclude`; Write
-`.git/config` (relative); Write `$FIX/home/proj/.git/config`.
+`.git/config` (relative); Write `$FIX/home/proj/.git/config`; Write
+`$FIX/tmpdir/config-link`; `tee $FIX/tmpdir/config-link`; `echo x >>
+$FIX/tmpdir/repo-link/.git/config`; `git -C $FIX/tmpdir/repo-link remote
+remove origin`; `false && cd $FIX/repo; git remote remove origin`
+(skipped cd); `true || cd $FIX/repo; git remote remove origin`; `mkdir -p
+$FIX/tmpdir/x && cd $FIX/repo; git remote remove origin`; `cd; git remote
+remove origin` with cwd `$FIX/repo` (bare cd goes home); `cd -; git
+remote remove origin` with cwd `$FIX/repo`; `echo ';' cd $FIX/repo; git
+remote remove origin` and the backslash form `echo \; cd ...` (quoted
+operator); `git config set --value old core.hooksPath /x`; `git -C
+$FIX/repo config -f<non-temp>/.git/config core.hooksPath /x` (glued);
+`git -C $FIX/repo config --file=<non-temp>/.git/config core.hooksPath
+/x`; `git config --frobnicate x user.name y` (unknown option); `git branch
+-D "$branch"`; `git worktree remove "$wt"`; `echo x >| .git/config` and
+the glued `>|.git/config`; `ln -sfn $FIX/home/proj $FIX/tmpdir/link; git
+-C $FIX/repo remote remove origin` (taint); `git -C $FIX/repo worktree
+add $FIX/tmpdir/wt2 && git -C $FIX/repo remote remove origin` (taint).
 
 Allow cases: `git -C $FIX/repo remote remove origin`; `-C $FIX/repo remote
 set-url origin x`; `-C $FIX/wt remote remove origin` (linked worktree
@@ -500,9 +590,18 @@ remove origin`; `env DOTFILES_ALLOW_GIT_META=1 git remote remove origin`;
 remove' claude/`; `echo x >> .gitignore`; `echo x >>
 $FIX/tmpdir/.git/config`; `sed -n 1p .git/config`; Write
 `$FIX/home/.gitconfig`; Write `$FIX/tmpdir/r/.git/config`; Read
-`<non-temp>/.git/config`; an empty command; `HERDR_ENV` unset;
-`HERDR_ENV=0`; malformed JSON (`not json`); a payload whose `tool_input`
-is a string.
+`<non-temp>/.git/config`; an empty command; `DOTFILES_ALLOW_GIT_META=1
+echo x > .git/config`; `DOTFILES_ALLOW_GIT_META=1 tee .git/config`;
+`mkdir -p $FIX/tmpdir/x && cd $FIX/repo && git remote remove origin`
+(pure chain); `cd $FIX/repo; cd $FIX/wt; git remote remove origin`;
+`false && cd $FIX/repo && git remote remove origin` (git runs only after
+the cd); `echo ';' && git -C $FIX/repo remote remove origin` (quoted
+operator, explicit -C); `git commit -m 'a; b' && git status`; `git -C
+$FIX/repo config set --value old core.hooksPath /x`; `git branch -D
+"$branch"` with an empty `CLAUDE_CONFIG_DIR` (no protected records); `git
+-C $FIX/repo remote remove origin; ln -s a b` (a later taint does not
+reach an earlier segment); `HERDR_ENV` unset; `HERDR_ENV=0`; malformed
+JSON (`not json`); a payload whose `tool_input` is a string.
 
 Read-only proof: a sha256 listing of every file under `$FIX/cfg` is
 identical before and after a denied `git branch -D talon/T-1/x` and an
@@ -558,9 +657,12 @@ are not visible); shell control-flow keywords (`if`, `for`, `{ }`) are
 plain words to the walk, so a `cd` inside a `{ ...; }` group leaks like a
 plain `cd` (groups run in the current shell, so that is also the shell's
 behavior); a bind mount into a real checkout (symlinks are caught by
-canonicalization); TOCTOU between the rev-parse and the executed command
-(needs a concurrent attacker with filesystem control; every fixture root
-is throwaway); `cp`/`mv` source detection (every non-option token is
+canonicalization); a same-command re-point of a fixture path by a tool
+other than `ln`/`mv`/`cp`/`rsync`/`git worktree` (for example `python3 -c
+"os.symlink(...)"`), and a concurrent re-point by another process between
+the rev-parse and the executed command (every fixture root is throwaway);
+`cd` reachability through `if`/`case`/`for` bodies (the walk only models
+`&&`, `||`, `;`, subshells, pipelines, and background jobs); `cp`/`mv` source detection (every non-option token is
 checked, so `cp .git/config /tmp/backup`, itself a read, denies).
 
 ### D11. Docs
@@ -615,9 +717,11 @@ Bash|Edit|Write`. The live drift check needs no edit (derived from the
    `git remote remove origin` and `git -C`.
 3. AC3 Incident shapes: `( cd "" && git remote remove origin )` and
    `( cd "$repo" && git remote remove origin )` deny; `( cd <fixture> );
-git remote remove origin` denies; `git -C <fixture repo> remote remove
-origin` allows; the containment escape (`$FIX/tmpdir/wt-esc`) denies
-   with the linked-worktree reason.
+   git remote remove origin`, `false && cd <fixture>; git remote remove
+   origin`, and the quoted-operator shape deny; `git -C <fixture repo>
+   remote remove origin` and `cd <fixture> && git remote remove origin`
+   allow; the containment escape (`$FIX/tmpdir/wt-esc`) denies with the
+   linked-worktree reason; the symlink aliases and the taint shapes deny.
 4. AC4 Config: every D8 config deny and allow case behaves as listed.
 5. AC5 Task records: every D8 branch/worktree case behaves as listed and
    the throwaway state root is byte-identical afterwards.
@@ -632,7 +736,7 @@ origin` allows; the containment escape (`$FIX/tmpdir/wt-esc`) denies
    passes with the new `grg:` label and its diff is append-only;
    `scratch-policy.test.sh` still passes.
 9. AC9 Suite: `sh claude/hooks/git-remote-guard.test.sh` under a sandbox
-   `HOME` reports `N passed, 0 failed` with at least 120 PASS lines, is
+   `HOME` reports `N passed, 0 failed` with at least 150 PASS lines, is
    registered in `bin/dotfiles-tests` (one added line, no removed lines),
    has no executed `cd` (D8 scan), asserts the mktemp root before use,
    and routes every fixture git call through the env-isolating `g()`.
@@ -662,6 +766,19 @@ committing them; the public-safety failure is the documented expected
 one. Side finding from Codex's probe: rm_guard's `split_segments` treats
 `);` as a word, so `(cd /x); rm -rf /` hides the `rm` from rm_guard; filed
 under Follow-ups, not fixed here.
+
+## Review resolution (Codex spec review, round 2, 2026-09-08)
+
+Verdict was needs-rework with 8 findings, all applied: 1 (conditional and
+bare `cd`: the possible-cwd set and chain purity model, D3), 2 (quoted
+operators fabricating segments: the quoted-operator rule, D3), 3
+(`--value`, glued `-f`, `--file=`, and unknown options fail closed, R2),
+4 (non-literal branch/worktree targets, R3), 5 (symlink aliases of
+guarded files, D7), 6 (same-command re-pointing: the taint rule, D3, with
+the residual narrowed in D10), 7 (`>|` tokenization, D3 step 2), 8
+(override covers redirections, D6/D3). Per the review skill's two-round
+cap, no third spec round was run; the plan review is the next external
+gate.
 
 ## Follow-ups (not in this task)
 
