@@ -568,12 +568,17 @@ def bash_targets(command, cwd, home, depth=0):
     """[(cwd, word)] write targets of one command string. `cwd` is tracked
     as a SET of candidates rather than one string, so an uncertain `cd`
     (a subshell, a failed cd, cd options) fails toward guarding rather
-    than away from it (B3)."""
+    than away from it (B3). `pushd` is a `cd` that also remembers the old
+    cwd; `popd` returns to it, but this scanner doesn't model the actual
+    dir stack, so a `popd` is treated as a cwd change of unknown
+    direction -- widened to every cwd candidate seen so far in this
+    command, never narrowed (B-2)."""
     if depth > 1:
         return []
     cleaned, redirs = scan_raw(command)
     found = []
     cwds = {cwd}
+    seen_cwds = {cwd}
     stack = []
     for kind, tokens in segment_groups(rm_guard.tokenize(cleaned)):
         if kind == "push":
@@ -596,11 +601,14 @@ def bash_targets(command, cwd, home, depth=0):
         if not words:
             continue
         head = rm_guard.basename(words[0])
-        if head == "cd":
+        if head in ("cd", "pushd"):
             new_cwds = set()
             for c in cwds:
                 new_cwds |= cd_target_candidates(words, c, home)
             cwds = new_cwds
+            seen_cwds |= cwds
+        elif head == "popd":
+            cwds |= seen_cwds
         elif head in ("sed", "gsed"):
             ops = script_operands(words, ("-e", "-f", "--expression", "--file"), "ef")
             for c in cwds:

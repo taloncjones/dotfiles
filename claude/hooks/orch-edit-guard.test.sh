@@ -322,6 +322,10 @@ echo x > $TR" "$R" "$SID_A"
 hook_case "AC4 arithmetic << before a write is not a heredoc, bracket form (B-1)" deny Bash "n=\$[1 << 8]
 echo x > $TR" "$R" "$SID_A"
 
+# --- AC4 cycle-3 regressions (co-review c3 B-2) -------------------------
+hook_case "AC4 pushd then relative redirect denied (B-2)" deny Bash "pushd $R/dir && echo x > inner.txt" "$N" "$SID_A"
+hook_case "AC4 popd cwd change of unknown direction denied (B-2)" deny Bash "pushd $R && popd && echo x > tracked.txt" "$N" "$SID_A"
+
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
 marker() {
