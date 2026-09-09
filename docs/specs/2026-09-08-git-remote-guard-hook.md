@@ -270,12 +270,19 @@ fixture (D4).
 
 ### D4. Git invocation parsing and the fixture exemption
 
-`parse_git(tokens)` skips git's global options to find the subcommand:
+`parse_git(tokens)` walks git's global options to find the subcommand:
 `-C <path>` values are collected in order; `-c`, `--namespace`,
-`--config-env` consume one value; `--git-dir`, `--work-tree` (separate or
-`=` form) set a location-hint flag; any other `-`-prefixed token is
-skipped. The first non-option token is the subcommand; the rest are its
-args.
+`--config-env`, `--attr-source`, `--super-prefix` consume one value;
+`--git-dir`, `--work-tree` (separate or `=` form) set a location-hint
+flag. A fixed table of known valueless globals (`--no-pager`,
+`--paginate`, `-p`/`-P`, `--bare`, `--no-optional-locks`,
+`--literal-pathspecs`, and similar) is skipped in place, since none of
+them can shift a later value into the subcommand position. Any other
+`-`-prefixed token given as a separate argument is unrecognized and
+indistinguishable from a value-taking option whose value would
+otherwise be misread as the subcommand, so it fails closed instead of
+guessing. The first non-option token is the subcommand; the rest are
+its args.
 
 Effective directories: for every member of the segment's possible-cwd
 set, apply each `-C` value in order with `resolve(expand_home(value,

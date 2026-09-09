@@ -62,6 +62,13 @@ OPERATOR_CHARS = ";&|()\n"
 REMOTE_DENY = ("remove", "rm", "set-url", "rename", "prune")
 GIT_OPTS_WITH_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
                      "--attr-source", "--super-prefix")
+GIT_VALUELESS_GLOBAL_OPTS = ("--no-pager", "--paginate", "-p", "-P", "--bare",
+                             "--no-replace-objects", "--no-lazy-fetch",
+                             "--literal-pathspecs", "--glob-pathspecs",
+                             "--noglob-pathspecs", "--icase-pathspecs",
+                             "--no-optional-locks", "--no-advice", "--html-path",
+                             "--man-path", "--info-path", "--version", "--help",
+                             "--exec-path")
 LOCATION_OPTS = ("--git-dir", "--work-tree")
 LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 TAINT_HEADS = ("ln", "mv", "cp", "rsync")
@@ -246,8 +253,10 @@ def parse_git(tokens: list):
     """(subcommand, args, -C values in order, location-hint flag, unknown-option flag).
 
     A `-`-prefixed global option with its value embedded via `=` cannot shift
-    which token is the subcommand, so it is skipped like any other flag. One
-    given as a separate argument can -- an unrecognized instance is
+    which token is the subcommand, so it is skipped like any other flag.
+    Known valueless globals (GIT_VALUELESS_GLOBAL_OPTS) are also skipped in
+    place, since they never consume a separate argument. Any other
+    `-`-prefixed option given as a separate argument is unrecognized and
     indistinguishable from a value-taking option whose value would otherwise
     be misread as the subcommand (git --attr-source HEAD remote remove
     origin), so `unknown` comes back True and the caller fails closed instead
@@ -266,6 +275,9 @@ def parse_git(tokens: list):
             hints = True
         if tok in GIT_OPTS_WITH_ARG:
             i += 2
+            continue
+        if tok in GIT_VALUELESS_GLOBAL_OPTS:
+            i += 1
             continue
         if tok.startswith("-") and "=" not in tok:
             return None, tokens[i + 1:], cdirs, hints, True
