@@ -21,3 +21,5 @@ is the staging tier, not an archive.
   explicitly before entering temporary worktrees; verify launch readiness.
 - (2026-09) Check the actual shell: zsh does not split unquoted variables
   and uses `pipestatus`; prefer arrays or explicit arguments.
+- (2026-09) An orchestrator session dispatches; it edits repo files only for
+  a small change the human approved this turn. Larger: todo + kickoff.

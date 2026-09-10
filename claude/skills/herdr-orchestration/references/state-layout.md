@@ -38,6 +38,7 @@ STATE_ROOT/
       <task_id>.review.json           # review worker verdict (separate file)
       <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
       <task_id>.brief.md              # mech kickoff brief file (--brief-file)
+      orch-edits.jsonl                # tasks/orch-edits.jsonl bounded edit-marker audit
     think/
       <think_id>.question.md          # orchestrator-written brief (input contract)
       <think_id>.launch.json          # wrapper-written, create-exclusive, before launch (liveness)
@@ -123,6 +124,10 @@ STATE_ROOT/
 - **Native owner identity:** records additionally distinguish runtime and the
   Codex controller's exact thread UUID. A saved session string alone does not
   permit another runtime/thread to reuse its fence.
+- **Edit marker:** `orch-edit-allow.json` is account-local payload state, but
+  only a `claim-owner` binding checked under the shared owner lock may mint it.
+  It carries the session, fence, expiry, and edit budget; `orch-edits.jsonl`
+  records marker mints, reservations, allows, and refusals.
 - **Inbox socket:** `messaging_socket` is the owner's Claude Code inbox
   socket (`CLAUDE_CODE_MESSAGING_SOCKET`), or `null`. Written by
   `claim-owner`/`refresh-owner --messaging-socket`; `pid` is taken from the

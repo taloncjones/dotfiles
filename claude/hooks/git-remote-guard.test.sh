@@ -516,7 +516,7 @@ ours = [e for e in pre if e.get("matcher") == "Bash|Edit|Write"]
 bash = [h["command"] for e in pre if e.get("matcher") == "Bash" for h in e["hooks"]]
 want_bash = ["~/.claude/hooks/commit_guard.py", "~/.claude/hooks/no_ai_attribution_bash.py",
              "~/.claude/hooks/push_guard.py", "~/.claude/hooks/herdr_worktree_guard.py",
-             "~/.claude/hooks/rm_guard.py"]
+             "~/.claude/hooks/rm_guard.py", "~/.claude/hooks/orch_edit_guard.py"]
 ok = len(ours) == 1 and ours[0]["hooks"] == [{"type": "command", "command": "~/.claude/hooks/git_remote_guard.py"}] \
     and bash == want_bash
 sys.exit(0 if ok else 1)

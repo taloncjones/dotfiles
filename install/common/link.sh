@@ -150,6 +150,7 @@ link_codex_path() {
   ln -sfn "$source" "$destination"
 }
 
+link_codex_path "$DOTFILEDIR/codex/hooks/orch_edit_guard.py" "$HOME/.codex/hooks/orch_edit_guard.py"
 link_codex_path "$DOTFILEDIR/claude/hooks/git_remote_guard.py" "$HOME/.codex/hooks/git_remote_guard.py"
 
 for shared_skill in repo-recall post-merge todos handoff kickoff voice; do
@@ -296,6 +297,11 @@ add_codex_hook \
   'rm_guard.py' \
   'Bash|Shell|exec_command|shell_command|unified_exec' \
   "$HOME/.codex/hooks/rm_guard.py"
+
+add_codex_hook \
+  'orch_edit_guard.py' \
+  'Edit|Write|MultiEdit|apply_patch|Bash|Shell|exec_command|shell_command|unified_exec' \
+  "$HOME/.codex/hooks/orch_edit_guard.py"
 
 add_codex_hook \
   'git_remote_guard.py' \

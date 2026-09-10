@@ -35,6 +35,7 @@ sh claude/hooks/herdr-stop-gate.test.sh
 bash claude/hooks/agent-runtime.test.sh
 bash claude/hooks/herdr-dispatch.test.sh
 sh claude/hooks/scratch-policy.test.sh
+sh claude/hooks/orch-edit-guard.test.sh
 sh claude/hooks/git-remote-guard.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh

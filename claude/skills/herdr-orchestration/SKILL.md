@@ -72,6 +72,9 @@ for the provider's `launch_env` mapping.
      -> prints a `fence` token on success, or `BUSY` (exit 1) if another
      session holds a live claim. On `BUSY`, yield to read-only status/triage
      and offer the user an explicit takeover; do not mutate state.
+   - `<id>` is `$CLAUDE_CODE_SESSION_ID` (the session id every hook payload
+     carries); the orchestrator edit guard keys on it, so never substitute
+     another identifier.
    - **On the initial claim only** (not on refresh), label THIS session's own
      workspace so the Herdr UI shows the standing orchestrator, not a bare
      name: `herdr workspace rename "$HERDR_WORKSPACE_ID" "orch:<repo>"`
@@ -1064,6 +1067,21 @@ Rules (these are outward-facing writes, so treat them carefully):
 
 ## Safety
 
+- **An orchestrator session dispatches; it does not edit.** It changes
+  repo files only for a small change (a few lines, one or two files, no
+  new behaviour) that the human approved in the current turn; anything
+  larger becomes a todo and a kickoff. Writes outside every git work tree
+  (`STATE_ROOT`, the session scratchpad, `$TMPDIR`) and to `.todos/` are
+  always fine; a checkout parked under the scratchpad is still a checkout.
+  Enforced by `claude/hooks/orch_edit_guard.py` (PreToolUse on Edit,
+  Write, Bash), which refuses writes to tracked or unignored paths in any
+  git work tree from the session named in shared coordination. For the approved
+  case run
+  `python3 "$CORE" allow-edit --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> --session <id> --fence <fence> --minutes 5 --max-edits 3 --note "<what was approved>"`
+  AFTER the approval and in the same turn, make the edit, and name it in
+  the turn summary. The marker is bounded three ways (minutes, write
+  budget, this repo only) and every guarded attempt under it, and every
+  refusal, is recorded in `tasks/orch-edits.jsonl`.
 - The orchestrator never merges, pushes, or opens a PR. Merge/`/ship`/
   `/post-merge` remain explicit human actions.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
