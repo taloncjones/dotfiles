@@ -70,13 +70,16 @@ epic, comment). Then confirm. Default is "do all".
 # Worktree removal. Plain `git worktree remove` FAILS on a worktree that
 # contains submodules ("working trees containing submodules cannot be moved or
 # removed"). Fall back to rm -rf + prune in that case.
-git worktree remove "<wt>" 2>/dev/null \
+# In a herdr session the git metadata guard denies deleting a task's worktree
+# or branch until its record reads merged; the Step 2 confirmation is the
+# explicit confirmation the DOTFILES_ALLOW_GIT_META=1 override requires.
+DOTFILES_ALLOW_GIT_META=1 git worktree remove "<wt>" 2>/dev/null \
   || { rm -rf "<wt>" && git worktree prune; }
 
 # Local branch: -D, not -d. A squash-merged branch's commits are NOT ancestors
 # of the base, so -d refuses ("not fully merged") even though the PR is merged.
 # Only force-delete after Step 0 confirmed state == MERGED.
-git branch -D "<headRefName>"
+DOTFILES_ALLOW_GIT_META=1 git branch -D "<headRefName>"
 
 # Remote branch only if it lingered (usually already auto-deleted):
 git ls-remote --heads origin "<headRefName>" | grep -q . \

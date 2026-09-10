@@ -217,6 +217,15 @@
             "command": "~/.claude/hooks/orch_edit_guard.py"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/git_remote_guard.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [
