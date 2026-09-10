@@ -134,7 +134,7 @@ enabled = true # duplicate
 enabled = true
 TOML
 
-    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
 
     [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@dotfiles-workflows")" = true ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@openai-curated")" = false ] &&
@@ -147,7 +147,7 @@ TOML
         }
 
     first_cksum="$(cksum "$tmp_home/.codex/config.toml")"
-    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
     second_cksum="$(cksum "$tmp_home/.codex/config.toml")"
     rm -rf "$tmp_home"
     [ "$first_cksum" = "$second_cksum" ]
@@ -172,8 +172,8 @@ removes_stale_claude_web_codex_hook() {
         ln -s "$PWD/$path" "$tmp_repo/$path"
     done
 
-    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
-    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
     result=0
     test ! -e "$tmp_repo/.codex/hooks.json" || result=1
     test ! -e "$tmp_repo/.codex/hooks/session-start.sh" || result=1
@@ -200,8 +200,8 @@ preserves_multi_command_codex_hook_manifest() {
 
     cp "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before"
     cp "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before"
-    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
-    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
     result=0
     cmp -s "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before" || result=1
     cmp -s "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before" || result=1
@@ -221,8 +221,8 @@ sweeps_empty_codex_project_dirs() {
         ln -s "$PWD/$path" "$tmp_repo/$path"
     done
 
-    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
-    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
     result=0
     test ! -e "$tmp_repo/.codex" || result=1
     rm -rf "$tmp_home"
@@ -247,7 +247,7 @@ preserves_codex_hook_with_unrecognized_script() {
 
     cp "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before"
     cp "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before"
-    HOME="$tmp_home" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$tmp_repo" bash install/common/link.sh >/dev/null
     result=0
     cmp -s "$tmp_repo/.codex/hooks.json" "$tmp_home/manifest.before" || result=1
     cmp -s "$tmp_repo/.codex/hooks/session-start.sh" "$tmp_home/script.before" || result=1
@@ -261,8 +261,8 @@ assert "installer preserves a Codex hook whose script is not the legacy bootstra
 links_shared_workflow_surfaces() (
     tmp_home="$(mktemp -d)"
     trap 'rm -rf "$tmp_home"' EXIT
-    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
-    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
     for skill in repo-recall post-merge todos handoff kickoff voice; do
         [ "$(readlink "$tmp_home/.codex/skills/$skill")" = "$PWD/claude/skills/$skill" ] || return 1
         [ -f "$tmp_home/.codex/skills/$skill/SKILL.md" ] || return 1
@@ -284,6 +284,18 @@ links_shared_workflow_surfaces() (
     [ "$(rg -c 'command = .*herdr_worktree_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
     [ "$(readlink "$tmp_home/.codex/hooks/rm_guard.py")" = "$PWD/claude/hooks/rm_guard.py" ] || return 1
     [ "$(rg -c 'command = .*rm_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    [ "$(readlink "$tmp_home/.codex/hooks/git_remote_guard.py")" = "$PWD/claude/hooks/git_remote_guard.py" ] || return 1
+    python3 - "$tmp_home/.codex/config.toml" <<'PY' || return 1
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    config = tomllib.load(source)
+entries = [entry for entry in config["hooks"]["PreToolUse"]
+           if any("git_remote_guard.py" in hook["command"] for hook in entry["hooks"])]
+assert len(entries) == 1
+assert {"exec_command", "shell_command", "unified_exec", "apply_patch"} <= set(entries[0]["matcher"].split("|"))
+PY
     printf '%s\n' '{"tool_name":"exec_command","tool_input":{"cmd":"herdr worktree create task"}}' |
         "$tmp_home/.codex/hooks/herdr_worktree_guard.py" >/dev/null 2>&1 && return 1
     [ "$?" -eq 2 ]
@@ -297,15 +309,15 @@ preserves_custom_codex_lesson_destinations() (
     trap 'rm -rf "$tmp_root"' EXIT
     tmp_home="$tmp_root/absent-home"
 
-    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
     [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
-    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
     [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
 
     file_home="$tmp_root/file-home"
     mkdir -p "$file_home/.codex/rules"
     printf 'custom lesson file\n' >"$file_home/.codex/rules/agent-lessons.md"
-    HOME="$file_home" DOTFILEDIR="$PWD" bash install/common/link.sh >"$file_home/install.out" 2>"$file_home/install.err"
+    HOME="$file_home" CODEX_HOME="$file_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >"$file_home/install.out" 2>"$file_home/install.err"
     [ ! -L "$file_home/.codex/rules/agent-lessons.md" ] || return 1
     [ "$(cat "$file_home/.codex/rules/agent-lessons.md")" = 'custom lesson file' ] || return 1
     rg -q -F "Preserving existing Codex path: $file_home/.codex/rules/agent-lessons.md" "$file_home/install.err" || return 1
@@ -313,7 +325,7 @@ preserves_custom_codex_lesson_destinations() (
     directory_home="$tmp_root/directory-home"
     mkdir -p "$directory_home/.codex/rules/agent-lessons.md"
     printf 'custom lesson directory\n' >"$directory_home/.codex/rules/agent-lessons.md/keep.txt"
-    HOME="$directory_home" DOTFILEDIR="$PWD" bash install/common/link.sh >"$directory_home/install.out" 2>"$directory_home/install.err"
+    HOME="$directory_home" CODEX_HOME="$directory_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >"$directory_home/install.out" 2>"$directory_home/install.err"
     [ -d "$directory_home/.codex/rules/agent-lessons.md" ] || return 1
     [ "$(cat "$directory_home/.codex/rules/agent-lessons.md/keep.txt")" = 'custom lesson directory' ] || return 1
     [ ! -e "$directory_home/.codex/rules/agent-lessons.md/agent-lessons.md" ] || return 1
@@ -358,6 +370,35 @@ preserves_custom_codex_skill_destinations() (
 
 assert "installer preserves custom skill directories and files while refreshing symlinks" \
     preserves_custom_codex_skill_destinations
+
+preserves_custom_git_guard() (
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    mkdir -p "$tmp_home/.codex/hooks"
+    printf 'custom git guard\n' >"$tmp_home/.codex/hooks/git_remote_guard.py"
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" \
+        bash install/common/link.sh >/dev/null 2>"$tmp_home/install.err"
+    [ ! -L "$tmp_home/.codex/hooks/git_remote_guard.py" ] || return 1
+    [ "$(cat "$tmp_home/.codex/hooks/git_remote_guard.py")" = 'custom git guard' ] || return 1
+    rg -q -F 'Preserving existing Codex path:' "$tmp_home/install.err"
+)
+
+assert "installer preserves a custom Codex git metadata guard" \
+    preserves_custom_git_guard
+
+isolates_fixture_codex_home() (
+    caller_codex_home="$(mktemp -d)"
+    trap 'rm -rf "$caller_codex_home"' EXIT
+    printf '[plugins."ecc@ecc"]\nenabled = true\n' >"$caller_codex_home/config.toml"
+    cp "$caller_codex_home/config.toml" "$caller_codex_home/config.before"
+    result=0
+    CODEX_HOME="$caller_codex_home" dedupes_managed_workflow_plugins || result=1
+    cmp -s "$caller_codex_home/config.before" "$caller_codex_home/config.toml" || result=1
+    return "$result"
+)
+
+assert "installer fixtures preserve an inherited caller Codex home" \
+    isolates_fixture_codex_home
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

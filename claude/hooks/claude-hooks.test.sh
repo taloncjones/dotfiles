@@ -1213,5 +1213,35 @@ else
     printf 'FAIL  gate: hook leaves the config dir byte-identical (rc=%s/%s/%s)\n' "$rc1" "$rc2" "$rc3" >&2; FAIL=$((FAIL + 1))
 fi
 
+# git_remote_guard.py registration: the template carries exactly one
+# PreToolUse entry with matcher Bash|Edit|Write, listing only the git
+# metadata guard, appended last, and the Bash guard group is untouched.
+# Independent of live machine state; the live drift check above is
+# derived from the template and covers reconciled machines.
+if python3 - <<'PY'
+import json
+import sys
+
+pre = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
+ours = [e for e in pre if e.get("matcher") == "Bash|Edit|Write"]
+bash = [h["command"] for e in pre if e.get("matcher") == "Bash" for h in e["hooks"]]
+want_bash = [
+    "~/.claude/hooks/commit_guard.py",
+    "~/.claude/hooks/no_ai_attribution_bash.py",
+    "~/.claude/hooks/push_guard.py",
+    "~/.claude/hooks/herdr_worktree_guard.py",
+    "~/.claude/hooks/rm_guard.py",
+]
+ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
+      and ours[0]["hooks"] == [{"type": "command",
+                                "command": "~/.claude/hooks/git_remote_guard.py"}])
+sys.exit(0 if ok else 1)
+PY
+then
+    printf 'PASS  grg: template registers the git metadata guard under Bash|Edit|Write\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  grg: template registers the git metadata guard under Bash|Edit|Write\n' >&2; FAIL=$((FAIL + 1))
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

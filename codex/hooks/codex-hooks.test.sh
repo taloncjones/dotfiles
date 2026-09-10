@@ -155,5 +155,18 @@ assert_allows "rm guard ignores malformed shell input" \
     claude/hooks/rm_guard.py \
     '{"tool_name":"exec_command","tool_input":{"args":[]}}'
 
+HERDR_ENV=1 assert_denies_2 "git guard blocks global metadata writes from Codex" \
+    claude/hooks/git_remote_guard.py \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"git config --global core.editor false"}}'
+HERDR_ENV=1 assert_denies_2 "git guard handles nested camelCase shell input" \
+    claude/hooks/git_remote_guard.py \
+    '{"toolName":"unified_exec","toolInput":{"args":{"command":"git config --global core.editor false"}}}'
+HERDR_ENV=1 assert_denies_2 "git guard blocks apply_patch metadata writes" \
+    claude/hooks/git_remote_guard.py \
+    '{"tool_name":"apply_patch","tool_input":{"input":"*** Begin Patch\n*** Update File: /guard-fixture/.git/config\n@@\n-old\n+new\n*** End Patch"}}'
+HERDR_ENV=0 assert_allows "git guard stays inactive outside Herd" \
+    claude/hooks/git_remote_guard.py \
+    '{"tool_name":"exec_command","tool_input":{"cmd":"git config --global core.editor false"}}'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
