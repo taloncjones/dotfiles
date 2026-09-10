@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -147,7 +148,8 @@ elif args[:2] == ["pane", "run"]:
     for part in command.split("; "):
         words = shlex.split(part)
         if words[0] == "unset":
-            values[words[1]] = "__UNSET__"
+            if words[1] != "-f":
+                values[words[1]] = "__UNSET__"
         elif words[0] == "export":
             key, value = words[1].split("=", 1)
             values[key] = value
@@ -159,7 +161,12 @@ elif args[:2] == ["pane", "run"]:
             if match is None:
                 raise SystemExit("invalid account probe")
             key = match.group(2)
-            value = "wrong" if mode == "wrong-shell-env" else values[key]
+            if key == "RUNTIME_BINARY":
+                value = str(Path(os.environ["FAKE_RUNTIME_DIR"]).resolve() / os.environ.get("FAKE_RUNTIME", "codex"))
+                if mode == "wrong-runtime-binary":
+                    value = "/wrong/codex"
+            else:
+                value = "wrong" if mode == "wrong-shell-env" else values[key]
             lines.append(f"{match.group(1)}:{key}={value}")
     Path(os.environ["FAKE_ENV_OUTPUT"]).write_text("\n".join(lines) + "\n")
     # Native protocol 20 pane run acknowledges success with empty stdout.
@@ -268,9 +275,17 @@ class Fixture:
         assert fence == 1, fence
         self.bin = self.root / "herdr"
         fake_herdr(self.bin)
+        self.runtime_dir = self.root / "runtime bin"
+        self.runtime_dir.mkdir()
+        for runtime in ("claude", "codex"):
+            executable = self.runtime_dir / runtime
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
         self.log = self.root / "calls.jsonl"
         self.env = {
             **os.environ,
+            "PATH": str(self.runtime_dir) + os.pathsep + os.environ.get("PATH", os.defpath),
+            "FAKE_RUNTIME_DIR": str(self.runtime_dir),
             "FAKE_HERDR_LOG": str(self.log),
             "FAKE_HERDR_MODE": "ok",
             "FAKE_PANE": "w1:p1",
@@ -369,6 +384,116 @@ def test_launch_records_attempt_before_native_start():
         assert result["observed_effort"] is None, result
     finally:
         fixture.close()
+
+
+def test_runtime_binding_precedes_start_and_records_selected_entry():
+    fixture = Fixture()
+    try:
+        result = fixture.launch()
+        expected = str(fixture.runtime_dir.resolve() / "codex")
+        task = json.loads(fixture.task_file.read_text())
+        assert task["workers"][-1]["runtime_binary"] == expected, task
+        commands = [call[3] for call in fixture.calls() if call[:2] == ["pane", "run"]]
+        assert any("command -v" in command and str(fixture.runtime_dir) in command for command in commands)
+    finally:
+        fixture.close()
+
+
+def test_missing_or_mismatched_binary_refuses_before_attempt_and_start():
+    for mode in ("missing", "wrong-runtime-binary"):
+        fixture = Fixture()
+        try:
+            if mode == "missing":
+                fixture.env["PATH"] = str(fixture.root / "missing")
+            else:
+                fixture.env["FAKE_HERDR_MODE"] = mode
+            try:
+                fixture.launch()
+            except herdr_dispatch.DispatchError as exc:
+                assert "runtime" in str(exc), exc
+            else:
+                raise AssertionError("unverified executable accepted")
+            assert json.loads(fixture.task_file.read_text())["workers"] == []
+            assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
+        finally:
+            fixture.close()
+
+
+def test_runtime_resolution_preserves_filesystem_parent_semantics():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "actual/nested").mkdir(parents=True)
+        (root / "actual/bin").mkdir()
+        (root / "bin").mkdir()
+        (root / "link").symlink_to(root / "actual/nested", target_is_directory=True)
+        versioned = root / "actual/bin/versioned executable"
+        versioned.write_text("#!/bin/sh\nprintf 'EXPECTED\\n'\n")
+        versioned.chmod(0o700)
+        for runtime in ("claude", "codex"):
+            (root / "actual/bin" / runtime).symlink_to(versioned)
+            wrong = root / "bin" / runtime
+            wrong.write_text("#!/bin/sh\nprintf 'WRONG\\n'\n")
+            wrong.chmod(0o700)
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                for search in (str(root / "link/../bin"), "link/../bin"):
+                    selected = herdr_dispatch._runtime_binary(runtime, {"PATH": search})
+                    assert selected == str((root / "actual/bin").resolve() / runtime), selected
+                    assert subprocess.check_output([selected], text=True).strip() == "EXPECTED"
+            finally:
+                os.chdir(original_cwd)
+
+
+def test_runtime_binding_bypasses_aliases_functions_and_stale_hashes():
+    for shell in ("bash", "zsh"):
+        shell_binary = shutil.which(shell)
+        if shell_binary is None:
+            print(f"SKIP  {shell} runtime binding probe: shell unavailable")
+            continue
+        for runtime in ("claude", "codex"):
+            fixture = Fixture()
+            original_run = herdr_dispatch._run_herdr
+            original_validate = herdr_dispatch._validate_pane
+            try:
+                selected = fixture.runtime_dir / runtime
+                versioned = fixture.runtime_dir / "versioned executable"
+                versioned.write_text('#!/bin/sh\nprintf "BINARY_ACCOUNT=%s\\n" "${CLAUDE_CONFIG_DIR-unset}"\n')
+                versioned.chmod(0o700)
+                selected.unlink()
+                selected.symlink_to(versioned)
+                output = ""
+
+                def run(_cli, argv, **kwargs):
+                    nonlocal output
+                    if argv[:2] == ["pane", "run"]:
+                        setup = (
+                            f'{runtime}() {{ export CLAUDE_CONFIG_DIR=wrong; printf "WRAPPER\\n"; }}\n'
+                            f"alias {runtime}='false'\n"
+                            + (f"hash -p /bin/false {runtime}\n" if shell == "bash" else f"hash {runtime}=/bin/false\n")
+                        )
+                        process = subprocess.run(
+                            [shell_binary, "-f", "-c", setup + argv[3] + f"\n{runtime}\n"],
+                            env=fixture.env, text=True, capture_output=True, check=True,
+                        )
+                        output = process.stdout
+                        return ""
+                    marker = argv[argv.index("--match") + 1]
+                    return {"type": "output_matched", "pane_id": "w1:p1", "matched_line": marker,
+                            "read": {"text": output}}
+
+                herdr_dispatch._run_herdr = run
+                herdr_dispatch._validate_pane = lambda *args: None
+                herdr_dispatch._bind_pane_environment(
+                    "fake", "w1:p1", "w1", fixture.repo,
+                    {"launch_env": {"CLAUDE_CONFIG_DIR": None}, "account_id": "personal"},
+                    fixture.env, runtime_binary=str(selected), runtime=runtime,
+                )
+                assert "BINARY_ACCOUNT=unset" in output and "WRAPPER" not in output, output
+            finally:
+                herdr_dispatch._run_herdr = original_run
+                herdr_dispatch._validate_pane = original_validate
+                fixture.close()
 
 
 def test_prompt_is_literal_argv_and_wait_is_only_a_hint():
@@ -956,6 +1081,10 @@ def test_dispatch_entrypoint_preserves_machine_readable_cli_contract():
 
 
 for name, test in (
+    ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
+    ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
+    ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_attempt_and_start),
+    ("real shells bypass stale runtime wrappers and hashes", test_runtime_binding_bypasses_aliases_functions_and_stale_hashes),
     ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),

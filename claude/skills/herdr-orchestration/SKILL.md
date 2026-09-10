@@ -754,6 +754,12 @@ flags. The adapter owns argv quoting, environment binding, attempt reservation,
 readiness inspection, and presentation updates. It never creates a worktree
 or chooses a different account for the caller.
 
+- Native Herd fixes the executable name. The adapter resolves that executable
+  through the dispatch environment, removes its alias/function only in the
+  designated idle task pane, and verifies its PATH resolution alongside account
+  bindings before start. The attempt records `runtime_binary`. This verifies
+  prelaunch resolution; it does not prove the running process's account or
+  permit another controller to change the pane between binding and start.
 - Implementation uses `workspace-write`; read/review uses `read-only`.
 - A read-only Codex reviewer may request normal automatic approval for the
   exact lifecycle record and findings-output paths authorized by its brief.
