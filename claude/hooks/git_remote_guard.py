@@ -54,21 +54,43 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import rm_guard  # noqa: E402  parsing helpers, unchanged
+import rm_guard
 
 OVERRIDE = "DOTFILES_ALLOW_GIT_META=1"
 UNTRUSTED = "$UNTRUSTED_CWD"  # non-literal sentinel: cwd cannot be established
 OPERATOR_CHARS = ";&|()\n"
 REMOTE_DENY = ("remove", "rm", "set-url", "rename", "prune")
-GIT_OPTS_WITH_ARG = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
-                     "--attr-source", "--super-prefix")
-GIT_VALUELESS_GLOBAL_OPTS = ("--no-pager", "--paginate", "-p", "-P", "--bare",
-                             "--no-replace-objects", "--no-lazy-fetch",
-                             "--literal-pathspecs", "--glob-pathspecs",
-                             "--noglob-pathspecs", "--icase-pathspecs",
-                             "--no-optional-locks", "--no-advice", "--html-path",
-                             "--man-path", "--info-path", "--version", "--help",
-                             "--exec-path")
+GIT_OPTS_WITH_ARG = (
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+    "--attr-source",
+    "--super-prefix",
+)
+GIT_VALUELESS_GLOBAL_OPTS = (
+    "--no-pager",
+    "--paginate",
+    "-p",
+    "-P",
+    "--bare",
+    "--no-replace-objects",
+    "--no-lazy-fetch",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-optional-locks",
+    "--no-advice",
+    "--html-path",
+    "--man-path",
+    "--info-path",
+    "--version",
+    "--help",
+    "--exec-path",
+)
 LOCATION_OPTS = ("--git-dir", "--work-tree")
 LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 TAINT_HEADS = ("ln", "mv", "cp", "rsync")
@@ -76,24 +98,58 @@ TAINT_GIT_WORKTREE = ("add", "move", "repair")
 # git config option tables; a write with an option outside them is guarded
 CFG_VALUE = ("--file", "--blob", "--type", "--default", "--comment", "--value", "--url")
 CFG_READ_VALUE = ("--get-color", "--get-colorbool")
-CFG_WRITE = ("--add", "--replace-all", "--unset", "--unset-all",
-             "--remove-section", "--rename-section", "--edit", "-e")
+CFG_WRITE = (
+    "--add",
+    "--replace-all",
+    "--unset",
+    "--unset-all",
+    "--remove-section",
+    "--rename-section",
+    "--edit",
+    "-e",
+)
 CFG_SECTION = ("--remove-section", "--rename-section")
 CFG_READ = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l")
 CFG_SCOPE_OUTSIDE = ("--global", "--system")
-CFG_FLAGS = ("--local", "--worktree", "--bool", "--int", "--bool-or-int", "--bool-or-str",
-             "--path", "--expiry-date", "--fixed-value", "--all", "--append", "--includes",
-             "--no-includes", "--null", "-z", "--name-only", "--show-origin", "--show-scope",
-             "--show-names", "--no-show-names", "--")
+CFG_FLAGS = (
+    "--local",
+    "--worktree",
+    "--bool",
+    "--int",
+    "--bool-or-int",
+    "--bool-or-str",
+    "--path",
+    "--expiry-date",
+    "--fixed-value",
+    "--all",
+    "--append",
+    "--includes",
+    "--no-includes",
+    "--null",
+    "-z",
+    "--name-only",
+    "--show-origin",
+    "--show-scope",
+    "--show-names",
+    "--no-show-names",
+    "--",
+)
 CFG_WRITE_VERBS = ("set", "unset", "remove-section", "rename-section", "edit")
 CFG_SECTION_VERBS = ("remove-section", "rename-section")
 CFG_READ_VERBS = ("get", "list")
-GUARDED_KEY = re.compile(r"^(remote(\..*)?|core(\..*)?|branch\..+\.(remote|merge|pushremote))$", re.I)
-GUARDED_SECTION = re.compile(r"^(remote(\..*)?|core|branch\..+)$", re.I)
+GUARDED_KEY = re.compile(
+    r"^(remote(\..*)?|core(\..*)?|branch\..+\.(remote|merge|pushremote))$",
+    re.IGNORECASE,
+)
+GUARDED_SECTION = re.compile(r"^(remote(\..*)?|core|branch\..+)$", re.IGNORECASE)
 TERMINAL_STATUSES = frozenset({"merged", "failed", "abandoned"})
 WRITER_HEADS = ("tee", "cp", "mv", "truncate", "sed")
 REDIRECTS = (">", ">>", ">|", "1>", "2>", "1>>", "2>>", "&>", "&>>")
 GIT_FILE = re.compile(r"(^|/)\.git/(config|info/exclude)$")
+PATCH_FILE_HEADERS = re.compile(
+    r"^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move (?:to|from): (.+)$",
+    re.MULTILINE,
+)
 SEGMENT_MAX = 160
 FIXTURE_RULE = (
     "Fixture repos only: pass a literal, existing path under ${TMPDIR:-/tmp} to git -C "
@@ -104,14 +160,28 @@ FIXTURE_RULE = (
 
 # --- paths -----------------------------------------------------------------
 
+
 def canon(path: str) -> str:
-    """realpath of the longest existing ancestor, joined with the rest."""
-    existing, rest = path, []
-    while existing != "/" and not os.path.lexists(existing):
-        existing, tail = os.path.split(existing)
-        rest.append(tail)
-    real = os.path.realpath(existing)
-    return os.path.join(real, *reversed(rest)) if rest else real
+    """Resolve symlinks while traversing the path, including before `..`."""
+    return os.path.realpath(path)
+
+
+def resolve_filesystem(path: str, cwd: str, home: str) -> str:
+    """Resolve a user path from `cwd` with filesystem, not lexical, semantics.
+
+    `normpath` before `realpath` turns `fixture/escape/..` into `fixture`
+    without following `escape`. Git's `-C` and config-file paths traverse the
+    symlink first, so guards must do the same.
+    """
+    return canon(raw_filesystem_path(path, cwd, home))
+
+
+def raw_filesystem_path(
+    path: str, cwd: str, home: str, *, expand_home: bool = True
+) -> str:
+    """Join `path` to `cwd` without lexical normalization or optional expansion."""
+    expanded = rm_guard.expand_home(path, home) if expand_home else path
+    return expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
 
 
 def tmp_roots(home_real: str) -> list:
@@ -120,7 +190,9 @@ def tmp_roots(home_real: str) -> list:
     if t and os.path.isabs(t):
         rp = os.path.realpath(t)
         shallow = len([c for c in rp.split("/") if c]) < 2
-        if not (rp == "/" or rp == home_real or home_real.startswith(rp + "/") or shallow):
+        if not (
+            rp == "/" or rp == home_real or home_real.startswith(rp + "/") or shallow
+        ):
             roots.append(rp)
     roots.append(os.path.realpath("/tmp"))
     return roots
@@ -156,27 +228,42 @@ def fixture_dir(path: str, roots: list, home_real: str):
     try:
         out = subprocess.run(
             ["git", "-C", c, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, env=env, timeout=5)
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5,
+            check=False,
+        )
     except (OSError, subprocess.SubprocessError):
         return "fixture repository could not be resolved"
     if out.returncode != 0:
         return "fixture path is not inside a repository under the temp root"
     if under_root(canon(out.stdout.strip()), roots, home_real) is None:
-        return "fixture path is a linked worktree whose .git lives outside the temp root"
+        return (
+            "fixture path is a linked worktree whose .git lives outside the temp root"
+        )
     return None
 
 
-def guarded_file(path: str, cwds: set, home: str, roots: list, home_real: str,
-                 taint: bool = False) -> bool:
+def guarded_file(
+    path: str,
+    cwds: set,
+    home: str,
+    roots: list,
+    home_real: str,
+    taint: bool = False,
+    direct_path: bool = False,
+) -> bool:
     """True when `path` names .git/config or .git/info/exclude (directly or
     through a symlink) outside every temp root, for some possible cwd. Under
     taint (an earlier segment may re-point paths) the temp-root exemption is
-    withdrawn: any matching path is guarded."""
-    if not literal(path):
+    withdrawn: any matching path is guarded. Direct tool paths are literal
+    filenames: shell expansion syntax has no special meaning in them."""
+    if not direct_path and not literal(path):
         return False
     for cwd in cwds:
-        base = cwd if literal(cwd) else "/"
-        p = rm_guard.resolve(rm_guard.expand_home(path, home), base)
+        base = cwd if direct_path or literal(cwd) else "/"
+        p = raw_filesystem_path(path, base, home, expand_home=not direct_path)
         c = canon(p)
         if not (GIT_FILE.search(p) or GIT_FILE.search(c)):
             continue
@@ -185,7 +272,17 @@ def guarded_file(path: str, cwds: set, home: str, roots: list, home_real: str,
     return False
 
 
+def guarded_patch_file(patch: str, cwds: set, home: str, roots: list, home_real: str):
+    """First guarded apply_patch file header, if any."""
+    for match in PATCH_FILE_HEADERS.finditer(patch):
+        path = next(value for value in match.groups() if value is not None)
+        if guarded_file(path, cwds, home, roots, home_real, direct_path=True):
+            return path
+    return None
+
+
 # --- tokens ----------------------------------------------------------------
+
 
 def quoted_operator(command: str) -> bool:
     """True when an operator character is quoted or backslash-escaped: the
@@ -249,6 +346,7 @@ def is_operator(tok: str) -> bool:
 
 # --- git parsing -----------------------------------------------------------
 
+
 def parse_git(tokens: list):
     """(subcommand, args, -C values in order, location-hint flag, unknown-option flag).
 
@@ -271,7 +369,7 @@ def parse_git(tokens: list):
                 cdirs.append(tokens[i + 1])
             i += 2
             continue
-        if tok in LOCATION_OPTS or tok.startswith("--git-dir=") or tok.startswith("--work-tree="):
+        if tok in LOCATION_OPTS or tok.startswith(("--git-dir=", "--work-tree=")):
             hints = True
         if tok in GIT_OPTS_WITH_ARG:
             i += 2
@@ -280,11 +378,11 @@ def parse_git(tokens: list):
             i += 1
             continue
         if tok.startswith("-") and "=" not in tok:
-            return None, tokens[i + 1:], cdirs, hints, True
+            return None, tokens[i + 1 :], cdirs, hints, True
         if tok.startswith("-"):
             i += 1
             continue
-        return tok, tokens[i + 1:], cdirs, hints, False
+        return tok, tokens[i + 1 :], cdirs, hints, False
     return None, [], cdirs, hints, False
 
 
@@ -298,10 +396,12 @@ def effective_dirs(cdirs: list, cwds: set, home: str):
                 return None, "working directory contains an unexpanded variable or glob"
             if c == "":
                 continue  # git -C "" is a no-op
-            d = rm_guard.resolve(rm_guard.expand_home(c, home), d)
+            d = resolve_filesystem(c, d, home)
         if not literal(d):
-            return None, ("working directory cannot be established "
-                          "(unexpanded variable, quoted operator, or cd -)")
+            return None, (
+                "working directory cannot be established "
+                "(unexpanded variable, quoted operator, or cd -)"
+            )
         out.add(d)
     return out, None
 
@@ -372,25 +472,63 @@ def branch_delete_flag(args: list) -> bool:
     for a in args:
         if a in ("-d", "-D", "--delete"):
             return True
-        if a.startswith("-") and not a.startswith("--") and any(ch in "dD" for ch in a[1:]):
+        if (
+            a.startswith("-")
+            and not a.startswith("--")
+            and any(ch in "dD" for ch in a[1:])
+        ):
             return True
     return False
 
 
 # --- task records (read-only) -------------------------------------------------
 
+
 def _core():
     import herdr_orch_core  # deferred: only R3 needs it (about 30 ms)
+
     return herdr_orch_core
 
 
-def own_task():
+def selected_state_root(cwds: set, runtime: str):
+    """Select exactly one account-local state root from repository context.
+
+    Synthetic fixture cwd values retain the legacy ambient root. A repository
+    context never falls back across account roots: its policy selection is the
+    same one used by the controller's claim-owner and write-task commands.
+    """
+    core = _core()
+    bound_personal = os.environ.get("HERDR_PERSONAL")
+    bound_account = os.environ.get("HERDR_ACCOUNT_ID")
+    if (bound_personal is None) != (bound_account is None):
+        return None
+    if bound_personal is not None and bound_personal not in ("0", "1"):
+        return None
+    roots = set()
+    for cwd in cwds:
+        if not literal(cwd):
+            continue
+        try:
+            context = core.repository_context(cwd)
+            scope = core.account_scope(
+                context["root"], runtime, personal=bound_personal == "1"
+            )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+        if bound_account is not None and bound_account != scope["account_id"]:
+            return None
+        roots.add(core.account_payload_root(scope) / "herdr-orch")
+    if not roots:
+        return core.state_root()
+    return roots.pop() if len(roots) == 1 else None
+
+
+def own_task(root):
     """(repo_slug, task_id) of this session's task via HERDR_WORKSPACE_ID, or None."""
     core = _core()
     ws = os.environ.get("HERDR_WORKSPACE_ID", "")
     if not core.valid_workspace_id(ws):
         return None
-    root = core.state_root()
     for idx in sorted(root.glob(f"*/workspaces/{ws}.json")):
         index = core.read_index(idx.parent.parent, ws)
         if index and isinstance(index.get("task_id"), str):
@@ -398,13 +536,16 @@ def own_task():
     return None
 
 
-def protected_records() -> list:
+def protected_records(cwds: set, runtime: str):
     """[(task_id, record)] for every non-terminal task that is not this
     session's own; sidecars, symlinks, and unreadable files are skipped."""
     core = _core()
-    own = own_task()
+    root = selected_state_root(cwds, runtime)
+    if root is None:
+        return None
+    own = own_task(root)
     out = []
-    for p in sorted(core.state_root().glob("*/tasks/*.json")):
+    for p in sorted(root.glob("*/tasks/*.json")):
         tid = p.name[:-5]
         if not core.valid_task_id(tid) or p.is_symlink():
             continue
@@ -421,37 +562,61 @@ def protected_records() -> list:
     return out
 
 
-def protected_branch(name: str):
-    recs = [(t, r) for t, r in protected_records() if isinstance(r.get("branch"), str)]
+def protected_branch(name: str, cwds: set, runtime: str):
+    records = protected_records(cwds, runtime)
+    if records is None:
+        return "(unresolved)", "account selection cannot be verified"
+    recs = [(t, r) for t, r in records if isinstance(r.get("branch"), str)]
     if not literal(name):
-        return ("(unresolved)", f"{len(recs)} protected task branches exist") if recs else None
-    if name.startswith("refs/heads/"):
-        name = name[len("refs/heads/"):]
+        return (
+            ("(unresolved)", f"{len(recs)} protected task branches exist")
+            if recs
+            else None
+        )
+    name = name.removeprefix("refs/heads/")
+    if name in ("@", "HEAD") or name.startswith("@{"):
+        return (
+            ("(unresolved)", f"{len(recs)} protected task branches exist")
+            if recs
+            else None
+        )
     for tid, rec in recs:
         if rec["branch"] == name:
             return tid, rec.get("status")
     return None
 
 
-def protected_worktree(tok: str, cwds: set, home: str):
-    recs = [(t, r) for t, r in protected_records()
-            if isinstance(r.get("worktree"), str) and r["worktree"]]
+def protected_worktree(tok: str, cwds: set, account_cwds: set, home: str, runtime: str):
+    records = protected_records(account_cwds, runtime)
+    if records is None:
+        return "(unresolved)", "account selection cannot be verified"
+    recs = [
+        (t, r)
+        for t, r in records
+        if isinstance(r.get("worktree"), str) and r["worktree"]
+    ]
     if not literal(tok):
-        return ("(unresolved)", f"{len(recs)} protected task worktrees exist") if recs else None
-    targets = {canon(rm_guard.resolve(rm_guard.expand_home(tok, home), cwd))
-               for cwd in cwds if literal(cwd)}
+        return (
+            ("(unresolved)", f"{len(recs)} protected task worktrees exist")
+            if recs
+            else None
+        )
+    targets = {resolve_filesystem(tok, cwd, home) for cwd in cwds if literal(cwd)}
     unknown_cwd = any(not literal(cwd) for cwd in cwds)
     suffix = tok.strip("/")
     for tid, rec in recs:
         wc = canon(rec["worktree"])
         if wc in targets:
             return tid, rec.get("status")
-        if not tok.startswith("/") and (unknown_cwd or (suffix and wc.endswith("/" + suffix))):
+        if not tok.startswith("/") and (
+            unknown_cwd or (suffix and wc.endswith("/" + suffix))
+        ):
             return tid, rec.get("status")
     return None
 
 
 # --- rules -----------------------------------------------------------------
+
 
 def check_git(tokens: list, ctx: dict):
     cwds, home, roots, home_real = ctx["P"], ctx["home"], ctx["roots"], ctx["home_real"]
@@ -482,31 +647,57 @@ def check_git(tokens: list, ctx: dict):
         if not branch_delete_flag(args):
             return None
         for name in [a for a in args if not a.startswith("-")]:
-            hit = protected_branch(name)
+            hit = protected_branch(name, ctx["account_cwds"], ctx["runtime"])
             if hit:
-                return (f"git branch delete of {name} targets the branch of orchestrated "
-                        f"task {hit[0]} ({hit[1]}) -- {seg}")
+                return (
+                    f"git branch delete of {name} targets the branch of orchestrated "
+                    f"task {hit[0]} ({hit[1]}) -- {seg}"
+                )
         return None
     elif sub == "worktree" and args and args[0] == "remove":
+        dirs, reason = effective_dirs(cdirs, cwds, home)
+        if dirs is None:
+            recs = protected_records(ctx["account_cwds"], ctx["runtime"])
+            if recs is None:
+                return (
+                    f"git worktree remove cannot verify its account selection -- {seg}"
+                )
+            if recs:
+                return (
+                    f"git worktree remove cannot resolve its working directory ({reason}) "
+                    f"while {len(recs)} orchestrated tasks are protected -- {seg}"
+                )
+            return None
         for tok in [a for a in args[1:] if not a.startswith("-")]:
-            hit = protected_worktree(tok, cwds, home)
+            hit = protected_worktree(
+                tok, dirs, ctx["account_cwds"], home, ctx["runtime"]
+            )
             if hit:
-                return (f"git worktree remove of {tok} targets the worktree of orchestrated "
-                        f"task {hit[0]} ({hit[1]}) -- {seg}")
+                return (
+                    f"git worktree remove of {tok} targets the worktree of orchestrated "
+                    f"task {hit[0]} ({hit[1]}) -- {seg}"
+                )
         return None
     else:
         return None
     if hints:
         return f"{what} (--git-dir/--work-tree forms are not accepted; use git -C) -- {seg}"
     if ctx["taint"]:
-        return (f"{what} (an earlier segment can re-point the fixture path before git runs; "
-                f"run it as a separate call) -- {seg}")
+        return (
+            f"{what} (an earlier segment can re-point the fixture path before git runs; "
+            f"run it as a separate call) -- {seg}"
+        )
     if sub == "config" and fpath is not None:
-        if literal(fpath):
-            dirs, _ = effective_dirs([], cwds, home)
-            if dirs and all(under_root(canon(rm_guard.resolve(rm_guard.expand_home(fpath, home), d)),
-                                       roots, home_real) for d in dirs):
-                return None
+        dirs, _ = effective_dirs(cdirs, cwds, home)
+        if (
+            literal(fpath)
+            and dirs
+            and all(
+                under_root(resolve_filesystem(fpath, d, home), roots, home_real)
+                for d in dirs
+            )
+        ):
+            return None
         return f"{what} -- {seg}"
     dirs, reason = effective_dirs(cdirs, cwds, home)
     if dirs is None:
@@ -523,15 +714,25 @@ def check_redirects(tokens: list, ctx: dict):
     taint = ctx["taint"]
     seg = " ".join(tokens)[:SEGMENT_MAX]
     for i, tok in enumerate(tokens):
-        if tok in REDIRECTS and i + 1 < len(tokens) \
-                and guarded_file(tokens[i + 1], cwds, home, roots, home_real, taint):
-            return (f"redirection into {tokens[i + 1]} edits git metadata shared by every "
-                    f"linked worktree -- {seg}")
+        if (
+            tok in REDIRECTS
+            and i + 1 < len(tokens)
+            and guarded_file(tokens[i + 1], cwds, home, roots, home_real, taint)
+        ):
+            return (
+                f"redirection into {tokens[i + 1]} edits git metadata shared by every "
+                f"linked worktree -- {seg}"
+            )
         for r in REDIRECTS:
-            if tok.startswith(r) and len(tok) > len(r) \
-                    and guarded_file(tok[len(r):], cwds, home, roots, home_real, taint):
-                return (f"redirection into {tok[len(r):]} edits git metadata shared by every "
-                        f"linked worktree -- {seg}")
+            if (
+                tok.startswith(r)
+                and len(tok) > len(r)
+                and guarded_file(tok[len(r) :], cwds, home, roots, home_real, taint)
+            ):
+                return (
+                    f"redirection into {tok[len(r) :]} edits git metadata shared by every "
+                    f"linked worktree -- {seg}"
+                )
     return None
 
 
@@ -541,12 +742,17 @@ def check_writers(tokens: list, ctx: dict):
     if head not in WRITER_HEADS:
         return None
     if head == "sed" and not any(
-            t == "--in-place" or t.startswith("--in-place=")
-            or (t.startswith("-i") and not t.startswith("--")) for t in tokens[1:]):
+        t == "--in-place"
+        or t.startswith("--in-place=")
+        or (t.startswith("-i") and not t.startswith("--"))
+        for t in tokens[1:]
+    ):
         return None
     seg = " ".join(tokens)[:SEGMENT_MAX]
     for tok in tokens[1:]:
-        if not tok.startswith("-") and guarded_file(tok, cwds, home, roots, home_real, ctx["taint"]):
+        if not tok.startswith("-") and guarded_file(
+            tok, cwds, home, roots, home_real, ctx["taint"]
+        ):
             return f"{head} on {tok} edits git metadata shared by every linked worktree -- {seg}"
     return None
 
@@ -571,16 +777,17 @@ def cd_target(tokens: list, cwd: str, home: str) -> str:
 
 # --- the walk ---------------------------------------------------------------
 
+
 class Chain:
     """Possible-cwd bookkeeping for one run of segments between unconditional
     boundaries (`;`, newline, `&`, `(`, `)`, start, end)."""
 
     def __init__(self, start: set):
         self.start = set(start)
-        self.first_cd = None   # target of a cd that opened the chain (always runs)
-        self.cds = []          # targets of later cds (may be skipped)
-        self.pure = True       # every joiner so far is &&
-        self.first = True      # no segment consumed yet
+        self.first_cd = None  # target of a cd that opened the chain (always runs)
+        self.cds = []  # targets of later cds (may be skipped)
+        self.pure = True  # every joiner so far is &&
+        self.first = True  # no segment consumed yet
 
     def possible(self) -> set:
         if self.pure:
@@ -604,18 +811,35 @@ class Chain:
             self.cds.append(target)
 
 
-def check_command(command: str, real_cwd: str, home: str, roots: list, home_real: str,
-                  cwds=None, taint_box=None):
+def check_command(
+    command: str,
+    real_cwd: str,
+    home: str,
+    roots: list,
+    home_real: str,
+    cwds=None,
+    taint_box=None,
+    runtime: str = "claude",
+    account_cwds=None,
+):
     """Denial reason for `command`, or None. `taint_box` is a one-element
     list shared across wrapper recursion: taint set inside `sh -c` reaches
     the caller and vice versa; cwd state stays scoped to each script."""
-    start = set(cwds) if cwds is not None else {real_cwd}
+    account_cwds = set(account_cwds) if account_cwds is not None else {real_cwd}
+    start = set(cwds) if cwds is not None else set(account_cwds)
     if quoted_operator(command):
         start = {UNTRUSTED}
     if taint_box is None:
         taint_box = [False]
-    ctx = {"P": set(start), "home": home, "roots": roots, "home_real": home_real,
-           "taint": taint_box[0]}
+    ctx = {
+        "P": set(start),
+        "home": home,
+        "roots": roots,
+        "home_real": home_real,
+        "taint": taint_box[0],
+        "runtime": runtime,
+        "account_cwds": account_cwds,
+    }
     tokens = normalize_operators(rm_guard.tokenize(command))
     chain = Chain(start)
     stack = []
@@ -631,24 +855,36 @@ def check_command(command: str, real_cwd: str, home: str, roots: list, home_real
         ctx["P"] = chain.possible()
         ctx["taint"] = taint_box[0]
         stripped = rm_guard.strip_prefixes(raw)
-        overridden = OVERRIDE in raw[:len(raw) - len(stripped)]
+        overridden = OVERRIDE in raw[: len(raw) - len(stripped)]
         head = rm_guard.basename(stripped[0]) if stripped else ""
         if head == "cd" and term not in ("|", "&"):
-            targets = {cd_target(stripped, cwd, home) if literal(cwd) else UNTRUSTED
-                       for cwd in ctx["P"]}
+            targets = {
+                cd_target(stripped, cwd, home) if literal(cwd) else UNTRUSTED
+                for cwd in ctx["P"]
+            }
             chain.record_cd(next(iter(targets)) if len(targets) == 1 else UNTRUSTED)
         reason = None
-        if overridden:
-            pass
-        elif (reason := check_redirects(raw, ctx)) is not None:
-            pass
-        elif not stripped or head == "cd":
+        if (
+            overridden
+            or (reason := check_redirects(raw, ctx)) is not None
+            or not stripped
+            or head == "cd"
+        ):
             pass
         elif head in rm_guard.SHELL_WRAPPERS:
             inner = rm_guard.extract_shell_c_arg(stripped)
             if inner is not None:
-                reason = check_command(inner, real_cwd, home, roots, home_real,
-                                       ctx["P"], taint_box)
+                reason = check_command(
+                    inner,
+                    real_cwd,
+                    home,
+                    roots,
+                    home_real,
+                    ctx["P"],
+                    taint_box,
+                    runtime,
+                    ctx["account_cwds"],
+                )
         elif head == "git":
             reason = check_git(stripped, ctx)
         else:
@@ -701,24 +937,85 @@ def check_command(command: str, real_cwd: str, home: str, roots: list, home_real
 
 # --- entry -------------------------------------------------------------------
 
+
 def decide(data: dict):
-    tool = data.get("tool_name", "")
-    tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        return None
+    tool = data.get("tool_name") or data.get("toolName") or ""
+    lowered = tool.lower() if isinstance(tool, str) else ""
+    tool_input = data.get("tool_input") or data.get("toolInput") or {}
     home = os.environ.get("HOME", os.path.expanduser("~"))
     home_real = os.path.realpath(home)
     roots = tmp_roots(home_real)
-    cwd = data.get("cwd") or os.getcwd()
-    if tool == "Bash":
-        command = tool_input.get("command")
-        if isinstance(command, str) and command.strip():
-            return check_command(command, cwd, home, roots, home_real)
+    payload_cwd = data.get("cwd")
+    cwd = payload_cwd if isinstance(payload_cwd, str) and payload_cwd else os.getcwd()
+    if isinstance(tool_input, str):
+        if lowered == "apply_patch":
+            path = guarded_patch_file(tool_input, {cwd}, home, roots, home_real)
+            if path is not None:
+                return f"{tool} to {path} edits git metadata shared by every linked worktree"
         return None
-    if tool in ("Write", "Edit"):
-        path = tool_input.get("file_path")
-        if isinstance(path, str) and guarded_file(path, {cwd}, home, roots, home_real):
-            return f"{tool} to {path} edits git metadata shared by every linked worktree"
+    if not isinstance(tool_input, dict):
+        return None
+    nested = tool_input.get("args")
+    inputs = [tool_input] + ([nested] if isinstance(nested, dict) else [])
+    tool_cwd = next(
+        (
+            value
+            for item in inputs
+            for key in ("workdir", "cwd")
+            if isinstance(value := item.get(key), str) and value
+        ),
+        None,
+    )
+    if tool_cwd is not None:
+        cwd = resolve_filesystem(tool_cwd, cwd, home)
+    if lowered in rm_guard.SHELL_TOOLS:
+        command = next(
+            (
+                value
+                for item in inputs
+                for key in ("command", "cmd")
+                if isinstance(value := item.get(key), str)
+            ),
+            None,
+        )
+        if isinstance(command, str) and command.strip():
+            runtime = (
+                "codex"
+                if lowered in ("exec_command", "shell_command", "unified_exec")
+                else "claude"
+            )
+            return check_command(command, cwd, home, roots, home_real, runtime=runtime)
+        return None
+    if lowered in ("write", "edit", "multiedit"):
+        path = next(
+            (
+                value
+                for item in inputs
+                for key in ("file_path", "filePath", "path")
+                if isinstance(value := item.get(key), str)
+            ),
+            None,
+        )
+        if isinstance(path, str) and guarded_file(
+            path, {cwd}, home, roots, home_real, direct_path=True
+        ):
+            return (
+                f"{tool} to {path} edits git metadata shared by every linked worktree"
+            )
+    if lowered == "apply_patch":
+        patch = next(
+            (
+                value
+                for item in inputs
+                for key in ("input", "patch")
+                if isinstance(value := item.get(key), str)
+            ),
+            None,
+        )
+        if isinstance(patch, str):
+            path = guarded_patch_file(patch, {cwd}, home, roots, home_real)
+            if path is not None:
+                return f"{tool} to {path} edits git metadata shared by every linked worktree"
     return None
 
 

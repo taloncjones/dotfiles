@@ -30,7 +30,11 @@ REAL="$H/proj"        # a "real" repo: under HOME, outside every root
 WTESC="$T/wt-esc"     # linked worktree of $REAL: the containment escape
 CFG="$FIX/cfg"        # throwaway CLAUDE_CONFIG_DIR with task records
 NONTMP="/Users/grg-test-user/proj"   # synthetic cwd outside every root
-mkdir -p "$T/x" "$H" "$ESC" "$FIX/wt-t1" "$FIX/other" \
+WORK="$H/Git/work/project"  # real work-owned repository for account selection
+COORD="$FIX/coordination"  # native coordination locks, never caller state
+XDG="$FIX/xdg-state"       # native fallback state root, never caller state
+WORK_CONFIG="$H/.claude-work"
+mkdir -p "$T/x" "$H" "$ESC" "$FIX/wt-t1" "$FIX/other" "$COORD" "$XDG" \
     "$CFG/herdr-orch/slug-x/tasks" "$CFG/herdr-orch/slug-x/workspaces" \
     "$CFG/herdr-orch/slug-y/tasks" "$CFG/herdr-orch/slug-y/workspaces"
 
@@ -61,9 +65,17 @@ g init -q "$REAL"
 g -C "$REAL" remote add origin https://example.invalid/real.git
 g -C "$REAL" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
 g -C "$REAL" worktree add -q "$WTESC" -b escb >/dev/null 2>&1
+mkdir -p "$WORK"
+g init -q "$WORK"
+g -C "$WORK" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+mkdir -p "$REAL/child"
+ln -s "$REAL/child" "$R/escape"
 printf 'gitdir: %s/.git/worktrees/esc\n' "$NONTMP" > "$ESC/.git"
 ln -s "$REAL/.git/config" "$T/config-link"
 ln -s "$REAL" "$T/repo-link"
+mkdir -p "$T/metadata/.git"
+ln -s "$H/config-store" "$T/metadata/.git/config"
+mkdir -p "$T/~/.git"
 # Task records: T-1 active (own task of workspace w1), T-2 merged, T-3
 # reviewed (not terminal), and a same-id T-1 in another slug.
 printf '{"task_id":"T-1","branch":"talon/T-1/x","worktree":"%s","status":"in-progress"}' "$FIX/wt-t1" \
@@ -81,6 +93,35 @@ printf '{"task_id":"T-9","branch":"talon/T-9/x","status":"in-progress"}' \
     > "$CFG/herdr-orch/slug-x/tasks/T-9.done.json"
 ln -s "$CFG/herdr-orch/slug-x/tasks/T-1.json" "$CFG/herdr-orch/slug-x/tasks/T-8.json"
 
+# Native Codex state is selected from the work-owned repository, even when
+# CLAUDE_CONFIG_DIR is absent. These records are created through the real core
+# commands so selection and account-payload layout match the controller.
+WORK_SLUG=$(env -u CLAUDE_CONFIG_DIR -u CLAUDE_PERSONAL_ONLY \
+    -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_WORK_TREE -u HERDR_PERSONAL \
+    -u HERDR_ACCOUNT_ID -u HERDR_WORKSPACE_ID HERDR_COORDINATION_ROOT="$COORD" \
+    XDG_STATE_HOME="$XDG" HOME="$H" CLAUDE_WORK_CONFIG_DIR="$WORK_CONFIG" \
+    python3 - "$WORK" <<'PY'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+context = core.repository_context(sys.argv[1])
+print(core.repo_slug("", context["common_dir"]))
+PY
+)
+WORK_FENCE=$(env -u CLAUDE_CONFIG_DIR -u CLAUDE_PERSONAL_ONLY \
+    -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_WORK_TREE -u HERDR_PERSONAL \
+    -u HERDR_ACCOUNT_ID -u HERDR_WORKSPACE_ID HERDR_COORDINATION_ROOT="$COORD" \
+    XDG_STATE_HOME="$XDG" HOME="$H" CLAUDE_WORK_CONFIG_DIR="$WORK_CONFIG" \
+    python3 claude/hooks/herdr_orch_core.py claim-owner --repo-path "$WORK" --runtime codex \
+    --repo-slug "$WORK_SLUG" --session work-session --host test --pid 1 --thread-id test-thread)
+env -u CLAUDE_CONFIG_DIR -u CLAUDE_PERSONAL_ONLY -u WORKFLOW_PERSONAL_ACCOUNT \
+    -u CLAUDE_WORK_TREE -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u HERDR_WORKSPACE_ID \
+    HERDR_COORDINATION_ROOT="$COORD" XDG_STATE_HOME="$XDG" HOME="$H" \
+    CLAUDE_WORK_CONFIG_DIR="$WORK_CONFIG" \
+    python3 claude/hooks/herdr_orch_core.py write-task --repo-path "$WORK" --runtime codex \
+    --repo-slug "$WORK_SLUG" --task-id WORK-1 --session work-session --fence "$WORK_FENCE" \
+    --json '{"task_id":"WORK-1","branch":"active-task","worktree":"'"$WORK"'/active","status":"in-progress"}'
+
 # payload CMD CWD TOOL -> PreToolUse JSON on stdout (file_path for non-Bash)
 payload() {
     P_CMD="$1" P_CWD="$2" P_TOOL="${3:-Bash}" python3 - <<'PY'
@@ -89,6 +130,47 @@ e = os.environ
 ti = {"command": e["P_CMD"]} if e["P_TOOL"] == "Bash" else {"file_path": e["P_CMD"]}
 print(json.dumps({"hook_event_name": "PreToolUse", "tool_name": e["P_TOOL"],
                   "cwd": e["P_CWD"], "tool_input": ti}))
+PY
+}
+
+# payload_codex TOOL FIELD CMD CWD -> a Codex shell-tool payload. FIELD is
+# direct, nested, or camel to cover the native adapter aliases.
+payload_codex() {
+    P_TOOL="$1" P_FIELD="$2" P_CMD="$3" P_CWD="$4" python3 - <<'PY'
+import json, os
+e = os.environ
+command = {"cmd": e["P_CMD"]}
+if e["P_FIELD"] == "direct":
+    data = {"tool_name": e["P_TOOL"], "cwd": e["P_CWD"], "tool_input": command}
+elif e["P_FIELD"] == "nested":
+    data = {"tool_name": e["P_TOOL"], "cwd": e["P_CWD"], "tool_input": {"args": command}}
+else:
+    data = {"toolName": e["P_TOOL"], "cwd": e["P_CWD"], "toolInput": command}
+print(json.dumps(data))
+PY
+}
+
+# payload_patch FIELD PATH CWD -> apply_patch payload variants used by Codex.
+payload_patch() {
+    P_FIELD="$1" P_PATH="$2" P_CWD="$3" python3 - <<'PY'
+import json, os
+e = os.environ
+patch = "*** Begin Patch\n*** Update File: %s\n@@\n-old\n+new\n*** End Patch" % e["P_PATH"]
+if e["P_FIELD"] == "freeform":
+    tool_input = patch
+else:
+    tool_input = {e["P_FIELD"]: patch}
+print(json.dumps({"tool_name": "apply_patch", "cwd": e["P_CWD"], "tool_input": tool_input}))
+PY
+}
+
+# payload_file_alias FIELD PATH CWD -> Write payload with an adapter file key.
+payload_file_alias() {
+    P_FIELD="$1" P_PATH="$2" P_CWD="$3" python3 - <<'PY'
+import json, os
+e = os.environ
+print(json.dumps({"tool_name": "Write", "cwd": e["P_CWD"],
+                  "tool_input": {e["P_FIELD"]: e["P_PATH"]}}))
 PY
 }
 
@@ -105,6 +187,18 @@ run_plain() {
     shift
     printf '%s' "$p" | env -u HERDR_WORKSPACE_ID -u HERDR_ENV TMPDIR="$T" HOME="$H" \
         CLAUDE_CONFIG_DIR="$CFG" "$@" "$HOOK" >"$FIX/out" 2>"$FIX/err"
+}
+
+# run_work PAYLOAD [NAME=VALUE ...]: a native Codex work-account payload with
+# CLAUDE_CONFIG_DIR deliberately unset, matching the controller's launch env.
+run_work() {
+    p="$1"
+    shift
+    printf '%s' "$p" | env -u HERDR_WORKSPACE_ID -u CLAUDE_CONFIG_DIR \
+        -u CLAUDE_PERSONAL_ONLY -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_WORK_TREE \
+        -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID HERDR_ENV=1 TMPDIR="$T" HOME="$H" \
+        HERDR_COORDINATION_ROOT="$COORD" XDG_STATE_HOME="$XDG" \
+        CLAUDE_WORK_CONFIG_DIR="$WORK_CONFIG" "$@" "$HOOK" >"$FIX/out" 2>"$FIX/err"
 }
 
 # check LABEL EXPECT(deny|allow) RC: deny is exit 2, empty stdout, exactly two
@@ -207,6 +301,7 @@ case_ "denies -C a temp dir that is not a repo" deny "git -C $T remote remove or
 case_ "denies -C a gitfile with missing metadata" deny "git -C $ESC remote remove origin"
 case_ "denies -C the containment escape" deny "git -C $WTESC remote remove origin"
 reason_has "escape names the linked-worktree reason" "linked worktree whose .git lives outside the temp root"
+case_ "denies -C through a fixture symlink parent" deny "git -C $R/escape/.. remote remove origin"
 case_ "denies -C a repo under HOME" deny "git -C $REAL remote remove origin"
 case_ "denies -C a symlink to a real repo" deny "git -C $T/repo-link remote remove origin"
 case_ "denies -C a non-temp path" deny "git -C $NONTMP remote remove origin"
@@ -261,6 +356,8 @@ case_ "allows git -c override" allow "git -c remote.origin.url=x fetch --dry-run
 case_ "allows -C fixture config write" allow "git -C $R config remote.origin.url x"
 case_ "allows -C fixture config set --value" allow "git -C $R config set --value old core.hooksPath /x"
 case_ "allows config --file under the root" allow "git config --file $T/cfg remote.origin.url x"
+case_ "allows config --file relative to -C fixture" allow "git -C $R config --file .git/config remote.origin.url x" "$WT"
+case_ "denies config --file through a fixture symlink parent" deny "git -C $R config --file escape/../.git/config remote.origin.url x" "$WT"
 
 # --- R3: another task's branch or worktree (spec D5) ---
 case_ "denies branch -D of an active task" deny "git branch -D talon/T-1/x"
@@ -268,11 +365,14 @@ reason_has "branch denial names the task and status" "task T-1 (in-progress)"
 case_ "denies branch --delete --force of an active task" deny "git branch --delete --force talon/T-1/x"
 case_ "denies branch -D of a reviewed (unmerged) task" deny "git branch -D talon/T-3/x"
 case_ "denies branch -D in refs/heads form" deny "git branch -D refs/heads/talon/T-1/x"
+case_ "denies branch shorthand while task branches are protected" deny "git branch -D @{-1}"
 case_ "denies branch -D of a same-id task in another slug" deny "git branch -D talon/T-1/y" "$NONTMP" Bash HERDR_WORKSPACE_ID=w1
 case_ "denies branch -D of an unexpanded name" deny "git branch -D \"\$branch\""
 case_ "denies worktree remove of an active task path" deny "git worktree remove $FIX/wt-t1"
 case_ "denies worktree remove --force of an active task path" deny "git worktree remove --force $FIX/wt-t1"
 case_ "denies worktree remove by trailing component" deny "git worktree remove wt-t1"
+case_ "denies worktree remove relative to -C fixture" deny "git -C $R worktree remove ../wt-t1"
+case_ "denies worktree remove after unresolved -C" deny "git -C \"\$d\" worktree remove $FIX/other"
 case_ "denies worktree remove of an unexpanded path" deny "git worktree remove \"\$wt\""
 case_ "allows branch --list" allow "git branch --list"
 case_ "allows branch -D of an unrelated branch" allow "git branch -D feature/other"
@@ -285,6 +385,18 @@ case_ "allows worktree list" allow "git worktree list"
 case_ "allows worktree prune" allow "git worktree prune"
 mkdir -p "$FIX/nocfg"
 case_ "allows branch -D of an unexpanded name with no records" allow "git branch -D \"\$branch\"" "$NONTMP" Bash CLAUDE_CONFIG_DIR="$FIX/nocfg"
+case_ "allows unresolved -C worktree remove with no records" allow "git -C \"\$d\" worktree remove $FIX/other" "$NONTMP" Bash CLAUDE_CONFIG_DIR="$FIX/nocfg"
+
+# --- R3 account scope: native Codex work state (spec D5) ---
+if run_work "$(payload_codex exec_command direct 'git branch -D active-task' "$WORK")"; then rc=0; else rc=$?; fi
+check "denies Codex branch delete from work account state" deny "$rc"
+if run_work "$(payload_codex exec_command direct "git worktree remove $WORK/active" "$WORK")"; then rc=0; else rc=$?; fi
+check "denies Codex worktree remove from work account state" deny "$rc"
+if run_work "$(payload_codex exec_command direct 'git branch -D active-task' "$WORK")" \
+        WORKFLOW_PERSONAL_ACCOUNT=1; then rc=0; else rc=$?; fi
+check "allows Codex personal override without reading work state" allow "$rc"
+if run_work "$(payload_codex exec_command direct 'cd "\$empty_path"; git branch -D active-task' "$WORK")"; then rc=0; else rc=$?; fi
+check "denies Codex branch delete after an unresolved cd" deny "$rc"
 
 # --- R4: guarded files (spec D7) ---
 case_ "denies Write to .git/config" deny "$NONTMP/.git/config" "$NONTMP" Write
@@ -292,6 +404,11 @@ case_ "denies Edit of .git/info/exclude" deny "$NONTMP/.git/info/exclude" "$NONT
 case_ "denies Write to a relative .git/config" deny ".git/config" "$NONTMP" Write
 case_ "denies Write to .git/config under HOME" deny "$REAL/.git/config" "$NONTMP" Write
 case_ "denies Write through a symlink alias" deny "$T/config-link" "$NONTMP" Write
+case_ "denies Write through a .git/config symlink" deny "$T/metadata/.git/config" "$NONTMP" Write
+case_ "denies Write literal glob path to .git/config" deny "$H/project[1]/.git/config" "$NONTMP" Write
+case_ "denies Edit literal dollar path to .git/config" deny "$H/project\$local/.git/config" "$NONTMP" Edit
+case_ "allows Write literal glob path outside git metadata" allow "$H/project[1]/notes" "$NONTMP" Write
+case_ "allows Write literal tilde path under TMPDIR" allow "~/.git/config" "$T" Write
 case_ "denies redirection into .git/config" deny "echo x >> .git/config"
 reason_has "redirection denial names the segment" "-- echo x >> .git/config"
 case_ "denies a glued redirection into .git/info/exclude" deny "printf 'x\\n' >>.git/info/exclude"
@@ -340,6 +457,28 @@ if printf '{"tool_name":"Bash","tool_input":"git remote remove origin","cwd":"%s
 check "ignores a string tool_input" allow "$rc"
 if printf '[1,2]' | env HERDR_ENV=1 HOME="$H" TMPDIR="$T" "$HOOK" >"$FIX/out" 2>"$FIX/err"; then rc=0; else rc=$?; fi
 check "ignores a non-object payload" allow "$rc"
+
+# Codex aliases must drive the same behavior as the Claude Bash payload.
+if run "$(payload_codex exec_command direct 'git remote remove origin' "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies exec_command cmd payload" deny "$rc"
+if run "$(payload_codex shell_command nested 'git remote remove origin' "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies shell_command nested cmd payload" deny "$rc"
+if run "$(payload_codex unified_exec camel 'git remote remove origin' "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies unified_exec camel cmd payload" deny "$rc"
+if run "$(payload_patch patch "$NONTMP/.git/config" "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies apply_patch patch payload" deny "$rc"
+if run "$(payload_patch input "$H/project[1]/.git/config" "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies apply_patch input literal glob path" deny "$rc"
+if run "$(payload_patch freeform "$NONTMP/.git/config" "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies apply_patch freeform payload" deny "$rc"
+if run "$(payload_patch freeform "$H/project\$local/.git/config" "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies apply_patch freeform literal dollar path" deny "$rc"
+if run "$(payload_patch input '~/.git/config' "$T")"; then rc=0; else rc=$?; fi
+check "allows apply_patch literal tilde path under TMPDIR" allow "$rc"
+if run "$(payload_file_alias filePath "$NONTMP/.git/config" "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies Write filePath payload" deny "$rc"
+if run "$(payload_file_alias path "$NONTMP/.git/config" "$NONTMP")"; then rc=0; else rc=$?; fi
+check "denies Write path payload" deny "$rc"
 
 # --- read-only state root (spec R3) ---
 state_snapshot() {
