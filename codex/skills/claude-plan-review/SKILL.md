@@ -1,69 +1,74 @@
 ---
 name: claude-plan-review
-description: Use when Codex has finalized an implementation plan and needs an independent Claude review before code execution begins.
+description: Obtain a bounded independent Claude review of one explicit frozen implementation plan.
 ---
 
 # Claude Plan Review
 
-Use this after `superpowers-writing-plans` and before `superpowers-executing-plans`.
-Codex already wrote or accepted the plan; this adds a second-model review from
-Claude before implementation starts.
-
-## Target
-
-1. If the user passed a plan path, use it.
-2. Otherwise choose the newest plan-like file from the first existing location:
-   `docs/plans/`, `docs/superpowers/specs/`, `.planning/`, `~/.claude/plans/`.
-3. State the resolved path before running the review.
-
-## Review Command
-
-Inline the plan contents so the review is deterministic:
+Set `REVIEW_SKILL_FILE` to this skill's absolute `SKILL.md` path supplied by
+the skill loader. Resolve installed symlinks before using a helper. If the
+loader supplies no path, the existing `DOTFILEDIR` is the fallback; never guess
+from the target checkout or another account's skill directory.
 
 ```bash
-claude -p "$(cat <<'PROMPT'
-You are an expert staff engineer reviewing an IMPLEMENTATION PLAN before code is
-written. Be terse and specific. Do not rewrite the plan.
+REVIEW_ROOT=$(uv run --no-project python - "${REVIEW_SKILL_FILE:-}" "${DOTFILEDIR:-}" <<'PYROOT'
+from pathlib import Path
+import sys
 
-For each issue return:
-- SEVERITY: critical, high, medium, or low
-- LOCATION: plan section or line
-- PROBLEM: what is wrong or missing
-- FIX: concrete change to the plan
-
-Review for:
-- Missing or hand-waved steps
-- Unsafe ordering or hidden dependencies
-- Missing test-first coverage
-- Steps too large to implement and verify in one pass
-- Unstated assumptions, rollback gaps, migration/data-loss risks
-- Drift from project AGENTS.md, CLAUDE.md, README, or plan conventions
-
-End with:
-VERDICT: ship-as-is | minor-fixes | needs-rework
-
-=== PLAN FILE: <path> ===
-<plan contents>
-
-=== OPTIONAL CONTEXT ===
-<relevant AGENTS.md / CLAUDE.md / README / spec excerpts>
-PROMPT
-)" </dev/null
+source, fallback = sys.argv[1:]
+if source and (not Path(source).is_absolute() or Path(source).name != "SKILL.md"):
+    raise SystemExit("Use the absolute SKILL.md path supplied by the skill loader")
+root = Path(source).resolve(strict=True).parents[3] if source else (
+    Path(fallback).expanduser().resolve(strict=True) if fallback else None
+)
+required = ("claude/skills/co-review/scripts/review.py", "claude/hooks/agent_runtime.py")
+if root is None or not all((root / name).is_file() for name in required):
+    raise SystemExit("Installed review helpers are unavailable")
+print(root)
+PYROOT
+) || exit 2
+REVIEW_HELPER="$REVIEW_ROOT/claude/skills/co-review/scripts/review.py"
+RUNNER="$REVIEW_ROOT/claude/hooks/agent_runtime.py"
 ```
 
-Use `--permission-mode dontAsk --tools ""` if Claude tries to use tools instead
-of reviewing the inline content.
+Require an explicit plan path under `docs/superpowers/plans/`; never choose a
+global or newest document. Freeze the selected document:
 
-## Report And Resolve
+```bash
+uv run --no-project python "$REVIEW_HELPER" artifact \
+  --repo "$REPO" --kind plan --path "$PLAN_PATH" --task-id "$TASK_ID" \
+  --runtime codex
+```
 
-- Present Claude findings as a severity-sorted list.
-- Verify findings against the plan before relaying them.
-- Ask which fixes to apply; default is all non-low findings.
-- Patch the plan only after user approval.
-- Re-state Claude's verdict and whether the plan is ready for execution.
+Validate the returned absolute path and SHA-256, then set `FROZEN_PLAN`
+and `FROZEN_PLAN_SHA256` from those validated fields. Dispatch only that copy.
+Apply any deliberate `--personal` override to both artifact freezing and the
+partner launch so they use the same account scope.
 
-## Stop Conditions
+Resolve Claude account scope from the original repository through
+`workflow_context.py account-scope`. Personal Claude requires an unset
+`CLAUDE_CONFIG_DIR`; do not route by a temporary snapshot path or inherited
+environment. The partner remains read-only and receives bounded requested
+output: severity, location, problem, concrete fix, and verdict. Empty, error,
+or malformed output is incomplete.
 
-- No plan file exists.
-- The user declined second-model review.
-- Claude cannot run locally; report the command failure and do not invent review findings.
+Resolve model and effort through `agent_runtime.resolve_route("claude",
+"reviewer")` through the shared runtime runner; do not duplicate a route table
+in this skill.
+
+```bash
+PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-plan-review.XXXXXX")
+printf '%s\n' "/code-review frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Return severity, location, problem, concrete fix, and one verdict. Do not invoke co-review, another partner, or external actions." >"$PROMPT_FILE"
+uv run --no-project python "$RUNNER" run \
+  --runtime claude --role reviewer --risk normal --provisional \
+  --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$PROMPT_FILE"
+```
+
+Add `--personal` only for a deliberate personal override. Use `--risk critical`
+only for explicit critical risk; preserve unknown observed metadata as unknown.
+
+Verify each finding against the frozen plan, present a deduplicated list, and
+retain uncertain findings as unresolved. Apply fixes within existing user
+authorization; otherwise ask before editing the live plan. Use at most one
+skeptic verification round.

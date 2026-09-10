@@ -8,10 +8,9 @@
 # defined, helper and vars stripped).
 
 set -u
-
-# The wrapper's second rung honours an inherited CLAUDE_CONFIG_DIR, and every
-# Claude session exports one. Clear it so each case controls the variable.
-unset CLAUDE_CONFIG_DIR
+# Every case declares its routing context; the machine running the suite
+# may itself be personal-only or inherit an account from an orchestrator.
+unset CLAUDE_PERSONAL_ONLY CLAUDE_CONFIG_DIR CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR WORKFLOW_PERSONAL_ACCOUNT
 
 ACCT=zsh/claude-account.zsh
 if [ ! -f "$ACCT" ]; then
@@ -31,11 +30,6 @@ if awk '/^function claude\(\)/,/^}/' "$ACCT" | sed 's/#.*//' | grep -q '_claude_
     fail "wrapper is self-contained (no helper call in claude())"
 else
     pass "wrapper is self-contained (no helper call in claude())"
-fi
-if grep -q 'CLAUDE_CONFIG_DIR="\$cfg" command claude' "$ACCT"; then
-    pass "wrapper always injects an explicit config dir"
-else
-    fail "wrapper always injects an explicit config dir"
 fi
 
 if ! command -v zsh >/dev/null 2>&1; then
@@ -87,9 +81,10 @@ run_case() {
     fi
 }
 
-# 1. Personal cwd, env unset: explicit personal dir injected.
-run_case "personal cwd routes to ~/.claude (always-inject)" \
-    "$SBHOME/elsewhere" "claude -p hi" "$SBHOME/.claude" "-p hi"
+# 1. The native default account requires an unset config variable; explicitly
+# setting ~/.claude selects a separate authentication namespace in the CLI.
+run_case "personal cwd uses native default account (config unset)" \
+    "$SBHOME/elsewhere" "claude -p hi" "UNSET" "-p hi"
 
 # 2. Work cwd, env unset: work dir injected.
 run_case "work cwd routes to ~/.claude-work" \
@@ -103,8 +98,8 @@ ln -s "$SBHOME/Git/work/real-proj" "$SBHOME/work-shortcut"
 run_case "symlinked path into work tree routes to work" \
     "$SBHOME/work-shortcut" "claude" "$SBHOME/.claude-work"
 
-# 4. Non-empty env wins over cwd, from both cwds.
-run_case "non-empty env wins from personal cwd" \
+# 4. Non-empty env wins in unknown and work directories.
+run_case "non-empty env wins from unknown cwd" \
     "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
 run_case "non-empty env wins from work cwd" \
     "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
@@ -113,18 +108,18 @@ run_case "relative env value is normalized to absolute" \
 
 # 5. Exported-empty env is consumed, never propagated.
 run_case "exported-empty env treated as unset (personal cwd)" \
-    "$SBHOME/elsewhere" "export CLAUDE_CONFIG_DIR=; claude" "$SBHOME/.claude"
+    "$SBHOME/elsewhere" "export CLAUDE_CONFIG_DIR=; claude" "UNSET"
 run_case "exported-empty env treated as unset (work cwd)" \
     "$SBHOME/Git/work/proj" "export CLAUDE_CONFIG_DIR=; claude" "$SBHOME/.claude-work"
 
 # 6. --personal overrides everything incl. custom env; flag not forwarded.
 run_case "--personal beats custom env, flag filtered" \
     "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude --personal -p hi" \
-    "$SBHOME/.claude" "-p hi"
+    "UNSET" "-p hi"
 # Per spec, every argv element equal to --personal is the flag, even
 # after -- (matches today's filter): it forces personal and is removed.
 run_case "--personal after -- still forces personal and is filtered" \
-    "$SBHOME/Git/work/proj" "claude -- --personal" "$SBHOME/.claude" "--"
+    "$SBHOME/Git/work/proj" "claude -- --personal" "UNSET" "--"
 
 # 7. Pre-set CLAUDE_WORK_* values are honored.
 mkdir -p "$SBHOME/alt-tree/x"
@@ -139,107 +134,198 @@ run_case "snapshot: helper+vars stripped, work cwd still routes" \
     "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; claude" \
     "$SBHOME/.claude-work"
 
-# 8b. Linked worktrees. A checkout of a work repo that lives OUTSIDE the
-# work tree (herdr ~/.herdr/worktrees/, EnterWorktree .claude/worktrees/,
-# .worktrees/) routes by the repo it belongs to. Two sandbox repos, each
-# with one linked worktree (git worktree add) under
-# $SBHOME/.herdr/worktrees/. GIT_CONFIG_GLOBAL=/dev/null keeps the
-# machine's hooksPath and signing config out of the fixture. Skipped when
-# git is not installed.
-LINKED_WORK=""
-LINKED_PERSONAL=""
-if command -v git >/dev/null 2>&1; then
-    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-    for repo in "$SBHOME/Git/work/wrepo" "$SBHOME/elsewhere/prepo"; do
-        git -c init.defaultBranch=main init -q "$repo"
-        git -C "$repo" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
-    done
-    git -C "$SBHOME/Git/work/wrepo" worktree add -q "$SBHOME/.herdr/worktrees/wrepo/wt" -b wt
-    git -C "$SBHOME/elsewhere/prepo" worktree add -q "$SBHOME/.herdr/worktrees/prepo/wt" -b wt
-    LINKED_WORK="$SBHOME/.herdr/worktrees/wrepo/wt"
-    LINKED_PERSONAL="$SBHOME/.herdr/worktrees/prepo/wt"
-    mkdir -p "$LINKED_WORK/sub"
+# A personal-only machine must never launch through an inherited work or
+# custom config, regardless of directory ownership.
+run_case "personal-only machine routes work cwd to personal account" \
+    "$SBHOME/Git/work/proj" "CLAUDE_PERSONAL_ONLY=1 claude" "UNSET"
+run_case "personal-only machine overrides inherited work account" \
+    "$SBHOME/Git/work/proj" \
+    "CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "personal-only machine overrides custom account in unknown cwd" \
+    "$SBHOME/elsewhere" \
+    "CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "UNSET"
+run_case "personal-only machine ignores alternate work config" \
+    "$SBHOME/Git/work/proj" \
+    "CLAUDE_PERSONAL_ONLY=1 CLAUDE_WORK_CONFIG_DIR=$SBHOME/custom claude" "UNSET"
+run_case "personal-only flag zero preserves work routing" \
+    "$SBHOME/Git/work/proj" "CLAUDE_PERSONAL_ONLY=0 claude" "$SBHOME/.claude-work"
+run_case "explicit default config normalizes to the native personal account" \
+    "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/.claude claude" "UNSET"
+run_case "snapshot: personal-only machine remains personal without helper" \
+    "$SBHOME/Git/work/proj" \
+    "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" \
+    "UNSET"
 
-    run_case "linked worktree of a work repo routes to work" \
-        "$LINKED_WORK" "claude" "$SBHOME/.claude-work"
-    run_case "subdirectory of a linked work worktree routes to work" \
-        "$LINKED_WORK/sub" "claude" "$SBHOME/.claude-work"
-    run_case "linked worktree of a personal repo routes to personal" \
-        "$LINKED_PERSONAL" "claude" "$SBHOME/.claude"
-    run_case "main checkout outside the work tree routes to personal" \
-        "$SBHOME/elsewhere/prepo" "claude" "$SBHOME/.claude"
-    run_case "--personal beats the linked-worktree rung, flag filtered" \
-        "$LINKED_WORK" "claude --personal -p hi" "$SBHOME/.claude" "-p hi"
-    run_case "non-empty env beats the linked-worktree rung" \
-        "$LINKED_WORK" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
-    run_case "snapshot: helper+vars stripped, linked work worktree still routes" \
-        "$LINKED_WORK" \
-        "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; claude" \
-        "$SBHOME/.claude-work"
+# Known personal ownership must win over inherited work/custom account
+# settings. Use real Git repositories so external worktree routing depends
+# on their canonical common directory, not a guessed worktree name.
+PERSONAL="$SBHOME/Git/personal/proj"
+PERSONAL_WT="$SBHOME/elsewhere/personal-worktree"
+PERSONAL_WORK_WT="$SBHOME/Git/work/personal-worktree"
+mkdir -p "$PERSONAL/nested" "$SBHOME/Git/personal-other"
+git_fixture() {
+    env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        git -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+        -c user.name=Test -c user.email=test@example.invalid "$@"
+}
+git_fixture init -q "$PERSONAL" || exit 2
+git_fixture -C "$PERSONAL" commit -q --allow-empty -m fixture || exit 2
+git_fixture -C "$PERSONAL" worktree add -q --detach "$PERSONAL_WT" || exit 2
+git_fixture -C "$PERSONAL" worktree add -q --detach "$PERSONAL_WORK_WT" || exit 2
+SEPARATE_WORK="$SBHOME/Git/personal/separate-work-metadata"
+SEPARATE_EXTERNAL="$SBHOME/Git/personal/separate-external-metadata"
+git_fixture init -q --separate-git-dir "$SBHOME/Git/work/personal-metadata.git" "$SEPARATE_WORK" || exit 2
+git_fixture init -q --separate-git-dir "$SBHOME/external-personal-metadata.git" "$SEPARATE_EXTERNAL" || exit 2
+mkdir -p "$PERSONAL_WT/nested"
+ln -s "$PERSONAL" "$SBHOME/personal-shortcut"
 
-    # git absent from PATH: the rung is skipped silently; personal as before.
-    ZSH_BIN="$(command -v zsh)"
-    : > "$TMP/rec"
-    err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin" \
-        "$ZSH_BIN" -c "cd '$LINKED_WORK' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
-    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
-    if [ -z "$err" ] && [ "$got_cfg" = "$SBHOME/.claude" ]; then
-        pass "git absent: linked work worktree falls back to personal, silently"
+run_case "personal repo overrides inherited work account" \
+    "$PERSONAL" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "personal repo overrides inherited custom account" \
+    "$PERSONAL" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "UNSET"
+run_case "personal repo overrides inherited relative custom account" \
+    "$PERSONAL" "CLAUDE_CONFIG_DIR=custom claude" "UNSET"
+run_case "personal subdirectory overrides inherited work account" \
+    "$PERSONAL/nested" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "symlink to personal repo overrides inherited work account" \
+    "$SBHOME/personal-shortcut" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "external personal worktree overrides inherited work account" \
+    "$PERSONAL_WT" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "external personal worktree subdirectory overrides custom account" \
+    "$PERSONAL_WT/nested" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "UNSET"
+run_case "personal worktree in work tree still uses personal account" \
+    "$PERSONAL_WORK_WT" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "personal repo overrides overlapping work-tree setting" \
+    "$PERSONAL" "CLAUDE_WORK_TREE=$SBHOME/Git claude" "UNSET"
+run_case "inherited Git directory cannot mask personal ownership" \
+    "$PERSONAL_WT" "GIT_DIR=$SBHOME/nonexistent CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "snapshot: personal root stays safe with helper and vars stripped" \
+    "$PERSONAL" \
+    "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" \
+    "UNSET"
+run_case "snapshot: external personal worktree stays safe with helper stripped" \
+    "$PERSONAL_WT" \
+    "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" \
+    "UNSET"
+run_case "personal path prefix requires a directory boundary" \
+    "$SBHOME/Git/personal-other" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "$SBHOME/.claude-work"
+run_case "personal checkout overrides separate Git metadata under work" \
+    "$SEPARATE_WORK" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "personal checkout overrides separate Git metadata outside both trees" \
+    "$SEPARATE_EXTERNAL" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+run_case "snapshot: personal checkout remains safe with separate work metadata" \
+    "$SEPARATE_WORK" \
+    "unfunction _claude_config_dir; CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+
+# Git cannot recover the primary checkout path when it uses a separate Git
+# directory and this linked checkout is external. Inherited work and custom
+# routes must fail closed; an explicit personal request remains authorized.
+SEPARATE_PRIMARY="$SBHOME/Git/personal/separate-primary"
+SEPARATE_METADATA="$TMP/metadata/separate-primary.git"
+SEPARATE_LINKED="$TMP/external-separate-linked"
+mkdir -p "$(dirname "$SEPARATE_METADATA")"
+git_fixture init -q --separate-git-dir "$SEPARATE_METADATA" "$SEPARATE_PRIMARY" || exit 2
+git_fixture -C "$SEPARATE_PRIMARY" commit -q --allow-empty -m fixture || exit 2
+git_fixture -C "$SEPARATE_PRIMARY" worktree add -q --detach "$SEPARATE_LINKED" || exit 2
+run_refusal() {
+    label="$1" cwd="$2" body="$3"
+    rec="$TMP/rec"
+    : > "$rec"
+    out="$(RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+        zsh -c "cd '$cwd' && source '$REPO/$ACCT' && $body" 2>&1)"
+    rc=$?
+    if [ "$rc" = 2 ] && [ ! -s "$rec" ] && case "$out" in *ambiguous*) true;; *) false;; esac; then
+        pass "$label"
     else
-        fail "git absent: linked work worktree falls back to personal, silently (err='$err' cfg='$got_cfg')"
+        fail "$label (status=$rc output='$out')"
     fi
+}
+run_refusal "external linked separate metadata refuses inherited work route" \
+    "$SEPARATE_LINKED" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude"
+run_refusal "external linked separate metadata refuses inherited custom route" \
+    "$SEPARATE_LINKED" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude"
+run_case "external linked separate metadata accepts explicit personal route" \
+    "$SEPARATE_LINKED" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude --personal" "UNSET"
 
-    # Not a repo: git's error is discarded, nothing reaches stderr.
-    : > "$TMP/rec"
-    err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
-        zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
-    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
-    if [ -z "$err" ] && [ "$got_cfg" = "$SBHOME/.claude" ]; then
-        pass "non-repo cwd: personal, no git noise on stderr"
-    else
-        fail "non-repo cwd: personal, no git noise on stderr (err='$err' cfg='$got_cfg')"
-    fi
-
-    # Non-git cwd under `set -e`: the git probe's nonzero exit must not
-    # trip errexit and abort the wrapper before claude launches. Headless
-    # callers (cron, `zsh -c`, orchestrator dispatches without
-    # CLAUDE_CONFIG_DIR set) run under this exact condition.
-    : > "$TMP/rec"
-    RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
-        zsh -ec "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" >/dev/null 2>&1
-    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
-    if [ "$got_cfg" = "$SBHOME/.claude" ]; then
-        pass "set -e: non-git cwd still reaches claude (git probe failure absorbed)"
-    else
-        fail "set -e: non-git cwd still reaches claude (git probe failure absorbed) (cfg='$got_cfg')"
-    fi
-
-    # A corrupt / hook-wrapped git that prints two lines for
-    # --git-common-dir must be treated as "no repo" (mirrors
-    # account_guard.py's `"\n" in common -> None`), not fed into :A
-    # resolution. The stub's first line is a real path under the work
-    # tree's .git -- without the newline guard, :h of the combined
-    # (single, embedded-newline) path string still resolves under the
-    # work tree, so this cwd would misroute to work.
-    MULTI="$TMP/bin-multiline"
-    mkdir -p "$MULTI"
-    cat >"$MULTI/git" <<MULTIEOF
-#!/bin/sh
-printf '%s\n%s\n' "$SBHOME/Git/work/proj/.git" "corrupted-second-line"
-exit 0
-MULTIEOF
-    chmod +x "$MULTI/git"
-    : > "$TMP/rec"
-    err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$MULTI:$TMP/bin:$PATH" \
-        zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
-    got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
-    if [ -z "$err" ] && [ "$got_cfg" = "$SBHOME/.claude" ]; then
-        pass "multiline git-common-dir output treated as no-repo, routes personal"
-    else
-        fail "multiline git-common-dir output treated as no-repo, routes personal (err='$err' cfg='$got_cfg')"
-    fi
+# Unsetting the child's config must not alter its parent shell's account.
+out="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+    zsh -c "cd '$PERSONAL' && source '$REPO/$ACCT' && export CLAUDE_CONFIG_DIR='$SBHOME/.claude-work'; claude; print -r -- \"\$CLAUDE_CONFIG_DIR\"")"
+if [ "$out" = "$SBHOME/.claude-work" ]; then
+    pass "personal launch preserves the parent shell's inherited work config"
 else
-    echo "SKIP: git not installed; linked-worktree cases not run"
+    fail "personal launch preserves the parent shell's inherited work config (got '$out')"
+fi
+
+# PR99: external work worktrees use the selected repository account. Keep
+# personal quota native and refuse launches when Git cannot prove ownership.
+LINKED_WORK="$SBHOME/.herdr/worktrees/wrepo/wt"
+LINKED_PERSONAL="$SBHOME/.herdr/worktrees/prepo/wt"
+for repo in "$SBHOME/Git/work/wrepo" "$SBHOME/elsewhere/prepo"; do
+    git_fixture init -q "$repo" || exit 2
+    git_fixture -C "$repo" commit -q --allow-empty -m fixture || exit 2
+done
+git_fixture -C "$SBHOME/Git/work/wrepo" worktree add -q --detach "$LINKED_WORK" || exit 2
+git_fixture -C "$SBHOME/elsewhere/prepo" worktree add -q --detach "$LINKED_PERSONAL" || exit 2
+mkdir -p "$LINKED_WORK/sub"
+run_case "linked worktree of a work repo routes to work" \
+    "$LINKED_WORK" "claude" "$SBHOME/.claude-work"
+run_case "subdirectory of a linked work worktree routes to work" \
+    "$LINKED_WORK/sub" "claude" "$SBHOME/.claude-work"
+run_case "linked worktree of a personal repo keeps native personal account" \
+    "$LINKED_PERSONAL" "claude" "UNSET"
+run_case "main checkout outside the work tree keeps native personal account" \
+    "$SBHOME/elsewhere/prepo" "claude" "UNSET"
+run_case "--personal overrides linked work repository and is filtered" \
+    "$LINKED_WORK" "claude --personal -p hi" "UNSET" "-p hi"
+run_case "explicit account overrides linked work repository default" \
+    "$LINKED_WORK" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude" "$SBHOME/custom"
+run_case "snapshot: helper and vars absent, linked worktree still routes" \
+    "$LINKED_WORK" \
+    "unfunction _claude_config_dir; unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR; claude" \
+    "$SBHOME/.claude-work"
+
+mkdir -p "$TMP/personal-child"
+cat > "$TMP/personal-child/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${CLAUDE_CONFIG_DIR-UNSET}" > "$RECORD.cfg"
+printf '%s\n' "${CLAUDE_PERSONAL_ONLY-UNSET}" > "$RECORD.machine"
+exec python3 "$CONTEXT_PROBE" account-scope --cwd "$PWD" --runtime claude > "$RECORD.scope"
+EOF
+chmod +x "$TMP/personal-child/claude"
+out="$(RECORD="$TMP/rec" CONTEXT_PROBE="$REPO/claude/skills/lib/workflow_context.py" \
+    HOME="$SBHOME" PATH="$TMP/personal-child:$TMP/bin:$PATH" \
+    zsh -c "cd '$LINKED_WORK' && source '$REPO/$ACCT' && export CLAUDE_CONFIG_DIR='$SBHOME/.claude-work'; unset WORKFLOW_PERSONAL_ACCOUNT; claude --personal; printf '%s|%s' \"\$CLAUDE_CONFIG_DIR\" \"\${WORKFLOW_PERSONAL_ACCOUNT-UNSET}\"")"
+kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' "$TMP/rec.scope")"
+if [ "$kind" = personal ] && [ "$(cat "$TMP/rec.cfg")" = UNSET ] \
+    && [ "$(cat "$TMP/rec.machine")" = UNSET ] \
+    && [ "$out" = "$SBHOME/.claude-work|UNSET" ]; then
+    pass "personal linked-worktree child retains account scope without changing caller or machine policy"
+else
+    fail "personal linked-worktree child retains account scope (kind='$kind' caller='$out')"
+fi
+
+mkdir -p "$TMP/no-git" "$TMP/malformed-git"
+ln -s "$(command -v python3)" "$TMP/no-git/python3"
+ln -s "$TMP/bin/claude" "$TMP/no-git/claude"
+run_refusal "git absent: linked worktree refuses unverified account" \
+    "$LINKED_WORK" "PATH='$TMP/no-git' claude"
+cat > "$TMP/malformed-git/git" <<'EOF'
+#!/bin/sh
+printf '%s\n%s\n' "$HOME/Git/work/wrepo/.git" "corrupted-second-line"
+EOF
+chmod +x "$TMP/malformed-git/git"
+run_refusal "multiline git output refuses unverified account" \
+    "$LINKED_WORK" "PATH='$TMP/malformed-git':\$PATH claude"
+
+: > "$TMP/rec"
+err="$(RECORD="$TMP/rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+    zsh -ec "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude" 2>&1 >/dev/null)"
+rc=$?
+got_cfg="$(sed -n 's/^cfg=//p' "$TMP/rec")"
+if [ "$rc" = 0 ] && [ -z "$err" ] && [ "$got_cfg" = UNSET ]; then
+    pass "set -e: non-repository cwd uses native personal without git noise"
+else
+    fail "set -e: non-repository cwd uses native personal (rc=$rc err='$err' cfg='$got_cfg')"
 fi
 
 # 9. Wrapper exit status passes through.
@@ -281,10 +367,22 @@ acct_case() {
 acct_case "claude-account: personal label" "$SBHOME/elsewhere" "" "personal"
 acct_case "claude-account: work label" "$SBHOME/Git/work/proj" "" "work"
 acct_case "claude-account: custom label" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR=$SBHOME/custom" "custom"
-if [ -n "$LINKED_WORK" ]; then
-    acct_case "claude-account: linked work worktree shows work" "$LINKED_WORK" "" "work"
-    acct_case "claude-account: linked personal worktree shows personal" "$LINKED_PERSONAL" "" "personal"
-fi
+acct_case "claude-account: linked work repository label" "$LINKED_WORK" "" "work"
+acct_case "claude-account: linked personal repository label" "$LINKED_PERSONAL" "" "personal"
+acct_case "claude-account: personal-only machine overrides work account" "$SBHOME/Git/work/proj" \
+    "CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR=$SBHOME/.claude-work" "personal"
+acct_case "claude-account: personal-only machine overrides unknown custom account" "$SBHOME/elsewhere" \
+    "CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR=$SBHOME/custom" "personal"
+acct_case "claude-account: personal repo overrides work label" "$PERSONAL" \
+    "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work" "personal"
+acct_case "claude-account: external personal worktree overrides work label" "$PERSONAL_WT" \
+    "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work" "personal"
+acct_case "claude-account: personal repo overrides overlapping work tree" "$PERSONAL" \
+    "CLAUDE_WORK_TREE=$SBHOME/Git" "personal"
+acct_case "claude-account: personal checkout overrides separate work metadata" "$SEPARATE_WORK" \
+    "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work" "personal"
+acct_case "claude-account: personal checkout overrides separate external metadata" "$SEPARATE_EXTERNAL" \
+    "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work" "personal"
 
 # --- shell-mode matrix: wrapper defined via .zshenv in -lc / -c / -ic ---
 # ZDOTDIR sandbox mirrors the installed layout: $ZDOTDIR/.zshenv is a
@@ -312,8 +410,17 @@ run_mode() {
 # every shell mode). Reuses the sandbox dirs and work-shortcut symlink
 # created by the Task 1 cases.
 for mode in "-lc" "-c" "-ic"; do
+    run_mode "zsh $mode: linked work repository routes to work" \
+        "$mode" "$LINKED_WORK" "claude" "$SBHOME/.claude-work"
+    run_mode "zsh $mode: personal-only machine overrides inherited work account" \
+        "$mode" "$SBHOME/Git/work/proj" \
+        "CLAUDE_PERSONAL_ONLY=1 CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+    run_mode "zsh $mode: personal repo overrides inherited work account" \
+        "$mode" "$PERSONAL" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
+    run_mode "zsh $mode: external personal worktree overrides inherited work account" \
+        "$mode" "$PERSONAL_WT" "CLAUDE_CONFIG_DIR=$SBHOME/.claude-work claude" "UNSET"
     run_mode "zsh $mode: personal cwd routes to ~/.claude" \
-        "$mode" "$SBHOME/elsewhere" "claude" "$SBHOME/.claude"
+        "$mode" "$SBHOME/elsewhere" "claude" "UNSET"
     run_mode "zsh $mode: work cwd routes to ~/.claude-work" \
         "$mode" "$SBHOME/Git/work/proj" "claude" "$SBHOME/.claude-work"
     run_mode "zsh $mode: symlinked work path routes to work" \
@@ -323,13 +430,9 @@ for mode in "-lc" "-c" "-ic"; do
     run_mode "zsh $mode: exported-empty env consumed (work cwd)" \
         "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR= claude" "$SBHOME/.claude-work"
     run_mode "zsh $mode: exported-empty env consumed (personal cwd)" \
-        "$mode" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR= claude" "$SBHOME/.claude"
+        "$mode" "$SBHOME/elsewhere" "CLAUDE_CONFIG_DIR= claude" "UNSET"
     run_mode "zsh $mode: --personal beats custom env" \
-        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude --personal" "$SBHOME/.claude"
-    if [ -n "$LINKED_WORK" ]; then
-        run_mode "zsh $mode: linked work worktree routes to work" \
-            "$mode" "$LINKED_WORK" "claude" "$SBHOME/.claude-work"
-    fi
+        "$mode" "$SBHOME/Git/work/proj" "CLAUDE_CONFIG_DIR=$SBHOME/custom claude --personal" "UNSET"
 done
 
 # .zshenv contract: silent on success, no external commands.

@@ -22,8 +22,8 @@ exited N`, and returns that status. `$?` is trustworthy again.
   `~/.claude/plugins/installed_plugins.json` when it matters.
 - Never run ECC's `sync-ecc-to-codex.sh` directly -- it overwrites
   `core.hooksPath` and writes through the `~/.codex/AGENTS.md` symlink into
-  the repo. The `codex-ecc-sync` wrapper (zsh/functions.zsh) is the only safe
-  entry; `ecc-install`/`ecc-update` already call it.
+  the repo. Use `ecc-install`/`ecc-update`, which stage a self-contained native
+  Codex plugin. The old sync wrapper is retired; see repo CLAUDE.md.
 - The `claude` desktop app and IDE extensions bypass the `claude()` zsh
   wrapper and always land on `~/.claude` (personal), even under `~/Git/work`.
   The `account_guard.py` SessionStart hook warns inside the session.
@@ -55,7 +55,6 @@ bin scripts are symlinked into `~/bin` by install/common/link.sh.
 | `superpowers-install`   | zsh function | Register official marketplace by git URL if absent, install plugin in BOTH config dirs                                                |
 | `superpowers-update`    | zsh function | `claude plugins update` in each dir that has it                                                                                       |
 | `superpowers-uninstall` | zsh function | Uninstall from both config dirs                                                                                                       |
-| `codex-ecc-sync`        | zsh function | SAFE wrapper around ECC's codex sync (redirects hooks dir, restores hooksPath)                                                        |
 | `dotfiles-repair`       | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                         |
 | `setup-claude`          | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                                    |
 | `claude-account`        | zsh function | Print which account a launch from `$PWD` would use                                                                                    |
@@ -229,7 +228,7 @@ claude-code-platform-reference for mechanics):
 | `claude` (wrapper) under `~/Git/work` (symlinks resolved)                                                  | `~/.claude-work` (work)             |
 | `claude` (wrapper) in a linked worktree of a repo under `~/Git/work` (herdr, EnterWorktree, `.worktrees/`) | `~/.claude-work` (work)             |
 | `claude --personal` from a work dir                                                                        | `~/.claude`                         |
-| Pre-set `CLAUDE_CONFIG_DIR`                                                                                | always wins                         |
+| Pre-set `CLAUDE_CONFIG_DIR`                                                                                | applies except in known personal repositories or under personal overrides |
 | Desktop app / IDE extension / `command claude` / scripts / cron                                            | `~/.claude` regardless of directory |
 
 ```bash
@@ -237,15 +236,16 @@ claude-account        # prints: work (~/.claude-work) | personal (~/.claude) | c
 claude --personal     # force personal from inside ~/Git/work
 ```
 
-Herdr worker launches do not rely on the wrapper: the orchestration skill
-prefixes every launch line with `CLAUDE_CONFIG_DIR=$CFG` (its own dir),
-because the pane shell is spawned by the herdr server and inherits nothing.
+Herd dispatch binds the selected account and runtime environment to the actual
+pane. Its server-spawned shell does not inherit the controller's environment.
+Native personal Claude unsets `CLAUDE_CONFIG_DIR`; work/custom namespaces stay
+explicit. Personal quota remains allowed in work repositories.
 
 The bypass row is the daily trap. `claude/hooks/account_guard.py`
 (SessionStart, registered in claude/settings.json.tmpl) fires in EVERY session
-and injects a `[WARNING] account_guard: ...` context message when account and
-directory disagree (and an `[INFO]` breadcrumb for a deliberate custom
-`CLAUDE_CONFIG_DIR`). If you see that warning: relaunch via the wrapper, and
+and warns when personal repository context could reach a work account or the
+selected scope is unverified. Deliberate personal quota in a work repository
+is allowed. If you see that warning: relaunch via the wrapper, and
 avoid logins/plugin installs/billing-sensitive work until on the right
 account. `~/.claude-work` is created on first work-side launch (fresh OAuth
 login). Cloud containers are personal-account only -- there is no
@@ -306,8 +306,8 @@ TODO.md` symlinked to main; `STATE.md config.json` copied per-worktree.
   `installed_plugins.json`; `bootstrap-cloud.sh` `ensure_plugin` is the gold
   standard not yet ported.
 - `settings.json.tmpl` changes need manual merge on existing machines.
-- `codex-ecc-sync` uses `sed -i ''` (functions.zsh:358) -- BSD/macOS-only; it
-  errors on GNU sed (Linux).
+- The old Codex sync and its BSD-only cleanup are retired; native plugin
+  staging is the supported lifecycle.
 - `dotfiles-repair` checks only `~/.claude/settings.json`, not the work dir's.
 - ECC rules vendoring necessity is an open question.
 

@@ -3,7 +3,7 @@
 #
 # The dotfiles-workflows marketplace copies of ECC and Superpowers are
 # canonical for Codex; when one is enabled, its upstream/account-provisioned
-# duplicate entries in ~/.codex/config.toml are flipped to enabled = false.
+# duplicate entries in CODEX_HOME/config.toml are flipped to enabled = false.
 # Function definitions only -- callers invoke dedupe_codex_workflow_plugins.
 #
 # Sourced twice per install/update cycle:
@@ -84,16 +84,42 @@ disable_codex_plugin() {
 }
 
 dedupe_codex_workflow_plugins() {
-  local config="$HOME/.codex/config.toml"
+  local codex_surface_home="${CODEX_HOME:-$HOME/.codex}"
+  local config="$codex_surface_home/config.toml"
 
   [ -f "$config" ] || return 0
 
   if codex_plugin_enabled "$config" "ecc@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "ecc@ecc"
+    disable_codex_plugin "$config" "ecc@ecc" || return 1
   fi
 
   if codex_plugin_enabled "$config" "superpowers@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "superpowers@openai-curated"
-    disable_codex_plugin "$config" "superpowers@claude-plugins-official"
+    disable_codex_plugin "$config" "superpowers@openai-curated" || return 1
+    disable_codex_plugin "$config" "superpowers@claude-plugins-official" || return 1
   fi
+
+  # Keep repo-owned compatibility repairs in the same install/update lifecycle.
+  # Focused discovery is opt-in; the helper remembers a previously adopted
+  # catalog and never removes skill files or rewrites Claude configuration.
+  local surface_helper="$DOTFILEDIR/install/common/codex-surfaces.py"
+  if [ -f "$surface_helper" ]; then
+    if command -v uv >/dev/null 2>&1; then
+      uv run --python '>=3.11' --no-project --offline --no-cache python \
+        "$surface_helper" --codex-home "$codex_surface_home" --apply >/dev/null || return 1
+    elif command -v python3 >/dev/null 2>&1 && python3 -c 'import tomllib' >/dev/null 2>&1; then
+      python3 "$surface_helper" --codex-home "$codex_surface_home" --apply >/dev/null || return 1
+    else
+      echo "[WARNING] Python 3.11+ is required to reconcile Codex plugin surfaces; install a supported Python or uv." >&2
+      return 1
+    fi
+  fi
+}
+
+# Optional maintenance must not prevent unrelated installation and cleanup.
+# Explicit native plugin lifecycle commands use the strict function above.
+reconcile_codex_workflow_plugins_for_install() {
+  if ! dedupe_codex_workflow_plugins; then
+    echo "[WARNING] Codex surface reconciliation did not complete; continuing installation. Resolve the error above and retry reconciliation." >&2
+  fi
+  return 0
 }

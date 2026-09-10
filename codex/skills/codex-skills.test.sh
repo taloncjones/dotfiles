@@ -22,53 +22,29 @@ assert "claude-spec-review skill exists" \
     test -f codex/skills/claude-spec-review/SKILL.md
 assert "co-review skill exists" \
     test -f codex/skills/co-review/SKILL.md
-assert "claude-plan-review invokes Claude reviewer" \
-    rg -q 'claude' codex/skills/claude-plan-review/SKILL.md
-assert "claude-spec-review invokes Claude reviewer" \
-    rg -q 'claude -p' codex/skills/claude-spec-review/SKILL.md
-assert "claude-plan-review uses valid no-tools flag" \
-    rg -q -- '--tools ""' codex/skills/claude-plan-review/SKILL.md
+# Snapshot/base/tree, privacy, cleanup, and route behavior are exercised by
+# the registered review-helper and agent-runtime suites. Keep this suite
+# focused on installed discovery and links to those shared implementations.
+assert "claude-plan-review uses the shared native runtime" \
+    rg -q 'agent_runtime' codex/skills/claude-plan-review/SKILL.md
+assert "claude-spec-review selects the Claude runtime" \
+    rg -q -- '--runtime claude' codex/skills/claude-spec-review/SKILL.md
 assert "co-review mentions both reviewers" \
     rg -q 'Claude.*Codex|Codex.*Claude' codex/skills/co-review/SKILL.md
-assert "co-review uses internal Codex session" \
-    rg -q 'current Codex session' codex/skills/co-review/SKILL.md
-assert "co-review does not spawn nested codex review" \
-    rg -q 'Do not launch `codex review`' codex/skills/co-review/SKILL.md
-assert "co-review uses Claude native code review" \
-    rg -q 'claude -p "/code-review' codex/skills/co-review/SKILL.md
-assert "Claude co-review pins Codex Sol" \
-    sh -c "[ \"\$(rg -o -- '-m gpt-5\\.6-sol' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 1 ]"
-assert "Claude co-review defaults Codex to high effort" \
-    sh -c "[ \"\$(rg -o 'model_reasoning_effort=\\\"high\\\"' claude/skills/co-review/SKILL.md | wc -l | tr -d ' ')\" -eq 1 ]"
-assert "Claude co-review defines an adversarial Codex rubric" \
-    sh -c "rg -q 'CODEX_REVIEW_RUBRIC=' claude/skills/co-review/SKILL.md && rg -q 'runtime correctness' claude/skills/co-review/SKILL.md"
-assert "Claude co-review reserves xhigh for high-risk changes" \
-    sh -c "rg -q 'Escalate Codex to .*xhigh.* only for' claude/skills/co-review/SKILL.md && rg -U -q '(?s)high-risk changes involving auth/security.*concurrency/lifecycle.*migrations.*hardware safety' claude/skills/co-review/SKILL.md"
-assert "Claude co-review reports the selected Codex effort" \
-    rg -q '<codex-effort> effort' claude/skills/co-review/SKILL.md
-
-# Pinning assertions -- guarantees already merged in PR #69; no negative test.
-assert "Claude co-review invokes Codex exactly once" \
-    sh -c "[ \"\$(rg -c -F '( cd \"\$WT\" && codex exec review --base' claude/skills/co-review/SKILL.md | tr -d ' ')\" -eq 1 ]"
-assert "Claude co-review forbids subagent Codex invocations" \
-    sh -c "[ \"\$(rg -c -F 'does not exempt this subagent' claude/skills/co-review/SKILL.md | tr -d ' ')\" -eq 2 ]"
-assert "Claude co-review tears down the worktree unconditionally" \
-    sh -c "rg -q 'unconditional finalization' claude/skills/co-review/SKILL.md && rg -q -F 'git worktree remove --force \"\$WT\"' claude/skills/co-review/SKILL.md"
-
-# Slice assertions -- new guarantees from this branch; each MUST fail against
-# the pre-slice SKILL.md (verified when first added, before the skill edits).
-assert "Claude co-review pins the PR base to a merge-base SHA" \
-    sh -c "rg -q -F 'merge-base FETCH_HEAD \"\$PR_HEAD\"' claude/skills/co-review/SKILL.md && rg -q -F 'fetch origin \"\$BASE_REF\"' claude/skills/co-review/SKILL.md"
-assert "Claude co-review pins the branch-mode base against the pinned head" \
-    sh -c "rg -q -F 'git merge-base <branch-the-work-forked-from> \"\$SNAP_HEAD\"' claude/skills/co-review/SKILL.md"
-assert "Claude co-review guards the empty diff in every mode" \
-    sh -c "rg -q -F 'diff --quiet \"\$SNAP_BASE\" \"\$SNAP_HEAD\"' claude/skills/co-review/SKILL.md"
-assert "Claude co-review checks out the PR detached" \
-    sh -c "rg -q -F 'gh pr checkout <n> --detach' claude/skills/co-review/SKILL.md"
-assert "Claude co-review re-runs teardown in the re-review pass" \
-    sh -c "rg -q 'Steps 1-3\.6 run again' claude/skills/co-review/SKILL.md"
-assert "Claude co-review forbids generic Codex invocations" \
-    rg -q -F 'NEVER invoke Codex' claude/skills/co-review/SKILL.md
+assert "co-review uses the native Codex session" \
+    rg -q 'Codex reviews.*in this session' codex/skills/co-review/SKILL.md
+assert "co-review prevents nested Codex CLI reviews" \
+    rg -q 'Do not run `codex exec`' codex/skills/co-review/SKILL.md
+assert "co-review uses the Claude native review flow" \
+    rg -q '/code-review' codex/skills/co-review/SKILL.md
+assert "Claude co-review routes model and effort through the shared runtime" \
+    rg -q 'agent_runtime' claude/skills/co-review/SKILL.md
+assert "Claude co-review freezes and verifies its input" \
+    sh -c 'rg -q "prepare --repo" claude/skills/co-review/SKILL.md && rg -q "verify --manifest" claude/skills/co-review/SKILL.md'
+assert "Claude co-review uses ownership-checked cleanup" \
+    rg -q 'cleanup --manifest' claude/skills/co-review/SKILL.md
+assert "document review binds a frozen plan" \
+    rg -q 'FROZEN_PLAN_SHA256' codex/skills/claude-plan-review/SKILL.md
 
 assert "installer links repo-managed codex skills" \
     rg -q 'codex/skills' install/common/link.sh
@@ -181,7 +157,7 @@ assert "installer disables duplicate managed workflow providers" \
     dedupes_managed_workflow_plugins
 
 assert "plugin lifecycle re-runs workflow dedupe post-install" \
-    sh -c "rg -q 'dedupe_codex_workflow_plugins' install/common/claude-plugins.sh"
+    rg -q '^reconcile_codex_workflow_plugins_for_install$' install/common/claude-plugins.sh
 
 removes_stale_claude_web_codex_hook() {
     tmp_home="$(mktemp -d)"
@@ -281,6 +257,107 @@ preserves_codex_hook_with_unrecognized_script() {
 
 assert "installer preserves a Codex hook whose script is not the legacy bootstrap" \
     preserves_codex_hook_with_unrecognized_script
+
+links_shared_workflow_surfaces() (
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    for skill in repo-recall post-merge todos handoff kickoff voice; do
+        [ "$(readlink "$tmp_home/.codex/skills/$skill")" = "$PWD/claude/skills/$skill" ] || return 1
+        [ -f "$tmp_home/.codex/skills/$skill/SKILL.md" ] || return 1
+    done
+    [ "$(readlink "$tmp_home/.codex/skills/herdr-orchestration")" = "$PWD/codex/skills/herdr-orchestration" ] || return 1
+    [ -f "$tmp_home/.codex/skills/herdr-orchestration/SKILL.md" ] || return 1
+    printf 'A concrete fixture sentence.\n' >"$tmp_home/voice.txt"
+    voice_resolver=$(sed -n '/^V=/,/^fi$/p' "$PWD/claude/skills/voice/SKILL.md")
+    [ -n "$voice_resolver" ] || return 1
+    for voice_home in "$tmp_home/.codex" "$tmp_home/missing-codex"; do
+        HOME="$tmp_home" CODEX_HOME="$voice_home" CLAUDE_CONFIG_DIR="$tmp_home/.claude" \
+            bash -c "$voice_resolver"'
+                python3 "$V" lint \
+                    --kind pr-body --file "$1" >/dev/null
+            ' _ "$tmp_home/voice.txt" || return 1
+    done
+    [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
+    [ "$(readlink "$tmp_home/.codex/hooks/herdr_worktree_guard.py")" = "$PWD/claude/hooks/herdr_worktree_guard.py" ] || return 1
+    [ "$(rg -c 'command = .*herdr_worktree_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    [ "$(readlink "$tmp_home/.codex/hooks/rm_guard.py")" = "$PWD/claude/hooks/rm_guard.py" ] || return 1
+    [ "$(rg -c 'command = .*rm_guard.py' "$tmp_home/.codex/config.toml")" -eq 1 ] || return 1
+    printf '%s\n' '{"tool_name":"exec_command","tool_input":{"cmd":"herdr worktree create task"}}' |
+        "$tmp_home/.codex/hooks/herdr_worktree_guard.py" >/dev/null 2>&1 && return 1
+    [ "$?" -eq 2 ]
+)
+
+assert "installer shares maintained workflows and Herd guard with Codex" \
+    links_shared_workflow_surfaces
+
+preserves_custom_codex_lesson_destinations() (
+    tmp_root="$(mktemp -d)"
+    trap 'rm -rf "$tmp_root"' EXIT
+    tmp_home="$tmp_root/absent-home"
+
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
+    HOME="$tmp_home" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    [ "$(readlink "$tmp_home/.codex/rules/agent-lessons.md")" = "$PWD/claude/rules/personal/agent-lessons.md" ] || return 1
+
+    file_home="$tmp_root/file-home"
+    mkdir -p "$file_home/.codex/rules"
+    printf 'custom lesson file\n' >"$file_home/.codex/rules/agent-lessons.md"
+    HOME="$file_home" DOTFILEDIR="$PWD" bash install/common/link.sh >"$file_home/install.out" 2>"$file_home/install.err"
+    [ ! -L "$file_home/.codex/rules/agent-lessons.md" ] || return 1
+    [ "$(cat "$file_home/.codex/rules/agent-lessons.md")" = 'custom lesson file' ] || return 1
+    rg -q -F "Preserving existing Codex path: $file_home/.codex/rules/agent-lessons.md" "$file_home/install.err" || return 1
+
+    directory_home="$tmp_root/directory-home"
+    mkdir -p "$directory_home/.codex/rules/agent-lessons.md"
+    printf 'custom lesson directory\n' >"$directory_home/.codex/rules/agent-lessons.md/keep.txt"
+    HOME="$directory_home" DOTFILEDIR="$PWD" bash install/common/link.sh >"$directory_home/install.out" 2>"$directory_home/install.err"
+    [ -d "$directory_home/.codex/rules/agent-lessons.md" ] || return 1
+    [ "$(cat "$directory_home/.codex/rules/agent-lessons.md/keep.txt")" = 'custom lesson directory' ] || return 1
+    [ ! -e "$directory_home/.codex/rules/agent-lessons.md/agent-lessons.md" ] || return 1
+    rg -q -F "Preserving existing Codex path: $directory_home/.codex/rules/agent-lessons.md" "$directory_home/install.err" || return 1
+
+)
+
+assert "installer preserves custom Codex lesson files and directories" \
+    preserves_custom_codex_lesson_destinations
+
+preserves_custom_codex_skill_destinations() (
+    tmp_home="$(mktemp -d)"
+    trap 'rm -rf "$tmp_home"' EXIT
+    for skill in repo-recall claude-plan-review; do
+        mkdir -p "$tmp_home/.codex/skills/$skill"
+        printf 'custom skill\n' >"$tmp_home/.codex/skills/$skill/SKILL.md"
+    done
+    for skill in todos co-review; do
+        printf 'custom file\n' >"$tmp_home/.codex/skills/$skill"
+    done
+    ln -s "$tmp_home/missing-old-skill" "$tmp_home/.codex/skills/post-merge"
+    mkdir -p "$tmp_home/custom-target"
+    printf 'keep target\n' >"$tmp_home/custom-target/personal.txt"
+    ln -s "$tmp_home/custom-target" "$tmp_home/.codex/skills/claude-spec-review"
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >"$tmp_home/install.out" 2>"$tmp_home/install.err"
+    for skill in repo-recall claude-plan-review; do
+        [ ! -L "$tmp_home/.codex/skills/$skill" ] || return 1
+        [ "$(cat "$tmp_home/.codex/skills/$skill/SKILL.md")" = 'custom skill' ] || return 1
+        [ ! -e "$tmp_home/.codex/skills/$skill/$skill" ] || return 1
+        rg -q -F "Preserving existing Codex path: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
+    done
+    for skill in todos co-review; do
+        [ ! -L "$tmp_home/.codex/skills/$skill" ] || return 1
+        [ "$(cat "$tmp_home/.codex/skills/$skill")" = 'custom file' ] || return 1
+        rg -q -F "Preserving existing Codex path: $tmp_home/.codex/skills/$skill" "$tmp_home/install.err" || return 1
+    done
+    [ "$(readlink "$tmp_home/.codex/skills/post-merge")" = "$PWD/claude/skills/post-merge" ] || return 1
+    [ "$(readlink "$tmp_home/.codex/skills/claude-spec-review")" = "$PWD/codex/skills/claude-spec-review" ] || return 1
+    [ "$(cat "$tmp_home/custom-target/personal.txt")" = 'keep target' ] || return 1
+    [ ! -e "$tmp_home/custom-target/claude-spec-review" ]
+)
+
+assert "installer preserves custom skill directories and files while refreshing symlinks" \
+    preserves_custom_codex_skill_destinations
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

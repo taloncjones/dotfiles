@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """recall.py - per-repo full-text recall over prose artifacts.
 
-Indexes docs/, .claude/handoffs/, .todos/, findings dirs and Claude Code
-auto-memory into a SQLite FTS5 index stored under the active Claude config
+Indexes docs/, runtime handoffs, .todos/, findings dirs and Claude Code
+auto-memory into a SQLite FTS5 index stored under a shared recall config
 dir, and answers ranked queries. See SKILL.md for the contract.
 """
 import argparse
@@ -17,6 +17,12 @@ import sys
 import time
 from collections import namedtuple
 from pathlib import Path
+
+CONTEXT_LIB = Path(__file__).resolve().parents[2] / "lib"
+if str(CONTEXT_LIB) not in sys.path:
+    sys.path.insert(0, str(CONTEXT_LIB))
+
+from workflow_context import account_scope, repository_context
 
 RECALL_VERSION = "1"
 SCHEMA_VERSION = "1"
@@ -51,14 +57,16 @@ KIND_EXT = {
 IN_TREE_RULES = [
     ("findings", "docs/findings", True),
     ("findings", ".claude/findings", True),
+    ("findings", ".codex/findings", True),
     ("handoffs", ".claude/handoffs", False),
+    ("handoffs", ".codex/handoffs", False),
     ("todos", ".todos/pending", False),
     ("todos", ".todos/completed", False),
     ("docs", "docs", True),
     ("docs", "", False),
 ]
 EXCLUDED_DIRS = {".git", ".worktrees", "node_modules"}
-ALLOWED_HIDDEN_DIRS = {".todos", ".claude"}
+ALLOWED_HIDDEN_DIRS = {".todos", ".claude", ".codex"}
 SKIP_BASENAMES = {("todos", "TODO.md"), ("memory", "MEMORY.md")}
 EVAL_NOTES = {"hit", "paraphrase", "synonym", "tokenization", "missing-source"}
 
@@ -111,50 +119,84 @@ def _home(env):
     return Path(env.get("HOME", str(Path.home())))
 
 
-def resolve_config_dir(anchor, env=None):
-    """Same rule as _claude_config_dir() in zsh/functions.zsh.
+def config_dir_for_scope(scope, env=None):
+    """Render the provider-selected Claude route without changing its path spelling.
 
-    anchor: resolved directory to classify (the top level, or cwd for
-    status --all)."""
+    The shared provider decides the account policy. This adapter keeps the
+    configured spelling for compatibility with existing recall paths on
+    platforms where a temporary-directory alias resolves differently.
+    """
     env = os.environ if env is None else env
-    explicit = env.get("CLAUDE_CONFIG_DIR")
-    if explicit:
-        return Path(explicit).expanduser()
+    explicit_storage = env.get("RECALL_CONFIG_DIR")
+    if explicit_storage:
+        return Path(explicit_storage).expanduser()
     home = _home(env)
-    work_tree = Path(env.get("CLAUDE_WORK_TREE", str(home / "Git" / "work"))).expanduser()
-    try:
-        work_tree = work_tree.resolve()
-    except OSError:
-        pass
-    anchor = Path(anchor)
-    if anchor == work_tree or work_tree in anchor.parents:
-        return Path(env.get("CLAUDE_WORK_CONFIG_DIR", str(home / ".claude-work"))).expanduser()
+    if scope["kind"] == "custom":
+        return Path(env["CLAUDE_CONFIG_DIR"]).expanduser()
+    if scope["kind"] == "work":
+        return Path(
+            env.get("CLAUDE_WORK_CONFIG_DIR", str(home / ".claude-work"))
+        ).expanduser()
     return home / ".claude"
 
 
 def git_paths(cwd):
     """(toplevel, canonical_root) resolved, or None outside a working tree."""
+    # Inherited Git context must not reclassify personal content as work.
+    # Match the account guard and shell wrapper's ownership probe boundary.
+    probe_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"}
+    }
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
-            cwd=str(cwd), capture_output=True, text=True, check=True,
+            [
+                "git",
+                "rev-parse",
+                "--show-toplevel",
+                "--git-common-dir",
+                "--absolute-git-dir",
+            ],
+            cwd=str(cwd),
+            env=probe_env,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.splitlines()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
-    if len(out) < 2 or not out[0]:
+    if len(out) < 3 or not out[0]:
         return None
     toplevel = Path(out[0]).resolve()
     common = Path(out[1])
     if not common.is_absolute():
         common = Path(cwd) / common
     common = common.resolve()
-    canonical = toplevel if ".git/modules/" in f"{common}/" else common.parent
+    git_dir = Path(out[2]).resolve()
+    # Primary checkouts own their content even when --separate-git-dir
+    # places metadata under another account's tree. Only linked worktrees
+    # need a different canonical root; their Git directory differs from common.
+    primary = git_dir == common
+    canonical = (
+        toplevel if primary or ".git/modules/" in f"{common}/" else common.parent
+    )
     return toplevel, canonical
 
 
-def index_path(config_dir, toplevel, canonical):
-    """Index file for this tree; refuses a location inside the repo."""
-    path = Path(config_dir) / "recall" / repo_id(toplevel) / "index.db"
+def index_path(config_dir, toplevel, canonical, *, memory_config_dir=None):
+    """Index for this tree and, in shared storage, its memory account.
+
+    Account separation prevents no-refresh and locked-refresh fallback from
+    returning another account's cached memory. Default storage keeps its
+    existing path. Refuses a location inside the repo.
+    """
+    cache_id = repo_id(toplevel)
+    if memory_config_dir is not None:
+        account_root = Path(memory_config_dir).resolve()
+        account_id = hashlib.sha256(os.fsencode(account_root)).hexdigest()
+        cache_id = f"{cache_id}-account-{account_id}"
+    path = Path(config_dir) / "recall" / cache_id / "index.db"
     try:
         probe = path.parent.resolve()
     except OSError:
@@ -236,13 +278,13 @@ def _has_symlink_component(path, root):
 
 def _excluded_dir(dir_parts):
     """True when any directory component is excluded: .git, worktree dirs,
-    node_modules, or a dot-directory other than .todos / .claude."""
+    node_modules, or an unsupported dot-directory."""
     for i, part in enumerate(dir_parts):
         if part in EXCLUDED_DIRS:
             return True
         if part.startswith(".") and part not in ALLOWED_HIDDEN_DIRS:
             return True
-        if part == "worktrees" and i > 0 and dir_parts[i - 1] == ".claude":
+        if part == "worktrees" and i > 0 and dir_parts[i - 1] in {".claude", ".codex"}:
             return True
     return False
 
@@ -357,12 +399,29 @@ class Context:
 
     def __init__(self, cwd=None):
         cwd = Path(cwd or os.getcwd())
-        paths = git_paths(cwd)
-        if paths is None:
+        try:
+            repository = repository_context(cwd)
+        except subprocess.CalledProcessError:
             raise SystemExit(_fail(EXIT_NOT_GIT, "not inside a git working tree"))
-        self.toplevel, self.canonical = paths
-        self.config_dir = resolve_config_dir(self.toplevel)
-        self.index_file = index_path(self.config_dir, self.toplevel, self.canonical)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise ConfigError("Git context is unavailable") from exc
+        try:
+            scope = account_scope(cwd, "claude")
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        self.toplevel = Path(repository["root"])
+        self.canonical = Path(repository["primary_root"] or repository["root"])
+        self.config_dir = config_dir_for_scope(scope)
+        memory_env = dict(os.environ)
+        memory_env.pop("RECALL_CONFIG_DIR", None)
+        self.memory_config_dir = config_dir_for_scope(scope, memory_env)
+        memory_scope = self.memory_config_dir if os.environ.get("RECALL_CONFIG_DIR") else None
+        self.index_file = index_path(
+            self.config_dir,
+            self.toplevel,
+            self.canonical,
+            memory_config_dir=memory_scope,
+        )
 
 
 # --- chunking ---------------------------------------------------------------
@@ -539,7 +598,9 @@ def _index_one(conn, src, text):
 
 
 def refresh(conn, ctx, full=False, quiet=False):
-    sources = collect_sources(ctx.toplevel, ctx.canonical, ctx.config_dir, quiet=quiet)
+    sources = collect_sources(
+        ctx.toplevel, ctx.canonical, ctx.memory_config_dir, quiet=quiet
+    )
     try:
         conn.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError as exc:
@@ -672,8 +733,9 @@ def _storage_error(exc):
 
 NO_SOURCES_MESSAGE = (
     "no eligible sources in this repo; looked for docs/**/*.md, *.md, "
-    ".claude/handoffs/*.md, .todos/{pending,completed}/*.md, docs/findings/, "
-    ".claude/findings/, and Claude memory for this path")
+    ".{claude,codex}/handoffs/*.md, .todos/{pending,completed}/*.md, docs/findings/, "
+    ".{claude,codex}/findings/, and Claude memory for this path"
+)
 
 
 def cmd_search(args):
@@ -793,6 +855,7 @@ def cmd_status(args):
         # empty schema.
         refresh_or_degrade(conn, ctx, quiet=False)
     print(f"config dir: {ctx.config_dir}")
+    print(f"memory config dir: {ctx.memory_config_dir}")
     print(f"index: {ctx.index_file}")
     print(f"schema: {_meta(conn, 'schema_version')}")
     print(f"version: {RECALL_VERSION}")
@@ -809,7 +872,12 @@ def cmd_status(args):
 
 
 def status_all():
-    config_dir = resolve_config_dir(Path(os.getcwd()).resolve())
+    cwd = Path(os.getcwd()).resolve()
+    try:
+        scope = account_scope(cwd, "claude")
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    config_dir = config_dir_for_scope(scope)
     root = config_dir / "recall"
     print(f"config dir: {config_dir}")
     if not root.is_dir():

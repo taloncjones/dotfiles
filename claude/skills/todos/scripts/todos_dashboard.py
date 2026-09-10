@@ -5,16 +5,16 @@ Invoked as `todos.sh dashboard [--open] [--online] [--out PATH]
 [--completed N]`; see claude/skills/todos/SKILL.md ("Dashboard").
 
 Reads, never writes: .todos/{pending,completed,research}/ and the herdr
-task records under TODOS_STATE_ROOT (default
-${CLAUDE_CONFIG_DIR:-~/.claude}/herdr-orch). Dependency state comes from
+task records under the selected account payload root (or the explicit
+TODOS_STATE_ROOT override). Dependency state comes from
 todos.sh's own resolver (`_depends` / `_normalize_ref` / `_resolve`), so
 there is one resolver. The only write is the output file, default
-${TODOS_DASHBOARD_DIR:-${XDG_STATE_HOME:-~/.local/state}/dotfiles/dashboard}/<repo_slug>.html,
-written to a sibling temp file and renamed into place.
+${XDG_STATE_HOME:-~/.local/state}/dotfiles/dashboard/<account_id>/<repo_slug>.html.
+TODOS_DASHBOARD_DIR and --out deliberately select an explicit output path.
+The page is written to a sibling temp file and renamed into place.
 """
 import argparse
 import datetime
-import hashlib
 import html
 import json
 import os
@@ -24,6 +24,12 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[2] / "hooks"))
+sys.path.insert(0, str(HERE.parents[1] / "lib"))
+import herdr_orch_core as core
+from workflow_context import account_scope, repository_context
+from workflow_context import git as context_git
+
 TODOS_SH = Path(os.environ.get("TODOS_DASHBOARD_TODOS_SH") or HERE / "todos.sh")
 TODOS_DIRNAME = ".todos"
 SUMMARY_LEN = 140
@@ -65,22 +71,10 @@ def safe_href(url):
 
 
 def git(args, cwd=None):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    return r.returncode, r.stdout.strip()
-
-
-def repo_slug(remote_url, common_dir=None):
-    # Mirrors herdr_orch_core.repo_slug (pinned by the dashboard test suite).
-    if remote_url:
-        u = remote_url.strip()
-        u = re.sub(r"\.git\Z", "", u)
-        u = re.sub(r"\A[a-z]+://", "", u)
-        u = re.sub(r"\A[^@]+@", "", u)
-        norm = re.sub(r"[^a-z0-9]+", "-", u.lower()).strip("-")
-        h = hashlib.sha256(remote_url.strip().encode()).hexdigest()[:8]
-        return f"{norm}-{h}"
-    h = hashlib.sha256(str(Path(common_dir).resolve()).encode()).hexdigest()[:8]
-    return f"local-{h}"
+    try:
+        return 0, context_git(cwd or Path.cwd(), *args).strip()
+    except subprocess.CalledProcessError as e:
+        return e.returncode, (e.stdout or "").strip()
 
 
 def unquote(v):
@@ -180,7 +174,11 @@ class Resolver:
 
     def __init__(self, root, online):
         self.root = root
-        self.env = dict(os.environ)
+        self.env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        }
         if online:
             self.env.pop("TODOS_OFFLINE", None)
         else:
@@ -231,11 +229,14 @@ class Resolver:
         return out
 
 
-def read_json(path):
+def read_json(path, *, confined=False):
     """-> (dict|None, unreadable: bool). Missing file is (None, False)."""
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        if confined:
+            data = json.loads(core.read_payload_text(path))
+        else:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
     except FileNotFoundError:
         return None, False
     except (OSError, ValueError, UnicodeDecodeError):
@@ -255,7 +256,7 @@ def field(d, key):
     return ""
 
 
-def herdr_status(tasks_dir, basename):
+def herdr_status(tasks_dir, basename, *, confined=False):
     """Read-only view of tasks/td-<basename>.{json,review.json,done.json}.
 
     The task record is authoritative for status and the live worker. The
@@ -265,7 +266,7 @@ def herdr_status(tasks_dir, basename):
     workspace across phases, so workspace_id proves nothing), else stale.
     """
     task_id = f"td-{basename}"
-    rec, bad = read_json(tasks_dir / f"{task_id}.json")
+    rec, bad = read_json(tasks_dir / f"{task_id}.json", confined=confined)
     if rec is None and not bad:
         return None
     st = {"task_id": task_id, "status": "", "phase": "", "role": "", "model": "",
@@ -283,7 +284,7 @@ def herdr_status(tasks_dir, basename):
                 st[k] = field(w, k)
     else:
         st["status"] = "unreadable"
-    rev, bad = read_json(tasks_dir / f"{task_id}.review.json")
+    rev, bad = read_json(tasks_dir / f"{task_id}.review.json", confined=confined)
     if rev is not None:
         st["review"] = field(rev, "outcome") or "unknown"
         st["blocking_count"] = field(rev, "blocking_count")
@@ -291,7 +292,7 @@ def herdr_status(tasks_dir, basename):
         st["review_stale"] = not st["review_head_sha"] or field(rev, "reviewed_head_sha") != st["review_head_sha"]
     elif bad:
         st["review"] = "unreadable"
-    done, bad = read_json(tasks_dir / f"{task_id}.done.json")
+    done, bad = read_json(tasks_dir / f"{task_id}.done.json", confined=confined)
     if done is not None:
         st["done_outcome"] = field(done, "outcome")
         st["done_phase"] = field(done, "phase")
@@ -311,7 +312,7 @@ def read_text(path):
         return None
 
 
-def load_todo(path, resolver, tasks_dir, pending):
+def load_todo(path, resolver, tasks_dir, pending, confined_state):
     text = read_text(path)
     if text is None:
         return None
@@ -333,7 +334,7 @@ def load_todo(path, resolver, tasks_dir, pending):
         "summary": problem_summary(body),
         "links": body_links(body),
         "deps": resolver.resolve_all(path, basename) if pending else [],
-        "herdr": herdr_status(tasks_dir, basename),
+        "herdr": herdr_status(tasks_dir, basename, confined=confined_state),
     }
     t["blocked"] = any(state not in SATISFIED for _, state in t["deps"])
     h = t["herdr"]
@@ -341,12 +342,12 @@ def load_todo(path, resolver, tasks_dir, pending):
     return t
 
 
-def load_dir(d, resolver, tasks_dir, pending):
+def load_dir(d, resolver, tasks_dir, pending, confined_state):
     if not d.is_dir():
         return []
     out = []
     for p in sorted(d.glob("*.md")):
-        t = load_todo(p, resolver, tasks_dir, pending)
+        t = load_todo(p, resolver, tasks_dir, pending, confined_state)
         if t is not None:
             out.append(t)
     return out
@@ -1138,20 +1139,19 @@ Static page: rerun <span class="mono">todos.sh dashboard</span> and reload to re
 
 # --- main -------------------------------------------------------------------
 
-def default_out_dir():
+def default_out_dir(account_id):
     d = os.environ.get("TODOS_DASHBOARD_DIR")
     if d:
         return Path(d)
     state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(state) / "dotfiles" / "dashboard"
+    return Path(state) / "dotfiles" / "dashboard" / account_id
 
 
-def default_state_root():
+def default_state_root(scope):
     d = os.environ.get("TODOS_STATE_ROOT")
     if d:
         return Path(d)
-    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    return Path(cfg) / "herdr-orch"
+    return core.account_payload_root(scope) / "herdr-orch"
 
 
 def _leaf_form(path):
@@ -1201,7 +1201,7 @@ def open_file(path):
         warn(f"cannot open {path}: {opener}: {e.strerror or e}")
 
 
-USAGE = "usage: todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]"
+USAGE = "usage: todos.sh dashboard [--runtime claude|codex] [--personal] [--open] [--online] [--out PATH] [--completed N]"
 
 
 class Parser(argparse.ArgumentParser):
@@ -1211,6 +1211,8 @@ class Parser(argparse.ArgumentParser):
 
 def parse_args(argv):
     p = Parser(prog="todos.sh dashboard", add_help=True)
+    p.add_argument("--runtime", choices=("claude", "codex"))
+    p.add_argument("--personal", action="store_true")
     p.add_argument("--open", action="store_true")
     p.add_argument("--online", action="store_true")
     p.add_argument("--out")
@@ -1219,6 +1221,26 @@ def parse_args(argv):
     if args.completed < 0:
         die("--completed needs a non-negative integer")
     return args
+
+
+def selected_runtime(args):
+    if args.runtime:
+        return args.runtime
+    inherited = os.environ.get("ORCH_RUNTIME")
+    if inherited in ("claude", "codex"):
+        return inherited
+    return "codex" if os.environ.get("CODEX_HOME") else "claude"
+
+
+def selected_scope(root, args):
+    try:
+        return account_scope(
+            root,
+            selected_runtime(args),
+            personal=args.personal or os.environ.get("HERDR_PERSONAL") == "1",
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        die(f"cannot resolve the selected account scope: {e}")
 
 
 def visibility_warning(root):
@@ -1254,25 +1276,30 @@ def main(argv=None):
     if rc != 0 or not root:
         die("not inside a git repository")
     root = Path(root)
+    try:
+        context = repository_context(root)
+    except (OSError, subprocess.SubprocessError) as e:
+        die(f"cannot resolve repository identity: {e}")
+    scope = selected_scope(root, args)
     rc, remote = git(["remote", "get-url", "origin"], cwd=root)
     if rc != 0:
         remote = ""
-    _, common = git(["rev-parse", "--git-common-dir"], cwd=root)
-    slug = repo_slug(remote, common_dir=root / common if common else root)
+    slug = core.repo_slug(remote, context["common_dir"])
     _, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
 
     todos_dir = root / TODOS_DIRNAME
-    state_root = default_state_root()
+    state_root = default_state_root(scope)
     tasks_dir = state_root / slug / "tasks"
-    out = Path(args.out) if args.out else default_out_dir() / f"{slug}.html"
+    confined_state = not bool(os.environ.get("TODOS_STATE_ROOT"))
+    out = Path(args.out) if args.out else default_out_dir(scope["account_id"]) / f"{slug}.html"
     out = out if out.is_absolute() else Path.cwd() / out
     guard_out_path(out, [(f"{TODOS_DIRNAME}/", todos_dir), ("the herdr state root", state_root)])
 
     if todos_dir.is_dir():
         visibility_warning(root)
     resolver = Resolver(root, args.online)
-    pending = load_dir(todos_dir / "pending", resolver, tasks_dir, True)
-    completed = load_dir(todos_dir / "completed", resolver, tasks_dir, False)
+    pending = load_dir(todos_dir / "pending", resolver, tasks_dir, True, confined_state)
+    completed = load_dir(todos_dir / "completed", resolver, tasks_dir, False, confined_state)
     pending.sort(key=open_sort_key)
     completed.sort(key=lambda t: (t["created"], t["basename"]), reverse=True)
     completed = completed[:args.completed]

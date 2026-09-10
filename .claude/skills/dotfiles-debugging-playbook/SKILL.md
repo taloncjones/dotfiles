@@ -24,9 +24,9 @@ _worktree_ is a linked `git worktree` checkout; _hydration_ is the
 
 - [WARNING] Never run ECC's `sync-ecc-to-codex.sh` directly to "fix" Codex
   state -- it overwrites `core.hooksPath`, writes through the `~/.codex/AGENTS.md`
-  symlink into this repo, and leaves nameless agent files. Only the
-  `codex-ecc-sync` wrapper in `zsh/functions.zsh` runs it safely
-  (`ECC_GLOBAL_HOOKS_DIR` redirect).
+  symlink into this repo, and leaves nameless agent files. Both direct sync
+  and its old wrapper are retired. Use native `ecc-install`/`ecc-update` and
+  the diagnostics in repo CLAUDE.md, "Codex plugin integration".
 - [WARNING] Never "fix" a cloud container's git identity by copying the
   signing block from `~/.gitconfig-personal` -- `op-ssh-sign` needs 1Password
   and every commit would fail. `bootstrap-cloud.sh` `reattribute_git_identity`
@@ -320,7 +320,7 @@ ls -ld /path/to/main/.todos                  # main must actually have .todos/
 
 | Finding                                               | Cause                                                                                                                                       | Fix                                                                                                   |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `core.hooksPath` wrong/absent                         | Something rewrote it (the classic culprit: running ECC's sync script directly -- see warnings)                                              | Re-link `~/.gitconfig` (`dotfiles-repair`); use `codex-ecc-sync` only                                 |
+| `core.hooksPath` wrong/absent                         | Something rewrote it (the classic culprit: running ECC's sync script directly -- see warnings)                                              | Re-link `~/.gitconfig` (`dotfiles-repair`); use native `ecc-install`/`ecc-update` only                                 |
 | Hook fired but printed `WARN: .todos has wrong shape` | Existing dir/symlink does not match the canonical symlink; hook refuses destructive replace by default                                      | Re-run checkout with `GSD_HOOK_REPAIR=1` (destructive -- rsync worktree-unique content to main FIRST) |
 | Hook printed `workspace mode detected`                | `.planning/config.json` declares `"mode": "workspace"` or phases/PROJECT.md exist -- hydration is skipped by design; leftover symlinks warn | `GSD_HOOK_ISOLATE=1` converts leftover symlinks to per-worktree copies                                |
 | No output at all                                      | File checkout (not branch), or `.git` is a directory (main checkout), or main has no `.todos/`                                              | Expected no-ops -- see the guard chain at the top of `git/hooks/post-checkout`                        |

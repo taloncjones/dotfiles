@@ -1,24 +1,33 @@
 ---
 name: voice
-description: Use before posting any outward-facing text an agent wrote (PR title or body, PR comment, Jira title, description, or comment, code comment or docstring) to run a second-model voice pass with Codex. Trigger on "voice pass", "de-generify this", "make this sound human", "check this PR body". Returns a rewrite plus what changed and why; never posts, edits, or commits on its own.
+description: Use before posting any outward-facing text an agent wrote (PR title or body, PR comment, Jira title, description, or comment, code comment or docstring) to run an independent voice pass with Codex. Trigger on "voice pass", "de-generify this", "make this sound human", "check this PR body". Returns a rewrite plus what changed and why; never posts, edits, or commits on its own.
 ---
 
-# Voice (second-model voice pass)
+# Voice (independent prose pass)
 
-The model that wrote a PR body is a poor judge of its own voice. This skill
-sends the text to Codex (`gpt-6-astra`) with the CLAUDE.md style rules and
-shows the before/after for a human to approve. The script never posts.
+This skill sends the text to a fresh Codex session (`gpt-6-astra`) with the
+shared style rules and shows the before/after for a human to approve. It
+works from Claude or Codex; an Astra author gets a separate context, which
+does not provide different-model independence. The script never posts.
 
 ## Usage
 
 ```bash
-V=~/.claude/skills/voice/scripts/voice.py
-python3 $V lint    --kind pr-body --file body.md          # mechanical checks only, no model
-python3 $V rewrite --kind pr-body --file body.md          # Codex rewrite + report
-python3 $V rewrite --pr 123                               # title and body via gh pr view
-python3 $V rewrite --kind code-comment --range src/x.py:40-52
-printf '%s' "$TEXT" | python3 $V rewrite --kind jira-comment --stdin
+V="${CODEX_HOME:-$HOME/.codex}/skills/voice/scripts/voice.py"
+if [ ! -f "$V" ]; then
+  V="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/voice/scripts/voice.py"
+fi
+python3 "$V" lint    --kind pr-body --file body.md          # mechanical checks only, no model
+python3 "$V" rewrite --kind pr-body --file body.md          # Codex rewrite + report
+python3 "$V" rewrite --pr 123                               # title and body via gh pr view
+python3 "$V" rewrite --kind code-comment --range src/x.py:40-52
+printf '%s' "$TEXT" | python3 "$V" rewrite --kind jira-comment --stdin
 ```
+
+The resolver uses the installed Codex skill when present, then the selected
+Claude config directory. Both runtimes use the same script and rules. When
+reading a source checkout directly, use its loaded skill directory instead.
+The child preserves the caller's selected `CODEX_HOME`.
 
 Kinds: `pr-title`, `pr-body`, `pr-comment`, `jira-title`, `jira-description`,
 `jira-comment`, `code-comment`. Flags: `--effort high|xhigh` (default high),

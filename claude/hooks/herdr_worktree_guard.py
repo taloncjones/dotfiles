@@ -26,7 +26,7 @@ control-flow/grouping keywords (`if ... then`, `( ... )`, `{ ... }`) --
 a create at the head of a segment inside one of these is not detected,
 since segments() splits only on `;`/`&`/`|`.
 
-Runs before Bash tool calls. Fails open on any exception.
+Runs before Claude and Codex shell tool calls. Fails open on any exception.
 """
 
 import json
@@ -40,6 +40,7 @@ STRING_WRAPPERS = ("sh", "bash", "zsh", "dash", "eval")
 HERDR_GLOBAL_OPTS_WITH_ARG = ("--session", "--remote", "--remote-keybindings")
 CREATE_TEXT = "herdr worktree create"
 MAX_DEPTH = 3
+SHELL_TOOLS = {"bash", "shell", "exec_command", "shell_command", "unified_exec"}
 
 CONTINUATION = re.compile(r"\\\n")
 OPERATOR = re.compile(r"^[;&|]+$")
@@ -143,9 +144,9 @@ def create_lacks_cwd(tokens: list[str]) -> bool:
             i += 2
         else:
             i += 1
-    if tokens[i:i + 2] != ["worktree", "create"]:
+    if tokens[i : i + 2] != ["worktree", "create"]:
         return False
-    for tok in tokens[i + 2:]:
+    for tok in tokens[i + 2 :]:
         if tok == "--cwd" or tok.startswith("--cwd=") or tok in ("--help", "-h"):
             return False
     return True
@@ -175,9 +176,23 @@ def command_lacks_cwd(command: str, depth: int = 0) -> bool:
 def main():
     try:
         data = json.load(sys.stdin)
-        if data.get("tool_name", "") != "Bash":
+        tool_name = data.get("tool_name") or data.get("toolName") or ""
+        if not isinstance(tool_name, str) or tool_name.lower() not in SHELL_TOOLS:
             sys.exit(0)
-        command = data.get("tool_input", {}).get("command", "")
+        tool_input = data.get("tool_input") or data.get("toolInput") or {}
+        if not isinstance(tool_input, dict):
+            sys.exit(0)
+        nested = tool_input.get("args")
+        inputs = [tool_input] + ([nested] if isinstance(nested, dict) else [])
+        command = next(
+            (
+                value
+                for item in inputs
+                for key in ("command", "cmd")
+                if isinstance(value := item.get(key), str)
+            ),
+            "",
+        )
         if not isinstance(command, str) or not command_lacks_cwd(command):
             sys.exit(0)
         print(
@@ -191,7 +206,7 @@ def main():
             file=sys.stderr,
         )
         sys.exit(2)
-    except Exception:
+    except Exception:  # noqa: BLE001 - The outer hook boundary must fail open.
         # Fail open: a crashed guard must never block work.
         sys.exit(0)
 

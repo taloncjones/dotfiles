@@ -21,8 +21,8 @@ inside `sh -c`/`bash -c`/`zsh -c` wrappers). Other deleters (`find -delete`,
 `xargs rm`, `gio trash`, etc.) and `rm` reached only via a pipe or command
 substitution are not inspected; that residual is left to the classifier.
 
-Runs before Bash tool calls. Fails open on any exception, and on any segment
-that contains no `rm`/`rmdir` token.
+Runs before Claude and Codex shell tool calls. Fails open on any exception,
+and on any segment that contains no `rm`/`rmdir` token.
 """
 
 import json
@@ -38,6 +38,8 @@ PREFIX_WRAPPERS = ("env", "exec", "command", "nohup", "time", "xargs", "sudo", "
 SHELL_WRAPPERS = ("sh", "bash", "zsh")
 
 REMOVE_COMMANDS = ("rm", "rmdir")
+
+SHELL_TOOLS = {"bash", "shell", "exec_command", "shell_command", "unified_exec"}
 
 SYSTEM_PATHS = (
     "/etc", "/bin", "/usr", "/sbin", "/lib",
@@ -300,14 +302,44 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
 def main():
     try:
         data = json.load(sys.stdin)
-        if data.get("tool_name", "") != "Bash":
+        tool_name = data.get("tool_name") or data.get("toolName") or ""
+        if not isinstance(tool_name, str) or tool_name.lower() not in SHELL_TOOLS:
             sys.exit(0)
 
-        command = data.get("tool_input", {}).get("command", "")
+        tool_input = data.get("tool_input") or data.get("toolInput") or {}
+        if not isinstance(tool_input, dict):
+            sys.exit(0)
+        nested = tool_input.get("args")
+        inputs = [tool_input] + ([nested] if isinstance(nested, dict) else [])
+        command = next(
+            (
+                value
+                for item in inputs
+                for key in ("command", "cmd")
+                if isinstance(value := item.get(key), str)
+            ),
+            "",
+        )
         if not isinstance(command, str) or "rm" not in command:
             sys.exit(0)
 
-        real_cwd = data.get("cwd") or os.getcwd()
+        payload_cwd = data.get("cwd")
+        real_cwd = (
+            payload_cwd
+            if isinstance(payload_cwd, str) and payload_cwd
+            else os.getcwd()
+        )
+        tool_workdir = next(
+            (
+                value
+                for item in inputs
+                for key in ("workdir", "cwd")
+                if isinstance(value := item.get(key), str) and value
+            ),
+            None,
+        )
+        if tool_workdir is not None:
+            real_cwd = resolve(tool_workdir, real_cwd)
         home = os.environ.get("HOME", os.path.expanduser("~"))
 
         reason = check_command(command, real_cwd, home)

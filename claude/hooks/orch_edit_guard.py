@@ -52,6 +52,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import sys
@@ -60,12 +61,14 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # never leave __pycache__ under the hooks dir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import herdr_orch_core as core  # noqa: E402  read-only helpers
-import rm_guard  # noqa: E402  tokenizer and path helpers, unchanged
+import herdr_orch_core as core
+import rm_guard
+from workflow_context import account_scope, repository_context
 
 TOOLS = ("Edit", "Write", "Bash")
 SESSION_ID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
 MARKER_ID_RE = re.compile(r"[0-9a-f]{16}\Z")
 MARKER_FILE = "orch-edit-allow.json"
 AUDIT_FILE = "orch-edits.jsonl"
@@ -99,8 +102,14 @@ def git(args, cwd, budget):
         return None, ""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
     try:
-        p = subprocess.run(["git", "-C", cwd, *args], capture_output=True,
-                           text=True, timeout=left, env=env)
+        p = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            timeout=left,
+            env=env,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None, ""
     return p.returncode, p.stdout
@@ -108,42 +117,65 @@ def git(args, cwd, budget):
 
 # --- state root reads ------------------------------------------------------
 
+
 def read_state_json(path):
-    """Parsed JSON object at `path`, or None when it is a symlink, not a
-    regular file, outside STATE_ROOT, unreadable, or not an object."""
-    p = Path(path)
+    """Parsed regular payload object, or None for an invalid marker."""
     try:
-        if p.is_symlink() or not p.is_file() \
-                or not core.contained(p, core.state_root()):
-            return None
-        with open(p) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+        data = json.loads(core.read_payload_text(path))
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
 
 
-def owned_slugs(session_id):
-    """{slug: fence} over every owner record naming this session. A file
-    that is not an owner record (corrupt, symlink, no int fence) is
-    skipped: it never un-guards a valid sibling."""
+def selected_scope(cwd, runtime):
+    personal = (
+        os.environ.get("HERDR_PERSONAL") == "1"
+        or os.environ.get("WORKFLOW_PERSONAL_ACCOUNT") == "1"
+    )
+    return account_scope(cwd, runtime, personal=personal)
+
+
+def owned_slugs(session_id, runtime, caller_scope, candidates):
+    """Caller-account owners and independently resolved target scopes."""
     owned = {}
+    personal = (
+        os.environ.get("HERDR_PERSONAL") == "1"
+        or os.environ.get("WORKFLOW_PERSONAL_ACCOUNT") == "1"
+    )
+    targets = {}
+    for slug, top in candidates.items():
+        try:
+            context = repository_context(top)
+            scope = account_scope(context["root"], runtime, personal=personal)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+        targets[slug] = {"context": context, "scope": scope}
+    root = core.account_payload_root(caller_scope) / "herdr-orch"
     try:
-        files = sorted(core.state_root().glob("*/owner.json"))
-    except OSError:
+        names = core.payload_names(root)
+    except (OSError, ValueError):
         return owned
-    for p in files:
-        rec = read_state_json(p)
-        if not rec or rec.get("session_id") != session_id:
+    for slug in sorted(name for name in names if core.valid_repo_slug(name)):
+        rd = root / slug
+        rec = read_state_json(core.coordination.owner_path(rd))
+        if not (
+            rec
+            and rec.get("runtime", "claude") == runtime
+            and rec.get("session_id") == session_id
+            and rec.get("account_id") == caller_scope["account_id"]
+            and isinstance(rec.get("fence"), int)
+            and not isinstance(rec.get("fence"), bool)
+        ):
             continue
-        fence = rec.get("fence")
-        if isinstance(fence, bool) or not isinstance(fence, int):
-            continue
-        owned[p.parent.name] = fence
+        entry = {"fence": rec["fence"], "rd": rd, "caller_scope": caller_scope}
+        if slug in targets:
+            entry.update(targets[slug])
+        owned[slug] = entry
     return owned
 
 
 # --- paths and classification ---------------------------------------------
+
 
 def canon(path):
     """realpath of the longest existing ancestor, joined with the rest."""
@@ -204,6 +236,7 @@ def repo_slug_of(top, budget, cache):
 
 # --- Bash: pass 1, raw scan ------------------------------------------------
 
+
 def read_word(text, j):
     """Quote-aware word starting at text[j]: (word, end). Quotes are
     removed and backslash escapes resolved; `$` and backticks are kept
@@ -215,17 +248,28 @@ def read_word(text, j):
         c = text[j]
         if quote:
             if quote == '"' and c == "\\" and j + 1 < n:
-                out.append(text[j + 1]); j += 2; continue
+                out.append(text[j + 1])
+                j += 2
+                continue
             if c == quote:
-                quote = None; j += 1; continue
-            out.append(c); j += 1; continue
+                quote = None
+                j += 1
+                continue
+            out.append(c)
+            j += 1
+            continue
         if c in "'\"":
-            quote = c; j += 1; continue
+            quote = c
+            j += 1
+            continue
         if c == "\\" and j + 1 < n:
-            out.append(text[j + 1]); j += 2; continue
+            out.append(text[j + 1])
+            j += 2
+            continue
         if c in WORD_STOP:
             break
-        out.append(c); j += 1
+        out.append(c)
+        j += 1
     return "".join(out), j
 
 
@@ -238,7 +282,9 @@ def io_number_start(out):
     k = len(out)
     while k > 0 and len(out[k - 1]) == 1 and out[k - 1].isdigit():
         k -= 1
-    if k < len(out) and (k == 0 or out[k - 1] in (" ", "\t", "\n", ";", "&", "|", "(", ")")):
+    if k < len(out) and (
+        k == 0 or out[k - 1] in (" ", "\t", "\n", ";", "&", "|", "(", ")")
+    ):
         return k
     k = len(out)
     if k > 0 and out[k - 1] == "&":
@@ -261,7 +307,7 @@ def scan_raw(text):
     out = []
     redirs = {}
     heredocs = []  # (word, strip_tabs) pending on the current line
-    arith_paren = 0    # open '(' still needed to close a $(( ... )) we're in
+    arith_paren = 0  # open '(' still needed to close a $(( ... )) we're in
     arith_bracket = 0  # open '[' still needed to close a $[ ... ] we're in
     i = 0
     quote = None
@@ -269,20 +315,30 @@ def scan_raw(text):
         c = text[i]
         if quote:
             if quote == '"' and c == "\\" and i + 1 < n:
-                out.append(text[i:i + 2]); i += 2; continue
+                out.append(text[i : i + 2])
+                i += 2
+                continue
             if c == quote:
                 quote = None
-            out.append(c); i += 1; continue
+            out.append(c)
+            i += 1
+            continue
         if c in "'\"":
-            quote = c; out.append(c); i += 1; continue
+            quote = c
+            out.append(c)
+            i += 1
+            continue
         if c == "\\" and i + 1 < n:
-            out.append(text[i:i + 2]); i += 2; continue
+            out.append(text[i : i + 2])
+            i += 2
+            continue
         if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
             j = text.find("\n", i)
             i = n if j < 0 else j
             continue
         if c == "\n":
-            out.append(c); i += 1
+            out.append(c)
+            i += 1
             for word, strip_tabs in heredocs:
                 while i < n:
                     j = text.find("\n", i)
@@ -299,48 +355,68 @@ def scan_raw(text):
         if arith_paren == 0 and arith_bracket == 0:
             if c == "$" and text.startswith("$((", i):
                 arith_paren = 2
-                out.append("$(("); i += 3; continue
+                out.append("$((")
+                i += 3
+                continue
             if c == "$" and text.startswith("$[", i):
                 arith_bracket = 1
-                out.append("$["); i += 2; continue
+                out.append("$[")
+                i += 2
+                continue
         elif arith_paren > 0:
             if c == "(":
                 arith_paren += 1
             elif c == ")":
                 arith_paren -= 1
-            out.append(c); i += 1; continue
+            out.append(c)
+            i += 1
+            continue
         elif arith_bracket > 0:
             if c == "[":
                 arith_bracket += 1
             elif c == "]":
                 arith_bracket -= 1
-            out.append(c); i += 1; continue
+            out.append(c)
+            i += 1
+            continue
         if c == "<":
-            if text.startswith("<<<", i) or text.startswith("<>", i) \
-                    or not text.startswith("<<", i):
+            if (
+                text.startswith("<<<", i)
+                or text.startswith("<>", i)
+                or not text.startswith("<<", i)
+            ):
                 # input redirection (<, <>, <<<): consume the operator, an
                 # IO number before it, and the operand; never a target
-                j = i + (3 if text.startswith("<<<", i) else 2 if text.startswith("<>", i) else 1)
+                j = i + (
+                    3
+                    if text.startswith("<<<", i)
+                    else 2
+                    if text.startswith("<>", i)
+                    else 1
+                )
                 m = j
                 while m < n and text[m] in " \t":
                     m += 1
-                del out[io_number_start(out):]
+                del out[io_number_start(out) :]
                 if m < n and text[m] == "&":
                     e = m + 1
                     while e < n and text[e].isdigit():
                         e += 1
                 else:
                     _w, e = read_word(text, m)
-                out.append(" "); i = e; continue
-            j = i + 2                              # heredoc
+                out.append(" ")
+                i = e
+                continue
+            j = i + 2  # heredoc
             strip_tabs = False
             if j < n and text[j] == "-":
-                strip_tabs = True; j += 1
+                strip_tabs = True
+                j += 1
             while j < n and text[j] in " \t":
                 j += 1
             word, j = read_word(text, j)
             heredocs.append((word, strip_tabs))
-            del out[io_number_start(out):]        # 0<<EOF: the IO number goes too
+            del out[io_number_start(out) :]  # 0<<EOF: the IO number goes too
             out.append(" ")
             i = j
             continue
@@ -351,22 +427,28 @@ def scan_raw(text):
             m = j
             while m < n and text[m] in " \t":
                 m += 1
-            del out[io_number_start(out):]        # 2> / &> prefix, if any
+            del out[io_number_start(out) :]  # 2> / &> prefix, if any
             if m < n and text[m] == "&":
                 e = m + 1
                 while e < n and text[e].isdigit():
                     e += 1
-                if e > m + 1:                      # dup: >&2, 2>&1
-                    out.append(" "); i = e; continue
-                if e < n and text[e] == "-":        # close: >&-
-                    out.append(" "); i = e + 1; continue
+                if e > m + 1:  # dup: >&2, 2>&1
+                    out.append(" ")
+                    i = e
+                    continue
+                if e < n and text[e] == "-":  # close: >&-
+                    out.append(" ")
+                    i = e + 1
+                    continue
                 # bare '&' with no digit/'-' after it: >&file / >>&file
                 # redirects stdout+stderr to a FILENAME, not a dup (B2).
                 m = e
                 while m < n and text[m] in " \t":
                     m += 1
-            if m < n and text[m] == "(":          # process substitution
-                out.append(" "); i = m; continue
+            if m < n and text[m] == "(":  # process substitution
+                out.append(" ")
+                i = m
+                continue
             word, e = read_word(text, m)
             if word:
                 num = len(redirs)
@@ -376,11 +458,13 @@ def scan_raw(text):
                 out.append(" ")
             i = e
             continue
-        out.append(c); i += 1
+        out.append(c)
+        i += 1
     return "".join(out), redirs
 
 
 # --- Bash: pass 2, per-segment operands -----------------------------------
+
 
 def has_inplace(words):
     """Accepted gap (A7): a sed `w file` command or `s///w file` flag also
@@ -412,13 +496,21 @@ def script_operands(words, value_opts, script_flags):
     ops, skip = [], False
     for t in words[1:]:
         if skip:
-            skip = False; continue
+            skip = False
+            continue
         if t in value_opts:
-            skip = True; explicit = True; continue
+            skip = True
+            explicit = True
+            continue
         if any(t.startswith(v + "=") for v in value_opts if v.startswith("--")):
-            explicit = True; continue
-        if t.startswith("-") and not t.startswith("--") and len(t) > 1 \
-                and any(ch in t[1:] for ch in script_flags):
+            explicit = True
+            continue
+        if (
+            t.startswith("-")
+            and not t.startswith("--")
+            and len(t) > 1
+            and any(ch in t[1:] for ch in script_flags)
+        ):
             explicit = True
             continue
         if t.startswith("-") and len(t) > 1:
@@ -460,11 +552,15 @@ def copy_targets(words, cwd, home, include_sources):
     ops, tdir, skip = [], None, False
     for t in words[1:]:
         if skip:
-            tdir = t; skip = False; continue
+            tdir = t
+            skip = False
+            continue
         if t in ("-t", "--target-directory"):
-            skip = True; continue
+            skip = True
+            continue
         if t.startswith("--target-directory="):
-            tdir = t.split("=", 1)[1]; continue
+            tdir = t.split("=", 1)[1]
+            continue
         if t.startswith("-") and len(t) > 1:
             continue
         ops.append(t)
@@ -486,8 +582,11 @@ def copy_targets(words, cwd, home, include_sources):
 
 
 def _existing(ops, cwd, home):
-    return [w for w in ops
-            if os.path.lexists(rm_guard.resolve(rm_guard.expand_home(w, home), cwd))]
+    return [
+        w
+        for w in ops
+        if os.path.lexists(rm_guard.resolve(rm_guard.expand_home(w, home), cwd))
+    ]
 
 
 def shell_c_arg(words):
@@ -498,8 +597,12 @@ def shell_c_arg(words):
     i = 1
     while i < len(words):
         tok = words[i]
-        if tok == "-c" or (tok.startswith("-") and not tok.startswith("--")
-                            and len(tok) > 1 and "c" in tok[1:]):
+        if tok == "-c" or (
+            tok.startswith("-")
+            and not tok.startswith("--")
+            and len(tok) > 1
+            and "c" in tok[1:]
+        ):
             return words[i + 1] if i + 1 < len(words) else None
         if tok.startswith("-"):
             i += 1
@@ -509,29 +612,33 @@ def shell_c_arg(words):
 
 
 def segment_groups(tokens):
-    """Yield ('seg', words) per `;`/`&`/`|`-separated segment, and
+    """Yield segments with their preceding and following shell operators, and
     ('push', []) / ('pop', []) at `(`/`)` subshell boundaries -- a `cd`
     inside a subshell must not persist past its closing `)` (B3)."""
     current = []
+    previous = None
     for tok in tokens:
         if tok and all(c in ";&|\n" for c in tok):
             if current:
-                yield "seg", current
+                yield "seg", current, previous, tok
                 current = []
+            previous = tok
         elif tok == "(":
             if current:
-                yield "seg", current
+                yield "seg", current, previous, None
                 current = []
-            yield "push", []
+            yield "push", [], previous, None
+            previous = None
         elif tok == ")":
             if current:
-                yield "seg", current
+                yield "seg", current, previous, None
                 current = []
-            yield "pop", []
+            yield "pop", [], previous, None
+            previous = None
         else:
             current.append(tok)
     if current:
-        yield "seg", current
+        yield "seg", current, previous, None
 
 
 def rm_operands(words):
@@ -599,7 +706,7 @@ def bash_targets(command, cwd, home, depth=0):
     cwds = {cwd}
     seen_cwds = {cwd}
     stack = []
-    for kind, tokens in segment_groups(rm_guard.tokenize(cleaned)):
+    for kind, tokens, previous, following in segment_groups(rm_guard.tokenize(cleaned)):
         if kind == "push":
             stack.append(cwds)
             continue
@@ -632,7 +739,10 @@ def bash_targets(command, cwd, home, depth=0):
             new_cwds = set()
             for c in cwds:
                 new_cwds |= cd_target_candidates(words, c, home)
-            cwds = new_cwds
+            if previous in ("&&", "||"):
+                new_cwds |= cwds
+            if following != "|":
+                cwds = new_cwds
             seen_cwds |= cwds
         elif head == "popd":
             cwds |= seen_cwds
@@ -663,8 +773,9 @@ def bash_targets(command, cwd, home, depth=0):
 
 # --- targets ---------------------------------------------------------------
 
+
 def targets_for(payload, tool, cwd, home):
-    """[(cwd, word)] raw write targets of one tool call."""
+    """[(cwd, word, shell_expands)] raw write targets of one tool call."""
     ti = payload.get("tool_input")
     if not isinstance(ti, dict):
         return []
@@ -672,18 +783,30 @@ def targets_for(payload, tool, cwd, home):
         cmd = ti.get("command")
         if not isinstance(cmd, str) or not cmd.strip():
             return []
-        return bash_targets(cmd, cwd, home)
+        return [
+            (target_cwd, word, True)
+            for target_cwd, word in bash_targets(cmd, cwd, home)
+        ]
+    paths = ti.get("file_paths")
+    if isinstance(paths, list):
+        return [
+            (cwd, path, False)
+            for path in paths
+            if isinstance(path, str) and path.strip()
+        ]
     fp = ti.get("file_path")
-    return [(cwd, fp)] if isinstance(fp, str) and fp.strip() else []
+    return [(cwd, fp, False)] if isinstance(fp, str) and fp.strip() else []
 
 
 def resolve_targets(raw, home):
     """Canonical absolute paths, skipping anything the shell would still
     expand ($VAR, backticks, globs), deduplicated, capped."""
     paths = []
-    for c_cwd, w in raw:
+    for c_cwd, w, shell_expands in raw:
         w = rm_guard.expand_home(w, home)
-        if not w or "$" in w or "`" in w or rm_guard.has_glob_chars(w):
+        if not w or (
+            shell_expands and ("$" in w or "`" in w or rm_guard.has_glob_chars(w))
+        ):
             continue
         p = canon(rm_guard.resolve(w, c_cwd))
         if p not in paths:
@@ -693,52 +816,61 @@ def resolve_targets(raw, home):
 
 # --- audit -----------------------------------------------------------------
 
-def audit_append(slug, rec):
-    """Append one JSON line to STATE_ROOT/<slug>/tasks/orch-edits.jsonl.
+
+def audit_append(rd, rec):
+    """Append one JSON line to the selected payload's tasks/orch-edits.jsonl.
     True on success; False when tasks/ is missing or the file is not a
     plain regular file (symlink, FIFO) or cannot be opened. Never raises.
 
     Accepted gap (A5): near-identical to herdr_orch_core.append_orch_edit
     (same O_APPEND|O_NOFOLLOW + short-write check); the two must stay
     byte-compatible for the shared budget log but are not shared code."""
-    p = core.repo_dir(slug) / "tasks" / AUDIT_FILE
+    p = Path(rd) / "tasks" / AUDIT_FILE
     try:
-        if not p.parent.is_dir() or not core.contained(p.parent, core.state_root()):
-            return False
-        try:
-            st = os.lstat(p)
-        except FileNotFoundError:
-            st = None
-        if st is not None and not stat.S_ISREG(st.st_mode):
-            return False
-        flags = (os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK
-                 | getattr(os, "O_NOFOLLOW", 0))
-        data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
-        fd = os.open(p, flags, 0o600)
-        try:
-            written = os.write(fd, data)
-        finally:
-            os.close(fd)
-    except OSError:
+        with core.coordination.payload_parent(p) as (parent, name):
+            try:
+                st = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                st = None
+            if st is not None and not stat.S_ISREG(st.st_mode):
+                return False
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | os.O_NONBLOCK
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
+            fd = os.open(name, flags, 0o600, dir_fd=parent)
+            try:
+                written = os.write(fd, data)
+            finally:
+                os.close(fd)
+    except (OSError, ValueError):
         return False
     return written == len(data)  # a short write is not a record
 
 
 # --- marker and budget -----------------------------------------------------
 
-def read_marker(slug, session_id, fence):
+
+def read_marker(rd, session_id, fence):
     """(marker, None) when the slug's marker is valid for this session and
     fence and unexpired; else (None, why) with why in no-marker, fence,
     expired. A malformed file is no marker, never an exception."""
-    m = read_state_json(core.repo_dir(slug) / MARKER_FILE)
+    m = read_state_json(Path(rd) / MARKER_FILE)
     if not m or m.get("v") != 1 or m.get("session_id") != session_id:
         return None, "no-marker"
     mid = m.get("marker_id")
     if not isinstance(mid, str) or not MARKER_ID_RE.match(mid):
         return None, "no-marker"
     me = m.get("max_edits")
-    if isinstance(me, bool) or not isinstance(me, int) \
-            or not (MAX_EDITS_RANGE[0] <= me <= MAX_EDITS_RANGE[1]):
+    if (
+        isinstance(me, bool)
+        or not isinstance(me, int)
+        or not (MAX_EDITS_RANGE[0] <= me <= MAX_EDITS_RANGE[1])
+    ):
         return None, "no-marker"
     mf = m.get("fence")
     if isinstance(mf, bool) or not isinstance(mf, int) or mf != fence:
@@ -755,7 +887,7 @@ def read_marker(slug, session_id, fence):
     return m, None
 
 
-def claim_budget(slug, marker, session_id, tool_use_id, paths):
+def claim_budget(rd, marker, session_id, tool_use_id, paths):
     """Reserve budget claim-then-count: append one claim line per path,
     re-read the log, and return the 1-based ordinal of this invocation's
     last claim among all claims carrying this marker_id. None when an
@@ -768,16 +900,21 @@ def claim_budget(slug, marker, session_id, tool_use_id, paths):
     (1-10) and short-lived markers, worth rotating if that changes."""
     claim_id = secrets.token_hex(4)
     for p in paths:
-        rec = {"v": 1, "ts": core.now_iso(), "event": "orch-edit-claim",
-               "marker_id": marker["marker_id"], "claim_id": claim_id,
-               "session_id": session_id, "tool_use_id": tool_use_id,
-               "path": p[:PATH_MAX]}
-        if not audit_append(slug, rec):
+        rec = {
+            "v": 1,
+            "ts": core.now_iso(),
+            "event": "orch-edit-claim",
+            "marker_id": marker["marker_id"],
+            "claim_id": claim_id,
+            "session_id": session_id,
+            "tool_use_id": tool_use_id,
+            "path": p[:PATH_MAX],
+        }
+        if not audit_append(rd, rec):
             return None
     try:
-        with open(core.repo_dir(slug) / "tasks" / AUDIT_FILE, errors="replace") as f:
-            lines = f.readlines()
-    except OSError:
+        lines = core.read_payload_text(Path(rd) / "tasks" / AUDIT_FILE).splitlines()
+    except (OSError, ValueError):
         return None
     ordinal, own, seen = 0, None, 0
     for line in lines:
@@ -785,8 +922,11 @@ def claim_budget(slug, marker, session_id, tool_use_id, paths):
             rec = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(rec, dict) or rec.get("event") != "orch-edit-claim" \
-                or rec.get("marker_id") != marker["marker_id"]:
+        if (
+            not isinstance(rec, dict)
+            or rec.get("event") != "orch-edit-claim"
+            or rec.get("marker_id") != marker["marker_id"]
+        ):
             continue
         ordinal += 1
         if rec.get("claim_id") == claim_id:
@@ -798,7 +938,7 @@ def claim_budget(slug, marker, session_id, tool_use_id, paths):
     return own if seen == len(paths) else None
 
 
-def marker_verdict(guarded, owned, session_id, tool_use_id, budget):
+def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
     """('allow', slug, marker) or ('deny', why, slug, detail). Every
     guarded target must resolve to one slug this session owns; that
     slug's marker must validate; then the budget claim must land within
@@ -807,7 +947,7 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget):
     slugs = {}
     for c, top, _reason in guarded:
         slugs.setdefault(repo_slug_of(top, budget, cache), []).append(c)
-    first = sorted(owned)[0]
+    first = min(owned)
     if len(slugs) != 1 or None in slugs or next(iter(slugs)) not in owned:
         # When every slug in `slugs` IS owned (a single command writing
         # tracked files in two repos this session owns), the generator
@@ -822,47 +962,90 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget):
         target = next((s for s in slugs if s not in owned), None) or "unknown"
         return "deny", "scope", first, {"target_slug": target}
     slug = next(iter(slugs))
-    marker, why = read_marker(slug, session_id, owned[slug])
-    if marker is None:
-        return "deny", why, slug, {}
-    ordinal = claim_budget(slug, marker, session_id, tool_use_id,
-                           [c for c, _top, _reason in guarded])
-    if ordinal is None:
-        return "deny", "budget", slug, {"unwritable": True, "marker": marker}
-    if ordinal > marker["max_edits"]:
-        return "deny", "budget", slug, {"ordinal": ordinal, "marker": marker}
-    return "allow", slug, marker
+    owner = owned[slug]
+    if "context" not in owner:
+        return "deny", "scope", first, {"target_slug": slug}
+    if owner["scope"]["account_id"] != owner["caller_scope"]["account_id"]:
+        return "deny", "scope", first, {"target_slug": slug}
+    rd = owner["rd"]
+    try:
+        with core.owner_transaction(
+            rd,
+            session_id,
+            owner["fence"],
+            context=owner["context"],
+            expected_slug=slug,
+            scope=owner["scope"],
+        ) as tx:
+            marker, why = read_marker(rd, session_id, tx.current["fence"])
+            if marker is None:
+                return "deny", why, slug, {}
+            ordinal = claim_budget(
+                rd,
+                marker,
+                session_id,
+                tool_use_id,
+                [c for c, _top, _reason in guarded],
+            )
+            if ordinal is None:
+                return "deny", "budget", slug, {"unwritable": True, "marker": marker}
+            if ordinal > marker["max_edits"]:
+                return "deny", "budget", slug, {"ordinal": ordinal, "marker": marker}
+            return "allow", slug, marker
+    except (OSError, ValueError, subprocess.SubprocessError, KeyError):
+        return "deny", "fence", slug, {}
 
 
 # --- refusal ---------------------------------------------------------------
 
-def refuse(why, slug, fence, session_id, first, detail):
+
+def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
     """Print the three-line refusal for `why` and return 2."""
     c, top, reason = first
-    print(f"{BLOCKED} -- this session is the herdr orchestrator for {slug} "
-          f"and {c} is a {reason} path in {top}.", file=sys.stderr)
-    allow_line = (f"Small edit the human approved THIS turn? Run: {CORE_CMD} "
-                  f"allow-edit --repo-slug {slug} --session {session_id} "
-                  f"--fence {fence} --minutes 5 --note '<what was approved>' "
-                  f"and retry.")
+    print(
+        f"{BLOCKED} -- this session is the herdr orchestrator for {slug} "
+        f"and {c} is a {reason} path in {top}.",
+        file=sys.stderr,
+    )
+    allow_line = (
+        f"Small edit the human approved THIS turn? Run: {CORE_CMD} "
+        f"allow-edit --repo-slug {slug} --session {session_id} "
+        f"--fence {fence} --repo-path {shlex.quote(top)} "
+        f"--runtime {runtime} --minutes 5 --note '<what was approved>' "
+        f"and retry."
+    )
     if why == "scope":
-        print(f"This session does not orchestrate {detail.get('target_slug')} "
-              f"(owned: {detail.get('owned')}); no marker can allow an edit there.",
-              file=sys.stderr)
-        print("Dispatch it: file a todo in that repo and kick off a worker, "
-              "or ask the human.", file=sys.stderr)
+        print(
+            f"This session does not orchestrate {detail.get('target_slug')} "
+            f"(owned: {detail.get('owned')}); no marker can allow an edit there.",
+            file=sys.stderr,
+        )
+        print(
+            "Dispatch it: file a todo in that repo and kick off a worker, "
+            "or ask the human.",
+            file=sys.stderr,
+        )
     elif why == "budget":
         if detail.get("unwritable"):
-            print(f"Cannot reserve budget: {core.repo_dir(slug) / 'tasks' / AUDIT_FILE} "
-                  "is not writable.", file=sys.stderr)
+            print(
+                f"Cannot reserve budget: {Path(rd) / 'tasks' / AUDIT_FILE} "
+                "is not writable.",
+                file=sys.stderr,
+            )
         else:
             m = detail["marker"]
-            print(f"The allow-edit marker {m['marker_id']} for {slug} is exhausted "
-                  f"({detail['ordinal']} of {m['max_edits']} claims).", file=sys.stderr)
+            print(
+                f"The allow-edit marker {m['marker_id']} for {slug} is exhausted "
+                f"({detail['ordinal']} of {m['max_edits']} claims).",
+                file=sys.stderr,
+            )
         print(allow_line, file=sys.stderr)
     else:
-        print("Orchestrators dispatch, they do not edit: file a todo and kick "
-              "off a worker (herdr-orchestration SKILL.md, Safety).", file=sys.stderr)
+        print(
+            "Orchestrators dispatch, they do not edit: file a todo and kick "
+            "off a worker (herdr-orchestration SKILL.md, Safety).",
+            file=sys.stderr,
+        )
         print(allow_line, file=sys.stderr)
     sys.stderr.flush()
     return 2
@@ -870,7 +1053,8 @@ def refuse(why, slug, fence, session_id, first, detail):
 
 # --- decision --------------------------------------------------------------
 
-def decide(payload):
+
+def decide(payload, runtime="claude"):
     """Exit status for one PreToolUse payload: 0 allow, 2 refuse."""
     if not isinstance(payload, dict) or payload.get("hook_event_name") != "PreToolUse":
         return 0
@@ -880,15 +1064,21 @@ def decide(payload):
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SESSION_ID_RE.match(sid):
         return 0
-    owned = owned_slugs(sid)
-    if not owned:
-        return 0
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.getcwd()
+    caller_cwd = (
+        payload.get("caller_cwd") if isinstance(payload.get("caller_cwd"), str) else cwd
+    )
+    try:
+        caller_scope = selected_scope(caller_cwd, runtime)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
     home = os.environ.get("HOME", os.path.expanduser("~"))
     paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
     if not paths:
         return 0
-    state_real = os.path.realpath(core.state_root())
+    state_real = os.path.realpath(
+        core.account_payload_root(caller_scope) / "herdr-orch"
+    )
     budget = Budget(GIT_BUDGET_SECS)
     guarded = []
     for p in paths:
@@ -899,25 +1089,58 @@ def decide(payload):
             guarded.append((p, hit[0], hit[1]))
     if not guarded:
         return 0
+    slug_cache = {}
+    candidates = {}
+    for _path, top, _reason in guarded:
+        slug = repo_slug_of(top, budget, slug_cache)
+        if slug is not None:
+            candidates.setdefault(slug, top)
+    owned = owned_slugs(sid, runtime, caller_scope, candidates)
+    if not owned:
+        return 0
     tool_use_id = payload.get("tool_use_id")
-    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget)
+    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime)
     if verdict[0] == "allow":
         _, slug, marker = verdict
+        rd = owned[slug]["rd"]
         for c, top, reason in guarded:
-            audit_append(slug, {
-                "v": 1, "ts": core.now_iso(), "event": "orch-edit-allowed",
-                "session_id": sid, "tool_name": tool, "tool_use_id": tool_use_id,
-                "path": c[:PATH_MAX], "repo": top[:PATH_MAX], "reason": reason,
-                "marker_id": marker["marker_id"], "marker_expires": marker.get("expires")})
+            audit_append(
+                rd,
+                {
+                    "v": 1,
+                    "ts": core.now_iso(),
+                    "event": "orch-edit-allowed",
+                    "session_id": sid,
+                    "tool_name": tool,
+                    "tool_use_id": tool_use_id,
+                    "path": c[:PATH_MAX],
+                    "repo": top[:PATH_MAX],
+                    "reason": reason,
+                    "marker_id": marker["marker_id"],
+                    "marker_expires": marker.get("expires"),
+                },
+            )
         return 0
     _, why, slug, detail = verdict
     detail = dict(detail, owned=",".join(sorted(owned)))
-    rc = refuse(why, slug, owned[slug], sid, guarded[0], detail)
+    rd = owned[slug]["rd"]
+    rc = refuse(why, slug, owned[slug]["fence"], sid, guarded[0], detail, runtime, rd)
     c, top, reason = guarded[0]
-    audit_append(slug, {
-        "v": 1, "ts": core.now_iso(), "event": "orch-edit-denied",
-        "session_id": sid, "tool_name": tool, "tool_use_id": tool_use_id,
-        "path": c[:PATH_MAX], "repo": top[:PATH_MAX], "reason": reason, "why": why})
+    audit_append(
+        rd,
+        {
+            "v": 1,
+            "ts": core.now_iso(),
+            "event": "orch-edit-denied",
+            "session_id": sid,
+            "tool_name": tool,
+            "tool_use_id": tool_use_id,
+            "path": c[:PATH_MAX],
+            "repo": top[:PATH_MAX],
+            "reason": reason,
+            "why": why,
+        },
+    )
     return rc
 
 

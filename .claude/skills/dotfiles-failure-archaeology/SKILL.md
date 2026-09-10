@@ -184,16 +184,14 @@ punch through the symlinks and global git config.
 
 **Evidence.** Pre-public -- public history starts at 93f2573 ("dotfiles:
 Initial public release"), so no incident hash exists. The scars are in the
-live tree: the CLAUDE.md "Codex plugin integration" warning; the leftover
-sweep in install/common/link.sh (search `ecc-\|superpowers-`); the safe
-wrapper `codex-ecc-sync` in zsh/functions.zsh, which runs the upstream script
-with `ECC_GLOBAL_HOOKS_DIR="$HOME/.config/git/hooks"` so hooks land in the
-dotfiles-owned dir.
+live tree: the CLAUDE.md "Codex plugin integration" warning and the leftover
+sweep in install/common/link.sh (search `ecc-\|superpowers-`). The former
+redirecting sync wrapper was later retired too.
 
-**Resolution.** Never run `sync-ecc-to-codex.sh` directly. `ecc-install` /
-`ecc-update` call the `codex-ecc-sync` wrapper; `install/common/link.sh`
-sweeps `~/.codex/{skills,agents}/{ecc,superpowers}-*` leftovers on every
-`update`.
+**Resolution.** Never run `sync-ecc-to-codex.sh`. `ecc-install` and
+`ecc-update` stage self-contained native Codex plugins; global guidance and
+git-hook ownership remain with dotfiles. See repo CLAUDE.md for current
+lifecycle and discovery repair.
 
 **Status: settled (abandoned).** Lesson: before letting any upstream installer
 write into a symlink-managed dir, check what it writes through and what global
@@ -290,7 +288,6 @@ and hashless by design.
 | Cloud plugin declaration still primary                | `grep -n 'enabledPlugins\|extraKnownMarketplaces' .claude/settings.json`                                                                                                                                                             |
 | SessionStart hook still self-heal, gated              | `grep -n 'CLAUDE_CODE_REMOTE' .claude/hooks/session-start.sh`                                                                                                                                                                        |
 | GSD policy comment intact                             | `grep -n 'rug-pull' zsh/functions.zsh`                                                                                                                                                                                               |
-| codex-ecc-sync wrapper + hooks redirect intact        | `grep -n 'ECC_GLOBAL_HOOKS_DIR' zsh/functions.zsh`                                                                                                                                                                                   |
 | link.sh leftover sweep intact                         | `grep -n "name 'ecc-\*'" install/common/link.sh`                                                                                                                                                                                     |
 | Saga 6 items resolved (backticks, update propagation) | `grep -n 'uname' zsh/.zprofile; grep -n 'install_status' zsh/functions.zsh`                                                                                                                                                          |
 | Deleted todo.md recoverable                           | `git show c0a9072^:todo.md`                                                                                                                                                                                                          |

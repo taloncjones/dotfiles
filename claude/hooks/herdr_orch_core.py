@@ -6,8 +6,9 @@ Stdlib only; fails safe. The CLI is the only fenced state-mutation surface.
 """
 
 import contextlib
+import contextvars
 import datetime
-import fcntl
+import fnmatch
 import hashlib
 import json
 import math
@@ -21,6 +22,16 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_runtime
+import herdr_coordination as coordination
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
+from workflow_context import account_scope, atomic_json_at, repository_context
+from workflow_context import git as context_git
+
+_PAYLOAD_SELECTION = contextvars.ContextVar("herdr_payload_selection", default=None)
 
 WORKSPACE_ID_RE = re.compile(r"[A-Za-z0-9]+\Z")
 AGENT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
@@ -357,13 +368,11 @@ def mech_contract(config, task_id):
 
 
 def _git(worktree, *args):
-    """stdout of a git command in the worktree, or None on any failure."""
+    """Sanitized Git output in the selected worktree, or None on failure."""
     try:
-        cp = subprocess.run(["git", "-C", worktree, *args], capture_output=True,
-                            text=True, timeout=30)
+        return context_git(worktree, *args).strip()
     except (OSError, subprocess.SubprocessError):
         return None
-    return cp.stdout.strip() if cp.returncode == 0 else None
 
 
 def _usage_exhausted(result) -> bool:
@@ -439,11 +448,21 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", (text or "").replace("\r", ""))
 
 
-def parse_banner(text):
-    """{"model", "effort"} from the FIRST Claude Code banner in text, or
-    None when there is no anchored version line or the model line names no
-    known family (spec 3): unknown text is unreadable, never a downgrade."""
-    lines = strip_ansi(text).splitlines()
+def parse_banner(text, after=None):
+    """Read an unambiguous banner after an optional fresh capture marker.
+
+    Multiple banners without a boundary are historical evidence, never launch
+    confirmation. Callers must capture only new output or supply their marker.
+    """
+    clean = strip_ansi(text)
+    if after is not None:
+        if not after or clean.splitlines().count(after) != 1:
+            return None
+        lines = clean.splitlines()
+        clean = "\n".join(lines[lines.index(after) + 1:])
+    lines = clean.splitlines()
+    if sum(bool(_BANNER_VERSION_RE.search(line)) for line in lines) != 1:
+        return None
     for i, line in enumerate(lines):
         if not _BANNER_VERSION_RE.search(line):
             continue
@@ -476,9 +495,22 @@ def classify_banner(parsed, alias, effort) -> str:
     return "ok"
 
 
+def account_payload_root(scope) -> Path:
+    """Keep configured account symlinks visible to no-follow state traversal."""
+    if scope["kind"] == "personal":
+        return Path.home().resolve() / ".claude"
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not configured and scope["kind"] == "work":
+        configured = os.environ.get("CLAUDE_WORK_CONFIG_DIR") or Path.home().resolve() / ".claude-work"
+    return coordination.payload_path(configured or scope["account_root"])
+
+
 def state_root() -> Path:
-    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    return Path(base) / "herdr-orch"
+    selected = _PAYLOAD_SELECTION.get()
+    if selected is not None:
+        return account_payload_root(selected["scope"]) / "herdr-orch"
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home().resolve() / ".claude")
+    return coordination.payload_path(base) / "herdr-orch"
 
 
 def repo_slug(remote_url, common_dir=None) -> str:
@@ -624,58 +656,86 @@ def _iso(epoch) -> str:
 
 
 def allow_edit_marker(session_id, fence, minutes, max_edits, note, now=None) -> dict:
-    """The orch-edit-allow.json record (orch_edit_guard.py reads it). One
-    fresh marker_id per mint is the budget identity: two mints in the same
-    second still get separate budgets."""
+    """Build the short-lived marker read by orch_edit_guard.py."""
     now = time.time() if now is None else now
-    exp = now + 60 * minutes
-    return {
-        "v": 1,
-        "marker_id": secrets.token_hex(8),
-        "session_id": session_id,
-        "fence": int(fence),
-        "ts": _iso(now),
-        "minutes": int(minutes),
-        "max_edits": int(max_edits),
-        "expires_epoch": exp,
-        "expires": _iso(exp),
-        "note": (note or "")[:ALLOW_EDIT_NOTE_MAX],
-    }
+    expires = now + 60 * minutes
+    return {"v": 1, "marker_id": secrets.token_hex(8), "session_id": session_id,
+            "fence": int(fence), "ts": _iso(now), "minutes": int(minutes),
+            "max_edits": int(max_edits), "expires_epoch": expires,
+            "expires": _iso(expires), "note": (note or "")[:ALLOW_EDIT_NOTE_MAX]}
 
 
 def append_orch_edit(rd, rec) -> bool:
-    """Append one line to <rd>/tasks/orch-edits.jsonl, creating tasks/.
-    False (never raises) when the file is a symlink, a FIFO, or cannot be
-    opened for append -- the guard hook refuses to reserve budget against
-    such a file, so the caller warns."""
-    tasks = Path(rd) / "tasks"
-    p = tasks / ORCH_EDITS_FILE
+    """Append an edit audit record through a no-follow payload parent."""
+    path = Path(rd) / "tasks" / ORCH_EDITS_FILE
     try:
-        tasks.mkdir(parents=True, exist_ok=True)
-        try:
-            st = os.lstat(p)
-        except FileNotFoundError:
-            st = None
-        if st is not None and not stat.S_ISREG(st.st_mode):
-            return False
-        flags = (os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK
-                 | getattr(os, "O_NOFOLLOW", 0))
-        data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
-        fd = os.open(p, flags, 0o600)
-        try:
-            written = os.write(fd, data)
-        finally:
-            os.close(fd)
-    except OSError:
+        create_payload_dir(path.parent)
+        with coordination.payload_parent(path) as (parent, name):
+            try:
+                st = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                st = None
+            if st is not None and not stat.S_ISREG(st.st_mode):
+                return False
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=parent)
+            try:
+                data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
+                return os.write(fd, data) == len(data)
+            finally:
+                os.close(fd)
+    except (OSError, ValueError):
         return False
-    return written == len(data)  # a short write is not a record
 
 
 def write_json_atomic(path, data) -> None:
-    path = Path(path)
-    tmp = Path(f"{path}.tmp.{os.getpid()}")
-    tmp.write_text(json.dumps(data))
-    os.replace(tmp, path)
+    with coordination.payload_parent(path, create=True) as (parent, name):
+        atomic_json_at(parent, name, data)
+
+
+def read_payload_bytes(path):
+    """Read a regular payload file without following any parent or file link."""
+    with coordination.payload_parent(path) as (parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("payload must be a regular file")
+            return stream.read()
+
+
+def read_payload_text(path):
+    return read_payload_bytes(path).decode("utf-8")
+
+
+def payload_names(path):
+    try:
+        with coordination.payload_parent(Path(path) / ".listing") as (parent, _):
+            return os.listdir(parent)
+    except ValueError as exc:
+        raise OSError("invalid payload directory") from exc
+
+
+def payload_files(path, pattern):
+    try:
+        return [Path(path) / name for name in payload_names(path) if fnmatch.fnmatchcase(name, pattern)]
+    except FileNotFoundError:
+        return []
+
+
+def create_payload_dir(path):
+    with coordination.payload_parent(Path(path) / ".directory", create=True):
+        pass
+
+
+def append_payload(path, data):
+    with coordination.payload_parent(path, create=True) as (parent, name):
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=parent)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("payload must be a regular file")
+            os.write(fd, data)
+        finally:
+            os.close(fd)
 
 
 def read_index(rd, ws):
@@ -685,8 +745,7 @@ def read_index(rd, ws):
     try:
         if p.is_symlink() or not contained(p, state_root()):
             return None
-        with open(p) as f:
-            data = json.load(f)
+        data = json.loads(read_payload_text(p))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -697,7 +756,7 @@ def read_config(rd):
     try:
         if p.is_symlink() or not contained(p, state_root()):
             return {}
-        cfg = json.loads(p.read_text())
+        cfg = json.loads(read_payload_text(p))
     except (OSError, ValueError):
         return {}
     return cfg if isinstance(cfg, dict) else {}
@@ -710,7 +769,7 @@ def read_capabilities(rd, session_id):
     try:
         if p.is_symlink() or not contained(p, state_root()):
             return None
-        cap = json.loads(p.read_text())
+        cap = json.loads(read_payload_text(p))
     except (OSError, ValueError):
         return None
     if not valid_capabilities(cap, session_id):
@@ -725,15 +784,10 @@ def append_event(rd, ws, event, **fields) -> bool:
     rec = {"v": 1, "ts": now_iso(), "workspace_id": ws, "event": event}
     rec.update(fields)
     line = json.dumps(rec, separators=(",", ":")) + "\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(p, flags, 0o600)
-    except OSError:
+        append_payload(p, line.encode())
+    except (OSError, ValueError):
         return False
-    try:
-        os.write(fd, line.encode())
-    finally:
-        os.close(fd)
     return True
 
 
@@ -771,7 +825,7 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
         return "bad-id"   # keeps the wire content inside the \S+ grammar
     deadline = time.monotonic() + WAKE_BUDGET_SECS
     try:
-        owner = json.loads(_owner_path(rd).read_text())
+        owner = json.loads(read_payload_text(_owner_path(rd)))
     except (FileNotFoundError, NotADirectoryError):
         return "no-owner"
     except (OSError, ValueError):
@@ -874,10 +928,10 @@ def spend_path(rd, task_id) -> Path:
 def append_spend(rd, task_id, rec) -> None:
     """Append one ledger line. Raises OSError on failure (caller maps it)."""
     p = spend_path(rd, task_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a") as f:
-        f.write(json.dumps(rec) + "\n")
-        f.flush()
+    try:
+        append_payload(p, (json.dumps(rec) + "\n").encode())
+    except ValueError as exc:
+        raise OSError("invalid spend payload") from exc
 
 
 def valid_mech_agent(agent, task_id) -> bool:
@@ -1001,6 +1055,7 @@ def _v1(rec) -> bool:
 
 
 def valid_launch_record(rec, tid) -> bool:
+    """Validate thinker schema; legacy repo_slug/pid are optional, checked if set."""
     if not (_v1(rec) and rec.get("think_id") == tid and valid_think_id(tid)):
         return False
     if rec.get("kind") != think_kind(tid):
@@ -1016,6 +1071,10 @@ def valid_launch_record(rec, tid) -> bool:
     if rec.get("attempt") != (2 if retry else 1) or isinstance(rec.get("attempt"), bool):
         return False
     if rec.get("parent") != (tid[:-2] if retry else None):
+        return False
+    if "repo_slug" in rec and not valid_repo_slug(rec["repo_slug"]):
+        return False
+    if "pid" in rec and (type(rec["pid"]) is not int or rec["pid"] < 1):
         return False
     return _parse_iso(rec.get("started")) is not None
 
@@ -1045,7 +1104,7 @@ def think_scan(rd, now_ts):
     out = {"launches": [], "answers": {}, "live": [], "lost": [], "skipped_files": 0, "corrupt": []}
     d = think_dir(rd)
     try:
-        names = sorted(os.listdir(d))
+        names = sorted(payload_names(d))
     except OSError:
         return out
     launched = set()
@@ -1057,7 +1116,7 @@ def think_scan(rd, now_ts):
                 out["corrupt"].append(tid)          # unknown stem: liveness cannot be judged
                 continue
             try:
-                rec = json.loads((d / name).read_text())
+                rec = json.loads(read_payload_text(d / name))
             except (OSError, ValueError):
                 rec = None
             if valid_launch_record(rec, tid):
@@ -1073,7 +1132,7 @@ def think_scan(rd, now_ts):
                 continue
             answer_present.add(tid)
             try:
-                rec = json.loads((d / name).read_text())
+                rec = json.loads(read_payload_text(d / name))
             except (OSError, ValueError):
                 rec = None
             if tid in launched and valid_answer_record(rec, tid):
@@ -1115,41 +1174,19 @@ def publish_exclusive(path, data) -> bool:
     """Create `path` with the JSON content or do nothing. Same-directory temp,
     fsync, then os.link (fails if the target exists -- never a replace); the
     temp is always removed, so a failure leaves no partial target."""
-    path = Path(path)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except OSError:
-        return False
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(data, indent=2) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.link(tmp, path)
+        with coordination.payload_parent(path) as (parent, name):
+            atomic_json_at(parent, name, data, exclusive=True)
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
 
 
 @contextlib.contextmanager
 def think_lock(rd):
-    """Repo-wide exclusive lock over the liveness/budget check and the launch
-    record write (spec 4.4). Released before claude is launched."""
-    d = think_dir(rd)
-    d.mkdir(parents=True, exist_ok=True)
-    fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    """Persistent liveness/budget lock; acquire after owner, release for models."""
+    with coordination.ordered_lock(think_dir(rd) / ".lock", "think"):
         yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 THINK_TOOLS = "Read,Glob,Grep"
@@ -1187,6 +1224,8 @@ def run_think(rd, a, question, launch, add_dirs) -> int:
     status, reason, answer, errors = think_outcome(subtype, result)
     used = models_used(result)
     downgrade = is_downgrade(used, a.model)
+    if downgrade and status == "answered":
+        status, reason, answer = "unanswered", "error", None
 
     def _num(k, integer=False):
         v = (result or {}).get(k)
@@ -1204,8 +1243,13 @@ def run_think(rd, a, question, launch, add_dirs) -> int:
            "permission_denials": len(denials) if isinstance(denials, list) else 0,
            "errors": errors, "exit_code": exit_code,
            "session_id": (result or {}).get("session_id"), "started": launch["started"], "ts": now_iso()}
-    if not publish_exclusive(think_dir(rd) / f"{a.think_id}.answer.json", rec):
-        sys.stderr.write("[X] cannot publish the answer file\n")
+    try:
+        with owner_transaction(rd, a.session, a.fence), think_lock(rd):
+            if not publish_exclusive(think_dir(rd) / f"{a.think_id}.answer.json", rec):
+                sys.stderr.write("[X] cannot publish the answer file\n")
+                return 3
+    except (OSError, ValueError):
+        sys.stderr.write("[X] owner changed; answer not published\n")
         return 3
     return 0
 
@@ -1278,15 +1322,34 @@ def wrapper_outcome(subtype, head_sha, base_sha, dirty):
     return ("paused" if usable else "failed"), "error"
 
 
+def _selected_headless_environment(cwd):
+    selection = _PAYLOAD_SELECTION.get()
+    if selection is None:
+        return None
+    actual = repository_context(cwd)
+    if actual["repo_id"] != selection["context"]["repo_id"]:
+        raise ValueError("headless launch repository does not match selected repository")
+    scope = selection["scope"]
+    actual_scope = account_scope(cwd, "claude", personal=scope["kind"] == "personal")
+    if actual_scope["account_id"] != scope["account_id"]:
+        raise ValueError("headless launch account does not match the actual checkout")
+    child_env = dict(os.environ)
+    agent_runtime._apply_launch_environment(child_env, scope)
+    return child_env
+
+
 def run_headless(argv, cwd, stdin_text, timeout_secs):
     """Run `claude -p` with the text on stdin in its own process group; kill
     the group on timeout. (subtype, result, exit_code) where subtype is
     'timeout', 'unparseable', or the result's subtype."""
+    if coordination.locks_held():
+        raise RuntimeError("model subprocess cannot run under coordination locks")
+    child_env = _selected_headless_environment(cwd)
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, start_new_session=True)
+                                text=True, start_new_session=True, env=child_env)
     except OSError as e:
         sys.stderr.write(f"[X] cannot launch claude: {e}\n")
         return subtype, result, exit_code
@@ -1310,6 +1373,7 @@ def run_mech(rd, a, brief, timeout_secs) -> int:
     """Launch a headless capped worker; write start/end ledger lines and a
     guaranteed completion record. Exit 0 all writes ok; 2 nothing written;
     3 a post-start step failed (git lookup, record write, or end line)."""
+    _selected_headless_environment(a.worktree)
     start_ts = now_iso()
     caps = {"max_turns": a.max_turns, "max_budget_usd": a.max_budget_usd,
             "timeout_secs": a.timeout_secs}
@@ -1337,7 +1401,7 @@ def run_mech(rd, a, brief, timeout_secs) -> int:
     dirty = not git_ok or porcelain != ""
     done_path = rd / "tasks" / f"{a.task_id}.done.json"
     try:
-        existing = json.loads(done_path.read_text())
+        existing = json.loads(read_payload_text(done_path))
     except (OSError, ValueError):
         existing = None
     rc = 0
@@ -1466,7 +1530,7 @@ def watch_scan(rd, prev):
     for sub, suffixes in WATCH_DIRS.items():
         d = Path(rd) / sub
         try:
-            names = sorted(os.listdir(d))
+            names = sorted(payload_names(d))
         except FileNotFoundError:
             continue
         except OSError:
@@ -1481,8 +1545,11 @@ def watch_scan(rd, prev):
                 if name.endswith(suffix) and valid(name[: -len(suffix)]):
                     key = str(d / name)
                     try:
-                        st = (d / name).stat()
-                    except OSError:
+                        with coordination.payload_parent(d / name) as (parent, basename):
+                            st = os.stat(basename, dir_fd=parent, follow_symlinks=False)
+                            if not stat.S_ISREG(st.st_mode):
+                                raise OSError("invalid watched payload")
+                    except (OSError, ValueError):
                         if key in prev:
                             snap[key] = prev[key]
                         break
@@ -1501,7 +1568,7 @@ def heartbeat_active(rd) -> bool:
     active status. Sidecars and foreign filenames never count."""
     d = Path(rd) / "tasks"
     try:
-        names = os.listdir(d)
+        names = payload_names(d)
     except OSError:
         return False
     for name in names:
@@ -1512,7 +1579,7 @@ def heartbeat_active(rd) -> bool:
         if not valid_task_id(name[: -len(".json")]):
             continue
         try:
-            rec = json.loads((d / name).read_text())
+            rec = json.loads(read_payload_text(d / name))
         except (OSError, ValueError):
             continue
         if isinstance(rec, dict) and rec.get("status") in ACTIVE_STATUSES:
@@ -1573,115 +1640,123 @@ def _owner_path(rd) -> Path:
     return Path(rd) / "owner.json"
 
 
-def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None):
-    Path(rd).mkdir(parents=True, exist_ok=True)
-    p = _owner_path(rd)
+def owner_transaction(rd, session=None, fence=None, context=None, expected_slug=None, scope=None):
+    """Validate account selection, then hold ownership through publication."""
+    selected = _PAYLOAD_SELECTION.get()
+    if selected is not None:
+        context = context or selected["context"]
+        scope = scope or selected["scope"]
+        expected_slug = expected_slug or Path(rd).name
+    account_id = None
+    if context is not None:
+        actual = repository_context(context["root"])
+        if actual["repo_id"] != context["repo_id"]:
+            raise ValueError("repository identity changed")
+        selected_scope = account_scope(actual["root"], (scope or {}).get("runtime", "claude"),
+                                       personal=(scope or {}).get("kind") == "personal")
+        if scope is not None and any(scope.get(key) != selected_scope[key] for key in ("account_root", "account_id", "kind")):
+            raise ValueError("account selection is not authorized by repository context")
+        expected = account_payload_root(selected_scope) / "herdr-orch" / Path(rd).name
+        if coordination.payload_path(rd) != expected:
+            raise ValueError("payload root does not match the selected account")
+        account_id = selected_scope["account_id"]
+    elif scope is not None:
+        raise ValueError("explicit account scope requires repository context")
+    roots = [Path.home() / name / "herdr-orch" for name in (".claude", ".claude-work", ".codex")]
+    return coordination.owner_transaction(
+        rd, session=session, fence=fence,
+        canonical_id=context["repo_id"] if context else None,
+        expected_slug=expected_slug, legacy_roots=roots, account_id=account_id,
+    )
+
+
+def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
+                context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None):
     sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
     if reason == "ok" and int(pid) != sock_pid:
-        print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; "
-              f"using {sock_pid}", file=sys.stderr)
+        print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; using {sock_pid}", file=sys.stderr)
     elif reason not in ("ok", "empty"):
-        print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}",
-              file=sys.stderr)
-    rec = {
-        "session_id": session_id,
-        "host": host,
-        "pid": sock_pid if reason == "ok" else pid,
-        "heartbeat_ts": time.time(),
-        "fence": 1,
-        "messaging_socket": sock,
-    }
-    excl = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    tmp = Path(f"{p}.new.{os.getpid()}")
-    try:  # fast path: first-ever claim publishes atomically via link, so `p`
-        # never appears on disk with partial/empty content for a racing reader.
-        tmp.write_text(json.dumps(rec))
-        try:
-            os.link(tmp, p)
-            return 1
-        except FileExistsError:
-            pass  # someone else won the first claim; fall through to takeover
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-    lock = Path(f"{p}.lock")
-    try:  # serialize the read-modify-write of an existing owner
-        lfd = os.open(lock, excl, 0o600)
-    except FileExistsError:
-        try:  # a crashed holder (e.g. SIGKILL before the finally unlink) can
-            # leave this lock forever; break it by mtime so ownership never
-            # wedges permanently, retrying the exclusive-create exactly once.
-            stale_lock = time.time() - os.stat(lock).st_mtime > stale_secs
-        except OSError:
-            stale_lock = False
-        if not stale_lock:
-            return None  # fresh lock: another takeover in progress; caller may retry
-        # Known limitation (single-user-unreachable): two contenders can race
-        # this unlink/re-create -- one may unlink a lock the other just remade.
-        # The loser's exclusive-create then fails and it returns None to retry;
-        # the fence still names exactly one winner, so it self-heals. Only
-        # reachable with concurrent orchestrators on one repo.
-        try:
-            os.unlink(lock)
-        except OSError:
-            pass
-        try:
-            lfd = os.open(lock, excl, 0o600)
-        except FileExistsError:
-            return None  # lost the race to break it; caller may retry
-    try:
-        try:
-            cur = json.loads(p.read_text())
-        except (OSError, ValueError):
-            cur = {}
-        fresh = time.time() - float(cur.get("heartbeat_ts", 0)) <= stale_secs
-        if fresh and cur.get("session_id") != session_id:
-            return None
-        fence = int(cur.get("fence", 0)) + 1
-        rec["fence"] = fence
-        write_json_atomic(p, rec)
+        print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}", file=sys.stderr)
+    with owner_transaction(rd, context=context, expected_slug=expected_slug, scope=scope) as tx:
+        fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs, runtime=runtime, thread_id=thread_id)
+        if fence is not None:
+            # The private mirror supports legacy wake readers. Only metadata
+            # without the account-local socket is copied into the registry.
+            write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))
         return fence
-    finally:
-        os.close(lfd)
-        try:
-            os.unlink(lock)
-        except OSError:
-            pass
 
 
 def check_fence(rd, session_id, fence) -> bool:
     try:
-        cur = json.loads(_owner_path(rd).read_text())
+        with owner_transaction(rd) as tx:
+            return tx.check(session_id, fence)
     except (OSError, ValueError):
         return False
-    return cur.get("session_id") == session_id and int(cur.get("fence", -1)) == int(
-        fence
-    )
 
 
 def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
-    if not check_fence(rd, session_id, fence):
-        return False
-    cur = json.loads(_owner_path(rd).read_text())
-    cur["heartbeat_ts"] = time.time()
-    if isinstance(cur.get("pid"), str) and cur["pid"].isdigit():
-        cur["pid"] = int(cur["pid"])  # migrate records written by the pre-flag CLI
-    if messaging_socket is not None:  # None = flag omitted: leave untouched
-        sock, _pid, reason = validate_messaging_socket(
-            messaging_socket, expect_pid=cur.get("pid")
-        )
+    sock = None
+    if messaging_socket is not None:
+        sock, _pid, reason = validate_messaging_socket(messaging_socket)
         if reason not in ("ok", "empty"):
-            print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}",
-                  file=sys.stderr)
-        cur["messaging_socket"] = sock
-    write_json_atomic(_owner_path(rd), cur)
-    return True
+            print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}", file=sys.stderr)
+    try:
+        with owner_transaction(rd) as tx:
+            if not tx.refresh(session_id, fence):
+                return False
+            try:
+                old = json.loads(read_payload_text(_owner_path(rd)))
+            except (OSError, ValueError):
+                old = {}
+            if messaging_socket is None:
+                sock = old.get("messaging_socket") if isinstance(old, dict) else None
+            if messaging_socket and _pid != tx.current["pid"]:
+                if reason == "ok":
+                    print("[WARNING] messaging socket ignored (pid-mismatch)", file=sys.stderr)
+                sock = None
+            write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+ATTEMPT_FIELDS = ("launch_id", "phase", "runtime", "workspace_id", "pane_id", "source_head_sha")
+
+
+def attempt_matches(task, done, phase, workspace):
+    """Native history requires the latest row; wholly legacy history stays readable."""
+    workers = task.get("workers", [])
+    if not isinstance(workers, list):
+        return False
+    native = any(isinstance(w, dict) and "runtime" in w for w in workers)
+    # A malformed or untyped successor cannot revive an older native attempt
+    # or downgrade this task to the permissive legacy matching rules.
+    if native and (
+        not isinstance(workers[-1], dict)
+        or "runtime" not in workers[-1]
+        or workers[-1].get("phase") != phase
+    ):
+        return False
+    matching = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
+    if not matching:
+        return not native
+    worker = matching[-1]
+    if worker.get("workspace_id") != workspace:
+        return False
+    # Migration is additive: old attempts compare any recorded fields; native
+    # attempts carry runtime and require the entire identity tuple.
+    if "runtime" in worker and (worker["runtime"] not in ("claude", "codex")
+            or not isinstance(worker.get("source_head_sha"), str)
+            or not SHA40_RE.fullmatch(worker["source_head_sha"])):
+        return False
+    fields = ATTEMPT_FIELDS if "runtime" in worker else tuple(k for k in ATTEMPT_FIELDS if k in worker)
+    return all(_nonempty_str(worker.get(key)) and done.get(key) == worker[key] for key in fields)
 
 
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
+        return False
+    if not attempt_matches(task, done, "implement", workspace):
         return False
     if done.get("outcome") != "completed":
         return False
@@ -1700,8 +1775,72 @@ def is_completed(task, done, live_head_sha, workspace) -> bool:
     )  # at least one commit ahead of base
 
 
+def is_plan_completed(task, done, head_sha, workspace, payload_root) -> bool:
+    """Confirm the current planning milestone using immutable private artifacts."""
+    if not isinstance(task, dict) or not isinstance(done, dict):
+        return False
+    if (done.get("task_id") != task.get("task_id") or done.get("phase") != "plan"
+            or done.get("outcome") != "completed" or done.get("head_sha") != head_sha
+            or done.get("base_sha") != task.get("base_sha")
+            or not attempt_matches(task, done, "plan", workspace)):
+        return False
+    artifacts = task.get("plan_artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 2 or done.get("plan_artifacts") != artifacts:
+        return False
+    if any(not isinstance(ref, dict) for ref in artifacts):
+        return False
+    if [ref.get("kind") for ref in artifacts].count("plan") != 1 or [ref.get("kind") for ref in artifacts].count("spec") != 1:
+        return False
+    root = coordination.payload_path(payload_root)
+    selected = _PAYLOAD_SELECTION.get()
+    account_root = account_payload_root(selected["scope"]) if selected else root
+    slug = task.get("repo_slug")
+    repo_id = task.get("repo_id")
+    if selected:
+        context = selected["context"]
+        slug = repo_slug(_git(context["root"], "remote", "get-url", "origin") or "", context["common_dir"])
+        repo_id = context["repo_id"]
+        if task.get("repo_slug", slug) != slug or task.get("repo_id", repo_id) != repo_id:
+            return False
+    if not valid_repo_slug(slug) or not valid_task_id(task.get("task_id")):
+        return False
+    if root != account_root and account_root not in root.parents:
+        return False
+    task_root = account_root / "herdr-orch" / slug / "artifacts" / task["task_id"]
+    expected_metadata = {
+        "task_id": task["task_id"],
+        "repo_id": repo_id,
+        "account_id": selected["scope"]["account_id"] if selected else coordination.account_id_for_root(account_root),
+    }
+    for ref in artifacts:
+        name, digest = ref.get("path"), ref.get("sha256")
+        if not isinstance(name, str) or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            return False
+        path = coordination.payload_path(name)
+        if not Path(name).is_absolute() or ".." in Path(name).parts or (path != root and root not in path.parents):
+            return False
+        try:
+            relative = path.relative_to(task_root)
+        except ValueError:
+            return False
+        # The helper's launch directory may be reserved before dispatch and
+        # need not equal the worker launch ID. It must be one safe component.
+        if len(relative.parts) != 2 or not valid_task_id(relative.parts[0]):
+            return False
+        if "task" in ref and (not isinstance(ref["task"], dict) or any(ref["task"].get(key) != value for key, value in expected_metadata.items())):
+            return False
+        if "source" in ref and (not isinstance(ref["source"], dict) or ref["source"].get("repo_id") != repo_id or ref["source"].get("sha256") != digest):
+            return False
+        try:
+            if hashlib.sha256(read_payload_bytes(path)).hexdigest() != digest:
+                return False
+        except (OSError, ValueError):
+            return False
+    return True
+
+
 def should_dispatch_review(task, head_sha) -> bool:
-    if task.get("status") != "completed":
+    if not isinstance(task, dict) or task.get("status") != "completed":
         return False
     return task.get("review_head_sha") != head_sha
 
@@ -1716,6 +1855,8 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     blocking findings from clearing the gate."""
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
+    if not attempt_matches(task, done, "review", workspace):
+        return False
     if done.get("task_id") != task.get("task_id"):
         return False
     # Provenance: only the workspace the orchestrator dispatched for review.
@@ -1723,7 +1864,7 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
         return False
     if done.get("phase") != "review" or done.get("outcome") != "approved":
         return False
-    if int(done.get("blocking_count", 0)) != 0:
+    if type(done.get("blocking_count")) is not int or done["blocking_count"] != 0:
         return False
     return task.get("review_head_sha") == head_sha and (
         done.get("reviewed_head_sha") == head_sha
@@ -1736,20 +1877,15 @@ def _require(cond, msg) -> None:
         raise SystemExit(2)
 
 
+@contextlib.contextmanager
 def _fenced(ns):
-    # Known limitation (single-user-unreachable): this fence check and the
-    # caller's subsequent write are not one atomic step -- a just-superseded
-    # owner could pass here and then write in the gap after a concurrent
-    # takeover. Fence-mitigated (the next refresh/claim by the live owner wins)
-    # and needs two contending orchestrators on one repo; revisit only if this
-    # ever becomes multi-user.
     _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
     rd = repo_dir(ns.repo_slug)
-    _require(check_fence(rd, ns.session, int(ns.fence)), "stale or missing fence")
-    return rd
+    with owner_transaction(rd, ns.session, ns.fence):
+        yield rd
 
 
-def main(argv=None) -> int:
+def _main(argv=None) -> int:
     import argparse
 
     ap = argparse.ArgumentParser()
@@ -1758,17 +1894,21 @@ def main(argv=None) -> int:
     def add(name, *args, fenced=False):
         p = sub.add_parser(name)
         p.add_argument("--repo-slug", required=True)
+        p.add_argument("--repo-path", default=None)
+        p.add_argument("--runtime", choices=("claude", "codex"), default=None)
+        p.add_argument("--personal", action="store_true")
         if fenced:
             p.add_argument("--session", required=True)
-            p.add_argument("--fence", required=True)
+            p.add_argument("--fence", type=int, required=True)
         for a in args:
-            p.add_argument(a, required=True)
+            p.add_argument(a, required=True, **({"type": int} if a == "--fence" else {}))
         return p
 
     co = add("claim-owner", "--session", "--host")
     co.add_argument("--pid", type=int, required=True)   # was a positional-style required str
     co.add_argument("--stale-secs", type=int, default=None)  # test/override hook
     co.add_argument("--messaging-socket", default=None)
+    co.add_argument("--thread-id", default=None)
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
@@ -1808,6 +1948,8 @@ def main(argv=None) -> int:
     cb.add_argument("--text-file", default=None)
     cb.add_argument("--text", default=None)
     cb.add_argument("--json", action="store_true")
+    cb.add_argument("--after", default=None)
+    cb.add_argument("--fresh-capture", action="store_true")
     ed = add(
         "emit-done",
         "--task-id",
@@ -1819,6 +1961,7 @@ def main(argv=None) -> int:
         "--base-sha",
     )
     ed.add_argument("--launch-id", default=None)
+    ed.add_argument("--plan-artifacts", default=None)
     ed.add_argument("--reason", default=None)
     er = add(
         "emit-review",
@@ -1828,12 +1971,18 @@ def main(argv=None) -> int:
         "--reviewed-head-sha",
         "--outcome",
     )
+    er.add_argument("--launch-id", default=None)
+    for emitter in (ed, er):
+        emitter.add_argument("--pane-id", default=None)
+        emitter.add_argument("--source-head-sha", default=None)
     er.add_argument("--findings-ref", default=None)
     er.add_argument("--blocking-count", type=int, default=0)
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
+    cp = add("confirm-plan", "--task-id", "--workspace", "--head-sha")
+    cp.add_argument("--payload-root", default=None)
     w = add("watch")
     w.add_argument("--interval", type=int, default=15)
     w.add_argument("--heartbeat-secs", type=int, default=1800)
@@ -1846,12 +1995,37 @@ def main(argv=None) -> int:
     vc.add_argument("--allow-unpinned", action="store_true")
     vc.add_argument("--validate-only", action="store_true")
     ns = ap.parse_args(argv)
+    if ns.repo_path is not None or ns.runtime is not None or ns.personal:
+        context = repository_context(ns.repo_path or os.getcwd())
+        scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
+        try:
+            remote = context_git(context["root"], "remote", "get-url", "origin")
+        except subprocess.SubprocessError:
+            remote = ""
+        _require(ns.repo_slug == repo_slug(remote, context["common_dir"]), "repo-slug does not match repository identity")
+        _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
 
     if ns.cmd == "claim-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         kw = {} if ns.stale_secs is None else {"stale_secs": ns.stale_secs}
+        try:
+            context = repository_context(ns.repo_path or os.getcwd())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            _require(ns.repo_path is None, "repo-path must resolve to a committed Git checkout")
+            context = None
+        expected_slug = None
+        if context:
+            try:
+                remote = context_git(context["root"], "remote", "get-url", "origin")
+            except subprocess.SubprocessError:
+                remote = ""
+            expected_slug = repo_slug(remote, context["common_dir"])
+            _require(ns.repo_slug == expected_slug, "repo-slug does not match repository identity")
+            if _PAYLOAD_SELECTION.get() is None:
+                scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
+                _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
         fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
-                            messaging_socket=ns.messaging_socket, **kw)
+                            messaging_socket=ns.messaging_socket, context=context, expected_slug=expected_slug, runtime=ns.runtime or "claude", thread_id=ns.thread_id, scope=(_PAYLOAD_SELECTION.get() or {}).get("scope"), **kw)
         if fence is None:
             print("BUSY")
             return 1
@@ -1869,48 +2043,48 @@ def main(argv=None) -> int:
                                messaging_socket=ns.messaging_socket) else 1
         )
     if ns.cmd == "write-task":
-        rd = _fenced(ns)
-        _require(valid_task_id(ns.task_id), "invalid task-id")
-        try:
-            rec = json.loads(ns.json)
-        except ValueError:
-            rec = None
-        # Persisting a non-dict (e.g. a bare `[]`) would later crash `status`
-        # on `.get`; a task_id mismatch would mislabel the record under its file.
-        _require(
-            isinstance(rec, dict) and rec.get("task_id") == ns.task_id,
-            "task json must be a JSON object whose task_id equals --task-id",
-        )
-        (rd / "tasks").mkdir(parents=True, exist_ok=True)
-        write_json_atomic(rd / "tasks" / f"{ns.task_id}.json", rec)
-        return 0
+        with _fenced(ns) as rd:
+            _require(valid_task_id(ns.task_id), "invalid task-id")
+            try:
+                rec = json.loads(ns.json)
+            except ValueError:
+                rec = None
+            # Persisting a non-dict (e.g. a bare `[]`) would later crash `status`
+            # on `.get`; a task_id mismatch would mislabel the record under its file.
+            _require(
+                isinstance(rec, dict) and rec.get("task_id") == ns.task_id,
+                "task json must be a JSON object whose task_id equals --task-id",
+            )
+            create_payload_dir(rd / "tasks")
+            write_json_atomic(rd / "tasks" / f"{ns.task_id}.json", rec)
+            return 0
     if ns.cmd == "write-index":
-        rd = _fenced(ns)
-        _require(valid_workspace_id(ns.workspace), "invalid workspace")
-        try:
-            rec = json.loads(ns.json)
-        except ValueError:
-            rec = None
-        # Same guard as write-task: a non-dict index would read back as None
-        # (read_index rejects it), silently orphaning the workspace's events.
-        _require(isinstance(rec, dict), "index json must be a JSON object")
-        (rd / "workspaces").mkdir(parents=True, exist_ok=True)
-        write_json_atomic(index_path(rd, ns.workspace), rec)
-        return 0
+        with _fenced(ns) as rd:
+            _require(valid_workspace_id(ns.workspace), "invalid workspace")
+            try:
+                rec = json.loads(ns.json)
+            except ValueError:
+                rec = None
+            # Same guard as write-task: a non-dict index would read back as None
+            # (read_index rejects it), silently orphaning the workspace's events.
+            _require(isinstance(rec, dict), "index json must be a JSON object")
+            create_payload_dir(rd / "workspaces")
+            write_json_atomic(index_path(rd, ns.workspace), rec)
+            return 0
     if ns.cmd == "write-capabilities":
-        rd = _fenced(ns)
-        try:
-            rec = json.loads(ns.json)
-        except ValueError:
-            rec = None
-        _require(
-            valid_capabilities(rec, ns.session),
-            "capabilities json must be {v:1, session_id==--session, "
-            "available:{fable,opus,sonnet,haiku all bool}}",
-        )
-        Path(rd).mkdir(parents=True, exist_ok=True)
-        write_json_atomic(rd / "capabilities.json", rec)
-        return 0
+        with _fenced(ns) as rd:
+            try:
+                rec = json.loads(ns.json)
+            except ValueError:
+                rec = None
+            _require(
+                valid_capabilities(rec, ns.session),
+                "capabilities json must be {v:1, session_id==--session, "
+                "available:{fable,opus,sonnet,haiku all bool}}",
+            )
+            create_payload_dir(rd)
+            write_json_atomic(rd / "capabilities.json", rec)
+            return 0
     if ns.cmd == "resolve-model":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         rd = repo_dir(ns.repo_slug)
@@ -1948,33 +2122,34 @@ def main(argv=None) -> int:
         print(json.dumps(table))
         return 0
     if ns.cmd == "disable-model":
-        rd = _fenced(ns)
-        _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
-        available = read_capabilities(rd, ns.session)
-        _require(available is not None, "capabilities map absent or stale")
-        rec = {"v": 1, "session_id": ns.session, "available": dict(available)}
-        rec["available"][ns.model] = False
-        write_json_atomic(rd / "capabilities.json", rec)
-        return 0
+        with _fenced(ns) as rd:
+            _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
+            available = read_capabilities(rd, ns.session)
+            _require(available is not None, "capabilities map absent or stale")
+            rec = {"v": 1, "session_id": ns.session, "available": dict(available)}
+            rec["available"][ns.model] = False
+            write_json_atomic(rd / "capabilities.json", rec)
+            return 0
     if ns.cmd == "allow-edit":
-        rd = _fenced(ns)
+        _require(ns.repo_path is not None, "allow-edit requires --repo-path")
         _require(1 <= ns.minutes <= ALLOW_EDIT_MAX_MINUTES,
                  f"--minutes must be an integer in 1..{ALLOW_EDIT_MAX_MINUTES}")
         _require(1 <= ns.max_edits <= ALLOW_EDIT_MAX_EDITS,
                  f"--max-edits must be an integer in 1..{ALLOW_EDIT_MAX_EDITS}")
-        rec = allow_edit_marker(ns.session, ns.fence, ns.minutes, ns.max_edits, ns.note)
-        write_json_atomic(rd / ORCH_MARKER_FILE, rec)
-        audit = {"v": 1, "ts": rec["ts"], "event": "allow-edit",
-                 "marker_id": rec["marker_id"], "session_id": ns.session,
-                 "fence": rec["fence"], "minutes": rec["minutes"],
-                 "max_edits": rec["max_edits"], "expires": rec["expires"],
-                 "note": rec["note"]}
-        if not append_orch_edit(rd, audit):
-            print("[WARNING] could not append to tasks/orch-edits.jsonl; the "
-                  "edit guard cannot reserve budget until it is a writable "
-                  "regular file", file=sys.stderr)
-        print(f"expires {rec['expires']} marker {rec['marker_id']}")
-        return 0
+        with _fenced(ns) as rd:
+            rec = allow_edit_marker(ns.session, ns.fence, ns.minutes, ns.max_edits, ns.note)
+            write_json_atomic(rd / ORCH_MARKER_FILE, rec)
+            audit = {"v": 1, "ts": rec["ts"], "event": "allow-edit",
+                     "marker_id": rec["marker_id"], "session_id": ns.session,
+                     "fence": rec["fence"], "minutes": rec["minutes"],
+                     "max_edits": rec["max_edits"], "expires": rec["expires"],
+                     "note": rec["note"]}
+            if not append_orch_edit(rd, audit):
+                print("[WARNING] could not append to tasks/orch-edits.jsonl; the "
+                      "edit guard cannot reserve budget until it is a writable regular file",
+                      file=sys.stderr)
+            print(f"expires {rec['expires']} marker {rec['marker_id']}")
+            return 0
     if ns.cmd == "classify-probe":
         _require(ns.model in CAP_MODELS, "model must be one of fable/opus/sonnet/haiku")
         try:
@@ -1994,7 +2169,7 @@ def main(argv=None) -> int:
             except OSError:
                 text = None
         _require(text is not None, "text-file not readable")
-        parsed = parse_banner(text)
+        parsed = parse_banner(text, after=ns.after) if ns.after is not None or ns.fresh_capture else None
         cls = classify_banner(parsed, ns.model, ns.effort)
         if ns.json:
             print(json.dumps({"class": cls, "model": (parsed or {}).get("model"),
@@ -2007,7 +2182,7 @@ def main(argv=None) -> int:
         _require(valid_task_id(ns.task_id), "invalid task-id")
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
         rd = repo_dir(ns.repo_slug)
-        (rd / "tasks").mkdir(parents=True, exist_ok=True)
+        create_payload_dir(rd / "tasks")
         if ns.cmd == "emit-done":
             done = {
                 "v": 1,
@@ -2020,6 +2195,9 @@ def main(argv=None) -> int:
                 "base_sha": ns.base_sha,
                 "ts": now_iso(),
             }
+            if ns.plan_artifacts is not None:
+                _require(ns.phase == "plan", "plan-artifacts requires phase plan")
+                done["plan_artifacts"] = json.loads(ns.plan_artifacts)
             if ns.launch_id:
                 done["launch_id"] = ns.launch_id
             if ns.reason is not None:
@@ -2044,8 +2222,25 @@ def main(argv=None) -> int:
             # A distinct file so a review verdict never clobbers the impl
             # completion record -- the two coexist and are read independently.
             out = rd / "tasks" / f"{ns.task_id}.review.json"
+        if ns.launch_id:
+            done["launch_id"] = ns.launch_id
+        if ns.runtime is not None:
+            _require(ns.launch_id and ns.pane_id and ns.source_head_sha,
+                     "runtime attempt requires launch-id, pane-id, and source-head-sha")
+            _require(SHA40_RE.fullmatch(ns.source_head_sha), "source-head-sha must be 40 hex")
+            done.update(runtime=ns.runtime, pane_id=ns.pane_id, source_head_sha=ns.source_head_sha)
         _require(contained(out, state_root()), "escapes state root")
-        write_json_atomic(out, done)
+        if ns.runtime is not None:
+            with owner_transaction(rd):
+                try:
+                    task = json.loads(read_payload_text(rd / "tasks" / f"{ns.task_id}.json"))
+                except (OSError, ValueError):
+                    task = None
+                _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
+                         "result does not match the current dispatched attempt")
+                write_json_atomic(out, done)
+        else:
+            write_json_atomic(out, done)
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -2053,27 +2248,27 @@ def main(argv=None) -> int:
         # Associate each workspace's events with its task via the workspace index,
         # then order per-task events chronologically (ts, event tie-breaker).
         by_task = {}
-        for ef in (rd / "workspaces").glob("*.events.jsonl"):
+        for ef in payload_files(rd / "workspaces", "*.events.jsonl"):
             ws = ef.name[: -len(".events.jsonl")]
             idx = read_index(rd, ws) or {}
             tid = idx.get("task_id")
             if not tid:
                 continue
             by_task.setdefault(tid, []).extend(
-                parse_events(ef.read_text().splitlines())
+                parse_events(read_payload_text(ef).splitlines())
             )
-        for tid in by_task:
-            by_task[tid].sort(key=lambda r: (r.get("ts", ""), r.get("event", "")))
+        for task_events in by_task.values():
+            task_events.sort(key=lambda r: (r.get("ts", ""), r.get("event", "")))
         result = {}
         totals = {k: 0 for k in SPEND_KEYS}
         totals["usd"] = 0.0
         untracked = 0
         primary = set()
-        for tf in sorted((rd / "tasks").glob("*.json")):
+        for tf in sorted(payload_files(rd / "tasks", "*.json")):
             if tf.name.endswith((".done.json", ".review.json")):
                 continue
             try:
-                task = json.loads(tf.read_text())
+                task = json.loads(read_payload_text(tf))
             except ValueError:
                 continue
             if not isinstance(task, dict):
@@ -2082,7 +2277,7 @@ def main(argv=None) -> int:
             primary.add(tf.name[: -len(".json")])
             sp = spend_path(rd, tid) if isinstance(tid, str) else None
             try:
-                lines = sp.read_text().splitlines() if sp and sp.is_file() else []
+                lines = read_payload_text(sp).splitlines() if sp and sp.is_file() else []
             except OSError:
                 lines = []
             spend = fold_spend(lines, tid)
@@ -2110,7 +2305,7 @@ def main(argv=None) -> int:
         totals["untracked_launches"] = untracked
         orphans = set()
         for suffix in (".spend.jsonl", ".done.json"):
-            for f in (rd / "tasks").glob(f"*{suffix}"):
+            for f in payload_files(rd / "tasks", f"*{suffix}"):
                 tid = f.name[: -len(suffix)]
                 if valid_task_id(tid) and tid not in primary:
                     orphans.add(tid)
@@ -2140,11 +2335,11 @@ def main(argv=None) -> int:
         tf = rd / "tasks" / f"{ns.task_id}.json"
         _require(contained(tf, state_root()), "escapes state root")
         try:
-            task = json.loads(tf.read_text())
+            task = json.loads(read_payload_text(tf))
         except (OSError, ValueError):
             return 1
         return 0 if should_dispatch_review(task, ns.head_sha) else 1
-    if ns.cmd == "confirm-completion":
+    if ns.cmd in ("confirm-completion", "confirm-plan"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
@@ -2154,13 +2349,17 @@ def main(argv=None) -> int:
         _require(contained(tf, state_root()), "escapes state root")
         _require(contained(df, state_root()), "escapes state root")
         try:
-            task = json.loads(tf.read_text())
+            task = json.loads(read_payload_text(tf))
         except (OSError, ValueError):
             return 1
         try:
-            done = json.loads(df.read_text())
+            done = json.loads(read_payload_text(df))
         except (OSError, ValueError):
             done = None
+        if ns.cmd == "confirm-plan":
+            payload_root = Path(ns.payload_root) if ns.payload_root else state_root().parent
+            _require(contained(payload_root, state_root().parent), "payload-root escapes selected account scope")
+            return 0 if is_plan_completed(task, done, ns.head_sha, ns.workspace, payload_root) else 1
         return 0 if is_completed(task, done, ns.head_sha, ns.workspace) else 1
     if ns.cmd == "confirm-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -2172,11 +2371,11 @@ def main(argv=None) -> int:
         _require(contained(tf, state_root()), "escapes state root")
         _require(contained(rf, state_root()), "escapes state root")
         try:
-            task = json.loads(tf.read_text())
+            task = json.loads(read_payload_text(tf))
         except (OSError, ValueError):
             return 1
         try:
-            done = json.loads(rf.read_text())
+            done = json.loads(read_payload_text(rf))
         except (OSError, ValueError):
             done = None
         return 0 if is_reviewed(task, done, ns.head_sha, ns.workspace) else 1
@@ -2224,7 +2423,7 @@ def main(argv=None) -> int:
             # record that simply lacks pin fields, so the skill's grandfather
             # rule can never be satisfied by corruption.
             try:
-                task = json.loads(tf.read_text())
+                task = json.loads(read_payload_text(tf))
             except (OSError, ValueError):
                 task = None
             _require(
@@ -2337,7 +2536,7 @@ def main(argv=None) -> int:
         _require(bf.is_file() and not bf.is_symlink() and contained(bf, state_root()),
                  "brief-file must be a regular file under STATE_ROOT")
         try:
-            brief = bf.read_text()
+            brief = read_payload_text(bf)
         except (OSError, UnicodeDecodeError):
             brief = None
         _require(brief is not None, "brief-file is not readable as text")
@@ -2346,12 +2545,14 @@ def main(argv=None) -> int:
                  "worktree must be an existing git checkout")
         rd = repo_dir(ns.repo_slug)
         try:
-            (rd / "tasks").mkdir(parents=True, exist_ok=True)
+            create_payload_dir(rd / "tasks")
         except OSError:
             pass  # run_mech's first append reports the unwritable ledger as exit 2
         return run_mech(rd, ns, brief, ns.timeout_secs)
     if ns.cmd == "run-think":
-        rd = _fenced(ns)                      # stale/foreign fence refused like write-task (exit 2)
+        _selected_headless_environment(ns.cwd)
+        rd = repo_dir(ns.repo_slug)
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_think_id(ns.think_id), "invalid think-id")
         _require(ns.kind in THINK_KINDS and think_kind(ns.think_id) == ns.kind, "kind must match the think-id")
         _require(ns.task_id is None or valid_task_id(ns.task_id), "invalid task-id")
@@ -2366,7 +2567,7 @@ def main(argv=None) -> int:
         qf = think_dir(rd) / f"{ns.think_id}.question.md"
         _require(qf.is_file() and not qf.is_symlink(), "question file missing or not a regular file")
         try:
-            question = qf.read_text()
+            question = read_payload_text(qf)
         except (OSError, UnicodeDecodeError):
             question = None
         _require(question is not None, "question file is not readable as text")
@@ -2394,7 +2595,7 @@ def main(argv=None) -> int:
 
             def _load(name):
                 try:
-                    return json.loads((think_dir(rd) / name).read_text())
+                    return json.loads(read_payload_text(think_dir(rd) / name))
                 except (OSError, ValueError):
                     return None
             plaunch, prec = _load(f"{ns.parent}.launch.json"), _load(f"{ns.parent}.answer.json")
@@ -2410,7 +2611,7 @@ def main(argv=None) -> int:
             _require(ns.max_budget_usd == plaunch["caps"]["max_budget_usd"],
                      "retry --max-budget-usd must equal the parent launch's cap (the escalation budget)")
             try:
-                same_q = (think_dir(rd) / f"{ns.parent}.question.md").read_bytes() == qf.read_bytes()
+                same_q = read_payload_bytes(think_dir(rd) / f"{ns.parent}.question.md") == read_payload_bytes(qf)
             except OSError:
                 same_q = False
             _require(same_q, "retry question must be byte-identical to the parent's")
@@ -2425,8 +2626,7 @@ def main(argv=None) -> int:
                 return 4
         cfg_caps, err = think_caps(read_config(rd))
         _require(err is None, err or "")
-        with think_lock(rd):
-            _require(check_fence(rd, ns.session, int(ns.fence)), "stale fence")
+        with _fenced(ns), think_lock(rd):
             now = now_iso()
             scan = think_scan(rd, now)
             if scan["corrupt"]:
@@ -2449,6 +2649,17 @@ def main(argv=None) -> int:
                 return 2
         return run_think(rd, ns, question, launch, add_dirs)
     return 2
+
+
+def main(argv=None) -> int:
+    selected = _PAYLOAD_SELECTION.set(None)
+    try:
+        return _main(argv)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        sys.stderr.write(f"[X] {exc}\n")
+        return 2
+    finally:
+        _PAYLOAD_SELECTION.reset(selected)
 
 
 if __name__ == "__main__":

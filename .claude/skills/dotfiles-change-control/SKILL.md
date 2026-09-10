@@ -22,9 +22,9 @@ your first blocked commit.
   `docs/superpowers/`, `docs/plans/`, and `docs/specs/` ignored and untracked;
   approval to create one is not approval to publish it.
 - [WARNING] Never hand-edit vendored content: the ECC language dirs under
-  `claude/rules/` (everything except `personal/`) and the `<!-- BEGIN ECC -->`
-  sentinel block in `codex/AGENTS.md`. Installers overwrite both; your edit
-  dies on the next `ecc-update`.
+  `claude/rules/` (everything except `personal/`) and native plugin payloads.
+  Change their lifecycle or owned adapters. `codex/AGENTS.md` is now fully
+  repo-owned; the stale copied upstream instruction block is retired.
 - [WARNING] `claude/settings.json.tmpl` changes reach existing machines only at
   their next `update`/link run (reconcile merge); until then live settings are
   stale -- see the protocol below.
@@ -186,13 +186,9 @@ When you change the template:
   corrected (it ran in fresh cloud clones where the untracked vendored dirs did
   not exist; the harness loader is real). The retirement stands on the
   marketplace-clone-superset argument alone.
-- `codex/AGENTS.md`: everything between `<!-- BEGIN ECC -->` and the matching
-  end marker is a sync-managed sentinel block. Edit only the text outside it;
-  regenerate the block via `codex-ecc-sync` (in `zsh/functions.zsh`), which
-  runs ECC's sync script SAFELY with `ECC_GLOBAL_HOOKS_DIR` redirected. Never
-  run ECC's `sync-ecc-to-codex.sh` directly -- it overwrites `core.hooksPath`
-  and writes through the `~/.codex/AGENTS.md` symlink into this repo
-  (documented incident, CLAUDE.md "Codex plugin integration").
+- `codex/AGENTS.md` is repo-owned global policy. Native plugins own upstream
+  guidance; do not reintroduce a copied instruction block or upstream global
+  sync. See repo CLAUDE.md, "Codex plugin integration".
 - ECC git hooks `git/hooks/pre-commit` and `pre-push` are vendored copies
   that are TRACKED in git (adapted from ECC, listed in `NOTICE`): do not patch
   them by hand; fix upstream or re-vendor.
@@ -259,7 +255,6 @@ containers use the platform checkout):
 | Seed-once settings behavior                                                            | `grep -n 'seed_machine_local_file' install/common/claude-links.sh`                                                         |
 | Cloud settings reconcile                                                               | `grep -n 'reconcile_claude_settings' bootstrap-cloud.sh`                                                                   |
 | Rules whitelist (only `personal/` tracked)                                             | `cat claude/rules/.gitignore`                                                                                              |
-| AGENTS.md sentinel marker                                                              | `grep -n 'BEGIN ECC' codex/AGENTS.md`                                                                                      |
 | CI trigger + steps                                                                     | `cat .github/workflows/tests.yml`                                                                                          |
 | Cited commits (2304015, 52f807d, e140ab3, 910f2bc, c1c4500, 8d4507f, 9ad4dc8, 465ee17) | `git show -s --format='%h %s' <hash>`                                                                                      |
 

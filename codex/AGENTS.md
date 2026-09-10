@@ -21,9 +21,10 @@ These are hard constraints in Codex. Some are hook-enforced when `[features].hoo
 - Never write API keys, tokens, passwords, or credentials to files
 - Use environment variables or secret managers
 
-## Codex Backup Mode
+## Shared Claude and Codex Workflows
 
-Use Codex as a backup for the Claude setup on this machine.
+Claude and Codex are supported daily drivers. Choose the runtime for the task;
+keep account boundaries, verification and review requirements consistent.
 
 - Dotfiles manages `~/.codex/AGENTS.md`, selected `~/.codex/hooks/*` symlinks, and native workflow plugin lifecycles
 - ECC and Superpowers are staged from separate upstream checkouts as self-contained `dotfiles-workflows` plugins
@@ -47,6 +48,33 @@ of the toolchain, and do not reinstall any variant.
 - Claude-specific statusline, slash commands, agents, and lifecycle hooks are not copied wholesale into Codex
 - Prefer git hooks for policies that must apply outside a single agent runtime
 
+## Shared Workflow Policy
+
+- Standing user authorization: the personal Claude account may be used for
+  task-related planning, coding, and review, including relevant code, diffs,
+  specs, and plans from personal or work repositories. Do not ask again just
+  because that context is sent to Anthropic through the personal account.
+  Confirm the selected account; this does not authorize sending personal
+  context through a work account or unrelated external actions.
+- Use the current Codex tool surface and configured model/roles. Native
+  plugins own upstream guidance; do not regenerate a copied ECC instruction
+  block or use retired upstream sync scripts.
+- Personal machines set `CLAUDE_PERSONAL_ONLY=1` in machine-local shell
+  configuration; never propagate that machine choice through this repo.
+  On machines using both accounts, a personal checkout or canonical owner
+  overrides inherited work-account settings. Capture the intended account
+  before launching partner reviewers or moving into temporary worktrees.
+- Work repositories may deliberately use personal Claude quota through
+  `claude --personal`; preserve that choice in child reviewers. Default
+  personal subprocesses unset `CLAUDE_CONFIG_DIR`. An explicit `~/.claude`
+  path can select a different authentication namespace; do not substitute it. The account restriction is one-way.
+- Read `~/.codex/rules/agent-lessons.md` when present before implementation
+  or review. It links to the same standing lessons used by Claude; do not
+  maintain a second copy.
+- Repo-owned skills may share canonical sources across runtimes. Keep
+  runtime-specific tool calls in their adapters and native plugin installs
+  independent.
+
 ## Worktree Default
 
 For implementation work, default to an isolated workspace before editing files.
@@ -62,7 +90,7 @@ Use these skills by default when the task matches:
 - `ecc:workspace-surface-audit` for setup, plugin, MCP, connector, repo-surface, or
   "what are we missing?" audits.
 - `superpowers:brainstorming`, `superpowers:writing-plans`,
-  `claude-plan-review` or `codex-plan-review`, and
+  `claude-spec-review`, `claude-plan-review`, and
   `superpowers:executing-plans` for substantial implementation work.
 - `ecc:tdd-workflow` or `superpowers:test-driven-development` for new behavior,
   regression fixes, and risky refactors.
@@ -79,17 +107,30 @@ Use these skills by default when the task matches:
   environment hardening.
 - `co-review` for top-level review orchestration after implementation, and
   `superpowers:verification-before-completion` before claiming work is done.
+- `repo-recall` for prior repo decisions, findings, plans, handoffs, and todos;
+  open the cited source before treating a search result as evidence.
+- `post-merge` for merged-branch cleanup and shared lessons distillation.
+- `todos` for inspecting and maintaining the repo's current and pending work.
+- `handoff` and `kickoff` for explicit task-scoped restart/resume.
+- `voice` for an independent prose pass before authorized outward writes.
+- `herdr-orchestration` for an opted-in persistent Herd controller. Follow
+  its native Codex adapter; Claude Workflow and messaging tools are not Codex
+  launch or completion APIs.
 
 ## Superpowers Flow
 
-For substantial work, follow the same shape as Claude:
+For substantial Codex-led work:
 
 1. `superpowers:brainstorming`
-2. `superpowers:writing-plans`
-3. `claude-plan-review` for a second-model plan review
-4. `superpowers:executing-plans`
-5. `co-review` for Claude + Codex code/PR review
-6. `superpowers:verification-before-completion`
+2. `claude-spec-review` for the completed specification
+3. `superpowers:writing-plans`
+4. `claude-plan-review` for the completed implementation plan
+5. `superpowers:executing-plans`
+6. `co-review` for Claude + Codex code/PR review
+7. `superpowers:verification-before-completion`
+
+Merge requires completed Claude and Codex code reviews and any required
+adversarial verification. Approval to merge preserves these gates.
 
 The `co-review` step is for top-level sessions where you orchestrate the review.
 When you were launched _as Claude's reviewer_ (a plain "review this" request
@@ -103,6 +144,13 @@ to `claude -p "/code-review"` and create a Claude -> Codex -> Claude loop.
 - Front-load critical information
 - Prefer examples over prose
 - Cite file paths with line numbers when discussing code
+- Write plain sentences. Avoid aphoristic fragment chains, "not X, but Y"
+  reversals, rule-of-three summaries, and labeled tradeoff callouts in chat,
+  tickets, PRs, and documentation.
+- Markdown-link every issue and PR reference in descriptions; do not rely on
+  the editor to auto-link plain text. Use the actual repository or issue URL.
+- When creating an authorized ticket, create its named dependency/context
+  links in the same batch: Blocks for ordering, Relates for context.
 
 ## Review
 
@@ -145,287 +193,30 @@ When asked to review, default to a code review mindset:
 - Run `cargo fmt` and `cargo clippy` before commits
 - Use snake_case for modules and files
 
-<!-- BEGIN ECC -->
-
-# Everything Claude Code (ECC) — Agent Instructions
-
-This is a **production-ready AI coding plugin** providing 67 specialized agents, 271 skills, 92 commands, and automated hook workflows for software development.
-
-**Version:** 2.0.0
-
-## Core Principles
-
-1. **Agent-First** — Delegate to specialized agents for domain tasks
-2. **Test-Driven** — Write tests before implementation, 80%+ coverage required
-3. **Security-First** — Never compromise on security; validate all inputs
-4. **Immutability** — Always create new objects, never mutate existing ones
-5. **Plan Before Execute** — Plan complex features before writing code
-
-## Available Agents
-
-| Agent                  | Purpose                                   | When to Use                                                   |
-| ---------------------- | ----------------------------------------- | ------------------------------------------------------------- |
-| planner                | Implementation planning                   | Complex features, refactoring                                 |
-| architect              | System design and scalability             | Architectural decisions                                       |
-| tdd-guide              | Test-driven development                   | New features, bug fixes                                       |
-| code-reviewer          | Code quality and maintainability          | After writing/modifying code                                  |
-| security-reviewer      | Vulnerability detection                   | Before commits, sensitive code                                |
-| spec-miner             | Brownfield spec extraction                | Onboarding brownfield projects to spec-driven development     |
-| build-error-resolver   | Fix build/type errors                     | When build fails                                              |
-| e2e-runner             | End-to-end Playwright testing             | Critical user flows                                           |
-| refactor-cleaner       | Dead code cleanup                         | Code maintenance                                              |
-| doc-updater            | Documentation and codemaps                | Updating docs                                                 |
-| cpp-reviewer           | C/C++ code review                         | C and C++ projects                                            |
-| cpp-build-resolver     | C/C++ build errors                        | C and C++ build failures                                      |
-| fsharp-reviewer        | F# functional code review                 | F# projects                                                   |
-| docs-lookup            | Documentation lookup via Context7         | API/docs questions                                            |
-| go-reviewer            | Go code review                            | Go projects                                                   |
-| go-build-resolver      | Go build errors                           | Go build failures                                             |
-| kotlin-reviewer        | Kotlin code review                        | Kotlin/Android/KMP projects                                   |
-| kotlin-build-resolver  | Kotlin/Gradle build errors                | Kotlin build failures                                         |
-| database-reviewer      | PostgreSQL/Supabase specialist            | Schema design, query optimization                             |
-| python-reviewer        | Python code review                        | Python projects                                               |
-| django-reviewer        | Django code review                        | Django apps, DRF APIs, ORM, migrations                        |
-| django-build-resolver  | Django build, migration, and setup errors | Django startup, dependency, migration, collectstatic failures |
-| java-reviewer          | Java and Spring Boot code review          | Java/Spring Boot projects                                     |
-| java-build-resolver    | Java/Maven/Gradle build errors            | Java build failures                                           |
-| loop-operator          | Autonomous loop execution                 | Run loops safely, monitor stalls, intervene                   |
-| harness-optimizer      | Harness config tuning                     | Reliability, cost, throughput                                 |
-| rust-reviewer          | Rust code review                          | Rust projects                                                 |
-| rust-build-resolver    | Rust build errors                         | Rust build failures                                           |
-| pytorch-build-resolver | PyTorch runtime/CUDA/training errors      | PyTorch build/training failures                               |
-| mle-reviewer           | Production ML pipeline review             | ML pipelines, evals, serving, monitoring, rollback            |
-| typescript-reviewer    | TypeScript/JavaScript code review         | TypeScript/JavaScript projects                                |
-
-## Agent Orchestration
-
-Use agents proactively without user prompt:
-
-- Complex feature requests → **planner**
-- Code just written/modified → **code-reviewer**
-- Bug fix or new feature → **tdd-guide**
-- Architectural decision → **architect**
-- Security-sensitive code → **security-reviewer**
-- Brownfield project onboarding → **spec-miner**
-- Autonomous loops / loop monitoring → **loop-operator**
-- Harness config reliability and cost → **harness-optimizer**
-
-Use parallel execution for independent operations — launch multiple agents simultaneously.
-
-## Security Guidelines
-
-**Before ANY commit:**
-
-- No hardcoded secrets (API keys, passwords, tokens)
-- All user inputs validated
-- SQL injection prevention (parameterized queries)
-- XSS prevention (sanitized HTML)
-- CSRF protection enabled
-- Authentication/authorization verified
-- Rate limiting on all endpoints
-- Error messages don't leak sensitive data
-
-**Secret management:** NEVER hardcode secrets. Use environment variables or a secret manager. Validate required secrets at startup. Rotate any exposed secrets immediately.
-
-**If security issue found:** STOP → use security-reviewer agent → fix CRITICAL issues → rotate exposed secrets → review codebase for similar issues.
-
-## Coding Style
-
-**Immutability (CRITICAL):** Always create new objects, never mutate. Return new copies with changes applied.
-
-**File organization:** Many small files over few large ones. 200-400 lines typical, 800 max. Organize by feature/domain, not by type. High cohesion, low coupling.
-
-**Error handling:** Handle errors at every level. Provide user-friendly messages in UI code. Log detailed context server-side. Never silently swallow errors.
-
-**Input validation:** Validate all user input at system boundaries. Use schema-based validation. Fail fast with clear messages. Never trust external data.
-
-**Code quality checklist:**
-
-- Functions small (<50 lines), files focused (<800 lines)
-- No deep nesting (>4 levels)
-- Proper error handling, no hardcoded values
-- Readable, well-named identifiers
-
-## Testing Requirements
-
-**Minimum coverage: 80%**
-
-Test types (all required):
-
-1. **Unit tests** — Individual functions, utilities, components
-2. **Integration tests** — API endpoints, database operations
-3. **E2E tests** — Critical user flows
-
-**TDD workflow (mandatory):**
-
-1. Write test first (RED) — test should FAIL
-2. Write minimal implementation (GREEN) — test should PASS
-3. Refactor (IMPROVE) — verify coverage 80%+
-
-Troubleshoot failures: check test isolation → verify mocks → fix implementation (not tests, unless tests are wrong).
-
-## Development Workflow
-
-1. **Plan** — Use planner agent, identify dependencies and risks, break into phases
-2. **TDD** — Use tdd-guide agent, write tests first, implement, refactor
-3. **Review** — Use code-reviewer agent immediately, address CRITICAL/HIGH issues
-4. **Capture knowledge in the right place**
-   - Personal debugging notes, preferences, and temporary context → auto memory
-   - Team/project knowledge (architecture decisions, API changes, runbooks) → the project's existing docs structure
-   - If the current task already produces the relevant docs or code comments, do not duplicate the same information elsewhere
-   - If there is no obvious project doc location, ask before creating a new top-level file
-5. **Commit** — Conventional commits format, comprehensive PR summaries
-
-## Workflow Surface Policy
-
-- `skills/` is the canonical workflow surface.
-- New workflow contributions should land in `skills/` first.
-- `commands/` is a legacy slash-entry compatibility surface and should only be added or updated when a shim is still required for migration or cross-harness parity.
-
-## Git Workflow
-
-**Commit format:** `<type>: <description>` — Types: feat, fix, refactor, docs, test, chore, perf, ci
-
-**PR workflow:** Analyze full commit history → draft comprehensive summary → include test plan → push with `-u` flag.
-
-## Architecture Patterns
-
-**API response format:** Consistent envelope with success indicator, data payload, error message, and pagination metadata.
-
-**Repository pattern:** Encapsulate data access behind standard interface (findAll, findById, create, update, delete). Business logic depends on abstract interface, not storage mechanism.
-
-**Skeleton projects:** Search for battle-tested templates, evaluate with parallel agents (security, extensibility, relevance), clone best match, iterate within proven structure.
-
-## Performance
-
-**Context management:** Avoid last 20% of context window for large refactoring and multi-file features. Lower-sensitivity tasks (single edits, docs, simple fixes) tolerate higher utilization.
-
-**Build troubleshooting:** Use build-error-resolver agent → analyze errors → fix incrementally → verify after each fix.
-
-## Project Structure
-
-```
-agents/          — 67 specialized subagents
-skills/          — 271 workflow skills and domain knowledge
-commands/        — 92 slash commands
-hooks/           — Trigger-based automations
-rules/           — Always-follow guidelines (common + per-language)
-scripts/         — Cross-platform Node.js utilities
-mcp-configs/     — 14 MCP server configurations
-tests/           — Test suite
-```
-
-`commands/` remains in the repo for compatibility, but the long-term direction is skills-first.
-
-## Success Metrics
-
-- All tests pass with 80%+ coverage
-- No security vulnerabilities
-- Code is readable and maintainable
-- Performance is acceptable
-- User requirements are met
-
----
-
-# Codex Supplement (From ECC .codex/AGENTS.md)
-
-# ECC for Codex CLI
-
-This supplements the root `AGENTS.md` with Codex-specific guidance.
-
-## Model Recommendations
-
-| Task Type                         | Recommended Model |
-| --------------------------------- | ----------------- |
-| Routine coding, tests, formatting | GPT 5.5           |
-| Complex features, architecture    | GPT 5.5           |
-| Debugging, refactoring            | GPT 5.5           |
-| Security review                   | GPT 5.5           |
-
-## Skills Discovery
-
-Skills are auto-loaded from `.agents/skills/`. Each skill contains:
-
-- `SKILL.md` — Detailed instructions and workflow
-- `agents/openai.yaml` — Codex interface metadata
-
-Available skills (use the `ecc:` prefix when invoking them in Codex):
-
-- tdd-workflow — Test-driven development with 80%+ coverage
-- security-review — Comprehensive security checklist
-- coding-standards — Universal coding standards
-- frontend-patterns — React/Next.js patterns
-- frontend-slides — Viewport-safe HTML presentations and PPTX-to-web conversion
-- article-writing — Long-form writing from notes and voice references
-- content-engine — Platform-native social content and repurposing
-- market-research — Source-attributed market and competitor research
-- investor-materials — Decks, memos, models, and one-pagers
-- investor-outreach — Personalized investor outreach and follow-ups
-- backend-patterns — API design, database, caching
-- e2e-testing — Playwright E2E tests
-- eval-harness — Eval-driven development
-- strategic-compact — Context management
-- api-design — REST API design patterns
-- verification-loop — Build, test, lint, typecheck, security
-- deep-research — Multi-source research with firecrawl and exa MCPs
-- exa-search — Neural search via Exa MCP for web, code, and companies
-- claude-api — Anthropic Claude API patterns and SDKs
-- x-api — X/Twitter API integration for posting, threads, and analytics
-- crosspost — Multi-platform content distribution
-- fal-ai-media — AI image/video/audio generation via fal.ai
-- dmux-workflows — Multi-agent orchestration with dmux
-
-## MCP Servers
-
-Treat the project-local `.codex/config.toml` as the default Codex baseline for ECC. The current ECC baseline enables GitHub, Context7, Exa, Memory, Playwright, and Sequential Thinking; add heavier extras in `~/.codex/config.toml` only when a task actually needs them.
-
-ECC's canonical Codex section name is `[mcp_servers.context7]`. The launcher package remains `@upstash/context7-mcp`; only the TOML section name is normalized for consistency with `codex mcp list` and the reference config.
-
-### Native plugin ownership
-
-The dotfiles-managed ECC Codex plugin declares its MCP servers through the plugin manifest. Never run upstream `scripts/sync-ecc-to-codex.sh`: it writes global Codex guidance, agent roles, MCP configuration, and git hooks outside the native plugin lifecycle.
-
-## External Action Boundaries
-
-Treat networked tools as read-only by default. Search, inspect, and draft freely within the user's requested scope, but require explicit user approval before posting, publishing, pushing, merging, opening paid jobs, dispatching remote agents, changing third-party resources, or modifying credentials.
-
-When approval is ambiguous, produce a local plan or draft artifact instead of taking the external action. Preserve user config and private state unless the user specifically asks for a scoped change.
-
-## Multi-Agent Support
-
-Codex now supports multi-agent workflows behind the experimental `features.multi_agent` flag.
-
-- Enable it in `.codex/config.toml` with `[features] multi_agent = true`
-- Define project-local roles under `[agents.<name>]`
-- Point each role at a TOML layer under `.codex/agents/`
-- Use `/agent` inside Codex CLI to inspect and steer child agents
-
-Sample role configs in this repo:
-
-- `.codex/agents/explorer.toml` — read-only evidence gathering
-- `.codex/agents/reviewer.toml` — correctness/security review
-- `.codex/agents/docs-researcher.toml` — API and release-note verification
-
-## Key Differences from Claude Code
-
-| Feature      | Claude Code              | Codex CLI                                            |
-| ------------ | ------------------------ | ---------------------------------------------------- |
-| Hooks        | 8+ event types           | Not yet supported                                    |
-| Context file | CLAUDE.md + AGENTS.md    | AGENTS.md only                                       |
-| Skills       | Skills loaded via plugin | `.agents/skills/` directory                          |
-| Commands     | `/slash` commands        | Instruction-based                                    |
-| Agents       | Subagent Task tool       | Multi-agent via `/agent` and `[agents.<name>]` roles |
-| Security     | Hook-based enforcement   | Instruction + sandbox                                |
-| MCP          | Full support             | Supported via `config.toml` and `codex mcp add`      |
-
-## Security Without Hooks
-
-Since Codex lacks hooks, security enforcement is instruction-based:
-
-1. Always validate inputs at system boundaries
-2. Never hardcode secrets — use environment variables
-3. Run `npm audit` / `pip audit` before committing
-4. Review `git diff` before every push
-5. Use `sandbox_mode = "workspace-write"` in config
-
-<!-- END ECC -->
+## Model and Effort Routing
+
+Use the shared resolver in `claude/hooks/agent_runtime.py` through the
+Herd/review skills. Pin model and effort for each new role; a parent's xhigh
+setting is not a normal-review default. Astra/high plans and reviews;
+Astra/xhigh handles explicitly critical reviews and deep judgments. Terra/high
+implements bounded tasks; Luna/medium reads and extracts. Sol/high is an
+explicit review or fallback choice. Mechanical writing on Luna requires an
+explicit task designation and an independent review gate. Escalate when a
+task exceeds its brief, rather than silently widening a cheap worker's scope.
+
+Requested settings are not observed settings. Report unavailable evidence as
+unknown; never label an existing xhigh session high. Codex wall timeouts and
+sandbox restrictions do not provide Claude dollar or turn caps.
+
+## Engineering Discipline
+
+- Plan substantial changes, then implement in owned worktrees. Keep private
+  plans/specs untracked in public repositories.
+- Use tests first for behavior and regression changes, with meaningful unit,
+  integration and end-to-end coverage where the changed behavior needs them.
+- Delegate independent, bounded tasks with explicit file ownership and review
+  their outputs. Avoid duplicate reviewers and recursive partner dispatch.
+- Keep checks proportional: run the relevant checks, then the required full
+  gate once integrated. Record actual results before claiming completion.
+- Preserve custom configuration. Native ECC and Superpowers updates must not
+  overwrite global instructions, credentials or git-hook ownership.

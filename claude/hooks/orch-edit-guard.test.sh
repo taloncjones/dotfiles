@@ -59,17 +59,19 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# mkrepo DIR REMOTE: one-commit repo with tracked.txt, f2, dir/inner.txt,
-# an ignored/ dir, and an untracked .todos/pending/ dir.
+# mkrepo DIR REMOTE: one-commit repo with ordinary and shell-metacharacter
+# names, an ignored/ dir, and an untracked .todos/pending/ dir.
 mkrepo() {
     git -c init.defaultBranch=main init -q "$1"
     mkdir -p "$1/dir" "$1/ignored" "$1/.todos/pending"
     printf 'tracked\n' > "$1/tracked.txt"
+    printf 'brackets\n' > "$1/[id].txt"
+    printf 'dollar\n' > "$1/\$name.txt"
     printf 'two\n' > "$1/f2"
     printf 'inner\n' > "$1/dir/inner.txt"
     printf 'ignored/\n' > "$1/.gitignore"
     printf 'x\n' > "$1/ignored/x"
-    git -C "$1" add tracked.txt f2 dir/inner.txt .gitignore
+    git -C "$1" add tracked.txt '[id].txt' '$name.txt' f2 dir/inner.txt .gitignore
     git -C "$1" -c user.name=t -c user.email=t@x commit -q -m base
     git -C "$1" remote add origin "$2"
 }
@@ -90,15 +92,26 @@ SLUG_2=$(slug_of "git@example.com:org/other.git")
 # sorted-first one; SID_B owns SLUG_2; a corrupt owner file under a slug
 # that sorts last; the scratch/tmp clones have no owner at all.
 RD_A="$CFG/herdr-orch/$SLUG_A"; RD_2="$CFG/herdr-orch/$SLUG_2"
-mkdir -p "$RD_A/tasks" "$RD_2" "$CFG/herdr-orch/aaa-first" "$CFG/herdr-orch/zz-corrupt"
-printf '{"session_id":"%s","host":"h","pid":1,"heartbeat_ts":0,"fence":4}' "$SID_A" > "$RD_A/owner.json"
-printf '{"session_id":"%s","host":"h","pid":1,"heartbeat_ts":0,"fence":9}' "$SID_A" > "$CFG/herdr-orch/aaa-first/owner.json"
-printf '{"session_id":"%s","host":"h","pid":1,"heartbeat_ts":0,"fence":1}' "$SID_B" > "$RD_2/owner.json"
+export HERDR_COORDINATION_ROOT="$FIX/coordination"
+mkdir -p "$CFG/herdr-orch/zz-corrupt"
+FENCE_A=
+for _ in 1 2 3 4; do
+    FENCE_A=$(env HOME="$H" CLAUDE_CONFIG_DIR="$CFG" HERDR_COORDINATION_ROOT="$HERDR_COORDINATION_ROOT" \
+        python3 "$CORE" claim-owner --repo-slug "$SLUG_A" --repo-path "$R" --runtime claude \
+        --session "$SID_A" --host h --pid 1 --stale-secs 0)
+done
+[ "$FENCE_A" = 4 ] || exit 1
+env HOME="$H" CLAUDE_CONFIG_DIR="$CFG" HERDR_COORDINATION_ROOT="$HERDR_COORDINATION_ROOT" \
+    python3 "$CORE" claim-owner --repo-slug "$SLUG_2" --repo-path "$R2" --runtime claude \
+    --session "$SID_B" --host h --pid 1 --stale-secs 0 >/dev/null
+mkdir -p "$RD_A/tasks" "$RD_2"
 printf 'not json' > "$CFG/herdr-orch/zz-corrupt/owner.json"
 AUDIT="$RD_A/tasks/orch-edits.jsonl"
 # A copy of the hooks dir for the production-invocation bytecode check, so
 # the suite never touches the checkout's own claude/hooks/.
-mkdir -p "$FIX/hooks"; cp claude/hooks/*.py "$FIX/hooks/"
+mkdir -p "$FIX/hooks" "$FIX/skills/lib"
+cp claude/hooks/*.py "$FIX/hooks/"
+cp claude/skills/lib/workflow_context.py "$FIX/skills/lib/"
 
 # payload TOOL SID ARG CWD [EVENT] -> PreToolUse JSON. ARG is file_path for
 # Edit/Write and command for Bash.
@@ -194,22 +207,32 @@ fi
 
 # --- AC2: owner denied on guarded Edit/Write targets --------------------
 hook_case "AC2 Edit tracked denied" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+printf '{"session_id":"%s","host":"h","pid":1,"heartbeat_ts":0,"fence":99}' "$SID_C" > "$RD_A/owner.json"
+hook_case "AC2 stale account payload mirror does not grant ownership" allow Edit "$R/tracked.txt" "$R" "$SID_C"
+hook_case "AC2 shared current owner still denies after a stale payload mirror" deny Edit "$R/tracked.txt" "$R" "$SID_A"
 hook_case "AC2 Write tracked denied" deny Write "$R/tracked.txt" "$R" "$SID_A"
 hook_case "AC2 Edit nested tracked denied" deny Edit "$R/dir/inner.txt" "$R" "$SID_A"
 hook_case "AC2 Write new untracked file denied" deny Write "$R/new.txt" "$R" "$SID_A"
 hook_case "AC2 Write new file in new subdir denied" deny Write "$R/newdir/deep/new.txt" "$R" "$SID_A"
 hook_case "AC2 relative file_path resolves against cwd" deny Edit "tracked.txt" "$R" "$SID_A"
+hook_case "AC2 direct Edit keeps literal brackets in file_path" deny Edit "[id].txt" "$R" "$SID_A"
+hook_case "AC2 direct Write keeps literal dollar signs in file_path" deny Write '$name.txt' "$R" "$SID_A"
 hook_case "AC2 symlink parked outside the repo still reaches the tracked file" deny Edit "$FIX/link_to_tracked" "$N" "$SID_A"
 hook_case "AC2 checkout under the scratchpad is still a checkout" deny Edit "$S/clone/tracked.txt" "$S" "$SID_A"
 hook_case "AC2 checkout under TMPDIR is still a checkout" deny Edit "$T/clone/tracked.txt" "$T" "$SID_A"
 hook_case "AC2 deny for a repo the session owns names its slug and fence" deny Edit "$R/tracked.txt" "$R" "$SID_A"
-if grep -q -- "--repo-slug $SLUG_A --session $SID_A --fence 4 " "$FIX/err" && ! grep -q 'aaa-first' "$FIX/err"; then
+if grep -q -- "--repo-slug $SLUG_A --session $SID_A --fence $FENCE_A " "$FIX/err"; then
     printf 'PASS  AC2 refusal names the target repo slug and fence, not the sorted-first owned slug\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  AC2 refusal names the target repo slug and fence, not the sorted-first owned slug\n' >&2; FAIL=$((FAIL + 1))
 fi
+if grep -q -- "--repo-path $R --runtime claude" "$FIX/err"; then
+    printf 'PASS  AC2 refusal binds allow-edit to the target repo and runtime\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  AC2 refusal binds allow-edit to the target repo and runtime\n' >&2; FAIL=$((FAIL + 1))
+fi
 # Short os.write must not count as a record (audit_append, spec 6.5 3a).
-if HOOK="$HOOK" CFG="$CFG" SLUG_A="$SLUG_A" python3 - <<'PY'
+if HOOK="$HOOK" CFG="$CFG" RD_A="$RD_A" python3 - <<'PY'
 import importlib.util, os, sys
 sys.dont_write_bytecode = True
 os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
@@ -218,10 +241,10 @@ g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
 real = os.write
 os.write = lambda fd, data: real(fd, data[:2])
 try:
-    assert g.audit_append(os.environ["SLUG_A"], {"v": 1, "event": "x"}) is False
+    assert g.audit_append(os.environ["RD_A"], {"v": 1, "event": "x"}) is False
 finally:
     os.write = real
-assert g.audit_append(os.environ["SLUG_A"], {"v": 1, "event": "x"}) is True
+assert g.audit_append(os.environ["RD_A"], {"v": 1, "event": "x"}) is True
 PY
 then
     printf 'PASS  AC2 audit_append treats a short write as failure\n'; PASS=$((PASS + 1))
@@ -273,6 +296,9 @@ hook_case "AC4 zsh -lc redirect denied (combined flag cluster, B1)" deny Bash "z
 hook_case "AC4 cd then relative redirect denied" deny Bash "cd $R/dir && echo x > inner.txt" "$N" "$SID_A"
 hook_case "AC4 subshell cd does not persist past its ) (B3)" deny Bash "(cd $S) ; echo x > tracked.txt" "$R" "$SID_A"
 hook_case "AC4 failed cd leaves the shell in place (B3)" deny Bash "cd $FIX/no-such-dir ; echo x > tracked.txt" "$R" "$SID_A"
+mkdir -p "$S/existing"
+hook_case "AC4 false && cd leaves the shell in place" deny Bash "false && cd $S/existing; echo x > tracked.txt" "$R" "$SID_A"
+hook_case "AC4 pipeline cd does not leave its subshell" deny Bash "cd $S/existing | cat; echo x > tracked.txt" "$R" "$SID_A"
 hook_case "AC4 cd -- with an operand denied (B3)" deny Bash "cd -- $R/dir && echo x > inner.txt" "$N" "$SID_A"
 hook_case "AC4 cd -P with an operand denied (B3)" deny Bash "cd -P $R/dir && echo x > inner.txt" "$N" "$SID_A"
 hook_case "AC4 env prefix then tee denied" deny Bash "env FOO=1 tee $TR" "$R" "$SID_A"
@@ -348,7 +374,7 @@ second_line_has() {   # LABEL SUBSTRING: second stderr line of the last run
     fi
 }
 
-reset_log; marker "$RD_A" "$SID_A" 4 300 10
+reset_log; marker "$RD_A" "$SID_A" "$FENCE_A" 300 10
 hook_case "AC5 valid marker allows Edit tracked" allow Edit "$R/tracked.txt" "$R" "$SID_A"
 hook_case "AC5 valid marker allows Write new file" allow Write "$R/new.txt" "$R" "$SID_A"
 hook_case "AC5 valid marker allows Bash redirect" allow Bash "echo x > $TR" "$R" "$SID_A"
@@ -443,22 +469,22 @@ if [ ! -e "$FIX/victim2" ]; then printf 'PASS  AC6 symlinked log not written thr
 # A claim of this invocation that does not survive on re-read (a concurrent
 # partial line spliced into ours) is an incomplete reservation: deny.
 reset_log; marker "$RD_A" "$SID_A" 4 300 5 "0000000000000002"
-if HOOK="$HOOK" CFG="$CFG" SLUG_A="$SLUG_A" SID_A="$SID_A" python3 - <<'PY'
+if HOOK="$HOOK" CFG="$CFG" RD_A="$RD_A" SID_A="$SID_A" python3 - <<'PY'
 import importlib.util, json, os, sys
 sys.dont_write_bytecode = True
 os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
 spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
 g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
-marker = json.load(open(os.path.join(os.environ["CFG"], "herdr-orch", os.environ["SLUG_A"], "orch-edit-allow.json")))
+marker = json.load(open(os.path.join(os.environ["RD_A"], "orch-edit-allow.json")))
 real = g.audit_append
 calls = []
-def flaky(slug, rec):
+def flaky(rd, rec):
     calls.append(rec)
-    return True if len(calls) == 2 else real(slug, rec)   # second claim silently lost
+    return True if len(calls) == 2 else real(rd, rec)   # second claim silently lost
 g.audit_append = flaky
-assert g.claim_budget(os.environ["SLUG_A"], marker, os.environ["SID_A"], "toolu_t", ["/a", "/b"]) is None
+assert g.claim_budget(os.environ["RD_A"], marker, os.environ["SID_A"], "toolu_t", ["/a", "/b"]) is None
 g.audit_append = real
-assert g.claim_budget(os.environ["SLUG_A"], marker, os.environ["SID_A"], "toolu_t", ["/a", "/b"]) == 3
+assert g.claim_budget(os.environ["RD_A"], marker, os.environ["SID_A"], "toolu_t", ["/a", "/b"]) == 3
 PY
 then
     printf 'PASS  AC6 a lost claim line makes the reservation incomplete (deny)\n'; PASS=$((PASS + 1))
@@ -510,8 +536,8 @@ reset_log; rm -f "$RD_A/orch-edit-allow.json"
 
 # --- AC7 link: the real allow-edit CLI mints a marker the hook honours ---
 reset_log
-CLAIM=$(env CLAUDE_CONFIG_DIR="$CFG" python3 "$CORE" claim-owner --repo-slug "$SLUG_A" --session "$SID_A" --host h --pid 1 --stale-secs 0 2>/dev/null)
-if env CLAUDE_CONFIG_DIR="$CFG" python3 "$CORE" allow-edit --repo-slug "$SLUG_A" --session "$SID_A" --fence "$CLAIM" --minutes 5 --max-edits 1 --note approved > "$FIX/ae.out" 2>"$FIX/ae.err" \
+CLAIM=$FENCE_A
+if env HOME="$H" CLAUDE_CONFIG_DIR="$CFG" HERDR_COORDINATION_ROOT="$HERDR_COORDINATION_ROOT" python3 "$CORE" allow-edit --repo-slug "$SLUG_A" --repo-path "$R" --runtime claude --session "$SID_A" --fence "$CLAIM" --minutes 5 --max-edits 1 --note approved > "$FIX/ae.out" 2>"$FIX/ae.err" \
         && grep -q '^expires .* marker [0-9a-f]\{16\}$' "$FIX/ae.out"; then
     printf 'PASS  AC7 allow-edit under the live fence prints expires and marker\n'; PASS=$((PASS + 1))
 else
@@ -519,13 +545,11 @@ else
 fi
 hook_case "AC7 hook honours the CLI-minted marker" allow Edit "$R/tracked.txt" "$R" "$SID_A"
 hook_case "AC7 CLI-minted budget 1 is then exhausted" deny Edit "$R/tracked.txt" "$R" "$SID_A"
-if env CLAUDE_CONFIG_DIR="$CFG" python3 "$CORE" allow-edit --repo-slug "$SLUG_A" --session "$SID_A" --fence "$((CLAIM + 1))" --minutes 5 >/dev/null 2>&1; then
+if env HOME="$H" CLAUDE_CONFIG_DIR="$CFG" HERDR_COORDINATION_ROOT="$HERDR_COORDINATION_ROOT" python3 "$CORE" allow-edit --repo-slug "$SLUG_A" --repo-path "$R" --runtime claude --session "$SID_A" --fence "$((CLAIM + 1))" --minutes 5 >/dev/null 2>&1; then
     printf 'FAIL  AC7 stale fence cannot mint\n' >&2; FAIL=$((FAIL + 1))
 else
     printf 'PASS  AC7 stale fence cannot mint\n'; PASS=$((PASS + 1))
 fi
-# restore the fixture owner record for the static block below
-printf '{"session_id":"%s","host":"h","pid":1,"heartbeat_ts":0,"fence":4}' "$SID_A" > "$RD_A/owner.json"
 rm -f "$RD_A/orch-edit-allow.json"
 
 # --- AC8 (no-marker part) and AC9: audit and malformed input ------------
@@ -624,7 +648,7 @@ PY
         printf 'FAIL  static: suite is registered in bin/dotfiles-tests\n' >&2; FAIL=$((FAIL + 1))
     fi
     if awk '/^## Safety/{f=1; next} f && /^- /{print; exit}' claude/skills/herdr-orchestration/SKILL.md | grep -q 'An orchestrator session dispatches; it does not edit' \
-            && grep -q 'allow-edit --repo-slug <slug> --session <id> --fence <fence> --minutes 5 --max-edits 3' claude/skills/herdr-orchestration/SKILL.md \
+            && grep -q 'allow-edit --repo-slug <slug> --repo-path <repo> --runtime <claude|codex> --session <id> --fence <fence> --minutes 5 --max-edits 3' claude/skills/herdr-orchestration/SKILL.md \
             && grep -q 'CLAUDE_CODE_SESSION_ID' claude/skills/herdr-orchestration/SKILL.md; then
         printf 'PASS  docs: SKILL.md Safety first bullet, allow-edit line, session-id sentence\n'; PASS=$((PASS + 1))
     else

@@ -41,34 +41,39 @@ assert_allows() {
 # a JSON warning on stdout or staying silent. guard_case drives it against a
 # fixture HOME so the account-aware routing is deterministic and machine-state
 # independent.
-#   label expect(warn|silent) home cfg(empty=unset CLAUDE_CONFIG_DIR) cwd
+#   label expect(warn|info|silent) home cfg(empty=unset CLAUDE_CONFIG_DIR) cwd [personal-only]
 guard_case() {
     label="$1"
     expect="$2"
     ghome="$3"
     gcfg="$4"
     gcwd="$5"
+    gpersonal_only="${6:-0}"
     payload=$(printf '{"cwd":"%s"}' "$gcwd")
     if [ -n "$gcfg" ]; then
-        out=$(printf '%s' "$payload" | env \
+        out=$(printf '%s' "$payload" | env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u WORKFLOW_PERSONAL_ACCOUNT \
             HOME="$ghome" \
+            CLAUDE_PERSONAL_ONLY="$gpersonal_only" \
             CLAUDE_CONFIG_DIR="$gcfg" \
             CLAUDE_WORK_TREE="$ghome/Git/work" \
             CLAUDE_WORK_CONFIG_DIR="$ghome/.claude-work" \
             claude/hooks/account_guard.py 2>/dev/null)
     else
-        out=$(printf '%s' "$payload" | env -u CLAUDE_CONFIG_DIR \
+        out=$(printf '%s' "$payload" | env -u CLAUDE_CONFIG_DIR -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u WORKFLOW_PERSONAL_ACCOUNT \
             HOME="$ghome" \
+            CLAUDE_PERSONAL_ONLY="$gpersonal_only" \
             CLAUDE_WORK_TREE="$ghome/Git/work" \
             CLAUDE_WORK_CONFIG_DIR="$ghome/.claude-work" \
             claude/hooks/account_guard.py 2>/dev/null)
     fi
-    if [ "$expect" = warn ]; then
-        if printf '%s' "$out" | grep -q 'account_guard'; then
+    if [ "$expect" = warn ] || [ "$expect" = info ]; then
+        severity=WARNING
+        [ "$expect" != info ] || severity=INFO
+        if printf '%s' "$out" | grep -q "\\[$severity\\] account_guard"; then
             printf 'PASS  %s\n' "$label"
             PASS=$((PASS + 1))
         else
-            printf 'FAIL  %s (expected a warning, got silence)\n' "$label" >&2
+            printf 'FAIL  %s (expected %s, got: %s)\n' "$label" "$severity" "$out" >&2
             FAIL=$((FAIL + 1))
         fi
     else
@@ -79,6 +84,29 @@ guard_case() {
             printf 'FAIL  %s (expected silence, got: %s)\n' "$label" "$out" >&2
             FAIL=$((FAIL + 1))
         fi
+    fi
+}
+
+guard_provider_failure_case() {
+    label="$1"
+    fixture="$GUARD_FIX/provider-$2"
+    mkdir -p "$fixture/hooks"
+    cp claude/hooks/account_guard.py "$fixture/hooks/account_guard.py"
+    if [ "$2" = broken ]; then
+        mkdir -p "$fixture/skills/lib"
+        printf 'raise RuntimeError("fixture provider failure")\n' > "$fixture/skills/lib/workflow_context.py"
+    fi
+    if out=$(printf '%s' '{"cwd":"/fixture"}' | env -i PATH="$PATH" HOME="$GUARD_FIX/provider-home" \
+        "$fixture/hooks/account_guard.py" 2>/dev/null); then
+        :
+    fi
+    if printf '%s' "$out" | grep -q '\[WARNING\] account_guard: account scope is unverified' \
+        && ! printf '%s' "$out" | grep -q "$GUARD_FIX"; then
+        printf 'PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (got: %s)\n' "$label" "$out" >&2
+        FAIL=$((FAIL + 1))
     fi
 }
 
@@ -638,6 +666,9 @@ trap - EXIT
 GUARD_FIX=$(mktemp -d)
 trap 'rm -rf "$GUARD_FIX"' EXIT
 
+guard_provider_failure_case "guard: missing shared provider warns without identifiers" missing
+guard_provider_failure_case "guard: broken shared provider warns without identifiers" broken
+
 # Fixture A: the default ~/.claude dir is signed into the WORK account (the
 # IDE-launch machine that produced the original false positive). Work identity
 # lives in the home-root ~/.claude.json legacy fallback.
@@ -662,20 +693,116 @@ printf '{"oauthAccount":{"accountUuid":"personal-uuid"}}' > "$GUARD_FIX/b/.claud
 
 guard_case "guard: personal account on personal repo -> silent" \
     silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/personal/repo"
-guard_case "guard: personal account on work repo -> warn" \
-    warn "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/repo"
+guard_case "guard: personal account override on work repo -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/repo"
 guard_case "guard: wrapper launch, work account on work repo -> silent" \
     silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/repo"
+guard_case "guard: work account on personal repo -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/repo"
+guard_case "guard: personal-only machine using personal account on work repo -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/repo" 1
+guard_case "guard: personal-only machine using work account on work repo -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/repo" 1
+guard_case "guard: personal-only machine catches work identity in default config" \
+    warn "$GUARD_FIX/a" "" "$GUARD_FIX/a/Git/work/repo" 1
+
+# Canonical repository ownership survives linked worktrees and symlinks.
+guard_git() {
+    env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        git -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+        -c user.name=Test -c user.email=test@example.invalid "$@"
+}
+for repo in "$GUARD_FIX/b/Git/personal/repo" "$GUARD_FIX/b/Git/work/repo"; do
+    guard_git init -q "$repo"
+    guard_git -C "$repo" commit -q --allow-empty -m fixture
+done
+guard_git -C "$GUARD_FIX/b/Git/personal/repo" worktree add -q --detach "$GUARD_FIX/b/Git/work/personal-worktree"
+guard_git -C "$GUARD_FIX/b/Git/work/repo" worktree add -q --detach "$GUARD_FIX/b/external-work-worktree"
+mkdir -p "$GUARD_FIX/b/Git/work/personal-worktree/nested"
+ln -s "$GUARD_FIX/b/Git/work/personal-worktree" "$GUARD_FIX/b/personal-shortcut"
+guard_case "guard: work identity on personal worktree under work tree -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/personal-worktree"
+guard_case "guard: work identity in personal worktree subdirectory -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/personal-worktree/nested"
+guard_case "guard: personal account on personal worktree under work tree -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/personal-worktree"
+guard_case "guard: symlink to personal worktree with work identity -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/personal-shortcut"
+guard_case "guard: external work worktree with work account -> silent" \
+    silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/external-work-worktree"
+guard_case "guard: external work worktree with personal override -> silent" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/external-work-worktree"
+guard_git -C "$GUARD_FIX/b/Git/work/repo" worktree add -q --detach "$GUARD_FIX/b/Git/personal/work-worktree"
+guard_case "guard: checkout under personal with work owner still protects personal scope" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/work-worktree"
+guard_git init -q --separate-git-dir "$GUARD_FIX/b/Git/work/personal-metadata.git" "$GUARD_FIX/b/Git/personal/separate-work-metadata"
+guard_git init -q --separate-git-dir "$GUARD_FIX/b/external-personal-metadata.git" "$GUARD_FIX/b/Git/personal/separate-external-metadata"
+guard_case "guard: personal checkout with separate work metadata -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/separate-work-metadata"
+guard_case "guard: personal checkout with separate external metadata -> warn" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/personal/separate-external-metadata"
+guard_git init -q --separate-git-dir "$GUARD_FIX/b/external-work-metadata.git" "$GUARD_FIX/b/Git/work/separate-external-metadata"
+guard_case "guard: work checkout with separate external metadata permits work account" \
+    silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/separate-external-metadata"
+guard_case "guard: work checkout with separate external metadata permits personal override" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/Git/work/separate-external-metadata"
+guard_case "guard: personal-only machine still rejects work account with separate metadata" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/Git/work/separate-external-metadata" 1
+mkdir -p "$GUARD_FIX/b/metadata"
+guard_git init -q --separate-git-dir "$GUARD_FIX/b/metadata/personal-primary.git" "$GUARD_FIX/b/Git/personal/separate-primary"
+guard_git -C "$GUARD_FIX/b/Git/personal/separate-primary" commit -q --allow-empty -m fixture
+guard_git -C "$GUARD_FIX/b/Git/personal/separate-primary" worktree add -q --detach "$GUARD_FIX/b/external-separate-linked"
+guard_case "guard: external linked separate metadata with inherited work is ambiguous" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/external-separate-linked"
+guard_case "guard: external linked separate metadata with custom config is ambiguous" \
+    warn "$GUARD_FIX/b" "$GUARD_FIX/b/custom" "$GUARD_FIX/b/external-separate-linked"
+guard_case "guard: explicit personal resolves external linked separate metadata" \
+    silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/external-separate-linked" 1
 
 # Fixture C: no work login at all (cloud container / personal-only machine).
-# Account cannot be resolved -> falls back to the original path-based check.
+# Account cannot be resolved -> config paths still protect personal scope.
 mkdir -p "$GUARD_FIX/c/.claude" \
     "$GUARD_FIX/c/Git/work/repo" "$GUARD_FIX/c/Git/personal/repo"
 
-guard_case "guard: fallback path check, default dir on work repo -> warn" \
-    warn "$GUARD_FIX/c" "" "$GUARD_FIX/c/Git/work/repo"
+guard_case "guard: fallback permits default dir on work repo -> silent" \
+    silent "$GUARD_FIX/c" "" "$GUARD_FIX/c/Git/work/repo"
 guard_case "guard: fallback path check, default dir on personal repo -> silent" \
     silent "$GUARD_FIX/c" "" "$GUARD_FIX/c/Git/personal/repo"
+guard_case "guard: fallback work config on personal repo -> warn" \
+    warn "$GUARD_FIX/c" "$GUARD_FIX/c/.claude-work" "$GUARD_FIX/c/Git/personal/repo"
+guard_case "guard: fallback custom config on work repo -> silent" \
+    silent "$GUARD_FIX/c" "$GUARD_FIX/c/custom" "$GUARD_FIX/c/Git/work/repo"
+guard_case "guard: fallback custom config on personal repo -> info" \
+    info "$GUARD_FIX/c" "$GUARD_FIX/c/custom" "$GUARD_FIX/c/Git/personal/repo"
+guard_case "guard: fallback personal-only machine with work config -> warn" \
+    warn "$GUARD_FIX/c" "$GUARD_FIX/c/.claude-work" "$GUARD_FIX/c/Git/work/repo" 1
+
+# The native default and an explicit ~/.claude select distinct authentication
+# namespaces. Metadata from one must not misidentify a session using the other.
+for fixture in d e f g; do
+    mkdir -p "$GUARD_FIX/$fixture/.claude-work" "$GUARD_FIX/$fixture/.claude" \
+        "$GUARD_FIX/$fixture/Git/personal/repo"
+    printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/$fixture/.claude-work/.claude.json"
+done
+printf '{"oauthAccount":{"accountUuid":"personal-uuid"}}' > "$GUARD_FIX/d/.claude.json"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/d/.claude/.claude.json"
+guard_case "guard: native default uses home metadata before explicit-dir metadata" \
+    silent "$GUARD_FIX/d" "" "$GUARD_FIX/d/Git/personal/repo"
+guard_case "guard: explicit default config uses its work metadata" \
+    warn "$GUARD_FIX/d" "$GUARD_FIX/d/.claude" "$GUARD_FIX/d/Git/personal/repo"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/e/.claude.json"
+printf '{"oauthAccount":{"accountUuid":"personal-uuid"}}' > "$GUARD_FIX/e/.claude/.claude.json"
+guard_case "guard: native default work identity cannot hide behind explicit personal metadata" \
+    warn "$GUARD_FIX/e" "" "$GUARD_FIX/e/Git/personal/repo"
+guard_case "guard: explicit default personal account ignores native work metadata" \
+    silent "$GUARD_FIX/e" "$GUARD_FIX/e/.claude" "$GUARD_FIX/e/Git/personal/repo"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/f/.claude.json"
+guard_case "guard: explicit namespace does not fall back to native work metadata" \
+    silent "$GUARD_FIX/f" "$GUARD_FIX/f/.claude" "$GUARD_FIX/f/Git/personal/repo"
+printf '{"oauthAccount":{"accountUuid":"work-uuid"}}' > "$GUARD_FIX/g/.claude/.claude.json"
+guard_case "guard: native namespace does not fall back to explicit work metadata" \
+    silent "$GUARD_FIX/g" "" "$GUARD_FIX/g/Git/personal/repo"
 
 # Fixture D: linked worktrees. A herdr / EnterWorktree / .worktrees checkout
 # of a work repo lives outside the work tree; the guard judges it by the repo
@@ -687,31 +814,30 @@ if command -v git >/dev/null 2>&1; then
     for gh in b c; do
         mkdir -p "$GUARD_FIX/$gh/Git/personal"
         for repo in "$GUARD_FIX/$gh/Git/work/wrepo" "$GUARD_FIX/$gh/Git/personal/prepo"; do
-            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c init.defaultBranch=main init -q "$repo"
-            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$repo" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+            guard_git -c init.defaultBranch=main init -q "$repo"
+            guard_git -C "$repo" commit -q --allow-empty -m base
         done
-        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$GUARD_FIX/$gh/Git/work/wrepo" worktree add -q "$GUARD_FIX/$gh/.herdr/worktrees/wrepo/wt" -b wt
-        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$GUARD_FIX/$gh/Git/personal/prepo" worktree add -q "$GUARD_FIX/$gh/.herdr/worktrees/prepo/wt" -b wt
+        guard_git -C "$GUARD_FIX/$gh/Git/work/wrepo" worktree add -q "$GUARD_FIX/$gh/.herdr/worktrees/wrepo/wt" -b wt
+        guard_git -C "$GUARD_FIX/$gh/Git/personal/prepo" worktree add -q "$GUARD_FIX/$gh/.herdr/worktrees/prepo/wt" -b wt
     done
     guard_case "guard: linked worktree of a work repo, work account -> silent" \
         silent "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/.herdr/worktrees/wrepo/wt"
-    guard_case "guard: linked worktree of a work repo, personal account -> warn" \
-        warn "$GUARD_FIX/b" "" "$GUARD_FIX/b/.herdr/worktrees/wrepo/wt"
+    guard_case "guard: linked worktree of a work repo, personal account -> silent" \
+        silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/.herdr/worktrees/wrepo/wt"
     guard_case "guard: linked worktree of a personal repo, work account -> warn" \
         warn "$GUARD_FIX/b" "$GUARD_FIX/b/.claude-work" "$GUARD_FIX/b/.herdr/worktrees/prepo/wt"
     guard_case "guard: linked worktree of a personal repo, personal account -> silent" \
         silent "$GUARD_FIX/b" "" "$GUARD_FIX/b/.herdr/worktrees/prepo/wt"
-    guard_case "guard: linked worktree, fallback path check, default dir on work repo -> warn" \
-        warn "$GUARD_FIX/c" "" "$GUARD_FIX/c/.herdr/worktrees/wrepo/wt"
+    guard_case "guard: linked worktree, default dir on work repo permits personal quota" \
+        silent "$GUARD_FIX/c" "" "$GUARD_FIX/c/.herdr/worktrees/wrepo/wt"
     guard_case "guard: linked worktree, fallback path check, work dir on work repo -> silent" \
         silent "$GUARD_FIX/c" "$GUARD_FIX/c/.claude-work" "$GUARD_FIX/c/.herdr/worktrees/wrepo/wt"
 
-    # Degraded git: missing from PATH (nogit), hanging past the guard's 2 s
-    # subprocess timeout (slowgit), or printing two lines (badgit). All fall
-    # back to the path rule (cwd outside the work tree, default dir ->
-    # silent), exit 0, and must not stall SessionStart: 3 s wall clock.
+    # Missing, hanging, or malformed Git cannot establish ownership. The
+    # canonical provider warns without selecting a fallback account and
+    # bounds each Git call at 5 seconds; allow wall-clock scheduling slack.
     mkdir -p "$GUARD_FIX/nogit" "$GUARD_FIX/slowgit" "$GUARD_FIX/badgit"
-    printf '#!/bin/sh\nsleep 5\n' > "$GUARD_FIX/slowgit/git"
+    printf '#!/bin/sh\nexec sleep 15\n' > "$GUARD_FIX/slowgit/git"
     printf '#!/bin/sh\nprintf "%%s\\n" "$HOME/Git/work/wrepo/.git" "extra"\n' > "$GUARD_FIX/badgit/git"
     chmod +x "$GUARD_FIX/slowgit/git" "$GUARD_FIX/badgit/git"
     PY_BIN="$(command -v python3)"
@@ -724,18 +850,17 @@ if command -v git >/dev/null 2>&1; then
             "$PY_BIN" claude/hooks/account_guard.py 2>/dev/null)
         rc=$?
         elapsed=$(( $(date +%s) - t0 ))
-        if [ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q account_guard && [ "$elapsed" -le 3 ]; then
-            printf 'PASS  guard: linked worktree, %s -> path rule, silent, exit 0, within 3s\n' "$variant"
+        if [ "$rc" = 0 ] && printf '%s' "$out" | grep -qF '[WARNING] account_guard' && [ "$elapsed" -le 7 ]; then
+            printf 'PASS  guard: linked worktree, %s -> unverified scope warning within 7s\n' "$variant"
             PASS=$((PASS + 1))
         else
-            printf 'FAIL  guard: linked worktree, %s -> path rule, silent, exit 0, within 3s (rc=%s elapsed=%s out=%s)\n' "$variant" "$rc" "$elapsed" "$out" >&2
+            printf 'FAIL  guard: linked worktree, %s -> unverified scope warning within 7s (rc=%s elapsed=%s out=%s)\n' "$variant" "$rc" "$elapsed" "$out" >&2
             FAIL=$((FAIL + 1))
         fi
     done
 
-    # Short circuit: an in-tree cwd never calls git, so the hanging git
-    # cannot slow it. Fixture C, default dir on a work-tree path -> warn,
-    # answered within 1 s.
+    # An in-tree checkout still requires Git ownership: a personal repo can
+    # have a linked checkout under the work tree. Unavailable Git warns.
     t0=$(date +%s)
     out=$(printf '{"cwd":"%s"}' "$GUARD_FIX/c/Git/work/repo" | env -u CLAUDE_CONFIG_DIR \
         HOME="$GUARD_FIX/c" PATH="$GUARD_FIX/slowgit:$PATH" \
@@ -743,11 +868,11 @@ if command -v git >/dev/null 2>&1; then
         "$PY_BIN" claude/hooks/account_guard.py 2>/dev/null)
     rc=$?
     elapsed=$(( $(date +%s) - t0 ))
-    if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q account_guard && [ "$elapsed" -le 1 ]; then
-        printf 'PASS  guard: linked worktree, intree cwd with slowgit -> path rule, warn, within 1s\n'
+    if [ "$rc" = 0 ] && printf '%s' "$out" | grep -qF '[WARNING] account_guard' && [ "$elapsed" -le 7 ]; then
+        printf 'PASS  guard: intree cwd with slowgit -> unverified scope warning within 7s\n'
         PASS=$((PASS + 1))
     else
-        printf 'FAIL  guard: linked worktree, intree cwd with slowgit -> path rule, warn, within 1s (rc=%s elapsed=%s out=%s)\n' "$rc" "$elapsed" "$out" >&2
+        printf 'FAIL  guard: intree cwd with slowgit -> unverified scope warning within 7s (rc=%s elapsed=%s out=%s)\n' "$rc" "$elapsed" "$out" >&2
         FAIL=$((FAIL + 1))
     fi
 else
@@ -980,7 +1105,7 @@ gate_case() {
 }
 
 gate_case "impl worker without record is refused" block-1 w1 impl none nofile "$GATE_P_F"
-if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 --phase implement --outcome completed|failed|paused --head-sha "$(git rev-parse HEAD)" --base-sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; then
+if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py" emit-done --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent impl-proj-1 --phase implement --outcome '\''<completed|failed|paused>'\'' --head-sha "$(git rev-parse HEAD)" --base-sha bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; then
     printf 'PASS  gate: refusal prints the filled emit-done line\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  gate: refusal prints the filled emit-done line (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
@@ -989,7 +1114,7 @@ gate_case "impl worker with own fresh record is allowed" allow w1 impl done:fres
 gate_case "record from another workspace is refused" block-1 w1 impl done:fresh:w9:PROJ-1 nofile "$GATE_P_F"
 gate_case "record for another task is refused" block-1 w1 impl done:fresh:w1:PROJ-2 nofile "$GATE_P_F"
 gate_case "review worker is refused by a done record" block-1 w1 review done:fresh:w1:PROJ-1 nofile "$GATE_P_F"
-if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent rev-proj-1 --reviewed-head-sha "$(git rev-parse HEAD)" --outcome approved|changes-requested --blocking-count <n> --findings-ref <path>'; then
+if sed -n 2p "$GATE_LAST/err" | grep -Fxq 'Run: python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py" emit-review --repo-slug slug-x --task-id PROJ-1 --workspace w1 --agent rev-proj-1 --reviewed-head-sha "$(git rev-parse HEAD)" --outcome '\''<approved|changes-requested>'\'' --blocking-count '\''<count>'\'' --findings-ref '\''<path>'\'''; then
     printf 'PASS  gate: review refusal prints the filled emit-review line\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  gate: review refusal prints the filled emit-review line (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
@@ -997,7 +1122,7 @@ fi
 gate_case "review worker with review record is allowed" allow w1 review review:fresh:w1:PROJ-1 nofile "$GATE_P_F"
 gate_case "impl worker is refused by a review record alone" block-1 w1 impl review:fresh:w1:PROJ-1 nofile "$GATE_P_F"
 gate_case "missing task record prints placeholders" block-1 w1 impl notask nofile "$GATE_P_F"
-if sed -n 2p "$GATE_LAST/err" | grep -Fq -- '--agent <agent> --phase <phase> --outcome completed|failed|paused --head-sha "$(git rev-parse HEAD)" --base-sha <base_sha>'; then
+if sed -n 2p "$GATE_LAST/err" | grep -Fq -- '--agent '\''<agent>'\'' --phase '\''<phase>'\'' --outcome '\''<completed|failed|paused>'\'' --head-sha "$(git rev-parse HEAD)" --base-sha '\''<base_sha>'\'''; then
     printf 'PASS  gate: placeholders stand in for missing task record fields\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  gate: placeholders stand in for missing task record fields (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))

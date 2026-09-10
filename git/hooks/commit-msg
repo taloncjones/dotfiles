@@ -6,9 +6,9 @@ set -euo pipefail
 # Two layers, in order:
 #   1. Strip pass (no rg needed): removes agent attribution lines that tools
 #      inject -- agent Co-Authored-By trailers, session-URL trailers, and
-#      "Generated with|by <agent>" footers -- from line 2 onward. Every other
-#      line is written back byte-for-byte; a message with nothing to strip is
-#      not rewritten at all.
+#      "Generated with|by <agent>" footers -- from line 2 onward. Other line
+#      content is preserved; rewriting adds LF to an unterminated retained
+#      final line. A message with nothing to strip is not rewritten at all.
 #   2. Block checks (rg): reject what cannot be safely edited -- inline
 #      attribution in the subject or body, and emojis.
 # Squash-merge messages come from the PR body, which no git hook sees; the

@@ -14,10 +14,13 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TODOS="$HERE/../todos.sh"
 CORE="$HERE/../../../../hooks/herdr_orch_core.py"
+CONTEXT="$HERE/../../../lib/workflow_context.py"
 
 # A developer's own overrides must not leak into the fixtures.
 unset TODOS_DASHBOARD_DIR TODOS_STATE_ROOT TODOS_DASHBOARD_TODOS_SH TODOS_DASHBOARD_OPENER \
-      TODOS_OFFLINE TODOS_GH TODOS_BASE_REF XDG_STATE_HOME
+      TODOS_OFFLINE TODOS_GH TODOS_BASE_REF XDG_STATE_HOME CODEX_HOME \
+      CLAUDE_CONFIG_DIR CLAUDE_PERSONAL_ONLY CLAUDE_WORK_CONFIG_DIR CLAUDE_WORK_TREE \
+      ORCH_RUNTIME HERDR_PERSONAL
 # Fixture commits must not run the user's hooks, templates, or signing.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TEMPLATE_DIR=""
 
@@ -81,6 +84,20 @@ mk_repo() {
 # Same fixture without any remote: the no-remote case is a fresh repo, never a
 # mutation of an existing one.
 mk_repo_no_remote() { mk_repo_base; }
+
+mk_repo_at() { # mk_repo_at <empty-dir>
+  local d="$1"
+  guard_fixture "$(dirname "$d")"
+  mkdir "$d" || refuse "cannot create fixture repo $d"
+  { git -C "$d" init -q \
+    && git -C "$d" config user.email t@t && git -C "$d" config user.name t \
+    && git -C "$d" config commit.gpgsign false && git -C "$d" config core.hooksPath /dev/null \
+    && git -C "$d" commit -q --allow-empty -m base \
+    && git -C "$d" update-ref refs/remotes/origin/main HEAD \
+    && git -C "$d" remote add origin git@github.com:Org/Repo.git \
+    && mkdir -p "$d/.git/info" && printf '.todos/\n' >>"$d/.git/info/exclude"; } >/dev/null 2>&1 \
+    || refuse "cannot build fixture repo in $d"
+}
 
 mk_todo() { # mk_todo <repo> <pending|completed> <name>  (body on stdin)
   guard_fixture "$1"
@@ -205,6 +222,31 @@ render() {
 rc()  { cat "$RCF"; }
 err() { cat "$ERRF"; }
 
+render_scoped() { # render_scoped <repo> <home> <xdg-state> [dashboard args...]
+  local repo="$1" home="$2" xdg="$3"; shift 3
+  guard_fixture "$repo"; guard_fixture "$home"; guard_fixture "$xdg"
+  (
+    cd "$repo" || exit 2
+    unset CLAUDE_CONFIG_DIR CLAUDE_PERSONAL_ONLY CLAUDE_WORK_CONFIG_DIR
+    export HOME="$home" CODEX_HOME="$home/.codex" XDG_STATE_HOME="$xdg" \
+           CLAUDE_WORK_TREE="$home/Git/work" TODOS_DASHBOARD_NOW="2026-05-07 09:00" \
+           TODOS_TODAY=2026-05-07
+    bash "$TODOS" dashboard "$@" 2>"$ERRF"
+  )
+  printf '%s' "$?" >"$RCF"
+}
+
+scope_account_id() { # scope_account_id <repo> <home> [--personal]
+  local repo="$1" home="$2"; shift 2
+  local scope
+  scope=$( (
+    unset CLAUDE_CONFIG_DIR CLAUDE_PERSONAL_ONLY CLAUDE_WORK_CONFIG_DIR
+    HOME="$home" CODEX_HOME="$home/.codex" CLAUDE_WORK_TREE="$home/Git/work" \
+      python3 "$CONTEXT" account-scope --cwd "$repo" --runtime codex "$@"
+  ) ) || return 1
+  python3 -c 'import json,sys; print(json.loads(sys.argv[1])["account_id"])' "$scope"
+}
+
 # --- cases ---
 
 test_guard() {
@@ -281,6 +323,106 @@ test_default_path_slug() {
   rm_fixture "$repo" "$bare" "$sr"
 }
 test_default_path_slug
+
+test_account_scoped_state_and_output() {
+  local home repo xdg slug personal_tasks work_tasks work_id personal_id out work_page personal_page
+  home=$(mk_dir) || exit 2; mkdir -p "$home/Git/work" "$home/.claude" "$home/.claude-work"
+  repo="$home/Git/work/repo"; mk_repo_at "$repo"
+  xdg=$(mk_dir) || exit 2; slug=$(core_slug git@github.com:Org/Repo.git)
+  mk_todo "$repo" pending 2026-05-01-account <<'EOF'
+---
+created: 2026-05-01
+title: Account-scoped todo
+---
+EOF
+  personal_tasks="$home/.claude/herdr-orch/$slug/tasks"
+  work_tasks="$home/.claude-work/herdr-orch/$slug/tasks"
+  mkdir -p "$personal_tasks" "$work_tasks"
+  printf '{"status":"personal-only","workers":[]}' >"$personal_tasks/td-2026-05-01-account.json"
+  printf '{"status":"in-progress","workers":[]}' >"$work_tasks/td-2026-05-01-account.json"
+  work_id=$(scope_account_id "$repo" "$home") || refuse "cannot resolve work account id"
+  personal_id=$(scope_account_id "$repo" "$home" --personal) || refuse "cannot resolve personal account id"
+
+  out=$(render_scoped "$repo" "$home" "$xdg" --runtime codex)
+  assert_eq "account: work Codex dashboard exits 0" "$(rc)" "0"
+  work_page="$xdg/dotfiles/dashboard/$work_id/$slug.html"
+  assert_eq "account: work default output is account-partitioned" "$out" "$work_page"
+  assert_file_has "account: work Codex reads only work state" "$work_page" 'data-task-status="in-progress"'
+  assert_file_lacks "account: work Codex does not read personal state" "$work_page" 'personal-only'
+
+  out=$(render_scoped "$repo" "$home" "$xdg" --runtime codex --personal)
+  assert_eq "account: personal override dashboard exits 0" "$(rc)" "0"
+  personal_page="$xdg/dotfiles/dashboard/$personal_id/$slug.html"
+  assert_eq "account: personal override uses a separate output" "$out" "$personal_page"
+  assert_file_has "account: personal override reads personal state" "$personal_page" 'data-task-status="personal-only"'
+  assert_file_lacks "account: personal output stays distinct from work output" "$personal_page" 'in-progress'
+
+  out=$( (
+    export HERDR_PERSONAL=1
+    render_scoped "$repo" "$home" "$xdg" --runtime codex
+  ) )
+  assert_eq "account: bound personal dashboard exits 0" "$(rc)" "0"
+  assert_eq "account: bound personal keeps personal output" "$out" "$personal_page"
+  assert_file_has "account: bound personal reads personal state" "$personal_page" 'data-task-status="personal-only"'
+  ok "account: Codex work and deliberate personal scopes stay isolated"
+  rm_fixture "$home" "$xdg"
+}
+test_account_scoped_state_and_output
+
+test_inherited_git_location_is_ignored() {
+  local home work foreign xdg slug work_id tasks out page
+  home=$(mk_dir) || exit 2
+  mkdir -p "$home/Git/work" "$home/Git/personal" "$home/.claude" "$home/.claude-work"
+  work="$home/Git/work/active"; foreign="$home/Git/personal/foreign"
+  mk_repo_at "$work"; mk_repo_at "$foreign"
+  xdg=$(mk_dir) || exit 2; slug=$(core_slug git@github.com:Org/Repo.git)
+  mk_todo "$work" pending 2026-05-02-local <<'EOF'
+---
+created: 2026-05-02
+title: Local checkout wins
+---
+EOF
+  tasks="$home/.claude-work/herdr-orch/$slug/tasks"; mkdir -p "$tasks"
+  printf '{"status":"in-progress","workers":[]}' >"$tasks/td-2026-05-02-local.json"
+  work_id=$(scope_account_id "$work" "$home") || refuse "cannot resolve work account id"
+
+  out=$( (
+    export GIT_DIR="$foreign/.git" GIT_WORK_TREE="$foreign"
+    render_scoped "$work" "$home" "$xdg" --runtime codex
+  ) )
+  assert_eq "account: inherited Git location dashboard exits 0" "$(rc)" "0"
+  page="$xdg/dotfiles/dashboard/$work_id/$slug.html"
+  assert_eq "account: inherited Git location keeps current checkout output" "$out" "$page"
+  assert_file_has "account: inherited Git location keeps work state" "$page" 'data-task-status="in-progress"'
+  rm_fixture "$home" "$xdg"
+}
+test_inherited_git_location_is_ignored
+
+test_default_scope_rejects_cross_account_tasks_symlink() {
+  local home repo xdg slug work_tasks personal_tasks work_id out page
+  home=$(mk_dir) || exit 2; mkdir -p "$home/Git/work" "$home/.claude" "$home/.claude-work"
+  repo="$home/Git/work/repo"; mk_repo_at "$repo"
+  xdg=$(mk_dir) || exit 2; slug=$(core_slug git@github.com:Org/Repo.git)
+  mk_todo "$repo" pending 2026-05-03-scoped <<'EOF'
+---
+created: 2026-05-03
+title: Scoped task state
+---
+EOF
+  personal_tasks="$home/.claude/herdr-orch/$slug/tasks"; mkdir -p "$personal_tasks"
+  printf '{"status":"private-personal-marker","workers":[]}' >"$personal_tasks/td-2026-05-03-scoped.json"
+  work_tasks="$home/.claude-work/herdr-orch/$slug/tasks"; mkdir -p "$(dirname "$work_tasks")"
+  ln -s "$personal_tasks" "$work_tasks" || refuse "cannot plant cross-account tasks symlink"
+  work_id=$(scope_account_id "$repo" "$home") || refuse "cannot resolve work account id"
+
+  out=$(render_scoped "$repo" "$home" "$xdg" --runtime codex)
+  assert_eq "account: task symlink dashboard exits 0" "$(rc)" "0"
+  page="$xdg/dotfiles/dashboard/$work_id/$slug.html"
+  assert_eq "account: task symlink keeps work output" "$out" "$page"
+  assert_file_lacks "account: task symlink never reads personal state" "$page" 'private-personal-marker'
+  rm_fixture "$home" "$xdg"
+}
+test_default_scope_rejects_cross_account_tasks_symlink
 
 test_read_only() {
   local repo sr before after

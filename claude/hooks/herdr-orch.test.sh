@@ -2,6 +2,8 @@
 # herdr-orch.test.sh - unit + integration tests for the herdr-orchestration
 # core module and worker-status hook. Stdlib python only; no network, no herdr.
 set -e
+# Use physical macOS temp paths so strict no-follow state traversal is tested.
+TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))'); export TMPDIR
 PASS=0
 FAIL=0
 
@@ -10,6 +12,7 @@ FAIL=0
 # stdin; exit 0 pass / non-0 fail.
 check() {
     label="$1"
+    HERDR_COORDINATION_ROOT=$(mktemp -d); export HERDR_COORDINATION_ROOT
     body=$(cat)
     first_line=$(printf '%s\n' "$body" | head -n 1)
     case "$first_line" in
@@ -25,7 +28,8 @@ check() {
 # load helper prefixed to every snippet
 LOAD='import importlib.util,sys,os,tempfile,json,re
 spec=importlib.util.spec_from_file_location("core","claude/hooks/herdr_orch_core.py")
-c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)'
+c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
+from herdr_legacy_fixture import claim_legacy_owner'
 
 # Fake claude for run-mech checks, built once and reached via exported
 # FAKE_CLAUDE_DIR (shell functions do not survive into `sh -e -` snippets).
@@ -168,28 +172,28 @@ check "ownership: exclusive claim, locked stale takeover, fence" <<PY
 $LOAD
 root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
 rd=c.repo_dir("slug-abc");rd.mkdir(parents=True)
-f1=c.claim_owner(rd,"A","h",1);assert f1==1 and c.check_fence(rd,"A",f1)
-assert c.claim_owner(rd,"B","h",2) is None            # fresh owner: busy
-f2=c.claim_owner(rd,"B","h",2,stale_secs=0);assert f2==2   # stale: takeover
+f1=claim_legacy_owner(rd,"A","h",1);assert f1==1 and c.check_fence(rd,"A",f1)
+assert claim_legacy_owner(rd,"B","h",2) is None            # fresh owner: busy
+f2=claim_legacy_owner(rd,"B","h",2,stale_secs=0);assert f2==2   # stale: takeover
 assert not c.check_fence(rd,"A",f1) and c.check_fence(rd,"B",f2)
 assert c.refresh_owner(rd,"B",f2) and not c.refresh_owner(rd,"A",f1)
 sys.exit(0)
 PY
 
-check "ownership: stale owner.json.lock (crashed holder) is broken by mtime, not wedged forever" <<PY
+check "ownership: persistent flock survives an old mtime without unlinking" <<PY
 $LOAD
 root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
 rd=c.repo_dir("slug-lock");rd.mkdir(parents=True)
-f1=c.claim_owner(rd,"OLD","h",1);assert f1==1
-o=json.loads((rd/"owner.json").read_text());o["heartbeat_ts"]=0
-(rd/"owner.json").write_text(json.dumps(o))            # stale the stored owner
-lock=rd/"owner.json.lock"
+f1=claim_legacy_owner(rd,"OLD","h",1);assert f1==1
+o=json.loads(c.coordination.owner_path(rd).read_text());o["heartbeat_ts"]=0
+c.coordination.owner_path(rd).write_text(json.dumps(o))            # stale the stored owner
+lock=c.coordination.coordination_root()/".owner.lock"
 lock.write_text("")                                     # simulate a SIGKILLed holder's leaked lock
 os.utime(lock,(0,0))                                    # ancient mtime: no unlink ever ran
-f2=c.claim_owner(rd,"NEW","h",2,stale_secs=1)
+f2=claim_legacy_owner(rd,"NEW","h",2,stale_secs=1)
 assert f2 is not None, "stale lock permanently wedged claim_owner"
 assert c.check_fence(rd,"NEW",f2)
-assert not lock.exists()                                # broken lock cleaned up, not left behind
+assert lock.exists()                                    # inode persists across every transaction
 sys.exit(0)
 PY
 
@@ -198,15 +202,16 @@ $LOAD
 import subprocess, textwrap
 root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
 rd=c.repo_dir("slug-abc");rd.mkdir(parents=True)
-c.claim_owner(rd,"OLD","h",1)                          # existing owner
-o=json.loads((rd/"owner.json").read_text());o["heartbeat_ts"]=0
-(rd/"owner.json").write_text(json.dumps(o))            # stale the stored heartbeat field
+claim_legacy_owner(rd,"OLD","h",1)                          # existing owner
+o=json.loads(c.coordination.owner_path(rd).read_text());o["heartbeat_ts"]=0
+c.coordination.owner_path(rd).write_text(json.dumps(o))            # stale the stored heartbeat field
 prog=textwrap.dedent('''
 import importlib.util,os,sys
 s=importlib.util.spec_from_file_location("core","claude/hooks/herdr_orch_core.py")
 c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+from herdr_legacy_fixture import claim_legacy_owner
 rd=c.repo_dir("slug-abc")
-f=c.claim_owner(rd,sys.argv[1],"h",int(sys.argv[1][1:] or 0),stale_secs=1)
+f=claim_legacy_owner(rd,sys.argv[1],"h",int(sys.argv[1][1:] or 0)+1,stale_secs=1)
 print("WIN" if f else "LOSE")
 ''')
 env=dict(os.environ)
@@ -214,7 +219,7 @@ procs=[subprocess.Popen([sys.executable,"-c",prog,f"s{i}"],stdout=subprocess.PIP
 outs=[p.communicate()[0].decode().strip() for p in procs]
 # with a lock, some LOSE on contention and retry-eligible; but the owner file
 # must name exactly one session and check_fence must hold for only that one.
-owner=__import__("json").loads((rd/"owner.json").read_text())
+owner=__import__("json").loads(c.coordination.owner_path(rd).read_text())
 wins=outs.count("WIN")
 assert wins>=1
 assert c.check_fence(rd,owner["session_id"],owner["fence"])
@@ -225,13 +230,16 @@ check "ownership: concurrent FIRST-ever claim never yields a lost fence" <<PY
 $LOAD
 import subprocess, textwrap
 root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-fresh");rd.mkdir(parents=True)          # no pre-existing owner
+rd=c.repo_dir("slug-fresh");rd.mkdir(parents=True)
+with c.coordination.owner_transaction(rd, canonical_id="fixture", expected_slug="slug-fresh"):
+    pass                                                # explicit identity permits first claim
 prog=textwrap.dedent('''
 import importlib.util,os,sys
 s=importlib.util.spec_from_file_location("core","claude/hooks/herdr_orch_core.py")
 c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+from herdr_legacy_fixture import claim_legacy_owner
 rd=c.repo_dir("slug-fresh")
-f=c.claim_owner(rd,sys.argv[1],"h",int(sys.argv[1][1:] or 0))
+f=c.claim_owner(rd,sys.argv[1],"h",int(sys.argv[1][1:] or 0)+1)
 print(f if f is not None else "None")
 ''')
 env=dict(os.environ)
@@ -246,95 +254,7 @@ for sid,fence in winners:
 sys.exit(0)
 PY
 
-check "allow-edit: live fence mints marker, audit line, truncated note" <<PY
-$LOAD
-import time
-root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-ae");rd.mkdir(parents=True)
-f=c.claim_owner(rd,"S","h",1)
-rc=c.main(["allow-edit","--repo-slug","slug-ae","--session","S","--fence",str(f),"--minutes","5","--max-edits","2","--note","x"*300])
-assert rc==0
-m=json.loads((rd/"orch-edit-allow.json").read_text())
-assert m["v"]==1 and re.match(r"[0-9a-f]{16}\$",m["marker_id"]) and m["session_id"]=="S" and m["fence"]==f
-assert m["minutes"]==5 and m["max_edits"]==2 and len(m["note"])==200
-assert time.time()+290<m["expires_epoch"]<=time.time()+300
-assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\$",m["expires"]) and re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\$",m["ts"])
-lines=(rd/"tasks"/"orch-edits.jsonl").read_text().splitlines();assert len(lines)==1
-a=json.loads(lines[0]);assert a["v"]==1 and a["event"]=="allow-edit" and a["marker_id"]==m["marker_id"] and a["max_edits"]==2 and a["fence"]==f
-sys.exit(0)
-PY
-
-check "allow-edit: two mints get distinct marker ids and default max_edits 3" <<PY
-$LOAD
-root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-ae2");rd.mkdir(parents=True)
-f=c.claim_owner(rd,"S","h",1)
-assert c.main(["allow-edit","--repo-slug","slug-ae2","--session","S","--fence",str(f),"--minutes","1"])==0
-a=json.loads((rd/"orch-edit-allow.json").read_text())
-assert c.main(["allow-edit","--repo-slug","slug-ae2","--session","S","--fence",str(f),"--minutes","1"])==0
-b=json.loads((rd/"orch-edit-allow.json").read_text())
-assert a["marker_id"]!=b["marker_id"] and a["max_edits"]==3 and b["note"]==""
-assert len((rd/"tasks"/"orch-edits.jsonl").read_text().splitlines())==2
-sys.exit(0)
-PY
-
-check "allow-edit: stale fence exits 2 and writes nothing" <<PY
-$LOAD
-root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-ae3");rd.mkdir(parents=True)
-f=c.claim_owner(rd,"S","h",1)
-try:
-    c.main(["allow-edit","--repo-slug","slug-ae3","--session","S","--fence",str(f+1),"--minutes","5"]);raise AssertionError("should exit 2")
-except SystemExit as e:
-    assert e.code==2
-try:
-    c.main(["allow-edit","--repo-slug","slug-ae3","--session","OTHER","--fence",str(f),"--minutes","5"]);raise AssertionError("should exit 2")
-except SystemExit as e:
-    assert e.code==2
-assert not (rd/"orch-edit-allow.json").exists() and not (rd/"tasks").exists()
-sys.exit(0)
-PY
-
-check "allow-edit: minutes and max-edits out of range exit 2 and write nothing" <<PY
-$LOAD
-root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-ae4");rd.mkdir(parents=True)
-f=c.claim_owner(rd,"S","h",1)
-for extra in (["--minutes","0"],["--minutes","16"],["--minutes","5","--max-edits","0"],["--minutes","5","--max-edits","11"]):
-    try:
-        c.main(["allow-edit","--repo-slug","slug-ae4","--session","S","--fence",str(f)]+extra);raise AssertionError("should exit 2")
-    except SystemExit as e:
-        assert e.code==2
-assert not (rd/"orch-edit-allow.json").exists() and not (rd/"tasks").exists()
-sys.exit(0)
-PY
-
-check "allow-edit: symlinked audit log is not written through but the marker still lands" <<PY
-$LOAD
-root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-ae5");rd.mkdir(parents=True);(rd/"tasks").mkdir()
-victim=os.path.join(root,"victim");(rd/"tasks"/"orch-edits.jsonl").symlink_to(victim)
-f=c.claim_owner(rd,"S","h",1)
-assert c.main(["allow-edit","--repo-slug","slug-ae5","--session","S","--fence",str(f),"--minutes","5"])==0
-assert (rd/"orch-edit-allow.json").exists() and not os.path.exists(victim)
-sys.exit(0)
-PY
-
-check "allow-edit: append_orch_edit treats a short os.write as failure" <<PY
-$LOAD
-root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
-rd=c.repo_dir("slug-ae6");rd.mkdir(parents=True)
-real=c.os.write
-c.os.write=lambda fd,data: real(fd,data[:3])
-try:
-    assert c.append_orch_edit(rd,{"v":1,"event":"allow-edit"}) is False
-finally:
-    c.os.write=real
-assert c.append_orch_edit(rd,{"v":1,"event":"allow-edit"}) is True
-sys.exit(0)
-PY
-
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 
 check "should_dispatch_review: once per HEAD, re-review on new HEAD" <<PY
 $LOAD
@@ -349,10 +269,10 @@ PY
 
 check "CLI emit-done rejects path-escaping ids" <<'SH'
 root=$(mktemp -d)
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py emit-done \
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
   --repo-slug "../evil" --task-id "PROJ-1" --workspace w1 --agent a --phase implement \
   --outcome completed --head-sha h --base-sha b 2>/dev/null; then exit 1; fi
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py emit-done \
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
   --repo-slug "slug-x" --task-id "../evil" --workspace w1 --agent a --phase implement \
   --outcome completed --head-sha h --base-sha b 2>/dev/null; then exit 1; fi
 test ! -e "$root/../evil"
@@ -360,51 +280,51 @@ SH
 
 check "CLI write-task requires a live fence" <<'SH'
 root=$(mktemp -d)
-f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py claim-owner \
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
    --repo-slug slug-x --session S --host h --pid 1)
 task='{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress"}'
-CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json "$task"
 test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 # wrong fence is refused
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug slug-x --task-id PROJ-1 --session S --fence 999 --json "$task" 2>/dev/null; then exit 1; fi
 SH
 
 check "CLI write-task rejects non-dict json and task_id mismatch" <<'SH'
 root=$(mktemp -d)
-f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py claim-owner \
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
    --repo-slug slug-x --session S --host h --pid 1)
 # a bare array would persist and later crash `status` on .get -> must be refused
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json '[]' 2>/dev/null; then exit 1; fi
 # a dict whose task_id disagrees with --task-id is refused
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json '{"task_id":"PROJ-2"}' 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 # the matching record persists
-CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-task \
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug slug-x --task-id PROJ-1 --session S --fence "$f" --json '{"task_id":"PROJ-1","status":"kickoff"}'
 test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 SH
 
 check "CLI write-index rejects a non-dict payload (would orphan the workspace)" <<'SH'
 root=$(mktemp -d)
-f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py claim-owner \
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
    --repo-slug slug-x --session S --host h --pid 1)
 # a bare array reads back as None from read_index -> events silently orphaned; must be refused
-if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-index \
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-index \
    --repo-slug slug-x --workspace w1 --session S --fence "$f" --json '[]' 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/slug-x/workspaces/w1.json"
 # a well-formed object persists
-CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py write-index \
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-index \
    --repo-slug slug-x --workspace w1 --session S --fence "$f" --json '{"task_id":"PROJ-1","role":"impl"}'
 test -f "$root/herdr-orch/slug-x/workspaces/w1.json"
 SH
 
 check "CLI confirm-review: dispatched==reviewed==HEAD+workspace+no-blocking passes; else fails" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 # no task/review yet -> not reviewed
 if $CLI confirm-review --repo-slug slug-x --task-id PROJ-1 --workspace w9 --head-sha h1 2>/dev/null; then exit 1; fi
@@ -436,7 +356,7 @@ SH
 
 check "CLI emit-review writes a separate review.json with blocking_count, never clobbering done.json" <<'SH'
 root=$(mktemp -d)
-CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_orch_core.py emit-review \
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
   --repo-slug slug-x --task-id PROJ-1 --workspace w9 --agent rev-proj-1 \
   --reviewed-head-sha h9 --outcome changes-requested --blocking-count 3 --findings-ref /tmp/f.md
 python3 - <<PY
@@ -450,7 +370,7 @@ SH
 
 check "CLI status folds events per task, not cross-contaminated" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" --json '{"task_id":"PROJ-1","status":"in-progress"}'
 $CLI write-task --repo-slug slug-x --task-id PROJ-2 --session S --fence "$F" --json '{"task_id":"PROJ-2","status":"in-progress"}'
@@ -464,7 +384,7 @@ SH
 
 check "CLI status ignores .review.json sidecars (does not overwrite the task's status)" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","status":"reviewed","review_head_sha":"h1"}'
@@ -476,7 +396,7 @@ SH
 
 check "CLI should-dispatch-review: once per HEAD, re-review on new HEAD" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","status":"completed","review_head_sha":null}'
@@ -489,7 +409,7 @@ SH
 
 check "CLI confirm-completion: matching HEAD/base/workspace completes, mismatch does not" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
   --json '{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress"}'
@@ -549,7 +469,7 @@ sys.exit(0)
 PY
 
 check "write-capabilities CLI round-trips; rejects bad payload and stale fence" <<'SH'
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
@@ -595,7 +515,7 @@ sys.exit(0)
 PY
 
 check "resolve-model CLI: exit codes, stdout discipline, config override" <<'SH'
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 rc=0; out=$($CLI resolve-model --repo-slug slug-x --role plan --session S 2>/dev/null) || rc=$?
@@ -613,7 +533,7 @@ rc=0; $CLI resolve-model --repo-slug slug-x --role plan --session S >/dev/null 2
 SH
 
 check "disable-model: flips one alias false, downward-only, guards session+alias" <<'SH'
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 export CLAUDE_CONFIG_DIR="$(mktemp -d)"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 $CLI write-capabilities --repo-slug slug-x --session S --fence "$F" \
@@ -660,7 +580,7 @@ sys.exit(0)
 PY
 
 check "classify-probe CLI prints classification" <<'SH'
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":true,"api_error_status":429,"result":"usage limit reached"}')
 test "$out" = "unavailable"
 out=$($CLI classify-probe --repo-slug x --model fable --json '{"is_error":true,"api_error_status":429}')
@@ -876,7 +796,7 @@ S=github-com-org-repo-deadbeef
 mkdir -p "$root/herdr-orch/$S/tasks" "$root/herdr-orch/$S/workspaces"
 echo '{}' > "$root/herdr-orch/$S/tasks/PROJ-1.done.json"
 out="$root/watch.out"
-python3 claude/hooks/herdr_orch_core.py watch --repo-slug "$S" \
+python3 claude/hooks/herdr_legacy_fixture.py watch --repo-slug "$S" \
   --interval 1 --debounce-secs 1 > "$out" &
 wpid=$!
 trap 'kill $wpid 2>/dev/null || true' EXIT
@@ -896,7 +816,7 @@ S=github-com-org-repo-deadbeef
 mkdir -p "$root/herdr-orch/$S/tasks"
 echo '{}' > "$root/herdr-orch/$S/tasks/PROJ-1.done.json"
 out="$root/watch.out"
-python3 claude/hooks/herdr_orch_core.py watch --repo-slug "$S" \
+python3 claude/hooks/herdr_legacy_fixture.py watch --repo-slug "$S" \
   --interval 1 --debounce-secs 1 --exit-on-signal --since-epoch 0 > "$out"
 [ "$(cat "$out")" = "signal" ]
 SH
@@ -930,7 +850,7 @@ PY
 
 check "claim-owner stores a valid messaging_socket and takes pid from its basename" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 err=$(mktemp)
 F=$($CLI claim-owner --repo-slug slug-ms --session S --host h --pid 999 --messaging-socket /private/tmp/cc-socks/4242.sock 2>"$err")
 [ "$F" = 1 ]
@@ -945,7 +865,7 @@ SH
 
 check "claim-owner: matching --pid warns nothing; empty value stores null silently; invalid stores null with one warning" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 err=$(mktemp)
 $CLI claim-owner --repo-slug slug-a --session S --host h --pid 4242 --messaging-socket /tmp/cc-socks/4242.sock 2>"$err" >/dev/null
 [ ! -s "$err" ]
@@ -965,7 +885,7 @@ SH
 
 check "refresh-owner: omitted flag keeps socket; empty clears; pid mismatch nulls and warns" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 err=$(mktemp)
 F=$($CLI claim-owner --repo-slug slug-r --session S --host h --pid 4242 --messaging-socket /tmp/cc-socks/4242.sock)
 O="$root/herdr-orch/slug-r/owner.json"
@@ -984,7 +904,7 @@ SH
 
 check "legacy owner.json with string pid: refresh migrates it to int; --pid rejects non-integers" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 mkdir -p "$root/herdr-orch/slug-l"
 python3 -c "import json,time;json.dump({'session_id':'S','host':'h','pid':'4242','heartbeat_ts':time.time(),'fence':1},open('$root/herdr-orch/slug-l/owner.json','w'))"
 $CLI refresh-owner --repo-slug slug-l --session S --fence 1 --messaging-socket /tmp/cc-socks/4242.sock
@@ -1136,21 +1056,25 @@ slug="github-com-org-repo-deadbeef"; rd=os.path.join(root,"herdr-orch",slug)
 os.makedirs(os.path.join(rd,"workspaces")); os.makedirs(os.path.join(rd,"tasks"))
 json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"impl"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
 sockdir="/tmp/cc-socks-9%09d"%random.randrange(10**9); os.mkdir(sockdir,0o700)
+stop=threading.Event(); idle=threading.Event(); listener=None; srv=None
 try:
     path=f"{sockdir}/4242.sock"
-    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(4); srv.settimeout(2)
+    srv=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); srv.bind(path); srv.listen(4); srv.settimeout(0.1)
     got=[]
     def acc():
-        while True:
+        while not stop.is_set():
             try: conn,_=srv.accept()
-            except (socket.timeout,OSError): return
+            except socket.timeout:
+                idle.set()
+                continue
+            except OSError: return
             buf=b""
             while not buf.endswith(b"\n"):
                 d=conn.recv(4096)
                 if not d: break
                 buf+=d
             got.append(buf); conn.close()
-    threading.Thread(target=acc,daemon=True).start()
+    listener=threading.Thread(target=acc,daemon=True); listener.start()
     def run(payload):
         sys.stdin=io.StringIO(json.dumps(payload)); return h.main()
     def wait_got(n,secs=2.0):   # bounded poll instead of fixed sleeps
@@ -1175,6 +1099,8 @@ try:
     assert run({"hook_event_name":"Stop"})==0
     assert wait_got(2,0.3)==1 and events()==3
     os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET")
+    # An idle accept timeout must not expire the fixture before the next wake.
+    idle.clear(); assert idle.wait(2) and listener.is_alive()
     # 4. blocking notification posts blocked; non-blocking posts nothing and appends nothing
     assert run({"hook_event_name":"Notification","notification_type":"permission_prompt"})==0
     assert wait_got(2)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
@@ -1198,9 +1124,14 @@ try:
     assert events()==before+1 and wait_got(5,0.3)==4
     core.post_wake=real_post
     # 7. server gone: exit 0 within 2.5s
-    srv.close(); os.unlink(path)
+    stop.set(); srv.close(); os.unlink(path)
     t0=time.monotonic(); assert run({"hook_event_name":"Stop"})==0; assert time.monotonic()-t0<2.5
 finally:
+    stop.set()
+    if srv is not None: srv.close()
+    if listener is not None:
+        listener.join(2)
+        assert not listener.is_alive(), "fake inbox listener did not stop"
     shutil.rmtree(sockdir,ignore_errors=True)
 sys.exit(0)
 PY
@@ -1258,7 +1189,7 @@ PY
 
 check "verify-contract: unpinned validate/run/missing/schema exits" <<'SH'
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 WT=$(mktemp -d)
 printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}' > "$WT/c.json"
 $CLI verify-contract --repo-slug slug-x --task-id PROJ-1 --worktree "$WT" \
@@ -1279,7 +1210,7 @@ SH
 
 check "verify-contract: pinned mode enforces pin, hash, path match" <<'SH'
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 WT=$(mktemp -d)
 printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}' > "$WT/c.json"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
@@ -1306,7 +1237,7 @@ SH
 
 check "verify-contract: pinned validate-only prints hash, runs nothing; corrupt record exits 2" <<'SH'
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 WT=$(mktemp -d)
 printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"touch vo-ran"}]}' > "$WT/c.json"
 F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
@@ -1325,7 +1256,7 @@ SH
 
 check "verify-contract: rejects escape paths and symlinked contracts" <<'SH'
 ROOT=$(mktemp -d); export CLAUDE_CONFIG_DIR="$ROOT"
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 WT=$(mktemp -d); OUT=$(mktemp -d)
 printf '{"v":1,"task_id":"PROJ-1","commands":[{"name":"t","run":"true"}]}' > "$OUT/c.json"
 ln -s "$OUT/c.json" "$WT/link.json"
@@ -1360,7 +1291,7 @@ PY
 
 check "resolve-model/disable-model CLI accept the mech role and haiku alias" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-m --session S --host h --pid 1)
 ! $CLI write-capabilities --repo-slug slug-m --session S --fence "$F" \
   --json '{"v":1,"session_id":"S","available":{"fable":false,"opus":true,"sonnet":true}}' 2>/dev/null
@@ -1397,7 +1328,7 @@ PY
 
 check "mech-caps / mech-contract CLI" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-c"; mkdir -p "$RD"
 out=$($CLI mech-caps --repo-slug slug-c)
 [ "$out" = '{"max_turns": 40, "max_budget_usd": 2.0, "timeout_secs": 1800}' ]
@@ -1442,7 +1373,7 @@ PY
 
 check "think-caps CLI" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-t"; mkdir -p "$RD"
 [ "$($CLI think-caps --repo-slug slug-t)" = '{"max_turns": 15, "max_budget_usd": 3.0, "timeout_secs": 900, "daily_budget_usd": 10.0}' ]
 printf '{"v":1,"user":"u","default_base":"origin/main","think":{"timeout_secs":600}}' > "$RD/config.json"
@@ -1452,7 +1383,7 @@ SH
 
 check "emit-done: optional launch_id and reason round-trip; bad reason rejected" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 $CLI emit-done --repo-slug slug-e --task-id td-x --workspace w1 --agent mech-td-x --phase implement \
   --outcome paused --head-sha h1 --base-sha b0 --launch-id mech-td-x-20260901T000000Z --reason needs_design
 python3 -c "import json;d=json.load(open('$CLAUDE_CONFIG_DIR/herdr-orch/slug-e/tasks/td-x.done.json'));assert d['launch_id']=='mech-td-x-20260901T000000Z' and d['reason']=='needs_design',d"
@@ -1498,7 +1429,7 @@ PY
 
 check "status: per-task spend, _totals with untracked_launches, _orphans" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-s"; mkdir -p "$RD/tasks" "$RD/workspaces"
 F=$($CLI claim-owner --repo-slug slug-s --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-s --task-id td-a --session S --fence "$F" \
@@ -1584,7 +1515,7 @@ SH
 
 check "run-mech --effort passes the flag and records it; absent -> null and argv unchanged" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-me"; mkdir -p "$RD/tasks"
 WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
 BASE=$(git -C "$WT" rev-parse HEAD); printf 'brief\n' > "$RD/tasks/td-me.brief.md"
@@ -1690,7 +1621,7 @@ PY
 check "run-mech: unwritable ledger dir exits 2 before any write (fresh task id)" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
 export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
-CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
 WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
 : > "$RD/tasks/b.md"; printf '{"type":"result","subtype":"success"}' > "$FAKE_CLAUDE_JSON"
 chmod 500 "$RD/tasks"
@@ -1703,7 +1634,7 @@ SH
 check "run-mech: validation exits 2 and writes nothing" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
 export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
-CLI="python3 claude/hooks/herdr_orch_core.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"; RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-r"; mkdir -p "$RD/tasks"
 WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
 : > "$RD/tasks/b.md"; OUT=$(mktemp -d); : > "$OUT/b.md"; : > "$RD/tasks/noread.md"; chmod 000 "$RD/tasks/noread.md"
 base="--repo-slug slug-r --task-id td-r --workspace w1 --model haiku --worktree $WT --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60"
@@ -1753,7 +1684,7 @@ PY
 
 check "resolve-effort CLI prints level or inherit, exit 5 on bad config" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-e"; mkdir -p "$RD"
 [ "$($CLI resolve-effort --repo-slug slug-e --role plan)" = high ]
 [ "$($CLI resolve-effort --repo-slug slug-e --role impl)" = inherit ]
@@ -1769,7 +1700,8 @@ SH
 check "docs pin the mech tier: role row, run-mech launch, liveness table, ledger schema, brief variant" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 grep -q '| Mechanical worker (`mech`)' "$S"
-grep -q 'resolve-model --role mech' "$S"
+grep -Fq -- 'route --runtime <claude|codex> --role mechanical --risk normal' "$S"
+grep -q 'Legacy Claude wrapper' "$S"
 grep -q 'run-mech --repo-slug' "$S"
 grep -q '"haiku":true' "$S"                                  # probe writes the fourth alias
 grep -q 'mech-caps --repo-slug' "$S"
@@ -1848,7 +1780,7 @@ PY
 
 check "routing-table CLI exit codes" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-rt --session S --host h --pid 1)
 rc=0; $CLI routing-table --repo-slug slug-rt --session S >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 3 ]
 $CLI write-capabilities --repo-slug slug-rt --session S --fence "$F" \
@@ -1878,9 +1810,9 @@ assert c.classify_banner(p,"fable","medium")=="ok"
 ansi="\x1b[1mClaude Code v2.1.260\x1b[0m\r\n\x1b[38;5;208mSonnet 5 with xhigh effort\x1b[0m "+D+" Claude Max\n"
 assert c.parse_banner(ansi)=={"model":"Sonnet 5","effort":"xhigh"}
 assert c.strip_ansi("\x1b]0;title\x07x\x1b[2Ky")=="xy"
-# adversarial: first banner wins; unknown family is unreadable, never downgrade
+# adversarial: ambiguous historical banners are unreadable
 two="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n> tell me about Claude Code v9.9.9\n Opus 9\n"
-assert c.classify_banner(c.parse_banner(two),"sonnet","inherit")=="ok"
+assert c.classify_banner(c.parse_banner(two),"sonnet","inherit")=="ok"  # quoted mention is not a banner
 quoted="> the banner said Claude Code v2.1.260 earlier\n Opus 9\nClaude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"
 assert c.parse_banner(quoted)["model"]=="Sonnet 5"                       # unanchored mention is not a banner line
 far="Claude Code v2.1.260\n Sonnet 5 "+D+" Claude Max\n"+"\n".join("line %d"%i for i in range(20))+"\n "+B+" xhigh "+D+" /effort\n"
@@ -1893,7 +1825,7 @@ PY
 
 check "classify-banner CLI" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 T=$(mktemp); printf 'Claude Code v2.1.260\n  Sonnet 5 with high effort \302\267 Claude Max\n' > "$T"
 [ "$($CLI classify-banner --repo-slug slug-b --model sonnet --effort high --text-file "$T")" = ok ]
 [ "$($CLI classify-banner --repo-slug slug-b --model fable --effort high --text-file "$T")" = downgrade ]
@@ -1936,7 +1868,7 @@ PY
 
 check "think validators + scan: invalid records fail closed; live/lost per record timeout; reservation accounting" <<PY
 $LOAD
-rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
+rd=os.path.join(tempfile.mkdtemp(),"slug"); os.mkdir(rd); td=os.path.join(rd,"think"); os.mkdir(td)
 def w(name,rec): open(os.path.join(td,name),"w").write(json.dumps(rec))
 L=lambda tid,started,to=900,**kw:dict({"v":1,"think_id":tid,"kind":c.think_kind(tid),"task_id":None,"repo_slug":"s","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":to},"attempt":2 if tid.endswith("-2") else 1,"parent":tid[:-2] if tid.endswith("-2") else None,"started":started,"pid":1},**kw)
 opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
@@ -2008,7 +1940,7 @@ PY
 
 check "run-mech characterization: popen failure, unparseable stdout, nonzero exit, timeout return" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-ch"; mkdir -p "$RD/tasks"
 WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
 BASE=$(git -C "$WT" rev-parse HEAD); printf 'brief\n' > "$RD/tasks/td-ch.brief.md"
@@ -2035,20 +1967,22 @@ SH
 check "run_think: argv contract, answered/unanswered mapping, popen failure, unparseable, exit 3" <<PY
 $LOAD
 import types,subprocess,shutil
-rd=tempfile.mkdtemp(); td=os.path.join(rd,"think"); os.mkdir(td)
+rd=os.path.join(tempfile.mkdtemp(),"slug"); os.mkdir(rd); td=os.path.join(rd,"think"); os.mkdir(td)
 wt=tempfile.mkdtemp(); subprocess.run(["git","init","-q",wt],check=True)
 fake=os.environ["FAKE_CLAUDE_DIR"]; log=os.path.join(rd,"log"); resj=os.path.join(rd,"res.json")
 os.environ.update(FAKE_CLAUDE_LOG=log,FAKE_CLAUDE_JSON=resj); os.environ.pop("FAKE_CLAUDE_HOOK",None); os.environ.pop("FAKE_CLAUDE_SLEEP",None)
 os.environ["PATH"]=fake+os.pathsep+os.environ["PATH"]
 tid="think-triage-20260904170000"
-a=types.SimpleNamespace(think_id=tid,kind="triage",task_id=None,repo_slug="slug",model="fable",effort="high",cwd=wt)
+a=types.SimpleNamespace(session="S",fence=1,think_id=tid,kind="triage",task_id=None,repo_slug="slug",model="fable",effort="high",cwd=wt)
+claim_legacy_owner(rd,"S","h",1)
 launch={"v":1,"think_id":tid,"kind":"triage","task_id":None,"repo_slug":"slug","model":"fable","effort":"high","caps":{"max_turns":15,"max_budget_usd":3.0,"timeout_secs":60},"attempt":1,"parent":None,"started":"2026-09-04T17:00:00Z","pid":1}
 opt=lambda i:{"label":f"o{i}","summary":"s","tradeoffs":"t","risk":"low"}
 good={"recommendation":"do A","rationale":"because","options":[opt(1),opt(2)],"confidence":"high"}
 def res(**kw): open(resj,"w").write(json.dumps(dict({"type":"result"},**kw)))
 def ans(): return json.load(open(os.path.join(td,tid+".answer.json")))
 def reset():
-    for n in os.listdir(td): os.unlink(os.path.join(td,n))
+    for n in os.listdir(td):
+        if n != ".lock": os.unlink(os.path.join(td,n))
 res(subtype="success",is_error=False,num_turns=4,total_cost_usd=0.9,duration_ms=1000,session_id="sid",permission_denials=[{"tool":"Read"}],modelUsage={"claude-fable-5-1":{}},structured_output=good)
 assert c.run_think(rd,a,"Which item first?\n",launch,[os.path.join(rd,"tasks")])==0
 r=ans(); assert r["status"]=="answered" and r["answer"]==good and r["total_cost_usd"]==0.9 and r["num_turns"]==4 and r["permission_denials"]==1 and r["attempt"]==1 and r["caps"]["timeout_secs"]==60,r
@@ -2095,7 +2029,7 @@ PY
 
 check "run-think handler: happy path via CLI, stale fence, exit 2 cases write nothing" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
 git -C "$WT" remote add origin https://github.com/org/repo2.git
 SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo2.git'))")
@@ -2142,7 +2076,7 @@ SH
 
 check "run-think limits: live sibling, lost sibling ignored, daily ceiling with reservation, retry rules, concurrency" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
 git -C "$WT" remote add origin https://github.com/org/repo3.git
 SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo3.git'))")
@@ -2203,7 +2137,7 @@ SH
 
 check "run-think retry: parent launch record missing task_id key does not crash" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 WT=$(mktemp -d); git -C "$WT" init -q; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
 git -C "$WT" remote add origin https://github.com/org/repo-taskidkey.git
 SLUG=$(python3 -c "import importlib.util;s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py');c=importlib.util.module_from_spec(s);s.loader.exec_module(c);print(c.repo_slug('https://github.com/org/repo-taskidkey.git'))")
@@ -2230,7 +2164,7 @@ SH
 
 check "status: _think fold, legacy workers effort unknown, watch includes think files" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_orch_core.py"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-st --session S --host h --pid 1)
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-st"; mkdir -p "$RD/think"
 TODAY=$(date -u +%Y-%m-%d)
