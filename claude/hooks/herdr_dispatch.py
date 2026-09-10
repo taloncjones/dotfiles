@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import time
@@ -36,6 +37,24 @@ WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
 AGENT_STATES = ("idle", "done")
 
 
+def _runtime_binary(runtime: str, env: dict[str, str]) -> str:
+    executable = shutil.which(runtime, path=env.get("PATH", os.defpath))
+    if executable is None:
+        raise DispatchError(f"runtime executable is unavailable: {runtime}")
+    # Keep the entry name: versioned installations often use a runtime-named
+    # symlink whose resolved target has a different basename.
+    try:
+        entry = Path(executable)
+        selected = str(entry.parent.resolve(strict=True) / entry.name)
+    except (OSError, RuntimeError) as exc:
+        raise DispatchError(
+            f"runtime executable parent cannot be resolved: {runtime}"
+        ) from exc
+    if ":" in str(Path(selected).parent) or any(c in selected for c in "\r\n"):
+        raise DispatchError("runtime executable cannot be bound through PATH")
+    return selected
+
+
 def _bind_pane_environment(
     herdr_cli: str,
     pane_id: str,
@@ -45,6 +64,8 @@ def _bind_pane_environment(
     env: dict[str, str],
     *,
     personal: bool = False,
+    runtime: str | None = None,
+    runtime_binary: str | None = None,
 ) -> None:
     launch_env = scope.get("launch_env")
     if not isinstance(launch_env, dict) or len(launch_env) > 4:
@@ -81,6 +102,30 @@ def _bind_pane_environment(
     probes = [
         f"printf '{token}:{key}=%s\\n' \"${{{key}-__UNSET__}}\"" for key in bindings
     ]
+    if runtime is not None or runtime_binary is not None:
+        if (
+            runtime not in ("claude", "codex")
+            or not isinstance(runtime_binary, str)
+            or not Path(runtime_binary).is_absolute()
+            or Path(runtime_binary).name != runtime
+            or ":" in str(Path(runtime_binary).parent)
+            or any(c in runtime_binary for c in "\r\n")
+        ):
+            raise DispatchError("runtime executable binding is invalid")
+        # Herd's agent-start protocol fixes argv[0] to the runtime name.
+        # Bypass wrappers in this owned idle task pane, then verify the exact
+        # entry that its shell will resolve. Persistent shell files are untouched.
+        assignments.extend(
+            [
+                f"unset -f '{runtime}' 2>/dev/null || :",
+                f"unalias '{runtime}' 2>/dev/null || :",
+                f'export PATH={shlex.quote(str(Path(runtime_binary).parent))}:"$PATH"',
+                "hash -r",
+            ]
+        )
+        probes.append(
+            f"printf '{token}:RUNTIME_BINARY=%s\\n' \"$(command -v '{runtime}')\""
+        )
     ready_probe = (
         "printf '%s%s\\n' "
         f"{shlex.quote(ready_marker[:marker_split])} "
@@ -120,8 +165,12 @@ def _bind_pane_environment(
         for key, value in bindings.items()
     }
     expected.add(ready_marker)
+    if runtime_binary is not None:
+        expected.add(f"{token}:RUNTIME_BINARY={runtime_binary}")
     if not isinstance(text, str) or not expected.issubset(set(text.splitlines())):
-        raise DispatchError("target pane account environment could not be verified")
+        raise DispatchError(
+            "target pane account environment or runtime executable could not be verified"
+        )
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, env)
 
 
@@ -424,6 +473,7 @@ def launch(
         )
     _check_todo_ready(pending_task, repository["root"], todos_cli, child_env)
     agent_runtime._apply_launch_environment(child_env, scope)
+    runtime_binary = _runtime_binary(runtime, child_env)
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
     _bind_pane_environment(
         herdr_cli,
@@ -433,6 +483,8 @@ def launch(
         scope,
         child_env,
         personal=personal,
+        runtime=runtime,
+        runtime_binary=runtime_binary,
     )
 
     pre_capture = _run_herdr(
@@ -448,6 +500,7 @@ def launch(
         "launch_id": launch_id,
         "phase": phase,
         "runtime": runtime,
+        "runtime_binary": runtime_binary,
         "workspace_id": workspace_id,
         "pane_id": pane_id,
         "source_head_sha": repository["head"],

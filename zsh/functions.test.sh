@@ -216,7 +216,7 @@ run_case() {
 
 run_codex_case() {
     snippet="$1"
-    HOME="$TMP/home-codex" DOTFILEDIR="$REPO" zsh -f -c "
+    HOME="$TMP/home-codex" CODEX_HOME="$TMP/home-codex/.codex" DOTFILEDIR="$REPO" zsh -f -c "
         path=(/usr/bin /bin)
         source '$REPO/$FUNCS'
         path=('$TMP/stubs/codex-good' /usr/bin /bin)
@@ -372,6 +372,35 @@ if run_codex_case "CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_ensure_plugi
 else
     fail "ECC native install verifies its effective staged payload"
 fi
+
+# 7a. A caller-selected CODEX_HOME must never receive the fixture cache.
+CALLER_CODEX_HOME="$TMP/caller-codex-home"
+CALLER_CACHE="$CALLER_CODEX_HOME/plugins/cache/dotfiles-workflows/ecc/2.0.0"
+mkdir -p "$CALLER_CACHE"
+printf '%s\n' 'caller cache sentinel' >"$CALLER_CACHE/sentinel-payload"
+printf '%s\n' 'caller config sentinel' >"$CALLER_CODEX_HOME/config.toml"
+cp "$CALLER_CACHE/sentinel-payload" "$TMP/caller-cache-before"
+cp "$CALLER_CODEX_HOME/config.toml" "$TMP/caller-config-before"
+rm -rf "$TMP/home-codex"
+if (
+    CODEX_HOME="$CALLER_CODEX_HOME"
+    export CODEX_HOME
+    run_codex_case "CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_ensure_plugin ecc@dotfiles-workflows '$STAGED'"
+) &&
+   cmp -s "$TMP/caller-cache-before" "$CALLER_CACHE/sentinel-payload" &&
+   cmp -s "$TMP/caller-config-before" "$CALLER_CODEX_HOME/config.toml" &&
+   [ ! -e "$CALLER_CACHE/skills/sample/SKILL.md" ] &&
+   [ ! -e "$CALLER_CACHE/skills/quoted/SKILL.md" ]; then
+    pass "Codex test cases preserve inherited CODEX_HOME"
+else
+    fail "Codex test cases preserve inherited CODEX_HOME"
+fi
+
+# Keep the remaining cache-validation cases independent from this sentinel.
+mkdir -p "$TMP/home-codex/.codex/plugins/cache/dotfiles-workflows/ecc/2.0.0"
+cp -R "$STAGED/plugins/ecc/." \
+    "$TMP/home-codex/.codex/plugins/cache/dotfiles-workflows/ecc/2.0.0/"
+
 CACHE_PAYLOAD="$TMP/home-codex/.codex/plugins/cache/dotfiles-workflows/ecc/2.0.0"
 printf '%s\n' '{}' >"$CACHE_PAYLOAD/.dotfiles-provenance.json"
 if run_codex_case "_codex_staged_plugin_is_effective ecc@dotfiles-workflows '$STAGED/plugins/ecc'"; then
