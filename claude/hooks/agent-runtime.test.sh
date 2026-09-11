@@ -3,6 +3,7 @@ set -uo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 export PYTHONPATH="$ROOT/claude/hooks${PYTHONPATH:+:$PYTHONPATH}"
+export DOTFILES_TEST_ROOT="$ROOT"
 export UV_CACHE_DIR="${TMPDIR:-/tmp}/dotfiles-agent-runtime-uv-cache"
 if command -v uv >/dev/null 2>&1; then
   PYTHON=(uv run --offline --no-project python)
@@ -1266,6 +1267,45 @@ def test_configured_fallback_below_raised_floor_is_skipped_not_promoted():
     assert route["effort"] != "high", route
 
 
+def test_policy_document_matches_the_route_table():
+    doc = (
+        Path(os.environ["DOTFILES_TEST_ROOT"])
+        / "claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md"
+    )
+    text = doc.read_text()
+    checked_roles = set()
+    rows = 0
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        role, spec = cells[1], cells[2]
+        if role not in runtime.CLAUDE_ROUTES or "/" not in spec:
+            continue
+        model, _, effort = spec.partition("/")
+        # Assert per ROW, not per role. The table names planner three times and
+        # reviewer twice; collecting into a dict first would let a later row
+        # overwrite -- and thereby hide -- drift in an earlier one.
+        assert runtime.CLAUDE_ROUTES[role] == (model, effort), (
+            role,
+            model,
+            effort,
+            runtime.CLAUDE_ROUTES[role],
+        )
+        checked_roles.add(role)
+        rows += 1
+    assert rows >= 7, rows
+    assert len(checked_roles) >= 4, checked_roles
+    assert runtime.CLAUDE_FALLBACKS["planner"] == [{"model": "opus", "effort": "xhigh"}], (
+        runtime.CLAUDE_FALLBACKS
+    )
+    for role in runtime.DIFFICULTY_ROLES:
+        assert role in runtime.CLAUDE_ROUTES, role
+    assert "difficulty=hard" in doc.read_text()
+
+
 for name, test in (
     ("Claude controller routes to opus/medium", test_claude_controller_is_opus_medium),
     ("Claude planner falls back to opus/xhigh", test_claude_planner_falls_back_to_opus_xhigh),
@@ -1309,6 +1349,7 @@ for name, test in (
     ("hard implementation without fallback blocks", test_hard_implementation_without_fallback_blocks),
     ("hard planner still reaches its xhigh fallback", test_hard_planner_still_reaches_its_xhigh_fallback),
     ("configured fallback below raised floor is skipped not promoted", test_configured_fallback_below_raised_floor_is_skipped_not_promoted),
+    ("policy document matches the route table", test_policy_document_matches_the_route_table),
 ):
     check(name, test)
 
