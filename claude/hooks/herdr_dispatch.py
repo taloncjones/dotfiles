@@ -439,6 +439,8 @@ def launch(
         raise DispatchError("route runtime is unsupported")
     if route.get("ready") is not True:
         raise DispatchError("route is not ready")
+    if route.get("difficulty") is not None and route.get("difficulty_confirmed") is not True:
+        raise DispatchError("route difficulty must be confirmed")
     if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
         raise DispatchError("fence must be a positive integer")
     for name, value in (
@@ -509,6 +511,9 @@ def launch(
         "role": route["role"],
         "model": route["model"],
         "effort": route["effort"],
+        "difficulty": route.get("difficulty"),
+        "difficulty_proposed": route.get("difficulty_proposed"),
+        "difficulty_confirmed": route.get("difficulty_confirmed"),
         "status": "starting",
         "started_ns": started_ns,
         "capture_before_sha256": hashlib.sha256(pre_capture.encode()).hexdigest(),

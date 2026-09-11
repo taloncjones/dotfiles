@@ -121,6 +121,8 @@ for the provider's `launch_env` mapping.
 5. **Selected-runtime readiness (owner only, after config validation).**
    New native Claude and Codex dispatches use the selected runtime's resolver:
    `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|read_only|mechanical|think> --risk <normal|critical>`.
+   Step-to-worker defaults and the two effort-raising axes are in
+   `references/pipeline-worker-mapping.md`.
    Inspect the returned readiness and capability evidence before dispatch;
    retain unknown availability as unknown and block an unready route. Use
    explicit policy/capability inputs when needed, as described under Model

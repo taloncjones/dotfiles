@@ -148,7 +148,7 @@ Skills carry their own triggers; reach for them on judgement. The standing
 orders below are deliberate policy, not hints.
 
 - Full pipeline for substantial implementation (standing order of operations):
-  isolated worktree -> brainstorming -> write spec (to `docs/specs/`, the
+  isolated worktree -> brainstorming -> write spec (to `docs/superpowers/specs/`, the
   path codex-spec-review resolves first)
   -> `codex-spec-review` -> writing-plans -> `codex-plan-review` ->
   `subagent-driven-development` -> `co-review` at the branch gate. Do NOT improvise

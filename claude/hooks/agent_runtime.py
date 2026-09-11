@@ -24,6 +24,7 @@ CLAUDE_MODELS = ("fable", "opus", "sonnet", "haiku")
 EFFORTS = ("low", "medium", "high", "xhigh")
 EFFORT_RANK = {effort: rank for rank, effort in enumerate(EFFORTS)}
 RISK_LEVELS = ("normal", "critical")
+DIFFICULTIES = ("routine", "hard")
 AVAILABILITY = ("available", "unavailable", "indeterminate")
 SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 
@@ -77,7 +78,20 @@ if _UNKNOWN_FALLBACK_ROLES:
     )
 
 CRITICAL_ROLES = ("reviewer", "skeptic", "think")
-CONFIG_KEYS = ("routes", "fallbacks", "mechanical", "parent_effort", "provisional")
+# Difficulty escalates effort within the role's model. The gateway is excluded on
+# purpose: it runs at medium so routing judgment stays cheap and the budget lands
+# on specialists. The mechanical and read_only tiers are excluded because they are
+# human-designated per task -- a task too hard for them should not have been
+# designated mechanical or read_only.
+DIFFICULTY_ROLES = ("planner", "implementation", "reviewer", "skeptic", "think")
+CONFIG_KEYS = (
+    "routes",
+    "fallbacks",
+    "mechanical",
+    "difficulty",
+    "parent_effort",
+    "provisional",
+)
 
 
 def _workflow_context_module():
@@ -135,6 +149,33 @@ def _validate_config(config: dict[str, Any] | None) -> dict[str, Any]:
     if "provisional" in config and not isinstance(config["provisional"], bool):
         raise RouteError("provisional must be a boolean")
     return config
+
+
+def _difficulty(
+    role: str, config: dict[str, Any]
+) -> tuple[str | None, str | None, bool | None]:
+    if "difficulty" not in config:
+        return None, None, None
+    block = config["difficulty"]
+    if not isinstance(block, dict):
+        raise RouteError("difficulty must be an object")
+    if set(block) != {"level", "proposed", "confirmed"}:
+        raise RouteError("difficulty config requires level, proposed, and confirmed")
+    level = block["level"]
+    if level not in DIFFICULTIES:
+        raise RouteError(f"unsupported difficulty level: {level}")
+    proposed = block["proposed"]
+    if proposed is not None and proposed not in DIFFICULTIES:
+        raise RouteError(f"unsupported proposed difficulty: {proposed}")
+    if role not in DIFFICULTY_ROLES:
+        raise RouteError(f"difficulty is unsupported for role: {role}")
+    if block["confirmed"] is not True:
+        raise RouteError("difficulty requires explicit human confirmation")
+    return level, proposed, True
+
+
+def _bump_effort(effort: str) -> str:
+    return EFFORTS[min(EFFORT_RANK[effort] + 1, len(EFFORTS) - 1)]
 
 
 def _route_override(
@@ -314,8 +355,18 @@ def resolve_route(
             raise RouteError("mechanical writing requires an explicit review gate")
 
     default_model, default_effort = policy[role]
+    difficulty, difficulty_proposed, difficulty_confirmed = _difficulty(
+        role, selected_config
+    )
+    # Each axis was already checked for role eligibility -- risk above, difficulty
+    # inside _difficulty -- so an unsupported designation has raised by now rather
+    # than being absorbed into this maximum.
+    targets = [EFFORT_RANK[default_effort]]
+    if difficulty == "hard":
+        targets.append(EFFORT_RANK[_bump_effort(default_effort)])
     if risk == "critical":
-        default_effort = "xhigh"
+        targets.append(EFFORT_RANK["xhigh"])
+    default_effort = EFFORTS[max(targets)]
     requested_model, requested_effort = _route_override(
         runtime,
         role,
@@ -379,6 +430,9 @@ def resolve_route(
         "runtime": runtime,
         "role": role,
         "risk": risk,
+        "difficulty": difficulty,
+        "difficulty_proposed": difficulty_proposed,
+        "difficulty_confirmed": difficulty_confirmed,
         "requested_model": requested_model,
         "requested_effort": requested_effort,
         "model": selected_model,

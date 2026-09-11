@@ -3,6 +3,7 @@ set -uo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 export PYTHONPATH="$ROOT/claude/hooks${PYTHONPATH:+:$PYTHONPATH}"
+export DOTFILES_TEST_ROOT="$ROOT"
 export UV_CACHE_DIR="${TMPDIR:-/tmp}/dotfiles-agent-runtime-uv-cache"
 if command -v uv >/dev/null 2>&1; then
   PYTHON=(uv run --offline --no-project python)
@@ -1036,6 +1037,275 @@ def test_claude_fallback_defaults_are_scoped():
     assert not codex_unknown, codex_unknown
 
 
+def test_difficulty_requires_confirmation():
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "implementation",
+            config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": False}},
+        ),
+        "difficulty requires explicit human confirmation",
+    )
+
+
+def test_difficulty_confirmation_is_identity_not_truthiness():
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "implementation",
+            config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": 1}},
+        ),
+        "difficulty requires explicit human confirmation",
+    )
+
+
+def test_difficulty_rejects_malformed_blocks():
+    for block, message in (
+        ({"level": "hard", "confirmed": True}, "difficulty config requires level, proposed, and confirmed"),
+        (
+            {"level": "hard", "proposed": "hard", "confirmed": True, "extra": 1},
+            "difficulty config requires level, proposed, and confirmed",
+        ),
+        ({"level": "epic", "proposed": None, "confirmed": True}, "unsupported difficulty level: epic"),
+        ({"level": "hard", "proposed": "epic", "confirmed": True}, "unsupported proposed difficulty: epic"),
+    ):
+        raises(
+            runtime.RouteError,
+            lambda block=block: runtime.resolve_route(
+                "claude", "implementation", config={"difficulty": block}
+            ),
+            message,
+        )
+
+
+def test_explicit_null_difficulty_is_not_treated_as_absent():
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude", "implementation", config={"difficulty": None}
+        ),
+        "difficulty must be an object",
+    )
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude", "implementation", config={"difficulty": "hard"}
+        ),
+        "difficulty must be an object",
+    )
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude", "controller", config={"difficulty": None}
+        ),
+        "difficulty must be an object",
+    )
+
+
+def test_difficulty_is_refused_for_ineligible_roles():
+    for role in ("controller", "read_only"):
+        raises(
+            runtime.RouteError,
+            lambda role=role: runtime.resolve_route(
+                "claude",
+                role,
+                config={"difficulty": {"level": "hard", "proposed": None, "confirmed": True}},
+            ),
+            f"difficulty is unsupported for role: {role}",
+        )
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "mechanical",
+            config={
+                "mechanical": {"designated": True, "review_gate": True},
+                "difficulty": {"level": "hard", "proposed": None, "confirmed": True},
+            },
+        ),
+        "difficulty is unsupported for role: mechanical",
+    )
+
+
+def test_hard_difficulty_raises_implementation_effort():
+    route = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}},
+    )
+    assert route["model"] == "sonnet", route
+    assert route["effort"] == "xhigh", route
+    assert route["quality_floor"] == "xhigh", route
+    assert route["difficulty"] == "hard", route
+    assert route["difficulty_proposed"] == "hard", route
+    assert route["difficulty_confirmed"] is True, route
+
+
+def test_routine_difficulty_leaves_effort_unchanged():
+    route = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={"difficulty": {"level": "routine", "proposed": "routine", "confirmed": True}},
+    )
+    assert route["effort"] == "high", route
+    assert route["quality_floor"] == "high", route
+    assert route["difficulty"] == "routine", route
+
+
+def test_absent_difficulty_preserves_existing_semantics():
+    plain = runtime.resolve_route("claude", "implementation")
+    assert plain["effort"] == "high", plain
+    assert plain["difficulty"] is None, plain
+    assert plain["difficulty_proposed"] is None, plain
+    assert plain["difficulty_confirmed"] is None, plain
+    critical = runtime.resolve_route("claude", "reviewer", risk="critical")
+    assert critical["effort"] == "xhigh", critical
+    assert critical["quality_floor"] == "xhigh", critical
+    assert critical["difficulty"] is None, critical
+
+
+def test_bump_effort_saturates_at_the_top_rung():
+    assert runtime._bump_effort("high") == "xhigh"
+    assert runtime._bump_effort("xhigh") == "xhigh"
+    assert runtime._bump_effort("medium") == "high"
+
+
+def test_hard_and_critical_together_resolve_to_xhigh_once():
+    route = runtime.resolve_route(
+        "claude",
+        "reviewer",
+        risk="critical",
+        config={"difficulty": {"level": "hard", "proposed": None, "confirmed": True}},
+    )
+    assert route["effort"] == "xhigh", route
+    assert route["quality_floor"] == "xhigh", route
+    assert route["difficulty_proposed"] is None, route
+
+
+def test_critical_risk_still_refused_for_planner_with_difficulty():
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "planner",
+            risk="critical",
+            config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}},
+        ),
+        "critical risk is unsupported for role: planner",
+    )
+
+
+def test_route_override_below_raised_floor_is_refused():
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "implementation",
+            config={
+                "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
+                "routes": {"implementation": {"effort": "high"}},
+            },
+        ),
+        "configured effort high is below the xhigh role floor",
+    )
+
+
+def test_hard_implementation_without_fallback_blocks():
+    route = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}},
+        capabilities={
+            "models": {
+                "sonnet": model("unavailable", ["high", "xhigh"]),
+                "opus": model("available", ["high", "xhigh"]),
+            }
+        },
+    )
+    assert route["ready"] is False, route
+    assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
+    assert route["quality_floor"] == "xhigh", route
+
+
+def test_hard_planner_still_reaches_its_xhigh_fallback():
+    route = runtime.resolve_route(
+        "claude",
+        "planner",
+        config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}},
+        capabilities={
+            "models": {
+                "fable": model("unavailable", ["high", "xhigh"]),
+                "opus": model("available", ["high", "xhigh"]),
+            }
+        },
+    )
+    assert route["quality_floor"] == "xhigh", route
+    assert route["model"] == "opus", route
+    assert route["effort"] == "xhigh", route
+    assert route["ready"] is True, route
+
+
+def test_configured_fallback_below_raised_floor_is_skipped_not_promoted():
+    route = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={
+            "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
+            "fallbacks": {"implementation": [{"model": "opus", "effort": "high"}]},
+        },
+        capabilities={
+            "models": {
+                "sonnet": model("unavailable", ["high", "xhigh"]),
+                "opus": model("available", ["high", "xhigh"]),
+            }
+        },
+    )
+    assert route["ready"] is False, route
+    assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
+    assert route["effort"] != "high", route
+
+
+def test_policy_document_matches_the_route_table():
+    doc = (
+        Path(os.environ["DOTFILES_TEST_ROOT"])
+        / "claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md"
+    )
+    text = doc.read_text()
+    checked_roles = set()
+    rows = 0
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        role, spec = cells[1], cells[2]
+        if role not in runtime.CLAUDE_ROUTES or "/" not in spec:
+            continue
+        model, _, effort = spec.partition("/")
+        # Assert per ROW, not per role. The table names planner three times and
+        # reviewer twice; collecting into a dict first would let a later row
+        # overwrite -- and thereby hide -- drift in an earlier one.
+        assert runtime.CLAUDE_ROUTES[role] == (model, effort), (
+            role,
+            model,
+            effort,
+            runtime.CLAUDE_ROUTES[role],
+        )
+        checked_roles.add(role)
+        rows += 1
+    assert rows >= 7, rows
+    assert len(checked_roles) >= 4, checked_roles
+    assert runtime.CLAUDE_FALLBACKS["planner"] == [{"model": "opus", "effort": "xhigh"}], (
+        runtime.CLAUDE_FALLBACKS
+    )
+    for role in runtime.DIFFICULTY_ROLES:
+        assert role in runtime.CLAUDE_ROUTES, role
+    assert "difficulty=hard" in doc.read_text()
+
+
 for name, test in (
     ("Claude controller routes to opus/medium", test_claude_controller_is_opus_medium),
     ("Claude planner falls back to opus/xhigh", test_claude_planner_falls_back_to_opus_xhigh),
@@ -1064,6 +1334,22 @@ for name, test in (
     ("bounded run kills the process group on timeout", test_timeout_kills_the_process_group),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
     ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
+    ("difficulty requires confirmation", test_difficulty_requires_confirmation),
+    ("difficulty confirmation is identity not truthiness", test_difficulty_confirmation_is_identity_not_truthiness),
+    ("difficulty rejects malformed blocks", test_difficulty_rejects_malformed_blocks),
+    ("explicit null difficulty is not treated as absent", test_explicit_null_difficulty_is_not_treated_as_absent),
+    ("difficulty is refused for ineligible roles", test_difficulty_is_refused_for_ineligible_roles),
+    ("hard difficulty raises implementation effort", test_hard_difficulty_raises_implementation_effort),
+    ("routine difficulty leaves effort unchanged", test_routine_difficulty_leaves_effort_unchanged),
+    ("absent difficulty preserves existing semantics", test_absent_difficulty_preserves_existing_semantics),
+    ("bump effort saturates at the top rung", test_bump_effort_saturates_at_the_top_rung),
+    ("hard and critical together resolve to xhigh once", test_hard_and_critical_together_resolve_to_xhigh_once),
+    ("critical risk still refused for planner with difficulty", test_critical_risk_still_refused_for_planner_with_difficulty),
+    ("route override below raised floor is refused", test_route_override_below_raised_floor_is_refused),
+    ("hard implementation without fallback blocks", test_hard_implementation_without_fallback_blocks),
+    ("hard planner still reaches its xhigh fallback", test_hard_planner_still_reaches_its_xhigh_fallback),
+    ("configured fallback below raised floor is skipped not promoted", test_configured_fallback_below_raised_floor_is_skipped_not_promoted),
+    ("policy document matches the route table", test_policy_document_matches_the_route_table),
 ):
     check(name, test)
 
