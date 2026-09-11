@@ -113,9 +113,10 @@ Use these skills by default when the task matches:
 - `todos` for inspecting and maintaining the repo's current and pending work.
 - `handoff` and `kickoff` for explicit task-scoped restart/resume.
 - `voice` for an independent prose pass before authorized outward writes.
-- `herdr-orchestration` for an opted-in persistent Herd controller. Follow
-  its native Codex adapter; Claude Workflow and messaging tools are not Codex
-  launch or completion APIs.
+- `herdr-orchestration` for bounded UI/UX implementation, prose, and independent
+  review in Claude-led Herd work. Its installed Codex compatibility entrypoint
+  points to `claude/skills/herdr-orchestration/SKILL.md`; Claude Workflow and
+  messaging tools are not Codex launch or completion APIs.
 
 ## Superpowers Flow
 

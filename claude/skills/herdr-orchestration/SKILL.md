@@ -1,21 +1,20 @@
 ---
 name: herdr-orchestration
-description: Use to run a standing per-repo orchestrator over Herdr that turns a designated Jira ticket or repo todo into a briefed worker session in a worktree workspace, tracks it through a hook-fed event log, and dispatches an independent reviewer before handing back for merge. Trigger when the user says "kick off <TASK>", "what's queued", "status", or asks the orchestrator to supervise delegated work. Works with Claude or Codex; requires HERDR_ENV=1.
+description: Use to run a Claude-led standing per-repo orchestrator over Herdr that turns a designated Jira ticket or repo todo into a briefed worker session in a worktree workspace, tracks it through a hook-fed event log, and dispatches an independent reviewer before handing back for merge. Trigger when the user says "kick off <TASK>", "what's queued", "status", or asks the orchestrator to supervise delegated work. Codex participates through bounded UI/prose/review work; requires HERDR_ENV=1.
 ---
 
 # herdr-orchestration
 
-A per-repo orchestrator over Herdr. It turns a designated work item into a
+A Claude-led per-repo orchestrator over Herdr. It turns a designated work item into a
 briefed worker in a worktree-backed workspace, tracks the worker through a
 hook-fed event log plus worker-emitted completion records, and -- once it
 confirms real completion -- dispatches an independent reviewer before handing
-back to the human for merge. One standing orchestrator per repo.
+back to the human for merge. One standing Claude orchestrator per repo.
 
 This skill is a **thin caller**. All state mutation goes through the tested
 core CLI; the skill never hand-writes state JSON.
 
-For a Claude entrypoint, resolve the installed source first. A Codex entrypoint
-uses the setup block in its native adapter instead.
+For a Claude entrypoint, resolve the installed source first.
 
 ```bash
 # Store the core PATH, not a command string. Use explicit arguments in any shell.
@@ -46,10 +45,19 @@ Never infer the primary repository from the parent of a Git metadata directory.
 Keep the existing repo slug; the shared registry binds it to canonical Git
 identity and serializes owners across runtimes and account payload roots.
 
-For Codex, also read the native adapter at
-`codex/skills/herdr-orchestration/SKILL.md` in the same dotfiles checkout.
-Claude socket, Monitor, SendMessage, and Workflow instructions apply only when
-those native Claude capabilities exist. They are not Codex APIs.
+Default roles: Claude is the controller, planner, and general implementer.
+Codex provides UI/UX direction and bounded UI implementation, prose/voice, and
+independent review. Codex never owns the task or its commit and never emits the
+task-completion lifecycle record (`emit-done`); an independent Codex reviewer
+still emits its own review outcome (`emit-review`). Explicit user choices for
+standalone runtime use remain valid.
+
+`codex/skills/herdr-orchestration/SKILL.md` remains an installed compatibility
+entrypoint. Shared compatibility APIs are retained, while native Codex
+controller acceptance is deferred. Any later Codex controller-oriented examples
+are compatibility references, not default dispatch instructions. Claude socket,
+Monitor, SendMessage, and Workflow instructions apply only when those native
+Claude capabilities exist. They are not Codex APIs.
 
 Personal Claude subprocesses unset `CLAUDE_CONFIG_DIR`; work repositories may
 use explicit personal quota. Codex preserves actual `CODEX_HOME`. Resolve the
@@ -105,7 +113,7 @@ for the provider's `launch_env` mapping.
      hook wake held behind a dialog and dropped after `dialogExpiry`, and a
      `-p` orchestrator drops them after 5 minutes. Not added to
      `settings.json.tmpl` (it would apply to every session of the account).
-   - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above, or the Codex adapter setup, supplies `$TODOS`; never borrow another runtime's personal installation path.
+   - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above supplies `$TODOS`; never borrow another runtime's personal installation path.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
@@ -310,7 +318,7 @@ phase-appropriate brief (references/brief-template.md) and model.
    visibly retryable. Write the workspace index through `write-index`.
    For a repo TODO, persist its exact filename stem as `todo_id`; do not infer
    this field from a display label. Run the installed `todos.sh ready <id>
-   --offline` before dispatch. Exit 0 permits launch; blocked, missing, invalid,
+--offline` before dispatch. Exit 0 permits launch; blocked, missing, invalid,
    or unknown dependencies keep the task queued. The adapter checks this
    persisted binding again outside the owner lock. An old record without a
    binding needs explicit source reconciliation before a new TODO kickoff.
@@ -362,6 +370,82 @@ phase; it never marks the task `completed` and never dispatches review.
    plan paths and hashes. Status remains `in-progress`.
 4. Failed/paused planning never launches implementation. `confirm-completion`
    is the separate final implementation gate and rejects a plan milestone.
+
+## 2a-UI. Bounded Codex UI specialist dispatch
+
+Use this path only from the Claude implementation worker's existing task
+worktree. It adds no worktree, controller, permission bypass, account switch,
+or parallel writer. The Codex specialist may edit only the assigned UI files
+and tests, then exits with a result. It never claims task ownership, commits,
+or emits `emit-done` or `emit-review`.
+
+Resolve the UI route with the existing runtime policy override:
+
+```python
+agent_runtime.resolve_route(
+    "codex",
+    "implementation",
+    config={"routes": {"implementation": {"model": "gpt-6-astra", "effort": "high"}}},
+)
+```
+
+The generic Codex implementation route remains Terra/high for non-UI work. Run
+the existing `run_bounded`/`launch_argv` path through `agent_runtime.py` from
+the Claude worker's own worktree. `TASK_WORKTREE`, `UI_BRIEF`, and `UI_RESULT`
+must be absolute paths; the brief and result are private paths outside public
+repository content. The private brief must name the exact assigned UI files and
+tests, forbid commits, lifecycle emission, and account changes, and require the
+specialist to report any scope drift.
+
+```bash
+# Add --personal before --cwd when the original work-repository task deliberately
+# uses personal Claude quota.
+if uv run --no-cache --offline --no-project python "$RUNTIME" run \
+  --runtime codex --role implementation --risk normal \
+  --config-json '{"routes":{"implementation":{"model":"gpt-6-astra","effort":"high"}}}' \
+  --provisional --cwd "$TASK_WORKTREE" --sandbox workspace-write \
+  --timeout-secs 600 --prompt-file "$UI_BRIEF" > "$UI_RESULT"; then
+  python3 - "$UI_RESULT" <<'PY' || exit 1
+import json
+import sys
+
+try:
+    record = json.load(open(sys.argv[1]))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"invalid Codex runner JSON: {exc}")
+
+if not (
+    isinstance(record, dict)
+    and record.get("status") == "success"
+    and record.get("exit_code") == 0
+    and record.get("timed_out") is False
+    and isinstance(record.get("result"), str)
+    and record["result"].strip()
+):
+    raise SystemExit("Codex UI specialist result is incomplete")
+PY
+else
+  printf '%s\n' 'Codex UI specialist did not complete' >&2
+  exit 1
+fi
+```
+
+Run this inside the already isolated Claude worker worktree, preserving the
+selected account. For a personal Claude worker, leave `CLAUDE_CONFIG_DIR`
+unset. Preserve the worker's actual `CODEX_HOME`; do not replace either
+environment value or broaden `workspace-write` permissions. `--provisional`
+reports unverified availability; it does not make an error acceptable. Retain
+`--personal` on the runner invocation when the original task deliberately
+selects personal quota in a work repository.
+
+The runner process and JSON gate must both succeed before any other writer
+resumes. A nonzero process exit, malformed JSON, `error` or `timeout` status,
+missing or nonzero `exit_code`, true `timed_out`, empty/non-string `result`, or
+any diff/status scope drift blocks the pass. Claude then validates the complete
+diff, status including untracked files, and applicable tests. A fresh
+independent Claude reviewer -- never the supervising worker -- must approve the
+Codex UI change before the Claude worker commits and emits its own lifecycle
+record. Frozen Claude + Codex co-review remains the final gate.
 
 ## 3. Triage (advisory only -- read-only)
 

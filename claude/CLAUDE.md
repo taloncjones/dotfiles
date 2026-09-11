@@ -171,6 +171,12 @@ orders below are deliberate policy, not hints.
   (planner/reviewer on the stronger model, workers on cheaper models, per-task
   review). Author the Workflow script to that tiered-routing intent rather than
   relying on a separate orchestration skill.
+- For Herd work, Claude is the default controller, planner, and general
+  implementer. Codex supplies bounded UI implementation, prose, and independent
+  review through the canonical `claude/skills/herdr-orchestration/SKILL.md`
+  recipe; a fresh independent Claude reviewer must approve Codex UI edits.
+  Explicit user standalone runtime choices and existing review gates remain in
+  force.
 - Run verification-before-completion before claiming work is done.
 
 ## Code Design
