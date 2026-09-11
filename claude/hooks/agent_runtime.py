@@ -49,6 +49,33 @@ CLAUDE_ROUTES = {
     "think": ("fable", "high"),
 }
 
+# Same-account fallbacks applied when a role's DEFAULT model -- the one in the
+# route table above -- is unavailable and the caller supplied no fallbacks for
+# that role. Fable is the top tier for both fable-rooted roles, so losing it
+# drops a tier; xhigh on opus compensates rather than silently working at a
+# lower standard. Two deliberate limits:
+#   - A caller who overrides the route to a different model owns that choice, so
+#     the default does not fire. An explicit cheaper pick is never silently
+#     escalated back to opus/xhigh.
+#   - A config "fallbacks" entry for a role replaces the default outright,
+#     including an empty list to disable fallback for that role.
+CLAUDE_FALLBACKS: dict[str, list[dict[str, str]]] = {
+    "planner": [{"model": "opus", "effort": "xhigh"}],
+    "think": [{"model": "opus", "effort": "xhigh"}],
+}
+
+CODEX_FALLBACKS: dict[str, list[dict[str, str]]] = {}
+
+# A typo in a default key would degrade silently to "no fallback" with no signal,
+# so pin the default keys to real roles at import.
+_UNKNOWN_FALLBACK_ROLES = (set(CLAUDE_FALLBACKS) - set(CLAUDE_ROUTES)) | (
+    set(CODEX_FALLBACKS) - set(CODEX_ROUTES)
+)
+if _UNKNOWN_FALLBACK_ROLES:
+    raise RouteError(
+        f"unknown fallback role in defaults: {min(_UNKNOWN_FALLBACK_ROLES)}"
+    )
+
 CRITICAL_ROLES = ("reviewer", "skeptic", "think")
 CONFIG_KEYS = ("routes", "fallbacks", "mechanical", "parent_effort", "provisional")
 
@@ -222,7 +249,7 @@ def discover_capabilities(
 
 
 def _fallbacks(
-    runtime: str, role: str, config: dict[str, Any]
+    runtime: str, role: str, config: dict[str, Any], allow_defaults: bool = True
 ) -> list[tuple[str, str]]:
     block = config.get("fallbacks", {})
     if not isinstance(block, dict):
@@ -231,7 +258,13 @@ def _fallbacks(
     unknown_roles = sorted(set(block) - set(roles))
     if unknown_roles:
         raise RouteError(f"unsupported fallback role: {unknown_roles[0]}")
-    records = block.get(role, [])
+    if role in block:
+        records = block[role]
+    elif allow_defaults:
+        defaults = CLAUDE_FALLBACKS if runtime == "claude" else CODEX_FALLBACKS
+        records = defaults.get(role, [])
+    else:
+        records = []
     if not isinstance(records, list):
         raise RouteError("role fallbacks must be a list")
     known_models = _runtime_policy(runtime)[1]
@@ -298,7 +331,9 @@ def resolve_route(
     fallback = None
     blocked_reason = None
 
-    candidates = _fallbacks(runtime, role, selected_config)
+    candidates = _fallbacks(
+        runtime, role, selected_config, requested_model == default_model
+    )
     if availability == "unavailable":
         for candidate_model, candidate_effort in candidates:
             if EFFORT_RANK[candidate_effort] < EFFORT_RANK[quality_floor]:

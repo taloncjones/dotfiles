@@ -938,8 +938,108 @@ def test_claude_controller_fallback_respects_medium_floor():
     assert blocked["blocked_reason"] == "no-fallback-meets-quality-floor", blocked
 
 
+def test_claude_planner_falls_back_to_opus_xhigh():
+    # Fable is the requested planner tier. When it is unavailable (usage
+    # exhausted, enterprise account), the built-in default fallback takes opus at
+    # xhigh with no caller-supplied config -- losing the top tier is compensated,
+    # not silently planned around at a lower standard.
+    caps = {
+        "models": {
+            "fable": model(status="unavailable"),
+            "opus": model(efforts=("high", "xhigh")),
+        }
+    }
+    route = runtime.resolve_route("claude", "planner", capabilities=caps)
+    assert route["ready"] is True, route
+    assert (route["model"], route["effort"]) == ("opus", "xhigh"), route
+    assert route["fallback"] == {
+        "from": "fable",
+        "reason": "requested-model-unavailable",
+    }, route
+    # The requested tier is still reported alongside the served one.
+    assert (route["requested_model"], route["requested_effort"]) == (
+        "fable",
+        "high",
+    ), route
+
+    # While fable is available the default never fires.
+    healthy = runtime.resolve_route(
+        "claude",
+        "planner",
+        capabilities={"models": {"fable": model(efforts=("high", "xhigh"))}},
+    )
+    assert healthy["ready"] is True, healthy
+    assert (healthy["model"], healthy["effort"]) == ("fable", "high"), healthy
+    assert healthy["fallback"] is None, healthy
+
+    # An explicit config entry replaces the default outright, including an empty
+    # list to disable fallback for the role.
+    disabled = runtime.resolve_route(
+        "claude",
+        "planner",
+        config={"fallbacks": {"planner": []}},
+        capabilities=caps,
+    )
+    assert disabled["ready"] is False, disabled
+    assert disabled["blocked_reason"] == "no-fallback-meets-quality-floor", disabled
+
+    # A caller who routes planning to a cheaper model owns that choice. The
+    # default is keyed on the route-table model, so an explicit downgrade blocks
+    # for re-decision instead of silently escalating back to opus/xhigh.
+    override_caps = {"models": {"haiku": model(status="unavailable"), "opus": model()}}
+    override = runtime.resolve_route(
+        "claude",
+        "planner",
+        config={"routes": {"planner": {"model": "haiku", "effort": "high"}}},
+        capabilities=override_caps,
+    )
+    assert override["ready"] is False, override
+    assert override["blocked_reason"] == "no-fallback-meets-quality-floor", override
+    assert override["model"] == "haiku", override
+
+
+def test_claude_fallback_defaults_are_scoped():
+    # think is the other fable-rooted role and is documented fable -> opus, so it
+    # carries the same default -- at normal risk and at critical, where the floor
+    # rises to xhigh.
+    caps = {"models": {"fable": model(status="unavailable"), "opus": model()}}
+    normal = runtime.resolve_route("claude", "think", capabilities=caps)
+    assert normal["ready"] is True, normal
+    assert (normal["model"], normal["effort"]) == ("opus", "xhigh"), normal
+
+    critical = runtime.resolve_route(
+        "claude", "think", risk="critical", capabilities=caps
+    )
+    assert critical["ready"] is True, critical
+    assert (critical["model"], critical["effort"]) == ("opus", "xhigh"), critical
+    assert critical["quality_floor"] == "xhigh", critical
+
+    # A Claude role with no default still blocks rather than inventing one.
+    reviewer_caps = {"models": {"opus": model(status="unavailable"), "sonnet": model()}}
+    reviewer = runtime.resolve_route(
+        "claude", "reviewer", capabilities=reviewer_caps
+    )
+    assert reviewer["ready"] is False, reviewer
+    assert reviewer["blocked_reason"] == "no-fallback-meets-quality-floor", reviewer
+
+    # Codex is unaffected: CODEX_FALLBACKS is empty, so behaviour is unchanged.
+    codex_caps = {"models": {"gpt-6-astra": model(status="unavailable")}}
+    codex = runtime.resolve_route("codex", "planner", capabilities=codex_caps)
+    assert codex["ready"] is False, codex
+    assert codex["blocked_reason"] == "no-fallback-meets-quality-floor", codex
+
+    # A typo in a default key would degrade silently to "no fallback", so the
+    # shipped tables must only name real roles.
+    claude_unknown = set(runtime.CLAUDE_FALLBACKS) - set(runtime.CLAUDE_ROUTES)
+    codex_unknown = set(runtime.CODEX_FALLBACKS) - set(runtime.CODEX_ROUTES)
+    assert not claude_unknown, claude_unknown
+    assert not codex_unknown, codex_unknown
+
+
 for name, test in (
     ("Claude controller routes to opus/medium", test_claude_controller_is_opus_medium),
+    ("Claude planner falls back to opus/xhigh", test_claude_planner_falls_back_to_opus_xhigh),
+    ("Claude fallback defaults are scoped to fable-rooted roles", test_claude_fallback_defaults_are_scoped),
     ("Claude controller fallback respects the medium floor", test_claude_controller_fallback_respects_medium_floor),
     ("model catalog separates effort support from availability", test_model_catalog_discovers_effort_without_claiming_availability),
     ("Codex role table uses Astra, Terra and Luna", test_codex_role_table),
