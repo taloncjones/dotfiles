@@ -80,8 +80,9 @@ if _UNKNOWN_FALLBACK_ROLES:
 CRITICAL_ROLES = ("reviewer", "skeptic", "think")
 # Difficulty escalates effort within the role's model. The gateway is excluded on
 # purpose: it runs at medium so routing judgment stays cheap and the budget lands
-# on specialists. The cheap tier is excluded because it is human-designated per
-# task -- a task too hard for it should not have been designated mechanical.
+# on specialists. The mechanical and read_only tiers are excluded because they are
+# human-designated per task -- a task too hard for them should not have been
+# designated mechanical or read_only.
 DIFFICULTY_ROLES = ("planner", "implementation", "reviewer", "skeptic", "think")
 CONFIG_KEYS = (
     "routes",
@@ -166,10 +167,10 @@ def _difficulty(
     proposed = block["proposed"]
     if proposed is not None and proposed not in DIFFICULTIES:
         raise RouteError(f"unsupported proposed difficulty: {proposed}")
-    if block["confirmed"] is not True:
-        raise RouteError("difficulty requires explicit human confirmation")
     if role not in DIFFICULTY_ROLES:
         raise RouteError(f"difficulty is unsupported for role: {role}")
+    if block["confirmed"] is not True:
+        raise RouteError("difficulty requires explicit human confirmation")
     return level, proposed, True
 
 

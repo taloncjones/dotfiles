@@ -46,6 +46,9 @@ Two axes raise effort within the role's chosen model. Neither lowers it.
   and the proposal is recorded alongside the outcome so the agreement rate is
   measurable before the confirmation step is retired.
 
+Both axes apply on either runtime -- `resolve_route` resolves `difficulty` and
+`risk=critical` the same way for Claude and Codex native routes, not just Claude.
+
 Both raise `quality_floor` with the effort, so a fallback below the raised floor
 is skipped rather than promoted, and exhaustion blocks at
 `no-fallback-meets-quality-floor` instead of quietly serving less.

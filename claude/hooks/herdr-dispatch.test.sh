@@ -1115,6 +1115,32 @@ def test_attempt_record_carries_absent_difficulty_shape():
         fixture.close()
 
 
+def test_tampered_unconfirmed_difficulty_route_rejects_launch():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        route = agent_runtime.resolve_route(
+            "claude",
+            "implementation",
+            config={"difficulty": {"level": "hard", "proposed": "routine", "confirmed": True}},
+            capabilities={
+                "models": {"sonnet": {"status": "available", "efforts": ["high", "xhigh"]}}
+            },
+        )
+        assert route["ready"] is True, route
+        route["difficulty_confirmed"] = False
+        try:
+            fixture.launch(route=route)
+        except herdr_dispatch.DispatchError as exc:
+            assert "confirmed" in str(exc), exc
+        else:
+            raise AssertionError("unconfirmed difficulty route was accepted")
+        assert fixture.calls() == [], fixture.calls()
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+    finally:
+        fixture.close()
+
+
 for name, test in (
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
@@ -1147,6 +1173,7 @@ for name, test in (
     ("dispatch entrypoint preserves its JSON CLI contract", test_dispatch_entrypoint_preserves_machine_readable_cli_contract),
     ("attempt record carries difficulty provenance", test_attempt_record_carries_difficulty_provenance),
     ("attempt record carries absent difficulty shape", test_attempt_record_carries_absent_difficulty_shape),
+    ("tampered unconfirmed difficulty route rejects launch", test_tampered_unconfirmed_difficulty_route_rejects_launch),
 ):
     check(name, test)
 
