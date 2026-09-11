@@ -1211,6 +1211,60 @@ def test_route_override_below_raised_floor_is_refused():
     )
 
 
+def test_hard_implementation_without_fallback_blocks():
+    route = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}},
+        capabilities={
+            "models": {
+                "sonnet": model("unavailable", ["high", "xhigh"]),
+                "opus": model("available", ["high", "xhigh"]),
+            }
+        },
+    )
+    assert route["ready"] is False, route
+    assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
+
+
+def test_hard_planner_still_reaches_its_xhigh_fallback():
+    route = runtime.resolve_route(
+        "claude",
+        "planner",
+        config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}},
+        capabilities={
+            "models": {
+                "fable": model("unavailable", ["high", "xhigh"]),
+                "opus": model("available", ["high", "xhigh"]),
+            }
+        },
+    )
+    assert route["quality_floor"] == "xhigh", route
+    assert route["model"] == "opus", route
+    assert route["effort"] == "xhigh", route
+    assert route["ready"] is True, route
+
+
+def test_configured_fallback_below_raised_floor_is_skipped_not_promoted():
+    route = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={
+            "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
+            "fallbacks": {"implementation": [{"model": "opus", "effort": "high"}]},
+        },
+        capabilities={
+            "models": {
+                "sonnet": model("unavailable", ["high", "xhigh"]),
+                "opus": model("available", ["high", "xhigh"]),
+            }
+        },
+    )
+    assert route["ready"] is False, route
+    assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
+    assert route["effort"] != "high", route
+
+
 for name, test in (
     ("Claude controller routes to opus/medium", test_claude_controller_is_opus_medium),
     ("Claude planner falls back to opus/xhigh", test_claude_planner_falls_back_to_opus_xhigh),
@@ -1251,6 +1305,9 @@ for name, test in (
     ("hard and critical together resolve to xhigh once", test_hard_and_critical_together_resolve_to_xhigh_once),
     ("critical risk still refused for planner with difficulty", test_critical_risk_still_refused_for_planner_with_difficulty),
     ("route override below raised floor is refused", test_route_override_below_raised_floor_is_refused),
+    ("hard implementation without fallback blocks", test_hard_implementation_without_fallback_blocks),
+    ("hard planner still reaches its xhigh fallback", test_hard_planner_still_reaches_its_xhigh_fallback),
+    ("configured fallback below raised floor is skipped not promoted", test_configured_fallback_below_raised_floor_is_skipped_not_promoted),
 ):
     check(name, test)
 
