@@ -23,3 +23,5 @@ is the staging tier, not an archive.
   and uses `pipestatus`; prefer arrays or explicit arguments.
 - (2026-09) An orchestrator session dispatches; it edits repo files only for
   a small change the human approved this turn. Larger: todo + kickoff.
+- (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
+  MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
