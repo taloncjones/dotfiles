@@ -938,8 +938,55 @@ def test_claude_controller_fallback_respects_medium_floor():
     assert blocked["blocked_reason"] == "no-fallback-meets-quality-floor", blocked
 
 
+def test_claude_planner_falls_back_to_opus_xhigh():
+    # Fable is the requested planner tier. When it is unavailable (usage
+    # exhausted, enterprise account), the built-in default fallback takes opus at
+    # xhigh with no caller-supplied config -- losing the top tier is compensated,
+    # not silently planned around at a lower standard.
+    caps = {
+        "models": {
+            "fable": model(status="unavailable"),
+            "opus": model(efforts=("high", "xhigh")),
+        }
+    }
+    route = runtime.resolve_route("claude", "planner", capabilities=caps)
+    assert route["ready"] is True, route
+    assert (route["model"], route["effort"]) == ("opus", "xhigh"), route
+    assert route["fallback"] == {
+        "from": "fable",
+        "reason": "requested-model-unavailable",
+    }, route
+    # The requested tier is still reported alongside the served one.
+    assert (route["requested_model"], route["requested_effort"]) == (
+        "fable",
+        "high",
+    ), route
+
+    # While fable is available the default never fires.
+    healthy = runtime.resolve_route(
+        "claude",
+        "planner",
+        capabilities={"models": {"fable": model(efforts=("high", "xhigh"))}},
+    )
+    assert healthy["ready"] is True, healthy
+    assert (healthy["model"], healthy["effort"]) == ("fable", "high"), healthy
+    assert healthy["fallback"] is None, healthy
+
+    # An explicit config entry replaces the default outright, including an empty
+    # list to disable fallback for the role.
+    disabled = runtime.resolve_route(
+        "claude",
+        "planner",
+        config={"fallbacks": {"planner": []}},
+        capabilities=caps,
+    )
+    assert disabled["ready"] is False, disabled
+    assert disabled["blocked_reason"] == "no-fallback-meets-quality-floor", disabled
+
+
 for name, test in (
     ("Claude controller routes to opus/medium", test_claude_controller_is_opus_medium),
+    ("Claude planner falls back to opus/xhigh", test_claude_planner_falls_back_to_opus_xhigh),
     ("Claude controller fallback respects the medium floor", test_claude_controller_fallback_respects_medium_floor),
     ("model catalog separates effort support from availability", test_model_catalog_discovers_effort_without_claiming_availability),
     ("Codex role table uses Astra, Terra and Luna", test_codex_role_table),

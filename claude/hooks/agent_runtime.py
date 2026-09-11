@@ -49,6 +49,17 @@ CLAUDE_ROUTES = {
     "think": ("fable", "high"),
 }
 
+# Same-account fallbacks applied when the requested model is unavailable and the
+# caller supplied no fallbacks for that role. Fable is the top planning tier, so
+# losing it drops a tier; xhigh on opus compensates rather than silently planning
+# at a lower standard. A config "fallbacks" entry for a role replaces the default
+# outright, including an empty list to disable fallback for that role.
+CLAUDE_FALLBACKS: dict[str, list[dict[str, str]]] = {
+    "planner": [{"model": "opus", "effort": "xhigh"}],
+}
+
+CODEX_FALLBACKS: dict[str, list[dict[str, str]]] = {}
+
 CRITICAL_ROLES = ("reviewer", "skeptic", "think")
 CONFIG_KEYS = ("routes", "fallbacks", "mechanical", "parent_effort", "provisional")
 
@@ -231,7 +242,8 @@ def _fallbacks(
     unknown_roles = sorted(set(block) - set(roles))
     if unknown_roles:
         raise RouteError(f"unsupported fallback role: {unknown_roles[0]}")
-    records = block.get(role, [])
+    defaults = CLAUDE_FALLBACKS if runtime == "claude" else CODEX_FALLBACKS
+    records = block[role] if role in block else defaults.get(role, [])
     if not isinstance(records, list):
         raise RouteError("role fallbacks must be a list")
     known_models = _runtime_policy(runtime)[1]
