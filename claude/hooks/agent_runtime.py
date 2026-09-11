@@ -39,7 +39,7 @@ CODEX_ROUTES = {
 }
 
 CLAUDE_ROUTES = {
-    "controller": ("fable", "high"),
+    "controller": ("opus", "medium"),
     "planner": ("fable", "high"),
     "reviewer": ("opus", "high"),
     "skeptic": ("opus", "high"),
