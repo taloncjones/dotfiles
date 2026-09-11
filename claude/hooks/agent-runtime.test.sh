@@ -1225,6 +1225,7 @@ def test_hard_implementation_without_fallback_blocks():
     )
     assert route["ready"] is False, route
     assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
+    assert route["quality_floor"] == "xhigh", route
 
 
 def test_hard_planner_still_reaches_its_xhigh_fallback():
