@@ -47,8 +47,10 @@ identity and serializes owners across runtimes and account payload roots.
 
 Default roles: Claude is the controller, planner, and general implementer.
 Codex provides UI/UX direction and bounded UI implementation, prose/voice, and
-independent review. Codex never owns the task, commit, or lifecycle emission.
-Explicit user choices for standalone runtime use remain valid.
+independent review. Codex never owns the task or its commit and never emits the
+task-completion lifecycle record (`emit-done`); an independent Codex reviewer
+still emits its own review outcome (`emit-review`). Explicit user choices for
+standalone runtime use remain valid.
 
 `codex/skills/herdr-orchestration/SKILL.md` remains an installed compatibility
 entrypoint. Shared compatibility APIs are retained, while native Codex
@@ -111,7 +113,7 @@ for the provider's `launch_env` mapping.
      hook wake held behind a dialog and dropped after `dialogExpiry`, and a
      `-p` orchestrator drops them after 5 minutes. Not added to
      `settings.json.tmpl` (it would apply to every session of the account).
-   - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above, or the Codex adapter setup, supplies `$TODOS`; never borrow another runtime's personal installation path.
+   - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above supplies `$TODOS`; never borrow another runtime's personal installation path.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
@@ -316,7 +318,7 @@ phase-appropriate brief (references/brief-template.md) and model.
    visibly retryable. Write the workspace index through `write-index`.
    For a repo TODO, persist its exact filename stem as `todo_id`; do not infer
    this field from a display label. Run the installed `todos.sh ready <id>
-   --offline` before dispatch. Exit 0 permits launch; blocked, missing, invalid,
+--offline` before dispatch. Exit 0 permits launch; blocked, missing, invalid,
    or unknown dependencies keep the task queued. The adapter checks this
    persisted binding again outside the owner lock. An old record without a
    binding needs explicit source reconciliation before a new TODO kickoff.
