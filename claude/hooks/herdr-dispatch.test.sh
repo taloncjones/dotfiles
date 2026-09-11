@@ -1080,6 +1080,41 @@ def test_dispatch_entrypoint_preserves_machine_readable_cli_contract():
     }, process.stdout
 
 
+def test_attempt_record_carries_difficulty_provenance():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        route = agent_runtime.resolve_route(
+            "claude",
+            "implementation",
+            config={"difficulty": {"level": "hard", "proposed": "routine", "confirmed": True}},
+            capabilities={
+                "models": {"sonnet": {"status": "available", "efforts": ["high", "xhigh"]}}
+            },
+        )
+        assert route["ready"] is True, route
+        fixture.launch(route=route)
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["difficulty"] == "hard", attempt
+        assert attempt["difficulty_proposed"] == "routine", attempt
+        assert attempt["difficulty_confirmed"] is True, attempt
+    finally:
+        fixture.close()
+
+
+def test_attempt_record_carries_absent_difficulty_shape():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.launch(route=claude_route())
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["difficulty"] is None, attempt
+        assert attempt["difficulty_proposed"] is None, attempt
+        assert attempt["difficulty_confirmed"] is None, attempt
+    finally:
+        fixture.close()
+
+
 for name, test in (
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
@@ -1110,6 +1145,8 @@ for name, test in (
     ("inspect rejects traversal and symlinked payload parent", test_inspect_rejects_traversal_and_symlinked_payload_parent),
     ("unvalidated native wake falls back to bounded watch", test_unvalidated_wake_uses_bounded_watch_fallback_only),
     ("dispatch entrypoint preserves its JSON CLI contract", test_dispatch_entrypoint_preserves_machine_readable_cli_contract),
+    ("attempt record carries difficulty provenance", test_attempt_record_carries_difficulty_provenance),
+    ("attempt record carries absent difficulty shape", test_attempt_record_carries_absent_difficulty_shape),
 ):
     check(name, test)
 
