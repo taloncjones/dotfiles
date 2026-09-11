@@ -53,8 +53,9 @@ still emits its own review outcome (`emit-review`). Explicit user choices for
 standalone runtime use remain valid.
 
 `codex/skills/herdr-orchestration/SKILL.md` remains an installed compatibility
-entrypoint. Shared compatibility APIs are retained, while native Codex
-controller acceptance is deferred. Any later Codex controller-oriented examples
+entrypoint. Shared compatibility APIs are retained, but a Codex-driven Herd
+controller is not supported and is not a goal; Codex participates only as a
+bounded specialist. Any later Codex controller-oriented examples
 are compatibility references, not default dispatch instructions. Claude socket,
 Monitor, SendMessage, and Workflow instructions apply only when those native
 Claude capabilities exist. They are not Codex APIs.
