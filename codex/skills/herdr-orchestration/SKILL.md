@@ -28,4 +28,6 @@ lifecycle record. A fresh independent Claude review is required for Codex UI
 edits before the Claude worker accepts them.
 
 Normal standalone Codex CLI use remains the user's choice. Shared compatibility
-APIs remain installed; native Codex controller acceptance is deferred.
+APIs remain installed. A Codex-driven Herd controller is not supported and is not
+a goal - Codex participates only as a bounded specialist (UX/UI, prose/voice,
+independent review).

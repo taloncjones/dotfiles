@@ -886,7 +886,61 @@ def test_launch_plan_applies_personal_repository_plugin_policy():
     assert 'plugins."atlassian@claude-plugins-official".enabled=false' in plan["argv"], plan
 
 
+def test_claude_controller_is_opus_medium():
+    route = runtime.resolve_route("claude", "controller")
+    assert (route["model"], route["effort"]) == ("opus", "medium"), route
+    assert route["quality_floor"] == "medium", route
+    # An override below the new medium floor is rejected.
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude", "controller", config={"routes": {"controller": {"effort": "low"}}}
+        ),
+        "below the medium role floor",
+    )
+    # Every other Claude role tuple is unchanged.
+    expected = {
+        "planner": ("fable", "high"),
+        "reviewer": ("opus", "high"),
+        "skeptic": ("opus", "high"),
+        "implementation": ("sonnet", "high"),
+        "read_only": ("haiku", "medium"),
+    }
+    for role, tup in expected.items():
+        r = runtime.resolve_route("claude", role)
+        assert (r["model"], r["effort"]) == tup, (role, r)
+
+
+def test_claude_controller_fallback_respects_medium_floor():
+    # A medium-effort fallback IS accepted under the new medium floor. This is the
+    # floor-distinguishing case: before the change the requested model is fable
+    # (absent from caps -> indeterminate -> not ready), so this fails; after the
+    # change the requested opus is unavailable and the medium fallback is taken.
+    ok_caps = {"models": {"opus": model(status="unavailable"), "sonnet": model()}}
+    ok = runtime.resolve_route(
+        "claude",
+        "controller",
+        config={"fallbacks": {"controller": [{"model": "sonnet", "effort": "medium"}]}},
+        capabilities=ok_caps,
+    )
+    assert ok["ready"] is True, ok
+    assert (ok["model"], ok["effort"]) == ("sonnet", "medium"), ok
+
+    # A sub-floor (low) fallback is still skipped and blocks.
+    block_caps = {"models": {"opus": model(status="unavailable"), "haiku": model()}}
+    blocked = runtime.resolve_route(
+        "claude",
+        "controller",
+        config={"fallbacks": {"controller": [{"model": "haiku", "effort": "low"}]}},
+        capabilities=block_caps,
+    )
+    assert blocked["ready"] is False, blocked
+    assert blocked["blocked_reason"] == "no-fallback-meets-quality-floor", blocked
+
+
 for name, test in (
+    ("Claude controller routes to opus/medium", test_claude_controller_is_opus_medium),
+    ("Claude controller fallback respects the medium floor", test_claude_controller_fallback_respects_medium_floor),
     ("model catalog separates effort support from availability", test_model_catalog_discovers_effort_without_claiming_availability),
     ("Codex role table uses Astra, Terra and Luna", test_codex_role_table),
     ("critical review and think explicitly use xhigh", test_critical_routes_are_explicit_xhigh),
