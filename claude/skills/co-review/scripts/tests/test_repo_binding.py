@@ -213,8 +213,20 @@ class ResolverParams(unittest.TestCase):
             seen["args"] = (host, user, port)
             return "github.com"
 
-        rb.normalize_url("git@github.com:owner/repo.git", capture)
-        self.assertEqual(seen["args"], ("github.com", "git", None))
+        rb.normalize_url("git@Git-Personal:owner/repo.git", capture)
+        self.assertEqual(seen["args"], ("Git-Personal", "git", None))
+
+    def test_ssh_resolver_gets_original_case(self):
+        # ssh config `Host` matching is case-sensitive, so normalize_url must
+        # pass the host to the resolver unmodified, not lowercased.
+        seen = {}
+
+        def capture(host, user=None, port=None):
+            seen["host"] = host
+            return "github.com"
+
+        rb.normalize_url("git@Git-Personal:owner/repo.git", capture)
+        self.assertEqual(seen["host"], "Git-Personal")
 
 
 class GhLookup(unittest.TestCase):

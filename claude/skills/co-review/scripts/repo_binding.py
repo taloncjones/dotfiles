@@ -62,19 +62,21 @@ def normalize_url(url: str, host_resolver=None) -> str | None:
     if parsed is None:
         return None
     transport, host, user, port, path = parsed
-    host = host.lower()
     if transport == "ssh":
         # Resolve EVERY ssh host through ssh config, including a literal
         # 'github.com', and with the URL's own user and port: a `Host github.com`
         # / `HostName elsewhere` stanza -- or a `Match user`/port-dependent one --
         # would otherwise let an origin that resolves off github.com pass.
+        # Pass the ORIGINAL-case host: ssh config `Host` matching is
+        # case-sensitive (`ssh -G git-personal` and `ssh -G Git-Personal` can
+        # resolve differently), so lowercasing here would break real aliases.
         if host_resolver is None:
             return None
         resolved = host_resolver(host, user, port)
         if not resolved or resolved.lower() != _GITHUB:
             return None
     else:  # web: a real DNS host, no ssh config; must be literally github.com
-        if host != _GITHUB:
+        if host.lower() != _GITHUB:
             return None
     owner_repo = _owner_repo(path)
     if owner_repo is None:
