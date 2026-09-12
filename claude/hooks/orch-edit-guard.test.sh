@@ -949,6 +949,15 @@ hook_case "AC-G nested sibling owner.json does not un-fence a lead (normal path)
 hook_case "AC-G nested sibling owner.json does not un-fence a lead (overflow path)" deny Bash "$many" "$LWS" "$SID_C"
 rm -rf "$CFG/herdr-orch/zz-nested" "$HERDR_COORDINATION_ROOT/zz-nested"
 
+# A non-UTF-8 origin URL survives surrogateescape git decoding but cannot be
+# strict-encoded by repo_slug(); slug derivation must yield None (fail closed
+# on both paths) instead of raising into the fail-open handler (co-review r8).
+mkrepo "$FIX/badorigin" "git@example.com:org/placeholder.git"
+git -C "$FIX/badorigin" remote set-url origin "$(printf 'git@example.com:org/x\377y.git')"
+hook_case "AC-G non-UTF-8 origin: a launcher's write is denied, not failed open" deny Edit "$FIX/badorigin/tracked.txt" "$FIX/badorigin" "$SID_A"
+lead_setup "$SID_C" "$LWS"
+hook_case "AC-G non-UTF-8 origin: a lead's outside write is denied, not failed open" deny Edit "$FIX/badorigin/tracked.txt" "$FIX/badorigin" "$SID_C"
+
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
         && PYTHONPYCACHEPREFIX="$FIX/pyc" python3 -m py_compile "$HOOK"; then

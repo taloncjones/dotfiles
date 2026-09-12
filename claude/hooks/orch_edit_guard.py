@@ -315,7 +315,16 @@ def repo_slug_of(top, budget, cache):
         if rc2 == 0 and common.strip():
             cd = common.strip()
             cd = cd if os.path.isabs(cd) else os.path.join(top, cd)
-            slug = core.repo_slug(url.strip() if rc == 0 else "", cd)
+            # Total: git output is decoded with surrogateescape, so a
+            # non-UTF-8 origin URL reaches repo_slug() with surrogates that
+            # its strict .encode() rejects (UnicodeEncodeError). That raised
+            # past decide() into the fail-open handler (co-review r8). An
+            # underivable slug is None, which both the launcher path (scope
+            # deny) and the lead path (workspace check) treat as fail closed.
+            try:
+                slug = core.repo_slug(url.strip() if rc == 0 else "", cd)
+            except Exception:  # noqa: BLE001 -- underivable slug is None, never a crash
+                slug = None
         cache[top] = slug
     return cache[top]
 
