@@ -318,6 +318,17 @@ class OwnerTransaction:
             )
             scope = hashlib.sha256(root.encode()).hexdigest()
             previous = observed.get(scope)
+            if previous is not None:
+                # Normalize a persisted observation with the SAME defaults as
+                # `legacy` above before comparing. A legacy_seen entry written by
+                # an older version lacks control_tier/workspace_root, so a raw
+                # `previous != legacy` would spuriously report an unchanged legacy
+                # owner as changed and block the transaction after an upgrade.
+                previous = dict(
+                    _owner_metadata(previous),
+                    account_id=previous.get("account_id")
+                    or account_id_for_root(payload_account_root(root)),
+                )
             foreign = current and _owner_key(legacy) != _owner_key(current)
             if (
                 foreign
