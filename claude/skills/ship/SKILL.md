@@ -19,9 +19,13 @@ human gate is the merge itself.
 ## Resume (cheap re-runs)
 
 Before step 1, run the PR-ready currency gate. First verify `origin` is the PR's
-base repository (`gh pr view --json baseRepository`; on a fork PR origin is the
-contributor's fork and resolving the base there is wrong -- FAIL closed on
-mismatch). Fetch the PR's comments (`gh api --paginate --slurp
+base repository: read the base repo from the pulls REST response
+(`gh api repos/{owner}/{repo}/pulls/<n> -q .base.repo.full_name` -- `baseRepository`
+is not a `pr view` field) and compare it to origin's real fetch URL
+(`git remote get-url origin`, normalized to owner/repo -- not `gh repo view`,
+which honours `GH_REPO`). On a fork PR origin is the contributor's fork and
+resolving the base there is wrong -- FAIL closed on mismatch or if either side is
+unresolved. Fetch the PR's comments (`gh api --paginate --slurp
 repos/{owner}/{repo}/issues/{number}/comments | jq '[.[][] | {author:
 .user.login, created_at, id, body}]'` -- pipe to external `jq`, since `gh`
 rejects `--slurp` with `-q`; `--slurp` wraps the per-page arrays so `.[][]`

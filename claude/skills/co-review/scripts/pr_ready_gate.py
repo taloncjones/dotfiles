@@ -13,6 +13,10 @@ MARKER_RE = re.compile(
 )
 # A fence opener may be indented up to 3 spaces and carry an info string.
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}([`~])\1{2,}")
+# Markdown recognizes only CRLF/CR/LF as line breaks; str.splitlines() also
+# breaks on \v, \f, \x1c-\x1e, \x85, U+2028/2029, which would wrongly promote
+# text after such a character to a column-zero line.
+_LINE_RE = re.compile(r"\r\n|\r|\n")
 
 
 class GateInputError(Exception):
@@ -34,7 +38,7 @@ def _is_fence_close(raw: str, fence: tuple[str, int]) -> bool:
     lead = _leading_ws(raw)
     if "\t" in lead or len(lead) > 3:
         return False
-    body = raw.strip()
+    body = raw.strip(" \t")  # only ASCII space/tab count as fence whitespace
     return bool(body) and set(body) == {fence[0]} and len(body) >= fence[1]
 
 
@@ -60,7 +64,7 @@ def _markers_in_body(body: str) -> list[dict]:
     """Every valid marker on an unindented, unquoted, unfenced top-level line."""
     found: list[dict] = []
     fence: tuple[str, int] | None = None
-    for raw in body.splitlines():
+    for raw in _LINE_RE.split(body):
         if fence is not None:
             if _is_fence_close(raw, fence):
                 fence = None
@@ -72,7 +76,7 @@ def _markers_in_body(body: str) -> list[dict]:
         # The marker must sit at column 0: any leading whitespace (space or tab,
         # in any mix) is Markdown code indentation. Matching the unstripped line
         # against an anchored pattern enforces that; allow only trailing space.
-        hit = MARKER_RE.match(raw.rstrip())
+        hit = MARKER_RE.match(raw.rstrip(" \t"))  # ASCII trailing space only
         if hit:
             found.append(hit.groupdict())
     return found

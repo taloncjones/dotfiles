@@ -47,10 +47,12 @@ uv run --no-project python "$REVIEW_HELPER" prepare --repo "$REPO" --base-ref "$
 #   ... prepare --repo "$REPO" --base "$BASE" ...
 ```
 
-For a PR review first confirm `origin` is the PR's base repository
-(`gh pr view --json baseRepository`) -- on a fork PR `origin` is the
-contributor's fork and resolving the base there is wrong; fetch the verified
-target remote or stop. Then pass `--base-ref <baseRefName>` (the PR's target
+For a PR review first confirm `origin` is the PR's base repository: compare
+origin's real fetch URL (`git remote get-url origin`) to the base repo from the
+pulls REST response (`gh api repos/{owner}/{repo}/pulls/<n> -q
+.base.repo.full_name`; `baseRepository` is not a `pr view` field). On a fork PR
+`origin` is the contributor's fork and resolving the base there is wrong; fetch
+the verified target remote or stop. Then pass `--base-ref <baseRefName>` (the PR's target
 branch from `gh pr view --json baseRefName`). The helper fetches that origin branch
 read-only into an invocation-owned ref and diffs against the merge-base
 (three-dot, matching GitHub "Files changed"), so a stale local base cannot

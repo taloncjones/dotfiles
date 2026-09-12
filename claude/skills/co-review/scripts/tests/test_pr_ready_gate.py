@@ -75,6 +75,18 @@ class SelectMarkerTests(unittest.TestCase):
         body = "```example```\n" + marker()
         self.assertEqual(gate.select_marker([comment(body)], ME)["sha"], SHA_A)
 
+    def test_nbsp_closer_keeps_marker_hidden(self):
+        # a non-breaking space is not Markdown fence whitespace, so "~~~ "
+        # is not a valid closer and the marker stays inside the block.
+        body = "~~~\n~~~ \n" + marker() + "\n~~~"
+        self.assertIsNone(gate.select_marker([comment(body)], ME))
+
+    def test_vertical_tab_is_not_a_line_break(self):
+        # \v is not a Markdown line break, so "example\v<marker>" is one line and
+        # the marker is not at column zero.
+        body = "example\v" + marker()
+        self.assertIsNone(gate.select_marker([comment(body)], ME))
+
     def test_malformed_ignored(self):
         self.assertIsNone(
             gate.select_marker([comment("<!-- co-review: sha=xyz -->")], ME)
