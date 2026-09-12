@@ -177,14 +177,27 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
 # --- paths and classification ---------------------------------------------
 
 
-def canon(path):
-    """realpath of the longest existing ancestor, joined with the rest."""
-    existing, rest = path, []
-    while existing != "/" and not os.path.lexists(existing):
-        existing, tail = os.path.split(existing)
-        rest.append(tail)
-    real = os.path.realpath(existing)
-    return os.path.join(real, *reversed(rest)) if rest else real
+def canonical_target(word, cwd, home):
+    """True canonical destination of a raw write token, or None to skip.
+
+    Resolves from the RAW token (spec A1): the token is joined to its cwd
+    WITHOUT a lexical normpath, then os.path.realpath resolves symlinks and
+    `..` together, so a `..` that follows a symlink escapes correctly and a
+    `.todos`/STATE_ROOT component produced only by an unresolved `..` cannot
+    grant a false exemption (H1). realpath handles a nonexistent tail by
+    resolving the longest existing prefix and appending the rest.
+
+    None means "not a guardable target": an empty token, or one carrying a
+    NUL byte or any path value os.path cannot process (H2 -- the caller skips
+    it rather than letting the exception fail the whole hook open)."""
+    word = rm_guard.expand_home(word, home)
+    if not word or "\x00" in word:
+        return None
+    joined = word if word.startswith("/") else os.path.join(cwd, word)
+    try:
+        return os.path.realpath(joined)
+    except (OSError, ValueError):
+        return None
 
 
 def exempt(c, state_real):
@@ -539,7 +552,8 @@ def copy_targets(words, cwd, home, include_sources):
     source, because a move deletes the source path.
 
     Accepted gap (A1): a source that is itself a tracked symlink is
-    resolved by resolve_targets/canon() through its final target, not as
+    resolved by resolve_targets/canonical_target() through its final target,
+    not as
     the symlink entry mv actually removes; catching that needs a
     dereference-mode flag threaded through every target tuple, not a
     local fix here.
@@ -571,9 +585,17 @@ def copy_targets(words, cwd, home, include_sources):
     else:
         dest, srcs = tdir, ops
     out = []
-    dpath = rm_guard.resolve(rm_guard.expand_home(dest, home), cwd)
-    if os.path.isdir(dpath):
-        out.extend(os.path.join(dpath, os.path.basename(s)) for s in srcs)
+    # Probe the REALPATH destination, not the normpath one: a `dest` like
+    # `link/../out` with a symlinked `link` resolves to a different directory
+    # than its lexical spelling, so a normpath probe could pick the wrong
+    # dir-vs-file branch and drop the source basename (A1). The emitted target
+    # stays the RAW join so the single resolve_targets chokepoint canonicalizes.
+    try:
+        dprobe = os.path.realpath(os.path.join(cwd, rm_guard.expand_home(dest, home)))
+    except (OSError, ValueError):
+        dprobe = ""
+    if dprobe and os.path.isdir(dprobe):
+        out.extend(os.path.join(dest, os.path.basename(s)) for s in srcs)
     else:
         out.append(dest)
     if include_sources:
@@ -808,8 +830,8 @@ def resolve_targets(raw, home):
             shell_expands and ("$" in w or "`" in w or rm_guard.has_glob_chars(w))
         ):
             continue
-        p = canon(rm_guard.resolve(w, c_cwd))
-        if p not in paths:
+        p = canonical_target(w, c_cwd, home)
+        if p is not None and p not in paths:
             paths.append(p)
     return paths[:TARGET_CAP]
 

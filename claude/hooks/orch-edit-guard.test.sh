@@ -352,6 +352,38 @@ echo x > $TR" "$R" "$SID_A"
 hook_case "AC4 pushd then relative redirect denied (B-2)" deny Bash "pushd $R/dir && echo x > inner.txt" "$N" "$SID_A"
 hook_case "AC4 popd cwd change of unknown direction denied (B-2)" deny Bash "pushd $R && popd && echo x > tracked.txt" "$N" "$SID_A"
 
+# --- H1/H2: launcher-fence escapes closed (spec A2) ----------------------
+# H1a: a `..` tail under .todos must not keep the .todos exemption -- its
+# true destination is the tracked file, which stays guarded.
+hook_case "H1 .todos/../ escape to a tracked file denied" deny Bash "echo x > $R/.todos/pending/../../tracked.txt" "$R" "$SID_A"
+# H1b: a symlink inside .todos pointing at the repo root, then a relative
+# write, resolves out of .todos to a tracked file -> guarded.
+ln -s "$R" "$R/.todos/pending/rootlink"
+hook_case "H1 symlink inside .todos escaping to a tracked file denied" deny Edit "$R/.todos/pending/rootlink/tracked.txt" "$R" "$SID_A"
+# H1c (the decisive A1 case): a symlink INSIDE .todos, followed by `..`, whose
+# true destination is a tracked file. A normpath-first resolver collapses
+# `link/..` lexically and keeps the .todos exemption (wrong allow); realpath
+# from the raw token resolves the symlink first and escapes .todos.
+mkdir -p "$R/sub"; printf 'child\n' > "$R/sub/tracked-sub.txt"
+git -C "$R" add sub/tracked-sub.txt
+git -C "$R" -c user.name=t -c user.email=t@x commit -q -m sub
+ln -s "$R/sub" "$R/.todos/pending/sublink"
+hook_case "H1 symlink-then-.. inside .todos escaping to a tracked file denied" deny Edit "$R/.todos/pending/sublink/../sub/tracked-sub.txt" "$R" "$SID_A"
+# A genuine .todos write is still exempt.
+hook_case "H1 genuine .todos write still passes" allow Write "$R/.todos/pending/2026-09-12-real.md" "$R" "$SID_A"
+# H2: a NUL byte in a target must not crash classify() into the top-level
+# fail-open handler and un-guard a real tracked target in the same command.
+H2_R="$R" H2_SID="$SID_A" python3 - > "$FIX/h2.json" <<'PY'
+import json, os
+e = os.environ
+cmd = "tee " + e["H2_R"] + "/tracked.txt " + e["H2_R"] + "/a\x00b.txt"
+print(json.dumps({"session_id": e["H2_SID"], "cwd": e["H2_R"], "hook_event_name": "PreToolUse",
+                  "tool_name": "Bash", "tool_use_id": "toolu_h2",
+                  "tool_input": {"command": cmd}}))
+PY
+if run "$(cat "$FIX/h2.json")"; then rc=0; else rc=$?; fi
+expect "H2 NUL target does not fail open; the real tracked target still denies" deny "$rc"
+
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
 marker() {
