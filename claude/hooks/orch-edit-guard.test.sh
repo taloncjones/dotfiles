@@ -419,6 +419,42 @@ print(json.dumps({"session_id": e["H2_SID"], "cwd": e["H2_R"], "hook_event_name"
 PY
 if run "$(cat "$FIX/h2.json")"; then rc=0; else rc=$?; fi
 expect "H2 NUL target does not fail open; the real tracked target still denies" deny "$rc"
+# H3 (co-review r7): every parser on the privileged decision path is total.
+# A sentinel-shaped lookalike token with thousands of digits used to be
+# int()-converted (ValueError -> fail open); it is now just an unknown token.
+digits=$(python3 -c 'print("1" * 5000)')
+hook_case "H3 5000-digit sentinel lookalike does not fail open; tracked redirect denies" deny Bash "echo __ORCH_REDIR_${digits}__; echo x > $TR" "$R" "$SID_A"
+# A non-UTF-8 pathspec makes git echo raw bytes; a strict decode raised
+# UnicodeDecodeError past every caller. surrogateescape keeps the other
+# (tracked) target guarded.
+H3_R="$R" H3_SID="$SID_A" python3 - > "$FIX/h3.json" <<'PY'
+import json, os
+e = os.environ
+cmd = "tee " + e["H3_R"] + "/tracked.txt " + e["H3_R"] + "/bad\udcff"
+print(json.dumps({"session_id": e["H3_SID"], "cwd": e["H3_R"], "hook_event_name": "PreToolUse",
+                  "tool_name": "Bash", "tool_use_id": "toolu_h3",
+                  "tool_input": {"command": cmd}}))
+PY
+if run "$(cat "$FIX/h3.json")"; then rc=0; else rc=$?; fi
+expect "H3 non-UTF-8 sibling target does not fail open; tracked target denies" deny "$rc"
+# canonical_target must swallow a RecursionError from an older recursive
+# realpath (long symlink chain) and skip only that target.
+if HOOK="$HOOK" python3 - <<'PY'
+import importlib.util, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+real = os.path.realpath
+def boom(p): raise RecursionError("maximum recursion depth exceeded")
+os.path.realpath = boom
+try:
+    assert g.canonical_target("/x/y", "/", "/home") is None
+finally:
+    os.path.realpath = real
+assert g.canonical_target("/tmp", "/", "/home") is not None
+PY
+then printf 'PASS  H3 canonical_target swallows RecursionError and skips only that target\n'; PASS=$((PASS + 1))
+else printf 'FAIL  H3 canonical_target swallows RecursionError and skips only that target\n' >&2; FAIL=$((FAIL + 1)); fi
 
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
@@ -508,6 +544,14 @@ hook_case "AC6 budget 1: first allowed" allow Edit "$R/tracked.txt" "$R" "$SID_A
 hook_case "AC6 budget 1: second denied" deny Edit "$R/tracked.txt" "$R" "$SID_A"
 marker "$RD_A" "$SID_A" 4 300 1 "dddddddddddddddd"
 hook_case "AC6 re-minted marker starts a fresh budget" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+# A corrupt or deeply nested line in the audit log must be skipped, never
+# crash the budget reader open past the marker limit (co-review r7): with
+# such a line present, budget 2 still allows two writes and denies the third.
+reset_log; marker "$RD_A" "$SID_A" 4 300 2 "0000000000000003"
+python3 -c 'import sys; open(sys.argv[1], "a").write("[" * 100000 + "]" * 100000 + "\n")' "$AUDIT"
+hook_case "AC6 nested audit line: first write allowed" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+hook_case "AC6 nested audit line: second write allowed" allow Edit "$R/dir/inner.txt" "$R" "$SID_A"
+hook_case "AC6 nested audit line: third write denied (limit still enforced)" deny Edit "$R/tracked.txt" "$R" "$SID_A"
 reset_log; marker "$RD_A" "$SID_A" 4 300 2 "eeeeeeeeeeeeeeee"
 i=0
 while [ "$i" -lt 5 ]; do

@@ -104,16 +104,22 @@ def git(args, cwd, budget):
     if left <= 0:
         return None, ""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    # surrogateescape: a non-UTF-8 pathspec makes git echo raw bytes in its
+    # diagnostics, and a strict decode raised UnicodeDecodeError past every
+    # caller into the top-level fail-open handler (co-review r7). Decode
+    # losslessly, and treat any residual decode failure as this one probe
+    # being unguarded -- never as the whole hook crashing open.
     try:
         p = subprocess.run(
             ["git", "-C", cwd, *args],
             capture_output=True,
             text=True,
+            errors="surrogateescape",
             timeout=left,
             env=env,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None, ""
     return p.returncode, p.stdout
 
@@ -261,7 +267,9 @@ def canonical_target(word, cwd, home):
     joined = word if word.startswith("/") else os.path.join(cwd, word)
     try:
         return os.path.realpath(joined)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: an older recursive realpath on a long symlink
+        # chain; this one target is unguardable, the others still scan.
         return None
 
 
@@ -529,9 +537,11 @@ def scan_raw(text):
                 continue
             word, e = read_word(text, m)
             if word:
-                num = len(redirs)
-                redirs[num] = word
-                out.append(f" __ORCH_REDIR_{num}__ ")
+                # Key by the exact generated sentinel string so pass 2 looks
+                # it up verbatim and never int()-converts command text.
+                sentinel = f"__ORCH_REDIR_{len(redirs)}__"
+                redirs[sentinel] = word
+                out.append(f" {sentinel} ")
             else:
                 out.append(" ")
             i = e
@@ -657,7 +667,7 @@ def copy_targets(words, cwd, home, include_sources):
     # stays the RAW join so the single resolve_targets chokepoint canonicalizes.
     try:
         dprobe = os.path.realpath(os.path.join(cwd, rm_guard.expand_home(dest, home)))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         dprobe = ""
     if dprobe and os.path.isdir(dprobe):
         out.extend(os.path.join(dest, os.path.basename(s)) for s in srcs)
@@ -827,9 +837,13 @@ def bash_targets(command, cwd, home, depth=0):
             continue
         words = []
         for t in tokens:
-            m = SENTINEL_RE.match(t)
-            if m:
-                w = redirs.get(int(m.group(1)))
+            if SENTINEL_RE.match(t):
+                # Look the sentinel up by its exact string. A lookalike token
+                # in the command text (e.g. thousands of digits) used to be
+                # int()-converted, which raised ValueError past every caller
+                # and failed the guard open (co-review r7). An unknown
+                # sentinel-shaped token is simply not a redirect.
+                w = redirs.get(t)
                 if w:
                     found.extend((c, w) for c in cwds)
             else:
@@ -1041,7 +1055,11 @@ def claim_budget(rd, marker, session_id, tool_use_id, paths):
     for line in lines:
         try:
             rec = json.loads(line)
-        except ValueError:
+        except Exception:  # noqa: BLE001, S112 -- an unparseable line is skipped, never a crash (co-review r7)
+            # A torn concurrent line is skipped by contract; a corrupt or
+            # deeply nested line (RecursionError on older decoders) is
+            # likewise skipped -- it cannot be a valid claim, and letting it
+            # raise bypassed the whole marker limit via the fail-open handler.
             continue
         if (
             not isinstance(rec, dict)
@@ -1113,7 +1131,7 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
             if ordinal > marker["max_edits"]:
                 return "deny", "budget", slug, {"ordinal": ordinal, "marker": marker}
             return "allow", slug, marker
-    except (OSError, ValueError, subprocess.SubprocessError, KeyError):
+    except Exception:  # noqa: BLE001 -- any transaction/reader failure denies (fail closed, co-review r7)
         return "deny", "fence", slug, {}
 
 
