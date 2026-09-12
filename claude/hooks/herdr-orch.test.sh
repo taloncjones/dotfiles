@@ -2709,5 +2709,16 @@ test -f "$root/herdr-orch/$SLUG/leads/$bid/tasks/PROJ-3.review.json"
 test ! -e "$root/herdr-orch/$SLUG/tasks/PROJ-3.review.json"
 SH
 
+check "emit-done --binding rejects a non-id binding before touching the filesystem" <<'SH'
+root=$(mktemp -d)
+esc="$(mktemp -d)/evil"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
+   --repo-slug slug-escbind --binding "$esc" --task-id PROJ-9 --workspace w1 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   2>/dev/null; then exit 1; fi
+test ! -e "$esc/tasks"
+test ! -e "$esc"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

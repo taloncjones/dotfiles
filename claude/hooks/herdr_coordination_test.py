@@ -525,11 +525,13 @@ with c.owner_transaction(rd) as tx:
         )
         os.remove(lease)
         # A lease that has existed must never restart at fence 1.
-        with coordination.owner_transaction(
-            self.rd, canonical_id="canonical", expected_slug="repo"
-        ) as tx:
-            with self.assertRaises(ValueError):
-                tx.lead_claim("B", "host", 3, "/tmp/ws-a", "ldb-" + "b" * 32)
+        with (
+            coordination.owner_transaction(
+                self.rd, canonical_id="canonical", expected_slug="repo"
+            ) as tx,
+            self.assertRaises(ValueError),
+        ):
+            tx.lead_claim("B", "host", 3, "/tmp/ws-a", "ldb-" + "b" * 32)
 
     def test_lead_check_pins_binding_generation(self):
         with coordination.owner_transaction(
@@ -560,11 +562,13 @@ with c.owner_transaction(rd) as tx:
             self.assertFalse(tx.lead_refresh("A", 2, "/tmp/ws-a"))
 
     def test_slug_owner_claim_rejects_lead_tier(self):
-        with coordination.owner_transaction(
-            self.rd, canonical_id="canonical", expected_slug="repo"
-        ) as tx:
-            with self.assertRaises(ValueError):
-                tx.claim("A", "host", 1, control_tier="lead", workspace_root="/tmp/ws")
+        with (
+            coordination.owner_transaction(
+                self.rd, canonical_id="canonical", expected_slug="repo"
+            ) as tx,
+            self.assertRaises(ValueError),
+        ):
+            tx.claim("A", "host", 1, control_tier="lead", workspace_root="/tmp/ws")
 
 
 class AttemptTests(unittest.TestCase):

@@ -2405,6 +2405,7 @@ def _main(argv=None) -> int:
             # attempt fields there is no owner_transaction around publication,
             # and a revocation could race the write. The transactional
             # re-read below is the authoritative status check.
+            _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
             _require(ns.runtime is not None,
                      "a binding-scoped emit requires the native attempt fields")
             base = rd / "leads" / ns.binding
