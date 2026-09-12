@@ -905,15 +905,19 @@ def test_timeout_returns_when_a_detached_child_holds_the_pipe():
         bindir.mkdir()
         repo = root / "repo"
         init_repo(repo)
-        # The fake codex forks a setsid grandchild that sleeps holding stdout,
-        # then the direct child sleeps too. killpg reaps the child but not the
-        # detached grandchild.
+        # The fake codex forks a setsid grandchild that records its pid, then
+        # sleeps holding stdout; the direct child sleeps too. killpg alone
+        # reaps the child but not the detached grandchild -- the ppid snapshot
+        # in _kill_after_timeout must catch and kill it.
+        pidfile = root / "worker.pid"
         executable(
             bindir / "codex",
             "exec python3 -c '"
             "import os,sys,time\n"
             "if os.fork()==0:\n"
-            "    os.setsid(); time.sleep(120); sys.exit(0)\n"
+            "    os.setsid()\n"
+            f'    open("{pidfile}","w").write(str(os.getpid()))\n'
+            "    time.sleep(120); sys.exit(0)\n"
             "time.sleep(120)'\n",
         )
         env = dict(os.environ)
@@ -922,20 +926,42 @@ def test_timeout_returns_when_a_detached_child_holds_the_pipe():
             "codex", "implementation", capabilities=codex_capabilities()
         )
         started = time.monotonic()
+        # 1.0s (not 0.2s) so the worker reliably forks, setsids, and records
+        # its pid BEFORE cleanup runs -- the assertion below needs a worker
+        # that was alive and detached when the timeout fired.
         result = runtime.run_bounded(
             route,
             "prompt",
             repo,
             "workspace-write",
-            timeout_secs=0.2,
+            timeout_secs=1.0,
             env=env,
         )
         elapsed = time.monotonic() - started
-        # 0.2s timeout + a bounded 5s drain, comfortably under 10s -- never
+        # 1.0s timeout + a bounded 5s drain, comfortably under 10s -- never
         # the unbounded hang.
         assert elapsed < 10, elapsed
         assert result["status"] == "timeout", result
         assert result["timed_out"] is True, result
+        # The detached (setsid) worker must be dead too, not left running
+        # after the runner reported a timeout.
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "worker never recorded its pid"
+        worker = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(worker, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(worker, 9)
+        assert not alive, f"detached worker {worker} survived timeout cleanup"
 
 
 def test_route_and_launch_plan_cli_emit_json_contracts():
