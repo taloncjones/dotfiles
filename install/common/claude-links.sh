@@ -176,8 +176,9 @@ import hashlib
 with open(tmpl_path, "rb") as fh:
     tmpl_sha = hashlib.sha256(fh.read()).hexdigest()
 stamp_path = os.path.join(os.path.dirname(os.path.abspath(dest_path)), ".settings-template-sha256")
-with open(stamp_path, "w") as fh:
-    fh.write(tmpl_sha + "\n")
+if not os.path.islink(stamp_path):
+    with open(stamp_path, "w") as fh:
+        fh.write(tmpl_sha + "\n")
 
 ss = result.get("hooks", {}).get("SessionStart", [])
 cmds = [os.path.basename(h.get("command", "")) for grp in ss for h in grp.get("hooks", [])]

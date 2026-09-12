@@ -42,8 +42,10 @@ function update() {    # update([--ai]) will update the dotfiles installation; -
 	# navigate to dotfile install directory
 	dotfiles
 
-	# pull new version from origin
-	git pull
+	# pull new version from origin (non-fatal: both scopes still run the
+	# installer even when the pull fails, e.g. offline)
+	local pull_status=0
+	git pull || pull_status=$?
 
 	local install_status=0
 	if [[ "$scope" == "ai" ]]; then
@@ -74,7 +76,9 @@ function update() {    # update([--ai]) will update the dotfiles installation; -
 
 	# A completed update supersedes any pending staleness nudge (Task 6);
 	# keep the last-check stamp so the daily fetch cadence is unchanged.
-	rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/repo-staleness-result"
+	# Only clear it when BOTH the pull and the install actually succeeded --
+	# a failed pull must not silence a real staleness reminder.
+	(( pull_status == 0 && install_status == 0 )) && rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/repo-staleness-result"
 }
 
 # Extract a compressed archive without worrying about which tool to use
@@ -1328,6 +1332,7 @@ _claude_code_update_check
 # failure (offline, unwritable cache) is silent.
 _dotfiles_staleness_fetch() {
     local result_file="$1"
+    [[ -L "$result_file" ]] && return 0
     mkdir -p "${result_file:h}" 2>/dev/null || return 0
     local behind=""
     if git -C "$DOTFILEDIR" fetch --quiet 2>/dev/null; then
@@ -1353,6 +1358,7 @@ _dotfiles_staleness_fetch() {
 # real work tree (worktrees have a .git FILE, so ask git and require "true";
 # a bare repo or .git dir prints "false" and is excluded).
 _dotfiles_staleness_check() {
+    [[ -o interactive ]] || return 0
     [[ ! -t 1 ]] && return 0
     [[ -n "${DOTFILEDIR:-}" ]] || return 0
     [[ "$(git -C "$DOTFILEDIR" rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] || return 0
@@ -1362,12 +1368,19 @@ _dotfiles_staleness_check() {
     local result_file="$cache_dir/repo-staleness-result"
     local cache_ttl=86400  # 24 hours
 
+    # Never follow a symlinked cache file -- refuse to read/truncate it.
+    [[ -L "$result_file" || -L "$check_stamp" ]] && return 0
+
     # Surface the previous check's result once, then consume it so later
     # shells (and post-update shells) stay quiet until the next fetch.
+    # Always truncate after reading (even a malformed result), and only
+    # print when the content is a validated nonempty digit string.
     if [[ -f "$result_file" && -s "$result_file" ]]; then
         local behind
         behind="$(cat "$result_file" 2>/dev/null)"
-        [[ -n "$behind" ]] && echo "[INFO] dotfiles is $behind commit(s) behind -- run 'update' or 'update --ai'."
+        if [[ "$behind" == <-> ]]; then
+            printf '[INFO] dotfiles is %s commit(s) behind -- run '\''update'\'' or '\''update --ai'\''.\n' "$behind"
+        fi
         : > "$result_file" 2>/dev/null
     fi
 

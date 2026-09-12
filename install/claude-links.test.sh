@@ -365,5 +365,19 @@ else
     fail "failed reconcile writes no stamp"
 fi
 
+# a symlinked stamp path is never followed/overwritten by the stamp write
+SYMLINK_DIR="$TMP/symlinkdir"
+mkdir -p "$SYMLINK_DIR"
+printf '{"enabledPlugins": {"x@y": true}}\n' >"$SYMLINK_DIR/settings.json"
+ln -s "$SYMLINK_DIR/settings.json" "$SYMLINK_DIR/.settings-template-sha256"
+reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$SYMLINK_DIR/settings.json" >/dev/null 2>&1
+if jget "$SYMLINK_DIR/settings.json" "'hooks' in d" \
+   && [ -L "$SYMLINK_DIR/.settings-template-sha256" ] \
+   && ! grep -qE '^[0-9a-f]{64}$' "$SYMLINK_DIR/.settings-template-sha256"; then
+    pass "stamp write skipped through a symlinked stamp path"
+else
+    fail "stamp write skipped through a symlinked stamp path"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
