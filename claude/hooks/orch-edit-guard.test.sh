@@ -384,6 +384,13 @@ hook_case "H1 cd -P through a symlink-then-.. is guarded" deny Bash "cd -P $R/.t
 # tracked.txt is guarded only from $R (co-review r2 finding #1).
 ln -s "$FIX/nonexistent-physical-xyz" "$R/dl"
 hook_case "H1 failed cd -P keeps the original repo cwd guarded" deny Bash "cd -P $R/dl/../../scratch && echo x > tracked.txt" "$R" "$SID_A"
+# A `cd` through a non-directory intermediate component fails (both the lexical
+# and physical spellings collapse to $S, but the shell cannot traverse the file
+# $S/note.txt), leaving the shell in the repo cwd $R (co-review r3).
+hook_case "H1 cd through a non-dir intermediate keeps the repo cwd guarded" deny Bash "cd -P $S/note.txt/.. ; echo x > tracked.txt" "$R" "$SID_A"
+# A pipeline-ending `cd` runs in a subshell; the parent shell keeps its cwd, so
+# the following write is still guarded from the repo cwd (co-review r3).
+hook_case "H1 pipeline-ending cd does not move the parent cwd" deny Bash "true | cd $S/existing ; echo x > tracked.txt" "$R" "$SID_A"
 # A genuine .todos write is still exempt.
 hook_case "H1 genuine .todos write still passes" allow Write "$R/.todos/pending/2026-09-12-real.md" "$R" "$SID_A"
 # H2: a NUL byte in a target must not crash classify() into the top-level

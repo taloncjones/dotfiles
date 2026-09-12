@@ -777,21 +777,19 @@ def cd_target_candidates(words, cwd, home):
     # `cd -P link/..` through a symlink would leave the guard scanning the
     # wrong (lexical) directory and miss the real target (A1). Widening the
     # candidate set only over-guards; it never misses.
+    # Always keep the incoming `cwd` as a candidate alongside the lexical and
+    # physical (realpath) destinations. A `cd` can fail for reasons neither
+    # spelling reveals -- a non-directory intermediate component
+    # (`cd -P /dev/null/..`, both spellings collapse to `/dev` yet the shell
+    # cannot traverse the file `/dev/null`), or a pipeline-ending `cd` that
+    # runs in a subshell and never moves the parent shell -- and then the
+    # shell stays in `cwd`. Dropping `cwd` under any "cd surely succeeded"
+    # heuristic under-guards; retaining it only over-guards, which is safe.
     lexical = rm_guard.resolve(rm_guard.expand_home(operand, home), cwd)
     real = canonical_target(operand, cwd, home)
-    cands = {lexical}
+    cands = {lexical, cwd}
     if real is not None:
         cands.add(real)
-    # The shell lands in exactly one directory, but the scanner cannot know
-    # whether it used logical (lexical) or physical (-P, realpath) resolution,
-    # nor whether the cd even succeeded. Keep `cwd` UNLESS both resolutions
-    # agree on a single confirmed directory (only then does cd deterministically
-    # succeed there). A failed `cd -P` -- e.g. a lexical dir whose physical
-    # target does not exist -- leaves the shell in cwd, so cwd must stay a
-    # candidate whenever the two spellings differ or either is not a directory.
-    resolved_dirs = {c for c in cands if os.path.isdir(c)}
-    if len(cands) != 1 or len(resolved_dirs) != 1:
-        cands.add(cwd)
     return cands
 
 
