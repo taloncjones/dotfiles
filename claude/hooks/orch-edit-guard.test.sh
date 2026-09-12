@@ -666,5 +666,27 @@ PY
     fi
 fi
 
+# --- lead-tier classification (control_tier=lead) --------------------------
+# A repo owned by a LEAD whose workspace_root is a subdirectory. The lead may
+# edit inside that subdir, is denied for the same repo outside it (lead-scope),
+# is denied for a repo it does not own (pre-existing scope), and is denied
+# (fail closed) when its workspace_root cannot be resolved.
+RL="$FIX/leadrepo"; mkrepo "$RL" "git@example.com:org/lead.git"
+SLUG_L=$(slug_of "git@example.com:org/lead.git")
+SID_D=44444444-4444-4444-4444-444444444444
+env HOME="$H" CLAUDE_CONFIG_DIR="$CFG" HERDR_COORDINATION_ROOT="$HERDR_COORDINATION_ROOT" \
+    python3 "$CORE" claim-owner --repo-slug "$SLUG_L" --repo-path "$RL" --runtime claude \
+    --session "$SID_D" --host h --pid 1 --stale-secs 0 --control-tier lead --workspace-root "$RL/dir" >/dev/null
+
+hook_case "lead edits inside its workspace_root -> allow" allow Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
+hook_case "lead editing owned repo outside its workspace -> deny" deny Edit "$RL/tracked.txt" "$RL" "$SID_D"
+hook_case "lead editing an unowned repo -> deny" deny Edit "$R/tracked.txt" "$R" "$SID_D"
+
+# Corrupt the authoritative record's workspace_root to a nonexistent path: the
+# session is still identified as a lead, but scope cannot be established -> deny.
+python3 -c 'import json,os,sys; p=os.path.join(sys.argv[1],sys.argv[2],"owner.json"); rec=json.load(open(p)); rec["workspace_root"]="/nonexistent/ws"; json.dump(rec, open(p,"w"))' \
+    "$HERDR_COORDINATION_ROOT" "$SLUG_L"
+hook_case "lead with unresolvable workspace_root -> deny (fail closed)" deny Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

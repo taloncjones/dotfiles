@@ -167,7 +167,13 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
             and not isinstance(rec.get("fence"), bool)
         ):
             continue
-        entry = {"fence": rec["fence"], "rd": rd, "caller_scope": caller_scope}
+        entry = {
+            "fence": rec["fence"],
+            "rd": rd,
+            "caller_scope": caller_scope,
+            "control_tier": rec.get("control_tier", "launcher"),
+            "workspace_root": rec.get("workspace_root"),
+        }
         if slug in targets:
             entry.update(targets[slug])
         owned[slug] = entry
@@ -938,11 +944,29 @@ def claim_budget(rd, marker, session_id, tool_use_id, paths):
     return own if seen == len(paths) else None
 
 
+def lead_scope_verdict(guarded, owner, slug):
+    """A lead owner may edit only inside its own canonical workspace_root.
+    Fail closed: a missing or unresolvable workspace_root denies. Returns
+    ('allow', slug, None) or ('deny', 'lead-scope', slug, detail)."""
+    wr = owner.get("workspace_root")
+    if not isinstance(wr, str) or not wr:
+        return "deny", "lead-scope", slug, {"reason": "no-workspace-root", "workspace_root": wr}
+    root = canon(wr)
+    if not os.path.isdir(root):
+        return "deny", "lead-scope", slug, {"reason": "workspace-root-missing", "workspace_root": wr}
+    for c, _top, _reason in guarded:
+        cc = canon(c)
+        if cc != root and not cc.startswith(root + "/"):
+            return "deny", "lead-scope", slug, {"target": cc, "workspace_root": wr}
+    return "allow", slug, None
+
+
 def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
     """('allow', slug, marker) or ('deny', why, slug, detail). Every
     guarded target must resolve to one slug this session owns; that
     slug's marker must validate; then the budget claim must land within
-    max_edits."""
+    max_edits. A lead-tier owner is restricted to its workspace_root
+    instead (lead_scope_verdict), needing no marker."""
     cache = {}
     slugs = {}
     for c, top, _reason in guarded:
@@ -967,6 +991,8 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
         return "deny", "scope", first, {"target_slug": slug}
     if owner["scope"]["account_id"] != owner["caller_scope"]["account_id"]:
         return "deny", "scope", first, {"target_slug": slug}
+    if owner.get("control_tier", "launcher") == "lead":
+        return lead_scope_verdict(guarded, owner, slug)
     rd = owner["rd"]
     try:
         with core.owner_transaction(
@@ -1023,6 +1049,16 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
         print(
             "Dispatch it: file a todo in that repo and kick off a worker, "
             "or ask the human.",
+            file=sys.stderr,
+        )
+    elif why == "lead-scope":
+        print(
+            f"This session leads {slug}; it may edit only inside its workspace "
+            f"{detail.get('workspace_root')}, not {c}.",
+            file=sys.stderr,
+        )
+        print(
+            "Edit only within your lead workspace; dispatch anything else.",
             file=sys.stderr,
         )
     elif why == "budget":
@@ -1104,22 +1140,25 @@ def decide(payload, runtime="claude"):
         _, slug, marker = verdict
         rd = owned[slug]["rd"]
         for c, top, reason in guarded:
-            audit_append(
-                rd,
-                {
-                    "v": 1,
-                    "ts": core.now_iso(),
-                    "event": "orch-edit-allowed",
-                    "session_id": sid,
-                    "tool_name": tool,
-                    "tool_use_id": tool_use_id,
-                    "path": c[:PATH_MAX],
-                    "repo": top[:PATH_MAX],
-                    "reason": reason,
-                    "marker_id": marker["marker_id"],
-                    "marker_expires": marker.get("expires"),
-                },
-            )
+            rec = {
+                "v": 1,
+                "ts": core.now_iso(),
+                "event": "orch-edit-allowed",
+                "session_id": sid,
+                "tool_name": tool,
+                "tool_use_id": tool_use_id,
+                "path": c[:PATH_MAX],
+                "repo": top[:PATH_MAX],
+                "reason": reason,
+            }
+            # A lead-tier allow carries no marker; record the tier instead of
+            # indexing a None marker (which would raise and fail open).
+            if marker is None:
+                rec["control_tier"] = "lead"
+            else:
+                rec["marker_id"] = marker["marker_id"]
+                rec["marker_expires"] = marker.get("expires")
+            audit_append(rd, rec)
         return 0
     _, why, slug, detail = verdict
     detail = dict(detail, owned=",".join(sorted(owned)))
