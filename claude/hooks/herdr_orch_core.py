@@ -1671,14 +1671,17 @@ def owner_transaction(rd, session=None, fence=None, context=None, expected_slug=
 
 
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
-                context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None):
+                context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
+                control_tier="launcher", workspace_root=None):
     sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
     if reason == "ok" and int(pid) != sock_pid:
         print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; using {sock_pid}", file=sys.stderr)
     elif reason not in ("ok", "empty"):
         print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}", file=sys.stderr)
     with owner_transaction(rd, context=context, expected_slug=expected_slug, scope=scope) as tx:
-        fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs, runtime=runtime, thread_id=thread_id)
+        fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
+                         runtime=runtime, thread_id=thread_id,
+                         control_tier=control_tier, workspace_root=workspace_root)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
@@ -1909,6 +1912,8 @@ def _main(argv=None) -> int:
     co.add_argument("--stale-secs", type=int, default=None)  # test/override hook
     co.add_argument("--messaging-socket", default=None)
     co.add_argument("--thread-id", default=None)
+    co.add_argument("--control-tier", choices=("launcher", "lead"), default="launcher")
+    co.add_argument("--workspace-root", default=None)
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
@@ -2007,6 +2012,17 @@ def _main(argv=None) -> int:
 
     if ns.cmd == "claim-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        control_tier = ns.control_tier
+        workspace_root = ns.workspace_root
+        if control_tier == "lead":
+            _require(workspace_root, "control-tier lead requires --workspace-root")
+            # Absolute BEFORE realpath: canonicalizing a relative path would
+            # silently bind the workspace to the invocation directory.
+            _require(os.path.isabs(workspace_root), "workspace-root must be an absolute path")
+            workspace_root = os.path.realpath(workspace_root)
+            _require(os.path.isdir(workspace_root), "workspace-root must be an existing directory")
+        else:
+            _require(workspace_root is None, "workspace-root is only valid with --control-tier lead")
         kw = {} if ns.stale_secs is None else {"stale_secs": ns.stale_secs}
         try:
             context = repository_context(ns.repo_path or os.getcwd())
@@ -2025,7 +2041,8 @@ def _main(argv=None) -> int:
                 scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
                 _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
         fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
-                            messaging_socket=ns.messaging_socket, context=context, expected_slug=expected_slug, runtime=ns.runtime or "claude", thread_id=ns.thread_id, scope=(_PAYLOAD_SELECTION.get() or {}).get("scope"), **kw)
+                            messaging_socket=ns.messaging_socket, context=context, expected_slug=expected_slug, runtime=ns.runtime or "claude", thread_id=ns.thread_id, scope=(_PAYLOAD_SELECTION.get() or {}).get("scope"),
+                            control_tier=control_tier, workspace_root=workspace_root, **kw)
         if fence is None:
             print("BUSY")
             return 1
