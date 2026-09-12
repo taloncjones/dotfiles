@@ -14,7 +14,7 @@
     },
     {
       "name": "template-keeps-existing-env-keys",
-      "run": "python3 -c \"import json,sys; env=json.load(open('claude/settings.json.tmpl'))['env']; sys.exit(0 if env.get('ANTHROPIC_DEFAULT_OPUS_MODEL')=='claude-opus-5[1m]' and env.get('CLAUDE_CODE_DISABLE_TELEMETRY')=='1' and env.get('ECC_CONTEXT_MONITOR_COST_WARNINGS')=='0' else 1)\"",
+      "run": "python3 -c \"import json,sys; env=json.load(open('claude/settings.json.tmpl'))['env']; sys.exit(0 if env.get('ANTHROPIC_DEFAULT_OPUS_MODEL')=='claude-opus-4-8[1m]' and env.get('CLAUDE_CODE_DISABLE_TELEMETRY')=='1' and env.get('ECC_CONTEXT_MONITOR_COST_WARNINGS')=='0' else 1)\"",
       "timeout_secs": 600
     },
     {
