@@ -20,6 +20,16 @@ liveness, and account hashes, not plans, findings, or task text. Persistent
 locks serialize controllers across runtime/account payload roots. A different
 payload root does not grant a second owner for the same repository.
 
+Lead ownership is a per-(repository, workspace) lease stored beside the slug's
+`owner.json` as `lead-<key>.json`, where `<key>` is the first 16 hex chars of
+sha256(workspace_root). Lead leases coexist with the launcher lease and with
+each other; the launcher lease alone remains one-per-repository. A lead lease
+is claimable only through a launcher-issued dispatch binding whose expected
+session, account, runtime, repository, and workspace all match; a binding
+whose parent is not a launcher is unclaimable (two tiers only). Lead dispatch
+remains inactive until the guard and procedure slices land; nothing in the
+current skill issues bindings.
+
 All state remains machine-local and untracked. Private spec/plan copies live
 in the selected payload tree's `artifacts/<task>/<launch>/` and are referenced
 by immutable path/hash pairs.
@@ -39,6 +49,16 @@ STATE_ROOT/
       <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
       <task_id>.brief.md              # mech kickoff brief file (--brief-file)
       orch-edits.jsonl                # tasks/orch-edits.jsonl bounded edit-marker audit
+    bindings/
+      <binding_id>.json               # launcher-issued lead dispatch binding
+                                      # (ldb-<32hex>; schema_version 1; status
+                                      # issued -> claimed -> completed|revoked;
+                                      # written only under a launcher fence)
+    leads/
+      <binding_id>/                   # one lead's private record subtree
+        owner.json                    # mirror of the lead's per-workspace lease
+        tasks/                        # lead-scoped task/done/review records
+        workspaces/                   # lead-scoped workspace index records
     think/
       <think_id>.question.md          # orchestrator-written brief (input contract)
       <think_id>.launch.json          # wrapper-written, create-exclusive, before launch (liveness)
