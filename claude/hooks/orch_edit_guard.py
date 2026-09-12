@@ -36,15 +36,20 @@ Accepted holes (allow): scripts and functions, `python -c`, `git apply`/
 A-1; only sed/gsed/perl are modeled as in-place editors). This is a guard
 against drift, not evasion.
 
-Beyond TARGET_CAP (20) distinct targets, only the extra ones past the cap
-are unguarded (paths[:TARGET_CAP] keeps the first 20 seen and drops the
-rest) -- a single command mixing scratch and tracked targets is guarded
-or not per target, in first-seen order, not as a whole-command allow.
+A command naming more than TARGET_CAP (20) distinct canonical targets is an
+overflow the guard cannot scan within its git budget. Nothing is silently
+dropped: a privileged session (launcher or lead) is refused outright (fail
+closed -- an unscanned target could be a tracked file hidden by alias
+spellings or by one relative operand expanding across many retained `cd`
+candidates), while a plain worker is allowed as always.
 
-Deny is exit 2 with three stderr lines; allow is exit 0 and silent. Fails
-open on any unexpected exception (exit 0), matching the other guards.
-Malformed state files have defined outcomes: a bad owner.json is skipped,
-a bad marker is no marker.
+Deny is exit 2 with three stderr lines; allow is exit 0 and silent. On an
+unexpected exception the verdict is routed through crash_verdict(): a
+session identifiable as a launcher or lead fails CLOSED (exit 2, spec R9),
+and only a session with no privileged identity keeps the fail-open default
+(exit 0, matching the other guards) -- so no single reader or parser that
+raises can un-fence a fenced session. Malformed state files still have
+defined outcomes: a bad owner.json is skipped, a bad marker is no marker.
 """
 
 import json
@@ -61,6 +66,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # never leave __pycache__ under the hooks dir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import herdr_bindings as bindings
 import herdr_orch_core as core
 import rm_guard
 from workflow_context import account_scope, repository_context
@@ -101,28 +107,41 @@ def git(args, cwd, budget):
     if left <= 0:
         return None, ""
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+    # surrogateescape: a non-UTF-8 pathspec makes git echo raw bytes in its
+    # diagnostics, and a strict decode raised UnicodeDecodeError past every
+    # caller into the top-level fail-open handler (co-review r7). Decode
+    # losslessly, and treat any residual decode failure as this one probe
+    # being unguarded -- never as the whole hook crashing open.
     try:
         p = subprocess.run(
             ["git", "-C", cwd, *args],
             capture_output=True,
-            text=True,
             timeout=left,
             env=env,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+        # Decode ourselves: text=True would also translate universal newlines,
+        # turning a legal `\r` inside a path into `\n` and breaking the
+        # containment comparison (co-review r10). Bytes in, lossless out.
+        return p.returncode, p.stdout.decode("utf-8", "surrogateescape")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None, ""
-    return p.returncode, p.stdout
 
 
 # --- state root reads ------------------------------------------------------
 
 
 def read_state_json(path):
-    """Parsed regular payload object, or None for an invalid marker."""
+    """Parsed regular payload object, or None for an invalid record.
+
+    Total over arbitrary on-disk content: any read or decode error -- including
+    a RecursionError from deeply nested JSON, which is not a ValueError -- is
+    "no record". This reader feeds owned_slugs(), which runs BEFORE lead
+    discovery on every path, so an unrelated malformed owner.json must never
+    escape to the top-level fail-open handler and un-fence a contained lead."""
     try:
         data = json.loads(core.read_payload_text(path))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except Exception:  # noqa: BLE001 -- a bad state record is no record, never a crash
         return None
     return data if isinstance(data, dict) else None
 
@@ -165,6 +184,7 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
             and rec.get("account_id") == caller_scope["account_id"]
             and isinstance(rec.get("fence"), int)
             and not isinstance(rec.get("fence"), bool)
+            and rec.get("control_tier", "launcher") == "launcher"
         ):
             continue
         entry = {"fence": rec["fence"], "rd": rd, "caller_scope": caller_scope}
@@ -174,17 +194,127 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
     return owned
 
 
+def lead_authority(session_id, runtime, caller_scope):
+    """(is_lead, [authorized workspace_root, ...]) for this session.
+
+    Discovery is from the AUTHORITATIVE coordination namespace, not the
+    payload root: a session is a lead if any coordination slug holds a lead
+    lease naming it (session_id + account + runtime + control_tier lead, valid
+    record). This keeps a lead classified -- and therefore fenced -- even when
+    its payload-root slug directory or binding file has been removed.
+
+    A workspace_root is AUTHORIZED only when the lease's dispatch binding is
+    present, valid, not terminal (issued|claimed), issued by a launcher
+    parent, of tier lead, and agrees with the lease/context on runtime,
+    repo_slug, workspace_root, account, and expected session. A missing,
+    corrupt, revoked, completed, or mismatched binding leaves the session a
+    lead (is_lead True) with that workspace_root withheld -- fail closed."""
+    payload_root = core.account_payload_root(caller_scope) / "herdr-orch"
+    is_lead = False
+    roots = []
+    account_id = caller_scope["account_id"]
+    for slug in core.coordination.coordination_slugs():
+        try:
+            leases = core.coordination.iter_lead_leases(slug)
+        except (OSError, ValueError):
+            continue
+        for lease in leases:
+            if (
+                lease.get("session_id") != session_id
+                or lease.get("account_id") != account_id
+                or lease.get("runtime", "claude") != runtime
+                or lease.get("control_tier") != "lead"
+            ):
+                continue
+            is_lead = True
+            ws = lease.get("workspace_root")
+            binding_id = lease.get("binding_id")
+            try:
+                rec = bindings.read_binding(payload_root / slug, binding_id)
+            except Exception:  # noqa: BLE001 -- any read/validate error withholds the root (fail closed)
+                rec = None
+            if (
+                rec is not None
+                and rec.get("status") in ("issued", "claimed")
+                and rec.get("parent", {}).get("tier") == "launcher"
+                and rec.get("tier") == "lead"
+                and rec.get("runtime") == runtime
+                and rec.get("repo_slug") == slug
+                and rec.get("workspace_root") == ws
+                and rec.get("account_id") == account_id
+                and rec.get("expected_session_id") == session_id
+                and ws not in roots
+            ):
+                roots.append(ws)
+    return is_lead, roots
+
+
+def privileged_anywhere(session_id, runtime):
+    """Scope-independent: does ANY coordination record name this session as
+    a launcher (a slug's owner.json) or a lead (a lead-*.json lease)?
+
+    Used where the account scope cannot be derived: account_scope() reads
+    repository metadata (`git branch --show-current`, strict UTF-8) and can
+    raise on a legal non-UTF-8 branch name, yet the session's coordination
+    records stay readable. Ignoring account_id here can only over-match (a
+    false deny for a session privileged under another account), never
+    under-match. Total: an unreadable coordination root is False."""
+    try:
+        for slug in core.coordination.coordination_slugs():
+            rec = read_state_json(
+                core.coordination.coordination_root() / slug / "owner.json"
+            )
+            if (
+                rec
+                and rec.get("session_id") == session_id
+                and rec.get("runtime", "claude") == runtime
+                and rec.get("control_tier", "launcher") == "launcher"
+            ):
+                return True
+            # Per-slug isolation (co-review r10): a listing error in one slug
+            # must not abort the scan before a later slug's valid record --
+            # otherwise a fenced session reads as unprivileged and is allowed.
+            try:
+                leases = core.coordination.iter_lead_leases(slug)
+            except Exception:  # noqa: BLE001, S112 -- skip this slug, keep scanning
+                continue
+            for lease in leases:
+                if (
+                    lease.get("session_id") == session_id
+                    and lease.get("runtime", "claude") == runtime
+                ):
+                    return True
+    except Exception:  # noqa: BLE001 -- unreadable namespace: cannot identify
+        return False
+    return False
+
+
 # --- paths and classification ---------------------------------------------
 
 
-def canon(path):
-    """realpath of the longest existing ancestor, joined with the rest."""
-    existing, rest = path, []
-    while existing != "/" and not os.path.lexists(existing):
-        existing, tail = os.path.split(existing)
-        rest.append(tail)
-    real = os.path.realpath(existing)
-    return os.path.join(real, *reversed(rest)) if rest else real
+def canonical_target(word, cwd, home):
+    """True canonical destination of a raw write token, or None to skip.
+
+    Resolves from the RAW token (spec A1): the token is joined to its cwd
+    WITHOUT a lexical normpath, then os.path.realpath resolves symlinks and
+    `..` together, so a `..` that follows a symlink escapes correctly and a
+    `.todos`/STATE_ROOT component produced only by an unresolved `..` cannot
+    grant a false exemption (H1). realpath handles a nonexistent tail by
+    resolving the longest existing prefix and appending the rest.
+
+    None means "not a guardable target": an empty token, or one carrying a
+    NUL byte or any path value os.path cannot process (H2 -- the caller skips
+    it rather than letting the exception fail the whole hook open)."""
+    word = rm_guard.expand_home(word, home)
+    if not word or "\x00" in word:
+        return None
+    joined = word if word.startswith("/") else os.path.join(cwd, word)
+    try:
+        return os.path.realpath(joined)
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: an older recursive realpath on a long symlink
+        # chain; this one target is unguardable, the others still scan.
+        return None
 
 
 def exempt(c, state_real):
@@ -199,24 +329,36 @@ def classify(c, budget):
     d = c if os.path.isdir(c) else os.path.dirname(c)
     while d != "/" and not os.path.isdir(d):
         d = os.path.dirname(d)
-    rc, out = git(["rev-parse", "--show-toplevel", "--is-inside-git-dir"], d, budget)
-    if rc != 0:
+    # Two calls, parsed losslessly: the combined form's splitlines() misparsed
+    # a work-tree root containing a newline, returned "not guarded", and let
+    # a write into such a repo bypass containment (co-review r9). git ends the
+    # path with exactly one newline; strip only that, never embedded ones.
+    rc, out = git(["rev-parse", "--show-toplevel"], d, budget)
+    if rc != 0 or not out:
         return None
-    lines = out.splitlines()
-    if len(lines) < 2 or lines[1].strip() != "false":
+    rc, inside = git(["rev-parse", "--is-inside-git-dir"], d, budget)
+    if rc != 0 or inside.strip() != "false":
         return None
-    top = os.path.realpath(lines[0].strip())
+    top = os.path.realpath(out.removesuffix("\n"))
     if c != top and not c.startswith(top + "/"):
         return None
     # The work tree root itself (`mv /repo /tmp/x`) is guarded when it has
     # any tracked content: ls-files on "." exits 0 in that case.
     rel = os.path.relpath(c, top)
-    rc, _ = git(["ls-files", "--error-unmatch", "--", rel], top, budget)
+    # --literal-pathspecs: a legal filename beginning with `:(` (e.g.
+    # `:(glob)x`) is otherwise read as pathspec magic -- ls-files reports no
+    # match, check-ignore rejects it, and the target is "not guarded"
+    # (co-review r10). Every operand here is a literal path, never a pattern.
+    rc, _ = git(
+        ["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel], top, budget
+    )
     if rc == 0:
         return top, "tracked"
     if rc is None:
         return None
-    rc, _ = git(["check-ignore", "-q", "--", rel], top, budget)
+    # check-ignore does not support literal-pathspec magic (rc 128), so the
+    # leading-colon magic is neutralized with a `./` prefix instead.
+    rc, _ = git(["check-ignore", "-q", "--", "./" + rel], top, budget)
     return (top, "untracked") if rc == 1 else None
 
 
@@ -229,7 +371,16 @@ def repo_slug_of(top, budget, cache):
         if rc2 == 0 and common.strip():
             cd = common.strip()
             cd = cd if os.path.isabs(cd) else os.path.join(top, cd)
-            slug = core.repo_slug(url.strip() if rc == 0 else "", cd)
+            # Total: git output is decoded with surrogateescape, so a
+            # non-UTF-8 origin URL reaches repo_slug() with surrogates that
+            # its strict .encode() rejects (UnicodeEncodeError). That raised
+            # past decide() into the fail-open handler (co-review r8). An
+            # underivable slug is None, which both the launcher path (scope
+            # deny) and the lead path (workspace check) treat as fail closed.
+            try:
+                slug = core.repo_slug(url.strip() if rc == 0 else "", cd)
+            except Exception:  # noqa: BLE001 -- underivable slug is None, never a crash
+                slug = None
         cache[top] = slug
     return cache[top]
 
@@ -451,9 +602,11 @@ def scan_raw(text):
                 continue
             word, e = read_word(text, m)
             if word:
-                num = len(redirs)
-                redirs[num] = word
-                out.append(f" __ORCH_REDIR_{num}__ ")
+                # Key by the exact generated sentinel string so pass 2 looks
+                # it up verbatim and never int()-converts command text.
+                sentinel = f"__ORCH_REDIR_{len(redirs)}__"
+                redirs[sentinel] = word
+                out.append(f" {sentinel} ")
             else:
                 out.append(" ")
             i = e
@@ -539,7 +692,8 @@ def copy_targets(words, cwd, home, include_sources):
     source, because a move deletes the source path.
 
     Accepted gap (A1): a source that is itself a tracked symlink is
-    resolved by resolve_targets/canon() through its final target, not as
+    resolved by resolve_targets/canonical_target() through its final target,
+    not as
     the symlink entry mv actually removes; catching that needs a
     dereference-mode flag threaded through every target tuple, not a
     local fix here.
@@ -571,9 +725,17 @@ def copy_targets(words, cwd, home, include_sources):
     else:
         dest, srcs = tdir, ops
     out = []
-    dpath = rm_guard.resolve(rm_guard.expand_home(dest, home), cwd)
-    if os.path.isdir(dpath):
-        out.extend(os.path.join(dpath, os.path.basename(s)) for s in srcs)
+    # Probe the REALPATH destination, not the normpath one: a `dest` like
+    # `link/../out` with a symlinked `link` resolves to a different directory
+    # than its lexical spelling, so a normpath probe could pick the wrong
+    # dir-vs-file branch and drop the source basename (A1). The emitted target
+    # stays the RAW join so the single resolve_targets chokepoint canonicalizes.
+    try:
+        dprobe = os.path.realpath(os.path.join(cwd, rm_guard.expand_home(dest, home)))
+    except (OSError, ValueError, RecursionError):
+        dprobe = ""
+    if dprobe and os.path.isdir(dprobe):
+        out.extend(os.path.join(dest, os.path.basename(s)) for s in srcs)
     else:
         out.append(dest)
     if include_sources:
@@ -582,11 +744,17 @@ def copy_targets(words, cwd, home, include_sources):
 
 
 def _existing(ops, cwd, home):
-    return [
-        w
-        for w in ops
-        if os.path.lexists(rm_guard.resolve(rm_guard.expand_home(w, home), cwd))
-    ]
+    # Probe existence on the REALPATH of the raw token, not its normpath: a
+    # `sed -i`/`perl -i` operand like `link/../f` (with a symlinked `link`)
+    # has a lexical spelling that may not exist while its true target does,
+    # and a normpath probe would drop the real, guardable file (A1). Emit the
+    # raw `w` so the resolve_targets chokepoint still canonicalizes it.
+    kept = []
+    for w in ops:
+        p = canonical_target(w, cwd, home)
+        if p is not None and os.path.lexists(p):
+            kept.append(w)
+    return kept
 
 
 def shell_c_arg(words):
@@ -686,8 +854,26 @@ def cd_target_candidates(words, cwd, home):
         return {cwd}
     if "$" in operand or "`" in operand or rm_guard.has_glob_chars(operand):
         return {cwd}  # unexpanded target: accepted hole, same as other operands
-    target = rm_guard.resolve(rm_guard.expand_home(operand, home), cwd)
-    return {target} if os.path.isdir(target) else {target, cwd}
+    # A logical `cd` keeps the lexical path; `cd -P` resolves symlinks
+    # physically. The scanner does not know which spelling the shell will use,
+    # so it keeps BOTH the lexical and the realpath candidate -- otherwise a
+    # `cd -P link/..` through a symlink would leave the guard scanning the
+    # wrong (lexical) directory and miss the real target (A1). Widening the
+    # candidate set only over-guards; it never misses.
+    # Always keep the incoming `cwd` as a candidate alongside the lexical and
+    # physical (realpath) destinations. A `cd` can fail for reasons neither
+    # spelling reveals -- a non-directory intermediate component
+    # (`cd -P /dev/null/..`, both spellings collapse to `/dev` yet the shell
+    # cannot traverse the file `/dev/null`), or a pipeline-ending `cd` that
+    # runs in a subshell and never moves the parent shell -- and then the
+    # shell stays in `cwd`. Dropping `cwd` under any "cd surely succeeded"
+    # heuristic under-guards; retaining it only over-guards, which is safe.
+    lexical = rm_guard.resolve(rm_guard.expand_home(operand, home), cwd)
+    real = canonical_target(operand, cwd, home)
+    cands = {lexical, cwd}
+    if real is not None:
+        cands.add(real)
+    return cands
 
 
 def bash_targets(command, cwd, home, depth=0):
@@ -716,9 +902,13 @@ def bash_targets(command, cwd, home, depth=0):
             continue
         words = []
         for t in tokens:
-            m = SENTINEL_RE.match(t)
-            if m:
-                w = redirs.get(int(m.group(1)))
+            if SENTINEL_RE.match(t):
+                # Look the sentinel up by its exact string. A lookalike token
+                # in the command text (e.g. thousands of digits) used to be
+                # int()-converted, which raised ValueError past every caller
+                # and failed the guard open (co-review r7). An unknown
+                # sentinel-shaped token is simply not a redirect.
+                w = redirs.get(t)
                 if w:
                     found.extend((c, w) for c in cwds)
             else:
@@ -800,18 +990,28 @@ def targets_for(payload, tool, cwd, home):
 
 def resolve_targets(raw, home):
     """Canonical absolute paths, skipping anything the shell would still
-    expand ($VAR, backticks, globs), deduplicated, capped."""
+    expand ($VAR, backticks, globs), deduplicated by canonical path, NOT
+    capped.
+
+    Every operand is resolved: dedup by canonical path collapses alias
+    spellings of one destination (`/dev/null`, `/dev/./null`, ...) to a single
+    entry, so aliases cannot consume a budget. The caller treats more than
+    TARGET_CAP distinct canonical targets as an overflow it cannot scan within
+    the git budget and fails CLOSED for a privileged session -- silently
+    dropping the extras (whether from alias inflation or from one relative
+    operand expanding across many retained cwd candidates) would un-guard a
+    tracked write hidden past the cap."""
     paths = []
     for c_cwd, w, shell_expands in raw:
-        w = rm_guard.expand_home(w, home)
-        if not w or (
-            shell_expands and ("$" in w or "`" in w or rm_guard.has_glob_chars(w))
+        we = rm_guard.expand_home(w, home)
+        if not we or (
+            shell_expands and ("$" in we or "`" in we or rm_guard.has_glob_chars(we))
         ):
             continue
-        p = canon(rm_guard.resolve(w, c_cwd))
-        if p not in paths:
+        p = canonical_target(we, c_cwd, home)
+        if p is not None and p not in paths:
             paths.append(p)
-    return paths[:TARGET_CAP]
+    return paths
 
 
 # --- audit -----------------------------------------------------------------
@@ -920,7 +1120,11 @@ def claim_budget(rd, marker, session_id, tool_use_id, paths):
     for line in lines:
         try:
             rec = json.loads(line)
-        except ValueError:
+        except Exception:  # noqa: BLE001, S112 -- an unparseable line is skipped, never a crash (co-review r7)
+            # A torn concurrent line is skipped by contract; a corrupt or
+            # deeply nested line (RecursionError on older decoders) is
+            # likewise skipped -- it cannot be a valid claim, and letting it
+            # raise bypassed the whole marker limit via the fail-open handler.
             continue
         if (
             not isinstance(rec, dict)
@@ -992,16 +1196,24 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
             if ordinal > marker["max_edits"]:
                 return "deny", "budget", slug, {"ordinal": ordinal, "marker": marker}
             return "allow", slug, marker
-    except (OSError, ValueError, subprocess.SubprocessError, KeyError):
+    except Exception:  # noqa: BLE001 -- any transaction/reader failure denies (fail closed, co-review r7)
         return "deny", "fence", slug, {}
 
 
 # --- refusal ---------------------------------------------------------------
 
 
+def _printable(s):
+    """Collapse newlines/carriage returns in an interpolated path so a legal
+    filename with an embedded newline cannot add extra stderr lines and break
+    the exactly-three-line refusal contract. A no-op for ordinary paths."""
+    return s.replace("\n", "\\n").replace("\r", "\\r")
+
+
 def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
     """Print the three-line refusal for `why` and return 2."""
     c, top, reason = first
+    c, top = _printable(c), _printable(top)
     print(
         f"{BLOCKED} -- this session is the herdr orchestrator for {slug} "
         f"and {c} is a {reason} path in {top}.",
@@ -1027,9 +1239,9 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
         )
     elif why == "budget":
         if detail.get("unwritable"):
+            audit_path = _printable(str(Path(rd) / "tasks" / AUDIT_FILE))
             print(
-                f"Cannot reserve budget: {Path(rd) / 'tasks' / AUDIT_FILE} "
-                "is not writable.",
+                f"Cannot reserve budget: {audit_path} is not writable.",
                 file=sys.stderr,
             )
         else:
@@ -1047,6 +1259,62 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
             file=sys.stderr,
         )
         print(allow_line, file=sys.stderr)
+    sys.stderr.flush()
+    return 2
+
+
+def refuse_overflow(count):
+    """Three-line refusal when a privileged session's command names more
+    distinct canonical targets than the guard can scan (TARGET_CAP)."""
+    print(
+        f"{BLOCKED} -- this command names {count} distinct write targets, "
+        f"more than the {TARGET_CAP} the guard can scan.",
+        file=sys.stderr,
+    )
+    print(
+        "An orchestrator or lead session is fenced, and an unscanned target "
+        "could be a tracked file, so the whole command is refused.",
+        file=sys.stderr,
+    )
+    print(
+        "Split the command into smaller writes, or dispatch it to a worker.",
+        file=sys.stderr,
+    )
+    sys.stderr.flush()
+    return 2
+
+
+def under_workspace(path, roots):
+    return any(path == r or path.startswith(r + "/") for r in roots)
+
+
+def refuse_lead(first, roots):
+    """Print the three-line refusal for a lead editing outside its workspace."""
+    c, _top, reason = first
+    c = _printable(c)
+    print(
+        f"{BLOCKED} -- this session is a herdr lead fenced to its workspace "
+        f"and {c} is a {reason} path outside it.",
+        file=sys.stderr,
+    )
+    if roots:
+        print(
+            "A lead may only edit under its workspace: "
+            + ", ".join(_printable(r) for r in roots)
+            + ".",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "This lead's dispatch binding is missing, revoked, or complete, "
+            "so no workspace edit is authorized.",
+            file=sys.stderr,
+        )
+    print(
+        "Edit inside the lead's own worktree, or hand the change back to the "
+        "launcher (herdr-orchestration SKILL.md, Safety).",
+        file=sys.stderr,
+    )
     sys.stderr.flush()
     return 2
 
@@ -1071,10 +1339,24 @@ def decide(payload, runtime="claude"):
     try:
         caller_scope = selected_scope(caller_cwd, runtime)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return 0
+        # Scope derivation reads git metadata and can raise on a legal
+        # non-UTF-8 branch name. That is not "no privileged identity": the
+        # session's coordination records are still readable, so identify it
+        # without the scope and fail closed if it is fenced (co-review r9).
+        return refuse_crash() if privileged_anywhere(sid, runtime) else 0
     home = os.environ.get("HOME", os.path.expanduser("~"))
     paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
     if not paths:
+        return 0
+    if len(paths) > TARGET_CAP:
+        # Too many distinct canonical targets to scan every one within the git
+        # budget. Dropping the extras would un-guard a tracked write hidden
+        # past the cap (alias- or cd-inflated commands), so a privileged
+        # session (launcher or lead) fails CLOSED; a plain worker is allowed.
+        owned = owned_slugs(sid, runtime, caller_scope, {})
+        is_lead, _roots = lead_authority(sid, runtime, caller_scope)
+        if owned or is_lead:
+            return refuse_overflow(len(paths))
         return 0
     state_real = os.path.realpath(
         core.account_payload_root(caller_scope) / "herdr-orch"
@@ -1096,52 +1378,116 @@ def decide(payload, runtime="claude"):
         if slug is not None:
             candidates.setdefault(slug, top)
     owned = owned_slugs(sid, runtime, caller_scope, candidates)
-    if not owned:
-        return 0
-    tool_use_id = payload.get("tool_use_id")
-    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime)
-    if verdict[0] == "allow":
-        _, slug, marker = verdict
+    if owned:
+        tool_use_id = payload.get("tool_use_id")
+        verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime)
+        if verdict[0] == "allow":
+            _, slug, marker = verdict
+            rd = owned[slug]["rd"]
+            for c, top, reason in guarded:
+                audit_append(
+                    rd,
+                    {
+                        "v": 1,
+                        "ts": core.now_iso(),
+                        "event": "orch-edit-allowed",
+                        "session_id": sid,
+                        "tool_name": tool,
+                        "tool_use_id": tool_use_id,
+                        "path": c[:PATH_MAX],
+                        "repo": top[:PATH_MAX],
+                        "reason": reason,
+                        "marker_id": marker["marker_id"],
+                        "marker_expires": marker.get("expires"),
+                    },
+                )
+            return 0
+        _, why, slug, detail = verdict
+        detail = dict(detail, owned=",".join(sorted(owned)))
         rd = owned[slug]["rd"]
-        for c, top, reason in guarded:
-            audit_append(
-                rd,
-                {
-                    "v": 1,
-                    "ts": core.now_iso(),
-                    "event": "orch-edit-allowed",
-                    "session_id": sid,
-                    "tool_name": tool,
-                    "tool_use_id": tool_use_id,
-                    "path": c[:PATH_MAX],
-                    "repo": top[:PATH_MAX],
-                    "reason": reason,
-                    "marker_id": marker["marker_id"],
-                    "marker_expires": marker.get("expires"),
-                },
-            )
+        rc = refuse(
+            why, slug, owned[slug]["fence"], sid, guarded[0], detail, runtime, rd
+        )
+        c, top, reason = guarded[0]
+        audit_append(
+            rd,
+            {
+                "v": 1,
+                "ts": core.now_iso(),
+                "event": "orch-edit-denied",
+                "session_id": sid,
+                "tool_name": tool,
+                "tool_use_id": tool_use_id,
+                "path": c[:PATH_MAX],
+                "repo": top[:PATH_MAX],
+                "reason": reason,
+                "why": why,
+            },
+        )
+        return rc
+    # A session that owns no launcher lease may still be a lead, fenced to its
+    # workspace_root. A lead never consults the marker path, so a marker minted
+    # for the slug can never widen its scope. A non-lead is a plain worker.
+    is_lead, roots = lead_authority(sid, runtime, caller_scope)
+    if not is_lead:
         return 0
-    _, why, slug, detail = verdict
-    detail = dict(detail, owned=",".join(sorted(owned)))
-    rd = owned[slug]["rd"]
-    rc = refuse(why, slug, owned[slug]["fence"], sid, guarded[0], detail, runtime, rd)
-    c, top, reason = guarded[0]
-    audit_append(
-        rd,
-        {
-            "v": 1,
-            "ts": core.now_iso(),
-            "event": "orch-edit-denied",
-            "session_id": sid,
-            "tool_name": tool,
-            "tool_use_id": tool_use_id,
-            "path": c[:PATH_MAX],
-            "repo": top[:PATH_MAX],
-            "reason": reason,
-            "why": why,
-        },
-    )
-    return rc
+    if roots and all(under_workspace(c, roots) for c, _top, _reason in guarded):
+        return 0
+    return refuse_lead(guarded[0], roots)
+
+
+def refuse_crash():
+    """Three-line refusal when the guard itself failed while checking a
+    fenced session's write. Failing closed here is what turns "make X raise"
+    from a bypass into, at worst, a false deny."""
+    # The verdict is 2 regardless of whether the diagnostics can be written:
+    # a failing stderr must never turn a decided deny into an allow.
+    try:
+        print(
+            f"{BLOCKED} -- the guard hit an internal error while checking a "
+            "fenced (orchestrator or lead) session's write.",
+            file=sys.stderr,
+        )
+        print(
+            "A fenced session fails closed on any guard error: an unverified "
+            "target could be a tracked file.",
+            file=sys.stderr,
+        )
+        print(
+            "Retry once; if it persists, dispatch the edit to a worker and "
+            "report the guard error.",
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001, S110 -- diagnostics are best effort; the deny stands
+        pass
+    return 2
+
+
+def crash_verdict(payload, runtime="claude"):
+    """Exit status after decide() raised: 2 if the payload's session can be
+    identified as a launcher or lead (fail closed), else 0.
+
+    Spec R9 -- fail closed on ambiguity -- applied at the ONE chokepoint every
+    reader and parser sits behind, so it holds regardless of which of them
+    raised. Only a session with no privileged identity at all keeps the
+    documented fail-open default; if identification itself is impossible,
+    there is nothing to fence and 0 is returned. Total by construction."""
+    try:
+        if os.environ.get("HERDR_ENV") != "1":
+            return 0
+        sid = payload.get("session_id") if isinstance(payload, dict) else None
+        if not isinstance(sid, str) or not SESSION_ID_RE.match(sid):
+            return 0
+        # Scope-INDEPENDENT identification (co-review r9): deriving the
+        # account scope itself reads repository metadata (`git branch
+        # --show-current`, strict UTF-8) and can raise -- e.g. a non-UTF-8
+        # branch name -- which must not read as "not privileged" for a session
+        # whose coordination records are perfectly readable. Decide the
+        # verdict first; the refusal's diagnostics are total on their own.
+        return refuse_crash() if privileged_anywhere(sid, runtime) else 0
+    except Exception:  # noqa: BLE001 -- unidentifiable session: nothing to fence
+        return 0
 
 
 def main():
@@ -1149,7 +1495,10 @@ def main():
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
-    return decide(payload)
+    try:
+        return decide(payload)
+    except Exception:  # noqa: BLE001 -- route the crash through the fail-closed chokepoint
+        return crash_verdict(payload)
 
 
 if __name__ == "__main__":

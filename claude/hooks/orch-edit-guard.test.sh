@@ -340,7 +340,21 @@ hook_case "AC4 here-string then scratch redirect passes" allow Bash "cmd <<< wor
 hook_case "AC4 input from tracked, output to scratch passes" allow Bash "cat < $TR > $S/o" "$R" "$SID_A"
 hook_case "AC4 3>&1 dup passes" allow Bash "cmd 3>&1" "$R" "$SID_A"
 many=$(i=1; while [ "$i" -le 24 ]; do printf 'echo x > %s/f%s; ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
-hook_case "AC4 25th distinct target is past the cap (fail open)" allow Bash "$many" "$R" "$SID_A"
+# More than TARGET_CAP distinct canonical targets is an overflow the guard
+# cannot fully scan. Nothing is silently dropped: a privileged session fails
+# CLOSED (a tracked target could hide past the cap), a plain worker is allowed.
+hook_case "AC4 25 distinct targets: a launcher fails closed (overflow)" deny Bash "$many" "$R" "$SID_A"
+hook_case "AC4 25 distinct targets: a plain worker is allowed (overflow)" allow Bash "$many" "$R" "$SID_C"
+# Alias spellings of one destination collapse to ONE canonical target, so they
+# cannot consume the cap and hide a later tracked redirect (co-review r5).
+aliases=$(i=1; while [ "$i" -le 20 ]; do d=/dev; j=1; while [ "$j" -le "$i" ]; do d="$d/."; j=$((j + 1)); done; printf 'echo x > %s/null; ' "$d"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
+hook_case "AC4 20 alias spellings of /dev/null do not hide a tracked redirect" deny Bash "$aliases" "$R" "$SID_A"
+# One relative redirect after many successful `cd`s expands across the retained
+# cwd candidates; the resulting >20 distinct targets is an overflow, so a
+# launcher fails closed rather than having the real target dropped (co-review r4).
+i=1; while [ "$i" -le 41 ]; do mkdir -p "$S/cdd$i"; i=$((i + 1)); done
+cdchain=$(i=1; while [ "$i" -le 41 ]; do printf 'cd %s/cdd%s && ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > tracked.txt')
+hook_case "AC4 one redirect after 41 cd's is not un-guarded by the cap (fails closed)" deny Bash "$cdchain" "$R" "$SID_A"
 
 # --- AC4 cycle-3 regressions (co-review c3 B-1) -------------------------
 hook_case "AC4 arithmetic << before a write is not a heredoc, paren form (B-1)" deny Bash "n=\$((1 << 8))
@@ -351,6 +365,96 @@ echo x > $TR" "$R" "$SID_A"
 # --- AC4 cycle-3 regressions (co-review c3 B-2) -------------------------
 hook_case "AC4 pushd then relative redirect denied (B-2)" deny Bash "pushd $R/dir && echo x > inner.txt" "$N" "$SID_A"
 hook_case "AC4 popd cwd change of unknown direction denied (B-2)" deny Bash "pushd $R && popd && echo x > tracked.txt" "$N" "$SID_A"
+
+# --- H1/H2: launcher-fence escapes closed (spec A2) ----------------------
+# H1a: a `..` tail under .todos must not keep the .todos exemption -- its
+# true destination is the tracked file, which stays guarded.
+hook_case "H1 .todos/../ escape to a tracked file denied" deny Bash "echo x > $R/.todos/pending/../../tracked.txt" "$R" "$SID_A"
+# H1b: a symlink inside .todos pointing at the repo root, then a relative
+# write, resolves out of .todos to a tracked file -> guarded.
+ln -s "$R" "$R/.todos/pending/rootlink"
+hook_case "H1 symlink inside .todos escaping to a tracked file denied" deny Edit "$R/.todos/pending/rootlink/tracked.txt" "$R" "$SID_A"
+# H1c (the decisive A1 case): a symlink INSIDE .todos, followed by `..`, whose
+# true destination is a tracked file. A normpath-first resolver collapses
+# `link/..` lexically and keeps the .todos exemption (wrong allow); realpath
+# from the raw token resolves the symlink first and escapes .todos.
+mkdir -p "$R/sub"; printf 'child\n' > "$R/sub/tracked-sub.txt"
+git -C "$R" add sub/tracked-sub.txt
+git -C "$R" -c user.name=t -c user.email=t@x commit -q -m sub
+ln -s "$R/sub" "$R/.todos/pending/sublink"
+hook_case "H1 symlink-then-.. inside .todos escaping to a tracked file denied" deny Edit "$R/.todos/pending/sublink/../sub/tracked-sub.txt" "$R" "$SID_A"
+# H1d/H1e: the extraction-site probes (sed -i existence filter, cd -P) must not
+# use lexical resolution either -- a symlink-then-.. operand whose lexical
+# spelling is nonexistent must still be guarded via its real target. sublink ->
+# $R/sub, so sublink/../sub/tracked-sub.txt realpaths to $R/sub/tracked-sub.txt.
+hook_case "H1 sed -i through a symlink-then-.. is guarded (real target exists)" deny Bash "sed -i s/a/b/ $R/.todos/pending/sublink/../sub/tracked-sub.txt" "$R" "$SID_A"
+# cd -P physically resolves the symlink; a relative write then lands on the
+# real tracked file, not the exempt lexical .todos path.
+hook_case "H1 cd -P through a symlink-then-.. is guarded" deny Bash "cd -P $R/.todos/pending/sublink/.. && echo x > sub/tracked-sub.txt" "$N" "$SID_A"
+# A failed `cd -P` (its physical target does not exist) leaves the shell in the
+# ORIGINAL cwd, so that cwd must stay a guard candidate. Here the lexical target
+# ($S, outside any repo) is a real dir but the physical target is nonexistent
+# (dangling symlink), and the shell stays in the repo cwd $R; the write to
+# tracked.txt is guarded only from $R (co-review r2 finding #1).
+ln -s "$FIX/nonexistent-physical-xyz" "$R/dl"
+hook_case "H1 failed cd -P keeps the original repo cwd guarded" deny Bash "cd -P $R/dl/../../scratch && echo x > tracked.txt" "$R" "$SID_A"
+# A `cd` through a non-directory intermediate component fails (both the lexical
+# and physical spellings collapse to $S, but the shell cannot traverse the file
+# $S/note.txt), leaving the shell in the repo cwd $R (co-review r3).
+hook_case "H1 cd through a non-dir intermediate keeps the repo cwd guarded" deny Bash "cd -P $S/note.txt/.. ; echo x > tracked.txt" "$R" "$SID_A"
+# A pipeline-ending `cd` runs in a subshell; the parent shell keeps its cwd, so
+# the following write is still guarded from the repo cwd (co-review r3).
+hook_case "H1 pipeline-ending cd does not move the parent cwd" deny Bash "true | cd $S/existing ; echo x > tracked.txt" "$R" "$SID_A"
+# A genuine .todos write is still exempt.
+hook_case "H1 genuine .todos write still passes" allow Write "$R/.todos/pending/2026-09-12-real.md" "$R" "$SID_A"
+# H2: a NUL byte in a target must not crash classify() into the top-level
+# fail-open handler and un-guard a real tracked target in the same command.
+H2_R="$R" H2_SID="$SID_A" python3 - > "$FIX/h2.json" <<'PY'
+import json, os
+e = os.environ
+cmd = "tee " + e["H2_R"] + "/tracked.txt " + e["H2_R"] + "/a\x00b.txt"
+print(json.dumps({"session_id": e["H2_SID"], "cwd": e["H2_R"], "hook_event_name": "PreToolUse",
+                  "tool_name": "Bash", "tool_use_id": "toolu_h2",
+                  "tool_input": {"command": cmd}}))
+PY
+if run "$(cat "$FIX/h2.json")"; then rc=0; else rc=$?; fi
+expect "H2 NUL target does not fail open; the real tracked target still denies" deny "$rc"
+# H3 (co-review r7): every parser on the privileged decision path is total.
+# A sentinel-shaped lookalike token with thousands of digits used to be
+# int()-converted (ValueError -> fail open); it is now just an unknown token.
+digits=$(python3 -c 'print("1" * 5000)')
+hook_case "H3 5000-digit sentinel lookalike does not fail open; tracked redirect denies" deny Bash "echo __ORCH_REDIR_${digits}__; echo x > $TR" "$R" "$SID_A"
+# A non-UTF-8 pathspec makes git echo raw bytes; a strict decode raised
+# UnicodeDecodeError past every caller. surrogateescape keeps the other
+# (tracked) target guarded.
+H3_R="$R" H3_SID="$SID_A" python3 - > "$FIX/h3.json" <<'PY'
+import json, os
+e = os.environ
+cmd = "tee " + e["H3_R"] + "/tracked.txt " + e["H3_R"] + "/bad\udcff"
+print(json.dumps({"session_id": e["H3_SID"], "cwd": e["H3_R"], "hook_event_name": "PreToolUse",
+                  "tool_name": "Bash", "tool_use_id": "toolu_h3",
+                  "tool_input": {"command": cmd}}))
+PY
+if run "$(cat "$FIX/h3.json")"; then rc=0; else rc=$?; fi
+expect "H3 non-UTF-8 sibling target does not fail open; tracked target denies" deny "$rc"
+# canonical_target must swallow a RecursionError from an older recursive
+# realpath (long symlink chain) and skip only that target.
+if HOOK="$HOOK" python3 - <<'PY'
+import importlib.util, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+real = os.path.realpath
+def boom(p): raise RecursionError("maximum recursion depth exceeded")
+os.path.realpath = boom
+try:
+    assert g.canonical_target("/x/y", "/", "/home") is None
+finally:
+    os.path.realpath = real
+assert g.canonical_target("/tmp", "/", "/home") is not None
+PY
+then printf 'PASS  H3 canonical_target swallows RecursionError and skips only that target\n'; PASS=$((PASS + 1))
+else printf 'FAIL  H3 canonical_target swallows RecursionError and skips only that target\n' >&2; FAIL=$((FAIL + 1)); fi
 
 # --- AC5/AC6: marker and budget ----------------------------------------
 # marker DIR SID FENCE DELTA_SECS MAX [MARKER_ID]: a fixture marker.
@@ -440,6 +544,14 @@ hook_case "AC6 budget 1: first allowed" allow Edit "$R/tracked.txt" "$R" "$SID_A
 hook_case "AC6 budget 1: second denied" deny Edit "$R/tracked.txt" "$R" "$SID_A"
 marker "$RD_A" "$SID_A" 4 300 1 "dddddddddddddddd"
 hook_case "AC6 re-minted marker starts a fresh budget" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+# A corrupt or deeply nested line in the audit log must be skipped, never
+# crash the budget reader open past the marker limit (co-review r7): with
+# such a line present, budget 2 still allows two writes and denies the third.
+reset_log; marker "$RD_A" "$SID_A" 4 300 2 "0000000000000003"
+python3 -c 'import sys; open(sys.argv[1], "a").write("[" * 100000 + "]" * 100000 + "\n")' "$AUDIT"
+hook_case "AC6 nested audit line: first write allowed" allow Edit "$R/tracked.txt" "$R" "$SID_A"
+hook_case "AC6 nested audit line: second write allowed" allow Edit "$R/dir/inner.txt" "$R" "$SID_A"
+hook_case "AC6 nested audit line: third write denied (limit still enforced)" deny Edit "$R/tracked.txt" "$R" "$SID_A"
 reset_log; marker "$RD_A" "$SID_A" 4 300 2 "eeeeeeeeeeeeeeee"
 i=0
 while [ "$i" -lt 5 ]; do
@@ -606,13 +718,382 @@ hook_case "AC9 corrupt sibling owner file does not un-guard the valid owner" den
 # A git that hangs: the budget bounds the hook, and the target is not guarded.
 mkdir -p "$FIX/slowbin"; printf '#!/bin/sh\nsleep 30\n' > "$FIX/slowbin/git"; chmod +x "$FIX/slowbin/git"
 start=$(date +%s)
-hook_case "AC9 hanging git yields allow" allow Edit "$R/tracked.txt" "$R" "$SID_A" PATH="$FIX/slowbin:$PATH"
+# A hung git makes account-scope derivation raise. For a FENCED session that
+# is an unresolvable scope, which fails closed (spec R9; co-review r9); a
+# plain worker is still allowed. Either way the budget bounds the hook.
+hook_case "AC9 hanging git: a fenced launcher fails closed (scope unresolvable)" deny Edit "$R/tracked.txt" "$R" "$SID_A" PATH="$FIX/slowbin:$PATH"
 elapsed=$(( $(date +%s) - start ))
+hook_case "AC9 hanging git: a plain worker is allowed" allow Edit "$R/tracked.txt" "$R" "66666666-6666-6666-6666-666666666666" PATH="$FIX/slowbin:$PATH"
 if [ "$elapsed" -le 12 ]; then
     printf 'PASS  AC9 hanging git returns within the budget (%ss)\n' "$elapsed"; PASS=$((PASS + 1))
 else
     printf 'FAIL  AC9 hanging git returns within the budget (%ss)\n' "$elapsed" >&2; FAIL=$((FAIL + 1))
 fi
+
+# --- Lead authority resolution (spec 4.5) -------------------------------
+# Fully isolated: its own CLAUDE_CONFIG_DIR and HERDR_COORDINATION_ROOT under a
+# throwaway dir, so the destructive fail-closed cases below (rmtree of the
+# payload slug and root) cannot corrupt the suite's shared fixtures (a prior
+# revision let this test's rmtree mask a later launcher assertion).
+if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
+import importlib.util, json, os, sys, hashlib, shutil, tempfile
+sys.dont_write_bytecode = True
+sys.path.insert(0, "claude/hooks")
+iso = tempfile.mkdtemp()
+os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
+import herdr_orch_core as core
+import herdr_coordination as coordination
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"]); sid = os.environ["SID_L"]
+scope = g.selected_scope(os.environ["R"], "claude")
+coord = str(coordination.coordination_root())
+payload_root = os.path.join(str(core.account_payload_root(scope)), "herdr-orch")
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + "1" * 32
+slugd = os.path.join(coord, slug); os.makedirs(slugd, exist_ok=True)
+lease = {"schema_version": 1, "session_id": sid, "host": "h", "pid": 5, "fence": 1,
+         "heartbeat_ts": 9e18, "runtime": "claude", "thread_id": None,
+         "account_id": scope["account_id"], "control_tier": "lead",
+         "workspace_root": ws, "binding_id": bid}
+open(os.path.join(slugd, "lead-%s.json" % key), "w").write(json.dumps(lease))
+rd = os.path.join(payload_root, slug)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding = {"schema_version": 1, "binding_id": bid, "tier": "lead",
+           "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
+           "task_id": "td-x", "repo_id": None, "repo_slug": slug, "workspace_root": ws,
+           "account_id": scope["account_id"], "account_kind": scope["kind"],
+           "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+           "status": "claimed", "created_ts": "t", "updated_ts": "t"}
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [ws], ("live", is_lead, roots)
+binding["status"] = "revoked"; open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("revoked", is_lead, roots)
+os.remove(os.path.join(rd, "bindings", bid + ".json"))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("binding-file-gone", is_lead, roots)
+shutil.rmtree(rd)
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("payload-slug-gone", is_lead, roots)
+shutil.rmtree(payload_root, ignore_errors=True)
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("payload-root-gone", is_lead, roots)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding["status"] = "claimed"; binding["runtime"] = "codex"
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("runtime-mismatch", is_lead, roots)
+# A malformed UNRELATED lease (oversized heartbeat_ts) alongside a valid lease
+# must not crash the guard open: iter_lead_leases skips it (finding #2).
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding["runtime"] = "claude"
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+bad = dict(lease, heartbeat_ts=10 ** 400, workspace_root="/tmp/other-ws",
+          binding_id="ldb-" + "2" * 32)
+open(os.path.join(slugd, "lead-%s.json" % ("9" * 16)), "w").write(json.dumps(bad))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [ws], ("malformed-sibling", is_lead, roots)
+# A binding whose read raises an exotic exception (deeply nested JSON ->
+# RecursionError, not OSError/ValueError) must not escape into the guard's
+# top-level fail-open handler: the lead stays classified, the root withheld
+# (co-review r2 finding #2).
+os.remove(os.path.join(slugd, "lead-%s.json" % ("9" * 16)))
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write("[" * 100000 + "]" * 100000)
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("recursion-binding", is_lead, roots)
+shutil.rmtree(iso, ignore_errors=True)
+PY
+then
+    printf 'PASS  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling/recursion\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling/recursion\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+# --- Lead containment: guard acceptance (spec 7) ------------------------
+# lead_setup SID WS: write a live lead lease (coordination) + a matching
+# claimed binding (payload root) for SID at realpath(WS), under SLUG_A. The
+# lease key is sha256(realpath(WS))[:16]; the binding id is derived from the
+# same key so set_binding_status_fixture can find it again.
+lead_setup() {
+    LS_SID="$1" LS_WS="$2" LS_SLUG="$SLUG_A" LS_COORD="$HERDR_COORDINATION_ROOT" \
+    LS_CFG="$CFG" LS_REPO="$R" python3 - <<'PY'
+import hashlib, json, os, sys
+sys.path.insert(0, "claude/hooks")
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["LS_CFG"]
+import orch_edit_guard as g
+e = os.environ
+ws = os.path.realpath(e["LS_WS"]); slug = e["LS_SLUG"]; sid = e["LS_SID"]
+scope = g.selected_scope(e["LS_REPO"], "claude")
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + key + "0" * (32 - len(key))
+slugd = os.path.join(e["LS_COORD"], slug); os.makedirs(slugd, exist_ok=True)
+open(os.path.join(slugd, "lead-%s.json" % key), "w").write(json.dumps({
+    "schema_version": 1, "session_id": sid, "host": "h", "pid": 7, "fence": 1,
+    "heartbeat_ts": 9e18, "runtime": "claude", "thread_id": None,
+    "account_id": scope["account_id"], "control_tier": "lead",
+    "workspace_root": ws, "binding_id": bid}))
+rd = os.path.join(e["LS_CFG"], "herdr-orch", slug, "bindings"); os.makedirs(rd, exist_ok=True)
+open(os.path.join(rd, bid + ".json"), "w").write(json.dumps({
+    "schema_version": 1, "binding_id": bid, "tier": "lead",
+    "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
+    "task_id": "td-x", "repo_id": None, "repo_slug": slug, "workspace_root": ws,
+    "account_id": scope["account_id"], "account_kind": scope["kind"],
+    "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+    "status": "claimed", "created_ts": "t", "updated_ts": "t"}))
+PY
+}
+set_binding_status_fixture() {
+    SB_WS="$2" SB_STATUS="$3" SB_SLUG="$SLUG_A" SB_CFG="$CFG" python3 - <<'PY'
+import hashlib, json, os
+e = os.environ
+ws = os.path.realpath(e["SB_WS"]); key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + key + "0" * (32 - len(key))
+p = os.path.join(e["SB_CFG"], "herdr-orch", e["SB_SLUG"], "bindings", bid + ".json")
+rec = json.load(open(p)); rec["status"] = e["SB_STATUS"]; json.dump(rec, open(p, "w"))
+PY
+}
+# Real worktrees so workspace_root is a real dir and nested cases use real git.
+LWS="$FIX/leadws"; LWS2="$FIX/leadws2"
+git -C "$R" worktree add -q -b leadbr "$LWS" >/dev/null 2>&1
+git -C "$R" worktree add -q -b leadbr2 "$LWS2" >/dev/null 2>&1
+: > "$LWS/wsfile.txt"; : > "$LWS2/wsfile.txt"; mkdir -p "$LWS/nested"
+
+lead_setup "$SID_C" "$LWS"
+hook_case "LG lead edit inside its workspace allowed" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
+hook_case "LG lead edit of the main checkout denied" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+hook_case "AC-G lead inside workspace: new nested file allowed" allow Write "$LWS/sub/deep/new.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead inside workspace: nested dir allowed" allow Write "$LWS/nested/x.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead outside: sibling workspace denied" deny Write "$LWS2/wsfile.txt" "$LWS2" "$SID_C"
+hook_case "AC-G lead outside: unrelated repo denied" deny Edit "$R2/tracked.txt" "$R2" "$SID_C"
+ln -s "$R/tracked.txt" "$LWS/escape"
+hook_case "AC-G lead symlink escaping the workspace denied" deny Edit "$LWS/escape" "$LWS" "$SID_C"
+hook_case "AC-G lead ../ escape to the main checkout denied" deny Bash "echo x > $LWS/../repo/tracked.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead multi-target one-outside denied" deny Bash "tee $LWS/wsfile.txt $R/tracked.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead multi-target all-inside allowed" allow Bash "tee $LWS/wsfile.txt $LWS/wsfile2.txt" "$LWS" "$SID_C"
+mkdir -p "$LWS/deep"; ln -s "$LWS/deep" "$LWS/escwslink"
+hook_case "AC-G lead cp into a symlink-then-.. escaping the workspace denied" deny Bash "cp $LWS/wsfile.txt $LWS/escwslink/../../repo/tracked.txt" "$LWS" "$SID_C"
+# launcher (SID_A owns SLUG_A) is denied on its own repo (existing behavior).
+hook_case "AC-G launcher denied on its own repo" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+# A launcher of a DIFFERENT repo (SID_B owns SLUG_2) editing $R is a cross-scope
+# DENY, not a worker allow -- it is still an orchestrator, just off its scope.
+hook_case "AC-G launcher of another repo denied off-scope" deny Edit "$R/tracked.txt" "$R" "$SID_B"
+# A session that owns nothing and holds no lead lease is a plain worker: allow.
+SID_W=55555555-5555-5555-5555-555555555555
+hook_case "AC-G plain worker (owns nothing, no lease) allowed" allow Edit "$R/tracked.txt" "$R" "$SID_W"
+# A path with an embedded newline must not add stderr lines: refuse_lead (and
+# refuse) sanitize the interpolated path so the exactly-three-line refusal
+# contract holds for a legal newline-bearing filename (finding #4).
+if HOOK="$HOOK" python3 - <<'PY'
+import contextlib, importlib.util, io, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    rc = g.refuse_lead(("/repo/a\nb/tracked.txt", "/repo", "tracked"), ["/ws/a\nb"])
+lines = err.getvalue().splitlines()
+assert rc == 2, rc
+assert len(lines) == 3, (len(lines), lines)
+assert lines[0].startswith("Blocked: orch-edit-guard"), lines[0]
+PY
+then printf 'PASS  AC-G refuse_lead keeps three lines with a newline in the path\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G refuse_lead keeps three lines with a newline in the path\n' >&2; FAIL=$((FAIL + 1)); fi
+# refuse()'s budget-unwritable branch must also sanitize the audit path: a
+# config dir with a newline must not add a fourth stderr line (co-review r2 #3).
+if HOOK="$HOOK" python3 - <<'PY'
+import contextlib, importlib.util, io, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    rc = g.refuse("budget", "slug-x", 1, "sid", ("/repo/f", "/repo", "tracked"),
+                  {"unwritable": True, "owned": "slug-x"}, "claude", "/cfg/a\nb/x")
+lines = err.getvalue().splitlines()
+assert rc == 2 and len(lines) == 3, (rc, len(lines), lines)
+assert lines[0].startswith("Blocked: orch-edit-guard"), lines[0]
+PY
+then printf 'PASS  AC-G refuse budget-unwritable keeps three lines with a newline in the audit path\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G refuse budget-unwritable keeps three lines with a newline in the audit path\n' >&2; FAIL=$((FAIL + 1)); fi
+
+# LM: an allow-edit marker for the slug does not widen a lead outside its
+# workspace (leads never consult the marker path).
+lead_setup "$SID_C" "$LWS"
+marker "$RD_A" "$SID_C" 4 300 10 "aaaaaaaaaaaaaa01"
+hook_case "LM marker under the slug does not widen a lead outside its workspace" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+rm -f "$RD_A/orch-edit-allow.json"
+# LT: a completed binding ends lead edit authority even inside the workspace.
+lead_setup "$SID_C" "$LWS"; set_binding_status_fixture "$SID_C" "$LWS" completed
+hook_case "LT completed binding ends lead edit authority inside the workspace" deny Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
+# LX: with the lease removed, the session is a plain worker again (allow).
+lead_setup "$SID_C" "$LWS"
+rm -f "$HERDR_COORDINATION_ROOT/$SLUG_A"/lead-*.json
+hook_case "LX no lead lease reverts to plain-worker allow" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
+
+# Legacy no-tier owner record still blanket-fences (real guard path, not a
+# dict-default assertion): drop control_tier from SID_A's live coordination
+# owner.json, drive a real deny, then restore it for later cases.
+COWN="$HERDR_COORDINATION_ROOT/$SLUG_A/owner.json"
+cp "$COWN" "$FIX/owner.bak"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("control_tier",None); json.dump(d,open(p,"w"))' "$COWN"
+hook_case "AC-G legacy no-tier owner record still blanket-fences (deny)" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+cp "$FIX/owner.bak" "$COWN"
+
+# A deeply nested (RecursionError, not ValueError) owner.json under an
+# UNRELATED slug must not crash the guard open before lead discovery runs:
+# owned_slugs() reads every owner record first, on both the normal and the
+# overflow path (co-review r6). The lead must still be contained.
+mkdir -p "$CFG/herdr-orch/zz-nested" "$HERDR_COORDINATION_ROOT/zz-nested"
+python3 -c 'import sys; open(sys.argv[1], "w").write("[" * 100000 + "]" * 100000)' "$HERDR_COORDINATION_ROOT/zz-nested/owner.json"
+lead_setup "$SID_C" "$LWS"
+hook_case "AC-G nested sibling owner.json does not un-fence a lead (normal path)" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+hook_case "AC-G nested sibling owner.json does not un-fence a lead (overflow path)" deny Bash "$many" "$LWS" "$SID_C"
+rm -rf "$CFG/herdr-orch/zz-nested" "$HERDR_COORDINATION_ROOT/zz-nested"
+
+# A non-UTF-8 origin URL survives surrogateescape git decoding but cannot be
+# strict-encoded by repo_slug(); slug derivation must yield None (fail closed
+# on both paths) instead of raising into the fail-open handler (co-review r8).
+mkrepo "$FIX/badorigin" "git@example.com:org/placeholder.git"
+git -C "$FIX/badorigin" remote set-url origin "$(printf 'git@example.com:org/x\377y.git')"
+hook_case "AC-G non-UTF-8 origin: a launcher's write is denied, not failed open" deny Edit "$FIX/badorigin/tracked.txt" "$FIX/badorigin" "$SID_A"
+lead_setup "$SID_C" "$LWS"
+hook_case "AC-G non-UTF-8 origin: a lead's outside write is denied, not failed open" deny Edit "$FIX/badorigin/tracked.txt" "$FIX/badorigin" "$SID_C"
+
+# Structural fail-closed (spec R9 at the chokepoint): if the guard itself
+# raises while checking a write, an identified launcher or lead is DENIED and
+# only a session with no privileged identity keeps the fail-open default --
+# so no single raising reader/parser can un-fence a fenced session.
+lead_setup "$SID_C" "$LWS"
+if HOOK="$HOOK" CFG="$CFG" H="$H" R="$R" SID_A="$SID_A" SID_C="$SID_C" python3 - <<'PY'
+import contextlib, importlib.util, io, json, os, sys
+sys.dont_write_bytecode = True
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+os.environ["HERDR_ENV"] = "1"
+os.environ["HOME"] = os.environ["H"]
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+def boom(*a, **k): raise RuntimeError("injected guard failure")
+g.classify = boom
+R = os.environ["R"]
+def run(sid):
+    payload = {"session_id": sid, "cwd": R, "hook_event_name": "PreToolUse",
+               "tool_name": "Edit", "tool_use_id": "toolu_crash",
+               "tool_input": {"file_path": R + "/tracked.txt", "content": "x"}}
+    err = io.StringIO()
+    sys.stdin = io.StringIO(json.dumps(payload))
+    with contextlib.redirect_stderr(err):
+        rc = g.main()
+    return rc, err.getvalue().splitlines()
+rc, lines = run(os.environ["SID_A"])
+assert rc == 2 and len(lines) == 3 and lines[0].startswith("Blocked: orch-edit-guard"), ("launcher", rc, lines)
+rc, lines = run(os.environ["SID_C"])
+assert rc == 2 and len(lines) == 3, ("lead", rc, lines)
+rc, lines = run("55555555-5555-5555-5555-555555555555")
+assert rc == 0 and lines == [], ("worker", rc, lines)
+PY
+then printf 'PASS  AC-G guard crash fails closed for launcher and lead, open for a worker\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G guard crash fails closed for launcher and lead, open for a worker\n' >&2; FAIL=$((FAIL + 1)); fi
+
+# Identity must be derivable WITHOUT the account scope (co-review r9): scope
+# derivation reads `git branch --show-current` strictly and can raise on a
+# legal non-UTF-8 branch. A scope failure must not read as "not privileged".
+# Also: a failing stderr must not turn a decided deny into an allow.
+lead_setup "$SID_C" "$LWS"
+if HOOK="$HOOK" CFG="$CFG" H="$H" R="$R" SID_A="$SID_A" SID_C="$SID_C" python3 - <<'PY'
+import contextlib, importlib.util, io, json, os, sys
+sys.dont_write_bytecode = True
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+os.environ["HERDR_ENV"] = "1"
+os.environ["HOME"] = os.environ["H"]
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+R = os.environ["R"]
+def payload(sid):
+    return json.dumps({"session_id": sid, "cwd": R, "hook_event_name": "PreToolUse",
+                       "tool_name": "Edit", "tool_use_id": "toolu_scope",
+                       "tool_input": {"file_path": R + "/tracked.txt", "content": "x"}})
+def run(sid, stderr=None):
+    err = stderr if stderr is not None else io.StringIO()
+    sys.stdin = io.StringIO(payload(sid))
+    with contextlib.redirect_stderr(err):
+        return g.main()
+# 1) scope derivation raises -> launcher/lead deny, worker allow
+real_scope = g.selected_scope
+def bad_scope(*a, **k): raise ValueError("non-UTF-8 branch")
+g.selected_scope = bad_scope
+assert run(os.environ["SID_A"]) == 2, "launcher: scope failure must deny"
+assert run(os.environ["SID_C"]) == 2, "lead: scope failure must deny"
+assert run("55555555-5555-5555-5555-555555555555") == 0, "worker: scope failure allows"
+g.selected_scope = real_scope
+# 2) a crash plus a failing stderr still yields 2 for a launcher
+def boom(*a, **k): raise RuntimeError("injected")
+g.classify = boom
+class BadErr(io.StringIO):
+    def write(self, s): raise OSError("stderr closed")
+    def flush(self): raise OSError("stderr closed")
+assert run(os.environ["SID_A"], BadErr()) == 2, "launcher: stderr failure must not allow"
+PY
+then printf 'PASS  AC-G scope failure and stderr failure both keep a fenced session denied\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G scope failure and stderr failure both keep a fenced session denied\n' >&2; FAIL=$((FAIL + 1)); fi
+# Live form of the same scope failure: a non-UTF-8 branch in the lead's own
+# worktree. A write outside the workspace must still deny.
+git -C "$LWS" checkout -q -b "$(printf 'br\377x')" 2>/dev/null || true
+hook_case "AC-G non-UTF-8 branch in the lead's worktree: outside write still denied" deny Edit "$R/tracked.txt" "$LWS" "$SID_C"
+# A work-tree root containing a newline must still be classified (lossless
+# toplevel parse); a launcher's and a lead's writes there are denied, not
+# silently un-guarded (co-review r9, pre-existing logic escape).
+NLR="$FIX/nl
+repo"
+mkrepo "$NLR" "git@example.com:org/nl.git"
+hook_case "AC-G newline in repo root: a launcher's write is denied, not un-guarded" deny Edit "$NLR/tracked.txt" "$NLR" "$SID_A"
+hook_case "AC-G newline in repo root: a lead's outside write is denied, not un-guarded" deny Edit "$NLR/tracked.txt" "$NLR" "$SID_C"
+
+# Scope-free identity must survive a listing error in an UNRELATED slug that
+# sorts first (co-review r10): the scan continues to the later slug that
+# names the session, so a scope failure still fails closed for both roles.
+mkdir -p "$HERDR_COORDINATION_ROOT/aaa-first"
+lead_setup "$SID_C" "$LWS"
+if HOOK="$HOOK" CFG="$CFG" H="$H" R="$R" SID_A="$SID_A" SID_C="$SID_C" python3 - <<'PY'
+import contextlib, importlib.util, io, json, os, sys
+sys.dont_write_bytecode = True
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+os.environ["HERDR_ENV"] = "1"
+os.environ["HOME"] = os.environ["H"]
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+real_iter = g.core.coordination.iter_lead_leases
+def flaky(slug):
+    if slug == "aaa-first":
+        raise OSError("listing failed")
+    return real_iter(slug)
+g.core.coordination.iter_lead_leases = flaky
+def bad_scope(*a, **k): raise ValueError("scope unavailable")
+g.selected_scope = bad_scope
+R = os.environ["R"]
+def run(sid):
+    sys.stdin = io.StringIO(json.dumps({"session_id": sid, "cwd": R, "hook_event_name": "PreToolUse",
+        "tool_name": "Edit", "tool_use_id": "toolu_sib",
+        "tool_input": {"file_path": R + "/tracked.txt", "content": "x"}}))
+    with contextlib.redirect_stderr(io.StringIO()):
+        return g.main()
+assert run(os.environ["SID_A"]) == 2, "launcher must still be found past a failing sibling slug"
+assert run(os.environ["SID_C"]) == 2, "lead must still be found past a failing sibling slug"
+PY
+then printf 'PASS  AC-G identity scan survives a listing error in an unrelated first slug\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G identity scan survives a listing error in an unrelated first slug\n' >&2; FAIL=$((FAIL + 1)); fi
+rm -rf "$HERDR_COORDINATION_ROOT/aaa-first"
+# A legal filename beginning with `:(` must be classified literally, not read
+# as pathspec magic that leaves it un-guarded (co-review r10).
+hook_case "AC-G ':(glob)' filename is guarded literally (launcher denied)" deny Write "$R/:(glob)probe.txt" "$R" "$SID_A"
+hook_case "AC-G ':(glob)' filename is guarded literally (lead outside denied)" deny Write "$R/:(glob)probe.txt" "$R" "$SID_C"
+# A carriage return inside a work-tree root must survive git output decoding
+# (no universal-newline translation) so the root still matches (co-review r10).
+CRR="$FIX/cr$(printf '\r')repo"
+mkrepo "$CRR" "git@example.com:org/cr.git"
+hook_case "AC-G carriage return in repo root: a launcher's write is denied, not un-guarded" deny Edit "$CRR/tracked.txt" "$CRR" "$SID_A"
 
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \

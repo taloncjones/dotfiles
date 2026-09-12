@@ -41,6 +41,60 @@ def owner_path(rd):
     return coordination_root() / slug / "owner.json"
 
 
+def iter_lead_leases(slug):
+    """Every valid lead lease under a slug's coordination dir, read-only and
+    lockless -- the guard's convenience view of who holds a lead lease.
+
+    Opens the slug dir no-follow, scans `lead-*.json`, reads each no-follow,
+    and keeps only records that pass _valid_lead_lease. A missing dir yields
+    []; a corrupt, symlinked, or non-regular entry is skipped, never raised
+    (this never mutates and never takes the global lock)."""
+    if not _SLUG.fullmatch(slug):
+        raise ValueError("invalid repository slug")
+    base = coordination_root() / slug
+    try:
+        parent = os.open(
+            str(base),
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return []
+    leases = []
+    try:
+        for name in os.listdir(parent):
+            if not (name.startswith("lead-") and name.endswith(".json")):
+                continue
+            # Read AND validate under one guard: a malformed record must be
+            # skipped, never allowed to raise out of this read-only view and
+            # crash a caller (e.g. the edit guard) open. Any per-record error
+            # -- unreadable, corrupt, or a validation edge -- drops just that
+            # record and leaves valid siblings discoverable.
+            try:
+                rec = _read_at(parent, name)
+                valid = rec is not None and _valid_lead_lease(rec)
+            except Exception:  # noqa: BLE001, S112 -- read-only view; skip a bad record
+                continue
+            if valid:
+                leases.append(rec)
+    finally:
+        os.close(parent)
+    return leases
+
+
+def coordination_slugs():
+    """Valid slug directory names under the coordination root, sorted.
+
+    The coordination root is the authoritative cross-account namespace for
+    ownership and lead leases; the guard enumerates it (not the payload root)
+    so a lead lease stays discoverable even when its payload-root slug dir was
+    removed. A missing root yields []; non-slug entries are ignored."""
+    try:
+        names = os.listdir(str(coordination_root()))
+    except OSError:
+        return []
+    return sorted(n for n in names if _SLUG.fullmatch(n))
+
+
 def _read_at(parent, name):
     try:
         fd = os.open(
@@ -138,7 +192,11 @@ def _valid_owner(value):
         and type(value.get("fence")) is int
         and value["fence"] > 0
         and type(value.get("heartbeat_ts")) in (int, float)
-        and math.isfinite(value["heartbeat_ts"])
+        # An int is always finite; only a float can be inf/nan. Calling
+        # math.isfinite on an oversized int (from arbitrary JSON) raises
+        # OverflowError, which would otherwise escape validation and crash a
+        # reader open -- so never convert an int to float here.
+        and (type(value["heartbeat_ts"]) is int or math.isfinite(value["heartbeat_ts"]))
         and value["heartbeat_ts"] >= 0
         and value.get("runtime", "claude") in ("claude", "codex")
         and (value.get("thread_id") is None or isinstance(value["thread_id"], str))

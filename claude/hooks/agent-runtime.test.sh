@@ -894,6 +894,76 @@ def test_timeout_kills_the_process_group():
         assert result["total_cost_usd"] is None, result
 
 
+def test_timeout_returns_when_a_detached_child_holds_the_pipe():
+    # Regression: a runtime CLI that detaches its worker with setsid() escapes
+    # the killed process group and keeps the stdout pipe open. An unbounded
+    # drain then blocks forever (the observed 34-minute "timeout" hang). The
+    # bounded drain must return a timeout result promptly regardless.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        # The fake codex forks a setsid grandchild that records its pid, then
+        # sleeps holding stdout; the direct child sleeps too. killpg alone
+        # reaps the child but not the detached grandchild -- the ppid snapshot
+        # in _kill_after_timeout must catch and kill it.
+        pidfile = root / "worker.pid"
+        executable(
+            bindir / "codex",
+            "exec python3 -c '"
+            "import os,sys,time\n"
+            "if os.fork()==0:\n"
+            "    os.setsid()\n"
+            f'    open("{pidfile}","w").write(str(os.getpid()))\n'
+            "    time.sleep(120); sys.exit(0)\n"
+            "time.sleep(120)'\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        started = time.monotonic()
+        # 1.0s (not 0.2s) so the worker reliably forks, setsids, and records
+        # its pid BEFORE cleanup runs -- the assertion below needs a worker
+        # that was alive and detached when the timeout fired.
+        result = runtime.run_bounded(
+            route,
+            "prompt",
+            repo,
+            "workspace-write",
+            timeout_secs=1.0,
+            env=env,
+        )
+        elapsed = time.monotonic() - started
+        # 1.0s timeout + a bounded 5s drain, comfortably under 10s -- never
+        # the unbounded hang.
+        assert elapsed < 10, elapsed
+        assert result["status"] == "timeout", result
+        assert result["timed_out"] is True, result
+        # The detached (setsid) worker must be dead too, not left running
+        # after the runner reported a timeout.
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "worker never recorded its pid"
+        worker = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(worker, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(worker, 9)
+        assert not alive, f"detached worker {worker} survived timeout cleanup"
+
+
 def test_route_and_launch_plan_cli_emit_json_contracts():
     caps = json.dumps(codex_capabilities())
     route_process = subprocess.run(
@@ -1443,6 +1513,7 @@ for name, test in (
     ("bounded Codex launch applies repository plugin policy", test_bounded_codex_plugin_policy_uses_resolved_repository_scope),
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
     ("bounded run kills the process group on timeout", test_timeout_kills_the_process_group),
+    ("bounded run returns when a detached child holds the pipe", test_timeout_returns_when_a_detached_child_holds_the_pipe),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
     ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
     ("difficulty requires confirmation", test_difficulty_requires_confirmation),

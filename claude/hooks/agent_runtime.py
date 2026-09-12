@@ -800,6 +800,91 @@ def _timeout_result(runtime: str, stderr: str = "") -> dict[str, Any]:
     }
 
 
+def _descendants(root_pid: int) -> list[int]:
+    """Every live descendant pid of root_pid, found by walking `ps` ppid
+    links. Taken BEFORE the root is killed: a worker that called setsid()
+    has left the root's process group, but its ppid still names the root (or
+    an intermediate) until that parent dies, so this snapshot is how an
+    escaped worker is caught. Best effort; [] when `ps` is unavailable."""
+    try:
+        listing = subprocess.run(
+            ["ps", "-eo", "pid=,ppid="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    found: list[int] = []
+    stack = [root_pid]
+    while stack:
+        parent = stack.pop()
+        for child in children.get(parent, []):
+            if child not in found:
+                found.append(child)
+                stack.append(child)
+    return found
+
+
+def _kill_after_timeout(process: subprocess.Popen, drain_secs: float = 5.0) -> str:
+    """Terminate a timed-out child AND its escaped workers, then drain its
+    output WITHOUT hanging.
+
+    The child runs in its own session (start_new_session=True), so
+    os.killpg(pid) reaches the child and every descendant still in its group.
+    A descendant that called setsid() -- e.g. a runtime CLI that detaches its
+    model worker -- escapes that group: it would keep running (and editing)
+    after the runner reports a timeout, and it keeps the stdout/stderr pipe
+    open, which makes an UNBOUNDED communicate() block forever draining a
+    pipe that never reaches EOF (the observed 34-minute "timeout that never
+    returned"). So: snapshot the descendant tree by ppid FIRST, SIGKILL the
+    group, then SIGKILL each snapshotted descendant individually (catching
+    the setsid worker), then drain with a bound. Returns captured stderr
+    (possibly empty).
+
+    Best effort by construction: a worker whose intermediate parent already
+    exited before the snapshot has been reparented to init, so its ppid no
+    longer links it to this tree and it is not found. Such a worker is
+    orphaned to the OS rather than tracked; the runner still returns."""
+    victims = _descendants(process.pid)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        _stdout, stderr = process.communicate(timeout=drain_secs)
+        return stderr or ""
+    except subprocess.TimeoutExpired:
+        # A detached (setsid) descendant still holds the pipe; stop waiting.
+        for stream in (process.stdout, process.stderr, process.stdin):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
+        return ""
+
+
 def run_bounded(
     route: dict[str, Any],
     prompt: str,
@@ -860,11 +945,7 @@ def run_bounded(
     try:
         stdout, stderr = process.communicate(prompt, timeout=timeout_secs)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
+        stderr = _kill_after_timeout(process)
         result = _timeout_result(runtime, stderr.strip())
         result["account_kind"] = scope["kind"]
         result["account_id"] = scope["account_id"]

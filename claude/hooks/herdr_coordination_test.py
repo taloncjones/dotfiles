@@ -726,6 +726,47 @@ class AttemptTests(unittest.TestCase):
         )
         self.assertIsNone(core.parse_banner(old, after="LAUNCH-X"))
 
+    def test_iter_lead_leases_and_coordination_slugs(self):
+        self.assertIsNotNone(coordination, "shared coordination module missing")
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        registry = Path(tmp.name).resolve() / "registry"
+        os.environ["HERDR_COORDINATION_ROOT"] = str(registry)
+        slugd = registry / "slug-x"
+        slugd.mkdir(parents=True)
+        good = {
+            "schema_version": 1,
+            "session_id": "S1",
+            "host": "h",
+            "pid": 3,
+            "fence": 1,
+            "heartbeat_ts": 0,
+            "runtime": "claude",
+            "thread_id": None,
+            "account_id": "acc",
+            "control_tier": "lead",
+            "workspace_root": "/tmp/ws",
+            "binding_id": "ldb-" + "0" * 32,
+        }
+        (slugd / ("lead-" + "a" * 16 + ".json")).write_text(json.dumps(good))
+        (slugd / ("lead-" + "b" * 16 + ".json")).write_text("not json")
+        (slugd / "owner.json").write_text(json.dumps({"session_id": "L1"}))
+        leases = coordination.iter_lead_leases("slug-x")
+        self.assertEqual(len(leases), 1, leases)
+        self.assertEqual(leases[0]["session_id"], "S1")
+        self.assertEqual(leases[0]["binding_id"], good["binding_id"])
+        self.assertEqual(coordination.iter_lead_leases("slug-absent"), [])
+        # coordination_slugs enumerates the authoritative namespace.
+        (registry / "slug-y").mkdir(parents=True)
+        (registry / "not a slug").mkdir(parents=True)
+        slugs = coordination.coordination_slugs()
+        self.assertIn("slug-x", slugs)
+        self.assertIn("slug-y", slugs)
+        self.assertNotIn("not a slug", slugs)
+
 
 if __name__ == "__main__":
     unittest.main()
