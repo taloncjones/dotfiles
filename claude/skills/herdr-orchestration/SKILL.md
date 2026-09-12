@@ -35,6 +35,10 @@ aborts if the fence is stale. `emit-done`/`emit-review` are called by
 
 Full schemas: `references/state-layout.md`. Event vocabulary and fold rule:
 `references/event-schema.md`. Kickoff brief template: `references/brief-template.md`.
+Dispatch selector, gate policy, review incorporation and cache rules:
+`references/dispatch-mechanism.md`. Resolve pipeline routes by step:
+`python3 "$RUNTIME" route --step <step> --runtime <claude|codex>` (the role is
+derived from the step; do not hand-pick a role for a pipeline step).
 
 ## Runtime boundary
 

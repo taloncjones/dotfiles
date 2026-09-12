@@ -93,6 +93,42 @@ CONFIG_KEYS = (
     "provisional",
 )
 
+# Pipeline step -> role binding. The single source of truth for which role a
+# superpowers pipeline step dispatches under; role -> model/effort stays in
+# CLAUDE_ROUTES / CODEX_ROUTES. Steps are runtime-independent; the runtime
+# picks the model table.
+PIPELINE_ROUTES: dict[str, str] = {
+    "brainstorming": "planner",
+    "spec": "planner",
+    "plan": "planner",
+    "spec-review": "reviewer",
+    "plan-review": "reviewer",
+    "implement": "implementation",
+    "implementation-review": "reviewer",
+    "co-review": "reviewer",
+    "gateway": "controller",
+    "read-only": "read_only",
+    "mechanical": "mechanical",
+}
+
+# A step mapping to a role absent from either policy table would fail only at
+# dispatch time, so pin the values to real roles at import.
+_UNKNOWN_STEP_ROLES = {
+    role
+    for role in PIPELINE_ROUTES.values()
+    if role not in CLAUDE_ROUTES or role not in CODEX_ROUTES
+}
+if _UNKNOWN_STEP_ROLES:
+    raise RouteError(f"pipeline step maps to unknown role: {min(_UNKNOWN_STEP_ROLES)}")
+
+
+def role_for_step(step: str) -> str:
+    """Map a superpowers pipeline step to its policy role."""
+    try:
+        return PIPELINE_ROUTES[step]
+    except (KeyError, TypeError):
+        raise RouteError(f"unknown pipeline step: {step!r}")
+
 
 def _workflow_context_module():
     path = (

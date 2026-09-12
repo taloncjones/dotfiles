@@ -262,7 +262,9 @@ def _json_arg(value: str | None, name: str) -> dict[str, Any] | None:
 
 def _add_route_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime", required=True, choices=("claude", "codex"))
-    parser.add_argument("--role", required=True)
+    role_or_step = parser.add_mutually_exclusive_group(required=True)
+    role_or_step.add_argument("--role")
+    role_or_step.add_argument("--step")
     parser.add_argument("--risk", default="normal")
     parser.add_argument("--config-json")
     parser.add_argument("--capabilities-json")
@@ -276,8 +278,9 @@ def _route(args: argparse.Namespace) -> dict[str, Any]:
     config = _json_arg(args.config_json, "config-json") or {}
     if args.provisional:
         config = {**config, "provisional": True}
+    role = args.role if args.role is not None else agent_runtime.role_for_step(args.step)
     return agent_runtime.resolve_route(
-        args.runtime, args.role, args.risk, config, capabilities
+        args.runtime, role, args.risk, config, capabilities
     )
 
 

@@ -127,6 +127,93 @@ def test_codex_role_table():
         assert "account" not in route and "config_dir" not in route, route
 
 
+def test_pipeline_steps_bind_to_policy_routes():
+    expected = {
+        "brainstorming": ("claude", "planner", "fable", "high"),
+        "spec": ("claude", "planner", "fable", "high"),
+        "plan": ("claude", "planner", "fable", "high"),
+        "implement": ("claude", "implementation", "sonnet", "high"),
+        "implementation-review": ("claude", "reviewer", "opus", "high"),
+        "gateway": ("claude", "controller", "opus", "medium"),
+        "read-only": ("claude", "read_only", "haiku", "medium"),
+        "spec-review": ("codex", "reviewer", "gpt-6-astra", "high"),
+        "plan-review": ("codex", "reviewer", "gpt-6-astra", "high"),
+        "co-review": ("codex", "reviewer", "gpt-6-astra", "high"),
+    }
+    for step, (rt, role, wanted_model, wanted_effort) in expected.items():
+        assert runtime.role_for_step(step) == role, (step, role)
+        caps = codex_capabilities() if rt == "codex" else None
+        route = runtime.resolve_route(rt, role, capabilities=caps)
+        assert (route["model"], route["effort"]) == (wanted_model, wanted_effort), (step, route)
+
+
+def test_mechanical_step_maps_to_haiku_with_designation():
+    assert runtime.role_for_step("mechanical") == "mechanical"
+    cfg = {"mechanical": {"designated": True, "review_gate": True}}
+    route = runtime.resolve_route("claude", "mechanical", config=cfg)
+    assert (route["model"], route["effort"]) == ("haiku", "medium"), route
+
+
+def test_planning_step_never_resolves_to_sonnet():
+    route = runtime.resolve_route("claude", runtime.role_for_step("brainstorming"))
+    assert route["model"] != "sonnet", route
+
+
+def test_brainstorming_step_falls_back_to_opus_xhigh_when_fable_unavailable():
+    caps = {"models": {
+        "fable": {"status": "unavailable", "efforts": ["high"]},
+        "opus": {"status": "available", "efforts": ["high", "xhigh"]},
+    }}
+    route = runtime.resolve_route("claude", runtime.role_for_step("brainstorming"), capabilities=caps)
+    assert (route["model"], route["effort"]) == ("opus", "xhigh"), route
+
+
+def test_pipeline_route_mutation_breaks_conformance():
+    def conformance_assertion():
+        route = runtime.resolve_route("claude", runtime.role_for_step("brainstorming"))
+        assert route["model"] == "fable", route
+
+    conformance_assertion()
+    original = dict(runtime.PIPELINE_ROUTES)
+    try:
+        runtime.PIPELINE_ROUTES["brainstorming"] = "implementation"
+        raises(AssertionError, conformance_assertion)
+    finally:
+        runtime.PIPELINE_ROUTES.clear()
+        runtime.PIPELINE_ROUTES.update(original)
+    conformance_assertion()
+
+
+def test_unknown_pipeline_step_is_rejected():
+    raises(runtime.RouteError, lambda: runtime.role_for_step("deploy"), "unknown pipeline step")
+
+
+def test_route_step_cli_derives_role_from_pipeline_step():
+    caps = json.dumps({"models": {"fable": {"status": "available", "efforts": ["high", "xhigh"]}}})
+    step_process = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--step", "brainstorming", "--capabilities-json", caps],
+        check=True, capture_output=True, text=True,
+    )
+    route = json.loads(step_process.stdout)
+    assert route["role"] == "planner", route
+    assert (route["model"], route["effort"]) == ("fable", "high"), route
+    assert route["ready"] is True, route
+
+    both = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--step", "brainstorming", "--role", "planner"],
+        capture_output=True, text=True,
+    )
+    assert both.returncode != 0, both.stdout
+
+    neither = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude"],
+        capture_output=True, text=True,
+    )
+    assert neither.returncode != 0, neither.stdout
+
+
 def test_critical_routes_are_explicit_xhigh():
     caps = codex_capabilities()
     for role in ("reviewer", "think"):
@@ -1350,6 +1437,13 @@ for name, test in (
     ("hard planner still reaches its xhigh fallback", test_hard_planner_still_reaches_its_xhigh_fallback),
     ("configured fallback below raised floor is skipped not promoted", test_configured_fallback_below_raised_floor_is_skipped_not_promoted),
     ("policy document matches the route table", test_policy_document_matches_the_route_table),
+    ("pipeline steps bind to policy routes", test_pipeline_steps_bind_to_policy_routes),
+    ("mechanical step maps to haiku with designation", test_mechanical_step_maps_to_haiku_with_designation),
+    ("planning step never resolves to sonnet", test_planning_step_never_resolves_to_sonnet),
+    ("brainstorming step falls back to opus/xhigh", test_brainstorming_step_falls_back_to_opus_xhigh_when_fable_unavailable),
+    ("pipeline route mutation breaks conformance", test_pipeline_route_mutation_breaks_conformance),
+    ("unknown pipeline step is rejected", test_unknown_pipeline_step_is_rejected),
+    ("route --step derives role from pipeline step", test_route_step_cli_derives_role_from_pipeline_step),
 ):
     check(name, test)
 
