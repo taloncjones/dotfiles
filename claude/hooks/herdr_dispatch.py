@@ -919,28 +919,30 @@ def _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env):
     """
     argv = ["agent", "prompt", agent, prompt, "--wait", "--timeout",
             str(prompt_timeout_ms)]
+    # The invariant: the ONLY provably-retry-safe outcome is a process-CREATION
+    # failure (the delivery binary never ran). Once the process has started,
+    # every failure -- timeout, communication error, nonzero exit, undecodable
+    # or unparseable output, or a non-agent_prompted reply -- is uncertain,
+    # because the turn may already have been accepted. Never resend an uncertain.
     try:
         process = subprocess.run(
             [herdr_cli, *argv], env=env, check=False, capture_output=True,
             timeout=prompt_timeout_ms / 1000 + 5,
         )
-    except subprocess.TimeoutExpired:
-        return ("uncertain", None)  # may have accepted then run long
     except (FileNotFoundError, PermissionError) as exc:
         raise _RejectedDelivery("reprompt delivery could not start") from exc
-    except OSError:
-        return ("uncertain", None)  # communication error; may have landed
+    except (subprocess.TimeoutExpired, OSError):
+        return ("uncertain", None)  # started; outcome unknown
     if process.returncode != 0:
-        return ("uncertain", None)  # could be a post-acceptance failure
+        return ("uncertain", None)
     try:
         stdout = process.stdout.decode("utf-8")
-    except (UnicodeDecodeError, AttributeError):
-        return ("uncertain", None)
-    try:
         result = result_object(stdout, "Herdr agent prompt")
-    except DispatchError:
+        prompted = result.get("type") == "agent_prompted"
+    except (DispatchError, ValueError, AttributeError):
+        # Any failure to read a clean reply: the turn may have landed.
         return ("uncertain", None)
-    if result.get("type") != "agent_prompted":
+    if not prompted:
         return ("uncertain", None)
     return ("delivered", _prompt_state(result))
 
@@ -1028,10 +1030,17 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
                              json_result=True)
         assert isinstance(current, dict)
         _validate_agent(current, agent, runtime, pane_id)
-    except DispatchError:
+    except (DispatchError, OSError, ValueError) as exc:
+        # Readiness probe failed (validation, transport, or a decode/parse
+        # error). Nothing was delivered, so mark the intent failed (retry-safe)
+        # rather than stranding it at "starting", and refuse cleanly.
         _mark_reprompt(rd, task_id, session, fence, repository, scope, repo_slug,
                        launch_id, seq, status="failed", best_effort=True)
-        raise
+        if isinstance(exc, DispatchError):
+            raise
+        raise DispatchError(
+            f"reprompt could not confirm the live agent: {exc}"
+        ) from exc
 
     # Transaction 2: re-validate current-for-phase, deliver (acceptance), and
     # record the outcome -- ALL under one held fence, so no superseding writer
@@ -1076,6 +1085,15 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
             ) from exc
         status = ("delivered-unrecorded"
                   if delivered["outcome"] == "delivered" else "uncertain")
+        # Best-effort re-persist the true outcome in a fresh transaction so the
+        # entry is not stranded at "starting" -- a "delivered-unrecorded" entry
+        # does not block a later distinct pass, and a persisted "uncertain" one
+        # correctly does. If this also fails (storage still down), the entry
+        # stays "starting" and blocks pending manual reconciliation, which is
+        # the safe fallback.
+        _mark_reprompt(rd, task_id, session, fence, repository, scope, repo_slug,
+                       launch_id, seq, status=status,
+                       prompt_state=delivered["state"], best_effort=True)
         return {"status": status, "launch_id": launch_id, "phase": phase,
                 "reprompt_seq": seq, "prompt_state": delivered["state"],
                 "observation": REPROMPT_OBSERVATION}

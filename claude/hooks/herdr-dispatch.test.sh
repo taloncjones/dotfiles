@@ -1505,6 +1505,84 @@ def test_reprompt_refuses_to_stack_on_unresolved_prior():
         fx.close()
 
 
+def test_reprompt_unparseable_reply_valueerror_is_uncertain():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        original = herdr_dispatch.result_object
+
+        def bad_parse(*args, **kwargs):
+            raise ValueError("Exceeds the limit for integer string conversion")
+
+        herdr_dispatch.result_object = bad_parse
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.result_object = original
+        assert result["status"] == "uncertain", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "uncertain", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_readiness_decode_error_marks_failed_and_refuses():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        original = herdr_dispatch._run_herdr
+
+        def bad_readiness(cli, argv, **kwargs):
+            if argv[:2] == ["agent", "get"]:
+                raise ValueError("invalid utf-8 in agent readiness output")
+            return original(cli, argv, **kwargs)
+
+        herdr_dispatch._run_herdr = bad_readiness
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "confirm the live agent" in str(exc), exc
+        else:
+            raise AssertionError("a readiness decode failure must refuse")
+        finally:
+            herdr_dispatch._run_herdr = original
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery on readiness failure"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "failed", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        original_set = herdr_dispatch._set_reprompt_status
+        calls = {"n": 0}
+
+        def fail_once(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient storage error")
+            return original_set(*args, **kwargs)
+
+        herdr_dispatch._set_reprompt_status = fail_once
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch._set_reprompt_status = original_set
+        assert result["status"] == "delivered-unrecorded", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "delivered-unrecorded", target
+        # A delivered-unrecorded entry must not block a later distinct pass.
+        second = fx.reprompt(lid)
+        assert second["status"] == "reprompted", second
+        assert second["reprompt_seq"] == 1, second
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -1519,6 +1597,9 @@ for name, test in (
     ("reprompt post-spawn OSError is uncertain not failed", test_reprompt_post_spawn_oserror_is_uncertain_not_failed),
     ("reprompt undecodable output is uncertain", test_reprompt_undecodable_output_is_uncertain),
     ("reprompt refuses to stack on an unresolved prior", test_reprompt_refuses_to_stack_on_unresolved_prior),
+    ("reprompt unparseable reply is uncertain", test_reprompt_unparseable_reply_valueerror_is_uncertain),
+    ("reprompt readiness decode error marks failed and refuses", test_reprompt_readiness_decode_error_marks_failed_and_refuses),
+    ("reprompt delivered-unrecorded repersists and allows next pass", test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
