@@ -215,10 +215,10 @@ if jget "$CFG/settings.json" "d['model'] == 'claude-fable-5[1m]'"; then
 else
     fail "link path pins the shared Claude default to Fable 5 1M"
 fi
-if jget "$CFG/settings.json" "d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'claude-opus-5[1m]'"; then
-    pass "link path maps the Opus alias to Opus 5 1M"
+if jget "$CFG/settings.json" "d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'claude-opus-4-8[1m]'"; then
+    pass "link path maps the Opus alias to Opus 4.8 1M"
 else
-    fail "link path maps the Opus alias to Opus 5 1M"
+    fail "link path maps the Opus alias to Opus 4.8 1M"
 fi
 if jget "$CFG/settings.json" "{x.strip().lower() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending', 'post:bash:command-log-audit', 'post:bash:command-log-cost', 'post:skill:track', 'pre:mcp-health-check', 'post:mcp-health-check'}"; then
     pass "link path delivers the seven-id ECC hook exclusion"

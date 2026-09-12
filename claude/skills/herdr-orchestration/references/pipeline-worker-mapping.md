@@ -98,6 +98,6 @@ Each is resolved here, with the reason, so none is silently re-litigated.
     Nothing argued for a different value; the source simply omitted it.
 11. **Tier doctrine describes defaults, not exclusivity.** `opus` is the reviewer
     tier and also the gateway model at a lower effort. The `opus` alias resolves
-    to Opus 5 in both.
+    to Opus 4.8 in both.
 12. **Skeptic is `opus/high`**, rising to `xhigh` under `risk=critical` or
     `difficulty=hard` -- the same as reviewer, which the source left unstated.
