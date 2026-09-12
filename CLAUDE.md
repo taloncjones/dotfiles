@@ -65,7 +65,7 @@ is the equivalent.
 - `git/work/.gitconfig-work.tmpl` seeded to `~/.gitconfig-work` on first install (machine-local; run `identity-setup` to populate employer values)
 - `ssh/configs/config` -> `~/.ssh/config` (Includes `~/.ssh/config_local` first, then personal/work sub-configs; no global `ForwardAgent`)
 - `ssh/configs/agent.toml` seeded to `~/.config/1Password/ssh/agent.toml` on first install (machine-local)
-- `ssh/keys/id_ed25519_personal.pub` -> `~/.ssh/id_ed25519_personal.pub`; work key (`~/.ssh/id_ed25519_work.pub`) is machine-local, written by `identity-setup`
+- `ssh/keys/id_ed25519_personal.pub` -> `~/.ssh/id_ed25519_personal.pub`; work key (`~/.ssh/id_ed25519_work.pub`) is machine-local, written by `identity-setup`. `~/.ssh/id_ed25519_git_fallback` (machine-local, never tracked) is an optional GitHub-only on-disk key listed second in `config_personal` so git-over-SSH keeps working while the 1Password vault is locked (the agent serves no keys when locked); ssh skips it where absent
 - `ssh/configs/config_cloudflared.tmpl` seeded to `~/.ssh/config_cloudflared` on first install (machine-local; the real zone is edited there, the template keeps the inert `*.ssh.example.com` placeholder). Included from `ssh/configs/config` after `config_local`. Client side of Cloudflare Access SSH; host-side tunnel, Access app, and sshd are a manual runbook in README "Remote Access", never installer-driven.
 - `bin/remote-access-doctor` -> `~/bin/remote-access-doctor` -- read-only checker for the Cloudflare Access SSH client stanza and host role (tested by `bin/remote-access-doctor.test.sh`)
 - `vscode/` -> VS Code settings/keybindings

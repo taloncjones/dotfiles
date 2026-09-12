@@ -1,6 +1,7 @@
 Host Git-Personal
     HostName github.com
     IdentityFile ~/.ssh/id_ed25519_personal
+    IdentityFile ~/.ssh/id_ed25519_git_fallback
     IdentitiesOnly yes
     User git
 
@@ -10,5 +11,13 @@ Host Git-Personal
 # to a personal clone (key offer order no longer matters).
 Host github.com
     IdentityFile ~/.ssh/id_ed25519_personal
+    IdentityFile ~/.ssh/id_ed25519_git_fallback
     IdentitiesOnly yes
     User git
+
+# id_ed25519_git_fallback is a machine-local, GitHub-only on-disk key so git
+# keeps working while the Mac (and therefore the 1Password vault/agent) is
+# locked: the agent offers no keys when locked, and ssh falls through to this
+# file. The 1Password-held personal key is listed first and wins whenever the
+# vault is unlocked. The key is never tracked; ssh silently skips a missing
+# IdentityFile on machines without it.
