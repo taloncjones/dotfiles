@@ -596,6 +596,29 @@ def test_codex_result_reports_tokens_and_unknown_observations():
     assert result["observation"] == "unavailable-from-codex-jsonl", result
 
 
+def test_codex_result_joins_multiple_agent_messages():
+    output = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "first thoughts"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "final verdict"},
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ]
+    )
+    result = runtime.parse_runtime_result("codex", output)
+    assert result["status"] == "success", result
+    assert result["result"] == "first thoughts\n\nfinal verdict", result
+
+
 def test_result_errors_and_malformed_output_fail_closed():
     malformed = runtime.parse_runtime_result("codex", "not json\n[]")
     assert malformed["status"] == "unparseable", malformed
@@ -1413,6 +1436,7 @@ for name, test in (
     ("personal Codex argv requires valid scope", test_personal_repository_codex_argv_disables_atlassian_plugin),
     ("Codex lifecycle roots require workspace-write", test_codex_lifecycle_roots_require_workspace_write),
     ("Codex JSONL reports tokens and unknown observations", test_codex_result_reports_tokens_and_unknown_observations),
+    ("Codex JSONL joins multiple agent messages", test_codex_result_joins_multiple_agent_messages),
     ("error and malformed runtime output fail closed", test_result_errors_and_malformed_output_fail_closed),
     ("bounded run uses argv and native personal Claude env", test_run_uses_argv_and_unsets_default_claude_config),
     ("bounded run consumes the shared work account scope", test_run_consumes_shared_work_account_scope),
