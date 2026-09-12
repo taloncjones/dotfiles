@@ -2574,5 +2574,140 @@ assert not core.workspace_provenance_ok(wt_sub, ctx)        # subdir of linked w
 PY
 SH
 
+check "write-task --binding routes to the lead subtree under the lead fence" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-ws --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug slug-ws --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-ws --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ws --session S1 --fence "$lf" --binding "$bid" \
+   --task-id PROJ-9 --json '{"task_id":"PROJ-9"}'
+test -f "$root/herdr-orch/slug-ws/leads/$bid/tasks/PROJ-9.json"
+test ! -e "$root/herdr-orch/slug-ws/tasks/PROJ-9.json"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-index \
+   --repo-slug slug-ws --session S1 --fence "$lf" --binding "$bid" \
+   --workspace w1 --json '{"task_id":"PROJ-9","role":"impl"}'
+test -f "$root/herdr-orch/slug-ws/leads/$bid/workspaces/w1.json"
+# Authorization reads the authoritative coordination lease, never the payload
+# mirror: corrupting the mirror must not break a further write under the
+# still-valid real lead fence.
+python3 -c '
+import json, os, sys
+p = os.path.join(sys.argv[1], "herdr-orch", "slug-ws", "leads", sys.argv[2], "owner.json")
+json.dump({"session_id": "EVIL"}, open(p, "w"))
+' "$root" "$bid"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ws --session S1 --fence "$lf" --binding "$bid" \
+   --task-id PROJ-10 --json '{"task_id":"PROJ-10"}'
+test -f "$root/herdr-orch/slug-ws/leads/$bid/tasks/PROJ-10.json"
+SH
+
+check "cross-scope writes refused in both directions" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-xs --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug slug-xs --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-xs --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid")
+# Lead session+fence without --binding: no slug fence -> refused.
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-xs --session S1 --fence "$lf" \
+   --task-id PROJ-1 --json '{"task_id":"PROJ-1"}' 2>/dev/null; then exit 1; fi
+# Launcher session+fence with the lead's --binding: the fence belongs to the
+# slug owner, not the lead lease -> refused (cross-scope write).
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-xs --session L1 --fence "$f" --binding "$bid" \
+   --task-id PROJ-1 --json '{"task_id":"PROJ-1"}' 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/slug-xs/leads/$bid/tasks/PROJ-1.json"
+test ! -e "$root/herdr-orch/slug-xs/tasks/PROJ-1.json"
+SH
+
+check "emit-done --binding: attempt-grounded, lands in the lead subtree, needs claimed binding" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d); repo=$(mktemp -d)
+# --runtime on emit-done also triggers the CLI's real-repository identity
+# check (the same --runtime flag every command accepts), so the fixture
+# needs a real git checkout with a remote whose deterministic repo_slug()
+# we compute once and reuse for every call below.
+git -C "$repo" init -q
+git -C "$repo" remote add origin https://example.com/repo-em.git
+SLUG=$(python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as c
+print(c.repo_slug("https://example.com/repo-em.git"))
+')
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$SLUG" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$SLUG" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id PROJ-2 \
+   --json '{"task_id":"PROJ-2","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+# 1) emit-done WITHOUT the runtime attempt flags but WITH --binding -> refused.
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
+   --repo-slug "$SLUG" --binding "$bid" --task-id PROJ-2 --workspace w1 --agent mech-td-x \
+   --phase implement --outcome completed --head-sha h1 --base-sha b0 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$SLUG/leads/$bid/tasks/PROJ-2.done.json"
+# 2) emit-done WITH matching runtime attempt flags + --binding -> succeeds.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
+   --repo-slug "$SLUG" --repo-path "$repo" --binding "$bid" --task-id PROJ-2 --workspace w1 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40"
+# 3) the record lands at leads/$bid/tasks/PROJ-2.done.json, not the launcher path.
+test -f "$root/herdr-orch/$SLUG/leads/$bid/tasks/PROJ-2.done.json"
+test ! -e "$root/herdr-orch/$SLUG/tasks/PROJ-2.done.json"
+# 4) revoke the binding (claimed -> revoked is a legal transition); a further
+# emit-done with the same flags is then refused.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py set-binding-status \
+   --repo-slug "$SLUG" --session L1 --fence "$f" --binding "$bid" --status revoked
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
+   --repo-slug "$SLUG" --repo-path "$repo" --binding "$bid" --task-id PROJ-2 --workspace w1 \
+   --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+SH
+
+check "emit-review --binding lands in the lead subtree" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d); repo=$(mktemp -d)
+git -C "$repo" init -q
+git -C "$repo" remote add origin https://example.com/repo-er.git
+SLUG=$(python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as c
+print(c.repo_slug("https://example.com/repo-er.git"))
+')
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$SLUG" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$SLUG" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id PROJ-3 \
+   --json '{"task_id":"PROJ-3","workers":[{"role":"mech","launch_id":"L1","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$SLUG" --repo-path "$repo" --binding "$bid" --task-id PROJ-3 --workspace w9 \
+   --agent rev-proj-3 --reviewed-head-sha h1 --outcome approved \
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40"
+test -f "$root/herdr-orch/$SLUG/leads/$bid/tasks/PROJ-3.review.json"
+test ! -e "$root/herdr-orch/$SLUG/tasks/PROJ-3.review.json"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

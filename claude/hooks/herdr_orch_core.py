@@ -1965,6 +1965,32 @@ def _fenced(ns):
         yield rd
 
 
+@contextlib.contextmanager
+def _fenced_scoped(ns):
+    """Yield (rd, base): rd for a launcher fence, the lead subtree for a lead
+    fence named by --binding. Cross-scope combinations (launcher fence with
+    --binding, lead fence without it) fail closed."""
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    rd = repo_dir(ns.repo_slug)
+    if getattr(ns, "binding", None) is None:
+        with owner_transaction(rd, ns.session, ns.fence):
+            yield rd, rd
+        return
+    with owner_transaction(rd) as tx:
+        rec = bindings.read_binding(rd, ns.binding)
+        _require(rec is not None, "unknown dispatch binding")
+        _require(rec["status"] == "claimed", "binding is not claimed")
+        _require(
+            tx.lead_check(
+                ns.session, ns.fence, rec["workspace_root"], binding_id=ns.binding
+            ),
+            "stale, foreign-account, cross-generation, or missing lead fence",
+        )
+        base = rd / "leads" / ns.binding
+        _require(contained(base, state_root()), "escapes state root")
+        yield rd, base
+
+
 def _main(argv=None) -> int:
     import argparse
 
@@ -2003,8 +2029,10 @@ def _main(argv=None) -> int:
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
-    add("write-task", "--task-id", "--json", fenced=True)
-    add("write-index", "--workspace", "--json", fenced=True)
+    wt = add("write-task", "--task-id", "--json", fenced=True)
+    wt.add_argument("--binding", default=None)
+    wi = add("write-index", "--workspace", "--json", fenced=True)
+    wi.add_argument("--binding", default=None)
     add("write-capabilities", "--json", fenced=True)
     add("resolve-model", "--role", "--session")
     add("resolve-effort", "--role")
@@ -2066,6 +2094,7 @@ def _main(argv=None) -> int:
     for emitter in (ed, er):
         emitter.add_argument("--pane-id", default=None)
         emitter.add_argument("--source-head-sha", default=None)
+        emitter.add_argument("--binding", default=None)
     er.add_argument("--findings-ref", default=None)
     er.add_argument("--blocking-count", type=int, default=0)
     add("status")
@@ -2150,7 +2179,7 @@ def _main(argv=None) -> int:
                                messaging_socket=ns.messaging_socket) else 1
         )
     if ns.cmd == "write-task":
-        with _fenced(ns) as rd:
+        with _fenced_scoped(ns) as (rd, base):
             _require(valid_task_id(ns.task_id), "invalid task-id")
             try:
                 rec = json.loads(ns.json)
@@ -2162,11 +2191,11 @@ def _main(argv=None) -> int:
                 isinstance(rec, dict) and rec.get("task_id") == ns.task_id,
                 "task json must be a JSON object whose task_id equals --task-id",
             )
-            create_payload_dir(rd / "tasks")
-            write_json_atomic(rd / "tasks" / f"{ns.task_id}.json", rec)
+            create_payload_dir(base / "tasks")
+            write_json_atomic(base / "tasks" / f"{ns.task_id}.json", rec)
             return 0
     if ns.cmd == "write-index":
-        with _fenced(ns) as rd:
+        with _fenced_scoped(ns) as (rd, base):
             _require(valid_workspace_id(ns.workspace), "invalid workspace")
             try:
                 rec = json.loads(ns.json)
@@ -2175,8 +2204,8 @@ def _main(argv=None) -> int:
             # Same guard as write-task: a non-dict index would read back as None
             # (read_index rejects it), silently orphaning the workspace's events.
             _require(isinstance(rec, dict), "index json must be a JSON object")
-            create_payload_dir(rd / "workspaces")
-            write_json_atomic(index_path(rd, ns.workspace), rec)
+            create_payload_dir(base / "workspaces")
+            write_json_atomic(base / "workspaces" / f"{ns.workspace}.json", rec)
             return 0
     if ns.cmd == "write-capabilities":
         with _fenced(ns) as rd:
@@ -2370,7 +2399,16 @@ def _main(argv=None) -> int:
         _require(valid_task_id(ns.task_id), "invalid task-id")
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
         rd = repo_dir(ns.repo_slug)
-        create_payload_dir(rd / "tasks")
+        base = rd
+        if getattr(ns, "binding", None) is not None:
+            # A lead-scoped emit must be attempt-grounded: without the native
+            # attempt fields there is no owner_transaction around publication,
+            # and a revocation could race the write. The transactional
+            # re-read below is the authoritative status check.
+            _require(ns.runtime is not None,
+                     "a binding-scoped emit requires the native attempt fields")
+            base = rd / "leads" / ns.binding
+        create_payload_dir(base / "tasks")
         if ns.cmd == "emit-done":
             done = {
                 "v": 1,
@@ -2392,7 +2430,7 @@ def _main(argv=None) -> int:
                 _require(ns.reason in MECH_REASONS,
                          f"reason must be one of {'|'.join(MECH_REASONS)}")
                 done["reason"] = ns.reason
-            out = rd / "tasks" / f"{ns.task_id}.done.json"
+            out = base / "tasks" / f"{ns.task_id}.done.json"
         else:
             done = {
                 "v": 1,
@@ -2409,7 +2447,7 @@ def _main(argv=None) -> int:
                 done["findings_ref"] = ns.findings_ref
             # A distinct file so a review verdict never clobbers the impl
             # completion record -- the two coexist and are read independently.
-            out = rd / "tasks" / f"{ns.task_id}.review.json"
+            out = base / "tasks" / f"{ns.task_id}.review.json"
         if ns.launch_id:
             done["launch_id"] = ns.launch_id
         if ns.runtime is not None:
@@ -2420,8 +2458,12 @@ def _main(argv=None) -> int:
         _require(contained(out, state_root()), "escapes state root")
         if ns.runtime is not None:
             with owner_transaction(rd):
+                if getattr(ns, "binding", None) is not None:
+                    rec_b = bindings.read_binding(rd, ns.binding)
+                    _require(rec_b is not None, "unknown dispatch binding")
+                    _require(rec_b["status"] == "claimed", "binding is not claimed")
                 try:
-                    task = json.loads(read_payload_text(rd / "tasks" / f"{ns.task_id}.json"))
+                    task = json.loads(read_payload_text(base / "tasks" / f"{ns.task_id}.json"))
                 except (OSError, ValueError):
                     task = None
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
