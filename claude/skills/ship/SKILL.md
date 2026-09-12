@@ -18,10 +18,17 @@ human gate is the merge itself.
 
 ## Resume (cheap re-runs)
 
-Before step 1, check for a prior run: if the PR already carries a co-review
-comment AND no commits have landed since it was posted, the review still
-stands — skip step 1 and resume at step 2. Any newer commit invalidates the
-comment; re-review.
+Before step 1, run the PR-ready currency gate. Fetch the PR's comments
+(`gh api --paginate repos/{owner}/{repo}/issues/{number}/comments`, normalized to
+`{author: .user.login, created_at, id, body}`), resolve the target base
+(`review.py resolve-base --base-ref <baseRefName> --head <headRefOid>`), and run
+`scripts/pr_ready_gate.py --comments <file> --head <headRefOid> --base <resolved>
+--base-ref <baseRefName> --trusted-author <pr-author> --trusted-author
+<gh-login>`. If it PASSes -- latest trusted marker `verdict=APPROVE`, `sha ==
+headRefOid`, `base == resolved base`, `base_ref == baseRefName` -- the review
+stands; skip step 1 and resume at step 2. Any FAIL (newer commit, retarget,
+missing/CHANGES marker, or any lookup error -- the gate fails closed) means
+re-review.
 
 PR already `MERGED` (run died between merge and cleanup)? Jump straight to
 steps 5-6 — `post-merge` is propose-confirm-apply over observed state, so it
@@ -29,9 +36,15 @@ only proposes whatever cleanup is actually left.
 
 ## Steps
 
-1. **Co-review.** Invoke the `co-review` skill on the target PR. Fix all
-   approved findings with verified repros; re-run the affected tests after each
-   fix. Push fixes.
+1. **Co-review.** Invoke the `co-review` skill on the target PR and run its
+   bounded re-review loop to APPROVE: fix all confirmed findings with verified
+   repros, re-run affected tests, push, then re-freeze and re-review until a
+   complete round is clean (cap 5 rounds; escalate if it does not converge).
+   Compute the PR target with `gh pr view --json baseRefName` and pass
+   `--base-ref <baseRefName>` so the review diffs against the real merge-base;
+   warn if a supplied or local base diverges from the resolved target. Every PR
+   review entrypoint resolves and verifies the target branch before trusting a
+   marker -- never assume `origin` is the target without checking.
 
 2. **Verify.** Run the project's test suite locally, then wait for CI checks on
    the PR head to be green. Do not proceed on red or pending-forever checks —
