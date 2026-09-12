@@ -815,12 +815,17 @@ def resolve_targets(raw, home):
     cannot be fooled by `<workspace>/<symlink>/../escape` -- `rm_guard.resolve`
     collapses `..` before symlinks resolve, so the guard_path alone hides such
     an escape. Two raw targets can share a guard_path yet resolve to different
-    real paths (one direct, one through a symlink+`..`); dedup by the pair keeps
-    both so the lead check sees every real destination. `real_path` is None when
-    the raw target cannot be resolved (e.g. an embedded NUL) -- the lead check
-    treats None as an escape and denies."""
-    paths = []
-    seen = set()
+    real paths (one direct, one through a symlink+`..`); every distinct real_path
+    for a guard_path is kept so the lead check sees every real destination.
+    `real_path` is None when the raw target cannot be resolved (e.g. an embedded
+    NUL) -- the lead check treats None as an escape and denies.
+
+    The cap is on the number of DISTINCT guard_paths (TARGET_CAP), NOT on pairs:
+    symlink variants sharing one guard_path must never consume cap slots and push
+    a distinct tracked target past the cap (that would drop it from the launcher
+    fence). Every real_path of an admitted guard_path is retained."""
+    reals = {}
+    order = []
     for c_cwd, w, shell_expands in raw:
         w = rm_guard.expand_home(w, home)
         if not w or (
@@ -828,17 +833,19 @@ def resolve_targets(raw, home):
         ):
             continue
         p = canon(rm_guard.resolve(w, c_cwd))
+        if p not in reals:
+            if len(order) >= TARGET_CAP:
+                continue
+            reals[p] = []
+            order.append(p)
         base = w if os.path.isabs(w) else os.path.join(c_cwd, w)
         try:
             real = os.path.realpath(base)
         except (OSError, ValueError):
             real = None
-        key = (p, real)
-        if key in seen:
-            continue
-        seen.add(key)
-        paths.append((p, real))
-    return paths[:TARGET_CAP]
+        if real not in reals[p]:
+            reals[p].append(real)
+    return [(p, real) for p in order for real in reals[p]]
 
 
 # --- audit -----------------------------------------------------------------
@@ -988,6 +995,11 @@ def lead_scope_verdict(guarded, owner, slug, real_of):
         return "deny", "lead-scope", slug, {"reason": "bad-workspace-root", "workspace_root": wr}
     try:
         root = os.path.realpath(wr)
+        if root == os.sep:
+            # A lead workspace can never be the filesystem root -- that would make
+            # containment a no-op. Deny defensively even if a record slipped past
+            # claim-time validation.
+            return "deny", "lead-scope", slug, {"reason": "workspace-root-is-fs-root", "workspace_root": wr}
         if not os.path.isdir(root):
             return "deny", "lead-scope", slug, {"reason": "workspace-root-missing", "workspace_root": wr}
         for c, _top, _reason in guarded:
@@ -1037,8 +1049,6 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime, rea
         return "deny", "scope", first, {"target_slug": slug}
     if owner["scope"]["account_id"] != owner["caller_scope"]["account_id"]:
         return "deny", "scope", first, {"target_slug": slug}
-    if owner.get("control_tier", "launcher") == "lead":
-        return lead_scope_verdict(guarded, owner, slug, real_of)
     rd = owner["rd"]
     try:
         with core.owner_transaction(
@@ -1049,6 +1059,12 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime, rea
             expected_slug=slug,
             scope=owner["scope"],
         ) as tx:
+            # Decide tier and workspace from the record revalidated UNDER LOCK
+            # (tx.current), not the pre-lock discovery snapshot -- a reclaim that
+            # bumped the fence has already raised inside owner_transaction, and a
+            # reclaim that narrowed the workspace is reflected here.
+            if tx.current.get("control_tier", "launcher") == "lead":
+                return lead_scope_verdict(guarded, tx.current, slug, real_of)
             marker, why = read_marker(rd, session_id, tx.current["fence"])
             if marker is None:
                 return "deny", why, slug, {}
@@ -1100,7 +1116,7 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
     elif why == "lead-scope":
         print(
             f"This session leads {slug}; it may edit only inside its workspace "
-            f"{detail.get('workspace_root')}, not {c}.",
+            f"{detail.get('workspace_root')}, not {detail.get('target', c)}.",
             file=sys.stderr,
         )
         print(

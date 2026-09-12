@@ -695,6 +695,28 @@ hook_case "lead symlink+.. escape is denied" deny Edit "$RL/dir/link/../pwned.tx
 hook_case "lead mixed direct+escaping targets (same guard path) denies" deny \
     Bash "printf x > $RL/dir/pwned.txt; printf y > $RL/dir/link/../pwned.txt" "$RL" "$SID_D"
 
+# resolve_targets caps DISTINCT guard paths, not (guard,real) pairs: a symlink
+# variant sharing a guard path must not consume a cap slot and evict a distinct
+# target from the launcher fence (a launcher bypass otherwise).
+python3 - "$RL" <<'PY'
+import sys
+sys.path.insert(0, "claude/hooks")
+import orch_edit_guard as g
+rl = sys.argv[1]
+cap = g.TARGET_CAP
+raw = [(rl, "%s/dir/link/../f0" % rl, False)]  # extra real variant of guard path dir/f0
+raw += [(rl, "%s/dir/f%d" % (rl, i), False) for i in range(cap)]
+pairs = g.resolve_targets(raw, rl)
+gp = {p for p, _ in pairs}
+assert len(gp) == cap, ("distinct guard paths kept", len(gp), cap)
+assert g.canon("%s/dir/f%d" % (rl, cap - 1)) in gp, "last distinct target was evicted"
+PY
+if [ $? -eq 0 ]; then
+    printf 'PASS  resolve_targets caps distinct guard paths not pairs\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  resolve_targets caps distinct guard paths not pairs\n' >&2; FAIL=$((FAIL + 1))
+fi
+
 # Corrupt the authoritative record's workspace_root to a nonexistent ABSOLUTE
 # path: the session is still identified as a lead, but scope cannot be
 # established -> deny.
@@ -714,6 +736,12 @@ hook_case "lead with relative workspace_root -> deny (no hang)" deny Edit "$RL/d
 python3 -c 'import json,os,sys; p=os.path.join(sys.argv[1],sys.argv[2],"owner.json"); rec=json.load(open(p)); rec["workspace_root"]="/tmp/\x00bad"; json.dump(rec, open(p,"w"))' \
     "$HERDR_COORDINATION_ROOT" "$SLUG_L"
 hook_case "lead with malformed(NUL) workspace_root -> deny (no fail-open)" deny Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
+
+# Corrupt workspace_root to the FILESYSTEM ROOT: "/" is absolute and a real dir,
+# but a lead workspace of "/" would make containment a no-op. Deny defensively.
+python3 -c 'import json,os,sys; p=os.path.join(sys.argv[1],sys.argv[2],"owner.json"); rec=json.load(open(p)); rec["workspace_root"]="/"; json.dump(rec, open(p,"w"))' \
+    "$HERDR_COORDINATION_ROOT" "$SLUG_L"
+hook_case "lead with filesystem-root workspace_root -> deny (defensive)" deny Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

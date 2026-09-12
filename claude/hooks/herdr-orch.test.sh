@@ -2230,5 +2230,11 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-
    --repo-slug slug-x --session S --host h --pid 1 --workspace-root "$ws" 2>/dev/null; then exit 1; fi
 SH
 
+check "CLI claim-owner rejects lead workspace-root at filesystem root" <<'SH'
+root=$(mktemp -d)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-x --session S --host h --pid 1 --control-tier lead --workspace-root / 2>/dev/null; then exit 1; fi
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

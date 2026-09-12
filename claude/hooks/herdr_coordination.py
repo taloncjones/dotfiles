@@ -461,8 +461,11 @@ class OwnerTransaction:
                 not isinstance(workspace_root, str)
                 or not workspace_root
                 or not os.path.isabs(workspace_root)
+                or os.path.normpath(workspace_root) == os.sep
             ):
-                raise ValueError("lead owner requires an absolute workspace_root")
+                raise ValueError(
+                    "lead owner requires an absolute workspace_root below the filesystem root"
+                )
         elif workspace_root is not None:
             raise ValueError("workspace_root is only valid for a lead owner")
         self.assert_current()
