@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_runtime
+import herdr_bindings as bindings
 import herdr_coordination as coordination
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
@@ -524,6 +525,46 @@ def repo_slug(remote_url, common_dir=None) -> str:
         return f"{norm}-{h}"
     h = hashlib.sha256(str(Path(common_dir).resolve()).encode()).hexdigest()[:8]
     return f"local-{h}"
+
+
+def workspace_provenance_ok(ws, context) -> bool:
+    """True when ws is a linked worktree of the repository in context.
+
+    The primary checkout is rejected; a directory outside this repository is
+    rejected. Provenance beyond repository membership (that the LAUNCHER
+    created the worktree) is carried by the binding itself: only a launcher
+    fence can issue one.
+
+    The primary-vs-linked-worktree test is git-dir identity, not path
+    equality against the common dir's parent: a primary checkout using
+    `--separate-git-dir` has a common dir whose parent is not the checkout
+    root, so a realpath-equality check against that parent would misclassify
+    it as a linked worktree. A linked worktree's git-dir always lives under
+    `<common-dir>/worktrees/<name>`, distinct from the common dir itself; a
+    primary checkout's git-dir equals its common dir regardless of where
+    `--separate-git-dir` placed it.
+    """
+    try:
+        common = context_git(ws, "rev-parse", "--git-common-dir")
+        ws_common = (
+            os.path.realpath(os.path.join(ws, common))
+            if not os.path.isabs(common)
+            else os.path.realpath(common)
+        )
+        if ws_common != os.path.realpath(context["common_dir"]):
+            return False
+        gitdir = context_git(ws, "rev-parse", "--git-dir")
+        ws_gitdir = (
+            os.path.realpath(os.path.join(ws, gitdir))
+            if not os.path.isabs(gitdir)
+            else os.path.realpath(gitdir)
+        )
+        if ws_gitdir == ws_common:
+            return False
+        toplevel = context_git(ws, "rev-parse", "--show-toplevel")
+        return os.path.realpath(toplevel) == os.path.realpath(ws)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
 
 
 def jira_task_id(key: str) -> str:
@@ -1672,16 +1713,74 @@ def owner_transaction(rd, session=None, fence=None, context=None, expected_slug=
 
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
                 context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
-                control_tier="launcher", workspace_root=None):
+                control_tier="launcher", workspace_root=None, binding_id=None):
     sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
     if reason == "ok" and int(pid) != sock_pid:
         print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; using {sock_pid}", file=sys.stderr)
     elif reason not in ("ok", "empty"):
         print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}", file=sys.stderr)
+    if control_tier not in ("launcher", "lead"):
+        raise ValueError("invalid owner control_tier")
+    if control_tier == "launcher":
+        if workspace_root is not None or binding_id is not None:
+            raise ValueError("workspace_root/binding are only valid for a lead claim")
+    else:
+        if not coordination._valid_workspace_root(workspace_root):
+            raise ValueError("lead claim requires an absolute workspace_root below the filesystem root")
+        if not isinstance(binding_id, str) or not bindings.BINDING_ID_RE.fullmatch(binding_id):
+            raise ValueError("lead claim requires a valid binding id")
     with owner_transaction(rd, context=context, expected_slug=expected_slug, scope=scope) as tx:
+        if control_tier == "lead":
+            rec = bindings.read_binding(Path(rd), binding_id)
+            if rec is None:
+                raise ValueError("unknown dispatch binding")
+            if rec["parent"]["tier"] != "launcher":
+                raise ValueError("nested lead dispatch is forbidden")
+            if rec["expected_session_id"] != session_id:
+                raise ValueError("binding names a different session")
+            if rec["account_id"] != tx.account_id:
+                raise ValueError("binding names a different account")
+            if rec["runtime"] != runtime:
+                raise ValueError("binding names a different runtime")
+            if rec["repo_slug"] != Path(rd).name:
+                raise ValueError("binding names a different repository")
+            if rec["workspace_root"] != workspace_root:
+                raise ValueError("binding names a different workspace")
+            if rec["status"] != "issued" and not (
+                rec["status"] == "claimed" and rec["expected_session_id"] == session_id
+            ):
+                raise ValueError("binding is not claimable")
+            if rec["status"] == "claimed":
+                lease = tx.lead_read(workspace_root)
+                if not (
+                    lease is not None
+                    and coordination._valid_lead_lease(lease)
+                    and lease.get("binding_id") == binding_id
+                ):
+                    raise ValueError("binding generation is superseded; a new binding is required")
+            if context is None:
+                raise ValueError("a lead claim requires repository context")
+            if not workspace_provenance_ok(workspace_root, context):
+                raise ValueError(
+                    "workspace_root is not a linked worktree of this repository"
+                )
+            if rec["repo_id"] is not None and rec["repo_id"] != context["repo_id"]:
+                raise ValueError("binding names a different repository identity")
+            fence = tx.lead_claim(session_id, host, sock_pid if reason == "ok" else pid,
+                                  workspace_root, binding_id, stale_secs,
+                                  runtime=runtime, thread_id=thread_id)
+            if fence is not None:
+                if rec["status"] == "issued":
+                    write_json_atomic(bindings.binding_path(Path(rd), binding_id),
+                                      dict(rec, status="claimed", updated_ts=now_iso()))
+                mirror = Path(rd) / "leads" / binding_id / "owner.json"
+                if not contained(mirror, state_root()):
+                    raise ValueError("escapes state root")
+                lease = tx.lead_read(workspace_root)
+                write_json_atomic(mirror, dict(lease, messaging_socket=sock))
+            return fence
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
-                         runtime=runtime, thread_id=thread_id,
-                         control_tier=control_tier, workspace_root=workspace_root)
+                         runtime=runtime, thread_id=thread_id)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
@@ -1754,6 +1853,25 @@ def attempt_matches(task, done, phase, workspace):
         return False
     fields = ATTEMPT_FIELDS if "runtime" in worker else tuple(k for k in ATTEMPT_FIELDS if k in worker)
     return all(_nonempty_str(worker.get(key)) and done.get(key) == worker[key] for key in fields)
+
+
+def has_native_attempt(task, phase) -> bool:
+    """True when task's latest phase-matching worker is a native attempt row.
+
+    Binding-scoped task records are all new; the legacy-permissive fallback in
+    attempt_matches (no matching workers -> match) exists only to keep
+    pre-native task history readable and must never apply to them.
+    """
+    if not isinstance(task, dict):
+        return False
+    workers = task.get("workers", [])
+    if not isinstance(workers, list):
+        return False
+    matching = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
+    if not matching:
+        return False
+    worker = matching[-1]
+    return "runtime" in worker and all(_nonempty_str(worker.get(key)) for key in ATTEMPT_FIELDS)
 
 
 def is_completed(task, done, live_head_sha, workspace) -> bool:
@@ -1888,6 +2006,32 @@ def _fenced(ns):
         yield rd
 
 
+@contextlib.contextmanager
+def _fenced_scoped(ns):
+    """Yield (rd, base): rd for a launcher fence, the lead subtree for a lead
+    fence named by --binding. Cross-scope combinations (launcher fence with
+    --binding, lead fence without it) fail closed."""
+    _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+    rd = repo_dir(ns.repo_slug)
+    if getattr(ns, "binding", None) is None:
+        with owner_transaction(rd, ns.session, ns.fence):
+            yield rd, rd
+        return
+    with owner_transaction(rd) as tx:
+        rec = bindings.read_binding(rd, ns.binding)
+        _require(rec is not None, "unknown dispatch binding")
+        _require(rec["status"] == "claimed", "binding is not claimed")
+        _require(
+            tx.lead_check(
+                ns.session, ns.fence, rec["workspace_root"], binding_id=ns.binding
+            ),
+            "stale, foreign-account, cross-generation, or missing lead fence",
+        )
+        base = rd / "leads" / ns.binding
+        _require(contained(base, state_root()), "escapes state root")
+        yield rd, base
+
+
 def _main(argv=None) -> int:
     import argparse
 
@@ -1914,11 +2058,22 @@ def _main(argv=None) -> int:
     co.add_argument("--thread-id", default=None)
     co.add_argument("--control-tier", choices=("launcher", "lead"), default="launcher")
     co.add_argument("--workspace-root", default=None)
+    co.add_argument("--binding", default=None)
+    ib = add("issue-binding", "--task-id", fenced=True)
+    ib.add_argument("--workspace-root", required=True)
+    ib.add_argument("--expected-session", required=True)
+    ib.add_argument("--lead-runtime", choices=("claude", "codex"), default="claude")
+    ib.add_argument("--parent-task-id", default=None)
+    sb = add("set-binding-status", fenced=True)
+    sb.add_argument("--binding", required=True)
+    sb.add_argument("--status", choices=("revoked", "completed"), required=True)
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
-    add("write-task", "--task-id", "--json", fenced=True)
-    add("write-index", "--workspace", "--json", fenced=True)
+    wt = add("write-task", "--task-id", "--json", fenced=True)
+    wt.add_argument("--binding", default=None)
+    wi = add("write-index", "--workspace", "--json", fenced=True)
+    wi.add_argument("--binding", default=None)
     add("write-capabilities", "--json", fenced=True)
     add("resolve-model", "--role", "--session")
     add("resolve-effort", "--role")
@@ -1980,6 +2135,7 @@ def _main(argv=None) -> int:
     for emitter in (ed, er):
         emitter.add_argument("--pane-id", default=None)
         emitter.add_argument("--source-head-sha", default=None)
+        emitter.add_argument("--binding", default=None)
     er.add_argument("--findings-ref", default=None)
     er.add_argument("--blocking-count", type=int, default=0)
     add("status")
@@ -2023,6 +2179,10 @@ def _main(argv=None) -> int:
             _require(os.path.isdir(workspace_root), "workspace-root must be an existing directory")
         else:
             _require(workspace_root is None, "workspace-root is only valid with --control-tier lead")
+        if control_tier == "lead":
+            _require(ns.binding, "control-tier lead requires --binding")
+        else:
+            _require(ns.binding is None, "--binding is only valid with --control-tier lead")
         kw = {} if ns.stale_secs is None else {"stale_secs": ns.stale_secs}
         try:
             context = repository_context(ns.repo_path or os.getcwd())
@@ -2042,7 +2202,7 @@ def _main(argv=None) -> int:
                 _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
         fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
                             messaging_socket=ns.messaging_socket, context=context, expected_slug=expected_slug, runtime=ns.runtime or "claude", thread_id=ns.thread_id, scope=(_PAYLOAD_SELECTION.get() or {}).get("scope"),
-                            control_tier=control_tier, workspace_root=workspace_root, **kw)
+                            control_tier=control_tier, workspace_root=workspace_root, binding_id=ns.binding, **kw)
         if fence is None:
             print("BUSY")
             return 1
@@ -2060,7 +2220,7 @@ def _main(argv=None) -> int:
                                messaging_socket=ns.messaging_socket) else 1
         )
     if ns.cmd == "write-task":
-        with _fenced(ns) as rd:
+        with _fenced_scoped(ns) as (rd, base):
             _require(valid_task_id(ns.task_id), "invalid task-id")
             try:
                 rec = json.loads(ns.json)
@@ -2072,11 +2232,11 @@ def _main(argv=None) -> int:
                 isinstance(rec, dict) and rec.get("task_id") == ns.task_id,
                 "task json must be a JSON object whose task_id equals --task-id",
             )
-            create_payload_dir(rd / "tasks")
-            write_json_atomic(rd / "tasks" / f"{ns.task_id}.json", rec)
+            create_payload_dir(base / "tasks")
+            write_json_atomic(base / "tasks" / f"{ns.task_id}.json", rec)
             return 0
     if ns.cmd == "write-index":
-        with _fenced(ns) as rd:
+        with _fenced_scoped(ns) as (rd, base):
             _require(valid_workspace_id(ns.workspace), "invalid workspace")
             try:
                 rec = json.loads(ns.json)
@@ -2085,8 +2245,8 @@ def _main(argv=None) -> int:
             # Same guard as write-task: a non-dict index would read back as None
             # (read_index rejects it), silently orphaning the workspace's events.
             _require(isinstance(rec, dict), "index json must be a JSON object")
-            create_payload_dir(rd / "workspaces")
-            write_json_atomic(index_path(rd, ns.workspace), rec)
+            create_payload_dir(base / "workspaces")
+            write_json_atomic(base / "workspaces" / f"{ns.workspace}.json", rec)
             return 0
     if ns.cmd == "write-capabilities":
         with _fenced(ns) as rd:
@@ -2102,6 +2262,90 @@ def _main(argv=None) -> int:
             create_payload_dir(rd)
             write_json_atomic(rd / "capabilities.json", rec)
             return 0
+    if ns.cmd == "issue-binding":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(
+            ns.parent_task_id is None or valid_task_id(ns.parent_task_id),
+            "invalid parent-task-id",
+        )
+        _require(
+            isinstance(ns.expected_session, str) and bool(ns.expected_session),
+            "expected-session must be nonempty",
+        )
+        ws = ns.workspace_root
+        _require(os.path.isabs(ws), "workspace-root must be an absolute path")
+        ws = os.path.realpath(ws)
+        _require(os.path.isdir(ws), "workspace-root must be an existing directory")
+        _require(
+            coordination._valid_workspace_root(ws),
+            "workspace-root must be below the filesystem root",
+        )
+        selection = _PAYLOAD_SELECTION.get()
+        _require(
+            selection is not None,
+            "issue-binding requires repository context (--repo-path)",
+        )
+        _require(
+            workspace_provenance_ok(ws, selection["context"]),
+            "workspace-root must be a linked worktree of this repository, "
+            "not the primary checkout",
+        )
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(
+                tx.current.get("control_tier", "launcher") == "launcher",
+                "only a launcher owner issues bindings",
+            )
+            scope = (_PAYLOAD_SELECTION.get() or {}).get("scope") or {}
+            rec = {
+                "schema_version": 1,
+                "binding_id": bindings.new_binding_id(),
+                "parent": {
+                    "tier": "launcher",
+                    "task_id": ns.parent_task_id or ns.task_id,
+                    "session_id": ns.session,
+                },
+                "tier": "lead",
+                "task_id": ns.task_id,
+                "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
+                "repo_slug": ns.repo_slug,
+                "workspace_root": ws,
+                "account_id": tx.account_id,
+                "account_kind": scope.get("kind") or "personal",
+                "runtime": ns.lead_runtime,
+                "expected_session_id": ns.expected_session,
+                "created_fence": ns.fence,
+                "status": "issued",
+                "created_ts": now_iso(),
+                "updated_ts": now_iso(),
+            }
+            _require(bindings.valid_binding(rec), "constructed binding is invalid")
+            out = bindings.binding_path(rd, rec["binding_id"])
+            _require(contained(out, state_root()), "escapes state root")
+            create_payload_dir(out.parent)
+            write_json_atomic(out, rec)
+        print(rec["binding_id"])
+        return 0
+    if ns.cmd == "set-binding-status":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(
+                tx.current.get("control_tier", "launcher") == "launcher",
+                "only a launcher owner transitions bindings",
+            )
+            rec = bindings.read_binding(rd, ns.binding)
+            _require(rec is not None, "unknown dispatch binding")
+            _require(
+                bindings.can_transition(rec["status"], ns.status),
+                f"illegal binding transition {rec['status']} -> {ns.status}",
+            )
+            write_json_atomic(
+                bindings.binding_path(rd, ns.binding),
+                dict(rec, status=ns.status, updated_ts=now_iso()),
+            )
+        return 0
     if ns.cmd == "resolve-model":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         rd = repo_dir(ns.repo_slug)
@@ -2199,7 +2443,17 @@ def _main(argv=None) -> int:
         _require(valid_task_id(ns.task_id), "invalid task-id")
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
         rd = repo_dir(ns.repo_slug)
-        create_payload_dir(rd / "tasks")
+        base = rd
+        if getattr(ns, "binding", None) is not None:
+            # A lead-scoped emit must be attempt-grounded: without the native
+            # attempt fields there is no owner_transaction around publication,
+            # and a revocation could race the write. The transactional
+            # re-read below is the authoritative status check.
+            _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+            _require(ns.runtime is not None,
+                     "a binding-scoped emit requires the native attempt fields")
+            base = rd / "leads" / ns.binding
+        create_payload_dir(base / "tasks")
         if ns.cmd == "emit-done":
             done = {
                 "v": 1,
@@ -2221,7 +2475,7 @@ def _main(argv=None) -> int:
                 _require(ns.reason in MECH_REASONS,
                          f"reason must be one of {'|'.join(MECH_REASONS)}")
                 done["reason"] = ns.reason
-            out = rd / "tasks" / f"{ns.task_id}.done.json"
+            out = base / "tasks" / f"{ns.task_id}.done.json"
         else:
             done = {
                 "v": 1,
@@ -2238,7 +2492,7 @@ def _main(argv=None) -> int:
                 done["findings_ref"] = ns.findings_ref
             # A distinct file so a review verdict never clobbers the impl
             # completion record -- the two coexist and are read independently.
-            out = rd / "tasks" / f"{ns.task_id}.review.json"
+            out = base / "tasks" / f"{ns.task_id}.review.json"
         if ns.launch_id:
             done["launch_id"] = ns.launch_id
         if ns.runtime is not None:
@@ -2248,11 +2502,25 @@ def _main(argv=None) -> int:
             done.update(runtime=ns.runtime, pane_id=ns.pane_id, source_head_sha=ns.source_head_sha)
         _require(contained(out, state_root()), "escapes state root")
         if ns.runtime is not None:
-            with owner_transaction(rd):
+            with owner_transaction(rd) as tx:
+                if getattr(ns, "binding", None) is not None:
+                    rec_b = bindings.read_binding(rd, ns.binding)
+                    _require(rec_b is not None, "unknown dispatch binding")
+                    _require(rec_b["status"] == "claimed", "binding is not claimed")
+                    lease = tx.lead_read(rec_b["workspace_root"])
+                    _require(
+                        lease is not None
+                        and coordination._valid_lead_lease(lease)
+                        and lease.get("binding_id") == ns.binding,
+                        "binding generation is superseded or lease is missing",
+                    )
                 try:
-                    task = json.loads(read_payload_text(rd / "tasks" / f"{ns.task_id}.json"))
+                    task = json.loads(read_payload_text(base / "tasks" / f"{ns.task_id}.json"))
                 except (OSError, ValueError):
                     task = None
+                if getattr(ns, "binding", None) is not None:
+                    _require(has_native_attempt(task, done["phase"]),
+                             "binding-scoped emit requires a recorded native attempt")
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
                 write_json_atomic(out, done)

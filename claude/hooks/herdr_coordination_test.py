@@ -446,6 +446,147 @@ with c.owner_transaction(rd) as tx:
         self.assertTrue(record["model_attributable"])
         self.assertTrue(core.valid_answer_record(record, tid))
 
+    def test_lead_leases_coexist_per_workspace_and_with_launcher(self):
+        self.assertIsNotNone(coordination, "shared coordination module missing")
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.claim("L", "host", 1), 1)
+            f_a = tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32)
+            f_b = tx.lead_claim("B", "host", 3, "/tmp/ws-b", "ldb-" + "b" * 32)
+            self.assertEqual((f_a, f_b), (1, 1))
+            # Launcher slug lease is untouched by lead claims.
+            self.assertTrue(tx.check("L", 1))
+            self.assertTrue(tx.lead_check("A", 1, "/tmp/ws-a"))
+            self.assertTrue(tx.lead_check("B", 1, "/tmp/ws-b"))
+            # Wrong workspace, wrong session, wrong fence all fail.
+            self.assertFalse(tx.lead_check("A", 1, "/tmp/ws-b"))
+            self.assertFalse(tx.lead_check("X", 1, "/tmp/ws-a"))
+            self.assertFalse(tx.lead_check("A", 2, "/tmp/ws-a"))
+
+    def test_second_session_on_same_workspace_is_busy_until_stale(self):
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32), 1
+            )
+            self.assertIsNone(
+                tx.lead_claim("B", "host", 3, "/tmp/ws-a", "ldb-" + "b" * 32)
+            )
+            # Same session renews; the fence advances.
+            self.assertEqual(
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32), 2
+            )
+            # A stale holder is superseded by a new session.
+            self.assertEqual(
+                tx.lead_claim(
+                    "B", "host", 3, "/tmp/ws-a", "ldb-" + "b" * 32, stale_secs=0
+                ),
+                3,
+            )
+
+    def test_lead_lease_validation_fails_closed(self):
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            with self.assertRaises(ValueError):
+                tx.lead_claim("A", "host", 2, "relative/ws", "ldb-" + "a" * 32)
+            with self.assertRaises(ValueError):
+                tx.lead_claim("A", "host", 2, "/", "ldb-" + "a" * 32)
+            with self.assertRaises(ValueError):
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "not-a-binding-id")
+            self.assertEqual(
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32), 1
+            )
+        # Corrupt the persisted lease; the next claim/check must fail closed.
+        key = coordination.lead_lease_key("/tmp/ws-a")
+        lease = (
+            Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / f"lead-{key}.json"
+        )
+        lease.write_text("{}")
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            with self.assertRaises(ValueError):
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32)
+            self.assertFalse(tx.lead_check("A", 1, "/tmp/ws-a"))
+
+    def test_missing_initialized_lead_lease_fails_closed(self):
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32), 1
+            )
+        key = coordination.lead_lease_key("/tmp/ws-a")
+        lease = (
+            Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / f"lead-{key}.json"
+        )
+        os.remove(lease)
+        # A lease that has existed must never restart at fence 1.
+        with (
+            coordination.owner_transaction(
+                self.rd, canonical_id="canonical", expected_slug="repo"
+            ) as tx,
+            self.assertRaises(ValueError),
+        ):
+            tx.lead_claim("B", "host", 3, "/tmp/ws-a", "ldb-" + "b" * 32)
+
+    def test_lead_check_pins_binding_generation(self):
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32), 1
+            )
+            self.assertTrue(
+                tx.lead_check("A", 1, "/tmp/ws-a", binding_id="ldb-" + "a" * 32)
+            )
+            self.assertFalse(
+                tx.lead_check("A", 1, "/tmp/ws-a", binding_id="ldb-" + "b" * 32)
+            )
+
+    def test_lead_refresh_updates_heartbeat_only_for_holder(self):
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(
+                tx.lead_claim("A", "host", 2, "/tmp/ws-a", "ldb-" + "a" * 32), 1
+            )
+            before = tx.lead_read("/tmp/ws-a")["heartbeat_ts"]
+            time.sleep(0.01)
+            self.assertTrue(tx.lead_refresh("A", 1, "/tmp/ws-a"))
+            self.assertGreater(tx.lead_read("/tmp/ws-a")["heartbeat_ts"], before)
+            self.assertFalse(tx.lead_refresh("B", 1, "/tmp/ws-a"))
+            self.assertFalse(tx.lead_refresh("A", 2, "/tmp/ws-a"))
+
+    def test_slug_owner_claim_rejects_lead_tier(self):
+        with (
+            coordination.owner_transaction(
+                self.rd, canonical_id="canonical", expected_slug="repo"
+            ) as tx,
+            self.assertRaises(ValueError),
+        ):
+            tx.claim("A", "host", 1, control_tier="lead", workspace_root="/tmp/ws")
+
+    def test_persisted_lead_tier_slug_owner_fails_check(self):
+        # A slice-1-era owner.json can carry control_tier="lead" on the SLUG
+        # record itself (not a per-workspace lease). check() must reject it so
+        # it can never grant launcher write authority.
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            fence = tx.claim("A", "host", 1)
+        path = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / "owner.json"
+        rec = json.loads(path.read_text())
+        rec["control_tier"] = "lead"
+        rec["workspace_root"] = "/tmp/ws"
+        path.write_text(json.dumps(rec))
+        with coordination.owner_transaction(self.rd) as tx:
+            self.assertFalse(tx.check("A", fence))
+            self.assertFalse(tx.refresh("A", fence))
+
 
 class AttemptTests(unittest.TestCase):
     def test_latest_attempt_rejects_old_completion_and_review(self):
