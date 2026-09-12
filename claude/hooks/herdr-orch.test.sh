@@ -2275,5 +2275,121 @@ assert c._observation(dict(obs, control_tier="launcher", workspace_root=None)) =
 PY
 SH
 
+check "bindings: id format, schema validation, transitions" <<'SH'
+python3 - <<'PY'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_bindings as b
+bid = b.new_binding_id()
+assert b.BINDING_ID_RE.fullmatch(bid), bid
+assert not b.BINDING_ID_RE.fullmatch("ldb-XYZ")
+assert not b.BINDING_ID_RE.fullmatch("ldb-" + "0" * 31)
+good = {
+    "schema_version": 1,
+    "binding_id": bid,
+    "parent": {"tier": "launcher", "task_id": "td-x", "session_id": "L1"},
+    "tier": "lead",
+    "task_id": "td-slice",
+    "repo_id": None,
+    "repo_slug": "slug-x",
+    "workspace_root": "/tmp/ws",
+    "account_id": "acct",
+    "account_kind": "personal",
+    "runtime": "claude",
+    "expected_session_id": "S1",
+    "created_fence": 3,
+    "status": "issued",
+    "created_ts": "2026-09-12T00:00:00Z",
+    "updated_ts": "2026-09-12T00:00:00Z",
+}
+assert b.valid_binding(good)
+for field, bad in [
+    ("schema_version", 2),
+    ("schema_version", True),
+    ("schema_version", 1.0),
+    ("binding_id", "nope"),
+    ("tier", "launcher"),
+    ("parent", {"tier": "lead", "task_id": "t", "session_id": "s"}),
+    ("parent", {"tier": "launcher", "task_id": "", "session_id": "s"}),
+    ("repo_slug", "Bad/Slug"),
+    ("workspace_root", "/"),
+    ("workspace_root", "relative"),
+    ("runtime", "gpt"),
+    ("expected_session_id", ""),
+    ("created_fence", 0),
+    ("status", "pending"),
+    ("account_id", ""),
+    ("account_kind", "corporate"),
+    ("task_id", "../evil"),
+]:
+    rec = dict(good, **{field: bad})
+    assert not b.valid_binding(rec), (field, bad)
+assert b.can_transition("issued", "claimed")
+assert b.can_transition("issued", "revoked")
+assert b.can_transition("claimed", "completed")
+assert b.can_transition("claimed", "revoked")
+assert not b.can_transition("claimed", "issued")
+assert not b.can_transition("completed", "revoked")
+assert not b.can_transition("revoked", "claimed")
+PY
+SH
+
+check "bindings: read_binding round-trip, absent None, corrupt raises" <<'SH'
+python3 - <<'PY'
+import json, os, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+import herdr_bindings as b
+from pathlib import Path
+rd = Path(tempfile.mkdtemp())
+bid = b.new_binding_id()
+assert b.read_binding(rd, bid) is None
+rec = {
+    "schema_version": 1, "binding_id": bid,
+    "parent": {"tier": "launcher", "task_id": "td-x", "session_id": "L1"},
+    "tier": "lead", "task_id": "td-slice", "repo_id": None,
+    "repo_slug": "slug-x", "workspace_root": "/tmp/ws",
+    "account_id": "acct", "account_kind": "personal", "runtime": "claude",
+    "expected_session_id": "S1", "created_fence": 3, "status": "issued",
+    "created_ts": "t", "updated_ts": "t",
+}
+path = b.binding_path(rd, bid)
+path.parent.mkdir(parents=True)
+path.write_text(json.dumps(rec))
+assert b.read_binding(rd, bid) == rec
+path.write_text("not json")
+try:
+    b.read_binding(rd, bid)
+except ValueError:
+    pass
+else:
+    raise AssertionError("corrupt binding must raise")
+path.write_text(json.dumps(dict(rec, status="pending")))
+try:
+    b.read_binding(rd, bid)
+except ValueError:
+    pass
+else:
+    raise AssertionError("invalid binding must raise")
+# A symlinked binding file is rejected (no-follow read while locks are held).
+path.write_text(json.dumps(rec))
+target = rd / "elsewhere.json"
+os.replace(path, target)
+os.symlink(target, path)
+try:
+    b.read_binding(rd, bid)
+except ValueError:
+    pass
+else:
+    raise AssertionError("symlinked binding must raise")
+os.remove(path)
+try:
+    b.binding_path(rd, "../escape")
+except ValueError:
+    pass
+else:
+    raise AssertionError("invalid binding_id must raise in binding_path")
+PY
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
