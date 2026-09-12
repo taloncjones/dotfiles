@@ -99,9 +99,12 @@ is still the current attempt for its phase AND delivering acceptance, so no
 superseding attempt or ownership transfer can slip in between. It requires the
 live agent idle on its recorded pane. Delivery is classified so an incorporation
 turn is never double-delivered: confirmed rejection (only a provable
-pre-acceptance failure, retry-safe), uncertain (timeout, nonzero exit, or
-ambiguous reply -- never auto-resent), delivered, or delivered-unrecorded
-(accepted but the record write failed -- never resent).
+process-creation failure, retry-safe), uncertain (timeout, nonzero exit,
+post-spawn communication or decode error, or ambiguous reply -- never
+auto-resent), delivered, or delivered-unrecorded (accepted but the record write
+failed -- never resent). It also refuses to stack a new turn while the target's
+prior reprompt is unresolved (a "starting" or "uncertain" entry): reconcile that
+one first, so a retry can never re-deliver an already-accepted turn.
 
 Best-effort limitation: reprompt cannot prove the LIVE agent is the same process
 generation as the recorded launch -- a worker restarted under the same

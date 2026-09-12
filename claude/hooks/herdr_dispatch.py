@@ -907,22 +907,37 @@ def _mark_reprompt(rd, task_id, session, fence, repository, scope, repo_slug,
 
 def _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env):
     """Deliver one turn; classify into (delivered,state) | (uncertain,None) |
-    raise _RejectedDelivery (provable pre-acceptance rejection only)."""
+    raise _RejectedDelivery (provable pre-acceptance rejection only).
+
+    Only a process-CREATION failure (FileNotFoundError/PermissionError -- the
+    delivery binary never ran) is retry-safe rejection. A timeout, a nonzero
+    exit, any other OSError (which may arise while communicating AFTER the child
+    started), a decode failure, or a malformed/non-`agent_prompted` reply are
+    all uncertain -- the turn may have been accepted, so never resend.
+    Output is captured as bytes and decoded explicitly so invalid UTF-8 cannot
+    escape as a ValueError that a caller might mistake for a pre-delivery fault.
+    """
     argv = ["agent", "prompt", agent, prompt, "--wait", "--timeout",
             str(prompt_timeout_ms)]
     try:
         process = subprocess.run(
             [herdr_cli, *argv], env=env, check=False, capture_output=True,
-            text=True, timeout=prompt_timeout_ms / 1000 + 5,
+            timeout=prompt_timeout_ms / 1000 + 5,
         )
     except subprocess.TimeoutExpired:
         return ("uncertain", None)  # may have accepted then run long
-    except OSError as exc:
+    except (FileNotFoundError, PermissionError) as exc:
         raise _RejectedDelivery("reprompt delivery could not start") from exc
+    except OSError:
+        return ("uncertain", None)  # communication error; may have landed
     if process.returncode != 0:
         return ("uncertain", None)  # could be a post-acceptance failure
     try:
-        result = result_object(process.stdout, "Herdr agent prompt")
+        stdout = process.stdout.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError):
+        return ("uncertain", None)
+    try:
+        result = result_object(stdout, "Herdr agent prompt")
     except DispatchError:
         return ("uncertain", None)
     if result.get("type") != "agent_prompted":
@@ -980,6 +995,22 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
             agent = target["agent"]
             pane_id = target["pane_id"]
             reprompts = list(target.get("reprompts", []))
+            # Refuse to stack a new turn on an unresolved prior one: a "starting"
+            # (in-flight/crashed) or "uncertain" (timeout/ambiguous) entry means
+            # a previous turn may already have landed. Reconcile it before
+            # sending another, so a retry can never double-deliver. "delivered",
+            # "delivered-unrecorded" (a distinct next pass) and "failed" (nothing
+            # delivered) do not block. Cross-session concurrency is already
+            # serialized by the owner fence.
+            if any(
+                isinstance(entry, dict)
+                and entry.get("status") in ("starting", "uncertain")
+                for entry in reprompts
+            ):
+                raise DispatchError(
+                    "a prior reprompt on this launch is unresolved; reconcile it "
+                    "before sending another"
+                )
             seq = len(reprompts)
             reprompts.append({
                 "seq": seq, "started_ns": started_ns,

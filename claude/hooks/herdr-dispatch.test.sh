@@ -1328,7 +1328,7 @@ def test_reprompt_spawn_failure_is_retry_safe_failed():
         original = herdr_dispatch.subprocess
 
         def boom(*args, **kwargs):
-            raise OSError("cannot spawn delivery process")
+            raise FileNotFoundError("no such delivery binary")
 
         herdr_dispatch.subprocess = types.SimpleNamespace(
             run=boom, TimeoutExpired=original.TimeoutExpired,
@@ -1425,6 +1425,86 @@ def test_reprompt_delivered_but_persistence_fails_returns_unrecorded():
         fx.close()
 
 
+def test_reprompt_post_spawn_oserror_is_uncertain_not_failed():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        import types
+        original = herdr_dispatch.subprocess
+
+        def comm_error(*args, **kwargs):
+            raise OSError("communication failed after the child started")
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=comm_error, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.subprocess = original
+        assert result["status"] == "uncertain", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "uncertain", target
+        assert target["reprompts"][0]["status"] != "failed", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_undecodable_output_is_uncertain():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        import types
+        original = herdr_dispatch.subprocess
+
+        def bad_bytes(*args, **kwargs):
+            return types.SimpleNamespace(
+                returncode=0, stdout=b"\xff\xfe\xff", stderr=b"")
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=bad_bytes, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.subprocess = original
+        assert result["status"] == "uncertain", result
+    finally:
+        fx.close()
+
+
+def test_reprompt_refuses_to_stack_on_unresolved_prior():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        import types
+        original = herdr_dispatch.subprocess
+
+        def slow(*args, **kwargs):
+            raise original.TimeoutExpired(cmd="agent prompt", timeout=1)
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=slow, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            first = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.subprocess = original
+        assert first["status"] == "uncertain", first
+        prompts_before = len(fx.prompt_calls())
+        # A retry would deliver cleanly now, but the unresolved prior turn must
+        # block it so the same incorporation is never double-delivered.
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "unresolved" in str(exc), exc
+        else:
+            raise AssertionError("stacking on an unresolved reprompt must refuse")
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery while unresolved"
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -1436,6 +1516,9 @@ for name, test in (
     ("reprompt non-prompted result is uncertain", test_reprompt_nonprompted_result_is_uncertain),
     ("reprompt timeout marks uncertain without resend", test_reprompt_uncertain_timeout_marks_uncertain_no_resend),
     ("reprompt delivered but persistence fails returns unrecorded", test_reprompt_delivered_but_persistence_fails_returns_unrecorded),
+    ("reprompt post-spawn OSError is uncertain not failed", test_reprompt_post_spawn_oserror_is_uncertain_not_failed),
+    ("reprompt undecodable output is uncertain", test_reprompt_undecodable_output_is_uncertain),
+    ("reprompt refuses to stack on an unresolved prior", test_reprompt_refuses_to_stack_on_unresolved_prior),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
