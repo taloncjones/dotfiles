@@ -771,7 +771,7 @@ def parse_runtime_result(runtime: str, output: str) -> dict[str, Any]:
     return {
         "runtime": "codex",
         "status": status,
-        "result": messages[-1] if messages else None,
+        "result": "\n\n".join(messages) if messages else None,
         "errors": errors,
         "token_usage": usage,
         "total_cost_usd": None,
