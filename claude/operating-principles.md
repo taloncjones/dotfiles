@@ -61,7 +61,9 @@ Standing engineering discipline for all sessions, all repos.
   or costs can reopen it. On contradiction, compare the rationales: go with the
   newer decision when the old rationale is obsolete (and say so), or ask the user
   with a brief pros/cons when it is genuinely close. Never silently drop an idea
-  because an earlier session decided against it.
+  because an earlier session decided against it. This applies to the agent's own
+  reasoning artifacts; a standing user directive or safety/approval gate is
+  re-raised with the user, never overridden without their go.
 - Push back on review findings you disagree with and name the disagreement. Do not
   fold blindly; do not dismiss blindly.
 - Answer the meta-question behind the literal one when the phrasing implies it.
