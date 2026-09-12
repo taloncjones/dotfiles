@@ -534,11 +534,17 @@ def workspace_provenance_ok(ws, context) -> bool:
     rejected. Provenance beyond repository membership (that the LAUNCHER
     created the worktree) is carried by the binding itself: only a launcher
     fence can issue one.
+
+    The primary-vs-linked-worktree test is git-dir identity, not path
+    equality against the common dir's parent: a primary checkout using
+    `--separate-git-dir` has a common dir whose parent is not the checkout
+    root, so a realpath-equality check against that parent would misclassify
+    it as a linked worktree. A linked worktree's git-dir always lives under
+    `<common-dir>/worktrees/<name>`, distinct from the common dir itself; a
+    primary checkout's git-dir equals its common dir regardless of where
+    `--separate-git-dir` placed it.
     """
     try:
-        primary = os.path.realpath(os.path.dirname(context["common_dir"]))
-        if os.path.realpath(ws) == primary:
-            return False
         common = context_git(ws, "rev-parse", "--git-common-dir")
         ws_common = (
             os.path.realpath(os.path.join(ws, common))
@@ -546,6 +552,14 @@ def workspace_provenance_ok(ws, context) -> bool:
             else os.path.realpath(common)
         )
         if ws_common != os.path.realpath(context["common_dir"]):
+            return False
+        gitdir = context_git(ws, "rev-parse", "--git-dir")
+        ws_gitdir = (
+            os.path.realpath(os.path.join(ws, gitdir))
+            if not os.path.isabs(gitdir)
+            else os.path.realpath(gitdir)
+        )
+        if ws_gitdir == ws_common:
             return False
         toplevel = context_git(ws, "rev-parse", "--show-toplevel")
         return os.path.realpath(toplevel) == os.path.realpath(ws)
@@ -1736,13 +1750,13 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                 rec["status"] == "claimed" and rec["expected_session_id"] == session_id
             ):
                 raise ValueError("binding is not claimable")
-            if context is not None and not workspace_provenance_ok(
-                workspace_root, context
-            ):
+            if context is None:
+                raise ValueError("a lead claim requires repository context")
+            if not workspace_provenance_ok(workspace_root, context):
                 raise ValueError(
                     "workspace_root is not a linked worktree of this repository"
                 )
-            if context is not None and rec["repo_id"] is not None and rec["repo_id"] != context["repo_id"]:
+            if rec["repo_id"] is not None and rec["repo_id"] != context["repo_id"]:
                 raise ValueError("binding names a different repository identity")
             fence = tx.lead_claim(session_id, host, sock_pid if reason == "ok" else pid,
                                   workspace_root, binding_id, stale_secs,
@@ -2241,12 +2255,15 @@ def _main(argv=None) -> int:
             "workspace-root must be below the filesystem root",
         )
         selection = _PAYLOAD_SELECTION.get()
-        if selection is not None:
-            _require(
-                workspace_provenance_ok(ws, selection["context"]),
-                "workspace-root must be a linked worktree of this repository, "
-                "not the primary checkout",
-            )
+        _require(
+            selection is not None,
+            "issue-binding requires repository context (--repo-path)",
+        )
+        _require(
+            workspace_provenance_ok(ws, selection["context"]),
+            "workspace-root must be a linked worktree of this repository, "
+            "not the primary checkout",
+        )
         rd = repo_dir(ns.repo_slug)
         with owner_transaction(rd, ns.session, ns.fence) as tx:
             _require(
@@ -2458,11 +2475,18 @@ def _main(argv=None) -> int:
             done.update(runtime=ns.runtime, pane_id=ns.pane_id, source_head_sha=ns.source_head_sha)
         _require(contained(out, state_root()), "escapes state root")
         if ns.runtime is not None:
-            with owner_transaction(rd):
+            with owner_transaction(rd) as tx:
                 if getattr(ns, "binding", None) is not None:
                     rec_b = bindings.read_binding(rd, ns.binding)
                     _require(rec_b is not None, "unknown dispatch binding")
                     _require(rec_b["status"] == "claimed", "binding is not claimed")
+                    lease = tx.lead_read(rec_b["workspace_root"])
+                    _require(
+                        lease is not None
+                        and coordination._valid_lead_lease(lease)
+                        and lease.get("binding_id") == ns.binding,
+                        "binding generation is superseded or lease is missing",
+                    )
                 try:
                     task = json.loads(read_payload_text(base / "tasks" / f"{ns.task_id}.json"))
                 except (OSError, ValueError):

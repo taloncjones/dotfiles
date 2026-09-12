@@ -486,6 +486,7 @@ class OwnerTransaction:
             and self.current["session_id"] == session
             and self.current["fence"] == fence
             and self.current.get("account_id") == self.account_id
+            and self.current.get("control_tier", "launcher") == "launcher"
         )
 
     def claim(

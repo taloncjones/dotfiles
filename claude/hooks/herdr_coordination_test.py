@@ -570,6 +570,23 @@ with c.owner_transaction(rd) as tx:
         ):
             tx.claim("A", "host", 1, control_tier="lead", workspace_root="/tmp/ws")
 
+    def test_persisted_lead_tier_slug_owner_fails_check(self):
+        # A slice-1-era owner.json can carry control_tier="lead" on the SLUG
+        # record itself (not a per-workspace lease). check() must reject it so
+        # it can never grant launcher write authority.
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            fence = tx.claim("A", "host", 1)
+        path = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / "owner.json"
+        rec = json.loads(path.read_text())
+        rec["control_tier"] = "lead"
+        rec["workspace_root"] = "/tmp/ws"
+        path.write_text(json.dumps(rec))
+        with coordination.owner_transaction(self.rd) as tx:
+            self.assertFalse(tx.check("A", fence))
+            self.assertFalse(tx.refresh("A", fence))
+
 
 class AttemptTests(unittest.TestCase):
     def test_latest_attempt_rejects_old_completion_and_review(self):
