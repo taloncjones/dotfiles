@@ -800,6 +800,41 @@ def _timeout_result(runtime: str, stderr: str = "") -> dict[str, Any]:
     }
 
 
+def _kill_after_timeout(process: subprocess.Popen, drain_secs: float = 5.0) -> str:
+    """Terminate a timed-out child and drain its output WITHOUT hanging.
+
+    The child runs in its own session (start_new_session=True), so
+    os.killpg(pid) reaches the child and every descendant still in its group.
+    A descendant that called setsid() -- e.g. a runtime CLI that detaches its
+    model worker -- escapes that group and keeps the stdout/stderr pipe open,
+    which makes an UNBOUNDED communicate() block forever draining a pipe that
+    never reaches EOF (the observed 34-minute "timeout that never returned").
+    So the drain is bounded: after SIGKILL we read what is already buffered
+    for a few seconds, then give up. Any escaped worker is left orphaned to
+    the OS reaper rather than wedging the runner. Returns captured stderr
+    (possibly empty)."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+    try:
+        _stdout, stderr = process.communicate(timeout=drain_secs)
+        return stderr or ""
+    except subprocess.TimeoutExpired:
+        # A detached (setsid) descendant still holds the pipe; stop waiting.
+        for stream in (process.stdout, process.stderr, process.stdin):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
+        return ""
+
+
 def run_bounded(
     route: dict[str, Any],
     prompt: str,
@@ -860,11 +895,7 @@ def run_bounded(
     try:
         stdout, stderr = process.communicate(prompt, timeout=timeout_secs)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
+        stderr = _kill_after_timeout(process)
         result = _timeout_result(runtime, stderr.strip())
         result["account_kind"] = scope["kind"]
         result["account_id"] = scope["account_id"]
