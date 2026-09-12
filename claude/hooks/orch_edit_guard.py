@@ -975,7 +975,7 @@ def _within(target, root):
         return False
 
 
-def lead_scope_verdict(guarded, owner, slug, real_of=None):
+def lead_scope_verdict(guarded, owner, slug, real_of):
     """A lead owner may edit only inside its own workspace_root. Fail closed:
     a non-absolute, missing, or unresolvable workspace_root denies, as does any
     target outside it. Containment uses each target's SYMLINK-RESOLVED real path
@@ -991,7 +991,12 @@ def lead_scope_verdict(guarded, owner, slug, real_of=None):
         if not os.path.isdir(root):
             return "deny", "lead-scope", slug, {"reason": "workspace-root-missing", "workspace_root": wr}
         for c, _top, _reason in guarded:
-            reals = real_of.get(c) or {os.path.realpath(c)}
+            reals = real_of.get(c)
+            if not reals:
+                # No resolved real path for this target (an incomplete real_of
+                # from a future caller): fail closed rather than fall back to
+                # the lexical guard path, which cannot see a symlink+`..` escape.
+                return "deny", "lead-scope", slug, {"reason": "unresolved-target", "target": c}
             for real in reals:
                 if real is None or not _within(real, root):
                     return "deny", "lead-scope", slug, {"target": real, "workspace_root": wr}
@@ -1002,7 +1007,7 @@ def lead_scope_verdict(guarded, owner, slug, real_of=None):
     return "allow", slug, None
 
 
-def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime, real_of=None):
+def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime, real_of):
     """('allow', slug, marker) or ('deny', why, slug, detail). Every
     guarded target must resolve to one slug this session owns; that
     slug's marker must validate; then the budget claim must land within
