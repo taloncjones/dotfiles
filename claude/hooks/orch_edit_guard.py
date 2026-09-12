@@ -122,10 +122,16 @@ def git(args, cwd, budget):
 
 
 def read_state_json(path):
-    """Parsed regular payload object, or None for an invalid marker."""
+    """Parsed regular payload object, or None for an invalid record.
+
+    Total over arbitrary on-disk content: any read or decode error -- including
+    a RecursionError from deeply nested JSON, which is not a ValueError -- is
+    "no record". This reader feeds owned_slugs(), which runs BEFORE lead
+    discovery on every path, so an unrelated malformed owner.json must never
+    escape to the top-level fail-open handler and un-fence a contained lead."""
     try:
         data = json.loads(core.read_payload_text(path))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except Exception:  # noqa: BLE001 -- a bad state record is no record, never a crash
         return None
     return data if isinstance(data, dict) else None
 

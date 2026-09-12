@@ -851,7 +851,12 @@ def _kill_after_timeout(process: subprocess.Popen, drain_secs: float = 5.0) -> s
     returned"). So: snapshot the descendant tree by ppid FIRST, SIGKILL the
     group, then SIGKILL each snapshotted descendant individually (catching
     the setsid worker), then drain with a bound. Returns captured stderr
-    (possibly empty)."""
+    (possibly empty).
+
+    Best effort by construction: a worker whose intermediate parent already
+    exited before the snapshot has been reparented to init, so its ppid no
+    longer links it to this tree and it is not found. Such a worker is
+    orphaned to the OS rather than tracked; the runner still returns."""
     victims = _descendants(process.pid)
     try:
         os.killpg(process.pid, signal.SIGKILL)

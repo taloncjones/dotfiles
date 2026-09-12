@@ -894,6 +894,17 @@ python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("control
 hook_case "AC-G legacy no-tier owner record still blanket-fences (deny)" deny Edit "$R/tracked.txt" "$R" "$SID_A"
 cp "$FIX/owner.bak" "$COWN"
 
+# A deeply nested (RecursionError, not ValueError) owner.json under an
+# UNRELATED slug must not crash the guard open before lead discovery runs:
+# owned_slugs() reads every owner record first, on both the normal and the
+# overflow path (co-review r6). The lead must still be contained.
+mkdir -p "$CFG/herdr-orch/zz-nested" "$HERDR_COORDINATION_ROOT/zz-nested"
+python3 -c 'import sys; open(sys.argv[1], "w").write("[" * 100000 + "]" * 100000)' "$HERDR_COORDINATION_ROOT/zz-nested/owner.json"
+lead_setup "$SID_C" "$LWS"
+hook_case "AC-G nested sibling owner.json does not un-fence a lead (normal path)" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+hook_case "AC-G nested sibling owner.json does not un-fence a lead (overflow path)" deny Bash "$many" "$LWS" "$SID_C"
+rm -rf "$CFG/herdr-orch/zz-nested" "$HERDR_COORDINATION_ROOT/zz-nested"
+
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
         && PYTHONPYCACHEPREFIX="$FIX/pyc" python3 -m py_compile "$HOOK"; then
