@@ -173,7 +173,18 @@ top-level line:
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `verdict` APPROVE only on a
-zero-actionable complete round. The marker line must be exactly one per comment,
+zero-actionable complete round.
+
+**Emit APPROVE only for a snapshot that equals the committed head.** `prepare`
+folds staged and unstaged changes into the reviewed tree, but the marker's `sha`
+names the committed head -- so an uncommitted local fix could earn an APPROVE
+whose `sha` still points at the buggy committed head, and the gate would pass for
+content that was never on the PR. For a PR review, freeze with a **clean working
+tree** and confirm `snapshot.codex_tree == source.source_tree` in the manifest
+before posting APPROVE; never emit an APPROVE marker for a dirty snapshot whose
+tree differs from its head.
+
+The marker line must be exactly one per comment,
 unindented, and outside the table/any code fence, so `scripts/pr_ready_gate.py`
 accepts it -- the gate and `ship`'s resume rule parse the latest such marker by
 comment creation instant and ignore quoted, fenced, indented, multiply-markered,
