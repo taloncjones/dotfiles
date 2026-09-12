@@ -40,16 +40,27 @@ def _transport_host_path(url: str):
                 host_part = host_part[:colon]
             if not host_part:
                 return None
-            return ("ssh", host_part, parts.username, parts.port, parts.path)
+            if "%" in host_part:
+                return None  # percent-encoded authority: git decodes, we don't
+            try:
+                port = parts.port
+            except ValueError:
+                return None  # malformed non-numeric port
+            return ("ssh", host_part, parts.username, port, parts.path)
         host = parts.hostname or ""
         if not host:
             return None
+        if "%" in host:
+            return None  # percent-encoded authority: git decodes, we don't
         if parts.scheme in ("https", "http"):
             return ("web", host, None, None, parts.path)
         return None  # file://, git://, unknown scheme
     scp = _SCP_RE.match(url)
     if scp:
-        return ("ssh", scp.group("host"), scp.group("user"), None, scp.group("path"))
+        host = scp.group("host")
+        if "%" in host:
+            return None  # percent-encoded authority: git decodes, we don't
+        return ("ssh", host, scp.group("user"), None, scp.group("path"))
     return None
 
 

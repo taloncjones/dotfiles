@@ -102,6 +102,27 @@ class NormalizeUrl(unittest.TestCase):
     def test_empty_is_none(self):
         self.assertIsNone(rb.normalize_url(""))
 
+    def test_percent_encoded_ssh_host_is_none(self):
+        # git percent-decodes the authority before connecting, so a
+        # percent-encoded host must be rejected rather than decoded and
+        # matched: decoding here could resolve a different host than git
+        # actually uses.
+        self.assertIsNone(
+            rb.normalize_url("ssh://git@%47it-Personal/owner/repo.git", resolver)
+        )
+
+    def test_percent_encoded_scp_host_is_none(self):
+        self.assertIsNone(
+            rb.normalize_url("git@%47it-Personal:owner/repo.git", resolver)
+        )
+
+    def test_malformed_port_is_none(self):
+        # urlsplit(...).port raises ValueError for a non-numeric port; that
+        # must be caught and treated as invalid, not propagate.
+        self.assertIsNone(
+            rb.normalize_url("ssh://git@github.com:notaport/owner/repo.git", resolver)
+        )
+
 
 class ParsePrUrl(unittest.TestCase):
     def test_ok(self):
