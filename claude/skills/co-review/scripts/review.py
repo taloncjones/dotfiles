@@ -77,6 +77,91 @@ def full_commit(repo: Path, reference: str) -> str:
     return text_git(repo, "rev-parse", "--verify", f"{reference}^{{commit}}")
 
 
+_BRANCH_BAD = ("..", "@{", "~", "^", ":", "\\", " ")
+
+
+def resolve_base(
+    repo: Path, base: str | None, base_ref: str | None, head: str
+) -> tuple[str, str | None, str | None]:
+    """Resolve the review base: an explicit commit, or an origin branch merge-base."""
+    if bool(base) == bool(base_ref):
+        raise ReviewError("exactly one of --base or --base-ref is required")
+    if base:
+        return full_commit(repo, base), None, None
+    branch = base_ref
+    if branch.startswith("-") or any(bad in branch for bad in _BRANCH_BAD):
+        raise ReviewError("--base-ref must be a plain origin branch name")
+    check = subprocess.run(
+        ["git", "-C", str(repo), "check-ref-format", "--branch", branch],
+        capture_output=True,
+        env=git_environment(),
+        check=False,
+    )
+    if check.returncode:
+        raise ReviewError("--base-ref is not a valid branch name")
+    nonce = secrets.token_hex(16)
+    ref = f"refs/co-review/{nonce}"
+    # One scope so the ref is always cleaned up even if fetch creates it and
+    # then fails. Bound the fetch to the owned ref: --refmap= and
+    # --no-write-fetch-head keep it from touching refs/remotes/origin/* or
+    # FETCH_HEAD (which prepare's source-unchanged checks cannot see), and
+    # --no-recurse-submodules keeps it from fanning out.
+    try:
+        try:
+            git(
+                repo,
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "origin",
+                f"+refs/heads/{branch}:{ref}",
+            )
+        except ReviewError as error:
+            raise ReviewError(
+                f"cannot fetch origin branch {branch!r}: {error}"
+            ) from error
+        tip = full_commit(repo, ref)
+        # merge-base exits 1 with empty output when histories are unrelated;
+        # that is "no merge base", not a git failure, so do not use git() here.
+        found = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--all", tip, head],
+            capture_output=True,
+            env=git_environment(),
+            check=False,
+            text=True,
+        )
+        if found.returncode not in (0, 1):
+            raise ReviewError(found.stderr.strip() or "merge-base failed")
+        merge_bases = found.stdout.split()
+        if not merge_bases:
+            raise ReviewError("no merge-base between origin branch and head")
+        if len(merge_bases) > 1:
+            raise ReviewError(
+                "multiple merge-bases; resolve explicitly: " + " ".join(merge_bases)
+            )
+        return merge_bases[0], branch, tip
+    finally:
+        removal = subprocess.run(
+            ["git", "-C", str(repo), "update-ref", "-d", ref],
+            capture_output=True,
+            env=git_environment(),
+            check=False,
+        )
+        still_present = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True,
+            env=git_environment(),
+            check=False,
+        )
+        if removal.returncode != 0 and still_present.returncode == 0:
+            print(
+                f"warning: could not remove co-review ref {ref}",
+                file=sys.stderr,
+            )
+
+
 def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -260,13 +345,15 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ReviewError("output directory must be empty")
     output_dir.mkdir(parents=True, exist_ok=True)
-    base = full_commit(repo, args.base)
     current_head = full_commit(repo, "HEAD")
     head = full_commit(repo, args.head or "HEAD")
     if head != current_head:
         raise ReviewError(
             "head must be the source repository's current HEAD when freezing local changes"
         )
+    base, base_ref, base_ref_tip = resolve_base(
+        repo, args.base, getattr(args, "base_ref", None), head
+    )
     before = status_porcelain(repo)
     original_index_tree = text_git(repo, "write-tree")
     staged = git(
@@ -447,6 +534,8 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
                 "root": str(repo),
                 "repo_id": context["repo_id"],
                 "base": base,
+                "base_ref": base_ref,
+                "base_ref_tip": base_ref_tip,
                 "head": head,
                 "source_tree": text_git(repo, "rev-parse", f"{head}^{{tree}}"),
             },
@@ -575,10 +664,15 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     prepare_parser = commands.add_parser("prepare")
     prepare_parser.add_argument("--repo", required=True)
-    prepare_parser.add_argument("--base", required=True)
+    prepare_parser.add_argument("--base")
+    prepare_parser.add_argument("--base-ref", dest="base_ref")
     prepare_parser.add_argument("--head")
     prepare_parser.add_argument("--output-dir", required=True)
     prepare_parser.add_argument("--include-untracked", action="append")
+    resolve_parser = commands.add_parser("resolve-base")
+    resolve_parser.add_argument("--repo", required=True)
+    resolve_parser.add_argument("--base-ref", dest="base_ref", required=True)
+    resolve_parser.add_argument("--head", required=True)
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("--manifest", required=True)
     artifact_parser = commands.add_parser("artifact")
@@ -610,6 +704,17 @@ def main(argv: list[str] | None = None) -> int:
             }
         elif args.command == "artifact":
             result = artifact(args)
+        elif args.command == "resolve-base":
+            repo = resolved_repo(args.repo)
+            head = full_commit(repo, args.head)
+            base, base_ref, base_ref_tip = resolve_base(
+                repo, None, args.base_ref, head
+            )
+            result = {
+                "base": base,
+                "base_ref": base_ref,
+                "base_ref_tip": base_ref_tip,
+            }
         else:
             result = cleanup(args)
     except ReviewError as error:

@@ -722,6 +722,202 @@ class ReviewHelperTests(unittest.TestCase):
                     ):
                         self.assertEqual(arguments[arguments.index(flag) + 1], expected)
 
+    def make_origin_target(self, extra_name):
+        """origin 'target' branch = self.base + <extra_name>; returns that tip."""
+        origin = self.root / "origin.git"
+        subprocess.run(
+            ["git", "clone", "--bare", "-q", str(self.repo), str(origin)],
+            check=True, capture_output=True,
+        )
+        work = self.root / f"work-{extra_name}"
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(work)],
+            check=True, capture_output=True,
+        )
+        for key, value in (("user.name", "O"), ("user.email", "o@x.invalid")):
+            subprocess.run(
+                ["git", "-C", str(work), "config", key, value],
+                check=True, capture_output=True,
+            )
+        (work / f"{extra_name}.txt").write_text(extra_name + "\n")
+        subprocess.run(
+            ["git", "-C", str(work), "add", f"{extra_name}.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-qm", f"origin: {extra_name}"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "push", "-q", "origin", "HEAD:refs/heads/target"],
+            check=True, capture_output=True,
+        )
+        tip = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.run_git("remote", "add", "origin", str(origin))
+        return tip
+
+    def test_base_ref_resolves_origin_merge_base_and_real_diff(self):
+        origin_tip = self.make_origin_target("origin_only")  # O = B + origin_only
+        # local 'target' branch at a DIFFERENT commit (B + local_only), never pushed
+        self.run_git("checkout", "-q", "-b", "target")
+        (self.repo / "local_only.txt").write_text("local\n")
+        self.run_git("add", "local_only.txt")
+        self.run_git("commit", "-qm", "local: target")
+        # feature head H = B + feature, checked out
+        self.run_git("checkout", "-q", "-b", "feature", self.base)
+        (self.repo / "feature.txt").write_text("feature\n")
+        self.run_git("add", "feature.txt")
+        self.run_git("commit", "-qm", "feature: work")
+
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo),
+            "--base-ref", "target", "--output-dir", str(output),
+        )
+        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
+
+        self.assertEqual(manifest["source"]["base"], self.base)
+        self.assertEqual(manifest["source"]["base_ref"], "target")
+        self.assertEqual(manifest["source"]["base_ref_tip"], origin_tip)
+        snapshot_head = manifest["snapshot"]["snapshot_head"]
+        diff = self.git("diff", "--name-status", self.base, snapshot_head)
+        self.assertEqual(diff, "A\tfeature.txt")
+
+    def test_base_and_base_ref_mutually_exclusive(self):
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base", self.base,
+            "--base-ref", "target", "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("exactly one of --base or --base-ref", result.stderr)
+
+    def test_neither_base_nor_base_ref_is_error(self):
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo),
+            "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("exactly one of --base or --base-ref", result.stderr)
+
+    def test_base_ref_unknown_branch_fails_clean(self):
+        self.make_origin_target("origin_only")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "nope",
+            "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("cannot fetch origin branch", result.stderr)
+
+    def test_base_ref_rejects_ref_expression(self):
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "a..b",
+            "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("plain origin branch name", result.stderr)
+
+    def test_base_ref_accepts_slashed_branch(self):
+        origin = self.root / "origin.git"
+        subprocess.run(
+            ["git", "clone", "--bare", "-q", str(self.repo), str(origin)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(origin), "branch", "release/1.0", "HEAD"],
+            check=True, capture_output=True,
+        )
+        self.run_git("remote", "add", "origin", str(origin))
+        (self.repo / "feature.txt").write_text("feature\n")
+        self.run_git("add", "feature.txt")
+        self.run_git("commit", "-qm", "feature")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo),
+            "--base-ref", "release/1.0", "--output-dir", str(output),
+        )
+        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
+        self.assertEqual(manifest["source"]["base_ref"], "release/1.0")
+
+    def test_base_ref_no_merge_base_unrelated_history(self):
+        origin = self.root / "origin.git"
+        subprocess.run(
+            ["git", "clone", "--bare", "-q", str(self.repo), str(origin)],
+            check=True, capture_output=True,
+        )
+        work = self.root / "orphan"
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(work)],
+            check=True, capture_output=True,
+        )
+        for key, value in (("user.name", "O"), ("user.email", "o@x.invalid")):
+            subprocess.run(
+                ["git", "-C", str(work), "config", key, value],
+                check=True, capture_output=True,
+            )
+        subprocess.run(
+            ["git", "-C", str(work), "checkout", "-q", "--orphan", "target"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "rm", "-rfq", "."],
+            check=True, capture_output=True,
+        )
+        (work / "unrelated.txt").write_text("x\n")
+        subprocess.run(
+            ["git", "-C", str(work), "add", "unrelated.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-qm", "orphan"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "push", "-q", "origin", "HEAD:refs/heads/target"],
+            check=True, capture_output=True,
+        )
+        self.run_git("remote", "add", "origin", str(origin))
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--output-dir", str(output), expect=2,
+        )
+        self.assertIn("no merge-base", result.stderr)
+
+    def test_base_ref_does_not_mutate_source_and_cleans_ref(self):
+        self.make_origin_target("origin_only")
+        (self.repo / "feature.txt").write_text("feature\n")
+        self.run_git("add", "feature.txt")
+        self.run_git("commit", "-qm", "feature")
+        head_before = self.git("rev-parse", "HEAD")
+        index_before = self.git("write-tree")
+        output = self.root / "review output"
+        self.command(
+            "prepare", "--repo", str(self.repo), "--base-ref", "target",
+            "--output-dir", str(output),
+        )
+        self.assertEqual(head_before, self.git("rev-parse", "HEAD"))
+        self.assertEqual(index_before, self.git("write-tree"))
+        self.assertEqual(self.git("for-each-ref", "refs/co-review/"), "")
+
+    def test_resolve_base_subcommand_uses_given_head_not_local(self):
+        origin_tip = self.make_origin_target("origin_only")
+        self.run_git("checkout", "-q", "-b", "other", self.base)
+        (self.repo / "h2.txt").write_text("h2\n")
+        self.run_git("add", "h2.txt")
+        self.run_git("commit", "-qm", "h2")
+        h2 = self.git("rev-parse", "HEAD")
+        self.run_git("checkout", "-q", self.base)
+        result = self.command(
+            "resolve-base", "--repo", str(self.repo),
+            "--base-ref", "target", "--head", h2,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["base"], self.base)
+        self.assertEqual(payload["base_ref_tip"], origin_tip)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

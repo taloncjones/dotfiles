@@ -40,15 +40,34 @@ path. Never invoke a helper through a path relative to the target repository.
 
 ```bash
 test -f "$REVIEW_HELPER" || { echo "co-review helper is unavailable" >&2; exit 2; }
-uv run --no-project python "$REVIEW_HELPER" prepare --repo "$REPO" --base "$BASE" \
+# PR review: resolve the base from the PR's real target branch.
+uv run --no-project python "$REVIEW_HELPER" prepare --repo "$REPO" --base-ref "$BASE_REF" \
   --output-dir "$REVIEW_OUTPUT" --include-untracked path/inspected-first
+# Local / plan / no-PR review: pin an explicit base commit instead.
+#   ... prepare --repo "$REPO" --base "$BASE" ...
 ```
 
-Require explicit repository, base, output directory, and untracked paths. The
-helper captures the committed head plus staged and unstaged changes through a
-temporary index, accepts only explicitly named regular untracked paths, and
-rejects symlinks, private paths, inherited Git routing, source drift, and tree
-mismatch. Its manifest pins base/head/tree, source identity, two worktrees,
+For a PR review first confirm `origin` is the PR's base repository: compare
+origin's real fetch URL (`git remote get-url origin`) to the base repo from the
+pulls REST response (`gh api repos/{owner}/{repo}/pulls/<n> -q
+.base.repo.full_name`; `baseRepository` is not a `pr view` field). On a fork PR
+`origin` is the contributor's fork and resolving the base there is wrong; fetch
+the verified target remote or stop. Then pass `--base-ref <baseRefName>` (the PR's target
+branch from `gh pr view --json baseRefName`). The helper fetches that origin branch
+read-only into an invocation-owned ref and diffs against the merge-base
+(three-dot, matching GitHub "Files changed"), so a stale local base cannot
+produce phantom findings for commits already on the target. Use `--base <sha>`
+only for local or plan review with no PR target. The base-ref fetch is a read
+that establishes the diff target; the no-mutate-source rule (do not publish,
+comment, or modify the checkout during preparation) still holds -- the only ref
+written is the invocation-owned `refs/co-review/*`, deleted before return.
+
+Require explicit repository, base (`--base` XOR `--base-ref`), output directory,
+and untracked paths. The helper captures the committed head plus staged and
+unstaged changes through a temporary index, accepts only explicitly named
+regular untracked paths, and rejects symlinks, private paths, inherited Git
+routing, source drift, and tree mismatch. Its manifest pins
+base/base_ref/base_ref_tip/head/tree, source identity, two worktrees,
 scope/exclusions, and an ownership nonce.
 
 ```bash
@@ -108,6 +127,68 @@ uv run --no-project python "$REVIEW_HELPER" cleanup --manifest "$MANIFEST"
 Cleanup refuses foreign roots, marker mismatches, modified trees, ignored or
 untracked snapshot files, and unexpected owned-output entries. Preserve the
 snapshot if it refuses cleanup.
+
+## Re-review loop
+
+One pass is not a gate. A **complete round** = freeze the committed head, run both
+finders (Claude `/code-review` + the Codex runner), plus any bounded attacker or
+skeptic required by the frozen paths, plus the skeptic verification of
+high-severity findings. A round that leaves any required finder or verification
+incomplete cannot approve (co-review's "incomplete, never a clean review" rule).
+
+1. Run a complete round.
+2. Apply confirmed fixes with verified repros; re-run the affected tests; commit
+   and push.
+3. Re-freeze the new committed head and run another complete round. Repeat.
+4. Return **APPROVE** only when a complete round yields zero unresolved
+   actionable findings. A finding that reappears unfixed is still actionable --
+   not a dismissible "duplicate". "Duplicate/non-actionable" means only: already
+   fixed and re-surfaced against old code, explicitly confirmed wontfix, or
+   out-of-scope for this change.
+5. Bound it: at most **5 complete rounds total** (the first round plus up to 4
+   re-reviews). Print each round's actionable-finding count. Escalate -- stop and
+   ask for a structural fix -- at the cap without APPROVE, or earlier when the
+   only remaining findings are genuinely non-actionable. Do not hard-stop merely
+   because a round's count failed to strictly decrease: real bugs can persist
+   across rounds.
+
+## Review provenance marker
+
+On every completed round, post one PR comment, by the authenticated `gh` user,
+that is both human-readable and machine-parseable. Lead with a findings **table**
+(clearer than bullets), then the hidden currency marker as its own unindented
+top-level line:
+
+```markdown
+### Co-review round <n>
+
+| Severity | File:line       | Issue | Fix |
+| -------- | --------------- | ----- | --- |
+| HIGH     | path/file.py:42 | ...   | ... |
+
+(or "No actionable findings." when the round is clean)
+
+<!-- co-review: sha=<reviewed-head-sha> base=<resolved-merge-base> base_ref=<baseRefName> verdict=<APPROVE|CHANGES> round=<n> -->
+```
+
+`sha` is the frozen committed head, `base` the resolved merge-base from
+`--base-ref`, `base_ref` the PR target branch, `verdict` APPROVE only on a
+zero-actionable complete round.
+
+**Emit APPROVE only for a snapshot that equals the committed head.** `prepare`
+folds staged and unstaged changes into the reviewed tree, but the marker's `sha`
+names the committed head -- so an uncommitted local fix could earn an APPROVE
+whose `sha` still points at the buggy committed head, and the gate would pass for
+content that was never on the PR. For a PR review, freeze with a **clean working
+tree** and confirm `snapshot.codex_tree == source.source_tree` in the manifest
+before posting APPROVE; never emit an APPROVE marker for a dirty snapshot whose
+tree differs from its head.
+
+The marker line must be exactly one per comment,
+unindented, and outside the table/any code fence, so `scripts/pr_ready_gate.py`
+accepts it -- the gate and `ship`'s resume rule parse the latest such marker by
+comment creation instant and ignore quoted, fenced, indented, multiply-markered,
+or other-author comments.
 
 ## Document reviews
 
