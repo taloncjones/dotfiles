@@ -115,6 +115,18 @@ class SelectMarkerTests(unittest.TestCase):
         later = comment(marker(sha=SHA_B), created_at="2026-09-11T09:30:00Z", cid=2)
         self.assertEqual(gate.select_marker([earlier, later], ME)["sha"], SHA_B)
 
+    def test_coworker_marker_is_not_a_currency_marker(self):
+        cw = (
+            "<!-- co-review-coworker: sha=" + SHA_A + " base=" + BASE_A
+            + " base_ref=main base_ref_tip=" + SHA_B
+            + " verdict=APPROVE round=1 -->"
+        )
+        # The anchored currency regex must not select a coworker marker...
+        self.assertIsNone(gate.select_marker([comment(cw)], ME))
+        # ...and the gate must FAIL when the only marker present is a coworker one.
+        verdict, _ = gate.decide([comment(cw)], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(verdict, "FAIL")
+
     def test_missing_created_at_fails_closed(self):
         # A marker-bearing trusted comment without ordering metadata cannot be
         # placed in time; fail closed rather than silently drop it.

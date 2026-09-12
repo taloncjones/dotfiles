@@ -60,7 +60,7 @@ def _fence_opener(raw: str) -> tuple[str, int] | None:
     return (char, length)
 
 
-def _markers_in_body(body: str) -> list[dict]:
+def _markers_in_body(body: str, marker_re=MARKER_RE) -> list[dict]:
     """Every valid marker on an unindented, unquoted, unfenced top-level line."""
     found: list[dict] = []
     fence: tuple[str, int] | None = None
@@ -76,7 +76,7 @@ def _markers_in_body(body: str) -> list[dict]:
         # The marker must sit at column 0: any leading whitespace (space or tab,
         # in any mix) is Markdown code indentation. Matching the unstripped line
         # against an anchored pattern enforces that; allow only trailing space.
-        hit = MARKER_RE.match(raw.rstrip(" \t"))  # ASCII trailing space only
+        hit = marker_re.match(raw.rstrip(" \t"))  # ASCII trailing space only
         if hit:
             found.append(hit.groupdict())
     return found
@@ -93,7 +93,7 @@ def _parse_instant(value) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def select_marker(comments, trusted_authors: set[str]) -> dict | None:
+def select_marker(comments, trusted_authors: set[str], marker_re=MARKER_RE) -> dict | None:
     """Latest trusted single marker by creation instant, or None. Fail-closed."""
     if not isinstance(comments, list):
         raise GateInputError("comments must be a JSON array")
@@ -103,7 +103,7 @@ def select_marker(comments, trusted_authors: set[str]) -> dict | None:
             raise GateInputError("each comment must be an object")
         if entry.get("author") not in trusted_authors:
             continue
-        markers = _markers_in_body(entry.get("body", "") or "")
+        markers = _markers_in_body(entry.get("body", "") or "", marker_re)
         if len(markers) != 1:
             continue  # none, or ambiguous multiple markers in one comment
         instant = _parse_instant(entry.get("created_at"))
