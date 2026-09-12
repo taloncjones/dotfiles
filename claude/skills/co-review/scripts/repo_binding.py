@@ -27,11 +27,23 @@ def _transport_host_path(url: str):
     `HostName` rewrite resolves the way git actually connects."""
     if "://" in url:
         parts = urlsplit(url)
+        if parts.scheme == "ssh":
+            # parts.hostname lowercases; ssh Host matching is case-sensitive,
+            # so extract the host from netloc preserving case: strip userinfo
+            # (up to and including the last '@') and a trailing ':port' (only
+            # when the part after the last colon is all digits).
+            netloc = parts.netloc
+            at = netloc.rfind("@")
+            host_part = netloc[at + 1:] if at != -1 else netloc
+            colon = host_part.rfind(":")
+            if colon != -1 and host_part[colon + 1:].isdigit():
+                host_part = host_part[:colon]
+            if not host_part:
+                return None
+            return ("ssh", host_part, parts.username, parts.port, parts.path)
         host = parts.hostname or ""
         if not host:
             return None
-        if parts.scheme == "ssh":
-            return ("ssh", host, parts.username, parts.port, parts.path)
         if parts.scheme in ("https", "http"):
             return ("web", host, None, None, parts.path)
         return None  # file://, git://, unknown scheme
@@ -140,10 +152,15 @@ def check(origin_url, pr_url, base_full_name, host_resolver):
     return (False, f"binding mismatch: origin {origin_id} != PR base {base_id}")
 
 
+def _clean_git_env():
+    import os
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git_origin(repo: str, runner=subprocess.run) -> str:
     out = runner(
         ["git", "-C", repo, "remote", "get-url", "origin"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=_clean_git_env(),
     )
     return out.stdout.strip()
 

@@ -57,30 +57,38 @@ class Verdict(unittest.TestCase):
 class Scope(unittest.TestCase):
     def test_no_prior_marker_is_full(self):
         self.assertEqual(
-            cr.decide_review_scope(None, SHA_NEW, TIP_OLD, True), ("full", None)
+            cr.decide_review_scope(None, SHA_NEW, "main", TIP_OLD, True), ("full", None)
         )
 
     def test_equal_head_is_full(self):
         # is_ancestor is True for identical commits; equal-head must still be full.
         self.assertEqual(
-            cr.decide_review_scope(prev(sha=SHA_NEW), SHA_NEW, TIP_OLD, True),
+            cr.decide_review_scope(prev(sha=SHA_NEW), SHA_NEW, "main", TIP_OLD, True),
             ("full", None),
         )
 
     def test_non_ancestor_is_full(self):
         self.assertEqual(
-            cr.decide_review_scope(prev(), SHA_NEW, TIP_OLD, False), ("full", None)
+            cr.decide_review_scope(prev(), SHA_NEW, "main", TIP_OLD, False), ("full", None)
         )
 
     def test_moved_base_is_full(self):
         self.assertEqual(
-            cr.decide_review_scope(prev(tip=TIP_OLD), SHA_NEW, TIP_NEW, True),
+            cr.decide_review_scope(prev(tip=TIP_OLD), SHA_NEW, "main", TIP_NEW, True),
+            ("full", None),
+        )
+
+    def test_retargeted_base_ref_is_full(self):
+        # Base branch changed (e.g. PR retargeted main -> release), even
+        # though tip and ancestry would otherwise allow incremental.
+        self.assertEqual(
+            cr.decide_review_scope(prev(), SHA_NEW, "release", TIP_OLD, True),
             ("full", None),
         )
 
     def test_incremental(self):
         self.assertEqual(
-            cr.decide_review_scope(prev(), SHA_NEW, TIP_OLD, True),
+            cr.decide_review_scope(prev(), SHA_NEW, "main", TIP_OLD, True),
             ("incremental", (SHA_OLD, SHA_NEW)),
         )
 
@@ -100,6 +108,20 @@ class Marker(unittest.TestCase):
         text = cr.build_marker(SHA_OLD, BASE, "main", TIP_OLD, "CHANGES", 2)
         got = cr.select_coworker_marker(
             [{"author": "them", "created_at": "2026-09-11T00:00:00Z", "id": 1, "body": text}],
+            {"me"},
+        )
+        self.assertIsNone(got)
+
+    def test_own_pr_currency_marker_not_selected(self):
+        # Symmetric isolation guard: the pr-ready currency marker format
+        # ('co-review: ...') must never be picked up as a coworker marker,
+        # even from a trusted author.
+        text = (
+            "<!-- co-review: sha=" + "a" * 40 + " base=" + "c" * 40 +
+            " base_ref=main verdict=APPROVE round=1 -->"
+        )
+        got = cr.select_coworker_marker(
+            [{"author": "me", "created_at": "2026-09-11T00:00:00Z", "id": 1, "body": text}],
             {"me"},
         )
         self.assertIsNone(got)

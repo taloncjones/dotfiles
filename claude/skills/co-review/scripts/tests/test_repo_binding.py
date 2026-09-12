@@ -87,6 +87,12 @@ class NormalizeUrl(unittest.TestCase):
     def test_non_github_host_is_none(self):
         self.assertIsNone(rb.normalize_url("git@gitlab.com:owner/repo.git"))
 
+    def test_ssh_scheme_original_case_host_resolves(self):
+        self.assertEqual(
+            rb.normalize_url("ssh://git@Git-Personal/owner/repo.git", resolver),
+            "github.com/owner/repo",
+        )
+
     def test_extra_path_segments_is_none(self):
         self.assertIsNone(rb.normalize_url("https://github.com/a/b/c"))
 
@@ -227,6 +233,41 @@ class ResolverParams(unittest.TestCase):
 
         rb.normalize_url("git@Git-Personal:owner/repo.git", capture)
         self.assertEqual(seen["host"], "Git-Personal")
+
+    def test_ssh_resolver_gets_original_case_host(self):
+        # Same guarantee for the ssh:// scheme form (not just scp-like).
+        seen = {}
+
+        def capture(host, user=None, port=None):
+            seen["host"] = host
+            return "github.com"
+
+        rb.normalize_url("ssh://git@Git-Personal/owner/repo.git", capture)
+        self.assertEqual(seen["host"], "Git-Personal")
+
+
+class GitOrigin(unittest.TestCase):
+    def test_strips_git_routing_env(self):
+        import os
+
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["kwargs"] = kw
+            class R:
+                returncode = 0
+                stdout = "git@github.com:o/r.git\n"
+            return R()
+
+        os.environ["GIT_CONFIG_COUNT"] = "1"
+        try:
+            rb._git_origin("/some/repo", runner=fake_run)
+        finally:
+            del os.environ["GIT_CONFIG_COUNT"]
+
+        self.assertIn("env", seen["kwargs"])
+        env = seen["kwargs"]["env"]
+        self.assertFalse(any(k.startswith("GIT_") for k in env))
 
 
 class GhLookup(unittest.TestCase):

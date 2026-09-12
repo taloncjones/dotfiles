@@ -58,12 +58,13 @@ def verdict_from_findings(findings) -> str:
     return "CHANGES" if any(is_blocking(f.get("severity")) for f in findings) else "APPROVE"
 
 
-def decide_review_scope(prev_marker, new_head, current_base_ref_tip, is_ancestor):
+def decide_review_scope(prev_marker, new_head, current_base_ref, current_base_ref_tip, is_ancestor):
     """('full', None) or ('incremental', (prev_head, new_head)).
 
     Full review whenever incremental would be wrong: first review, unchanged
     head (empty delta -- note --is-ancestor is True for identical commits),
-    rewritten history (prev not an ancestor), or a moved base tip.
+    rewritten history (prev not an ancestor), a retargeted base branch, or a
+    moved base tip.
     """
     if prev_marker is None:
         return ("full", None)
@@ -71,6 +72,8 @@ def decide_review_scope(prev_marker, new_head, current_base_ref_tip, is_ancestor
     if prev_head == new_head:
         return ("full", None)
     if not is_ancestor:
+        return ("full", None)
+    if current_base_ref != prev_marker["base_ref"]:
         return ("full", None)
     if current_base_ref_tip != prev_marker["base_ref_tip"]:
         return ("full", None)
