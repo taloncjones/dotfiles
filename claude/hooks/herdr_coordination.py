@@ -130,7 +130,11 @@ def _valid_owner(value):
         and value.get("control_tier", "launcher") in ("launcher", "lead")
         and (
             value.get("control_tier", "launcher") != "lead"
-            or (isinstance(value.get("workspace_root"), str) and bool(value["workspace_root"]))
+            or (
+                isinstance(value.get("workspace_root"), str)
+                and bool(value["workspace_root"])
+                and os.path.isabs(value["workspace_root"])
+            )
         )
         and (
             value.get("control_tier", "launcher") == "lead"
@@ -453,8 +457,12 @@ class OwnerTransaction:
         if control_tier not in ("launcher", "lead"):
             raise ValueError("invalid owner control_tier")
         if control_tier == "lead":
-            if not isinstance(workspace_root, str) or not workspace_root:
-                raise ValueError("lead owner requires a workspace_root")
+            if (
+                not isinstance(workspace_root, str)
+                or not workspace_root
+                or not os.path.isabs(workspace_root)
+            ):
+                raise ValueError("lead owner requires an absolute workspace_root")
         elif workspace_root is not None:
             raise ValueError("workspace_root is only valid for a lead owner")
         self.assert_current()

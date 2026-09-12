@@ -805,9 +805,17 @@ def targets_for(payload, tool, cwd, home):
 
 
 def resolve_targets(raw, home):
-    """Canonical absolute paths, skipping anything the shell would still
-    expand ($VAR, backticks, globs), deduplicated, capped."""
+    """`(guard_path, real_path)` pairs, skipping anything the shell would
+    still expand ($VAR, backticks, globs), deduplicated by guard_path, capped.
+
+    `guard_path` is the lexically-normalized target the launcher fence acts on
+    (`canon(rm_guard.resolve(...))`, unchanged). `real_path` additionally
+    resolves symlinks in the raw target so a lead-scope containment check
+    cannot be fooled by `<workspace>/<symlink>/../escape` -- `rm_guard.resolve`
+    collapses `..` before symlinks resolve, so the guard_path alone hides such
+    an escape."""
     paths = []
+    seen = set()
     for c_cwd, w, shell_expands in raw:
         w = rm_guard.expand_home(w, home)
         if not w or (
@@ -815,8 +823,11 @@ def resolve_targets(raw, home):
         ):
             continue
         p = canon(rm_guard.resolve(w, c_cwd))
-        if p not in paths:
-            paths.append(p)
+        if p in seen:
+            continue
+        seen.add(p)
+        base = w if os.path.isabs(w) else os.path.join(c_cwd, w)
+        paths.append((p, os.path.realpath(base)))
     return paths[:TARGET_CAP]
 
 
@@ -944,24 +955,38 @@ def claim_budget(rd, marker, session_id, tool_use_id, paths):
     return own if seen == len(paths) else None
 
 
-def lead_scope_verdict(guarded, owner, slug):
-    """A lead owner may edit only inside its own canonical workspace_root.
-    Fail closed: a missing or unresolvable workspace_root denies. Returns
+def _within(target, root):
+    """True iff canonical `target` is `root` or below it -- symlink- and
+    prefix-collision-safe (os.path.commonpath, not a string prefix, so
+    `/ws2` does not match root `/ws`, and root `/` matches every path)."""
+    try:
+        return os.path.commonpath([root, target]) == root
+    except ValueError:  # mixed absolute/relative or different drives
+        return False
+
+
+def lead_scope_verdict(guarded, owner, slug, real_of=None):
+    """A lead owner may edit only inside its own workspace_root. Fail closed:
+    a non-absolute, missing, or unresolvable workspace_root denies, as does any
+    target outside it. Containment uses each target's SYMLINK-RESOLVED real path
+    (`real_of`), not the lexically-normalized guard path, so a
+    `<workspace>/<symlink>/../escape` cannot slip through. Returns
     ('allow', slug, None) or ('deny', 'lead-scope', slug, detail)."""
+    real_of = real_of or {}
     wr = owner.get("workspace_root")
-    if not isinstance(wr, str) or not wr:
-        return "deny", "lead-scope", slug, {"reason": "no-workspace-root", "workspace_root": wr}
-    root = canon(wr)
+    if not isinstance(wr, str) or not os.path.isabs(wr):
+        return "deny", "lead-scope", slug, {"reason": "bad-workspace-root", "workspace_root": wr}
+    root = os.path.realpath(wr)
     if not os.path.isdir(root):
         return "deny", "lead-scope", slug, {"reason": "workspace-root-missing", "workspace_root": wr}
     for c, _top, _reason in guarded:
-        cc = canon(c)
-        if cc != root and not cc.startswith(root + "/"):
-            return "deny", "lead-scope", slug, {"target": cc, "workspace_root": wr}
+        real = real_of.get(c) or os.path.realpath(c)
+        if not _within(real, root):
+            return "deny", "lead-scope", slug, {"target": real, "workspace_root": wr}
     return "allow", slug, None
 
 
-def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
+def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime, real_of=None):
     """('allow', slug, marker) or ('deny', why, slug, detail). Every
     guarded target must resolve to one slug this session owns; that
     slug's marker must validate; then the budget claim must land within
@@ -992,7 +1017,7 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
     if owner["scope"]["account_id"] != owner["caller_scope"]["account_id"]:
         return "deny", "scope", first, {"target_slug": slug}
     if owner.get("control_tier", "launcher") == "lead":
-        return lead_scope_verdict(guarded, owner, slug)
+        return lead_scope_verdict(guarded, owner, slug, real_of)
     rd = owner["rd"]
     try:
         with core.owner_transaction(
@@ -1109,20 +1134,22 @@ def decide(payload, runtime="claude"):
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
     home = os.environ.get("HOME", os.path.expanduser("~"))
-    paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
-    if not paths:
+    pairs = resolve_targets(targets_for(payload, tool, cwd, home), home)
+    if not pairs:
         return 0
     state_real = os.path.realpath(
         core.account_payload_root(caller_scope) / "herdr-orch"
     )
     budget = Budget(GIT_BUDGET_SECS)
     guarded = []
-    for p in paths:
+    real_of = {}
+    for p, real in pairs:
         if exempt(p, state_real):
             continue
         hit = classify(p, budget)
         if hit:
             guarded.append((p, hit[0], hit[1]))
+            real_of[p] = real
     if not guarded:
         return 0
     slug_cache = {}
@@ -1135,7 +1162,7 @@ def decide(payload, runtime="claude"):
     if not owned:
         return 0
     tool_use_id = payload.get("tool_use_id")
-    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime)
+    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime, real_of)
     if verdict[0] == "allow":
         _, slug, marker = verdict
         rd = owned[slug]["rd"]

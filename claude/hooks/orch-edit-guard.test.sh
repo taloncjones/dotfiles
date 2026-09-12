@@ -682,11 +682,25 @@ hook_case "lead edits inside its workspace_root -> allow" allow Edit "$RL/dir/in
 hook_case "lead editing owned repo outside its workspace -> deny" deny Edit "$RL/tracked.txt" "$RL" "$SID_D"
 hook_case "lead editing an unowned repo -> deny" deny Edit "$R/tracked.txt" "$R" "$SID_D"
 
-# Corrupt the authoritative record's workspace_root to a nonexistent path: the
-# session is still identified as a lead, but scope cannot be established -> deny.
+# Symlink + `..` escape: a symlink INSIDE the workspace points outside it, and
+# `<workspace>/link/../escape` collapses (via normpath) to an in-workspace path
+# for the lexical guard path, but resolves (via symlinks) to OUTSIDE. Must deny.
+mkdir -p "$RL/other"
+ln -s "$RL/other" "$RL/dir/link"
+hook_case "lead symlink+.. escape is denied" deny Edit "$RL/dir/link/../pwned.txt" "$RL" "$SID_D"
+
+# Corrupt the authoritative record's workspace_root to a nonexistent ABSOLUTE
+# path: the session is still identified as a lead, but scope cannot be
+# established -> deny.
 python3 -c 'import json,os,sys; p=os.path.join(sys.argv[1],sys.argv[2],"owner.json"); rec=json.load(open(p)); rec["workspace_root"]="/nonexistent/ws"; json.dump(rec, open(p,"w"))' \
     "$HERDR_COORDINATION_ROOT" "$SLUG_L"
 hook_case "lead with unresolvable workspace_root -> deny (fail closed)" deny Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
+
+# Corrupt workspace_root to a RELATIVE path: canon() must not be run on it (that
+# would infinite-loop); the guard denies fail-closed instead of hanging.
+python3 -c 'import json,os,sys; p=os.path.join(sys.argv[1],sys.argv[2],"owner.json"); rec=json.load(open(p)); rec["workspace_root"]="relative/ws"; json.dump(rec, open(p,"w"))' \
+    "$HERDR_COORDINATION_ROOT" "$SLUG_L"
+hook_case "lead with relative workspace_root -> deny (no hang)" deny Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
