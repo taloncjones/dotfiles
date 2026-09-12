@@ -559,6 +559,13 @@ with c.owner_transaction(rd) as tx:
             self.assertFalse(tx.lead_refresh("B", 1, "/tmp/ws-a"))
             self.assertFalse(tx.lead_refresh("A", 2, "/tmp/ws-a"))
 
+    def test_slug_owner_claim_rejects_lead_tier(self):
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            with self.assertRaises(ValueError):
+                tx.claim("A", "host", 1, control_tier="lead", workspace_root="/tmp/ws")
+
 
 class AttemptTests(unittest.TestCase):
     def test_latest_attempt_rejects_old_completion_and_review(self):

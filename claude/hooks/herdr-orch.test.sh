@@ -2203,14 +2203,6 @@ assert c.watch_changed(snap1, snap2)
 PY
 SH
 
-check "CLI claim-owner records control_tier=lead + workspace_root" <<'SH'
-root=$(mktemp -d); ws=$(mktemp -d)
-f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
-   --repo-slug slug-lead --session S --host h --pid 1 --control-tier lead --workspace-root "$ws")
-test -n "$f"
-python3 -c 'import json,sys,os; rec=json.load(open(os.path.join(sys.argv[1],"herdr-orch","slug-lead","owner.json"))); assert rec["control_tier"]=="lead", rec; assert rec["workspace_root"]==os.path.realpath(sys.argv[2]), rec' "$root" "$ws"
-SH
-
 check "CLI claim-owner defaults control_tier=launcher when omitted" <<'SH'
 root=$(mktemp -d)
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
@@ -2230,18 +2222,106 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-
    --repo-slug slug-x --session S --host h --pid 1 --workspace-root "$ws" 2>/dev/null; then exit 1; fi
 SH
 
-check "CLI claim-owner rejects lead workspace-root at filesystem root" <<'SH'
-root=$(mktemp -d)
+check "CLI lead claim requires --binding and claims the per-workspace lease" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-lc --session L1 --host h --pid 1)
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
-   --repo-slug slug-x --session S --host h --pid 1 --control-tier lead --workspace-root / 2>/dev/null; then exit 1; fi
+   --repo-slug slug-lc --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" 2>/dev/null; then exit 1; fi
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug slug-lc --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-lc --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid")
+test "$lf" = 1
+python3 -c '
+import json, os, sys
+root, bid, ws = sys.argv[1:4]
+slug_owner = json.load(open(os.path.join(os.environ["HERDR_COORDINATION_ROOT"], "slug-lc", "owner.json")))
+assert slug_owner["session_id"] == "L1", slug_owner
+assert slug_owner.get("control_tier", "launcher") == "launcher", slug_owner
+rec = json.load(open(os.path.join(root, "herdr-orch", "slug-lc", "bindings", bid + ".json")))
+assert rec["status"] == "claimed", rec
+mirror = json.load(open(os.path.join(root, "herdr-orch", "slug-lc", "leads", bid, "owner.json")))
+assert mirror["session_id"] == "S1" and mirror["binding_id"] == bid, mirror
+assert mirror["workspace_root"] == os.path.realpath(ws), mirror
+' "$root" "$bid" "$ws"
 SH
 
-check "CLI claim-owner rejects a relative workspace-root before realpath" <<'SH'
-root=$(mktemp -d); ws=$(mktemp -d); fx=$PWD/claude/hooks/herdr_legacy_fixture.py
-# Run from an existing directory so realpath(".") WOULD have produced a valid
-# absolute path: only the explicit isabs() check may reject this.
-if (cd "$ws" && CLAUDE_CONFIG_DIR="$root" python3 "$fx" claim-owner \
-   --repo-slug slug-x --session S --host h --pid 1 --control-tier lead --workspace-root . 2>/dev/null); then exit 1; fi
+check "CLI lead claim rejects mismatched binding fields" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d); ws2=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-mm --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug slug-mm --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-mm --session WRONG --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-mm --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws2" --binding "$bid" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-mm --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding ldb-00000000000000000000000000000000 2>/dev/null; then exit 1; fi
+SH
+
+check "CLI lead claim rejects a revoked binding; same-session reclaim renews" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-rv --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug slug-rv --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-rv --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid")
+test "$lf" = 1
+lf2=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-rv --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid")
+test "$lf2" = 2
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py set-binding-status \
+   --repo-slug slug-rv --session L1 --fence "$f" --binding "$bid" --status revoked
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-rv --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid" 2>/dev/null; then exit 1; fi
+SH
+
+check "CLI launcher claim rejects --binding; lead workspace-root still validated" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-x --session L1 --host h --pid 1 --binding ldb-00000000000000000000000000000000 2>/dev/null; then exit 1; fi
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-wv --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug slug-wv --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-wv --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root relative/ws --binding "$bid" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-wv --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root / --binding "$bid" 2>/dev/null; then exit 1; fi
+SH
+
+check "CLI lead claim rejects a binding recorded for a different account" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-ac --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug slug-ac --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$ws" --expected-session S1)
+python3 -c '
+import json, os, sys
+p = os.path.join(sys.argv[1], "herdr-orch", "slug-ac", "bindings", sys.argv[2] + ".json")
+rec = json.load(open(p)); rec["account_id"] = "someone-else"; json.dump(rec, open(p, "w"))
+' "$root" "$bid"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-ac --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$ws" --binding "$bid" 2>/dev/null; then exit 1; fi
 SH
 
 check "read-side _valid_owner matches claim: rejects /, //, NUL, relative, empty" <<'SH'

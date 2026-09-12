@@ -1699,16 +1699,66 @@ def owner_transaction(rd, session=None, fence=None, context=None, expected_slug=
 
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
                 context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
-                control_tier="launcher", workspace_root=None):
+                control_tier="launcher", workspace_root=None, binding_id=None):
     sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
     if reason == "ok" and int(pid) != sock_pid:
         print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; using {sock_pid}", file=sys.stderr)
     elif reason not in ("ok", "empty"):
         print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}", file=sys.stderr)
+    if control_tier not in ("launcher", "lead"):
+        raise ValueError("invalid owner control_tier")
+    if control_tier == "launcher":
+        if workspace_root is not None or binding_id is not None:
+            raise ValueError("workspace_root/binding are only valid for a lead claim")
+    else:
+        if not coordination._valid_workspace_root(workspace_root):
+            raise ValueError("lead claim requires an absolute workspace_root below the filesystem root")
+        if not isinstance(binding_id, str) or not bindings.BINDING_ID_RE.fullmatch(binding_id):
+            raise ValueError("lead claim requires a valid binding id")
     with owner_transaction(rd, context=context, expected_slug=expected_slug, scope=scope) as tx:
+        if control_tier == "lead":
+            rec = bindings.read_binding(Path(rd), binding_id)
+            if rec is None:
+                raise ValueError("unknown dispatch binding")
+            if rec["parent"]["tier"] != "launcher":
+                raise ValueError("nested lead dispatch is forbidden")
+            if rec["expected_session_id"] != session_id:
+                raise ValueError("binding names a different session")
+            if rec["account_id"] != tx.account_id:
+                raise ValueError("binding names a different account")
+            if rec["runtime"] != runtime:
+                raise ValueError("binding names a different runtime")
+            if rec["repo_slug"] != Path(rd).name:
+                raise ValueError("binding names a different repository")
+            if rec["workspace_root"] != workspace_root:
+                raise ValueError("binding names a different workspace")
+            if rec["status"] != "issued" and not (
+                rec["status"] == "claimed" and rec["expected_session_id"] == session_id
+            ):
+                raise ValueError("binding is not claimable")
+            if context is not None and not workspace_provenance_ok(
+                workspace_root, context
+            ):
+                raise ValueError(
+                    "workspace_root is not a linked worktree of this repository"
+                )
+            if context is not None and rec["repo_id"] is not None and rec["repo_id"] != context["repo_id"]:
+                raise ValueError("binding names a different repository identity")
+            fence = tx.lead_claim(session_id, host, sock_pid if reason == "ok" else pid,
+                                  workspace_root, binding_id, stale_secs,
+                                  runtime=runtime, thread_id=thread_id)
+            if fence is not None:
+                if rec["status"] == "issued":
+                    write_json_atomic(bindings.binding_path(Path(rd), binding_id),
+                                      dict(rec, status="claimed", updated_ts=now_iso()))
+                mirror = Path(rd) / "leads" / binding_id / "owner.json"
+                if not contained(mirror, state_root()):
+                    raise ValueError("escapes state root")
+                lease = tx.lead_read(workspace_root)
+                write_json_atomic(mirror, dict(lease, messaging_socket=sock))
+            return fence
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
-                         runtime=runtime, thread_id=thread_id,
-                         control_tier=control_tier, workspace_root=workspace_root)
+                         runtime=runtime, thread_id=thread_id)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
@@ -1941,6 +1991,7 @@ def _main(argv=None) -> int:
     co.add_argument("--thread-id", default=None)
     co.add_argument("--control-tier", choices=("launcher", "lead"), default="launcher")
     co.add_argument("--workspace-root", default=None)
+    co.add_argument("--binding", default=None)
     ib = add("issue-binding", "--task-id", fenced=True)
     ib.add_argument("--workspace-root", required=True)
     ib.add_argument("--expected-session", required=True)
@@ -2058,6 +2109,10 @@ def _main(argv=None) -> int:
             _require(os.path.isdir(workspace_root), "workspace-root must be an existing directory")
         else:
             _require(workspace_root is None, "workspace-root is only valid with --control-tier lead")
+        if control_tier == "lead":
+            _require(ns.binding, "control-tier lead requires --binding")
+        else:
+            _require(ns.binding is None, "--binding is only valid with --control-tier lead")
         kw = {} if ns.stale_secs is None else {"stale_secs": ns.stale_secs}
         try:
             context = repository_context(ns.repo_path or os.getcwd())
@@ -2077,7 +2132,7 @@ def _main(argv=None) -> int:
                 _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
         fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
                             messaging_socket=ns.messaging_socket, context=context, expected_slug=expected_slug, runtime=ns.runtime or "claude", thread_id=ns.thread_id, scope=(_PAYLOAD_SELECTION.get() or {}).get("scope"),
-                            control_tier=control_tier, workspace_root=workspace_root, **kw)
+                            control_tier=control_tier, workspace_root=workspace_root, binding_id=ns.binding, **kw)
         if fence is None:
             print("BUSY")
             return 1

@@ -519,15 +519,12 @@ class OwnerTransaction:
             or (runtime == "codex" and not thread_id)
         ):
             raise ValueError("invalid owner runtime/thread identity")
-        if control_tier not in ("launcher", "lead"):
-            raise ValueError("invalid owner control_tier")
-        if control_tier == "lead":
-            if not _valid_workspace_root(workspace_root):
-                raise ValueError(
-                    "lead owner requires an absolute workspace_root below the filesystem root"
-                )
-        elif workspace_root is not None:
-            raise ValueError("workspace_root is only valid for a lead owner")
+        if control_tier != "launcher":
+            # Slug owner records are launcher-only; lead ownership is a
+            # per-workspace lease (lead_claim) grounded in a dispatch binding.
+            raise ValueError("slug ownership is launcher-only; use lead_claim")
+        if workspace_root is not None:
+            raise ValueError("workspace_root is only valid for a lead lease")
         self.assert_current()
         old = self.current
         if (
@@ -566,8 +563,8 @@ class OwnerTransaction:
             "runtime": runtime,
             "thread_id": thread_id,
             "account_id": self.account_id,
-            "control_tier": control_tier,
-            "workspace_root": workspace_root,
+            "control_tier": "launcher",
+            "workspace_root": None,
         }
         self._owner_write(self.current)
         return fence
