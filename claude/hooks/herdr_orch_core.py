@@ -1750,6 +1750,14 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                 rec["status"] == "claimed" and rec["expected_session_id"] == session_id
             ):
                 raise ValueError("binding is not claimable")
+            if rec["status"] == "claimed":
+                lease = tx.lead_read(workspace_root)
+                if not (
+                    lease is not None
+                    and coordination._valid_lead_lease(lease)
+                    and lease.get("binding_id") == binding_id
+                ):
+                    raise ValueError("binding generation is superseded; a new binding is required")
             if context is None:
                 raise ValueError("a lead claim requires repository context")
             if not workspace_provenance_ok(workspace_root, context):
@@ -1845,6 +1853,25 @@ def attempt_matches(task, done, phase, workspace):
         return False
     fields = ATTEMPT_FIELDS if "runtime" in worker else tuple(k for k in ATTEMPT_FIELDS if k in worker)
     return all(_nonempty_str(worker.get(key)) and done.get(key) == worker[key] for key in fields)
+
+
+def has_native_attempt(task, phase) -> bool:
+    """True when task's latest phase-matching worker is a native attempt row.
+
+    Binding-scoped task records are all new; the legacy-permissive fallback in
+    attempt_matches (no matching workers -> match) exists only to keep
+    pre-native task history readable and must never apply to them.
+    """
+    if not isinstance(task, dict):
+        return False
+    workers = task.get("workers", [])
+    if not isinstance(workers, list):
+        return False
+    matching = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
+    if not matching:
+        return False
+    worker = matching[-1]
+    return "runtime" in worker and all(_nonempty_str(worker.get(key)) for key in ATTEMPT_FIELDS)
 
 
 def is_completed(task, done, live_head_sha, workspace) -> bool:
@@ -2491,6 +2518,9 @@ def _main(argv=None) -> int:
                     task = json.loads(read_payload_text(base / "tasks" / f"{ns.task_id}.json"))
                 except (OSError, ValueError):
                     task = None
+                if getattr(ns, "binding", None) is not None:
+                    _require(has_native_attempt(task, done["phase"]),
+                             "binding-scoped emit requires a recorded native attempt")
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
                 write_json_atomic(out, done)
