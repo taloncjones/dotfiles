@@ -2203,5 +2203,32 @@ assert c.watch_changed(snap1, snap2)
 PY
 SH
 
+check "CLI claim-owner records control_tier=lead + workspace_root" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-lead --session S --host h --pid 1 --control-tier lead --workspace-root "$ws")
+test -n "$f"
+python3 -c 'import json,sys,os; rec=json.load(open(os.path.join(sys.argv[1],"herdr-orch","slug-lead","owner.json"))); assert rec["control_tier"]=="lead", rec; assert rec["workspace_root"]==os.path.realpath(sys.argv[2]), rec' "$root" "$ws"
+SH
+
+check "CLI claim-owner defaults control_tier=launcher when omitted" <<'SH'
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-l --session S --host h --pid 1 >/dev/null
+python3 -c 'import json,sys,os; rec=json.load(open(os.path.join(sys.argv[1],"herdr-orch","slug-l","owner.json"))); assert rec.get("control_tier","launcher")=="launcher", rec; assert rec.get("workspace_root") is None, rec' "$root"
+SH
+
+check "CLI claim-owner rejects control_tier=lead without workspace-root" <<'SH'
+root=$(mktemp -d)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-x --session S --host h --pid 1 --control-tier lead 2>/dev/null; then exit 1; fi
+SH
+
+check "CLI claim-owner rejects workspace-root without lead" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-x --session S --host h --pid 1 --workspace-root "$ws" 2>/dev/null; then exit 1; fi
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

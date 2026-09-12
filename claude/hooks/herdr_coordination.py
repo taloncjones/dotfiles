@@ -127,6 +127,15 @@ def _valid_owner(value):
         and (value.get("thread_id") is None or isinstance(value["thread_id"], str))
         and (value.get("runtime") != "codex" or bool(value.get("thread_id")))
         and (value.get("account_id") is None or isinstance(value["account_id"], str))
+        and value.get("control_tier", "launcher") in ("launcher", "lead")
+        and (
+            value.get("control_tier", "launcher") != "lead"
+            or (isinstance(value.get("workspace_root"), str) and bool(value["workspace_root"]))
+        )
+        and (
+            value.get("control_tier", "launcher") == "lead"
+            or value.get("workspace_root") is None
+        )
     )
 
 
@@ -140,6 +149,8 @@ def _owner_metadata(value):
         runtime=value.get("runtime", "claude"),
         thread_id=value.get("thread_id"),
         account_id=value.get("account_id"),
+        control_tier=value.get("control_tier", "launcher"),
+        workspace_root=value.get("workspace_root"),
     )
 
 
@@ -416,7 +427,8 @@ class OwnerTransaction:
         )
 
     def claim(
-        self, session, host, pid, stale_secs=900, runtime="claude", thread_id=None
+        self, session, host, pid, stale_secs=900, runtime="claude", thread_id=None,
+        control_tier="launcher", workspace_root=None,
     ):
         if (
             not isinstance(session, str)
@@ -438,6 +450,13 @@ class OwnerTransaction:
             or (runtime == "codex" and not thread_id)
         ):
             raise ValueError("invalid owner runtime/thread identity")
+        if control_tier not in ("launcher", "lead"):
+            raise ValueError("invalid owner control_tier")
+        if control_tier == "lead":
+            if not isinstance(workspace_root, str) or not workspace_root:
+                raise ValueError("lead owner requires a workspace_root")
+        elif workspace_root is not None:
+            raise ValueError("workspace_root is only valid for a lead owner")
         self.assert_current()
         old = self.current
         if (
@@ -476,6 +495,8 @@ class OwnerTransaction:
             "runtime": runtime,
             "thread_id": thread_id,
             "account_id": self.account_id,
+            "control_tier": control_tier,
+            "workspace_root": workspace_root,
         }
         self._owner_write(self.current)
         return fence
