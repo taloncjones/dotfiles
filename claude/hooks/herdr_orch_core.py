@@ -545,7 +545,10 @@ def workspace_provenance_ok(ws, context) -> bool:
             if not os.path.isabs(common)
             else os.path.realpath(common)
         )
-        return ws_common == os.path.realpath(context["common_dir"])
+        if ws_common != os.path.realpath(context["common_dir"]):
+            return False
+        toplevel = context_git(ws, "rev-parse", "--show-toplevel")
+        return os.path.realpath(toplevel) == os.path.realpath(ws)
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
 

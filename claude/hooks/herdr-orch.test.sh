@@ -2485,6 +2485,12 @@ assert core.workspace_provenance_ok(wt, ctx)
 assert not core.workspace_provenance_ok(repo, ctx)          # primary checkout
 foreign = tempfile.mkdtemp()
 assert not core.workspace_provenance_ok(foreign, ctx)       # not a worktree of this repo
+sub = os.path.join(repo, "sub")
+os.makedirs(sub)
+assert not core.workspace_provenance_ok(sub, ctx)           # subdir of primary checkout
+wt_sub = os.path.join(wt, "sub")
+os.makedirs(wt_sub)
+assert not core.workspace_provenance_ok(wt_sub, ctx)        # subdir of linked worktree
 PY
 SH
 
