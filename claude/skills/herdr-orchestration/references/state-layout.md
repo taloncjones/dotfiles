@@ -27,8 +27,22 @@ each other; the launcher lease alone remains one-per-repository. A lead lease
 is claimable only through a launcher-issued dispatch binding whose expected
 session, account, runtime, repository, and workspace all match; a binding
 whose parent is not a launcher is unclaimable (two tiers only). Lead dispatch
-remains inactive until the guard and procedure slices land; nothing in the
-current skill issues bindings.
+remains inactive until the procedure slice lands; nothing in the current skill
+issues bindings.
+
+The orch-edit guard reads these records read-only (no lock) to classify a
+session's role: a launcher-tier `owner.json` blanket-fences the session from
+every repo edit; a lead lease (validated against its dispatch binding: parent
+launcher, tier lead, status issued/claimed, matching runtime, repository,
+workspace, account, and expected session) fences the session to edits whose
+canonical destination is under its `workspace_root` and denies all others; a
+session with neither record is a plain worker. Lead leases are discovered from
+the authoritative coordination namespace, so a lead stays fenced even if its
+payload-root binding is missing; a lead whose binding is missing, corrupt,
+revoked, or completed is denied every repo edit (fail closed). The allow-edit
+marker never widens a lead's workspace scope. Every edit target is canonicalized
+from its raw token with symlinks and `..` resolved together, so a symlink- or
+`..`-through-`.todos` path cannot escape the fence.
 
 All state remains machine-local and untracked. Private spec/plan copies live
 in the selected payload tree's `artifacts/<task>/<launch>/` and are referenced
