@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_runtime
+import herdr_bindings as bindings
 import herdr_coordination as coordination
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
@@ -524,6 +525,29 @@ def repo_slug(remote_url, common_dir=None) -> str:
         return f"{norm}-{h}"
     h = hashlib.sha256(str(Path(common_dir).resolve()).encode()).hexdigest()[:8]
     return f"local-{h}"
+
+
+def workspace_provenance_ok(ws, context) -> bool:
+    """True when ws is a linked worktree of the repository in context.
+
+    The primary checkout is rejected; a directory outside this repository is
+    rejected. Provenance beyond repository membership (that the LAUNCHER
+    created the worktree) is carried by the binding itself: only a launcher
+    fence can issue one.
+    """
+    try:
+        primary = os.path.realpath(os.path.dirname(context["common_dir"]))
+        if os.path.realpath(ws) == primary:
+            return False
+        common = context_git(ws, "rev-parse", "--git-common-dir")
+        ws_common = (
+            os.path.realpath(os.path.join(ws, common))
+            if not os.path.isabs(common)
+            else os.path.realpath(common)
+        )
+        return ws_common == os.path.realpath(context["common_dir"])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
 
 
 def jira_task_id(key: str) -> str:
@@ -1914,6 +1938,14 @@ def _main(argv=None) -> int:
     co.add_argument("--thread-id", default=None)
     co.add_argument("--control-tier", choices=("launcher", "lead"), default="launcher")
     co.add_argument("--workspace-root", default=None)
+    ib = add("issue-binding", "--task-id", fenced=True)
+    ib.add_argument("--workspace-root", required=True)
+    ib.add_argument("--expected-session", required=True)
+    ib.add_argument("--lead-runtime", choices=("claude", "codex"), default="claude")
+    ib.add_argument("--parent-task-id", default=None)
+    sb = add("set-binding-status", fenced=True)
+    sb.add_argument("--binding", required=True)
+    sb.add_argument("--status", choices=("revoked", "completed"), required=True)
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
@@ -2102,6 +2134,87 @@ def _main(argv=None) -> int:
             create_payload_dir(rd)
             write_json_atomic(rd / "capabilities.json", rec)
             return 0
+    if ns.cmd == "issue-binding":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(
+            ns.parent_task_id is None or valid_task_id(ns.parent_task_id),
+            "invalid parent-task-id",
+        )
+        _require(
+            isinstance(ns.expected_session, str) and bool(ns.expected_session),
+            "expected-session must be nonempty",
+        )
+        ws = ns.workspace_root
+        _require(os.path.isabs(ws), "workspace-root must be an absolute path")
+        ws = os.path.realpath(ws)
+        _require(os.path.isdir(ws), "workspace-root must be an existing directory")
+        _require(
+            coordination._valid_workspace_root(ws),
+            "workspace-root must be below the filesystem root",
+        )
+        selection = _PAYLOAD_SELECTION.get()
+        if selection is not None:
+            _require(
+                workspace_provenance_ok(ws, selection["context"]),
+                "workspace-root must be a linked worktree of this repository, "
+                "not the primary checkout",
+            )
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(
+                tx.current.get("control_tier", "launcher") == "launcher",
+                "only a launcher owner issues bindings",
+            )
+            scope = (_PAYLOAD_SELECTION.get() or {}).get("scope") or {}
+            rec = {
+                "schema_version": 1,
+                "binding_id": bindings.new_binding_id(),
+                "parent": {
+                    "tier": "launcher",
+                    "task_id": ns.parent_task_id or ns.task_id,
+                    "session_id": ns.session,
+                },
+                "tier": "lead",
+                "task_id": ns.task_id,
+                "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
+                "repo_slug": ns.repo_slug,
+                "workspace_root": ws,
+                "account_id": tx.account_id,
+                "account_kind": scope.get("kind") or "personal",
+                "runtime": ns.lead_runtime,
+                "expected_session_id": ns.expected_session,
+                "created_fence": ns.fence,
+                "status": "issued",
+                "created_ts": now_iso(),
+                "updated_ts": now_iso(),
+            }
+            _require(bindings.valid_binding(rec), "constructed binding is invalid")
+            out = bindings.binding_path(rd, rec["binding_id"])
+            _require(contained(out, state_root()), "escapes state root")
+            create_payload_dir(out.parent)
+            write_json_atomic(out, rec)
+        print(rec["binding_id"])
+        return 0
+    if ns.cmd == "set-binding-status":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(
+                tx.current.get("control_tier", "launcher") == "launcher",
+                "only a launcher owner transitions bindings",
+            )
+            rec = bindings.read_binding(rd, ns.binding)
+            _require(rec is not None, "unknown dispatch binding")
+            _require(
+                bindings.can_transition(rec["status"], ns.status),
+                f"illegal binding transition {rec['status']} -> {ns.status}",
+            )
+            write_json_atomic(
+                bindings.binding_path(rd, ns.binding),
+                dict(rec, status=ns.status, updated_ts=now_iso()),
+            )
+        return 0
     if ns.cmd == "resolve-model":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         rd = repo_dir(ns.repo_slug)
