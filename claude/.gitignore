@@ -4,3 +4,11 @@
 # operating-principles.md is the committed, sanitized, model-agnostic distillation.
 Fable5.md
 Opus4.md
+
+# Per-task herdr verification contracts are local task residue, not shared
+# config. mech-contract writes claude/contracts/<task_id>-contract.json into
+# each worker's worktree and verify-contract reads it from that worktree's
+# filesystem (herdr_orch_core.py); nothing reads the committed copies. Keeping
+# them tracked only accumulated merged per-task files on main. The mechanism is
+# unaffected by ignoring them.
+contracts/
