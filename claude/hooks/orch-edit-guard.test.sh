@@ -1051,6 +1051,50 @@ mkrepo "$NLR" "git@example.com:org/nl.git"
 hook_case "AC-G newline in repo root: a launcher's write is denied, not un-guarded" deny Edit "$NLR/tracked.txt" "$NLR" "$SID_A"
 hook_case "AC-G newline in repo root: a lead's outside write is denied, not un-guarded" deny Edit "$NLR/tracked.txt" "$NLR" "$SID_C"
 
+# Scope-free identity must survive a listing error in an UNRELATED slug that
+# sorts first (co-review r10): the scan continues to the later slug that
+# names the session, so a scope failure still fails closed for both roles.
+mkdir -p "$HERDR_COORDINATION_ROOT/aaa-first"
+lead_setup "$SID_C" "$LWS"
+if HOOK="$HOOK" CFG="$CFG" H="$H" R="$R" SID_A="$SID_A" SID_C="$SID_C" python3 - <<'PY'
+import contextlib, importlib.util, io, json, os, sys
+sys.dont_write_bytecode = True
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+os.environ["HERDR_ENV"] = "1"
+os.environ["HOME"] = os.environ["H"]
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+real_iter = g.core.coordination.iter_lead_leases
+def flaky(slug):
+    if slug == "aaa-first":
+        raise OSError("listing failed")
+    return real_iter(slug)
+g.core.coordination.iter_lead_leases = flaky
+def bad_scope(*a, **k): raise ValueError("scope unavailable")
+g.selected_scope = bad_scope
+R = os.environ["R"]
+def run(sid):
+    sys.stdin = io.StringIO(json.dumps({"session_id": sid, "cwd": R, "hook_event_name": "PreToolUse",
+        "tool_name": "Edit", "tool_use_id": "toolu_sib",
+        "tool_input": {"file_path": R + "/tracked.txt", "content": "x"}}))
+    with contextlib.redirect_stderr(io.StringIO()):
+        return g.main()
+assert run(os.environ["SID_A"]) == 2, "launcher must still be found past a failing sibling slug"
+assert run(os.environ["SID_C"]) == 2, "lead must still be found past a failing sibling slug"
+PY
+then printf 'PASS  AC-G identity scan survives a listing error in an unrelated first slug\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G identity scan survives a listing error in an unrelated first slug\n' >&2; FAIL=$((FAIL + 1)); fi
+rm -rf "$HERDR_COORDINATION_ROOT/aaa-first"
+# A legal filename beginning with `:(` must be classified literally, not read
+# as pathspec magic that leaves it un-guarded (co-review r10).
+hook_case "AC-G ':(glob)' filename is guarded literally (launcher denied)" deny Write "$R/:(glob)probe.txt" "$R" "$SID_A"
+hook_case "AC-G ':(glob)' filename is guarded literally (lead outside denied)" deny Write "$R/:(glob)probe.txt" "$R" "$SID_C"
+# A carriage return inside a work-tree root must survive git output decoding
+# (no universal-newline translation) so the root still matches (co-review r10).
+CRR="$FIX/cr$(printf '\r')repo"
+mkrepo "$CRR" "git@example.com:org/cr.git"
+hook_case "AC-G carriage return in repo root: a launcher's write is denied, not un-guarded" deny Edit "$CRR/tracked.txt" "$CRR" "$SID_A"
+
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
         && PYTHONPYCACHEPREFIX="$FIX/pyc" python3 -m py_compile "$HOOK"; then

@@ -116,15 +116,16 @@ def git(args, cwd, budget):
         p = subprocess.run(
             ["git", "-C", cwd, *args],
             capture_output=True,
-            text=True,
-            errors="surrogateescape",
             timeout=left,
             env=env,
             check=False,
         )
+        # Decode ourselves: text=True would also translate universal newlines,
+        # turning a legal `\r` inside a path into `\n` and breaking the
+        # containment comparison (co-review r10). Bytes in, lossless out.
+        return p.returncode, p.stdout.decode("utf-8", "surrogateescape")
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None, ""
-    return p.returncode, p.stdout
 
 
 # --- state root reads ------------------------------------------------------
@@ -270,7 +271,14 @@ def privileged_anywhere(session_id, runtime):
                 and rec.get("control_tier", "launcher") == "launcher"
             ):
                 return True
-            for lease in core.coordination.iter_lead_leases(slug):
+            # Per-slug isolation (co-review r10): a listing error in one slug
+            # must not abort the scan before a later slug's valid record --
+            # otherwise a fenced session reads as unprivileged and is allowed.
+            try:
+                leases = core.coordination.iter_lead_leases(slug)
+            except Exception:  # noqa: BLE001, S112 -- skip this slug, keep scanning
+                continue
+            for lease in leases:
                 if (
                     lease.get("session_id") == session_id
                     and lease.get("runtime", "claude") == runtime
@@ -337,12 +345,20 @@ def classify(c, budget):
     # The work tree root itself (`mv /repo /tmp/x`) is guarded when it has
     # any tracked content: ls-files on "." exits 0 in that case.
     rel = os.path.relpath(c, top)
-    rc, _ = git(["ls-files", "--error-unmatch", "--", rel], top, budget)
+    # --literal-pathspecs: a legal filename beginning with `:(` (e.g.
+    # `:(glob)x`) is otherwise read as pathspec magic -- ls-files reports no
+    # match, check-ignore rejects it, and the target is "not guarded"
+    # (co-review r10). Every operand here is a literal path, never a pattern.
+    rc, _ = git(
+        ["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel], top, budget
+    )
     if rc == 0:
         return top, "tracked"
     if rc is None:
         return None
-    rc, _ = git(["check-ignore", "-q", "--", rel], top, budget)
+    # check-ignore does not support literal-pathspec magic (rc 128), so the
+    # leading-colon magic is neutralized with a `./` prefix instead.
+    rc, _ = git(["check-ignore", "-q", "--", "./" + rel], top, budget)
     return (top, "untracked") if rc == 1 else None
 
 
