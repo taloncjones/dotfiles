@@ -265,6 +265,15 @@
             "command": "~/.claude/hooks/account_guard.py"
           }
         ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/settings_drift_check.py"
+          }
+        ]
       }
     ],
     "Stop": [
