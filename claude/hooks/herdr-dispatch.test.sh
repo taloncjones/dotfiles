@@ -1583,6 +1583,49 @@ def test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass():
         fx.close()
 
 
+def test_result_object_normalizes_parse_failures_to_dispatch_error():
+    import herdr_dispatch_cli as cli
+
+    original = cli.json.loads
+    for exc in (RecursionError("too deep"), ValueError("integer too large")):
+        def raising(*args, _exc=exc, **kwargs):
+            raise _exc
+
+        cli.json.loads = raising
+        try:
+            cli.result_object('{"id": "x"}', "op")
+        except herdr_dispatch.DispatchError as caught:
+            assert "malformed JSON" in str(caught), caught
+        except Exception as leaked:  # noqa: BLE001
+            cli.json.loads = original
+            raise AssertionError(f"parse failure leaked as {type(leaked).__name__}")
+        else:
+            cli.json.loads = original
+            raise AssertionError("a parse failure must become DispatchError")
+        finally:
+            cli.json.loads = original
+
+
+def test_reprompt_cli_rejects_non_utf8_prompt_file():
+    fx = Fixture()
+    try:
+        bad = fx.root / "bad-prompt.bin"
+        bad.write_bytes(b"\xff\xfe\x00 not utf-8")
+        process = subprocess.run(
+            [sys.executable, herdr_dispatch.__file__, "reprompt",
+             "--repo-slug", fx.slug, "--task-id", "td-a", "--session", "S",
+             "--workspace-id", "w1", "--launch-id", "impl-td-a-abc",
+             "--phase", "implement", "--cwd", str(fx.repo), "--fence", "1",
+             "--prompt-file", str(bad), "--runtime", "codex"],
+            check=False, capture_output=True, text=True, env=fx.env,
+        )
+        assert process.returncode == 2, (process.returncode, process.stdout, process.stderr)
+        payload = json.loads(process.stdout)
+        assert payload["status"] == "error", payload
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -1600,6 +1643,8 @@ for name, test in (
     ("reprompt unparseable reply is uncertain", test_reprompt_unparseable_reply_valueerror_is_uncertain),
     ("reprompt readiness decode error marks failed and refuses", test_reprompt_readiness_decode_error_marks_failed_and_refuses),
     ("reprompt delivered-unrecorded repersists and allows next pass", test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass),
+    ("result_object normalizes parse failures to DispatchError", test_result_object_normalizes_parse_failures_to_dispatch_error),
+    ("reprompt CLI rejects a non-utf8 prompt file", test_reprompt_cli_rejects_non_utf8_prompt_file),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),

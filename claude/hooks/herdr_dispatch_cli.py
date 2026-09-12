@@ -24,7 +24,10 @@ def _dispatch_error(message: str) -> RuntimeError:
 def result_object(output: str, operation: str) -> dict[str, Any]:
     try:
         record = json.loads(output)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers JSONDecodeError plus value faults such as an integer
+        # over the str-conversion limit; RecursionError covers deeply nested
+        # input. All are malformed replies, not caller faults.
         raise _dispatch_error(f"{operation} returned malformed JSON") from exc
     if (
         not isinstance(record, dict)
@@ -490,7 +493,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(json.dumps(output, sort_keys=True))
         return 3 if output.get("status") in ("blocked", "unsupported") else 0
-    except (herdr_dispatch.DispatchError, OSError, agent_runtime.RouteError) as exc:
+    except (
+        herdr_dispatch.DispatchError,
+        OSError,
+        UnicodeError,
+        agent_runtime.RouteError,
+    ) as exc:
+        # UnicodeError covers a prompt-file that is not valid UTF-8, so a bad
+        # --prompt-file returns structured error JSON instead of a traceback.
         print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
         return 2
 
