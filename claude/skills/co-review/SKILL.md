@@ -137,8 +137,12 @@ high-severity findings. A round that leaves any required finder or verification
 incomplete cannot approve (co-review's "incomplete, never a clean review" rule).
 
 1. Run a complete round.
-2. Apply confirmed fixes with verified repros; re-run the affected tests; commit
-   and push.
+2. Post that round's comment first -- the verdict table plus the hidden marker at
+   the reviewed head (see "Review provenance marker") -- **before** committing any
+   fix for the round. Then apply confirmed fixes with verified repros, re-run the
+   affected tests, and commit and push. Posting before the fix commits keeps the
+   marker's `sha` (the reviewed head) above its own fixes on the PR timeline
+   rather than buried beneath them.
 3. Re-freeze the new committed head and run another complete round. Repeat.
 4. Return **APPROVE** only when a complete round yields zero unresolved
    actionable findings. A finding that reappears unfixed is still actionable --
@@ -209,9 +213,10 @@ This mode never emits the own-PR currency marker (`co-review: ...` from
 ## Review provenance marker
 
 On every completed round, post one PR comment, by the authenticated `gh` user,
-that is both human-readable and machine-parseable. Lead with a findings **table**
-(clearer than bullets), then the hidden currency marker as its own unindented
-top-level line:
+that is both human-readable and machine-parseable. Post it before committing the
+round's fixes (per the "Re-review loop" order) so the marker's `sha` sits above
+those fix commits on the timeline. Lead with a findings **table** (clearer than
+bullets), then the hidden currency marker as its own unindented top-level line:
 
 ```markdown
 ### Co-review round <n>
