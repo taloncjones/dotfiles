@@ -121,6 +121,10 @@ def _valid_workspace_root(value):
     )
 
 
+def lead_lease_key(workspace_root):
+    return hashlib.sha256(workspace_root.encode()).hexdigest()[:16]
+
+
 def _valid_owner(value):
     if not isinstance(value, dict):
         return False
@@ -149,6 +153,20 @@ def _valid_owner(value):
             value.get("control_tier", "launcher") == "lead"
             or value.get("workspace_root") is None
         )
+    )
+
+
+_BINDING_ID = re.compile(r"ldb-[0-9a-f]{32}\Z")
+
+
+def _valid_lead_lease(rec):
+    return (
+        _valid_owner(rec)
+        and type(rec.get("schema_version")) is int
+        and rec["schema_version"] == 1
+        and rec.get("control_tier") == "lead"
+        and isinstance(rec.get("binding_id"), str)
+        and bool(_BINDING_ID.fullmatch(rec["binding_id"]))
     )
 
 
@@ -288,6 +306,8 @@ class OwnerTransaction:
             or (
                 item.get("repo_id") is not None and not isinstance(item["repo_id"], str)
             )
+            or not isinstance(item.get("lead_seen", []), list)
+            or any(not isinstance(k, str) for k in item.get("lead_seen", []))
             for key, item in bindings.items()
         ):
             raise ValueError("corrupt repository bindings")
@@ -557,6 +577,137 @@ class OwnerTransaction:
             return False
         self.current = dict(self.current, heartbeat_ts=time.time())
         self._owner_write(self.current)
+        return True
+
+    def _lead_name(self, workspace_root):
+        if not _valid_workspace_root(workspace_root):
+            raise ValueError("invalid lead workspace_root")
+        return f"lead-{lead_lease_key(workspace_root)}.json"
+
+    def lead_read(self, workspace_root):
+        name = self._lead_name(workspace_root)
+        parent = self._owner_parent()
+        if parent is None:
+            return None
+        try:
+            return _read_at(parent, name)
+        finally:
+            os.close(parent)
+
+    def lead_claim(
+        self,
+        session,
+        host,
+        pid,
+        workspace_root,
+        binding_id,
+        stale_secs=900,
+        runtime="claude",
+        thread_id=None,
+    ):
+        if (
+            not isinstance(session, str)
+            or not session
+            or not isinstance(host, str)
+            or not host
+        ):
+            raise ValueError("session and host must be nonempty strings")
+        if (
+            type(pid) is not int
+            or pid < 1
+            or type(stale_secs) is not int
+            or stale_secs < 0
+        ):
+            raise ValueError("invalid lead pid or stale interval")
+        if (
+            runtime not in ("claude", "codex")
+            or (thread_id is not None and not isinstance(thread_id, str))
+            or (runtime == "codex" and not thread_id)
+        ):
+            raise ValueError("invalid lead runtime/thread identity")
+        if not isinstance(binding_id, str) or not _BINDING_ID.fullmatch(binding_id):
+            raise ValueError("invalid lead binding id")
+        name = self._lead_name(workspace_root)
+        self.assert_current()
+        old = self.lead_read(workspace_root)
+        key = lead_lease_key(workspace_root)
+        seen = self.bindings[self.slug].get("lead_seen", [])
+        if old is None and key in seen:
+            # Symmetric to owner_initialized on the slug lease: a lease that
+            # has existed must not silently restart at fence 1, or an old
+            # fence becomes valid again after the file is deleted or nulled.
+            raise ValueError(
+                "initialized lead lease is missing; explicit recovery required"
+            )
+        if old is not None and not _valid_lead_lease(old):
+            raise ValueError("corrupt lead lease; explicit recovery required")
+        if (
+            old
+            and time.time() - old["heartbeat_ts"] <= stale_secs
+            and (
+                old["session_id"] != session
+                or old.get("runtime", "claude") != runtime
+                or old.get("thread_id") != thread_id
+                or old.get("account_id") != self.account_id
+            )
+        ):
+            return None
+        fence = old["fence"] + 1 if old else 1
+        if key not in seen:
+            updated = dict(self.bindings[self.slug], lead_seen=sorted({*seen, key}))
+            self.bindings = dict(self.bindings, **{self.slug: updated})
+            atomic_json_at(self.registry_fd, "bindings.json", self.bindings)
+        record = {
+            "schema_version": 1,
+            "session_id": session,
+            "host": host,
+            "pid": pid,
+            "fence": fence,
+            "heartbeat_ts": time.time(),
+            "runtime": runtime,
+            "thread_id": thread_id,
+            "account_id": self.account_id,
+            "control_tier": "lead",
+            "workspace_root": workspace_root,
+            "binding_id": binding_id,
+        }
+        parent = self._owner_parent(create=True)
+        try:
+            self.assert_current()
+            atomic_json_at(parent, name, record)
+        finally:
+            os.close(parent)
+        return fence
+
+    def lead_check(self, session, fence, workspace_root, binding_id=None):
+        self.assert_current()
+        try:
+            lease = self.lead_read(workspace_root)
+        except ValueError:
+            return False
+        return (
+            type(fence) is int
+            and lease is not None
+            and _valid_lead_lease(lease)
+            and lease["session_id"] == session
+            and lease["fence"] == fence
+            and lease.get("account_id") == self.account_id
+            # Pin the fence to its binding generation: a successor lead on
+            # the same workspace must not authorize under a predecessor's
+            # still-claimed binding.
+            and (binding_id is None or lease["binding_id"] == binding_id)
+        )
+
+    def lead_refresh(self, session, fence, workspace_root):
+        if not self.lead_check(session, fence, workspace_root):
+            return False
+        lease = dict(self.lead_read(workspace_root), heartbeat_ts=time.time())
+        parent = self._owner_parent(create=True)
+        try:
+            self.assert_current()
+            atomic_json_at(parent, self._lead_name(workspace_root), lease)
+        finally:
+            os.close(parent)
         return True
 
 
