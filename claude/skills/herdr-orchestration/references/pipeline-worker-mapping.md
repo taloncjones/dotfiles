@@ -1,9 +1,13 @@
 # Pipeline worker mapping
 
-Policy an orchestrator follows when dispatching a superpowers pipeline. It is
-not a table any code reads: `claude/hooks/agent_runtime.py` is authoritative for
-every model and effort named here, and the `policy document matches the route
-table` case in `agent-runtime.test.sh` parses this file and fails if it drifts.
+Policy an orchestrator follows when dispatching a superpowers pipeline. The
+model and effort columns are not read from this file: `claude/hooks/agent_runtime.py`
+is authoritative for every model and effort named here, and the `policy document
+matches the route table` case in `agent-runtime.test.sh` parses this file and
+fails if it drifts. The step-to-role column IS bound in code -- by
+`agent_runtime.PIPELINE_ROUTES`, resolved via `route --step` (see
+`references/dispatch-mechanism.md`) -- so a pipeline dispatch derives its role
+from the step rather than hand-picking one.
 
 This describes the **native** path -- `agent_runtime.resolve_route` plus
 `herdr_dispatch.launch`. It does **not** describe the legacy
