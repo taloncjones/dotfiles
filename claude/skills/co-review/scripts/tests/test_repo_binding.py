@@ -14,7 +14,7 @@ _spec.loader.exec_module(rb)
 ALIASES = {"github.com": "github.com", "git-personal": "github.com", "gh-work": "github.com"}
 
 
-def resolver(alias):
+def resolver(alias, user=None, port=None):
     return ALIASES.get(alias.lower())
 
 
@@ -47,7 +47,7 @@ class NormalizeUrl(unittest.TestCase):
     def test_ssh_github_hostname_override_is_none(self):
         # `Host github.com` / `HostName elsewhere`: literal token is github.com
         # but it resolves off github.com, so it must be rejected.
-        def override(alias):
+        def override(alias, user=None, port=None):
             return "another.example" if alias.lower() == "github.com" else None
 
         self.assertIsNone(
@@ -176,6 +176,45 @@ class SshHost(unittest.TestCase):
             return R()
 
         self.assertIsNone(rb.ssh_host("X", runner=fake_run))
+
+    def test_passes_user_and_port(self):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            class R:
+                returncode = 0
+                stdout = "hostname github.com\n"
+            return R()
+
+        rb.ssh_host("github.com", user="git", port=2222, runner=fake_run)
+        self.assertIn("-l", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("-l") + 1], "git")
+        self.assertIn("-p", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("-p") + 1], "2222")
+        self.assertEqual(seen["cmd"][-1], "github.com")
+
+
+class ResolverParams(unittest.TestCase):
+    def test_ssh_resolver_receives_user_and_port(self):
+        seen = {}
+
+        def capture(host, user=None, port=None):
+            seen["args"] = (host, user, port)
+            return "github.com"
+
+        rb.normalize_url("ssh://git@github.com:2222/owner/repo.git", capture)
+        self.assertEqual(seen["args"], ("github.com", "git", 2222))
+
+    def test_scp_resolver_receives_user_no_port(self):
+        seen = {}
+
+        def capture(host, user=None, port=None):
+            seen["args"] = (host, user, port)
+            return "github.com"
+
+        rb.normalize_url("git@github.com:owner/repo.git", capture)
+        self.assertEqual(seen["args"], ("github.com", "git", None))
 
 
 class GhLookup(unittest.TestCase):

@@ -13,29 +13,31 @@ import sys
 from urllib.parse import urlsplit
 
 _GITHUB = "github.com"
-_SCP_RE = re.compile(r"^(?:[^@/]+@)?(?P<host>[^/:]+):(?P<path>.+)$")
+_SCP_RE = re.compile(r"^(?:(?P<user>[^@/]+)@)?(?P<host>[^/:]+):(?P<path>.+)$")
 _PR_PATH_RE = re.compile(r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<num>\d+)/?$")
 
 
 def _transport_host_path(url: str):
-    """(transport, host, path). transport is 'ssh' (scp-like or ssh://) or
-    'web' (https/http). None if the scheme is unsupported or the shape is
-    unrecognized. Only an explicit allowlist of schemes is accepted, so
+    """(transport, host, user, port, path). transport is 'ssh' (scp-like or
+    ssh://) or 'web' (https/http). None if the scheme is unsupported or the
+    shape is unrecognized. Only an explicit allowlist of schemes is accepted, so
     file://, git://, or an arbitrary helper scheme is rejected outright.
-    Transport matters: ssh config applies only to SSH, never to a web host."""
+    user/port are the SSH connection parameters (None for web / scp without a
+    user or port); they must feed `ssh -G` so a user- or port-dependent
+    `HostName` rewrite resolves the way git actually connects."""
     if "://" in url:
         parts = urlsplit(url)
         host = parts.hostname or ""
         if not host:
             return None
         if parts.scheme == "ssh":
-            return ("ssh", host, parts.path)
+            return ("ssh", host, parts.username, parts.port, parts.path)
         if parts.scheme in ("https", "http"):
-            return ("web", host, parts.path)
+            return ("web", host, None, None, parts.path)
         return None  # file://, git://, unknown scheme
     scp = _SCP_RE.match(url)
     if scp:
-        return ("ssh", scp.group("host"), scp.group("path"))
+        return ("ssh", scp.group("host"), scp.group("user"), None, scp.group("path"))
     return None
 
 
@@ -59,15 +61,16 @@ def normalize_url(url: str, host_resolver=None) -> str | None:
     parsed = _transport_host_path(url)
     if parsed is None:
         return None
-    transport, host, path = parsed
+    transport, host, user, port, path = parsed
     host = host.lower()
     if transport == "ssh":
         # Resolve EVERY ssh host through ssh config, including a literal
-        # 'github.com': a `Host github.com` / `HostName elsewhere` stanza would
-        # otherwise let an origin that resolves off github.com pass.
+        # 'github.com', and with the URL's own user and port: a `Host github.com`
+        # / `HostName elsewhere` stanza -- or a `Match user`/port-dependent one --
+        # would otherwise let an origin that resolves off github.com pass.
         if host_resolver is None:
             return None
-        resolved = host_resolver(host)
+        resolved = host_resolver(host, user, port)
         if not resolved or resolved.lower() != _GITHUB:
             return None
     else:  # web: a real DNS host, no ssh config; must be literally github.com
@@ -96,12 +99,19 @@ def matches(a, b) -> bool:
     return bool(a) and bool(b) and a == b
 
 
-def ssh_host(alias: str, runner=subprocess.run) -> str | None:
-    """Real hostname for an ssh alias via `ssh -G`, or None."""
+def ssh_host(alias, user=None, port=None, runner=subprocess.run) -> str | None:
+    """Real hostname via `ssh -G`, or None. Resolve with the URL's own user
+    (-l) and port (-p) so a user/port-dependent HostName rewrite resolves the
+    way git actually connects. Signature matches host_resolver(host, user, port).
+    """
+    cmd = ["ssh", "-G"]
+    if user:
+        cmd += ["-l", user]
+    if port:
+        cmd += ["-p", str(port)]
+    cmd.append(alias)
     try:
-        result = runner(
-            ["ssh", "-G", alias], capture_output=True, text=True, timeout=10
-        )
+        result = runner(cmd, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
