@@ -36,10 +36,12 @@ Accepted holes (allow): scripts and functions, `python -c`, `git apply`/
 A-1; only sed/gsed/perl are modeled as in-place editors). This is a guard
 against drift, not evasion.
 
-Beyond TARGET_CAP (20) distinct targets, only the extra ones past the cap
-are unguarded (paths[:TARGET_CAP] keeps the first 20 seen and drops the
-rest) -- a single command mixing scratch and tracked targets is guarded
-or not per target, in first-seen order, not as a whole-command allow.
+Beyond TARGET_CAP (20) distinct OPERANDS, only the extra operands past the
+cap are unguarded (the first 20 distinct source operands are admitted, in
+first-seen order, and every cwd-expansion of an admitted operand is kept so
+a single redirect after many `cd`s cannot be crowded out) -- a single
+command mixing scratch and tracked targets is guarded or not per operand,
+not as a whole-command allow.
 
 Deny is exit 2 with three stderr lines; allow is exit 0 and silent. Fails
 open on any unexpected exception (exit 0), matching the other guards.
@@ -903,18 +905,29 @@ def targets_for(payload, tool, cwd, home):
 
 def resolve_targets(raw, home):
     """Canonical absolute paths, skipping anything the shell would still
-    expand ($VAR, backticks, globs), deduplicated, capped."""
+    expand ($VAR, backticks, globs), deduplicated, capped.
+
+    The cap counts distinct source OPERANDS, not flattened (cwd, operand)
+    expansions: one operand (e.g. a single redirect) can expand to many
+    candidate cwds after successive `cd`s, and a flat cap on canonical paths
+    could push that operand's REAL destination past the cap and un-guard it.
+    Admitting whole operands keeps every candidate of an admitted one."""
     paths = []
+    operands = []
     for c_cwd, w, shell_expands in raw:
-        w = rm_guard.expand_home(w, home)
-        if not w or (
-            shell_expands and ("$" in w or "`" in w or rm_guard.has_glob_chars(w))
+        we = rm_guard.expand_home(w, home)
+        if not we or (
+            shell_expands and ("$" in we or "`" in we or rm_guard.has_glob_chars(we))
         ):
             continue
-        p = canonical_target(w, c_cwd, home)
+        if w not in operands:
+            if len(operands) >= TARGET_CAP:
+                continue
+            operands.append(w)
+        p = canonical_target(we, c_cwd, home)
         if p is not None and p not in paths:
             paths.append(p)
-    return paths[:TARGET_CAP]
+    return paths
 
 
 # --- audit -----------------------------------------------------------------

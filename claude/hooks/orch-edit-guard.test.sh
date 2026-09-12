@@ -341,6 +341,13 @@ hook_case "AC4 input from tracked, output to scratch passes" allow Bash "cat < $
 hook_case "AC4 3>&1 dup passes" allow Bash "cmd 3>&1" "$R" "$SID_A"
 many=$(i=1; while [ "$i" -le 24 ]; do printf 'echo x > %s/f%s; ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
 hook_case "AC4 25th distinct target is past the cap (fail open)" allow Bash "$many" "$R" "$SID_A"
+# The cap counts distinct OPERANDS, not (cwd, operand) expansions: after many
+# successful `cd`s the retained-cwd set exceeds 20 candidates, but a single
+# final relative redirect into a tracked file is ONE operand and must still be
+# guarded from the original repo cwd (co-review r4).
+i=1; while [ "$i" -le 41 ]; do mkdir -p "$S/cdd$i"; i=$((i + 1)); done
+cdchain=$(i=1; while [ "$i" -le 41 ]; do printf 'cd %s/cdd%s && ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > tracked.txt')
+hook_case "AC4 one redirect after 41 cd's is still guarded (operand cap, not path cap)" deny Bash "$cdchain" "$R" "$SID_A"
 
 # --- AC4 cycle-3 regressions (co-review c3 B-1) -------------------------
 hook_case "AC4 arithmetic << before a write is not a heredoc, paren form (B-1)" deny Bash "n=\$((1 << 8))
