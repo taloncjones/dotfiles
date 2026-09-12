@@ -90,12 +90,27 @@ as an appended turn to that live worker; teardown+resume from a handoff degrades
 to the fresh-worker weakness and is a fallback only.
 
 A dedicated, fence-checked dispatch primitive for "append a turn to a named live
-worker" is NOT yet shipped -- an early attempt was withdrawn at co-review because
-a correct one needs a CLI entrypoint, an owner-fence check, worktree/task-context
-validation, and an immutable herdr session identity to bind the recipient (the
-current name/pane checks cannot prove session continuity). Until it lands, run
-the incorporation loop above by hand through the existing dispatch surface, and
-treat cross-session teardown+resume as the fallback. Tracked as a follow-up.
+worker" is shipped as `herdr_dispatch reprompt` (CLI subcommand):
+`reprompt --repo-slug --task-id --session --workspace-id --launch-id --phase
+--cwd --prompt-file --fence [--runtime --prompt-timeout-ms --personal]`. It
+validates the worktree/task context, targets the worker by `launch_id` (not the
+latest attempt), and holds the owner fence across re-validating that the target
+is still the current attempt for its phase AND delivering acceptance, so no
+superseding attempt or ownership transfer can slip in between. It requires the
+live agent idle on its recorded pane. Delivery is classified so an incorporation
+turn is never double-delivered: confirmed rejection (only a provable
+pre-acceptance failure, retry-safe), uncertain (timeout, nonzero exit, or
+ambiguous reply -- never auto-resent), delivered, or delivered-unrecorded
+(accepted but the record write failed -- never resent).
+
+Best-effort limitation: reprompt cannot prove the LIVE agent is the same process
+generation as the recorded launch -- a worker restarted under the same
+name/pane/runtime passes the checks. Closing this needs herdr to expose an
+immutable session/process-generation id (same missing-capability class as the
+unsupported native `wake()` queue); the return payload carries
+`observation: "session-identity-not-exposed-by-herdr"`. Where the primitive is
+unavailable, run the incorporation loop above by hand through the dispatch
+surface and treat cross-session teardown+resume as the fallback.
 
 ## Cache economics
 
