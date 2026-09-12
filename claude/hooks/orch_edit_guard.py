@@ -806,14 +806,19 @@ def targets_for(payload, tool, cwd, home):
 
 def resolve_targets(raw, home):
     """`(guard_path, real_path)` pairs, skipping anything the shell would
-    still expand ($VAR, backticks, globs), deduplicated by guard_path, capped.
+    still expand ($VAR, backticks, globs), deduplicated by the WHOLE PAIR
+    (not guard_path alone), capped.
 
     `guard_path` is the lexically-normalized target the launcher fence acts on
     (`canon(rm_guard.resolve(...))`, unchanged). `real_path` additionally
     resolves symlinks in the raw target so a lead-scope containment check
     cannot be fooled by `<workspace>/<symlink>/../escape` -- `rm_guard.resolve`
     collapses `..` before symlinks resolve, so the guard_path alone hides such
-    an escape."""
+    an escape. Two raw targets can share a guard_path yet resolve to different
+    real paths (one direct, one through a symlink+`..`); dedup by the pair keeps
+    both so the lead check sees every real destination. `real_path` is None when
+    the raw target cannot be resolved (e.g. an embedded NUL) -- the lead check
+    treats None as an escape and denies."""
     paths = []
     seen = set()
     for c_cwd, w, shell_expands in raw:
@@ -823,11 +828,16 @@ def resolve_targets(raw, home):
         ):
             continue
         p = canon(rm_guard.resolve(w, c_cwd))
-        if p in seen:
-            continue
-        seen.add(p)
         base = w if os.path.isabs(w) else os.path.join(c_cwd, w)
-        paths.append((p, os.path.realpath(base)))
+        try:
+            real = os.path.realpath(base)
+        except (OSError, ValueError):
+            real = None
+        key = (p, real)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append((p, real))
     return paths[:TARGET_CAP]
 
 
@@ -976,13 +986,19 @@ def lead_scope_verdict(guarded, owner, slug, real_of=None):
     wr = owner.get("workspace_root")
     if not isinstance(wr, str) or not os.path.isabs(wr):
         return "deny", "lead-scope", slug, {"reason": "bad-workspace-root", "workspace_root": wr}
-    root = os.path.realpath(wr)
-    if not os.path.isdir(root):
-        return "deny", "lead-scope", slug, {"reason": "workspace-root-missing", "workspace_root": wr}
-    for c, _top, _reason in guarded:
-        real = real_of.get(c) or os.path.realpath(c)
-        if not _within(real, root):
-            return "deny", "lead-scope", slug, {"target": real, "workspace_root": wr}
+    try:
+        root = os.path.realpath(wr)
+        if not os.path.isdir(root):
+            return "deny", "lead-scope", slug, {"reason": "workspace-root-missing", "workspace_root": wr}
+        for c, _top, _reason in guarded:
+            reals = real_of.get(c) or {os.path.realpath(c)}
+            for real in reals:
+                if real is None or not _within(real, root):
+                    return "deny", "lead-scope", slug, {"target": real, "workspace_root": wr}
+    except (OSError, ValueError):
+        # A malformed path (e.g. an embedded NUL) must not escape to the
+        # top-level fail-open handler; deny instead.
+        return "deny", "lead-scope", slug, {"reason": "resolution-error", "workspace_root": wr}
     return "allow", slug, None
 
 
@@ -1141,15 +1157,21 @@ def decide(payload, runtime="claude"):
         core.account_payload_root(caller_scope) / "herdr-orch"
     )
     budget = Budget(GIT_BUDGET_SECS)
-    guarded = []
+    # Accumulate every distinct real path per guard_path (a symlink+`..` target
+    # can share a guard_path with a direct one); the lead check verifies them
+    # all. classify()/the launcher path still act once per guard_path.
     real_of = {}
     for p, real in pairs:
-        if exempt(p, state_real):
+        real_of.setdefault(p, set()).add(real)
+    guarded = []
+    seen_guard = set()
+    for p, _real in pairs:
+        if p in seen_guard or exempt(p, state_real):
             continue
+        seen_guard.add(p)
         hit = classify(p, budget)
         if hit:
             guarded.append((p, hit[0], hit[1]))
-            real_of[p] = real
     if not guarded:
         return 0
     slug_cache = {}

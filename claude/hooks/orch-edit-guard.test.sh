@@ -689,6 +689,12 @@ mkdir -p "$RL/other"
 ln -s "$RL/other" "$RL/dir/link"
 hook_case "lead symlink+.. escape is denied" deny Edit "$RL/dir/link/../pwned.txt" "$RL" "$SID_D"
 
+# Dedup escape: two write targets that collapse to the SAME lexical guard path
+# but resolve to DIFFERENT real paths (one direct in-workspace, one through the
+# symlink+`..` escaping outside). Dedup must not drop the escaping real path.
+hook_case "lead mixed direct+escaping targets (same guard path) denies" deny \
+    Bash "printf x > $RL/dir/pwned.txt; printf y > $RL/dir/link/../pwned.txt" "$RL" "$SID_D"
+
 # Corrupt the authoritative record's workspace_root to a nonexistent ABSOLUTE
 # path: the session is still identified as a lead, but scope cannot be
 # established -> deny.
@@ -701,6 +707,13 @@ hook_case "lead with unresolvable workspace_root -> deny (fail closed)" deny Edi
 python3 -c 'import json,os,sys; p=os.path.join(sys.argv[1],sys.argv[2],"owner.json"); rec=json.load(open(p)); rec["workspace_root"]="relative/ws"; json.dump(rec, open(p,"w"))' \
     "$HERDR_COORDINATION_ROOT" "$SLUG_L"
 hook_case "lead with relative workspace_root -> deny (no hang)" deny Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
+
+# Corrupt workspace_root to a MALFORMED absolute path (embedded NUL): it passes
+# the isabs() check but realpath() raises ValueError. The guard must catch it and
+# deny, NOT let the exception reach the top-level fail-open handler.
+python3 -c 'import json,os,sys; p=os.path.join(sys.argv[1],sys.argv[2],"owner.json"); rec=json.load(open(p)); rec["workspace_root"]="/tmp/\x00bad"; json.dump(rec, open(p,"w"))' \
+    "$HERDR_COORDINATION_ROOT" "$SLUG_L"
+hook_case "lead with malformed(NUL) workspace_root -> deny (no fail-open)" deny Edit "$RL/dir/inner.txt" "$RL" "$SID_D"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
