@@ -43,10 +43,13 @@ closed -- an unscanned target could be a tracked file hidden by alias
 spellings or by one relative operand expanding across many retained `cd`
 candidates), while a plain worker is allowed as always.
 
-Deny is exit 2 with three stderr lines; allow is exit 0 and silent. Fails
-open on any unexpected exception (exit 0), matching the other guards.
-Malformed state files have defined outcomes: a bad owner.json is skipped,
-a bad marker is no marker.
+Deny is exit 2 with three stderr lines; allow is exit 0 and silent. On an
+unexpected exception the verdict is routed through crash_verdict(): a
+session identifiable as a launcher or lead fails CLOSED (exit 2, spec R9),
+and only a session with no privileged identity keeps the fail-open default
+(exit 0, matching the other guards) -- so no single reader or parser that
+raises can un-fence a fenced session. Malformed state files still have
+defined outcomes: a bad owner.json is skipped, a bad marker is no marker.
 """
 
 import json
@@ -1376,12 +1379,68 @@ def decide(payload, runtime="claude"):
     return refuse_lead(guarded[0], roots)
 
 
+def refuse_crash():
+    """Three-line refusal when the guard itself failed while checking a
+    fenced session's write. Failing closed here is what turns "make X raise"
+    from a bypass into, at worst, a false deny."""
+    print(
+        f"{BLOCKED} -- the guard hit an internal error while checking a "
+        "fenced (orchestrator or lead) session's write.",
+        file=sys.stderr,
+    )
+    print(
+        "A fenced session fails closed on any guard error: an unverified "
+        "target could be a tracked file.",
+        file=sys.stderr,
+    )
+    print(
+        "Retry once; if it persists, dispatch the edit to a worker and "
+        "report the guard error.",
+        file=sys.stderr,
+    )
+    sys.stderr.flush()
+    return 2
+
+
+def crash_verdict(payload, runtime="claude"):
+    """Exit status after decide() raised: 2 if the payload's session can be
+    identified as a launcher or lead (fail closed), else 0.
+
+    Spec R9 -- fail closed on ambiguity -- applied at the ONE chokepoint every
+    reader and parser sits behind, so it holds regardless of which of them
+    raised. Only a session with no privileged identity at all keeps the
+    documented fail-open default; if identification itself is impossible,
+    there is nothing to fence and 0 is returned. Total by construction."""
+    try:
+        if os.environ.get("HERDR_ENV") != "1":
+            return 0
+        sid = payload.get("session_id") if isinstance(payload, dict) else None
+        if not isinstance(sid, str) or not SESSION_ID_RE.match(sid):
+            return 0
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.getcwd()
+        caller_cwd = (
+            payload.get("caller_cwd")
+            if isinstance(payload.get("caller_cwd"), str)
+            else cwd
+        )
+        caller_scope = selected_scope(caller_cwd, runtime)
+        if owned_slugs(sid, runtime, caller_scope, {}):
+            return refuse_crash()
+        is_lead, _roots = lead_authority(sid, runtime, caller_scope)
+        return refuse_crash() if is_lead else 0
+    except Exception:  # noqa: BLE001 -- unidentifiable session: nothing to fence
+        return 0
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
-    return decide(payload)
+    try:
+        return decide(payload)
+    except Exception:  # noqa: BLE001 -- route the crash through the fail-closed chokepoint
+        return crash_verdict(payload)
 
 
 if __name__ == "__main__":

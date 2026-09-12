@@ -958,6 +958,41 @@ hook_case "AC-G non-UTF-8 origin: a launcher's write is denied, not failed open"
 lead_setup "$SID_C" "$LWS"
 hook_case "AC-G non-UTF-8 origin: a lead's outside write is denied, not failed open" deny Edit "$FIX/badorigin/tracked.txt" "$FIX/badorigin" "$SID_C"
 
+# Structural fail-closed (spec R9 at the chokepoint): if the guard itself
+# raises while checking a write, an identified launcher or lead is DENIED and
+# only a session with no privileged identity keeps the fail-open default --
+# so no single raising reader/parser can un-fence a fenced session.
+lead_setup "$SID_C" "$LWS"
+if HOOK="$HOOK" CFG="$CFG" H="$H" R="$R" SID_A="$SID_A" SID_C="$SID_C" python3 - <<'PY'
+import contextlib, importlib.util, io, json, os, sys
+sys.dont_write_bytecode = True
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+os.environ["HERDR_ENV"] = "1"
+os.environ["HOME"] = os.environ["H"]
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+def boom(*a, **k): raise RuntimeError("injected guard failure")
+g.classify = boom
+R = os.environ["R"]
+def run(sid):
+    payload = {"session_id": sid, "cwd": R, "hook_event_name": "PreToolUse",
+               "tool_name": "Edit", "tool_use_id": "toolu_crash",
+               "tool_input": {"file_path": R + "/tracked.txt", "content": "x"}}
+    err = io.StringIO()
+    sys.stdin = io.StringIO(json.dumps(payload))
+    with contextlib.redirect_stderr(err):
+        rc = g.main()
+    return rc, err.getvalue().splitlines()
+rc, lines = run(os.environ["SID_A"])
+assert rc == 2 and len(lines) == 3 and lines[0].startswith("Blocked: orch-edit-guard"), ("launcher", rc, lines)
+rc, lines = run(os.environ["SID_C"])
+assert rc == 2 and len(lines) == 3, ("lead", rc, lines)
+rc, lines = run("55555555-5555-5555-5555-555555555555")
+assert rc == 0 and lines == [], ("worker", rc, lines)
+PY
+then printf 'PASS  AC-G guard crash fails closed for launcher and lead, open for a worker\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G guard crash fails closed for launcher and lead, open for a worker\n' >&2; FAIL=$((FAIL + 1)); fi
+
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
         && PYTHONPYCACHEPREFIX="$FIX/pyc" python3 -m py_compile "$HOOK"; then
