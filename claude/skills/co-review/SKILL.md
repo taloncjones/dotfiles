@@ -169,7 +169,15 @@ uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/repo_bi
 A non-zero exit means `origin` does not bind to the PR's base (a fork or the
 wrong remote) -- stop, or fetch the verified base remote before continuing.
 The PR URL is the independent identity for this check; never derive it from
-`origin`.
+`origin`. The origin probe runs with `GIT_*` routing stripped so an inherited
+`insteadOf` cannot make it disagree with the fetch that co-review `prepare`
+performs.
+
+Known limitation: the SSH resolution mirrors `git`'s connection via `ssh -G`
+with the URL's user and port, but does not parse a repo-local
+`core.sshCommand`. A `core.sshCommand` that rewrites the destination host is
+outside this check's threat model (it requires control of the reviewer's own
+git config); the binding assumes no such override.
 
 Per-round output:
 
@@ -188,7 +196,7 @@ Re-review scope: read the latest trusted coworker marker with
 `coworker_review.select_coworker_marker(comments, {gh_user})`; compute
 `is_ancestor` via `git merge-base --is-ancestor <prev_sha> <new_head>`; then
 call `coworker_review.decide_review_scope(prev_marker, new_head,
-current_base_ref_tip, is_ancestor)`. On `full`, re-diff the whole PR
+current_base_ref, current_base_ref_tip, is_ancestor)`. On `full`, re-diff the whole PR
 (three-dot). On `incremental`, review `prev_head..new_head` and also re-check
 every still-open prior finding against the new tree -- an incremental diff
 alone can miss a finding whose surrounding code moved. The verdict always
