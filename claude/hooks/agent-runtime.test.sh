@@ -188,6 +188,32 @@ def test_unknown_pipeline_step_is_rejected():
     raises(runtime.RouteError, lambda: runtime.role_for_step("deploy"), "unknown pipeline step")
 
 
+def test_route_step_cli_derives_role_from_pipeline_step():
+    caps = json.dumps({"models": {"fable": {"status": "available", "efforts": ["high", "xhigh"]}}})
+    step_process = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--step", "brainstorming", "--capabilities-json", caps],
+        check=True, capture_output=True, text=True,
+    )
+    route = json.loads(step_process.stdout)
+    assert route["role"] == "planner", route
+    assert (route["model"], route["effort"]) == ("fable", "high"), route
+    assert route["ready"] is True, route
+
+    both = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--step", "brainstorming", "--role", "planner"],
+        capture_output=True, text=True,
+    )
+    assert both.returncode != 0, both.stdout
+
+    neither = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude"],
+        capture_output=True, text=True,
+    )
+    assert neither.returncode != 0, neither.stdout
+
+
 def test_critical_routes_are_explicit_xhigh():
     caps = codex_capabilities()
     for role in ("reviewer", "think"):
@@ -1417,6 +1443,7 @@ for name, test in (
     ("brainstorming step falls back to opus/xhigh", test_brainstorming_step_falls_back_to_opus_xhigh_when_fable_unavailable),
     ("pipeline route mutation breaks conformance", test_pipeline_route_mutation_breaks_conformance),
     ("unknown pipeline step is rejected", test_unknown_pipeline_step_is_rejected),
+    ("route --step derives role from pipeline step", test_route_step_cli_derives_role_from_pipeline_step),
 ):
     check(name, test)
 
