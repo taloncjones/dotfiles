@@ -167,13 +167,7 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
             and not isinstance(rec.get("fence"), bool)
         ):
             continue
-        entry = {
-            "fence": rec["fence"],
-            "rd": rd,
-            "caller_scope": caller_scope,
-            "control_tier": rec.get("control_tier", "launcher"),
-            "workspace_root": rec.get("workspace_root"),
-        }
+        entry = {"fence": rec["fence"], "rd": rd, "caller_scope": caller_scope}
         if slug in targets:
             entry.update(targets[slug])
         owned[slug] = entry
@@ -805,27 +799,9 @@ def targets_for(payload, tool, cwd, home):
 
 
 def resolve_targets(raw, home):
-    """`(guard_path, real_path)` pairs, skipping anything the shell would
-    still expand ($VAR, backticks, globs), deduplicated by the WHOLE PAIR
-    (not guard_path alone), capped.
-
-    `guard_path` is the lexically-normalized target the launcher fence acts on
-    (`canon(rm_guard.resolve(...))`, unchanged). `real_path` additionally
-    resolves symlinks in the raw target so a lead-scope containment check
-    cannot be fooled by `<workspace>/<symlink>/../escape` -- `rm_guard.resolve`
-    collapses `..` before symlinks resolve, so the guard_path alone hides such
-    an escape. Two raw targets can share a guard_path yet resolve to different
-    real paths (one direct, one through a symlink+`..`); every distinct real_path
-    for a guard_path is kept so the lead check sees every real destination.
-    `real_path` is None when the raw target cannot be resolved (e.g. an embedded
-    NUL) -- the lead check treats None as an escape and denies.
-
-    The cap is on the number of DISTINCT guard_paths (TARGET_CAP), NOT on pairs:
-    symlink variants sharing one guard_path must never consume cap slots and push
-    a distinct tracked target past the cap (that would drop it from the launcher
-    fence). Every real_path of an admitted guard_path is retained."""
-    reals = {}
-    order = []
+    """Canonical absolute paths, skipping anything the shell would still
+    expand ($VAR, backticks, globs), deduplicated, capped."""
+    paths = []
     for c_cwd, w, shell_expands in raw:
         w = rm_guard.expand_home(w, home)
         if not w or (
@@ -833,19 +809,9 @@ def resolve_targets(raw, home):
         ):
             continue
         p = canon(rm_guard.resolve(w, c_cwd))
-        if p not in reals:
-            if len(order) >= TARGET_CAP:
-                continue
-            reals[p] = []
-            order.append(p)
-        base = w if os.path.isabs(w) else os.path.join(c_cwd, w)
-        try:
-            real = os.path.realpath(base)
-        except (OSError, ValueError):
-            real = None
-        if real not in reals[p]:
-            reals[p].append(real)
-    return [(p, real) for p in order for real in reals[p]]
+        if p not in paths:
+            paths.append(p)
+    return paths[:TARGET_CAP]
 
 
 # --- audit -----------------------------------------------------------------
@@ -972,59 +938,11 @@ def claim_budget(rd, marker, session_id, tool_use_id, paths):
     return own if seen == len(paths) else None
 
 
-def _within(target, root):
-    """True iff canonical `target` is `root` or below it -- symlink- and
-    prefix-collision-safe (os.path.commonpath, not a string prefix, so
-    `/ws2` does not match root `/ws`, and root `/` matches every path)."""
-    try:
-        return os.path.commonpath([root, target]) == root
-    except ValueError:  # mixed absolute/relative or different drives
-        return False
-
-
-def lead_scope_verdict(guarded, owner, slug, real_of):
-    """A lead owner may edit only inside its own workspace_root. Fail closed:
-    a non-absolute, missing, or unresolvable workspace_root denies, as does any
-    target outside it. Containment uses each target's SYMLINK-RESOLVED real path
-    (`real_of`), not the lexically-normalized guard path, so a
-    `<workspace>/<symlink>/../escape` cannot slip through. Returns
-    ('allow', slug, None) or ('deny', 'lead-scope', slug, detail)."""
-    real_of = real_of or {}
-    wr = owner.get("workspace_root")
-    if not isinstance(wr, str) or not os.path.isabs(wr):
-        return "deny", "lead-scope", slug, {"reason": "bad-workspace-root", "workspace_root": wr}
-    try:
-        root = os.path.realpath(wr)
-        if root == os.sep:
-            # A lead workspace can never be the filesystem root -- that would make
-            # containment a no-op. Deny defensively even if a record slipped past
-            # claim-time validation.
-            return "deny", "lead-scope", slug, {"reason": "workspace-root-is-fs-root", "workspace_root": wr}
-        if not os.path.isdir(root):
-            return "deny", "lead-scope", slug, {"reason": "workspace-root-missing", "workspace_root": wr}
-        for c, _top, _reason in guarded:
-            reals = real_of.get(c)
-            if not reals:
-                # No resolved real path for this target (an incomplete real_of
-                # from a future caller): fail closed rather than fall back to
-                # the lexical guard path, which cannot see a symlink+`..` escape.
-                return "deny", "lead-scope", slug, {"reason": "unresolved-target", "target": c}
-            for real in reals:
-                if real is None or not _within(real, root):
-                    return "deny", "lead-scope", slug, {"target": real, "workspace_root": wr}
-    except (OSError, ValueError):
-        # A malformed path (e.g. an embedded NUL) must not escape to the
-        # top-level fail-open handler; deny instead.
-        return "deny", "lead-scope", slug, {"reason": "resolution-error", "workspace_root": wr}
-    return "allow", slug, None
-
-
-def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime, real_of):
+def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
     """('allow', slug, marker) or ('deny', why, slug, detail). Every
     guarded target must resolve to one slug this session owns; that
     slug's marker must validate; then the budget claim must land within
-    max_edits. A lead-tier owner is restricted to its workspace_root
-    instead (lead_scope_verdict), needing no marker."""
+    max_edits."""
     cache = {}
     slugs = {}
     for c, top, _reason in guarded:
@@ -1059,12 +977,6 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime, rea
             expected_slug=slug,
             scope=owner["scope"],
         ) as tx:
-            # Decide tier and workspace from the record revalidated UNDER LOCK
-            # (tx.current), not the pre-lock discovery snapshot -- a reclaim that
-            # bumped the fence has already raised inside owner_transaction, and a
-            # reclaim that narrowed the workspace is reflected here.
-            if tx.current.get("control_tier", "launcher") == "lead":
-                return lead_scope_verdict(guarded, tx.current, slug, real_of)
             marker, why = read_marker(rd, session_id, tx.current["fence"])
             if marker is None:
                 return "deny", why, slug, {}
@@ -1111,16 +1023,6 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
         print(
             "Dispatch it: file a todo in that repo and kick off a worker, "
             "or ask the human.",
-            file=sys.stderr,
-        )
-    elif why == "lead-scope":
-        print(
-            f"This session leads {slug}; it may edit only inside its workspace "
-            f"{detail.get('workspace_root')}, not {detail.get('target', c)}.",
-            file=sys.stderr,
-        )
-        print(
-            "Edit only within your lead workspace; dispatch anything else.",
             file=sys.stderr,
         )
     elif why == "budget":
@@ -1171,25 +1073,17 @@ def decide(payload, runtime="claude"):
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
     home = os.environ.get("HOME", os.path.expanduser("~"))
-    pairs = resolve_targets(targets_for(payload, tool, cwd, home), home)
-    if not pairs:
+    paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
+    if not paths:
         return 0
     state_real = os.path.realpath(
         core.account_payload_root(caller_scope) / "herdr-orch"
     )
     budget = Budget(GIT_BUDGET_SECS)
-    # Accumulate every distinct real path per guard_path (a symlink+`..` target
-    # can share a guard_path with a direct one); the lead check verifies them
-    # all. classify()/the launcher path still act once per guard_path.
-    real_of = {}
-    for p, real in pairs:
-        real_of.setdefault(p, set()).add(real)
     guarded = []
-    seen_guard = set()
-    for p, _real in pairs:
-        if p in seen_guard or exempt(p, state_real):
+    for p in paths:
+        if exempt(p, state_real):
             continue
-        seen_guard.add(p)
         hit = classify(p, budget)
         if hit:
             guarded.append((p, hit[0], hit[1]))
@@ -1205,30 +1099,27 @@ def decide(payload, runtime="claude"):
     if not owned:
         return 0
     tool_use_id = payload.get("tool_use_id")
-    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime, real_of)
+    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime)
     if verdict[0] == "allow":
         _, slug, marker = verdict
         rd = owned[slug]["rd"]
         for c, top, reason in guarded:
-            rec = {
-                "v": 1,
-                "ts": core.now_iso(),
-                "event": "orch-edit-allowed",
-                "session_id": sid,
-                "tool_name": tool,
-                "tool_use_id": tool_use_id,
-                "path": c[:PATH_MAX],
-                "repo": top[:PATH_MAX],
-                "reason": reason,
-            }
-            # A lead-tier allow carries no marker; record the tier instead of
-            # indexing a None marker (which would raise and fail open).
-            if marker is None:
-                rec["control_tier"] = "lead"
-            else:
-                rec["marker_id"] = marker["marker_id"]
-                rec["marker_expires"] = marker.get("expires")
-            audit_append(rd, rec)
+            audit_append(
+                rd,
+                {
+                    "v": 1,
+                    "ts": core.now_iso(),
+                    "event": "orch-edit-allowed",
+                    "session_id": sid,
+                    "tool_name": tool,
+                    "tool_use_id": tool_use_id,
+                    "path": c[:PATH_MAX],
+                    "repo": top[:PATH_MAX],
+                    "reason": reason,
+                    "marker_id": marker["marker_id"],
+                    "marker_expires": marker.get("expires"),
+                },
+            )
         return 0
     _, why, slug, detail = verdict
     detail = dict(detail, owned=",".join(sorted(owned)))
