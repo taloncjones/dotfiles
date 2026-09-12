@@ -101,11 +101,27 @@ def resolve_base(
         raise ReviewError("--base-ref is not a valid branch name")
     nonce = secrets.token_hex(16)
     ref = f"refs/co-review/{nonce}"
+    # One scope so the ref is always cleaned up even if fetch creates it and
+    # then fails. Bound the fetch to the owned ref: --refmap= and
+    # --no-write-fetch-head keep it from touching refs/remotes/origin/* or
+    # FETCH_HEAD (which prepare's source-unchanged checks cannot see), and
+    # --no-recurse-submodules keeps it from fanning out.
     try:
-        git(repo, "fetch", "--no-tags", "origin", f"+refs/heads/{branch}:{ref}")
-    except ReviewError as error:
-        raise ReviewError(f"cannot fetch origin branch {branch!r}: {error}") from error
-    try:
+        try:
+            git(
+                repo,
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                "--refmap=",
+                "origin",
+                f"+refs/heads/{branch}:{ref}",
+            )
+        except ReviewError as error:
+            raise ReviewError(
+                f"cannot fetch origin branch {branch!r}: {error}"
+            ) from error
         tip = full_commit(repo, ref)
         # merge-base exits 1 with empty output when histories are unrelated;
         # that is "no merge base", not a git failure, so do not use git() here.
@@ -117,9 +133,7 @@ def resolve_base(
             text=True,
         )
         if found.returncode not in (0, 1):
-            raise ReviewError(
-                found.stderr.strip() or "merge-base failed"
-            )
+            raise ReviewError(found.stderr.strip() or "merge-base failed")
         merge_bases = found.stdout.split()
         if not merge_bases:
             raise ReviewError("no merge-base between origin branch and head")
@@ -129,12 +143,23 @@ def resolve_base(
             )
         return merge_bases[0], branch, tip
     finally:
-        subprocess.run(
+        removal = subprocess.run(
             ["git", "-C", str(repo), "update-ref", "-d", ref],
             capture_output=True,
             env=git_environment(),
             check=False,
         )
+        still_present = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+            capture_output=True,
+            env=git_environment(),
+            check=False,
+        )
+        if removal.returncode != 0 and still_present.returncode == 0:
+            print(
+                f"warning: could not remove co-review ref {ref}",
+                file=sys.stderr,
+            )
 
 
 def sha256_bytes(content: bytes) -> str:

@@ -149,20 +149,30 @@ incomplete cannot approve (co-review's "incomplete, never a clean review" rule).
 
 ## Review provenance marker
 
-On every completed round, post a PR comment whose body carries, as its own
-**unindented top-level line** (not quoted, not fenced, exactly one marker per
-comment), posted by the authenticated `gh` user:
+On every completed round, post one PR comment, by the authenticated `gh` user,
+that is both human-readable and machine-parseable. Lead with a findings **table**
+(clearer than bullets), then the hidden currency marker as its own unindented
+top-level line:
 
-```
+```markdown
+### Co-review round <n>
+
+| Severity | File:line       | Issue | Fix |
+| -------- | --------------- | ----- | --- |
+| HIGH     | path/file.py:42 | ...   | ... |
+
+(or "No actionable findings." when the round is clean)
+
 <!-- co-review: sha=<reviewed-head-sha> base=<resolved-merge-base> base_ref=<baseRefName> verdict=<APPROVE|CHANGES> round=<n> -->
 ```
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `verdict` APPROVE only on a
-zero-actionable complete round. The `pr-ready` gate and `ship`'s resume rule
-parse the latest such marker (by comment creation instant) via
-`scripts/pr_ready_gate.py`; a quoted, fenced, indented, multiply-markered, or
-other-author comment is rejected, so the marker must be posted exactly as above.
+zero-actionable complete round. The marker line must be exactly one per comment,
+unindented, and outside the table/any code fence, so `scripts/pr_ready_gate.py`
+accepts it -- the gate and `ship`'s resume rule parse the latest such marker by
+comment creation instant and ignore quoted, fenced, indented, multiply-markered,
+or other-author comments.
 
 ## Document reviews
 

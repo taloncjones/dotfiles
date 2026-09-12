@@ -19,8 +19,9 @@ human gate is the merge itself.
 ## Resume (cheap re-runs)
 
 Before step 1, run the PR-ready currency gate. Fetch the PR's comments
-(`gh api --paginate repos/{owner}/{repo}/issues/{number}/comments`, normalized to
-`{author: .user.login, created_at, id, body}`), resolve the target base
+(`gh api --paginate --slurp repos/{owner}/{repo}/issues/{number}/comments -q
+'[.[][] | {author: .user.login, created_at, id, body}]'` -- `--slurp` so the
+paginated pages form one JSON array), resolve the target base
 (`review.py resolve-base --base-ref <baseRefName> --head <headRefOid>`), and run
 `scripts/pr_ready_gate.py --comments <file> --head <headRefOid> --base <resolved>
 --base-ref <baseRefName> --trusted-author <pr-author> --trusted-author

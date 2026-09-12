@@ -19,8 +19,11 @@ the gate before anything else:
 ```bash
 gh pr view --json number,headRefOid,baseRefName,author
 gh api user -q .login                          # authenticated reviewer identity
-gh api --paginate repos/{owner}/{repo}/issues/{number}/comments \
-  -q '[.[] | {author: .user.login, created_at, id, body}]' > comments.json
+gh api --paginate --slurp repos/{owner}/{repo}/issues/{number}/comments \
+  -q '[.[][] | {author: .user.login, created_at, id, body}]' > comments.json
+# --slurp collapses the per-page arrays into one JSON array; .[][] flattens
+# page -> comment. Without it --paginate emits one array per page and json.load
+# rejects the file.
 uv run --no-project python <co-review>/scripts/review.py resolve-base \
   --repo "$PWD" --base-ref <baseRefName> --head <headRefOid>   # -> {base}
 uv run --no-project python <co-review>/scripts/pr_ready_gate.py \

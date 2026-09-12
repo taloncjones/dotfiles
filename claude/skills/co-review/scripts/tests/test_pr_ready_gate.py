@@ -50,6 +50,16 @@ class SelectMarkerTests(unittest.TestCase):
     def test_indented_code_rejected(self):
         self.assertIsNone(gate.select_marker([comment("    " + marker())], ME))
 
+    def test_space_tab_mixed_indent_rejected(self):
+        # one space then a tab is four columns of Markdown code indentation
+        self.assertIsNone(gate.select_marker([comment(" \t" + marker())], ME))
+
+    def test_fence_close_with_suffix_keeps_marker_hidden(self):
+        # "~~~x" is not a valid closing fence (non-whitespace suffix), so the
+        # marker stays inside the code block and must be ignored.
+        body = "~~~\n~~~still-code\n" + marker() + "\n~~~"
+        self.assertIsNone(gate.select_marker([comment(body)], ME))
+
     def test_malformed_ignored(self):
         self.assertIsNone(
             gate.select_marker([comment("<!-- co-review: sha=xyz -->")], ME)
@@ -78,10 +88,13 @@ class SelectMarkerTests(unittest.TestCase):
         later = comment(marker(sha=SHA_B), created_at="2026-09-11T09:30:00Z", cid=2)
         self.assertEqual(gate.select_marker([earlier, later], ME)["sha"], SHA_B)
 
-    def test_missing_created_at_dropped(self):
+    def test_missing_created_at_fails_closed(self):
+        # A marker-bearing trusted comment without ordering metadata cannot be
+        # placed in time; fail closed rather than silently drop it.
         bad = comment(marker(sha=SHA_A))
         del bad["created_at"]
-        self.assertIsNone(gate.select_marker([bad], ME))
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([bad], ME)
 
     def test_tie_break_by_id(self):
         a = comment(marker(sha=SHA_A), created_at="2026-09-11T10:00:00Z", cid=1)
@@ -130,6 +143,19 @@ class DecideTests(unittest.TestCase):
 
     def test_fail_bad_input_container(self):
         verdict, why = gate.decide("nope", ME, SHA_A, BASE_A, REF)
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("fail closed", why)
+
+    def test_fail_when_newer_changes_has_invalid_metadata(self):
+        # older valid APPROVE + newer CHANGES with no timestamp must not revive
+        # the approval: the whole decision fails closed.
+        older = comment(
+            marker(sha=SHA_A, verdict="APPROVE"),
+            created_at="2026-09-11T09:00:00Z", cid=1,
+        )
+        newer = comment(marker(sha=SHA_A, verdict="CHANGES"), cid=2)
+        del newer["created_at"]
+        verdict, why = gate.decide([older, newer], ME, SHA_A, BASE_A, REF)
         self.assertEqual(verdict, "FAIL")
         self.assertIn("fail closed", why)
 

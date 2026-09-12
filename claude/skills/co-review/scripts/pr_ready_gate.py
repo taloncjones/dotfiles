@@ -11,11 +11,21 @@ MARKER_RE = re.compile(
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
     r"round=(?P<round>\d+) -->$"
 )
-_FENCE_RE = re.compile(r"^([`~])\1{2,}")
+# A fence opener may be indented up to 3 spaces and carry an info string.
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}([`~])\1{2,}")
 
 
 class GateInputError(Exception):
     """The comments payload is not the expected shape."""
+
+
+def _is_fence_close(stripped: str, fence: tuple[str, int]) -> bool:
+    """A closer is only fence characters, of the same char and >= opener length.
+
+    Markdown does not accept a non-whitespace suffix on a closing fence, so a
+    line like ``~~~still-code`` stays inside the block.
+    """
+    return bool(stripped) and set(stripped) == {fence[0]} and len(stripped) >= fence[1]
 
 
 def _markers_in_body(body: str) -> list[dict]:
@@ -24,23 +34,19 @@ def _markers_in_body(body: str) -> list[dict]:
     fence: tuple[str, int] | None = None
     for raw in body.splitlines():
         stripped = raw.strip()
-        fence_hit = _FENCE_RE.match(stripped)
         if fence is not None:
-            if (
-                fence_hit
-                and fence_hit.group(1) == fence[0]
-                and len(fence_hit.group(0)) >= fence[1]
-            ):
+            if _is_fence_close(stripped, fence):
                 fence = None
             continue
-        if fence_hit:
-            fence = (fence_hit.group(1), len(fence_hit.group(0)))
+        opener = _FENCE_OPEN_RE.match(raw)
+        if opener:
+            run = opener.group(0).lstrip(" ")
+            fence = (run[0], len(run))
             continue
-        if raw.lstrip().startswith(">"):
-            continue
-        if raw[:1] == "\t" or (len(raw) - len(raw.lstrip(" "))) >= 4:
-            continue  # indented code block
-        hit = MARKER_RE.match(stripped)
+        # The marker must sit at column 0: any leading whitespace (space or tab,
+        # in any mix) is Markdown code indentation. Matching the unstripped line
+        # against an anchored pattern enforces that; allow only trailing space.
+        hit = MARKER_RE.match(raw.rstrip())
         if hit:
             found.append(hit.groupdict())
     return found
@@ -73,7 +79,10 @@ def select_marker(comments, trusted_authors: set[str]) -> dict | None:
         instant = _parse_instant(entry.get("created_at"))
         cid = entry.get("id")
         if instant is None or not isinstance(cid, int):
-            continue  # fail closed: no defaulting of ordering metadata
+            # A marker-bearing trusted comment without valid ordering metadata
+            # cannot be placed in time; silently dropping it could revive an
+            # older approval over a newer CHANGES. Fail closed instead.
+            raise GateInputError("marker comment has invalid created_at/id")
         candidates.append((instant, cid, markers[0]))
     if not candidates:
         return None
