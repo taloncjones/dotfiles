@@ -152,6 +152,60 @@ incomplete cannot approve (co-review's "incomplete, never a clean review" rule).
    because a round's count failed to strictly decrease: real bugs can persist
    across rounds.
 
+## Coworker PR review (`--comment`)
+
+Use this mode to review someone else's PR and hand back a verdict, not to run
+the own-PR loop above. No fixes are applied here -- the author writes the fix;
+fixing a coworker's branch yourself is the own-PR loop against a local
+checkout of it, not this mode.
+
+Binding gate first: run
+
+```bash
+uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/repo_binding.py" \
+  --repo "$REPO" --pr-url "$PR_URL"
+```
+
+A non-zero exit means `origin` does not bind to the PR's base (a fork or the
+wrong remote) -- stop, or fetch the verified base remote before continuing.
+The PR URL is the independent identity for this check; never derive it from
+`origin`. The origin probe runs with `GIT_*` routing stripped so an inherited
+`insteadOf` cannot make it disagree with the fetch that co-review `prepare`
+performs.
+
+Known limitation: the SSH resolution mirrors `git`'s connection via `ssh -G`
+with the URL's user and port, but does not parse a repo-local
+`core.sshCommand`. A `core.sshCommand` that rewrites the destination host is
+outside this check's threat model (it requires control of the reviewer's own
+git config); the binding assumes no such override.
+
+Per-round output:
+
+1. A findings table `| Severity | File:line | Issue | Blocking |` -- no `Fix`
+   column, since the author writes the fix, not this review.
+2. A visible `VERDICT: APPROVE` or `VERDICT: REQUEST CHANGES` line.
+3. The hidden coworker marker from
+   `claude/skills/co-review/scripts/coworker_review.py`'s `build_marker(...)`.
+
+Compute the verdict with `coworker_review.verdict_from_findings(findings)`:
+major/high/critical findings are blocking, minor/low/nit/advisory are
+advisory, and an unrecognized severity fails closed to blocking. Fill each
+row's `Blocking` column with `coworker_review.is_blocking(severity)`.
+
+Re-review scope: read the latest trusted coworker marker with
+`coworker_review.select_coworker_marker(comments, {gh_user})`; compute
+`is_ancestor` via `git merge-base --is-ancestor <prev_sha> <new_head>`; then
+call `coworker_review.decide_review_scope(prev_marker, new_head,
+current_base_ref, current_base_ref_tip, is_ancestor)`. On `full`, re-diff the whole PR
+(three-dot). On `incremental`, review `prev_head..new_head` and also re-check
+every still-open prior finding against the new tree -- an incremental diff
+alone can miss a finding whose surrounding code moved. The verdict always
+gates on all currently-open blocking findings, not just the ones from this
+round's diff.
+
+This mode never emits the own-PR currency marker (`co-review: ...` from
+"Review provenance marker" below). A coworker's PR is not your pr-ready gate.
+
 ## Review provenance marker
 
 On every completed round, post one PR comment, by the authenticated `gh` user,
