@@ -24,7 +24,10 @@ def _dispatch_error(message: str) -> RuntimeError:
 def result_object(output: str, operation: str) -> dict[str, Any]:
     try:
         record = json.loads(output)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers JSONDecodeError plus value faults such as an integer
+        # over the str-conversion limit; RecursionError covers deeply nested
+        # input. All are malformed replies, not caller faults.
         raise _dispatch_error(f"{operation} returned malformed JSON") from exc
     if (
         not isinstance(record, dict)
@@ -412,6 +415,22 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     for flag in ("thread-id", "event", "repo-slug", "workspace-id"):
         wake.add_argument(f"--{flag}", required=True)
     wake.add_argument("--queue-validated", action="store_true")
+    reprompt = commands.add_parser("reprompt")
+    for flag in (
+        "repo-slug",
+        "task-id",
+        "session",
+        "workspace-id",
+        "launch-id",
+        "phase",
+        "cwd",
+        "prompt-file",
+    ):
+        reprompt.add_argument(f"--{flag}", required=True)
+    reprompt.add_argument("--fence", required=True, type=int)
+    reprompt.add_argument("--runtime", default="claude", choices=("claude", "codex"))
+    reprompt.add_argument("--prompt-timeout-ms", type=int, default=120_000)
+    reprompt.add_argument("--personal", action="store_true")
     return parser
 
 
@@ -449,6 +468,21 @@ def main(argv: list[str] | None = None) -> int:
                 runtime=args.runtime,
                 personal=args.personal,
             )
+        elif args.command == "reprompt":
+            output = herdr_dispatch.reprompt(
+                repo_slug=args.repo_slug,
+                task_id=args.task_id,
+                session=args.session,
+                fence=args.fence,
+                workspace_id=args.workspace_id,
+                launch_id=args.launch_id,
+                phase=args.phase,
+                cwd=args.cwd,
+                prompt=Path(args.prompt_file).read_text(),
+                runtime=args.runtime,
+                prompt_timeout_ms=args.prompt_timeout_ms,
+                personal=args.personal,
+            )
         else:
             output = herdr_dispatch.wake(
                 args.thread_id,
@@ -459,7 +493,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(json.dumps(output, sort_keys=True))
         return 3 if output.get("status") in ("blocked", "unsupported") else 0
-    except (herdr_dispatch.DispatchError, OSError, agent_runtime.RouteError) as exc:
+    except (
+        herdr_dispatch.DispatchError,
+        OSError,
+        UnicodeError,
+        agent_runtime.RouteError,
+    ) as exc:
+        # UnicodeError covers a prompt-file that is not valid UTF-8, so a bad
+        # --prompt-file returns structured error JSON instead of a traceback.
         print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
         return 2
 

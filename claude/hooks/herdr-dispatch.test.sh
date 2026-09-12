@@ -203,13 +203,21 @@ elif args[:2] == ["agent", "start"]:
         "focused": False, "revision": 2}}}))
 elif args[:2] == ["agent", "get"]:
     observed_pane = "w9:p9" if mode == "stale-agent" else pane
+    busy = mode == "agent-busy"
     print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
         "name": os.environ["FAKE_AGENT"], "pane_id": observed_pane,
         "agent": os.environ.get("FAKE_RUNTIME", "codex"),
-        "agent_status": "idle", "interactive_ready": True, "launch_pending": False,
+        "agent_status": "working" if busy else "idle",
+        "interactive_ready": not busy, "launch_pending": busy,
         "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
         "focused": False, "revision": 2}}}))
 elif args[:2] == ["agent", "prompt"]:
+    if mode == "prompt-reject":
+        print(json.dumps({"error": "not_idle"}), file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "prompt-nonprompted":
+        print(json.dumps({"id": "fake", "result": {"type": "agent_info"}}))
+        raise SystemExit(0)
     print(json.dumps({"id": "fake", "result": {"type": "agent_prompted", "agent": {
         "name": os.environ["FAKE_AGENT"], "pane_id": pane,
         "agent": os.environ.get("FAKE_RUNTIME", "codex"),
@@ -330,6 +338,31 @@ class Fixture:
             prompt_timeout_ms=1000,
             **kwargs,
         )
+
+    def reprompt(self, launch_id, prompt="incorporate the review findings",
+                 fence=1, prompt_timeout_ms=1000, **kwargs):
+        return herdr_dispatch.reprompt(
+            repo_slug=self.slug,
+            task_id="td-a",
+            session="S",
+            fence=fence,
+            workspace_id="w1",
+            launch_id=launch_id,
+            phase="implement",
+            cwd=self.repo,
+            prompt=prompt,
+            runtime="codex",
+            herdr_cli=str(self.bin),
+            env=self.env,
+            prompt_timeout_ms=prompt_timeout_ms,
+            **kwargs,
+        )
+
+    def worker_records(self):
+        return json.loads(self.task_file.read_text())["workers"]
+
+    def prompt_calls(self):
+        return [c for c in self.calls() if c[:2] == ["agent", "prompt"]]
 
 
 def test_launch_records_attempt_before_native_start():
@@ -1080,6 +1113,32 @@ def test_dispatch_entrypoint_preserves_machine_readable_cli_contract():
     }, process.stdout
 
 
+def test_reprompt_cli_subcommand_reaches_the_function():
+    # Proves the reprompt subparser + main() wiring reaches herdr_dispatch.reprompt
+    # (the only sanctioned entrypoint). HERDR_ENV is unset so reprompt refuses
+    # deterministically without needing a live herdr.
+    fx = Fixture()
+    try:
+        prompt_file = fx.root / "reprompt-prompt.txt"
+        prompt_file.write_text("incorporate the review findings")
+        child_env = {k: v for k, v in fx.env.items() if k != "HERDR_ENV"}
+        process = subprocess.run(
+            [sys.executable, herdr_dispatch.__file__, "reprompt",
+             "--repo-slug", fx.slug, "--task-id", "td-a", "--session", "S",
+             "--workspace-id", "w1", "--launch-id", "impl-td-a-abc",
+             "--phase", "implement", "--cwd", str(fx.repo), "--fence", "1",
+             "--prompt-file", str(prompt_file), "--runtime", "codex"],
+            check=False, capture_output=True, text=True, env=child_env,
+        )
+        assert process.returncode == 2, (process.returncode, process.stdout, process.stderr)
+        assert json.loads(process.stdout) == {
+            "status": "error",
+            "error": "reprompt requires a Herdr-managed environment",
+        }, process.stdout
+    finally:
+        fx.close()
+
+
 def test_attempt_record_carries_difficulty_provenance():
     fixture = Fixture()
     try:
@@ -1141,7 +1200,471 @@ def test_tampered_unconfirmed_difficulty_route_rejects_launch():
         fixture.close()
 
 
+def test_reprompt_targets_named_launch_and_records_in_place():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        before = len(fx.worker_records())
+        result = fx.reprompt(lid)
+        assert result["status"] == "reprompted", result
+        assert result["reprompt_seq"] == 0, result
+        assert result["observation"] == "session-identity-not-exposed-by-herdr", result
+        workers = fx.worker_records()
+        assert len(workers) == before, workers
+        target = [w for w in workers if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "delivered", target
+        inspected = herdr_dispatch.inspect(
+            fx.slug, "td-a", "implement", "w1", cwd=fx.repo, runtime="codex")
+        assert inspected["current_attempt"]["launch_id"] == lid, inspected
+        # A later attempt for the same phase makes the older launch_id non-current
+        # (workers[-1] is NOT the selector; the named launch_id is).
+        task = json.loads(fx.task_file.read_text())
+        task["workers"].append({
+            "launch_id": "impl-td-a-newer", "phase": "implement",
+            "runtime": "codex", "workspace_id": "w1", "pane_id": "w1:p1",
+            "agent": "impl-td-a", "status": "launched"})
+        fx.task_file.write_text(json.dumps(task))
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "current attempt" in str(exc), exc
+        else:
+            raise AssertionError("a superseded launch_id must be refused")
+    finally:
+        fx.close()
+
+
+def test_reprompt_rejects_wrong_task_context():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        task = json.loads(fx.task_file.read_text())
+        task["branch"] = "totally-different-branch"
+        fx.task_file.write_text(json.dumps(task))
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "worktree and branch" in str(exc), exc
+        else:
+            raise AssertionError("wrong task context must be refused")
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery on refusal"
+    finally:
+        fx.close()
+
+
+def test_reprompt_requires_live_idle_agent():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        fx.env["FAKE_HERDR_MODE"] = "agent-busy"
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "current attempt" in str(exc), exc
+        else:
+            raise AssertionError("a busy agent must be refused")
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery to a busy agent"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "failed", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_refuses_on_lost_fence_before_delivery():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        try:
+            fx.reprompt(lid, fence=999)
+        except herdr_dispatch.DispatchError:
+            pass
+        else:
+            raise AssertionError("a wrong fence must be refused")
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery without the fence"
+    finally:
+        fx.close()
+
+
+def test_reprompt_supersession_before_delivery_refuses_without_delivery():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        original = herdr_dispatch._validate_agent
+
+        def superseding(*args, **kwargs):
+            task = json.loads(fx.task_file.read_text())
+            task["workers"].append({
+                "launch_id": "impl-td-a-newer", "phase": "implement",
+                "runtime": "codex", "workspace_id": "w1", "pane_id": "w1:p1",
+                "agent": "impl-td-a", "status": "launched"})
+            fx.task_file.write_text(json.dumps(task))
+            return original(*args, **kwargs)
+
+        herdr_dispatch._validate_agent = superseding
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "current attempt" in str(exc), exc
+        else:
+            raise AssertionError("supersession before delivery must refuse")
+        finally:
+            herdr_dispatch._validate_agent = original
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery on supersession"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "failed", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_spawn_failure_is_retry_safe_failed():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        import types
+        original = herdr_dispatch.subprocess
+
+        def boom(*args, **kwargs):
+            raise FileNotFoundError("no such delivery binary")
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=boom, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "rejected before acceptance" in str(exc), exc
+        else:
+            raise AssertionError("a spawn failure must raise")
+        finally:
+            herdr_dispatch.subprocess = original
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "failed", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_nonzero_exit_is_uncertain_not_failed():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        fx.env["FAKE_HERDR_MODE"] = "prompt-reject"
+        result = fx.reprompt(lid)
+        assert result["status"] == "uncertain", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "uncertain", target
+        assert target["reprompts"][0]["status"] != "failed", target
+        assert len(fx.prompt_calls()) == prompts_before + 1, "exactly one delivery, no resend"
+    finally:
+        fx.close()
+
+
+def test_reprompt_nonprompted_result_is_uncertain():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        fx.env["FAKE_HERDR_MODE"] = "prompt-nonprompted"
+        result = fx.reprompt(lid)
+        assert result["status"] == "uncertain", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "uncertain", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_uncertain_timeout_marks_uncertain_no_resend():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        import types
+        original = herdr_dispatch.subprocess
+
+        def slow(*args, **kwargs):
+            raise original.TimeoutExpired(cmd="agent prompt", timeout=1)
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=slow, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.subprocess = original
+        assert result["status"] == "uncertain", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "uncertain", target
+        assert len(fx.prompt_calls()) == prompts_before, "delivery raised before reaching herdr"
+    finally:
+        fx.close()
+
+
+def test_reprompt_delivered_but_persistence_fails_returns_unrecorded():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        original = herdr_dispatch._set_reprompt_status
+        state = {"calls": 0}
+
+        def failing(*args, **kwargs):
+            state["calls"] += 1
+            raise OSError("disk full while recording")
+
+        herdr_dispatch._set_reprompt_status = failing
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch._set_reprompt_status = original
+        assert result["status"] == "delivered-unrecorded", result
+        assert len(fx.prompt_calls()) == prompts_before + 1, "delivered once, no resend"
+    finally:
+        fx.close()
+
+
+def test_reprompt_post_spawn_oserror_is_uncertain_not_failed():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        import types
+        original = herdr_dispatch.subprocess
+
+        def comm_error(*args, **kwargs):
+            raise OSError("communication failed after the child started")
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=comm_error, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.subprocess = original
+        assert result["status"] == "uncertain", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "uncertain", target
+        assert target["reprompts"][0]["status"] != "failed", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_undecodable_output_is_uncertain():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        import types
+        original = herdr_dispatch.subprocess
+
+        def bad_bytes(*args, **kwargs):
+            return types.SimpleNamespace(
+                returncode=0, stdout=b"\xff\xfe\xff", stderr=b"")
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=bad_bytes, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.subprocess = original
+        assert result["status"] == "uncertain", result
+    finally:
+        fx.close()
+
+
+def test_reprompt_refuses_to_stack_on_unresolved_prior():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        import types
+        original = herdr_dispatch.subprocess
+
+        def slow(*args, **kwargs):
+            raise original.TimeoutExpired(cmd="agent prompt", timeout=1)
+
+        herdr_dispatch.subprocess = types.SimpleNamespace(
+            run=slow, TimeoutExpired=original.TimeoutExpired,
+            SubprocessError=original.SubprocessError)
+        try:
+            first = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.subprocess = original
+        assert first["status"] == "uncertain", first
+        prompts_before = len(fx.prompt_calls())
+        # A retry would deliver cleanly now, but the unresolved prior turn must
+        # block it so the same incorporation is never double-delivered.
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "unresolved" in str(exc), exc
+        else:
+            raise AssertionError("stacking on an unresolved reprompt must refuse")
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery while unresolved"
+    finally:
+        fx.close()
+
+
+def test_reprompt_unparseable_reply_valueerror_is_uncertain():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        original = herdr_dispatch.result_object
+
+        def bad_parse(*args, **kwargs):
+            raise ValueError("Exceeds the limit for integer string conversion")
+
+        herdr_dispatch.result_object = bad_parse
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch.result_object = original
+        assert result["status"] == "uncertain", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "uncertain", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_readiness_decode_error_marks_failed_and_refuses():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        original = herdr_dispatch._run_herdr
+
+        def bad_readiness(cli, argv, **kwargs):
+            if argv[:2] == ["agent", "get"]:
+                raise ValueError("invalid utf-8 in agent readiness output")
+            return original(cli, argv, **kwargs)
+
+        herdr_dispatch._run_herdr = bad_readiness
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "confirm the live agent" in str(exc), exc
+        else:
+            raise AssertionError("a readiness decode failure must refuse")
+        finally:
+            herdr_dispatch._run_herdr = original
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery on readiness failure"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "failed", target
+    finally:
+        fx.close()
+
+
+def test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        original_set = herdr_dispatch._set_reprompt_status
+        calls = {"n": 0}
+
+        def fail_once(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient storage error")
+            return original_set(*args, **kwargs)
+
+        herdr_dispatch._set_reprompt_status = fail_once
+        try:
+            result = fx.reprompt(lid)
+        finally:
+            herdr_dispatch._set_reprompt_status = original_set
+        assert result["status"] == "delivered-unrecorded", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "delivered-unrecorded", target
+        # A delivered-unrecorded entry must not block a later distinct pass.
+        second = fx.reprompt(lid)
+        assert second["status"] == "reprompted", second
+        assert second["reprompt_seq"] == 1, second
+    finally:
+        fx.close()
+
+
+def test_reprompt_rejects_unbounded_timeout_before_recording_intent():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        try:
+            fx.reprompt(lid, prompt_timeout_ms=2**31)
+        except herdr_dispatch.DispatchError as exc:
+            assert "between 1 and 300000" in str(exc), exc
+        else:
+            raise AssertionError("an unbounded timeout must be refused")
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery on bad timeout"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert "reprompts" not in target or target["reprompts"] == [], target
+    finally:
+        fx.close()
+
+
+def test_result_object_normalizes_parse_failures_to_dispatch_error():
+    import herdr_dispatch_cli as cli
+
+    original = cli.json.loads
+    for exc in (RecursionError("too deep"), ValueError("integer too large")):
+        def raising(*args, _exc=exc, **kwargs):
+            raise _exc
+
+        cli.json.loads = raising
+        try:
+            cli.result_object('{"id": "x"}', "op")
+        except herdr_dispatch.DispatchError as caught:
+            assert "malformed JSON" in str(caught), caught
+        except Exception as leaked:  # noqa: BLE001
+            cli.json.loads = original
+            raise AssertionError(f"parse failure leaked as {type(leaked).__name__}")
+        else:
+            cli.json.loads = original
+            raise AssertionError("a parse failure must become DispatchError")
+        finally:
+            cli.json.loads = original
+
+
+def test_reprompt_cli_rejects_non_utf8_prompt_file():
+    fx = Fixture()
+    try:
+        bad = fx.root / "bad-prompt.bin"
+        bad.write_bytes(b"\xff\xfe\x00 not utf-8")
+        process = subprocess.run(
+            [sys.executable, herdr_dispatch.__file__, "reprompt",
+             "--repo-slug", fx.slug, "--task-id", "td-a", "--session", "S",
+             "--workspace-id", "w1", "--launch-id", "impl-td-a-abc",
+             "--phase", "implement", "--cwd", str(fx.repo), "--fence", "1",
+             "--prompt-file", str(bad), "--runtime", "codex"],
+            check=False, capture_output=True, text=True, env=fx.env,
+        )
+        assert process.returncode == 2, (process.returncode, process.stdout, process.stderr)
+        payload = json.loads(process.stdout)
+        assert payload["status"] == "error", payload
+    finally:
+        fx.close()
+
+
 for name, test in (
+    ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
+    ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
+    ("reprompt requires a live idle agent", test_reprompt_requires_live_idle_agent),
+    ("reprompt refuses on a lost fence before delivery", test_reprompt_refuses_on_lost_fence_before_delivery),
+    ("reprompt refuses supersession before delivery", test_reprompt_supersession_before_delivery_refuses_without_delivery),
+    ("reprompt spawn failure is retry-safe failed", test_reprompt_spawn_failure_is_retry_safe_failed),
+    ("reprompt nonzero exit is uncertain not failed", test_reprompt_nonzero_exit_is_uncertain_not_failed),
+    ("reprompt non-prompted result is uncertain", test_reprompt_nonprompted_result_is_uncertain),
+    ("reprompt timeout marks uncertain without resend", test_reprompt_uncertain_timeout_marks_uncertain_no_resend),
+    ("reprompt delivered but persistence fails returns unrecorded", test_reprompt_delivered_but_persistence_fails_returns_unrecorded),
+    ("reprompt post-spawn OSError is uncertain not failed", test_reprompt_post_spawn_oserror_is_uncertain_not_failed),
+    ("reprompt undecodable output is uncertain", test_reprompt_undecodable_output_is_uncertain),
+    ("reprompt refuses to stack on an unresolved prior", test_reprompt_refuses_to_stack_on_unresolved_prior),
+    ("reprompt unparseable reply is uncertain", test_reprompt_unparseable_reply_valueerror_is_uncertain),
+    ("reprompt readiness decode error marks failed and refuses", test_reprompt_readiness_decode_error_marks_failed_and_refuses),
+    ("reprompt delivered-unrecorded repersists and allows next pass", test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass),
+    ("reprompt rejects an unbounded timeout before recording intent", test_reprompt_rejects_unbounded_timeout_before_recording_intent),
+    ("result_object normalizes parse failures to DispatchError", test_result_object_normalizes_parse_failures_to_dispatch_error),
+    ("reprompt CLI rejects a non-utf8 prompt file", test_reprompt_cli_rejects_non_utf8_prompt_file),
+    ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
     ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_attempt_and_start),
