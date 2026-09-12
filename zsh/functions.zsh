@@ -24,8 +24,18 @@ function functionlist() {    # functionlist() will list all of the available fun
     echo "$list" | sort -u -d -s | tr -d '\\+'
 }
 
-# update the dotfiles completely
-function update() {    # update() will update the current dotfiles installation and dependencies. ex: $ update
+# update the dotfiles completely, or just the Claude/Codex layer with --ai
+function update() {    # update([--ai]) will update the dotfiles installation; --ai refreshes only the Claude/Codex layer. ex: $ update --ai
+	local scope="full"
+	case "${1:-}" in
+		"") ;;
+		--ai) scope="ai" ;;
+		*)
+			echo "[X] usage: update [--ai]"
+			return 2
+			;;
+	esac
+
 	# save the current directory
 	currentdir=$(pwd)
 
@@ -35,23 +45,36 @@ function update() {    # update() will update the current dotfiles installation 
 	# pull new version from origin
 	git pull
 
-    # update tldr definitions
-    tldr --update
-	
-	# execute the install script
-	# note: we manually specify bash here, since the install script is written in bash
-	# and we're calling it from zsh. bad things happen if you use source instead
 	local install_status=0
-	bash $DOTFILEDIR/install/install.sh || install_status=$?
+	if [[ "$scope" == "ai" ]]; then
+		# scoped: Claude/Codex layer only -- no sudo, no brew, no defaults
+		bash $DOTFILEDIR/install/common/ai-update.sh || install_status=$?
+	else
+		# update tldr definitions
+		tldr --update
+
+		# execute the install script
+		# note: we manually specify bash here, since the install script is written in bash
+		# and we're calling it from zsh. bad things happen if you use source instead
+		bash $DOTFILEDIR/install/install.sh || install_status=$?
+	fi
 
 	# return user to previous directory
 	cd $currentdir
 
 	# propagate a red install instead of masking it with the cd above
 	if (( install_status != 0 )); then
-		echo "[X] update failed: install.sh exited $install_status"
+		if [[ "$scope" == "ai" ]]; then
+			echo "[X] update --ai failed: ai-update.sh exited $install_status"
+		else
+			echo "[X] update failed: install.sh exited $install_status"
+		fi
 		return $install_status
 	fi
+
+	# A completed update supersedes any pending staleness nudge (Task 6);
+	# keep the last-check stamp so the daily fetch cadence is unchanged.
+	rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/repo-staleness-result"
 }
 
 # Extract a compressed archive without worrying about which tool to use
