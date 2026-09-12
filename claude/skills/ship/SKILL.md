@@ -18,18 +18,22 @@ human gate is the merge itself.
 
 ## Resume (cheap re-runs)
 
-Before step 1, run the PR-ready currency gate. Fetch the PR's comments
-(`gh api --paginate --slurp repos/{owner}/{repo}/issues/{number}/comments -q
-'[.[][] | {author: .user.login, created_at, id, body}]'` -- `--slurp` so the
-paginated pages form one JSON array), resolve the target base
-(`review.py resolve-base --base-ref <baseRefName> --head <headRefOid>`), and run
-`scripts/pr_ready_gate.py --comments <file> --head <headRefOid> --base <resolved>
---base-ref <baseRefName> --trusted-author <pr-author> --trusted-author
-<gh-login>`. If it PASSes -- latest trusted marker `verdict=APPROVE`, `sha ==
+Before step 1, run the PR-ready currency gate. First verify `origin` is the PR's
+base repository (`gh pr view --json baseRepository`; on a fork PR origin is the
+contributor's fork and resolving the base there is wrong -- FAIL closed on
+mismatch). Fetch the PR's comments (`gh api --paginate --slurp
+repos/{owner}/{repo}/issues/{number}/comments | jq '[.[][] | {author:
+.user.login, created_at, id, body}]'` -- pipe to external `jq`, since `gh`
+rejects `--slurp` with `-q`; `--slurp` wraps the per-page arrays so `.[][]`
+flattens), resolve the target base (`review.py resolve-base --base-ref
+<baseRefName> --head <headRefOid>`), and run `scripts/pr_ready_gate.py --comments
+<file> --head <headRefOid> --base <resolved> --base-ref <baseRefName>
+--trusted-author <pr-author> --trusted-author <gh-login>`. If it PASSes -- origin
+is the base repo and the latest trusted marker has `verdict=APPROVE`, `sha ==
 headRefOid`, `base == resolved base`, `base_ref == baseRefName` -- the review
-stands; skip step 1 and resume at step 2. Any FAIL (newer commit, retarget,
-missing/CHANGES marker, or any lookup error -- the gate fails closed) means
-re-review.
+stands; skip step 1 and resume at step 2. Any FAIL (base-repo mismatch, newer
+commit, retarget, missing/CHANGES marker, or any lookup error -- the gate fails
+closed) means re-review.
 
 PR already `MERGED` (run died between merge and cleanup)? Jump straight to
 steps 5-6 — `post-merge` is propose-confirm-apply over observed state, so it

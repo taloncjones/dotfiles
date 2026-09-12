@@ -19,13 +19,41 @@ class GateInputError(Exception):
     """The comments payload is not the expected shape."""
 
 
-def _is_fence_close(stripped: str, fence: tuple[str, int]) -> bool:
-    """A closer is only fence characters, of the same char and >= opener length.
+def _leading_ws(raw: str) -> str:
+    return raw[: len(raw) - len(raw.lstrip(" \t"))]
 
-    Markdown does not accept a non-whitespace suffix on a closing fence, so a
-    line like ``~~~still-code`` stays inside the block.
+
+def _is_fence_close(raw: str, fence: tuple[str, int]) -> bool:
+    """A closer is only fence chars (same char, >= opener length), indented at
+    most 3 spaces and never by a tab.
+
+    Checking the raw line -- not a stripped copy -- is what makes a four-space or
+    tab-indented ``~~~`` count as code content, not a closer. Markdown also
+    forbids a non-whitespace suffix on a closer, so ``~~~x`` stays inside.
     """
-    return bool(stripped) and set(stripped) == {fence[0]} and len(stripped) >= fence[1]
+    lead = _leading_ws(raw)
+    if "\t" in lead or len(lead) > 3:
+        return False
+    body = raw.strip()
+    return bool(body) and set(body) == {fence[0]} and len(body) >= fence[1]
+
+
+def _fence_opener(raw: str) -> tuple[str, int] | None:
+    """(char, length) if raw opens a fenced code block, else None.
+
+    A backtick fence's info string cannot contain a backtick, so a line like
+    ``` ```example``` ``` is an inline code span, not a fence opener -- rejecting
+    it keeps a later top-level marker visible.
+    """
+    match = _FENCE_OPEN_RE.match(raw)
+    if not match:
+        return None
+    run = match.group(0).lstrip(" ")
+    char, length = run[0], len(run)
+    rest = raw.lstrip(" ")[length:]
+    if char == "`" and "`" in rest:
+        return None
+    return (char, length)
 
 
 def _markers_in_body(body: str) -> list[dict]:
@@ -33,15 +61,13 @@ def _markers_in_body(body: str) -> list[dict]:
     found: list[dict] = []
     fence: tuple[str, int] | None = None
     for raw in body.splitlines():
-        stripped = raw.strip()
         if fence is not None:
-            if _is_fence_close(stripped, fence):
+            if _is_fence_close(raw, fence):
                 fence = None
             continue
-        opener = _FENCE_OPEN_RE.match(raw)
-        if opener:
-            run = opener.group(0).lstrip(" ")
-            fence = (run[0], len(run))
+        opened = _fence_opener(raw)
+        if opened is not None:
+            fence = opened
             continue
         # The marker must sit at column 0: any leading whitespace (space or tab,
         # in any mix) is Markdown code indentation. Matching the unstripped line

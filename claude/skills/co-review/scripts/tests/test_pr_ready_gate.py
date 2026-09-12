@@ -60,6 +60,21 @@ class SelectMarkerTests(unittest.TestCase):
         body = "~~~\n~~~still-code\n" + marker() + "\n~~~"
         self.assertIsNone(gate.select_marker([comment(body)], ME))
 
+    def test_four_space_indented_closer_keeps_marker_hidden(self):
+        # a four-space-indented fence is code content, not a closer
+        body = "~~~\n    ~~~\n" + marker() + "\n~~~"
+        self.assertIsNone(gate.select_marker([comment(body)], ME))
+
+    def test_tab_indented_closer_keeps_marker_hidden(self):
+        body = "~~~\n\t~~~\n" + marker() + "\n~~~"
+        self.assertIsNone(gate.select_marker([comment(body)], ME))
+
+    def test_inline_backtick_span_is_not_a_fence(self):
+        # ```example``` is an inline code span (backtick info strings cannot hold
+        # backticks), so a following top-level marker stays visible.
+        body = "```example```\n" + marker()
+        self.assertEqual(gate.select_marker([comment(body)], ME)["sha"], SHA_A)
+
     def test_malformed_ignored(self):
         self.assertIsNone(
             gate.select_marker([comment("<!-- co-review: sha=xyz -->")], ME)

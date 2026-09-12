@@ -17,13 +17,17 @@ The branch is not ready unless its latest co-review is APPROVE and current. Run
 the gate before anything else:
 
 ```bash
-gh pr view --json number,headRefOid,baseRefName,author
+set -o pipefail
+gh pr view --json number,headRefOid,baseRefName,author,baseRepository
 gh api user -q .login                          # authenticated reviewer identity
+# Bind the review to the PR's real target repo: origin must BE the base repo.
+# On a fork PR, origin is the contributor's fork and resolving --base-ref there
+# is wrong -> fail closed unless origin matches baseRepository.nameWithOwner.
+#   [ "$(gh repo view --json nameWithOwner -q .nameWithOwner)" = "<baseRepo>" ] || STOP
+# --slurp gives one array PER PAGE wrapped in an outer array; pipe to external
+# jq to flatten (gh rejects --slurp together with -q/--jq).
 gh api --paginate --slurp repos/{owner}/{repo}/issues/{number}/comments \
-  -q '[.[][] | {author: .user.login, created_at, id, body}]' > comments.json
-# --slurp collapses the per-page arrays into one JSON array; .[][] flattens
-# page -> comment. Without it --paginate emits one array per page and json.load
-# rejects the file.
+  | jq '[.[][] | {author: .user.login, created_at, id, body}]' > comments.json
 uv run --no-project python <co-review>/scripts/review.py resolve-base \
   --repo "$PWD" --base-ref <baseRefName> --head <headRefOid>   # -> {base}
 uv run --no-project python <co-review>/scripts/pr_ready_gate.py \
@@ -32,11 +36,12 @@ uv run --no-project python <co-review>/scripts/pr_ready_gate.py \
   --trusted-author <pr-author-login> --trusted-author <gh-login>
 ```
 
-PASS requires the latest trusted marker `verdict=APPROVE`, `sha == headRefOid`,
-`base == resolved base`, and `base_ref == baseRefName`. On FAIL (stale head,
-retarget, missing/CHANGES marker, or ANY lookup/API error -- the gate fails
-closed), **STOP**: report "re-run co-review" and do not run the steps below or
-post any Jira/PR-body updates.
+PASS requires `origin` == the PR base repository, and the latest trusted marker
+`verdict=APPROVE`, `sha == headRefOid`, `base == resolved base`, and `base_ref ==
+baseRefName`. On FAIL (base-repo mismatch, stale head, retarget, missing/CHANGES
+marker, or ANY lookup/API error -- the gate fails closed), **STOP**: report
+"re-run co-review" and do not run the steps below or post any Jira/PR-body
+updates.
 
 **Step 1: Verify PR exists**
 
