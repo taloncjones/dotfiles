@@ -248,6 +248,39 @@ def lead_authority(session_id, runtime, caller_scope):
     return is_lead, roots
 
 
+def privileged_anywhere(session_id, runtime):
+    """Scope-independent: does ANY coordination record name this session as
+    a launcher (a slug's owner.json) or a lead (a lead-*.json lease)?
+
+    Used where the account scope cannot be derived: account_scope() reads
+    repository metadata (`git branch --show-current`, strict UTF-8) and can
+    raise on a legal non-UTF-8 branch name, yet the session's coordination
+    records stay readable. Ignoring account_id here can only over-match (a
+    false deny for a session privileged under another account), never
+    under-match. Total: an unreadable coordination root is False."""
+    try:
+        for slug in core.coordination.coordination_slugs():
+            rec = read_state_json(
+                core.coordination.coordination_root() / slug / "owner.json"
+            )
+            if (
+                rec
+                and rec.get("session_id") == session_id
+                and rec.get("runtime", "claude") == runtime
+                and rec.get("control_tier", "launcher") == "launcher"
+            ):
+                return True
+            for lease in core.coordination.iter_lead_leases(slug):
+                if (
+                    lease.get("session_id") == session_id
+                    and lease.get("runtime", "claude") == runtime
+                ):
+                    return True
+    except Exception:  # noqa: BLE001 -- unreadable namespace: cannot identify
+        return False
+    return False
+
+
 # --- paths and classification ---------------------------------------------
 
 
@@ -288,13 +321,17 @@ def classify(c, budget):
     d = c if os.path.isdir(c) else os.path.dirname(c)
     while d != "/" and not os.path.isdir(d):
         d = os.path.dirname(d)
-    rc, out = git(["rev-parse", "--show-toplevel", "--is-inside-git-dir"], d, budget)
-    if rc != 0:
+    # Two calls, parsed losslessly: the combined form's splitlines() misparsed
+    # a work-tree root containing a newline, returned "not guarded", and let
+    # a write into such a repo bypass containment (co-review r9). git ends the
+    # path with exactly one newline; strip only that, never embedded ones.
+    rc, out = git(["rev-parse", "--show-toplevel"], d, budget)
+    if rc != 0 or not out:
         return None
-    lines = out.splitlines()
-    if len(lines) < 2 or lines[1].strip() != "false":
+    rc, inside = git(["rev-parse", "--is-inside-git-dir"], d, budget)
+    if rc != 0 or inside.strip() != "false":
         return None
-    top = os.path.realpath(lines[0].strip())
+    top = os.path.realpath(out.removesuffix("\n"))
     if c != top and not c.startswith(top + "/"):
         return None
     # The work tree root itself (`mv /repo /tmp/x`) is guarded when it has
@@ -1286,7 +1323,11 @@ def decide(payload, runtime="claude"):
     try:
         caller_scope = selected_scope(caller_cwd, runtime)
     except (OSError, ValueError, subprocess.SubprocessError):
-        return 0
+        # Scope derivation reads git metadata and can raise on a legal
+        # non-UTF-8 branch name. That is not "no privileged identity": the
+        # session's coordination records are still readable, so identify it
+        # without the scope and fail closed if it is fenced (co-review r9).
+        return refuse_crash() if privileged_anywhere(sid, runtime) else 0
     home = os.environ.get("HOME", os.path.expanduser("~"))
     paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
     if not paths:
@@ -1383,22 +1424,27 @@ def refuse_crash():
     """Three-line refusal when the guard itself failed while checking a
     fenced session's write. Failing closed here is what turns "make X raise"
     from a bypass into, at worst, a false deny."""
-    print(
-        f"{BLOCKED} -- the guard hit an internal error while checking a "
-        "fenced (orchestrator or lead) session's write.",
-        file=sys.stderr,
-    )
-    print(
-        "A fenced session fails closed on any guard error: an unverified "
-        "target could be a tracked file.",
-        file=sys.stderr,
-    )
-    print(
-        "Retry once; if it persists, dispatch the edit to a worker and "
-        "report the guard error.",
-        file=sys.stderr,
-    )
-    sys.stderr.flush()
+    # The verdict is 2 regardless of whether the diagnostics can be written:
+    # a failing stderr must never turn a decided deny into an allow.
+    try:
+        print(
+            f"{BLOCKED} -- the guard hit an internal error while checking a "
+            "fenced (orchestrator or lead) session's write.",
+            file=sys.stderr,
+        )
+        print(
+            "A fenced session fails closed on any guard error: an unverified "
+            "target could be a tracked file.",
+            file=sys.stderr,
+        )
+        print(
+            "Retry once; if it persists, dispatch the edit to a worker and "
+            "report the guard error.",
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001, S110 -- diagnostics are best effort; the deny stands
+        pass
     return 2
 
 
@@ -1417,17 +1463,13 @@ def crash_verdict(payload, runtime="claude"):
         sid = payload.get("session_id") if isinstance(payload, dict) else None
         if not isinstance(sid, str) or not SESSION_ID_RE.match(sid):
             return 0
-        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.getcwd()
-        caller_cwd = (
-            payload.get("caller_cwd")
-            if isinstance(payload.get("caller_cwd"), str)
-            else cwd
-        )
-        caller_scope = selected_scope(caller_cwd, runtime)
-        if owned_slugs(sid, runtime, caller_scope, {}):
-            return refuse_crash()
-        is_lead, _roots = lead_authority(sid, runtime, caller_scope)
-        return refuse_crash() if is_lead else 0
+        # Scope-INDEPENDENT identification (co-review r9): deriving the
+        # account scope itself reads repository metadata (`git branch
+        # --show-current`, strict UTF-8) and can raise -- e.g. a non-UTF-8
+        # branch name -- which must not read as "not privileged" for a session
+        # whose coordination records are perfectly readable. Decide the
+        # verdict first; the refusal's diagnostics are total on their own.
+        return refuse_crash() if privileged_anywhere(sid, runtime) else 0
     except Exception:  # noqa: BLE001 -- unidentifiable session: nothing to fence
         return 0
 

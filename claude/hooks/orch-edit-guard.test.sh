@@ -718,8 +718,12 @@ hook_case "AC9 corrupt sibling owner file does not un-guard the valid owner" den
 # A git that hangs: the budget bounds the hook, and the target is not guarded.
 mkdir -p "$FIX/slowbin"; printf '#!/bin/sh\nsleep 30\n' > "$FIX/slowbin/git"; chmod +x "$FIX/slowbin/git"
 start=$(date +%s)
-hook_case "AC9 hanging git yields allow" allow Edit "$R/tracked.txt" "$R" "$SID_A" PATH="$FIX/slowbin:$PATH"
+# A hung git makes account-scope derivation raise. For a FENCED session that
+# is an unresolvable scope, which fails closed (spec R9; co-review r9); a
+# plain worker is still allowed. Either way the budget bounds the hook.
+hook_case "AC9 hanging git: a fenced launcher fails closed (scope unresolvable)" deny Edit "$R/tracked.txt" "$R" "$SID_A" PATH="$FIX/slowbin:$PATH"
 elapsed=$(( $(date +%s) - start ))
+hook_case "AC9 hanging git: a plain worker is allowed" allow Edit "$R/tracked.txt" "$R" "66666666-6666-6666-6666-666666666666" PATH="$FIX/slowbin:$PATH"
 if [ "$elapsed" -le 12 ]; then
     printf 'PASS  AC9 hanging git returns within the budget (%ss)\n' "$elapsed"; PASS=$((PASS + 1))
 else
@@ -992,6 +996,60 @@ assert rc == 0 and lines == [], ("worker", rc, lines)
 PY
 then printf 'PASS  AC-G guard crash fails closed for launcher and lead, open for a worker\n'; PASS=$((PASS + 1))
 else printf 'FAIL  AC-G guard crash fails closed for launcher and lead, open for a worker\n' >&2; FAIL=$((FAIL + 1)); fi
+
+# Identity must be derivable WITHOUT the account scope (co-review r9): scope
+# derivation reads `git branch --show-current` strictly and can raise on a
+# legal non-UTF-8 branch. A scope failure must not read as "not privileged".
+# Also: a failing stderr must not turn a decided deny into an allow.
+lead_setup "$SID_C" "$LWS"
+if HOOK="$HOOK" CFG="$CFG" H="$H" R="$R" SID_A="$SID_A" SID_C="$SID_C" python3 - <<'PY'
+import contextlib, importlib.util, io, json, os, sys
+sys.dont_write_bytecode = True
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+os.environ["HERDR_ENV"] = "1"
+os.environ["HOME"] = os.environ["H"]
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+R = os.environ["R"]
+def payload(sid):
+    return json.dumps({"session_id": sid, "cwd": R, "hook_event_name": "PreToolUse",
+                       "tool_name": "Edit", "tool_use_id": "toolu_scope",
+                       "tool_input": {"file_path": R + "/tracked.txt", "content": "x"}})
+def run(sid, stderr=None):
+    err = stderr if stderr is not None else io.StringIO()
+    sys.stdin = io.StringIO(payload(sid))
+    with contextlib.redirect_stderr(err):
+        return g.main()
+# 1) scope derivation raises -> launcher/lead deny, worker allow
+real_scope = g.selected_scope
+def bad_scope(*a, **k): raise ValueError("non-UTF-8 branch")
+g.selected_scope = bad_scope
+assert run(os.environ["SID_A"]) == 2, "launcher: scope failure must deny"
+assert run(os.environ["SID_C"]) == 2, "lead: scope failure must deny"
+assert run("55555555-5555-5555-5555-555555555555") == 0, "worker: scope failure allows"
+g.selected_scope = real_scope
+# 2) a crash plus a failing stderr still yields 2 for a launcher
+def boom(*a, **k): raise RuntimeError("injected")
+g.classify = boom
+class BadErr(io.StringIO):
+    def write(self, s): raise OSError("stderr closed")
+    def flush(self): raise OSError("stderr closed")
+assert run(os.environ["SID_A"], BadErr()) == 2, "launcher: stderr failure must not allow"
+PY
+then printf 'PASS  AC-G scope failure and stderr failure both keep a fenced session denied\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G scope failure and stderr failure both keep a fenced session denied\n' >&2; FAIL=$((FAIL + 1)); fi
+# Live form of the same scope failure: a non-UTF-8 branch in the lead's own
+# worktree. A write outside the workspace must still deny.
+git -C "$LWS" checkout -q -b "$(printf 'br\377x')" 2>/dev/null || true
+hook_case "AC-G non-UTF-8 branch in the lead's worktree: outside write still denied" deny Edit "$R/tracked.txt" "$LWS" "$SID_C"
+# A work-tree root containing a newline must still be classified (lossless
+# toplevel parse); a launcher's and a lead's writes there are denied, not
+# silently un-guarded (co-review r9, pre-existing logic escape).
+NLR="$FIX/nl
+repo"
+mkrepo "$NLR" "git@example.com:org/nl.git"
+hook_case "AC-G newline in repo root: a launcher's write is denied, not un-guarded" deny Edit "$NLR/tracked.txt" "$NLR" "$SID_A"
+hook_case "AC-G newline in repo root: a lead's outside write is denied, not un-guarded" deny Edit "$NLR/tracked.txt" "$NLR" "$SID_C"
 
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
