@@ -2794,10 +2794,19 @@ lfB=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py cla
 test "$lfB" = 2
 # A's session tries to re-claim under binding A -- its own binding record is
 # still "claimed" and names SA, so the old (pre-fix) renewal rule would let
-# this mint fence 3 and revive A's emits. It must be refused instead.
+# this mint fence 3 and revive A's emits. It must be refused instead. Pass
+# --stale-secs 0 so a rejection cannot instead come from B's fresh lease
+# still being busy -- only the superseded-generation guard is being tested.
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SA --host h --pid 2 --control-tier lead \
-   --workspace-root "$LF_WS" --binding "$bidA" 2>/dev/null; then exit 1; fi
+   --workspace-root "$LF_WS" --binding "$bidA" --stale-secs 0 2>/dev/null; then exit 1; fi
+# The authoritative lease (not just a per-binding mirror) still names B.
+key=$(python3 -c 'import os, sys; sys.path.insert(0,"claude/hooks"); import herdr_coordination as c; print(c.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+leaseholder=$(python3 -c "
+import json
+print(json.load(open('$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$key.json'))['binding_id'])
+")
+test "$leaseholder" = "$bidB"
 # A's own owner mirror is untouched by the failed reclaim (still fence 1);
 # B's mirror still shows the fence 2 takeover.
 faz=$(CLAUDE_CONFIG_DIR="$root" python3 -c "
