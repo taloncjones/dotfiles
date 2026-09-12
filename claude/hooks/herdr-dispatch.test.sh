@@ -340,7 +340,7 @@ class Fixture:
         )
 
     def reprompt(self, launch_id, prompt="incorporate the review findings",
-                 fence=1, **kwargs):
+                 fence=1, prompt_timeout_ms=1000, **kwargs):
         return herdr_dispatch.reprompt(
             repo_slug=self.slug,
             task_id="td-a",
@@ -354,7 +354,7 @@ class Fixture:
             runtime="codex",
             herdr_cli=str(self.bin),
             env=self.env,
-            prompt_timeout_ms=1000,
+            prompt_timeout_ms=prompt_timeout_ms,
             **kwargs,
         )
 
@@ -1583,6 +1583,24 @@ def test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass():
         fx.close()
 
 
+def test_reprompt_rejects_unbounded_timeout_before_recording_intent():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        prompts_before = len(fx.prompt_calls())
+        try:
+            fx.reprompt(lid, prompt_timeout_ms=2**31)
+        except herdr_dispatch.DispatchError as exc:
+            assert "between 1 and 300000" in str(exc), exc
+        else:
+            raise AssertionError("an unbounded timeout must be refused")
+        assert len(fx.prompt_calls()) == prompts_before, "no delivery on bad timeout"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert "reprompts" not in target or target["reprompts"] == [], target
+    finally:
+        fx.close()
+
+
 def test_result_object_normalizes_parse_failures_to_dispatch_error():
     import herdr_dispatch_cli as cli
 
@@ -1643,6 +1661,7 @@ for name, test in (
     ("reprompt unparseable reply is uncertain", test_reprompt_unparseable_reply_valueerror_is_uncertain),
     ("reprompt readiness decode error marks failed and refuses", test_reprompt_readiness_decode_error_marks_failed_and_refuses),
     ("reprompt delivered-unrecorded repersists and allows next pass", test_reprompt_delivered_unrecorded_repersists_and_allows_next_pass),
+    ("reprompt rejects an unbounded timeout before recording intent", test_reprompt_rejects_unbounded_timeout_before_recording_intent),
     ("result_object normalizes parse failures to DispatchError", test_result_object_normalizes_parse_failures_to_dispatch_error),
     ("reprompt CLI rejects a non-utf8 prompt file", test_reprompt_cli_rejects_non_utf8_prompt_file),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),

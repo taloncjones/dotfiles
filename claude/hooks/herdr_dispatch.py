@@ -962,8 +962,13 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
         raise DispatchError("fence must be a positive integer")
     if (isinstance(prompt_timeout_ms, bool)
-            or not isinstance(prompt_timeout_ms, int) or prompt_timeout_ms < 1):
-        raise DispatchError("prompt_timeout_ms must be a positive integer")
+            or not isinstance(prompt_timeout_ms, int)
+            or not 0 < prompt_timeout_ms <= 300_000):
+        # Upper-bounded so a pathological value cannot overflow subprocess
+        # timeout math during delivery and strand a recorded intent.
+        raise DispatchError(
+            "prompt_timeout_ms must be between 1 and 300000"
+        )
     if runtime not in ("claude", "codex"):
         raise DispatchError("route runtime is unsupported")
 
