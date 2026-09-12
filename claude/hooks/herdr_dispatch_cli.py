@@ -412,6 +412,22 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     for flag in ("thread-id", "event", "repo-slug", "workspace-id"):
         wake.add_argument(f"--{flag}", required=True)
     wake.add_argument("--queue-validated", action="store_true")
+    reprompt = commands.add_parser("reprompt")
+    for flag in (
+        "repo-slug",
+        "task-id",
+        "session",
+        "workspace-id",
+        "launch-id",
+        "phase",
+        "cwd",
+        "prompt-file",
+    ):
+        reprompt.add_argument(f"--{flag}", required=True)
+    reprompt.add_argument("--fence", required=True, type=int)
+    reprompt.add_argument("--runtime", default="claude", choices=("claude", "codex"))
+    reprompt.add_argument("--prompt-timeout-ms", type=int, default=120_000)
+    reprompt.add_argument("--personal", action="store_true")
     return parser
 
 
@@ -447,6 +463,21 @@ def main(argv: list[str] | None = None) -> int:
                 args.workspace_id,
                 cwd=args.cwd,
                 runtime=args.runtime,
+                personal=args.personal,
+            )
+        elif args.command == "reprompt":
+            output = herdr_dispatch.reprompt(
+                repo_slug=args.repo_slug,
+                task_id=args.task_id,
+                session=args.session,
+                fence=args.fence,
+                workspace_id=args.workspace_id,
+                launch_id=args.launch_id,
+                phase=args.phase,
+                cwd=args.cwd,
+                prompt=Path(args.prompt_file).read_text(),
+                runtime=args.runtime,
+                prompt_timeout_ms=args.prompt_timeout_ms,
                 personal=args.personal,
             )
         else:

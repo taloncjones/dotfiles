@@ -20,7 +20,7 @@ import herdr_orch_core as core
 from herdr_dispatch_cli import (
     fresh_codex_hook_review_required as _fresh_codex_hook_review_required,
 )
-from herdr_dispatch_cli import metadata_argv
+from herdr_dispatch_cli import metadata_argv, result_object
 from herdr_dispatch_cli import prompt_state as _prompt_state
 from herdr_dispatch_cli import run_herdr as _run_herdr
 from herdr_dispatch_cli import same_directory as _same_directory
@@ -809,6 +809,250 @@ def wake(
         "reason": "native-queue-adapter-unavailable",
         "fallback": "bounded-watch",
     }
+
+
+REPROMPT_OBSERVATION = "session-identity-not-exposed-by-herdr"
+
+
+class _RejectedDelivery(DispatchError):
+    """The reprompt was PROVABLY not accepted: the delivery process never ran.
+
+    Only this pre-acceptance signal is retry-safe. A nonzero exit, timeout, or
+    malformed reply can each occur AFTER the prompt was accepted (--wait), so
+    they are classified uncertain, never retry-safe.
+    """
+
+
+def _find_current_target(task, launch_id, phase, workspace_id, runtime):
+    workers = task.get("workers", [])
+    if not isinstance(workers, list):
+        raise DispatchError("task workers must be a list")
+    target = next(
+        (w for w in workers
+         if isinstance(w, dict) and w.get("launch_id") == launch_id),
+        None,
+    )
+    if target is None:
+        raise DispatchError("named launch is not present in the task record")
+    matching = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
+    if not matching or matching[-1] is not target:
+        raise DispatchError("named launch is no longer the current attempt for its phase")
+    if target.get("status") != "launched":
+        raise DispatchError("named launch is not a live launched attempt")
+    if target.get("runtime") != runtime:
+        raise DispatchError("named launch runtime does not match")
+    if target.get("workspace_id") != workspace_id:
+        raise DispatchError("named launch workspace does not match")
+    for key in ("pane_id", "agent"):
+        if not isinstance(target.get(key), str) or not target[key]:
+            raise DispatchError("named launch lacks pane or agent identity")
+    return target
+
+
+def _write_target_reprompts(task, task_path, launch_id, reprompts):
+    workers = task.get("workers", [])
+    new_workers = []
+    replaced = False
+    for worker in workers:
+        if (
+            isinstance(worker, dict)
+            and worker.get("launch_id") == launch_id
+            and not replaced
+        ):
+            new_workers.append({**worker, "reprompts": reprompts})
+            replaced = True
+        else:
+            new_workers.append(worker)
+    if not replaced:
+        raise DispatchError("named launch vanished before write")
+    core.write_json_atomic(task_path, {**task, "workers": new_workers})
+
+
+def _set_reprompt_status(task, task_path, launch_id, seq, status, prompt_state):
+    """Update reprompt entry `seq` using an already-read `task` (call inside an
+    open owner transaction)."""
+    target = next(
+        (w for w in task.get("workers", [])
+         if isinstance(w, dict) and w.get("launch_id") == launch_id),
+        None,
+    )
+    if target is None:
+        raise DispatchError("named launch vanished before recording")
+    reprompts = list(target.get("reprompts", []))
+    if seq >= len(reprompts) or not isinstance(reprompts[seq], dict):
+        raise DispatchError("reprompt record entry missing")
+    entry = {**reprompts[seq], "status": status}
+    if prompt_state is not None:
+        entry["prompt_state"] = prompt_state
+    reprompts[seq] = entry
+    _write_target_reprompts(task, task_path, launch_id, reprompts)
+
+
+def _mark_reprompt(rd, task_id, session, fence, repository, scope, repo_slug,
+                   launch_id, seq, *, status, prompt_state=None, best_effort=False):
+    """Open a fresh owner transaction to set a reprompt entry's status."""
+    task_path = rd / "tasks" / f"{task_id}.json"
+    try:
+        with core.owner_transaction(
+            rd, session, fence, context=repository, scope=scope,
+            expected_slug=repo_slug,
+        ):
+            task = _read_task(task_path, task_id)
+            _set_reprompt_status(task, task_path, launch_id, seq, status, prompt_state)
+    except (DispatchError, OSError, ValueError):
+        if best_effort:
+            return
+        raise
+
+
+def _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env):
+    """Deliver one turn; classify into (delivered,state) | (uncertain,None) |
+    raise _RejectedDelivery (provable pre-acceptance rejection only)."""
+    argv = ["agent", "prompt", agent, prompt, "--wait", "--timeout",
+            str(prompt_timeout_ms)]
+    try:
+        process = subprocess.run(
+            [herdr_cli, *argv], env=env, check=False, capture_output=True,
+            text=True, timeout=prompt_timeout_ms / 1000 + 5,
+        )
+    except subprocess.TimeoutExpired:
+        return ("uncertain", None)  # may have accepted then run long
+    except OSError as exc:
+        raise _RejectedDelivery("reprompt delivery could not start") from exc
+    if process.returncode != 0:
+        return ("uncertain", None)  # could be a post-acceptance failure
+    try:
+        result = result_object(process.stdout, "Herdr agent prompt")
+    except DispatchError:
+        return ("uncertain", None)
+    if result.get("type") != "agent_prompted":
+        return ("uncertain", None)
+    return ("delivered", _prompt_state(result))
+
+
+def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
+             phase, cwd, prompt, runtime="claude", herdr_cli="herdr",
+             env=None, prompt_timeout_ms=120_000, personal=False):
+    """Append a follow-up turn to a named, still-live dispatched worker."""
+    if phase not in PHASES:
+        raise DispatchError(f"unsupported phase: {phase}")
+    if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
+        raise DispatchError("invalid task or workspace identity")
+    if not isinstance(launch_id, str) or not launch_id:
+        raise DispatchError("launch_id must be non-empty text")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise DispatchError("prompt must be non-empty text")
+    if isinstance(fence, bool) or not isinstance(fence, int) or fence < 1:
+        raise DispatchError("fence must be a positive integer")
+    if (isinstance(prompt_timeout_ms, bool)
+            or not isinstance(prompt_timeout_ms, int) or prompt_timeout_ms < 1):
+        raise DispatchError("prompt_timeout_ms must be a positive integer")
+    if runtime not in ("claude", "codex"):
+        raise DispatchError("route runtime is unsupported")
+
+    child_env = dict(os.environ if env is None else env)
+    if child_env.get("HERDR_ENV") != "1":
+        raise DispatchError("reprompt requires a Herdr-managed environment")
+
+    try:
+        repository, scope = agent_runtime.execution_context(cwd, runtime, personal)
+    except agent_runtime.RouteError as exc:
+        raise DispatchError(str(exc)) from exc
+    if repo_slug != _expected_slug(repository, cwd):
+        raise DispatchError("repo slug does not match repository context")
+    rd = _payload_repo_dir(scope, repo_slug)
+    task_path = rd / "tasks" / f"{task_id}.json"
+    prompt_sha = hashlib.sha256(prompt.encode()).hexdigest()
+    started_ns = time.time_ns()
+
+    # Transaction 1: record intent (crash marker), fence-validated. A bad/lost
+    # fence or a persistence error surfaces from owner_transaction as
+    # ValueError/OSError; convert it to a DispatchError refusal (nothing has
+    # been delivered). Validation DispatchErrors propagate unchanged.
+    try:
+        with core.owner_transaction(
+            rd, session, fence, context=repository, scope=scope,
+            expected_slug=repo_slug,
+        ):
+            task = _read_task(task_path, task_id)
+            _validate_task_context(task, repository, repo_slug)
+            target = _find_current_target(task, launch_id, phase, workspace_id, runtime)
+            agent = target["agent"]
+            pane_id = target["pane_id"]
+            reprompts = list(target.get("reprompts", []))
+            seq = len(reprompts)
+            reprompts.append({
+                "seq": seq, "started_ns": started_ns,
+                "prompt_sha256": prompt_sha, "status": "starting",
+            })
+            _write_target_reprompts(task, task_path, launch_id, reprompts)
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"reprompt could not record intent: {exc}") from exc
+
+    # Live-agent validation: idle + interactive-ready on the recorded pane.
+    # Read-only herdr query; safe outside the fence. A failure here delivered
+    # nothing, so the recorded intent is marked failed (retry-safe), not orphaned.
+    try:
+        current = _run_herdr(herdr_cli, ["agent", "get", agent], env=child_env,
+                             json_result=True)
+        assert isinstance(current, dict)
+        _validate_agent(current, agent, runtime, pane_id)
+    except DispatchError:
+        _mark_reprompt(rd, task_id, session, fence, repository, scope, repo_slug,
+                       launch_id, seq, status="failed", best_effort=True)
+        raise
+
+    # Transaction 2: re-validate current-for-phase, deliver (acceptance), and
+    # record the outcome -- ALL under one held fence, so no superseding writer
+    # or ownership transfer can slip between validation and acceptance.
+    # `agent prompt --wait` returns at prompt acceptance (agent transitions to
+    # "working"), not turn completion (matching launch), so the critical section
+    # is bounded to acceptance, not the worker's whole turn.
+    delivered = {"done": False, "outcome": None, "state": None}
+    try:
+        with core.owner_transaction(
+            rd, session, fence, context=repository, scope=scope,
+            expected_slug=repo_slug,
+        ):
+            task = _read_task(task_path, task_id)
+            _validate_task_context(task, repository, repo_slug)
+            _find_current_target(task, launch_id, phase, workspace_id, runtime)
+            outcome, state = _deliver_reprompt(herdr_cli, agent, prompt,
+                                               prompt_timeout_ms, child_env)
+            delivered.update(done=True, outcome=outcome, state=state)
+            _set_reprompt_status(
+                task, task_path, launch_id, seq,
+                "delivered" if outcome == "delivered" else "uncertain", state,
+            )
+    except _RejectedDelivery:
+        # Provable pre-acceptance rejection: nothing delivered, retry-safe.
+        _mark_reprompt(rd, task_id, session, fence, repository, scope, repo_slug,
+                       launch_id, seq, status="failed", best_effort=True)
+        raise DispatchError("reprompt delivery was rejected before acceptance")
+    except (DispatchError, OSError, ValueError) as exc:
+        # If the exception fired BEFORE delivery (supersession, task-context,
+        # fence, persistence-on-read), nothing was delivered -> refuse and mark
+        # the intent failed (retry-safe). If AFTER delivery, the turn landed and
+        # only recording failed -> delivered-unrecorded; never resend.
+        if not delivered["done"]:
+            _mark_reprompt(rd, task_id, session, fence, repository, scope,
+                           repo_slug, launch_id, seq, status="failed",
+                           best_effort=True)
+            if isinstance(exc, DispatchError):
+                raise
+            raise DispatchError(
+                f"reprompt could not be validated or delivered: {exc}"
+            ) from exc
+        status = ("delivered-unrecorded"
+                  if delivered["outcome"] == "delivered" else "uncertain")
+        return {"status": status, "launch_id": launch_id, "phase": phase,
+                "reprompt_seq": seq, "prompt_state": delivered["state"],
+                "observation": REPROMPT_OBSERVATION}
+
+    result_status = "reprompted" if delivered["outcome"] == "delivered" else "uncertain"
+    return {"status": result_status, "launch_id": launch_id, "phase": phase,
+            "reprompt_seq": seq, "prompt_state": delivered["state"],
+            "observation": REPROMPT_OBSERVATION}
 
 
 def runtime_main(argv: list[str] | None = None) -> int:
