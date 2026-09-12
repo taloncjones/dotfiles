@@ -78,7 +78,10 @@ function update() {    # update([--ai]) will update the dotfiles installation; -
 	# keep the last-check stamp so the daily fetch cadence is unchanged.
 	# Only clear it when BOTH the pull and the install actually succeeded --
 	# a failed pull must not silence a real staleness reminder.
-	(( pull_status == 0 && install_status == 0 )) && rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/repo-staleness-result"
+	if (( pull_status == 0 && install_status == 0 )); then
+		rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/repo-staleness-result"
+	fi
+	return 0
 }
 
 # Extract a compressed archive without worrying about which tool to use
