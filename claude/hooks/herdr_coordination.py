@@ -41,6 +41,54 @@ def owner_path(rd):
     return coordination_root() / slug / "owner.json"
 
 
+def iter_lead_leases(slug):
+    """Every valid lead lease under a slug's coordination dir, read-only and
+    lockless -- the guard's convenience view of who holds a lead lease.
+
+    Opens the slug dir no-follow, scans `lead-*.json`, reads each no-follow,
+    and keeps only records that pass _valid_lead_lease. A missing dir yields
+    []; a corrupt, symlinked, or non-regular entry is skipped, never raised
+    (this never mutates and never takes the global lock)."""
+    if not _SLUG.fullmatch(slug):
+        raise ValueError("invalid repository slug")
+    base = coordination_root() / slug
+    try:
+        parent = os.open(
+            str(base),
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return []
+    leases = []
+    try:
+        for name in os.listdir(parent):
+            if not (name.startswith("lead-") and name.endswith(".json")):
+                continue
+            try:
+                rec = _read_at(parent, name)
+            except (ValueError, OSError):
+                continue
+            if rec is not None and _valid_lead_lease(rec):
+                leases.append(rec)
+    finally:
+        os.close(parent)
+    return leases
+
+
+def coordination_slugs():
+    """Valid slug directory names under the coordination root, sorted.
+
+    The coordination root is the authoritative cross-account namespace for
+    ownership and lead leases; the guard enumerates it (not the payload root)
+    so a lead lease stays discoverable even when its payload-root slug dir was
+    removed. A missing root yields []; non-slug entries are ignored."""
+    try:
+        names = os.listdir(str(coordination_root()))
+    except OSError:
+        return []
+    return sorted(n for n in names if _SLUG.fullmatch(n))
+
+
 def _read_at(parent, name):
     try:
         fd = os.open(
