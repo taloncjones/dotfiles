@@ -2016,6 +2016,9 @@ def _main(argv=None) -> int:
         workspace_root = ns.workspace_root
         if control_tier == "lead":
             _require(workspace_root, "control-tier lead requires --workspace-root")
+            # Absolute BEFORE realpath: canonicalizing a relative path would
+            # silently bind the workspace to the invocation directory.
+            _require(os.path.isabs(workspace_root), "workspace-root must be an absolute path")
             workspace_root = os.path.realpath(workspace_root)
             _require(os.path.isdir(workspace_root), "workspace-root must be an existing directory")
         else:

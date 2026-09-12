@@ -2236,5 +2236,44 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-
    --repo-slug slug-x --session S --host h --pid 1 --control-tier lead --workspace-root / 2>/dev/null; then exit 1; fi
 SH
 
+check "CLI claim-owner rejects a relative workspace-root before realpath" <<'SH'
+root=$(mktemp -d); ws=$(mktemp -d); fx=$PWD/claude/hooks/herdr_legacy_fixture.py
+# Run from an existing directory so realpath(".") WOULD have produced a valid
+# absolute path: only the explicit isabs() check may reject this.
+if (cd "$ws" && CLAUDE_CONFIG_DIR="$root" python3 "$fx" claim-owner \
+   --repo-slug slug-x --session S --host h --pid 1 --control-tier lead --workspace-root . 2>/dev/null); then exit 1; fi
+SH
+
+check "read-side _valid_owner matches claim: rejects /, //, NUL, relative, empty" <<'SH'
+python3 - <<'PY'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as c
+base = dict(session_id="S", host="h", pid=1, fence=1, heartbeat_ts=1.0)
+assert c._valid_owner(dict(base, control_tier="lead", workspace_root="/tmp/ws"))
+for bad in ("/", "//", "relative/ws", "/tmp/\x00bad", "", None):
+    rec = dict(base, control_tier="lead", workspace_root=bad)
+    assert not c._valid_owner(rec), ("accepted", bad)
+assert c._valid_owner(dict(base))  # legacy launcher record still valid
+PY
+SH
+
+check "legacy_seen observations persist base fields only (rollback-safe)" <<'SH'
+python3 - <<'PY'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as c
+base_fields = {"session_id", "host", "pid", "fence", "heartbeat_ts",
+               "runtime", "thread_id", "account_id"}
+full = dict(session_id="S", host="h", pid=1, fence=1, heartbeat_ts=1.0,
+            runtime="claude", thread_id=None, account_id="a",
+            control_tier="lead", workspace_root="/tmp/ws")
+obs = c._observation(full)
+assert set(obs) == base_fields, sorted(obs)  # a rolled-back reader compares verbatim
+# An entry persisted WITH extra fields (older HEAD builds) projects equal.
+assert c._observation(dict(obs, control_tier="launcher", workspace_root=None)) == obs
+PY
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

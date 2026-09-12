@@ -108,6 +108,19 @@ def _lock_at(parent, name):
         raise
 
 
+def _valid_workspace_root(value):
+    # Shared by claim (write side) and _valid_owner (read side) so a record
+    # one side rejects can never be accepted by the other. "//" is a distinct
+    # POSIX root that normpath preserves; a NUL byte survives isabs().
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and "\x00" not in value
+        and os.path.isabs(value)
+        and os.path.normpath(value) not in (os.sep, os.sep * 2)
+    )
+
+
 def _valid_owner(value):
     if not isinstance(value, dict):
         return False
@@ -130,11 +143,7 @@ def _valid_owner(value):
         and value.get("control_tier", "launcher") in ("launcher", "lead")
         and (
             value.get("control_tier", "launcher") != "lead"
-            or (
-                isinstance(value.get("workspace_root"), str)
-                and bool(value["workspace_root"])
-                and os.path.isabs(value["workspace_root"])
-            )
+            or _valid_workspace_root(value.get("workspace_root"))
         )
         and (
             value.get("control_tier", "launcher") == "lead"
@@ -155,6 +164,24 @@ def _owner_metadata(value):
         account_id=value.get("account_id"),
         control_tier=value.get("control_tier", "launcher"),
         workspace_root=value.get("workspace_root"),
+    )
+
+
+def _observation(value):
+    # legacy_seen entries persist in the BASE field set only. They exist to
+    # detect a changed foreign legacy owner, and a rolled-back (pre-tier)
+    # reader compares them verbatim: persisting newer optional fields would
+    # make that reader spuriously report an unchanged owner as changed and
+    # block every transaction until the entry is repaired.
+    result = {
+        key: value[key]
+        for key in ("session_id", "host", "pid", "fence", "heartbeat_ts")
+    }
+    return dict(
+        result,
+        runtime=value.get("runtime", "claude"),
+        thread_id=value.get("thread_id"),
+        account_id=value.get("account_id"),
     )
 
 
@@ -319,24 +346,24 @@ class OwnerTransaction:
             scope = hashlib.sha256(root.encode()).hexdigest()
             previous = observed.get(scope)
             if previous is not None:
-                # Normalize a persisted observation with the SAME defaults as
-                # `legacy` above before comparing. A legacy_seen entry written by
-                # an older version lacks control_tier/workspace_root, so a raw
-                # `previous != legacy` would spuriously report an unchanged legacy
-                # owner as changed and block the transaction after an upgrade.
+                # Project the persisted observation to the same base field set
+                # as the fresh one before comparing: an entry written by another
+                # version (older, or newer with extra optional fields) must not
+                # make an unchanged legacy owner read as changed and block the
+                # transaction.
                 previous = dict(
-                    _owner_metadata(previous),
+                    _observation(previous),
                     account_id=previous.get("account_id")
                     or account_id_for_root(payload_account_root(root)),
                 )
             foreign = current and _owner_key(legacy) != _owner_key(current)
             if (
                 foreign
-                and previous != legacy
+                and previous != _observation(legacy)
                 and time.time() - legacy["heartbeat_ts"] <= 900
             ):
                 raise ValueError("active legacy owner conflicts with shared ownership")
-            observed[scope] = legacy
+            observed[scope] = _observation(legacy)
             candidates.append(legacy)
         if current is None:
             live = [
@@ -442,8 +469,15 @@ class OwnerTransaction:
         )
 
     def claim(
-        self, session, host, pid, stale_secs=900, runtime="claude", thread_id=None,
-        control_tier="launcher", workspace_root=None,
+        self,
+        session,
+        host,
+        pid,
+        stale_secs=900,
+        runtime="claude",
+        thread_id=None,
+        control_tier="launcher",
+        workspace_root=None,
     ):
         if (
             not isinstance(session, str)
@@ -468,12 +502,7 @@ class OwnerTransaction:
         if control_tier not in ("launcher", "lead"):
             raise ValueError("invalid owner control_tier")
         if control_tier == "lead":
-            if (
-                not isinstance(workspace_root, str)
-                or not workspace_root
-                or not os.path.isabs(workspace_root)
-                or os.path.normpath(workspace_root) == os.sep
-            ):
+            if not _valid_workspace_root(workspace_root):
                 raise ValueError(
                     "lead owner requires an absolute workspace_root below the filesystem root"
                 )
