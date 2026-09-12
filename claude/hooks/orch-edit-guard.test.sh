@@ -340,14 +340,21 @@ hook_case "AC4 here-string then scratch redirect passes" allow Bash "cmd <<< wor
 hook_case "AC4 input from tracked, output to scratch passes" allow Bash "cat < $TR > $S/o" "$R" "$SID_A"
 hook_case "AC4 3>&1 dup passes" allow Bash "cmd 3>&1" "$R" "$SID_A"
 many=$(i=1; while [ "$i" -le 24 ]; do printf 'echo x > %s/f%s; ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
-hook_case "AC4 25th distinct target is past the cap (fail open)" allow Bash "$many" "$R" "$SID_A"
-# The cap counts distinct OPERANDS, not (cwd, operand) expansions: after many
-# successful `cd`s the retained-cwd set exceeds 20 candidates, but a single
-# final relative redirect into a tracked file is ONE operand and must still be
-# guarded from the original repo cwd (co-review r4).
+# More than TARGET_CAP distinct canonical targets is an overflow the guard
+# cannot fully scan. Nothing is silently dropped: a privileged session fails
+# CLOSED (a tracked target could hide past the cap), a plain worker is allowed.
+hook_case "AC4 25 distinct targets: a launcher fails closed (overflow)" deny Bash "$many" "$R" "$SID_A"
+hook_case "AC4 25 distinct targets: a plain worker is allowed (overflow)" allow Bash "$many" "$R" "$SID_C"
+# Alias spellings of one destination collapse to ONE canonical target, so they
+# cannot consume the cap and hide a later tracked redirect (co-review r5).
+aliases=$(i=1; while [ "$i" -le 20 ]; do d=/dev; j=1; while [ "$j" -le "$i" ]; do d="$d/."; j=$((j + 1)); done; printf 'echo x > %s/null; ' "$d"; i=$((i + 1)); done; printf 'echo x > %s' "$TR")
+hook_case "AC4 20 alias spellings of /dev/null do not hide a tracked redirect" deny Bash "$aliases" "$R" "$SID_A"
+# One relative redirect after many successful `cd`s expands across the retained
+# cwd candidates; the resulting >20 distinct targets is an overflow, so a
+# launcher fails closed rather than having the real target dropped (co-review r4).
 i=1; while [ "$i" -le 41 ]; do mkdir -p "$S/cdd$i"; i=$((i + 1)); done
 cdchain=$(i=1; while [ "$i" -le 41 ]; do printf 'cd %s/cdd%s && ' "$S" "$i"; i=$((i + 1)); done; printf 'echo x > tracked.txt')
-hook_case "AC4 one redirect after 41 cd's is still guarded (operand cap, not path cap)" deny Bash "$cdchain" "$R" "$SID_A"
+hook_case "AC4 one redirect after 41 cd's is not un-guarded by the cap (fails closed)" deny Bash "$cdchain" "$R" "$SID_A"
 
 # --- AC4 cycle-3 regressions (co-review c3 B-1) -------------------------
 hook_case "AC4 arithmetic << before a write is not a heredoc, paren form (B-1)" deny Bash "n=\$((1 << 8))

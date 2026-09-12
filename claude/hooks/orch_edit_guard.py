@@ -36,12 +36,12 @@ Accepted holes (allow): scripts and functions, `python -c`, `git apply`/
 A-1; only sed/gsed/perl are modeled as in-place editors). This is a guard
 against drift, not evasion.
 
-Beyond TARGET_CAP (20) distinct OPERANDS, only the extra operands past the
-cap are unguarded (the first 20 distinct source operands are admitted, in
-first-seen order, and every cwd-expansion of an admitted operand is kept so
-a single redirect after many `cd`s cannot be crowded out) -- a single
-command mixing scratch and tracked targets is guarded or not per operand,
-not as a whole-command allow.
+A command naming more than TARGET_CAP (20) distinct canonical targets is an
+overflow the guard cannot scan within its git budget. Nothing is silently
+dropped: a privileged session (launcher or lead) is refused outright (fail
+closed -- an unscanned target could be a tracked file hidden by alias
+spellings or by one relative operand expanding across many retained `cd`
+candidates), while a plain worker is allowed as always.
 
 Deny is exit 2 with three stderr lines; allow is exit 0 and silent. Fails
 open on any unexpected exception (exit 0), matching the other guards.
@@ -905,25 +905,24 @@ def targets_for(payload, tool, cwd, home):
 
 def resolve_targets(raw, home):
     """Canonical absolute paths, skipping anything the shell would still
-    expand ($VAR, backticks, globs), deduplicated, capped.
+    expand ($VAR, backticks, globs), deduplicated by canonical path, NOT
+    capped.
 
-    The cap counts distinct source OPERANDS, not flattened (cwd, operand)
-    expansions: one operand (e.g. a single redirect) can expand to many
-    candidate cwds after successive `cd`s, and a flat cap on canonical paths
-    could push that operand's REAL destination past the cap and un-guard it.
-    Admitting whole operands keeps every candidate of an admitted one."""
+    Every operand is resolved: dedup by canonical path collapses alias
+    spellings of one destination (`/dev/null`, `/dev/./null`, ...) to a single
+    entry, so aliases cannot consume a budget. The caller treats more than
+    TARGET_CAP distinct canonical targets as an overflow it cannot scan within
+    the git budget and fails CLOSED for a privileged session -- silently
+    dropping the extras (whether from alias inflation or from one relative
+    operand expanding across many retained cwd candidates) would un-guard a
+    tracked write hidden past the cap."""
     paths = []
-    operands = []
     for c_cwd, w, shell_expands in raw:
         we = rm_guard.expand_home(w, home)
         if not we or (
             shell_expands and ("$" in we or "`" in we or rm_guard.has_glob_chars(we))
         ):
             continue
-        if w not in operands:
-            if len(operands) >= TARGET_CAP:
-                continue
-            operands.append(w)
         p = canonical_target(we, c_cwd, home)
         if p is not None and p not in paths:
             paths.append(p)
@@ -1175,6 +1174,27 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
     return 2
 
 
+def refuse_overflow(count):
+    """Three-line refusal when a privileged session's command names more
+    distinct canonical targets than the guard can scan (TARGET_CAP)."""
+    print(
+        f"{BLOCKED} -- this command names {count} distinct write targets, "
+        f"more than the {TARGET_CAP} the guard can scan.",
+        file=sys.stderr,
+    )
+    print(
+        "An orchestrator or lead session is fenced, and an unscanned target "
+        "could be a tracked file, so the whole command is refused.",
+        file=sys.stderr,
+    )
+    print(
+        "Split the command into smaller writes, or dispatch it to a worker.",
+        file=sys.stderr,
+    )
+    sys.stderr.flush()
+    return 2
+
+
 def under_workspace(path, roots):
     return any(path == r or path.startswith(r + "/") for r in roots)
 
@@ -1234,6 +1254,16 @@ def decide(payload, runtime="claude"):
     home = os.environ.get("HOME", os.path.expanduser("~"))
     paths = resolve_targets(targets_for(payload, tool, cwd, home), home)
     if not paths:
+        return 0
+    if len(paths) > TARGET_CAP:
+        # Too many distinct canonical targets to scan every one within the git
+        # budget. Dropping the extras would un-guard a tracked write hidden
+        # past the cap (alias- or cd-inflated commands), so a privileged
+        # session (launcher or lead) fails CLOSED; a plain worker is allowed.
+        owned = owned_slugs(sid, runtime, caller_scope, {})
+        is_lead, _roots = lead_authority(sid, runtime, caller_scope)
+        if owned or is_lead:
+            return refuse_overflow(len(paths))
         return 0
     state_real = os.path.realpath(
         core.account_payload_root(caller_scope) / "herdr-orch"
