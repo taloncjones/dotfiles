@@ -64,11 +64,17 @@ def iter_lead_leases(slug):
         for name in os.listdir(parent):
             if not (name.startswith("lead-") and name.endswith(".json")):
                 continue
+            # Read AND validate under one guard: a malformed record must be
+            # skipped, never allowed to raise out of this read-only view and
+            # crash a caller (e.g. the edit guard) open. Any per-record error
+            # -- unreadable, corrupt, or a validation edge -- drops just that
+            # record and leaves valid siblings discoverable.
             try:
                 rec = _read_at(parent, name)
-            except (ValueError, OSError):
+                valid = rec is not None and _valid_lead_lease(rec)
+            except Exception:  # noqa: BLE001, S112 -- read-only view; skip a bad record
                 continue
-            if rec is not None and _valid_lead_lease(rec):
+            if valid:
                 leases.append(rec)
     finally:
         os.close(parent)
@@ -186,7 +192,11 @@ def _valid_owner(value):
         and type(value.get("fence")) is int
         and value["fence"] > 0
         and type(value.get("heartbeat_ts")) in (int, float)
-        and math.isfinite(value["heartbeat_ts"])
+        # An int is always finite; only a float can be inf/nan. Calling
+        # math.isfinite on an oversized int (from arbitrary JSON) raises
+        # OverflowError, which would otherwise escape validation and crash a
+        # reader open -- so never convert an int to float here.
+        and (type(value["heartbeat_ts"]) is int or math.isfinite(value["heartbeat_ts"]))
         and value["heartbeat_ts"] >= 0
         and value.get("runtime", "claude") in ("claude", "codex")
         and (value.get("thread_id") is None or isinstance(value["thread_id"], str))

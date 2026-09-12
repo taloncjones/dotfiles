@@ -661,11 +661,17 @@ def copy_targets(words, cwd, home, include_sources):
 
 
 def _existing(ops, cwd, home):
-    return [
-        w
-        for w in ops
-        if os.path.lexists(rm_guard.resolve(rm_guard.expand_home(w, home), cwd))
-    ]
+    # Probe existence on the REALPATH of the raw token, not its normpath: a
+    # `sed -i`/`perl -i` operand like `link/../f` (with a symlinked `link`)
+    # has a lexical spelling that may not exist while its true target does,
+    # and a normpath probe would drop the real, guardable file (A1). Emit the
+    # raw `w` so the resolve_targets chokepoint still canonicalizes it.
+    kept = []
+    for w in ops:
+        p = canonical_target(w, cwd, home)
+        if p is not None and os.path.lexists(p):
+            kept.append(w)
+    return kept
 
 
 def shell_c_arg(words):
@@ -765,8 +771,20 @@ def cd_target_candidates(words, cwd, home):
         return {cwd}
     if "$" in operand or "`" in operand or rm_guard.has_glob_chars(operand):
         return {cwd}  # unexpanded target: accepted hole, same as other operands
-    target = rm_guard.resolve(rm_guard.expand_home(operand, home), cwd)
-    return {target} if os.path.isdir(target) else {target, cwd}
+    # A logical `cd` keeps the lexical path; `cd -P` resolves symlinks
+    # physically. The scanner does not know which spelling the shell will use,
+    # so it keeps BOTH the lexical and the realpath candidate -- otherwise a
+    # `cd -P link/..` through a symlink would leave the guard scanning the
+    # wrong (lexical) directory and miss the real target (A1). Widening the
+    # candidate set only over-guards; it never misses.
+    lexical = rm_guard.resolve(rm_guard.expand_home(operand, home), cwd)
+    real = canonical_target(operand, cwd, home)
+    cands = {lexical}
+    if real is not None:
+        cands.add(real)
+    if not any(os.path.isdir(c) for c in cands):
+        cands.add(cwd)
+    return cands
 
 
 def bash_targets(command, cwd, home, depth=0):
@@ -1078,9 +1096,17 @@ def marker_verdict(guarded, owned, session_id, tool_use_id, budget, runtime):
 # --- refusal ---------------------------------------------------------------
 
 
+def _printable(s):
+    """Collapse newlines/carriage returns in an interpolated path so a legal
+    filename with an embedded newline cannot add extra stderr lines and break
+    the exactly-three-line refusal contract. A no-op for ordinary paths."""
+    return s.replace("\n", "\\n").replace("\r", "\\r")
+
+
 def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
     """Print the three-line refusal for `why` and return 2."""
     c, top, reason = first
+    c, top = _printable(c), _printable(top)
     print(
         f"{BLOCKED} -- this session is the herdr orchestrator for {slug} "
         f"and {c} is a {reason} path in {top}.",
@@ -1137,6 +1163,7 @@ def under_workspace(path, roots):
 def refuse_lead(first, roots):
     """Print the three-line refusal for a lead editing outside its workspace."""
     c, _top, reason = first
+    c = _printable(c)
     print(
         f"{BLOCKED} -- this session is a herdr lead fenced to its workspace "
         f"and {c} is a {reason} path outside it.",
@@ -1144,7 +1171,9 @@ def refuse_lead(first, roots):
     )
     if roots:
         print(
-            "A lead may only edit under its workspace: " + ", ".join(roots) + ".",
+            "A lead may only edit under its workspace: "
+            + ", ".join(_printable(r) for r in roots)
+            + ".",
             file=sys.stderr,
         )
     else:

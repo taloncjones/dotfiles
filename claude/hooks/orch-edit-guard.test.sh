@@ -369,6 +369,14 @@ git -C "$R" add sub/tracked-sub.txt
 git -C "$R" -c user.name=t -c user.email=t@x commit -q -m sub
 ln -s "$R/sub" "$R/.todos/pending/sublink"
 hook_case "H1 symlink-then-.. inside .todos escaping to a tracked file denied" deny Edit "$R/.todos/pending/sublink/../sub/tracked-sub.txt" "$R" "$SID_A"
+# H1d/H1e: the extraction-site probes (sed -i existence filter, cd -P) must not
+# use lexical resolution either -- a symlink-then-.. operand whose lexical
+# spelling is nonexistent must still be guarded via its real target. sublink ->
+# $R/sub, so sublink/../sub/tracked-sub.txt realpaths to $R/sub/tracked-sub.txt.
+hook_case "H1 sed -i through a symlink-then-.. is guarded (real target exists)" deny Bash "sed -i s/a/b/ $R/.todos/pending/sublink/../sub/tracked-sub.txt" "$R" "$SID_A"
+# cd -P physically resolves the symlink; a relative write then lands on the
+# real tracked file, not the exempt lexical .todos path.
+hook_case "H1 cd -P through a symlink-then-.. is guarded" deny Bash "cd -P $R/.todos/pending/sublink/.. && echo x > sub/tracked-sub.txt" "$N" "$SID_A"
 # A genuine .todos write is still exempt.
 hook_case "H1 genuine .todos write still passes" allow Write "$R/.todos/pending/2026-09-12-real.md" "$R" "$SID_A"
 # H2: a NUL byte in a target must not crash classify() into the top-level
@@ -647,17 +655,25 @@ else
 fi
 
 # --- Lead authority resolution (spec 4.5) -------------------------------
-if HOOK="$HOOK" CFG="$CFG" COORD="$HERDR_COORDINATION_ROOT" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
-import importlib.util, json, os, sys, hashlib
+# Fully isolated: its own CLAUDE_CONFIG_DIR and HERDR_COORDINATION_ROOT under a
+# throwaway dir, so the destructive fail-closed cases below (rmtree of the
+# payload slug and root) cannot corrupt the suite's shared fixtures (a prior
+# revision let this test's rmtree mask a later launcher assertion).
+if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
+import importlib.util, json, os, sys, hashlib, shutil, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, "claude/hooks")
-os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
-import herdr_orch_core as core  # noqa: F401
+iso = tempfile.mkdtemp()
+os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
+import herdr_orch_core as core
+import herdr_coordination as coordination
 spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
 g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
-slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"])
-coord = os.environ["COORD"]; sid = os.environ["SID_L"]
+slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"]); sid = os.environ["SID_L"]
 scope = g.selected_scope(os.environ["R"], "claude")
+coord = str(coordination.coordination_root())
+payload_root = os.path.join(str(core.account_payload_root(scope)), "herdr-orch")
 key = hashlib.sha256(ws.encode()).hexdigest()[:16]
 bid = "ldb-" + "1" * 32
 slugd = os.path.join(coord, slug); os.makedirs(slugd, exist_ok=True)
@@ -666,7 +682,7 @@ lease = {"schema_version": 1, "session_id": sid, "host": "h", "pid": 5, "fence":
          "account_id": scope["account_id"], "control_tier": "lead",
          "workspace_root": ws, "binding_id": bid}
 open(os.path.join(slugd, "lead-%s.json" % key), "w").write(json.dumps(lease))
-rd = os.path.join(os.environ["CFG"], "herdr-orch", slug)
+rd = os.path.join(payload_root, slug)
 os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
 binding = {"schema_version": 1, "binding_id": bid, "tier": "lead",
            "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
@@ -683,11 +699,10 @@ assert is_lead is True and roots == [], ("revoked", is_lead, roots)
 os.remove(os.path.join(rd, "bindings", bid + ".json"))
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("binding-file-gone", is_lead, roots)
-import shutil
 shutil.rmtree(rd)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("payload-slug-gone", is_lead, roots)
-shutil.rmtree(os.path.join(os.environ["CFG"], "herdr-orch"), ignore_errors=True)
+shutil.rmtree(payload_root, ignore_errors=True)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("payload-root-gone", is_lead, roots)
 os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
@@ -695,16 +710,23 @@ binding["status"] = "claimed"; binding["runtime"] = "codex"
 open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("runtime-mismatch", is_lead, roots)
+# A malformed UNRELATED lease (oversized heartbeat_ts) alongside a valid lease
+# must not crash the guard open: iter_lead_leases skips it (finding #2).
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding["runtime"] = "claude"
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+bad = dict(lease, heartbeat_ts=10 ** 400, workspace_root="/tmp/other-ws",
+          binding_id="ldb-" + "2" * 32)
+open(os.path.join(slugd, "lead-%s.json" % ("9" * 16)), "w").write(json.dumps(bad))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [ws], ("malformed-sibling", is_lead, roots)
+shutil.rmtree(iso, ignore_errors=True)
 PY
 then
-    printf 'PASS  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch\n'; PASS=$((PASS + 1))
+    printf 'PASS  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling\n'; PASS=$((PASS + 1))
 else
-    printf 'FAIL  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch\n' >&2; FAIL=$((FAIL + 1))
+    printf 'FAIL  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling\n' >&2; FAIL=$((FAIL + 1))
 fi
-# Clear LA's inline lease + binding so it cannot pollute the fixture cases.
-rm -f "$HERDR_COORDINATION_ROOT/$SLUG_A"/lead-*.json
-rm -rf "$CFG/herdr-orch/$SLUG_A/bindings"
-mkdir -p "$RD_A/tasks"
 
 # --- Lead containment: guard acceptance (spec 7) ------------------------
 # lead_setup SID WS: write a live lead lease (coordination) + a matching
@@ -771,8 +793,30 @@ mkdir -p "$LWS/deep"; ln -s "$LWS/deep" "$LWS/escwslink"
 hook_case "AC-G lead cp into a symlink-then-.. escaping the workspace denied" deny Bash "cp $LWS/wsfile.txt $LWS/escwslink/../../repo/tracked.txt" "$LWS" "$SID_C"
 # launcher (SID_A owns SLUG_A) is denied on its own repo (existing behavior).
 hook_case "AC-G launcher denied on its own repo" deny Edit "$R/tracked.txt" "$R" "$SID_A"
-# a session owning a DIFFERENT slug (SID_B owns SLUG_2) is a plain worker on $R.
-hook_case "AC-G unrelated-slug owner is a plain worker on the repo (allowed)" allow Edit "$R/tracked.txt" "$R" "$SID_B"
+# A launcher of a DIFFERENT repo (SID_B owns SLUG_2) editing $R is a cross-scope
+# DENY, not a worker allow -- it is still an orchestrator, just off its scope.
+hook_case "AC-G launcher of another repo denied off-scope" deny Edit "$R/tracked.txt" "$R" "$SID_B"
+# A session that owns nothing and holds no lead lease is a plain worker: allow.
+SID_W=55555555-5555-5555-5555-555555555555
+hook_case "AC-G plain worker (owns nothing, no lease) allowed" allow Edit "$R/tracked.txt" "$R" "$SID_W"
+# A path with an embedded newline must not add stderr lines: refuse_lead (and
+# refuse) sanitize the interpolated path so the exactly-three-line refusal
+# contract holds for a legal newline-bearing filename (finding #4).
+if HOOK="$HOOK" python3 - <<'PY'
+import contextlib, importlib.util, io, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    rc = g.refuse_lead(("/repo/a\nb/tracked.txt", "/repo", "tracked"), ["/ws/a\nb"])
+lines = err.getvalue().splitlines()
+assert rc == 2, rc
+assert len(lines) == 3, (len(lines), lines)
+assert lines[0].startswith("Blocked: orch-edit-guard"), lines[0]
+PY
+then printf 'PASS  AC-G refuse_lead keeps three lines with a newline in the path\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G refuse_lead keeps three lines with a newline in the path\n' >&2; FAIL=$((FAIL + 1)); fi
 
 # LM: an allow-edit marker for the slug does not widen a lead outside its
 # workspace (leads never consult the marker path).
