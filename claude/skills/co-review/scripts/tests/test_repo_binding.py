@@ -131,5 +131,79 @@ class Matches(unittest.TestCase):
         self.assertFalse(rb.matches("github.com/fork/r", "github.com/base/r"))
 
 
+class Check(unittest.TestCase):
+    def test_match(self):
+        ok, _ = rb.check(
+            "git@Git-Personal:owner/repo.git",
+            "https://github.com/owner/repo/pull/3",
+            "owner/repo",
+            resolver,
+        )
+        self.assertTrue(ok)
+
+    def test_fork_mismatch(self):
+        ok, msg = rb.check(
+            "git@github.com:contributor/repo.git",
+            "https://github.com/owner/repo/pull/3",
+            "owner/repo",
+            resolver,
+        )
+        self.assertFalse(ok)
+        self.assertIn("mismatch", msg.lower())
+
+    def test_bad_pr_url(self):
+        ok, _ = rb.check(
+            "git@github.com:owner/repo.git", "not-a-url", "owner/repo", resolver
+        )
+        self.assertFalse(ok)
+
+
+class SshHost(unittest.TestCase):
+    def test_extracts_hostname(self):
+        def fake_run(cmd, **kw):
+            class R:
+                returncode = 0
+                stdout = "user git\nhostname github.com\nport 22\n"
+            return R()
+
+        self.assertEqual(rb.ssh_host("Git-Personal", runner=fake_run), "github.com")
+
+    def test_missing_hostname_is_none(self):
+        def fake_run(cmd, **kw):
+            class R:
+                returncode = 0
+                stdout = "user git\n"
+            return R()
+
+        self.assertIsNone(rb.ssh_host("X", runner=fake_run))
+
+
+class GhLookup(unittest.TestCase):
+    def test_pins_hostname_github(self):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            class R:
+                returncode = 0
+                stdout = "owner/repo\n"
+            return R()
+
+        full_name = rb._gh_base_full_name("owner", "repo", 3, runner=fake_run)
+        self.assertEqual(full_name, "owner/repo")
+        self.assertIn("--hostname", seen["cmd"])
+        idx = seen["cmd"].index("--hostname")
+        self.assertEqual(seen["cmd"][idx + 1], "github.com")
+
+    def test_lookup_failure_raises(self):
+        import subprocess as sp
+
+        def fake_run(cmd, **kw):
+            raise sp.CalledProcessError(1, cmd)
+
+        with self.assertRaises(sp.CalledProcessError):
+            rb._gh_base_full_name("owner", "repo", 3, runner=fake_run)
+
+
 if __name__ == "__main__":
     unittest.main()

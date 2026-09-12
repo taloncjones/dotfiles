@@ -94,3 +94,81 @@ def parse_pr_url(url: str):
 
 def matches(a, b) -> bool:
     return bool(a) and bool(b) and a == b
+
+
+def ssh_host(alias: str, runner=subprocess.run) -> str | None:
+    """Real hostname for an ssh alias via `ssh -G`, or None."""
+    try:
+        result = runner(
+            ["ssh", "-G", alias], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.lower().startswith("hostname "):
+            return line.split(None, 1)[1].strip()
+    return None
+
+
+def check(origin_url, pr_url, base_full_name, host_resolver):
+    """(ok, message). ok only when origin binds to the PR's base repo."""
+    pr = parse_pr_url(pr_url)
+    if pr is None:
+        return (False, f"unusable PR URL: {pr_url!r}")
+    origin_id = normalize_url(origin_url, host_resolver)
+    if origin_id is None:
+        return (False, f"unusable origin URL: {origin_url!r}")
+    base_id = normalize_url(f"https://github.com/{base_full_name}")
+    if base_id is None:
+        return (False, f"unusable base repo: {base_full_name!r}")
+    if matches(origin_id, base_id):
+        return (True, f"origin {origin_id} binds to PR base {base_id}")
+    return (False, f"binding mismatch: origin {origin_id} != PR base {base_id}")
+
+
+def _git_origin(repo: str, runner=subprocess.run) -> str:
+    out = runner(
+        ["git", "-C", repo, "remote", "get-url", "origin"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def _gh_base_full_name(owner: str, repo: str, number: int, runner=subprocess.run) -> str:
+    # Pin the host: gh honors GH_HOST/enterprise defaults, and check() hardcodes
+    # github.com onto the result, so an unpinned lookup off github.com could
+    # validate a same-named repo on another host.
+    out = runner(
+        ["gh", "api", "--hostname", "github.com",
+         f"repos/{owner}/{repo}/pulls/{number}",
+         "-q", ".base.repo.full_name"],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="repo_binding.py")
+    ap.add_argument("--repo", required=True)
+    ap.add_argument("--pr-url", required=True)
+    args = ap.parse_args(argv)
+    pr = parse_pr_url(args.pr_url)
+    if pr is None:
+        print(f"unusable PR URL: {args.pr_url!r}", file=sys.stderr)
+        return 1
+    _, owner, repo, number = pr
+    try:
+        origin_url = _git_origin(args.repo)
+        base_full_name = _gh_base_full_name(owner, repo, number)
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"lookup failed (fail closed): {error}", file=sys.stderr)
+        return 1
+    ok, message = check(origin_url, args.pr_url, base_full_name, ssh_host)
+    print(message)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
