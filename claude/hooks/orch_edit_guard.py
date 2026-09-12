@@ -61,6 +61,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # never leave __pycache__ under the hooks dir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import herdr_bindings as bindings
 import herdr_orch_core as core
 import rm_guard
 from workflow_context import account_scope, repository_context
@@ -165,6 +166,7 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
             and rec.get("account_id") == caller_scope["account_id"]
             and isinstance(rec.get("fence"), int)
             and not isinstance(rec.get("fence"), bool)
+            and rec.get("control_tier", "launcher") == "launcher"
         ):
             continue
         entry = {"fence": rec["fence"], "rd": rd, "caller_scope": caller_scope}
@@ -172,6 +174,61 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
             entry.update(targets[slug])
         owned[slug] = entry
     return owned
+
+
+def lead_authority(session_id, runtime, caller_scope):
+    """(is_lead, [authorized workspace_root, ...]) for this session.
+
+    Discovery is from the AUTHORITATIVE coordination namespace, not the
+    payload root: a session is a lead if any coordination slug holds a lead
+    lease naming it (session_id + account + runtime + control_tier lead, valid
+    record). This keeps a lead classified -- and therefore fenced -- even when
+    its payload-root slug directory or binding file has been removed.
+
+    A workspace_root is AUTHORIZED only when the lease's dispatch binding is
+    present, valid, not terminal (issued|claimed), issued by a launcher
+    parent, of tier lead, and agrees with the lease/context on runtime,
+    repo_slug, workspace_root, account, and expected session. A missing,
+    corrupt, revoked, completed, or mismatched binding leaves the session a
+    lead (is_lead True) with that workspace_root withheld -- fail closed."""
+    payload_root = core.account_payload_root(caller_scope) / "herdr-orch"
+    is_lead = False
+    roots = []
+    account_id = caller_scope["account_id"]
+    for slug in core.coordination.coordination_slugs():
+        try:
+            leases = core.coordination.iter_lead_leases(slug)
+        except (OSError, ValueError):
+            continue
+        for lease in leases:
+            if (
+                lease.get("session_id") != session_id
+                or lease.get("account_id") != account_id
+                or lease.get("runtime", "claude") != runtime
+                or lease.get("control_tier") != "lead"
+            ):
+                continue
+            is_lead = True
+            ws = lease.get("workspace_root")
+            binding_id = lease.get("binding_id")
+            try:
+                rec = bindings.read_binding(payload_root / slug, binding_id)
+            except (OSError, ValueError):
+                rec = None
+            if (
+                rec is not None
+                and rec.get("status") in ("issued", "claimed")
+                and rec.get("parent", {}).get("tier") == "launcher"
+                and rec.get("tier") == "lead"
+                and rec.get("runtime") == runtime
+                and rec.get("repo_slug") == slug
+                and rec.get("workspace_root") == ws
+                and rec.get("account_id") == account_id
+                and rec.get("expected_session_id") == session_id
+                and ws not in roots
+            ):
+                roots.append(ws)
+    return is_lead, roots
 
 
 # --- paths and classification ---------------------------------------------
@@ -1073,6 +1130,38 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
     return 2
 
 
+def under_workspace(path, roots):
+    return any(path == r or path.startswith(r + "/") for r in roots)
+
+
+def refuse_lead(first, roots):
+    """Print the three-line refusal for a lead editing outside its workspace."""
+    c, _top, reason = first
+    print(
+        f"{BLOCKED} -- this session is a herdr lead fenced to its workspace "
+        f"and {c} is a {reason} path outside it.",
+        file=sys.stderr,
+    )
+    if roots:
+        print(
+            "A lead may only edit under its workspace: " + ", ".join(roots) + ".",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "This lead's dispatch binding is missing, revoked, or complete, "
+            "so no workspace edit is authorized.",
+            file=sys.stderr,
+        )
+    print(
+        "Edit inside the lead's own worktree, or hand the change back to the "
+        "launcher (herdr-orchestration SKILL.md, Safety).",
+        file=sys.stderr,
+    )
+    sys.stderr.flush()
+    return 2
+
+
 # --- decision --------------------------------------------------------------
 
 
@@ -1118,52 +1207,62 @@ def decide(payload, runtime="claude"):
         if slug is not None:
             candidates.setdefault(slug, top)
     owned = owned_slugs(sid, runtime, caller_scope, candidates)
-    if not owned:
-        return 0
-    tool_use_id = payload.get("tool_use_id")
-    verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime)
-    if verdict[0] == "allow":
-        _, slug, marker = verdict
+    if owned:
+        tool_use_id = payload.get("tool_use_id")
+        verdict = marker_verdict(guarded, owned, sid, tool_use_id, budget, runtime)
+        if verdict[0] == "allow":
+            _, slug, marker = verdict
+            rd = owned[slug]["rd"]
+            for c, top, reason in guarded:
+                audit_append(
+                    rd,
+                    {
+                        "v": 1,
+                        "ts": core.now_iso(),
+                        "event": "orch-edit-allowed",
+                        "session_id": sid,
+                        "tool_name": tool,
+                        "tool_use_id": tool_use_id,
+                        "path": c[:PATH_MAX],
+                        "repo": top[:PATH_MAX],
+                        "reason": reason,
+                        "marker_id": marker["marker_id"],
+                        "marker_expires": marker.get("expires"),
+                    },
+                )
+            return 0
+        _, why, slug, detail = verdict
+        detail = dict(detail, owned=",".join(sorted(owned)))
         rd = owned[slug]["rd"]
-        for c, top, reason in guarded:
-            audit_append(
-                rd,
-                {
-                    "v": 1,
-                    "ts": core.now_iso(),
-                    "event": "orch-edit-allowed",
-                    "session_id": sid,
-                    "tool_name": tool,
-                    "tool_use_id": tool_use_id,
-                    "path": c[:PATH_MAX],
-                    "repo": top[:PATH_MAX],
-                    "reason": reason,
-                    "marker_id": marker["marker_id"],
-                    "marker_expires": marker.get("expires"),
-                },
-            )
+        rc = refuse(
+            why, slug, owned[slug]["fence"], sid, guarded[0], detail, runtime, rd
+        )
+        c, top, reason = guarded[0]
+        audit_append(
+            rd,
+            {
+                "v": 1,
+                "ts": core.now_iso(),
+                "event": "orch-edit-denied",
+                "session_id": sid,
+                "tool_name": tool,
+                "tool_use_id": tool_use_id,
+                "path": c[:PATH_MAX],
+                "repo": top[:PATH_MAX],
+                "reason": reason,
+                "why": why,
+            },
+        )
+        return rc
+    # A session that owns no launcher lease may still be a lead, fenced to its
+    # workspace_root. A lead never consults the marker path, so a marker minted
+    # for the slug can never widen its scope. A non-lead is a plain worker.
+    is_lead, roots = lead_authority(sid, runtime, caller_scope)
+    if not is_lead:
         return 0
-    _, why, slug, detail = verdict
-    detail = dict(detail, owned=",".join(sorted(owned)))
-    rd = owned[slug]["rd"]
-    rc = refuse(why, slug, owned[slug]["fence"], sid, guarded[0], detail, runtime, rd)
-    c, top, reason = guarded[0]
-    audit_append(
-        rd,
-        {
-            "v": 1,
-            "ts": core.now_iso(),
-            "event": "orch-edit-denied",
-            "session_id": sid,
-            "tool_name": tool,
-            "tool_use_id": tool_use_id,
-            "path": c[:PATH_MAX],
-            "repo": top[:PATH_MAX],
-            "reason": reason,
-            "why": why,
-        },
-    )
-    return rc
+    if roots and all(under_workspace(c, roots) for c, _top, _reason in guarded):
+        return 0
+    return refuse_lead(guarded[0], roots)
 
 
 def main():

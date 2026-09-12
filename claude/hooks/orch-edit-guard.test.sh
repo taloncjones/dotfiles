@@ -646,6 +646,157 @@ else
     printf 'FAIL  AC9 hanging git returns within the budget (%ss)\n' "$elapsed" >&2; FAIL=$((FAIL + 1))
 fi
 
+# --- Lead authority resolution (spec 4.5) -------------------------------
+if HOOK="$HOOK" CFG="$CFG" COORD="$HERDR_COORDINATION_ROOT" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
+import importlib.util, json, os, sys, hashlib
+sys.dont_write_bytecode = True
+sys.path.insert(0, "claude/hooks")
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+import herdr_orch_core as core  # noqa: F401
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"])
+coord = os.environ["COORD"]; sid = os.environ["SID_L"]
+scope = g.selected_scope(os.environ["R"], "claude")
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + "1" * 32
+slugd = os.path.join(coord, slug); os.makedirs(slugd, exist_ok=True)
+lease = {"schema_version": 1, "session_id": sid, "host": "h", "pid": 5, "fence": 1,
+         "heartbeat_ts": 9e18, "runtime": "claude", "thread_id": None,
+         "account_id": scope["account_id"], "control_tier": "lead",
+         "workspace_root": ws, "binding_id": bid}
+open(os.path.join(slugd, "lead-%s.json" % key), "w").write(json.dumps(lease))
+rd = os.path.join(os.environ["CFG"], "herdr-orch", slug)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding = {"schema_version": 1, "binding_id": bid, "tier": "lead",
+           "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
+           "task_id": "td-x", "repo_id": None, "repo_slug": slug, "workspace_root": ws,
+           "account_id": scope["account_id"], "account_kind": scope["kind"],
+           "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+           "status": "claimed", "created_ts": "t", "updated_ts": "t"}
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [ws], ("live", is_lead, roots)
+binding["status"] = "revoked"; open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("revoked", is_lead, roots)
+os.remove(os.path.join(rd, "bindings", bid + ".json"))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("binding-file-gone", is_lead, roots)
+import shutil
+shutil.rmtree(rd)
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("payload-slug-gone", is_lead, roots)
+shutil.rmtree(os.path.join(os.environ["CFG"], "herdr-orch"), ignore_errors=True)
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("payload-root-gone", is_lead, roots)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding["status"] = "claimed"; binding["runtime"] = "codex"
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("runtime-mismatch", is_lead, roots)
+PY
+then
+    printf 'PASS  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch\n' >&2; FAIL=$((FAIL + 1))
+fi
+# Clear LA's inline lease + binding so it cannot pollute the fixture cases.
+rm -f "$HERDR_COORDINATION_ROOT/$SLUG_A"/lead-*.json
+rm -rf "$CFG/herdr-orch/$SLUG_A/bindings"
+mkdir -p "$RD_A/tasks"
+
+# --- Lead containment: guard acceptance (spec 7) ------------------------
+# lead_setup SID WS: write a live lead lease (coordination) + a matching
+# claimed binding (payload root) for SID at realpath(WS), under SLUG_A. The
+# lease key is sha256(realpath(WS))[:16]; the binding id is derived from the
+# same key so set_binding_status_fixture can find it again.
+lead_setup() {
+    LS_SID="$1" LS_WS="$2" LS_SLUG="$SLUG_A" LS_COORD="$HERDR_COORDINATION_ROOT" \
+    LS_CFG="$CFG" LS_REPO="$R" python3 - <<'PY'
+import hashlib, json, os, sys
+sys.path.insert(0, "claude/hooks")
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["LS_CFG"]
+import orch_edit_guard as g
+e = os.environ
+ws = os.path.realpath(e["LS_WS"]); slug = e["LS_SLUG"]; sid = e["LS_SID"]
+scope = g.selected_scope(e["LS_REPO"], "claude")
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + key + "0" * (32 - len(key))
+slugd = os.path.join(e["LS_COORD"], slug); os.makedirs(slugd, exist_ok=True)
+open(os.path.join(slugd, "lead-%s.json" % key), "w").write(json.dumps({
+    "schema_version": 1, "session_id": sid, "host": "h", "pid": 7, "fence": 1,
+    "heartbeat_ts": 9e18, "runtime": "claude", "thread_id": None,
+    "account_id": scope["account_id"], "control_tier": "lead",
+    "workspace_root": ws, "binding_id": bid}))
+rd = os.path.join(e["LS_CFG"], "herdr-orch", slug, "bindings"); os.makedirs(rd, exist_ok=True)
+open(os.path.join(rd, bid + ".json"), "w").write(json.dumps({
+    "schema_version": 1, "binding_id": bid, "tier": "lead",
+    "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
+    "task_id": "td-x", "repo_id": None, "repo_slug": slug, "workspace_root": ws,
+    "account_id": scope["account_id"], "account_kind": scope["kind"],
+    "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+    "status": "claimed", "created_ts": "t", "updated_ts": "t"}))
+PY
+}
+set_binding_status_fixture() {
+    SB_WS="$2" SB_STATUS="$3" SB_SLUG="$SLUG_A" SB_CFG="$CFG" python3 - <<'PY'
+import hashlib, json, os
+e = os.environ
+ws = os.path.realpath(e["SB_WS"]); key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + key + "0" * (32 - len(key))
+p = os.path.join(e["SB_CFG"], "herdr-orch", e["SB_SLUG"], "bindings", bid + ".json")
+rec = json.load(open(p)); rec["status"] = e["SB_STATUS"]; json.dump(rec, open(p, "w"))
+PY
+}
+# Real worktrees so workspace_root is a real dir and nested cases use real git.
+LWS="$FIX/leadws"; LWS2="$FIX/leadws2"
+git -C "$R" worktree add -q -b leadbr "$LWS" >/dev/null 2>&1
+git -C "$R" worktree add -q -b leadbr2 "$LWS2" >/dev/null 2>&1
+: > "$LWS/wsfile.txt"; : > "$LWS2/wsfile.txt"; mkdir -p "$LWS/nested"
+
+lead_setup "$SID_C" "$LWS"
+hook_case "LG lead edit inside its workspace allowed" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
+hook_case "LG lead edit of the main checkout denied" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+hook_case "AC-G lead inside workspace: new nested file allowed" allow Write "$LWS/sub/deep/new.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead inside workspace: nested dir allowed" allow Write "$LWS/nested/x.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead outside: sibling workspace denied" deny Write "$LWS2/wsfile.txt" "$LWS2" "$SID_C"
+hook_case "AC-G lead outside: unrelated repo denied" deny Edit "$R2/tracked.txt" "$R2" "$SID_C"
+ln -s "$R/tracked.txt" "$LWS/escape"
+hook_case "AC-G lead symlink escaping the workspace denied" deny Edit "$LWS/escape" "$LWS" "$SID_C"
+hook_case "AC-G lead ../ escape to the main checkout denied" deny Bash "echo x > $LWS/../repo/tracked.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead multi-target one-outside denied" deny Bash "tee $LWS/wsfile.txt $R/tracked.txt" "$LWS" "$SID_C"
+hook_case "AC-G lead multi-target all-inside allowed" allow Bash "tee $LWS/wsfile.txt $LWS/wsfile2.txt" "$LWS" "$SID_C"
+mkdir -p "$LWS/deep"; ln -s "$LWS/deep" "$LWS/escwslink"
+hook_case "AC-G lead cp into a symlink-then-.. escaping the workspace denied" deny Bash "cp $LWS/wsfile.txt $LWS/escwslink/../../repo/tracked.txt" "$LWS" "$SID_C"
+# launcher (SID_A owns SLUG_A) is denied on its own repo (existing behavior).
+hook_case "AC-G launcher denied on its own repo" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+# a session owning a DIFFERENT slug (SID_B owns SLUG_2) is a plain worker on $R.
+hook_case "AC-G unrelated-slug owner is a plain worker on the repo (allowed)" allow Edit "$R/tracked.txt" "$R" "$SID_B"
+
+# LM: an allow-edit marker for the slug does not widen a lead outside its
+# workspace (leads never consult the marker path).
+lead_setup "$SID_C" "$LWS"
+marker "$RD_A" "$SID_C" 4 300 10 "aaaaaaaaaaaaaa01"
+hook_case "LM marker under the slug does not widen a lead outside its workspace" deny Edit "$R/tracked.txt" "$R" "$SID_C"
+rm -f "$RD_A/orch-edit-allow.json"
+# LT: a completed binding ends lead edit authority even inside the workspace.
+lead_setup "$SID_C" "$LWS"; set_binding_status_fixture "$SID_C" "$LWS" completed
+hook_case "LT completed binding ends lead edit authority inside the workspace" deny Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
+# LX: with the lease removed, the session is a plain worker again (allow).
+lead_setup "$SID_C" "$LWS"
+rm -f "$HERDR_COORDINATION_ROOT/$SLUG_A"/lead-*.json
+hook_case "LX no lead lease reverts to plain-worker allow" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
+
+# Legacy no-tier owner record still blanket-fences (real guard path, not a
+# dict-default assertion): drop control_tier from SID_A's live coordination
+# owner.json, drive a real deny, then restore it for later cases.
+COWN="$HERDR_COORDINATION_ROOT/$SLUG_A/owner.json"
+cp "$COWN" "$FIX/owner.bak"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.pop("control_tier",None); json.dump(d,open(p,"w"))' "$COWN"
+hook_case "AC-G legacy no-tier owner record still blanket-fences (deny)" deny Edit "$R/tracked.txt" "$R" "$SID_A"
+cp "$FIX/owner.bak" "$COWN"
+
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
         && PYTHONPYCACHEPREFIX="$FIX/pyc" python3 -m py_compile "$HOOK"; then
