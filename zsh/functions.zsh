@@ -1321,3 +1321,66 @@ _claude_code_update_check() {
     fi
 }
 _claude_code_update_check
+
+# Synchronous worker: fetch origin and record the behind-count in the result
+# file (empty file = checked, up to date). Called in the background by
+# _dotfiles_staleness_check; call directly only in tests. Advisory: every
+# failure (offline, unwritable cache) is silent.
+_dotfiles_staleness_fetch() {
+    local result_file="$1"
+    mkdir -p "${result_file:h}" 2>/dev/null || return 0
+    local behind=""
+    if git -C "$DOTFILEDIR" fetch --quiet 2>/dev/null; then
+        behind="$(git -C "$DOTFILEDIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)"
+    fi
+    if [[ -n "$behind" && "$behind" != "0" ]]; then
+        echo "$behind" > "$result_file" 2>/dev/null
+    else
+        : > "$result_file" 2>/dev/null
+    fi
+}
+
+# Check whether the dotfiles checkout is behind origin (async, cached 24h).
+# Two files, so consuming a result never postpones the next check:
+#   repo-staleness-last-check  mtime-only claim stamp (when did we last fetch)
+#   repo-staleness-result      consumable behind-count from that fetch
+# The first interactive shell past the TTL claims the day (touch BEFORE
+# spawning, so a burst of new shells starts at most one fetch -- a
+# millisecond-wide race between two literally simultaneous shells can
+# double-fetch, which is idempotent and accepted), fetches in the
+# background, and a later shell prints the result ONCE (print consumes it).
+# Silent when current, offline, cache unwritable, or $DOTFILEDIR is not a
+# real work tree (worktrees have a .git FILE, so ask git and require "true";
+# a bare repo or .git dir prints "false" and is excluded).
+_dotfiles_staleness_check() {
+    [[ ! -t 1 ]] && return 0
+    [[ -n "${DOTFILEDIR:-}" ]] || return 0
+    [[ "$(git -C "$DOTFILEDIR" rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] || return 0
+
+    local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles"
+    local check_stamp="$cache_dir/repo-staleness-last-check"
+    local result_file="$cache_dir/repo-staleness-result"
+    local cache_ttl=86400  # 24 hours
+
+    # Surface the previous check's result once, then consume it so later
+    # shells (and post-update shells) stay quiet until the next fetch.
+    if [[ -f "$result_file" && -s "$result_file" ]]; then
+        local behind
+        behind="$(cat "$result_file" 2>/dev/null)"
+        [[ -n "$behind" ]] && echo "[INFO] dotfiles is $behind commit(s) behind -- run 'update' or 'update --ai'."
+        : > "$result_file" 2>/dev/null
+    fi
+
+    # Skip the fetch if checked recently (mtime of the claim stamp only;
+    # consuming the result above never touches this file).
+    if [[ -f "$check_stamp" ]]; then
+        local cache_age=$(( $(date +%s) - $(stat -f%m "$check_stamp" 2>/dev/null || stat -c%Y "$check_stamp" 2>/dev/null || echo 0) ))
+        (( cache_age < cache_ttl )) && return 0
+    fi
+
+    # Claim the day BEFORE spawning; unwritable cache degrades to silence.
+    mkdir -p "$cache_dir" 2>/dev/null || return 0
+    : > "$check_stamp" 2>/dev/null || return 0
+    _dotfiles_staleness_fetch "$result_file" &!
+}
+_dotfiles_staleness_check
