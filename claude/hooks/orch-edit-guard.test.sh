@@ -377,6 +377,13 @@ hook_case "H1 sed -i through a symlink-then-.. is guarded (real target exists)" 
 # cd -P physically resolves the symlink; a relative write then lands on the
 # real tracked file, not the exempt lexical .todos path.
 hook_case "H1 cd -P through a symlink-then-.. is guarded" deny Bash "cd -P $R/.todos/pending/sublink/.. && echo x > sub/tracked-sub.txt" "$N" "$SID_A"
+# A failed `cd -P` (its physical target does not exist) leaves the shell in the
+# ORIGINAL cwd, so that cwd must stay a guard candidate. Here the lexical target
+# ($S, outside any repo) is a real dir but the physical target is nonexistent
+# (dangling symlink), and the shell stays in the repo cwd $R; the write to
+# tracked.txt is guarded only from $R (co-review r2 finding #1).
+ln -s "$FIX/nonexistent-physical-xyz" "$R/dl"
+hook_case "H1 failed cd -P keeps the original repo cwd guarded" deny Bash "cd -P $R/dl/../../scratch && echo x > tracked.txt" "$R" "$SID_A"
 # A genuine .todos write is still exempt.
 hook_case "H1 genuine .todos write still passes" allow Write "$R/.todos/pending/2026-09-12-real.md" "$R" "$SID_A"
 # H2: a NUL byte in a target must not crash classify() into the top-level
@@ -720,12 +727,20 @@ bad = dict(lease, heartbeat_ts=10 ** 400, workspace_root="/tmp/other-ws",
 open(os.path.join(slugd, "lead-%s.json" % ("9" * 16)), "w").write(json.dumps(bad))
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("malformed-sibling", is_lead, roots)
+# A binding whose read raises an exotic exception (deeply nested JSON ->
+# RecursionError, not OSError/ValueError) must not escape into the guard's
+# top-level fail-open handler: the lead stays classified, the root withheld
+# (co-review r2 finding #2).
+os.remove(os.path.join(slugd, "lead-%s.json" % ("9" * 16)))
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write("[" * 100000 + "]" * 100000)
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("recursion-binding", is_lead, roots)
 shutil.rmtree(iso, ignore_errors=True)
 PY
 then
-    printf 'PASS  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling\n'; PASS=$((PASS + 1))
+    printf 'PASS  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling/recursion\n'; PASS=$((PASS + 1))
 else
-    printf 'FAIL  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling\n' >&2; FAIL=$((FAIL + 1))
+    printf 'FAIL  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling/recursion\n' >&2; FAIL=$((FAIL + 1))
 fi
 
 # --- Lead containment: guard acceptance (spec 7) ------------------------
@@ -817,6 +832,23 @@ assert lines[0].startswith("Blocked: orch-edit-guard"), lines[0]
 PY
 then printf 'PASS  AC-G refuse_lead keeps three lines with a newline in the path\n'; PASS=$((PASS + 1))
 else printf 'FAIL  AC-G refuse_lead keeps three lines with a newline in the path\n' >&2; FAIL=$((FAIL + 1)); fi
+# refuse()'s budget-unwritable branch must also sanitize the audit path: a
+# config dir with a newline must not add a fourth stderr line (co-review r2 #3).
+if HOOK="$HOOK" python3 - <<'PY'
+import contextlib, importlib.util, io, os, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    rc = g.refuse("budget", "slug-x", 1, "sid", ("/repo/f", "/repo", "tracked"),
+                  {"unwritable": True, "owned": "slug-x"}, "claude", "/cfg/a\nb/x")
+lines = err.getvalue().splitlines()
+assert rc == 2 and len(lines) == 3, (rc, len(lines), lines)
+assert lines[0].startswith("Blocked: orch-edit-guard"), lines[0]
+PY
+then printf 'PASS  AC-G refuse budget-unwritable keeps three lines with a newline in the audit path\n'; PASS=$((PASS + 1))
+else printf 'FAIL  AC-G refuse budget-unwritable keeps three lines with a newline in the audit path\n' >&2; FAIL=$((FAIL + 1)); fi
 
 # LM: an allow-edit marker for the slug does not widen a lead outside its
 # workspace (leads never consult the marker path).

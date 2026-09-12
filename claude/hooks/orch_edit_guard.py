@@ -213,7 +213,7 @@ def lead_authority(session_id, runtime, caller_scope):
             binding_id = lease.get("binding_id")
             try:
                 rec = bindings.read_binding(payload_root / slug, binding_id)
-            except (OSError, ValueError):
+            except Exception:  # noqa: BLE001 -- any read/validate error withholds the root (fail closed)
                 rec = None
             if (
                 rec is not None
@@ -782,7 +782,15 @@ def cd_target_candidates(words, cwd, home):
     cands = {lexical}
     if real is not None:
         cands.add(real)
-    if not any(os.path.isdir(c) for c in cands):
+    # The shell lands in exactly one directory, but the scanner cannot know
+    # whether it used logical (lexical) or physical (-P, realpath) resolution,
+    # nor whether the cd even succeeded. Keep `cwd` UNLESS both resolutions
+    # agree on a single confirmed directory (only then does cd deterministically
+    # succeed there). A failed `cd -P` -- e.g. a lexical dir whose physical
+    # target does not exist -- leaves the shell in cwd, so cwd must stay a
+    # candidate whenever the two spellings differ or either is not a directory.
+    resolved_dirs = {c for c in cands if os.path.isdir(c)}
+    if len(cands) != 1 or len(resolved_dirs) != 1:
         cands.add(cwd)
     return cands
 
@@ -1132,9 +1140,9 @@ def refuse(why, slug, fence, session_id, first, detail, runtime, rd):
         )
     elif why == "budget":
         if detail.get("unwritable"):
+            audit_path = _printable(str(Path(rd) / "tasks" / AUDIT_FILE))
             print(
-                f"Cannot reserve budget: {Path(rd) / 'tasks' / AUDIT_FILE} "
-                "is not writable.",
+                f"Cannot reserve budget: {audit_path} is not writable.",
                 file=sys.stderr,
             )
         else:
