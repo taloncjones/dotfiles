@@ -331,5 +331,53 @@ else
     fail "existing opt-outs retain every template isolation rule and account root"
 fi
 
+# --- reconcile writes a template stamp ---------------------------------
+STAMP_DIR="$TMP/stampdir"
+mkdir -p "$STAMP_DIR"
+reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$STAMP_DIR/settings.json" >/dev/null 2>&1
+expected_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$DOTFILEDIR"/claude/settings.json.tmpl)"
+if [ -f "$STAMP_DIR/.settings-template-sha256" ] \
+   && [ "$(cat "$STAMP_DIR/.settings-template-sha256")" = "$expected_sha" ]; then
+    pass "reconcile writes .settings-template-sha256 with template sha"
+else
+    fail "reconcile writes .settings-template-sha256 with template sha"
+fi
+
+# stamp refreshes when the template changes
+ALT_TMPL="$TMP/alt-settings.json.tmpl"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["_stamp_test"]=1; json.dump(d,open(sys.argv[2],"w"))' \
+    "$DOTFILEDIR"/claude/settings.json.tmpl "$ALT_TMPL"
+reconcile_claude_settings_file "$ALT_TMPL" "$STAMP_DIR/settings.json" >/dev/null 2>&1
+alt_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$ALT_TMPL")"
+if [ "$(cat "$STAMP_DIR/.settings-template-sha256")" = "$alt_sha" ]; then
+    pass "re-reconcile refreshes stamp to new template sha"
+else
+    fail "re-reconcile refreshes stamp to new template sha"
+fi
+
+# a failed reconcile (missing template) leaves no stamp behind
+NOSTAMP_DIR="$TMP/nostamp"
+mkdir -p "$NOSTAMP_DIR"
+reconcile_claude_settings_file "$TMP/does-not-exist.tmpl" "$NOSTAMP_DIR/settings.json" >/dev/null 2>&1
+if [ ! -f "$NOSTAMP_DIR/.settings-template-sha256" ]; then
+    pass "failed reconcile writes no stamp"
+else
+    fail "failed reconcile writes no stamp"
+fi
+
+# a symlinked stamp path is never followed/overwritten by the stamp write
+SYMLINK_DIR="$TMP/symlinkdir"
+mkdir -p "$SYMLINK_DIR"
+printf '{"enabledPlugins": {"x@y": true}}\n' >"$SYMLINK_DIR/settings.json"
+ln -s "$SYMLINK_DIR/settings.json" "$SYMLINK_DIR/.settings-template-sha256"
+reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$SYMLINK_DIR/settings.json" >/dev/null 2>&1
+if jget "$SYMLINK_DIR/settings.json" "'hooks' in d" \
+   && [ -L "$SYMLINK_DIR/.settings-template-sha256" ] \
+   && ! grep -qE '^[0-9a-f]{64}$' "$SYMLINK_DIR/.settings-template-sha256"; then
+    pass "stamp write skipped through a symlinked stamp path"
+else
+    fail "stamp write skipped through a symlinked stamp path"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

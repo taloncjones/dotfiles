@@ -47,11 +47,11 @@ assert "document review binds a frozen plan" \
     rg -q 'FROZEN_PLAN_SHA256' codex/skills/claude-plan-review/SKILL.md
 
 assert "installer links repo-managed codex skills" \
-    rg -q 'codex/skills' install/common/link.sh
+    rg -q 'codex/skills' install/common/codex-links.sh
 assert "installer keeps ~/.codex/skills as a real directory" \
-    rg -q 'mkdir -p "\$HOME"/\.codex/skills' install/common/link.sh
+    rg -q 'mkdir -p "\$HOME"/\.codex/skills' install/common/codex-links.sh
 assert "installer treats Codex plugins as canonical workflow owners" \
-    rg -q 'Codex plugins are the canonical owner' install/common/link.sh
+    rg -q 'Codex plugins are the canonical owner' install/common/codex-links.sh
 assert "ECC lifecycle installs a native Codex plugin" \
     rg -q '_codex_install_ecc_plugin' zsh/functions.zsh
 assert "Superpowers lifecycle installs the managed Codex plugin" \
@@ -61,9 +61,9 @@ assert "bootstrap installs workflows for Claude and Codex" \
 assert "ECC lifecycle never invokes the upstream Codex sync" \
     sh -c "! rg -q 'scripts/sync-ecc-to-codex.sh' zsh/functions.zsh"
 assert "installer removes stale standalone Superpowers skill snapshots" \
-    rg -q "name 'superpowers-\*'" install/common/link.sh
+    rg -q "name 'superpowers-\*'" install/common/codex-links.sh
 assert "installer removes stale standalone ECC skill snapshots" \
-    rg -q "name 'ecc-\*'" install/common/link.sh
+    rg -q "name 'ecc-\*'" install/common/codex-links.sh
 assert "Codex AGENTS references plugin-qualified Superpowers skills" \
     rg -q 'superpowers:brainstorming' codex/AGENTS.md
 assert "Codex AGENTS defaults implementation work to worktrees" \

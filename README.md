@@ -209,6 +209,9 @@ dotfiles
 # Update dotfiles and dependencies
 update
 
+# Refresh only the Claude/Codex layer (no sudo/brew/vscode)
+update --ai
+
 # Reload ZSH configuration
 reload
 ```

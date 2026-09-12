@@ -24,34 +24,64 @@ function functionlist() {    # functionlist() will list all of the available fun
     echo "$list" | sort -u -d -s | tr -d '\\+'
 }
 
-# update the dotfiles completely
-function update() {    # update() will update the current dotfiles installation and dependencies. ex: $ update
+# update the dotfiles completely, or just the Claude/Codex layer with --ai
+function update() {    # update([--ai]) will update the dotfiles installation; --ai refreshes only the Claude/Codex layer. ex: $ update --ai
+	local scope="full"
+	case "${1:-}" in
+		"") ;;
+		--ai) scope="ai" ;;
+		*)
+			echo "[X] usage: update [--ai]"
+			return 2
+			;;
+	esac
+
 	# save the current directory
 	currentdir=$(pwd)
 
 	# navigate to dotfile install directory
 	dotfiles
 
-	# pull new version from origin
-	git pull
+	# pull new version from origin (non-fatal: both scopes still run the
+	# installer even when the pull fails, e.g. offline)
+	local pull_status=0
+	git pull || pull_status=$?
 
-    # update tldr definitions
-    tldr --update
-	
-	# execute the install script
-	# note: we manually specify bash here, since the install script is written in bash
-	# and we're calling it from zsh. bad things happen if you use source instead
 	local install_status=0
-	bash $DOTFILEDIR/install/install.sh || install_status=$?
+	if [[ "$scope" == "ai" ]]; then
+		# scoped: Claude/Codex layer only -- no sudo, no brew, no defaults
+		bash $DOTFILEDIR/install/common/ai-update.sh || install_status=$?
+	else
+		# update tldr definitions
+		tldr --update
+
+		# execute the install script
+		# note: we manually specify bash here, since the install script is written in bash
+		# and we're calling it from zsh. bad things happen if you use source instead
+		bash $DOTFILEDIR/install/install.sh || install_status=$?
+	fi
 
 	# return user to previous directory
 	cd $currentdir
 
 	# propagate a red install instead of masking it with the cd above
 	if (( install_status != 0 )); then
-		echo "[X] update failed: install.sh exited $install_status"
+		if [[ "$scope" == "ai" ]]; then
+			echo "[X] update --ai failed: ai-update.sh exited $install_status"
+		else
+			echo "[X] update failed: install.sh exited $install_status"
+		fi
 		return $install_status
 	fi
+
+	# A completed update supersedes any pending staleness nudge (Task 6);
+	# keep the last-check stamp so the daily fetch cadence is unchanged.
+	# Only clear it when BOTH the pull and the install actually succeeded --
+	# a failed pull must not silence a real staleness reminder.
+	if (( pull_status == 0 && install_status == 0 )); then
+		rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles/repo-staleness-result"
+	fi
+	return 0
 }
 
 # Extract a compressed archive without worrying about which tool to use
@@ -1298,3 +1328,75 @@ _claude_code_update_check() {
     fi
 }
 _claude_code_update_check
+
+# Synchronous worker: fetch origin and record the behind-count in the result
+# file (empty file = checked, up to date). Called in the background by
+# _dotfiles_staleness_check; call directly only in tests. Advisory: every
+# failure (offline, unwritable cache) is silent.
+_dotfiles_staleness_fetch() {
+    local result_file="$1"
+    [[ -L "$result_file" ]] && return 0
+    mkdir -p "${result_file:h}" 2>/dev/null || return 0
+    local behind=""
+    if git -C "$DOTFILEDIR" fetch --quiet 2>/dev/null; then
+        behind="$(git -C "$DOTFILEDIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)"
+    fi
+    if [[ -n "$behind" && "$behind" != "0" ]]; then
+        echo "$behind" > "$result_file" 2>/dev/null
+    else
+        : > "$result_file" 2>/dev/null
+    fi
+}
+
+# Check whether the dotfiles checkout is behind origin (async, cached 24h).
+# Two files, so consuming a result never postpones the next check:
+#   repo-staleness-last-check  mtime-only claim stamp (when did we last fetch)
+#   repo-staleness-result      consumable behind-count from that fetch
+# The first interactive shell past the TTL claims the day (touch BEFORE
+# spawning, so a burst of new shells starts at most one fetch -- a
+# millisecond-wide race between two literally simultaneous shells can
+# double-fetch, which is idempotent and accepted), fetches in the
+# background, and a later shell prints the result ONCE (print consumes it).
+# Silent when current, offline, cache unwritable, or $DOTFILEDIR is not a
+# real work tree (worktrees have a .git FILE, so ask git and require "true";
+# a bare repo or .git dir prints "false" and is excluded).
+_dotfiles_staleness_check() {
+    [[ -o interactive ]] || return 0
+    [[ ! -t 1 ]] && return 0
+    [[ -n "${DOTFILEDIR:-}" ]] || return 0
+    [[ "$(git -C "$DOTFILEDIR" rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] || return 0
+
+    local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/dotfiles"
+    local check_stamp="$cache_dir/repo-staleness-last-check"
+    local result_file="$cache_dir/repo-staleness-result"
+    local cache_ttl=86400  # 24 hours
+
+    # Never follow a symlinked cache file -- refuse to read/truncate it.
+    [[ -L "$result_file" || -L "$check_stamp" ]] && return 0
+
+    # Surface the previous check's result once, then consume it so later
+    # shells (and post-update shells) stay quiet until the next fetch.
+    # Always truncate after reading (even a malformed result), and only
+    # print when the content is a validated nonempty digit string.
+    if [[ -f "$result_file" && -s "$result_file" ]]; then
+        local behind
+        behind="$(cat "$result_file" 2>/dev/null)"
+        if [[ "$behind" == <-> ]]; then
+            printf '[INFO] dotfiles is %s commit(s) behind -- run '\''update'\'' or '\''update --ai'\''.\n' "$behind"
+        fi
+        : > "$result_file" 2>/dev/null
+    fi
+
+    # Skip the fetch if checked recently (mtime of the claim stamp only;
+    # consuming the result above never touches this file).
+    if [[ -f "$check_stamp" ]]; then
+        local cache_age=$(( $(date +%s) - $(stat -f%m "$check_stamp" 2>/dev/null || stat -c%Y "$check_stamp" 2>/dev/null || echo 0) ))
+        (( cache_age < cache_ttl )) && return 0
+    fi
+
+    # Claim the day BEFORE spawning; unwritable cache degrades to silence.
+    mkdir -p "$cache_dir" 2>/dev/null || return 0
+    : > "$check_stamp" 2>/dev/null || return 0
+    _dotfiles_staleness_fetch "$result_file" &!
+}
+_dotfiles_staleness_check
