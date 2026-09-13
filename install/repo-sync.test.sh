@@ -237,6 +237,208 @@ else
     fail "dirty but current reports already up to date (rc=$RC)"
 fi
 
+# --- 6. untracked collision ---
+new_fixture untracked
+advance_origin untracked newfile.txt "upstream content"
+printf 'my private note\n' >"$TMP/untracked/clone/newfile.txt"
+old="$(head_of "$TMP/untracked/clone")"
+run_sync "$TMP/untracked/clone"
+if [ "$RC" -eq 28 ] && grep -q 'working tree verified unchanged' "$TMP/out" \
+    && [ "$(head_of "$TMP/untracked/clone")" = "$old" ] \
+    && [ "$(cat "$TMP/untracked/clone/newfile.txt")" = "my private note" ]; then
+    pass "untracked collision exits 28 and preserves local file"
+else
+    fail "untracked collision exits 28 and preserves local file (rc=$RC)"
+fi
+
+# --- 7. plain untracked file (no collision) fast-forwards over it ---
+new_fixture bystander
+advance_origin bystander
+printf 'scratch\n' >"$TMP/bystander/clone/scratch.txt"
+tip="$(head_of "$TMP/bystander/work")"
+run_sync "$TMP/bystander/clone"
+if [ "$RC" -eq 0 ] && [ "$(head_of "$TMP/bystander/clone")" = "$tip" ] \
+    && [ "$(cat "$TMP/bystander/clone/scratch.txt")" = "scratch" ]; then
+    pass "non-colliding untracked file survives fast-forward"
+else
+    fail "non-colliding untracked file survives fast-forward (rc=$RC)"
+fi
+
+# --- 15. ignored-file collision: --no-overwrite-ignore protects it ---
+new_fixture ignored
+printf 'PRIVATE local value\n' >"$TMP/ignored/clone/secret.conf"
+advance_origin ignored secret.conf "upstream tracked version" forceadd
+old="$(head_of "$TMP/ignored/clone")"
+run_sync "$TMP/ignored/clone"
+if [ "$RC" -eq 28 ] && [ "$(head_of "$TMP/ignored/clone")" = "$old" ] \
+    && [ "$(cat "$TMP/ignored/clone/secret.conf")" = "PRIVATE local value" ]; then
+    pass "ignored-file collision refused; local content preserved"
+else
+    fail "ignored-file collision refused; local content preserved (rc=$RC)"
+fi
+
+# --- 16. hostile config cannot subvert the guarded merge ---
+new_fixture hostile
+advance_origin hostile
+git_fix -C "$TMP/hostile/clone" config branch.main.mergeoptions --squash
+git_fix -C "$TMP/hostile/clone" config merge.autostash true
+tip="$(head_of "$TMP/hostile/work")"
+run_sync "$TMP/hostile/clone"
+stashes="$(env -i PATH="$STUB_BIN" GIT_CONFIG_GLOBAL="$GITCFG" GIT_CONFIG_NOSYSTEM=1 \
+    git -C "$TMP/hostile/clone" stash list 2>/dev/null)"
+if [ "$RC" -eq 0 ] && [ "$(head_of "$TMP/hostile/clone")" = "$tip" ] && [ -z "$stashes" ]; then
+    pass "hostile mergeoptions/autostash still lands exactly on upstream"
+else
+    fail "hostile mergeoptions/autostash still lands exactly on upstream (rc=$RC)"
+fi
+new_fixture hostiledirty
+advance_origin hostiledirty
+git_fix -C "$TMP/hostiledirty/clone" config merge.autostash true
+printf 'uncommitted\n' >"$TMP/hostiledirty/clone/base.txt"
+run_sync "$TMP/hostiledirty/clone"
+if [ "$RC" -eq 27 ] && [ "$(cat "$TMP/hostiledirty/clone/base.txt")" = "uncommitted" ]; then
+    pass "autostash config never stashes a dirty tree"
+else
+    fail "autostash config never stashes a dirty tree (rc=$RC)"
+fi
+
+# make_wrapper <dir> <script-body>: a fake `git` first on PATH; the body
+# runs with $REAL_GIT available and "$@" being the git args.
+make_wrapper() {
+    wdir="$1"; body="$2"
+    mkdir -p "$wdir"
+    {
+        printf '#!/bin/sh\n'
+        printf 'REAL_GIT=%s\n' "$REAL_GIT"
+        printf '%s\n' "$body"
+        printf 'exec "$REAL_GIT" "$@"\n'
+    } >"$wdir/git"
+    chmod +x "$wdir/git"
+}
+run_sync_wrapped() { wdir="$1"; shift; hrun "$wdir:$STUB_BIN" bash "$REPO/$SYNC" "$@"; }
+
+# --- 17. pre-merge inspection error fails closed (exit 29, no merge) ---
+new_fixture inspfail
+advance_origin inspfail
+old="$(head_of "$TMP/inspfail/clone")"
+make_wrapper "$TMP/w-revlist" '
+case "$*" in *" rev-list "*) exit 128 ;; esac'
+run_sync_wrapped "$TMP/w-revlist" "$TMP/inspfail/clone"
+if [ "$RC" -eq 29 ] && grep -q 'could not inspect' "$TMP/out" \
+    && [ "$(head_of "$TMP/inspfail/clone")" = "$old" ]; then
+    pass "rev-list failure exits 29 without merging"
+else
+    fail "rev-list failure exits 29 without merging (rc=$RC)"
+fi
+
+# --- 18. merge fails after moving HEAD -> exit 30, no rollback ---
+new_fixture headmoved
+advance_origin headmoved
+tip="$(head_of "$TMP/headmoved/work")"
+make_wrapper "$TMP/w-headmove" '
+case "$*" in *" merge "*)
+    repo=""; [ "$1" = "-C" ] && repo="$2"
+    "$REAL_GIT" -C "$repo" update-ref HEAD '"$tip"'
+    exit 1 ;;
+esac'
+run_sync_wrapped "$TMP/w-headmove" "$TMP/headmoved/clone"
+if [ "$RC" -eq 30 ] && grep -q 'uncertain state' "$TMP/out" \
+    && [ "$(head_of "$TMP/headmoved/clone")" = "$tip" ]; then
+    pass "moved HEAD on failed merge exits 30, evidence preserved"
+else
+    fail "moved HEAD on failed merge exits 30, evidence preserved (rc=$RC)"
+fi
+
+# --- 19. merge fails after touching a working file -> exit 30 ---
+new_fixture filetouched
+advance_origin filetouched
+make_wrapper "$TMP/w-filetouch" '
+case "$*" in *" merge "*)
+    repo=""; [ "$1" = "-C" ] && repo="$2"
+    printf "mutated\n" >>"$repo/base.txt"
+    exit 1 ;;
+esac'
+run_sync_wrapped "$TMP/w-filetouch" "$TMP/filetouched/clone"
+if [ "$RC" -eq 30 ] && grep -q 'uncertain state' "$TMP/out"; then
+    pass "mutated working file on failed merge exits 30, not 28"
+else
+    fail "mutated working file on failed merge exits 30, not 28 (rc=$RC)"
+fi
+
+# --- 20. post-merge verification failure -> exit 30, never 28/29 ---
+new_fixture postinsp
+advance_origin postinsp
+make_wrapper "$TMP/w-postinsp" '
+MARKER="'"$TMP"'/postinsp-merged"
+case "$*" in
+  *" merge "*) "$REAL_GIT" "$@"; rc=$?; touch "$MARKER"; exit $rc ;;
+  *" rev-parse HEAD") [ -f "$MARKER" ] && exit 128 ;;
+esac'
+run_sync_wrapped "$TMP/w-postinsp" "$TMP/postinsp/clone"
+if [ "$RC" -eq 30 ] && grep -q 'uncertain state' "$TMP/out"; then
+    pass "post-merge inspection failure exits 30"
+else
+    fail "post-merge inspection failure exits 30 (rc=$RC)"
+fi
+
+# --- 21. MERGE_HEAD probe error after failed merge -> 30, not 28 ---
+new_fixture mhprobe
+advance_origin mhprobe newfile.txt "upstream content"
+printf 'collide\n' >"$TMP/mhprobe/clone/newfile.txt"
+make_wrapper "$TMP/w-mhprobe" '
+case "$*" in *"--verify MERGE_HEAD"*) exit 128 ;; esac'
+run_sync_wrapped "$TMP/w-mhprobe" "$TMP/mhprobe/clone"
+if [ "$RC" -eq 30 ]; then
+    pass "MERGE_HEAD probe error exits 30, not 28"
+else
+    fail "MERGE_HEAD probe error exits 30, not 28 (rc=$RC)"
+fi
+
+# --- 22. untracked content mutated on failed merge -> 30, not 28 ---
+new_fixture untrmut
+advance_origin untrmut
+printf 'original note\n' >"$TMP/untrmut/clone/note.txt"
+make_wrapper "$TMP/w-untrmut" '
+case "$*" in *" merge "*)
+    repo=""; [ "$1" = "-C" ] && repo="$2"
+    printf "tampered\n" >"$repo/note.txt"
+    exit 1 ;;
+esac'
+run_sync_wrapped "$TMP/w-untrmut" "$TMP/untrmut/clone"
+if [ "$RC" -eq 30 ]; then
+    pass "mutated untracked content on failed merge exits 30"
+else
+    fail "mutated untracked content on failed merge exits 30 (rc=$RC)"
+fi
+
+# --- 23. symbolic-ref probe error -> 29, not misclassified detached ---
+new_fixture srprobe
+make_wrapper "$TMP/w-srprobe" '
+case "$*" in *" symbolic-ref "*) exit 128 ;; esac'
+run_sync_wrapped "$TMP/w-srprobe" "$TMP/srprobe/clone"
+if [ "$RC" -eq 29 ] && grep -q 'could not inspect' "$TMP/out"; then
+    pass "symbolic-ref probe error exits 29, not 21"
+else
+    fail "symbolic-ref probe error exits 29, not 21 (rc=$RC)"
+fi
+
+# --- 24. local "." upstream syncs without fetching ---
+new_fixture localup
+git_fix -C "$TMP/localup/clone" remote set-url origin "$TMP/would-fail"
+git_fix -C "$TMP/localup/clone" checkout -q -b behind "HEAD~0"
+git_fix -C "$TMP/localup/clone" branch -q --set-upstream-to=main behind
+git_fix -C "$TMP/localup/clone" checkout -q main
+printf 'main moves on\n' >"$TMP/localup/clone/base.txt"
+git_fix -C "$TMP/localup/clone" commit -q -am mainadvance
+maintip="$(head_of "$TMP/localup/clone")"
+git_fix -C "$TMP/localup/clone" checkout -q behind
+run_sync "$TMP/localup/clone"
+if [ "$RC" -eq 0 ] && [ "$(head_of "$TMP/localup/clone")" = "$maintip" ]; then
+    pass "local dot upstream fast-forwards without fetch"
+else
+    fail "local dot upstream fast-forwards without fetch (rc=$RC)"
+fi
+
 # --- usage errors ---
 run_sync --bogus-flag
 [ "$RC" -eq 2 ] && pass "unknown flag exits 2" || fail "unknown flag exits 2 (rc=$RC)"
