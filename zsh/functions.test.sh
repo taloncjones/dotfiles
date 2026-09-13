@@ -666,7 +666,7 @@ run_update() {
         cd '$TMP'
         update
         rc=\$?
-        pwd >'$TMP/pwd-after'
+        pwd -P >'$TMP/pwd-after'
         exit \$rc
     " >"$TMP/out" 2>&1
 }
@@ -692,7 +692,7 @@ fi
 # u3. installer failure propagates its EXACT code and restores the cwd.
 rm -f "$TMP/install-ran"
 run_update "$UPD/clone" env UPDATE_TEST_INSTALL_RC=3; urc=$?
-if [ "$urc" -eq 3 ] && [ "$(cat "$TMP/pwd-after")" = "$TMP" ]; then
+if [ "$urc" -eq 3 ] && [ "$(cat "$TMP/pwd-after")" = "$(cd "$TMP" && pwd -P)" ]; then
     pass "installer failure propagates exact code from update()"
 else
     fail "installer failure propagates exact code from update() (rc=$urc)"
@@ -724,7 +724,7 @@ touch "$UPDATE_TEST_MARKER"
 EOF
 run_update "$FAKE_SYNC_DIR"; urc=$?
 if [ "$urc" -eq 30 ] && [ ! -f "$TMP/install-ran" ] \
-    && [ "$(cat "$TMP/pwd-after")" = "$TMP" ] \
+    && [ "$(cat "$TMP/pwd-after")" = "$(cd "$TMP" && pwd -P)" ] \
     && grep -q 'update aborted' "$TMP/out"; then
     pass "uncertain sync state aborts update before install, cwd restored"
 else
