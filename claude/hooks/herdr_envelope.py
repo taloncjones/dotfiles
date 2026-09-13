@@ -9,6 +9,7 @@ module). An oversized or out-of-scope record is invalid -- the caller must
 REJECT it, never strip it down.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from pathlib import Path
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 _BINDING_ID_RE = re.compile(r"ldb-[0-9a-f]{32}\Z")
 _SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 OUTCOMES = ("pr_ready", "blocked", "failed", "cancelled")
 FOLLOW_UP_KINDS = ("todo", "handoff", "task")
@@ -27,6 +29,12 @@ ENVELOPE_MAX_STR = 500
 ENVELOPE_MAX_FOLLOW_UPS = 8
 _REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+-]{0,199}\Z")
 _BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/+-]{0,199}\Z")
+
+CONSUMED_KEYS = frozenset((
+    "schema_version", "binding_id", "sequence", "envelope_sha256",
+    "outcome", "integrated_by", "fence", "ts",
+))
+CONSUMED_MAX_RAW = 4096
 
 _ATTEMPT_KEYS = {
     "launch_id",
@@ -248,4 +256,79 @@ def read_envelope(rd, binding_id):
         raise ValueError("corrupt return envelope") from exc
     if not valid_envelope(rec) or rec["binding_id"] != binding_id:
         raise ValueError("invalid return envelope")
+    return rec
+
+
+def envelope_digest(rec):
+    """Canonical digest of an envelope's semantic content (key-order free)."""
+    return hashlib.sha256(
+        json.dumps(rec, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+
+
+def consumed_path(rd, binding_id):
+    if not isinstance(binding_id, str) or not _BINDING_ID_RE.fullmatch(binding_id):
+        raise ValueError("invalid binding id")
+    return Path(rd) / "leads" / binding_id / "envelope.consumed.json"
+
+
+def valid_consumed(rec):
+    return (
+        isinstance(rec, dict)
+        and set(rec) == CONSUMED_KEYS
+        and type(rec["schema_version"]) is int and rec["schema_version"] == 1
+        and isinstance(rec["binding_id"], str)
+        and bool(_BINDING_ID_RE.fullmatch(rec["binding_id"]))
+        and type(rec["sequence"]) is int and rec["sequence"] >= 1
+        and isinstance(rec["envelope_sha256"], str)
+        and bool(_SHA256_RE.fullmatch(rec["envelope_sha256"]))
+        and rec["outcome"] in OUTCOMES
+        and _nonempty(rec["integrated_by"])
+        and type(rec["fence"]) is int and rec["fence"] > 0
+        and _nonempty(rec["ts"])
+    )
+
+
+def _read_bounded(path, cap, label):
+    """Bounded no-follow read shared by the consumption/artifact readers;
+    same discipline as read_envelope. None if absent; ValueError on corrupt."""
+    try:
+        fd = os.open(
+            str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+        )
+    except FileNotFoundError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            raise ValueError(f"corrupt {label}")
+        raw = b""
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            raw += chunk
+            if len(raw) > cap:
+                raise ValueError(f"corrupt {label}")
+    finally:
+        os.close(fd)
+    try:
+        rec = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_dup_pairs)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"corrupt {label}") from exc
+    if not isinstance(rec, dict):
+        # A file holding JSON null (or any non-object) must be corrupt, not
+        # "absent": absence is signaled only by FileNotFoundError above.
+        raise ValueError(f"corrupt {label}")
+    return rec
+
+
+def read_consumed(rd, binding_id):
+    """The stored consumption record, None if absent; ValueError on corrupt."""
+    rec = _read_bounded(consumed_path(rd, binding_id), CONSUMED_MAX_RAW,
+                        "consumption record")
+    if rec is None:
+        return None
+    if not valid_consumed(rec) or rec["binding_id"] != binding_id:
+        raise ValueError("invalid consumption record")
     return rec
