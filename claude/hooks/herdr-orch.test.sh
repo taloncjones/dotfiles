@@ -4640,5 +4640,43 @@ assert json.load(open(sys.argv[1]))["status"] == "claimed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bidB.json"
 SH
 
+check "write-task --binding: refuse updates over a malformed prior task record" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-malformed-prior.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-mal \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+I1='{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}'
+# Create a valid binding-scoped task with implement row
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-mal \
+   --json '{"task_id":"td-mal","workers":['"$I1"']}'
+# Corrupt the on-disk record to have a phaseless row (malformed worker)
+python3 -c '
+import json, sys
+json.dump(
+    {"task_id": "td-mal", "workers": [{"runtime": "claude"}]},
+    open(sys.argv[1], "w"),
+)
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-mal.json"
+# Subsequent binding-scoped write-task updating status should be refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-mal \
+   --json '{"task_id":"td-mal","status":"claimed","workers":['"$I1"']}' 2>/dev/null; then exit 1; fi
+# Verify on-disk record is unchanged (still has the malformed row, status not updated)
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec.get("workers") == [{"runtime": "claude"}], rec
+assert rec.get("status") != "claimed", rec
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-mal.json"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

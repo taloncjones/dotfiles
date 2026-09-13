@@ -2351,18 +2351,16 @@ def _main(argv=None) -> int:
                         prior = json.loads(prior_raw)
                     except ValueError:
                         _require(False, "task record is unreadable")
-                    prior_workers = prior.get("workers") if isinstance(prior, dict) else None
-                    if isinstance(prior, dict) and isinstance(prior_workers, list):
-                        new_workers = rec.get("workers")
-                        _require(
-                            isinstance(new_workers, list)
-                            and len(new_workers) >= len(prior_workers)
-                            and all(new_workers[i] == prior_workers[i]
-                                    for i in range(len(prior_workers))),
-                            "binding-scoped dispatch history is append-only",
-                        )
-                    else:
-                        _require(False, "task record is malformed")
+                    _require(_valid_task_shape(prior), "task record is malformed")
+                    prior_workers = prior.get("workers")
+                    new_workers = rec.get("workers")
+                    _require(
+                        isinstance(new_workers, list)
+                        and len(new_workers) >= len(prior_workers)
+                        and all(new_workers[i] == prior_workers[i]
+                                for i in range(len(prior_workers))),
+                        "binding-scoped dispatch history is append-only",
+                    )
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
             return 0
