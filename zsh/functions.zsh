@@ -43,16 +43,20 @@ function update() {    # update([--ai]) will update the dotfiles installation; -
 	dotfiles
 
 	# guarded fetch + fast-forward (repo-sync.sh): non-fatal for both scopes
-	# -- the installer still runs from the current checkout when the sync is
-	# skipped (offline, dirty, diverged, ...). The one exception is exit 30:
-	# the sync left the checkout in an unverified state, and installing from
-	# it could propagate a half-updated tree into ~.
+	# -- the installer still runs from the current checkout when the sync
+	# exits with a classified skip status (usage error 2, or the documented
+	# 20-29 range: not-a-worktree, detached, wrong branch, no upstream,
+	# offline, ahead, diverged, dirty, refused-ff, or a pre-merge inspection
+	# failure). Any other status -- including 30 (unverified after a merge
+	# attempt) and an unclassified status such as 143 from a SIGTERM mid-run,
+	# where verification never ran -- aborts before the installer: installing
+	# from an unverified checkout could propagate a half-updated tree into ~.
 	local pull_status=0
 	bash "$DOTFILEDIR/install/common/repo-sync.sh" "$DOTFILEDIR" || pull_status=$?
-	if (( pull_status == 30 )); then
+	if (( pull_status != 0 && pull_status != 2 && (pull_status < 20 || pull_status > 29) )); then
 		cd $currentdir
-		echo "[X] update aborted: checkout state uncertain after sync; inspect $DOTFILEDIR"
-		return 30
+		echo "[X] update aborted: sync exited $pull_status without verified state; inspect $DOTFILEDIR"
+		return $pull_status
 	fi
 
 	local install_status=0

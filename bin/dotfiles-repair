@@ -38,11 +38,11 @@ sync_status=0
 bash "$DOTFILES/install/common/repo-sync.sh" --require-branch main "$DOTFILES" || sync_status=$?
 if [ "$sync_status" -eq 0 ]; then
   ok "dotfiles synced"
-elif [ "$sync_status" -eq 30 ]; then
-  err "checkout state uncertain after sync; resolve manually before repairing"
-  exit 30
-else
+elif [ "$sync_status" -eq 2 ] || { [ "$sync_status" -ge 20 ] && [ "$sync_status" -le 29 ]; }; then
   warn "dotfiles not synced; continuing repair from current checkout"
+else
+  err "sync exited $sync_status without verified state; resolve manually before repairing"
+  exit "$sync_status"
 fi
 
 step "2/5  Re-link dotfiles (replaces dangling/stale symlinks)"

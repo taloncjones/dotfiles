@@ -81,6 +81,12 @@ if [ "$remote" != "." ]; then
     fi
 fi
 
+# Revalidate the branch after the fetch window: a checkout switch racing the
+# fetch (or --require-branch's own window) must not let a stale $branch/
+# $remote pin the merge to the wrong branch's mergeoptions or upstream.
+post_fetch_branch="$(git -C "$repo" symbolic-ref -q --short HEAD)" || inspect_fail
+[ "$post_fetch_branch" = "$branch" ] || inspect_fail
+
 # Single resolution point: classification and merge use these exact shas,
 # so a concurrent ref move cannot make them target different commits.
 head_commit="$(git -C "$repo" rev-parse HEAD)" || inspect_fail
@@ -171,6 +177,8 @@ if git -C "$repo" -c merge.autoStash=false -c "branch.$branch.mergeoptions=" \
         merge --ff-only --no-overwrite-ignore "$upstream_commit"; then
     new_head="$(git -C "$repo" rev-parse HEAD)" || uncertain
     [ "$new_head" = "$upstream_commit" ] || uncertain
+    new_branch="$(git -C "$repo" symbolic-ref -q --short HEAD)" || uncertain
+    [ "$new_branch" = "$branch" ] || uncertain
     echo "[OK] fast-forwarded $head_commit..$new_head"
     exit 0
 else

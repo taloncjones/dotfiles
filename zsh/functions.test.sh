@@ -57,8 +57,8 @@ assert_grep "update() syncs via repo-sync.sh" \
 # refreshes at ~863/~1194); only the update() body must be free of it.
 assert_grep "update() no longer uses plain git pull" \
     sh -c "! sed -n '/^function update()/,/^function /p' $FUNCS | grep -q 'git pull'"
-assert_grep "update() aborts on uncertain sync state" \
-    grep -q 'pull_status == 30' "$FUNCS"
+assert_grep "update() aborts on unverified sync state" \
+    grep -q 'pull_status < 20' "$FUNCS"
 
 if ! command -v zsh >/dev/null 2>&1; then
     echo "SKIP: zsh not installed; behavioral cases run in CI (which installs zsh)"
@@ -729,6 +729,26 @@ if [ "$urc" -eq 30 ] && [ ! -f "$TMP/install-ran" ] \
     pass "uncertain sync state aborts update before install, cwd restored"
 else
     fail "uncertain sync state aborts update before install, cwd restored (rc=$urc)"
+fi
+
+# u6. an unclassified sync exit (e.g. 143 from a SIGTERM mid-merge, where
+# verification never ran) aborts before the installer, same as exit 30.
+rm -f "$TMP/install-ran"
+FAKE_SYNC_DIR="$UPD/killed"
+mkdir -p "$FAKE_SYNC_DIR/install/common"
+cat >"$FAKE_SYNC_DIR/install/common/repo-sync.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 143
+EOF
+cat >"$FAKE_SYNC_DIR/install/install.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$UPDATE_TEST_MARKER"
+EOF
+run_update "$FAKE_SYNC_DIR"; urc=$?
+if [ "$urc" -eq 143 ] && [ ! -f "$TMP/install-ran" ]; then
+    pass "unclassified sync exit aborts update before install"
+else
+    fail "unclassified sync exit aborts update before install (rc=$urc)"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

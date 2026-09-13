@@ -492,6 +492,24 @@ else
     fail "raw CRLF rewrite under core.autocrlf exits 30, not 28 (rc=$RC)"
 fi
 
+# --- 28. branch switch during the fetch window is caught, not fast-forwarded ---
+new_fixture sneakybranch
+advance_origin sneakybranch
+origintip="$(head_of "$TMP/sneakybranch/work")"
+make_wrapper "$TMP/w-sneakybranch" '
+case "$*" in *" fetch "*)
+    repo=""; [ "$1" = "-C" ] && repo="$2"
+    "$REAL_GIT" "$@"; rc=$?
+    "$REAL_GIT" -C "$repo" checkout -q -b sneaky
+    exit $rc ;;
+esac'
+run_sync_wrapped "$TMP/w-sneakybranch" "$TMP/sneakybranch/clone"
+if [ "$RC" -eq 29 ] && [ "$(head_of "$TMP/sneakybranch/clone")" != "$origintip" ]; then
+    pass "branch switch during fetch window exits 29, not fast-forwarded"
+else
+    fail "branch switch during fetch window exits 29, not fast-forwarded (rc=$RC)"
+fi
+
 # --- usage errors ---
 run_sync --bogus-flag
 [ "$RC" -eq 2 ] && pass "unknown flag exits 2" || fail "unknown flag exits 2 (rc=$RC)"
@@ -510,9 +528,9 @@ grep -q 'install/common/repo-sync.sh" --require-branch main' "$REPAIR" \
 grep -qF '|| sync_status=$?' "$REPAIR" \
     && pass "repair captures sync status set -e safely" \
     || fail "repair captures sync status set -e safely"
-grep -q '"\$sync_status" -eq 30' "$REPAIR" \
-    && pass "repair stops on uncertain sync state" \
-    || fail "repair stops on uncertain sync state"
+grep -q -- '-ge 20' "$REPAIR" && grep -q 'exit "\$sync_status"' "$REPAIR" \
+    && pass "repair stops on unverified sync state" \
+    || fail "repair stops on unverified sync state"
 
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
