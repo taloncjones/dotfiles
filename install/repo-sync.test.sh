@@ -15,8 +15,11 @@ PASS=0; FAIL=0
 pass() { printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
 fail() { printf 'FAIL  %s\n' "$1" >&2; FAIL=$((FAIL + 1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/repo-sync-test.XXXXXX")"
-TMP="$(cd "$TMP" && pwd)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/repo-sync-test.XXXXXX")" \
+    || { echo "FAIL: cannot create temp dir" >&2; exit 2; }
+[ -n "$TMP" ] && [ -d "$TMP" ] || { echo "FAIL: bad temp dir" >&2; exit 2; }
+TMP="$(cd "$TMP" && pwd)" || { echo "FAIL: cannot resolve temp dir" >&2; exit 2; }
+case "$TMP" in /*) ;; *) echo "FAIL: temp dir not absolute" >&2; exit 2 ;; esac
 trap 'rm -rf "$TMP"' EXIT
 REPO="$(pwd)"
 
