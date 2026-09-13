@@ -42,10 +42,18 @@ function update() {    # update([--ai]) will update the dotfiles installation; -
 	# navigate to dotfile install directory
 	dotfiles
 
-	# pull new version from origin (non-fatal: both scopes still run the
-	# installer even when the pull fails, e.g. offline)
+	# guarded fetch + fast-forward (repo-sync.sh): non-fatal for both scopes
+	# -- the installer still runs from the current checkout when the sync is
+	# skipped (offline, dirty, diverged, ...). The one exception is exit 30:
+	# the sync left the checkout in an unverified state, and installing from
+	# it could propagate a half-updated tree into ~.
 	local pull_status=0
-	git pull || pull_status=$?
+	bash "$DOTFILEDIR/install/common/repo-sync.sh" "$DOTFILEDIR" || pull_status=$?
+	if (( pull_status == 30 )); then
+		cd $currentdir
+		echo "[X] update aborted: checkout state uncertain after sync; inspect $DOTFILEDIR"
+		return 30
+	fi
 
 	local install_status=0
 	if [[ "$scope" == "ai" ]]; then

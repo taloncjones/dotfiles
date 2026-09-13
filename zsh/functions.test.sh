@@ -51,6 +51,14 @@ assert_grep "install verification never greps CLI plugin listings" \
     sh -c "! grep -q 'claude plugins list' $FUNCS"
 assert_grep "ensure helper verifies installed_plugins.json" \
     grep -q 'installed_plugins.json' "$FUNCS"
+assert_grep "update() syncs via repo-sync.sh" \
+    grep -q 'install/common/repo-sync.sh" "\$DOTFILEDIR"' "$FUNCS"
+# git pull appears legitimately elsewhere in the file (marketplace clone
+# refreshes at ~863/~1194); only the update() body must be free of it.
+assert_grep "update() no longer uses plain git pull" \
+    sh -c "! sed -n '/^function update()/,/^function /p' $FUNCS | grep -q 'git pull'"
+assert_grep "update() aborts on uncertain sync state" \
+    grep -q 'pull_status == 30' "$FUNCS"
 
 if ! command -v zsh >/dev/null 2>&1; then
     echo "SKIP: zsh not installed; behavioral cases run in CI (which installs zsh)"
@@ -599,6 +607,128 @@ if [ ! -e "$ECC_UPDATE_CACHE/.ecc-update" ]; then
     pass "failed Claude marketplace refresh leaves ECC epoch untouched"
 else
     fail "failed Claude marketplace refresh leaves ECC epoch untouched"
+fi
+
+# --- update() wiring: guarded sync + exit contract ------------------------
+UPD="$TMP/upd"
+mkdir -p "$UPD"
+cat >"$TMP/upd-gitconfig" <<'EOF'
+[user]
+	name = Fixture
+	email = fixture@example.invalid
+[commit]
+	gpgsign = false
+[init]
+	defaultBranch = main
+EOF
+# env -u: a developer shell's GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE or
+# GIT_CONFIG_COUNT/PARAMETERS would redirect fixture git calls or override
+# the pinned config; strip them (this zsh suite's convention is a HOME
+# sandbox, not env -i, so the strip is explicit).
+ugit() {
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+        -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+        HOME="$TMP/home" GIT_CONFIG_NOSYSTEM=1 \
+        GIT_CONFIG_GLOBAL="$TMP/upd-gitconfig" git "$@"
+}
+ugit init -q -b main "$UPD/seed"
+mkdir -p "$UPD/seed/install/common"
+cp "$REPO/install/common/repo-sync.sh" "$UPD/seed/install/common/repo-sync.sh"
+cat >"$UPD/seed/install/install.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$UPDATE_TEST_MARKER"
+exit "${UPDATE_TEST_INSTALL_RC:-0}"
+EOF
+printf 'version 1\n' >"$UPD/seed/payload.txt"
+ugit -C "$UPD/seed" add -A
+ugit -C "$UPD/seed" commit -q -m fixture
+ugit clone -q --bare "$UPD/seed" "$UPD/origin.git"
+ugit clone -q "$UPD/origin.git" "$UPD/clone"
+ugit clone -q "$UPD/origin.git" "$UPD/work"
+printf 'version 2\n' >"$UPD/work/payload.txt"
+ugit -C "$UPD/work" commit -q -am advance
+ugit -C "$UPD/work" push -q origin main
+
+# run_update <dotfiledir> [env VAR=... ]: run `update` in zsh with stubs
+# for dotfiles/tldr; staleness cache under the sandbox HOME.
+run_update() {
+    updir="$1"; shift
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE \
+        -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+    HOME="$TMP/home" XDG_CACHE_HOME="$TMP/home/.cache" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/upd-gitconfig" \
+    UPDATE_TEST_MARKER="$TMP/install-ran" "$@" zsh -f -c "
+        DOTFILEDIR='$updir'
+        path=(/usr/bin /bin)
+        source '$REPO/$FUNCS'
+        dotfiles() { cd \"\$DOTFILEDIR\"; }
+        tldr() { :; }
+        cd '$TMP'
+        update
+        rc=\$?
+        pwd >'$TMP/pwd-after'
+        exit \$rc
+    " >"$TMP/out" 2>&1
+}
+
+# u1. clean fast-forward reaches the fetched commit and installer runs.
+mkdir -p "$TMP/home/.cache/dotfiles"
+printf '1\n' >"$TMP/home/.cache/dotfiles/repo-staleness-result"
+rm -f "$TMP/install-ran"
+if run_update "$UPD/clone" \
+    && [ "$(ugit -C "$UPD/clone" rev-parse HEAD)" = "$(ugit -C "$UPD/work" rev-parse HEAD)" ] \
+    && [ -f "$TMP/install-ran" ]; then
+    pass "update() fast-forwards to fetched commit and runs installer"
+else
+    fail "update() fast-forwards to fetched commit and runs installer"
+fi
+# u2. ...and the staleness reminder was cleared (sync 0 + install 0).
+if [ ! -f "$TMP/home/.cache/dotfiles/repo-staleness-result" ]; then
+    pass "clean update clears the staleness reminder"
+else
+    fail "clean update clears the staleness reminder"
+fi
+
+# u3. installer failure propagates its EXACT code and restores the cwd.
+rm -f "$TMP/install-ran"
+run_update "$UPD/clone" env UPDATE_TEST_INSTALL_RC=3; urc=$?
+if [ "$urc" -eq 3 ] && [ "$(cat "$TMP/pwd-after")" = "$TMP" ]; then
+    pass "installer failure propagates exact code from update()"
+else
+    fail "installer failure propagates exact code from update() (rc=$urc)"
+fi
+
+# u4. sync failure is non-fatal but blocks the reminder-clear.
+printf '1\n' >"$TMP/home/.cache/dotfiles/repo-staleness-result"
+ugit -C "$UPD/clone" remote set-url origin "$TMP/gone"
+rm -f "$TMP/install-ran"
+if run_update "$UPD/clone" && [ -f "$TMP/install-ran" ] \
+    && [ -s "$TMP/home/.cache/dotfiles/repo-staleness-result" ]; then
+    pass "failed sync keeps update green but leaves the reminder"
+else
+    fail "failed sync keeps update green but leaves the reminder"
+fi
+ugit -C "$UPD/clone" remote set-url origin "$UPD/origin.git"
+
+# u5. exit 30 aborts before the installer runs.
+rm -f "$TMP/install-ran"
+FAKE_SYNC_DIR="$UPD/abort"
+mkdir -p "$FAKE_SYNC_DIR/install/common"
+cat >"$FAKE_SYNC_DIR/install/common/repo-sync.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 30
+EOF
+cat >"$FAKE_SYNC_DIR/install/install.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$UPDATE_TEST_MARKER"
+EOF
+run_update "$FAKE_SYNC_DIR"; urc=$?
+if [ "$urc" -eq 30 ] && [ ! -f "$TMP/install-ran" ] \
+    && [ "$(cat "$TMP/pwd-after")" = "$TMP" ] \
+    && grep -q 'update aborted' "$TMP/out"; then
+    pass "uncertain sync state aborts update before install, cwd restored"
+else
+    fail "uncertain sync state aborts update before install, cwd restored (rc=$urc)"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
