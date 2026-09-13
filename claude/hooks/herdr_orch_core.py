@@ -769,12 +769,15 @@ def create_payload_dir(path):
         pass
 
 
-def artifact_store_name(name, sha256):
-    """Store filename for one artifact: digest-prefixed (versioned) so a
-    re-emit that changes a name's content writes a NEW store file and the
-    prior manifest's referenced bytes are never replaced in place -- an
-    interruption at any point leaves the prior manifest fully consistent."""
-    return f"{sha256[:16]}-{name}"
+def artifact_blob_name(sha256):
+    """Store filename for one artifact: the content digest alone. Fixed
+    length, so a valid logical name (which lives only in the manifest) can
+    never push the stored component past a filesystem's name limit, and
+    versioned, so a re-emit that changes a name's content writes a NEW
+    store file and the prior manifest's referenced bytes are never
+    replaced in place -- an interruption at any point leaves the prior
+    manifest fully consistent."""
+    return sha256
 
 
 def _read_fd_capped(fd, cap):
@@ -3115,7 +3118,7 @@ def _main(argv=None) -> int:
             # its target) and are unlinked on any failure.
             with coordination.payload_parent(store / ".anchor") as (sfd, _):
                 for (name, data), art in zip(staged, rec["artifacts"]):
-                    final = artifact_store_name(name, art["sha256"])
+                    final = artifact_blob_name(art["sha256"])
                     tmp = f".tmp-{secrets.token_hex(8)}"
                     tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                   | getattr(os, "O_NOFOLLOW", 0), 0o600,
@@ -3136,10 +3139,7 @@ def _main(argv=None) -> int:
                 # manifest pointing at its own still-intact bytes plus new
                 # files it does not reference; stray temps sweep here too).
                 write_json_atomic(out, rec)
-                keep = {
-                    artifact_store_name(a["name"], a["sha256"])
-                    for a in rec["artifacts"]
-                }
+                keep = {artifact_blob_name(a["sha256"]) for a in rec["artifacts"]}
                 for existing in os.listdir(sfd):
                     if existing not in keep:
                         with contextlib.suppress(FileNotFoundError):
@@ -3193,6 +3193,10 @@ def _main(argv=None) -> int:
                 artifacts_manifest = envelope.read_artifacts(rd, ns.binding)
             except ValueError:
                 _require(False, "artifacts manifest is unreadable")
+            try:
+                receipt = envelope.read_release(rd, ns.binding)
+            except ValueError:
+                _require(False, "release receipt is unreadable")
 
             journal = {}
             base = rd / "leads" / ns.binding
@@ -3232,6 +3236,11 @@ def _main(argv=None) -> int:
                 generation = entry_before["generation"]
             elif prior is not None:
                 generation = prior["generation"]
+            elif receipt is not None:
+                # The durable receipt written alongside this binding's own
+                # release: the retry path when the release landed but the
+                # manifest publication then failed.
+                generation = receipt["generation"]
             else:
                 generation = None
 
@@ -3259,7 +3268,7 @@ def _main(argv=None) -> int:
                 )
                 store = envelope.artifact_store(rd, ns.binding)
                 for art in artifacts_manifest["artifacts"]:
-                    path = store / artifact_store_name(art["name"], art["sha256"])
+                    path = store / artifact_blob_name(art["sha256"])
                     ok = False
                     data = b""
                     try:
@@ -3343,29 +3352,49 @@ def _main(argv=None) -> int:
                 # Never claimed at all: nothing to release.
                 release_action = None
 
-            # 7. release -- first mutation.
+            # 7. release -- first mutation -- immediately followed by a
+            # durable per-binding receipt of the released generation, in the
+            # SAME transaction: if the manifest publication below then
+            # fails, a retry recovers its audit fields from the receipt
+            # instead of writing generation null / lease_released false.
             if release_action == "normal":
                 tx.lead_release(rec_b["workspace_root"], expected_binding=ns.binding)
             elif release_action == "force":
                 tx.lead_release(
                     rec_b["workspace_root"], expected_binding=ns.binding, force=True,
                 )
+            entry_after = tx.bindings[tx.slug].get("lead_ws", {}).get(
+                coordination.lead_lease_key(rec_b["workspace_root"])
+            )
+            released_now = (
+                release_action is not None
+                and entry_after is not None
+                and entry_after["binding_id"] is None
+            )
+            if released_now and receipt is None:
+                receipt = {
+                    "schema_version": 1,
+                    "binding_id": ns.binding,
+                    "generation": entry_after["generation"],
+                    "ts": now_iso(),
+                }
+                _require(envelope.valid_release(receipt), "invalid release receipt")
+                rp = envelope.release_path(rd, ns.binding)
+                _require(contained(rp, state_root()), "escapes state root")
+                write_json_atomic(rp, receipt)
 
             # 8. manifest write. lease_released is derived from the
             # POST-release registry state, never from lead_release's return
             # value (which reports only whether a FILE was removed -- false
             # for a missing-own release that cleared occupancy). It counts
-            # only a release THIS run performed for ns.binding (or a prior
-            # manifest's recorded release): a cleared occupancy left behind
-            # by another binding's release is not this binding's evidence.
-            entry_after = tx.bindings[tx.slug].get("lead_ws", {}).get(
-                coordination.lead_lease_key(rec_b["workspace_root"])
-            )
+            # only a release THIS run performed for ns.binding, a prior
+            # manifest's recorded release, or this binding's own release
+            # receipt: a cleared occupancy left behind by another binding's
+            # release is not this binding's evidence.
             lease_released = (
-                (release_action is not None
-                 and entry_after is not None
-                 and entry_after["binding_id"] is None)
+                released_now
                 or bool(prior and prior["lease_released"])
+                or receipt is not None
             )
             rec_t = {
                 "schema_version": 1,
@@ -3504,6 +3533,29 @@ def _main(argv=None) -> int:
                             except ValueError:
                                 action = "needs-manual-repair"
                             else:
+                                # Same durable receipt teardown writes with
+                                # its release: a later teardown of this
+                                # binding recovers generation/lease_released
+                                # from it. A corrupt existing receipt is
+                                # left for manual repair, never overwritten.
+                                entry_after = tx.bindings[tx.slug].get(
+                                    "lead_ws", {}
+                                ).get(coordination.lead_lease_key(ws))
+                                try:
+                                    rcpt = envelope.read_release(rd, bid)
+                                except ValueError:
+                                    rcpt = "corrupt"
+                                if (rcpt is None and entry_after is not None
+                                        and entry_after["binding_id"] is None):
+                                    rp = envelope.release_path(rd, bid)
+                                    _require(contained(rp, state_root()),
+                                             "escapes state root")
+                                    write_json_atomic(rp, {
+                                        "schema_version": 1,
+                                        "binding_id": bid,
+                                        "generation": entry_after["generation"],
+                                        "ts": now_iso(),
+                                    })
                                 action = ("revoked+released" if revoked_now
                                           else "released")
                 rows.append({"binding_id": bid, "task_id": rec_b["task_id"],

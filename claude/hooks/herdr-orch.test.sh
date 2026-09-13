@@ -4475,11 +4475,11 @@ assert rec["task_id"] == "td-x", rec
 assert {a["name"] for a in rec["artifacts"]} == {"handoff.md", "plan.md"}, rec
 store = envelope.artifact_store(rd, bid)
 for art in rec["artifacts"]:
-    data = (store / core.artifact_store_name(art["name"], art["sha256"])).read_bytes()
+    data = (store / core.artifact_blob_name(art["sha256"])).read_bytes()
     assert hashlib.sha256(data).hexdigest() == art["sha256"], art
     assert len(data) == art["bytes"], art
 stored = {p.name for p in store.iterdir() if p.is_file()}
-expected = {core.artifact_store_name(a["name"], a["sha256"]) for a in rec["artifacts"]}
+expected = {core.artifact_blob_name(a["sha256"]) for a in rec["artifacts"]}
 assert stored == expected, stored
 ' "$LF_SLUG" "$bid"
 # launcher identity is not the lease holder:
@@ -4510,12 +4510,11 @@ printf 'changed body' > "$SRC/handoff.md"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
     --file "$SRC/handoff.md" --file "$SRC/absent.md" 2>err; then exit 1; fi
-PREFIX=$(printf '%s' "$ORIG_SHA" | cut -c1-16)
 python3 -c '
 import hashlib, sys
 data = open(sys.argv[1], "rb").read()
 assert hashlib.sha256(data).hexdigest() == sys.argv[2], hashlib.sha256(data).hexdigest()
-' "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/$PREFIX-handoff.md" "$ORIG_SHA"
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/$ORIG_SHA" "$ORIG_SHA"
 # the store swapped for a symlink refuses before any byte lands outside it:
 STORE="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts"
 EVIL=$(mktemp -d)
@@ -5084,8 +5083,8 @@ assert rec["lease_released"] is True, rec
 ' "$LF_SLUG" "$bid"
 
 # Tamper an artifact store file's bytes: re-run fails on the digest gate.
-HP=$(python3 -c 'import hashlib; print(hashlib.sha256(b"handoff body").hexdigest()[:16])')
-ART="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/$HP-handoff.md"
+HP=$(python3 -c 'import hashlib; print(hashlib.sha256(b"handoff body").hexdigest())')
+ART="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/$HP"
 cp "$ART" "$ART.orig"
 printf 'TAMPERED' > "$ART"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
@@ -5101,7 +5100,7 @@ LEAD_DIR="$root/herdr-orch/$LF_SLUG/leads/$bid"
 [ ! -e "$LEAD_DIR/envelope.json" ] || exit 1
 [ ! -e "$LEAD_DIR/tasks/td-x.review-log.jsonl" ] || exit 1
 [ -e "$LEAD_DIR/envelope.consumed.json" ] || exit 1
-[ -e "$LEAD_DIR/artifacts/$HP-handoff.md" ] || exit 1
+[ -e "$LEAD_DIR/artifacts/$HP" ] || exit 1
 [ -e "$LEAD_DIR/teardown.json" ] || exit 1
 
 # Re-run AFTER prune: exit 0, and the manifest still carries the ORIGINAL
@@ -5700,14 +5699,13 @@ assert core.main(list(args)) == 2
 core.write_json_atomic = orig_wja
 assert envelope.read_artifacts(rd, bid) == before
 for art in before["artifacts"]:
-    data = (store / core.artifact_store_name(art["name"], art["sha256"])).read_bytes()
+    data = (store / core.artifact_blob_name(art["sha256"])).read_bytes()
     assert hashlib.sha256(data).hexdigest() == art["sha256"], art
 assert not [n for n in blobs() if n.startswith(".tmp-")], blobs()
 # (iii) a clean re-run publishes and sweeps everything unreferenced.
 assert core.main(list(args)) == 0
 final = envelope.read_artifacts(rd, bid)
-names = {core.artifact_store_name(a["name"], a["sha256"])
-         for a in final["artifacts"]}
+names = {core.artifact_blob_name(a["sha256"]) for a in final["artifacts"]}
 assert {a["name"] for a in final["artifacts"]} == {"new1.md", "new2.md"}
 assert set(blobs()) == names, blobs()
 EOF
@@ -5886,6 +5884,103 @@ assert entry["binding_id"] == sys.argv[3], entry
 ' "$LF_SLUG" "$KEY1" "$bidB"
 # a retry does not wedge: the run still exits 0
 CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply >/dev/null
+SH
+
+check "teardown retry after failed manifest publication recovers from the release receipt" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-receipt.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+# crash AFTER the release lands but BEFORE the manifest publishes
+CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$f" <<'EOF'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+slug, bid, f = sys.argv[1:4]
+rd = core.repo_dir(slug)
+orig_wja = core.write_json_atomic
+def boom(path, data):
+    if str(path).endswith("teardown.json"):
+        raise OSError("simulated crash before manifest publish")
+    return orig_wja(path, data)
+core.write_json_atomic = boom
+rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
+                "--fence", f, "--binding", bid, "--abandon",
+                "--descendants-terminated"])
+core.write_json_atomic = orig_wja
+assert rc == 2, rc
+# the release landed durably with its receipt; no manifest exists yet
+receipt = envelope.read_release(rd, bid)
+assert receipt is not None and receipt["generation"] == 1, receipt
+assert envelope.read_teardown(rd, bid) is None
+EOF
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+import os
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+key = coordination.lead_lease_key(os.path.realpath(sys.argv[2]))
+entry = data[sys.argv[1]]["lead_ws"][key]
+assert entry["binding_id"] is None, entry
+' "$LF_SLUG" "$LF_WS"
+# retry: audit fields recover from the receipt, never null/false
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
+   --abandon --descendants-terminated
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rec = envelope.read_teardown(core.repo_dir(sys.argv[1]), sys.argv[2])
+assert rec["generation"] == 1, rec
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bid"
+SH
+
+check "emit-artifacts stores a long multibyte logical name under a fixed-length blob" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-art-longname.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SRC=$(mktemp -d)
+# 120 U+00E9 characters: a VALID logical name (<=200 chars) whose UTF-8
+# encoding is 240 bytes -- any per-name store prefix would overflow a
+# 255-byte filesystem component; the fixed-length blob name must not.
+NAME=$(python3 -c 'import sys; sys.stdout.write("é" * 120)')
+printf 'long name body' > "$SRC/$NAME"
+CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+    --task-id td-x --file "$SRC/$NAME"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import hashlib, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+bid = sys.argv[2]
+rec = envelope.read_artifacts(rd, bid)
+(art,) = rec["artifacts"]
+assert art["name"] == "é" * 120, art
+blob = envelope.artifact_store(rd, bid) / core.artifact_blob_name(art["sha256"])
+data = blob.read_bytes()
+assert data == b"long name body", data
+assert hashlib.sha256(data).hexdigest() == art["sha256"], art
+' "$LF_SLUG" "$bid"
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
