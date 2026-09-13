@@ -28,14 +28,27 @@ ENVELOPE_MAX_STR = 500
 ENVELOPE_MAX_FOLLOW_UPS = 8
 _REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+-]{0,199}\Z")
 
-_ATTEMPT_KEYS = {"launch_id", "phase", "runtime", "workspace_id", "pane_id",
-                 "source_head_sha"}
-_TOP_KEYS = {"schema_version", "binding_id", "task_id", "attempt", "fence",
-             "sequence", "ts", "summary"}
+_ATTEMPT_KEYS = {
+    "launch_id",
+    "phase",
+    "runtime",
+    "workspace_id",
+    "pane_id",
+    "source_head_sha",
+}
+_TOP_KEYS = {
+    "schema_version",
+    "binding_id",
+    "task_id",
+    "attempt",
+    "fence",
+    "sequence",
+    "ts",
+    "summary",
+}
 _SUMMARY_KEYS = {"outcome", "pr", "expected_base_sha", "reason", "follow_ups"}
 _PR_KEYS = {"repo_id", "number", "branch", "head_sha", "approval"}
-_APPROVAL_KEYS = {"reviewer_session_id", "reviewer_runtime",
-                  "reviewed_head_sha"}
+_APPROVAL_KEYS = {"reviewer_session_id", "reviewer_runtime", "reviewed_head_sha"}
 
 
 def _nonempty(value):
@@ -51,29 +64,37 @@ def _valid_attempt(att):
         return False
     if att["phase"] != "implement" or att["runtime"] not in ("claude", "codex"):
         return False
-    if not (isinstance(att["source_head_sha"], str)
-            and SHA40_RE.fullmatch(att["source_head_sha"])):
+    if not (
+        isinstance(att["source_head_sha"], str)
+        and SHA40_RE.fullmatch(att["source_head_sha"])
+    ):
         return False
-    return all(_nonempty(att[k])
-               for k in ("launch_id", "workspace_id", "pane_id"))
+    return all(_nonempty(att[k]) for k in ("launch_id", "workspace_id", "pane_id"))
 
 
 def _valid_follow_ups(fus):
     if not isinstance(fus, list) or len(fus) > ENVELOPE_MAX_FOLLOW_UPS:
         return False
     # A reference is an identifier, never prose: no whitespace, max 200.
-    return all(isinstance(f, dict) and set(f) == {"kind", "ref"}
-               and f["kind"] in FOLLOW_UP_KINDS
-               and isinstance(f["ref"], str) and _REF_RE.fullmatch(f["ref"])
-               for f in fus)
+    return all(
+        isinstance(f, dict)
+        and set(f) == {"kind", "ref"}
+        and f["kind"] in FOLLOW_UP_KINDS
+        and isinstance(f["ref"], str)
+        and _REF_RE.fullmatch(f["ref"])
+        for f in fus
+    )
 
 
 def _valid_approval(ap):
-    return (isinstance(ap, dict) and set(ap) == _APPROVAL_KEYS
-            and _capped(ap["reviewer_session_id"])
-            and ap["reviewer_runtime"] in ("claude", "codex")
-            and isinstance(ap["reviewed_head_sha"], str)
-            and bool(SHA40_RE.fullmatch(ap["reviewed_head_sha"])))
+    return (
+        isinstance(ap, dict)
+        and set(ap) == _APPROVAL_KEYS
+        and _capped(ap["reviewer_session_id"])
+        and ap["reviewer_runtime"] in ("claude", "codex")
+        and isinstance(ap["reviewed_head_sha"], str)
+        and bool(SHA40_RE.fullmatch(ap["reviewed_head_sha"]))
+    )
 
 
 def _valid_pr(pr):
@@ -85,8 +106,7 @@ def _valid_pr(pr):
         return False
     if not _capped(pr["branch"]):
         return False
-    if not (isinstance(pr["head_sha"], str)
-            and SHA40_RE.fullmatch(pr["head_sha"])):
+    if not (isinstance(pr["head_sha"], str) and SHA40_RE.fullmatch(pr["head_sha"])):
         return False
     if not _valid_approval(pr["approval"]):
         return False
@@ -106,8 +126,12 @@ def _valid_summary(summary):
     ebs = summary["expected_base_sha"]
     reason = summary["reason"]
     if outcome == "pr_ready":
-        return (_valid_pr(pr) and reason is None
-                and isinstance(ebs, str) and bool(SHA40_RE.fullmatch(ebs)))
+        return (
+            _valid_pr(pr)
+            and reason is None
+            and isinstance(ebs, str)
+            and bool(SHA40_RE.fullmatch(ebs))
+        )
     if pr is not None or ebs is not None:
         return False
     if outcome == "cancelled":
@@ -120,11 +144,12 @@ def valid_envelope(rec):
         return False
     if type(rec["schema_version"]) is not int or rec["schema_version"] != 1:
         return False
-    if not (isinstance(rec["binding_id"], str)
-            and _BINDING_ID_RE.fullmatch(rec["binding_id"])):
+    if not (
+        isinstance(rec["binding_id"], str)
+        and _BINDING_ID_RE.fullmatch(rec["binding_id"])
+    ):
         return False
-    if not (isinstance(rec["task_id"], str)
-            and _SEGMENT_RE.fullmatch(rec["task_id"])):
+    if not (isinstance(rec["task_id"], str) and _SEGMENT_RE.fullmatch(rec["task_id"])):
         return False
     if not _valid_attempt(rec["attempt"]):
         return False
