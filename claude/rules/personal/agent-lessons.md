@@ -25,3 +25,7 @@ is the staging tier, not an archive.
   a small change the human approved this turn. Larger: todo + kickoff.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
   MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
+- (2026-09) Never expand a short sha by hand: any full sha you emit (markers,
+  comments, ledgers) comes from rev-parse, not pattern completion.
+- (2026-09) A worker never commits with failing tests: fix or report
+  BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
