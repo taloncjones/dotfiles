@@ -2365,6 +2365,16 @@ def _main(argv=None) -> int:
             )
             rec = bindings.read_binding(rd, ns.binding)
             _require(rec is not None, "unknown dispatch binding")
+            # completed is reachable only through the gated integrate-envelope
+            # path (expected-base/head/approval checks); this generic verb
+            # must not let a launcher shortcut those checks (herdr_bindings.
+            # TRANSITIONS still allows claimed -> completed structurally,
+            # integrate-envelope writes that transition directly under the
+            # same launcher fence).
+            _require(
+                ns.status != "completed",
+                "completed is reached only through integrate-envelope",
+            )
             _require(
                 bindings.can_transition(rec["status"], ns.status),
                 f"illegal binding transition {rec['status']} -> {ns.status}",
@@ -2707,6 +2717,11 @@ def _main(argv=None) -> int:
                          and latest_native_attempt(task, "review") is not None,
                          "integration requires recorded native attempts")
                 ap = pr["approval"]
+                # Reviewer independence is enforced at emit-envelope (the
+                # envelope is writable only through that transaction, which
+                # re-checks independence on every re-emit); integrate only
+                # re-checks identity-match and staleness against the review
+                # record recorded at that time.
                 _require(isinstance(review, dict)
                          and is_reviewed(task, review, pr["head_sha"],
                                          review.get("workspace_id"))

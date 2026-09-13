@@ -3475,5 +3475,37 @@ assert json.load(open(sys.argv[1]))["status"] == "claimed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bidA.json"
 SH
 
+check "set-binding-status: completed is refused outright; revoked still works" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-sbc.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+test "$lf" = 1
+# completed is refused outright, bypassing integrate-envelope is not allowed.
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py set-binding-status \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --status completed 2>/dev/null; then exit 1; fi
+python3 -c '
+import json, os, sys
+root, bid, slug = sys.argv[1:4]
+rec = json.load(open(os.path.join(root, "herdr-orch", slug, "bindings", bid + ".json")))
+assert rec["status"] == "claimed", rec
+' "$root" "$bid" "$LF_SLUG"
+# revoked is unaffected by the completed refusal.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py set-binding-status \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --status revoked
+python3 -c '
+import json, os, sys
+root, bid, slug = sys.argv[1:4]
+rec = json.load(open(os.path.join(root, "herdr-orch", slug, "bindings", bid + ".json")))
+assert rec["status"] == "revoked", rec
+' "$root" "$bid" "$LF_SLUG"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
