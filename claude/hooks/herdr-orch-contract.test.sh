@@ -461,5 +461,53 @@ ok "no-workflow kickoff renders the withheld line" "printf '%s' \"\$B2\" | grep 
 ok "skill documents the brief Routing block and both opt-in lines" \
   "grep -q '## Routing' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'withheld for this task' claude/skills/herdr-orchestration/references/brief-template.md"
 
+# 13. teardown-binding / reconcile-leads / emit-artifacts: required-flag
+# presence, fenced refusal, and teardown's claimed-requires---abandon
+# contract. A binding record is written directly (schema per
+# herdr_bindings.valid_binding) rather than through issue-binding's full
+# lead-fixture apparatus, which is out of scope for this fake-CLI suite.
+TDSLUG="github-com-org-teardown-fac0dead"
+TDF=$($CLI claim-owner --repo-slug "$TDSLUG" --session TD --host h --pid 5)
+TDRD="$ROOT/herdr-orch/$TDSLUG"
+TDWS=$(mktemp -d)
+BID="ldb-$(python3 -c 'import uuid;print(uuid.uuid4().hex)')"
+python3 -c "
+import json, os
+rd='$TDRD'; ws='$TDWS'; bid='$BID'
+os.makedirs(os.path.join(rd, 'bindings'), exist_ok=True)
+rec = {
+    'schema_version': 1, 'binding_id': bid, 'tier': 'lead',
+    'parent': {'tier': 'launcher', 'task_id': 'PROJ-TD', 'session_id': 'TD'},
+    'task_id': 'PROJ-TD', 'repo_id': None, 'repo_slug': '$TDSLUG',
+    'workspace_root': os.path.realpath(ws), 'account_id': 'a1',
+    'account_kind': 'personal', 'runtime': 'claude',
+    'expected_session_id': 'lead-1', 'created_fence': 1, 'status': 'claimed',
+    'created_ts': 't', 'updated_ts': 't',
+}
+json.dump(rec, open(os.path.join(rd, 'bindings', bid + '.json'), 'w'))
+"
+ARTF=$(mktemp); echo hello > "$ARTF"
+
+ok "emit-artifacts requires --file" \
+  "rc=0; $CLI emit-artifacts --repo-slug '$TDSLUG' --session TD --fence '$TDF' --task-id PROJ-TD --binding '$BID' >/dev/null 2>&1 || rc=\$?; [ \"\$rc\" != 0 ]"
+ok "teardown-binding requires --binding" \
+  "rc=0; $CLI teardown-binding --repo-slug '$TDSLUG' --session TD --fence '$TDF' >/dev/null 2>&1 || rc=\$?; [ \"\$rc\" != 0 ]"
+ok "reconcile-leads requires --repo-slug" \
+  "rc=0; $CLI reconcile-leads --session TD --fence '$TDF' >/dev/null 2>&1 || rc=\$?; [ \"\$rc\" != 0 ]"
+
+ok "teardown-binding refuses a bad fence" \
+  "! $CLI teardown-binding --repo-slug '$TDSLUG' --session TD --fence 999999 --binding '$BID' 2>/dev/null"
+ok "reconcile-leads refuses a bad fence" \
+  "! $CLI reconcile-leads --repo-slug '$TDSLUG' --session TD --fence 999999 2>/dev/null"
+ok "emit-artifacts refuses a bad fence" \
+  "! $CLI emit-artifacts --repo-slug '$TDSLUG' --session TD --fence 999999 --task-id PROJ-TD --binding '$BID' --file 'x=$ARTF' 2>/dev/null"
+
+ok "teardown-binding refuses a claimed binding without --abandon (integrate first)" \
+  "err=\$($CLI teardown-binding --repo-slug '$TDSLUG' --session TD --fence '$TDF' --binding '$BID' 2>&1 >/dev/null) || true; printf '%s' \"\$err\" | grep -q 'integrate first'"
+ok "teardown-binding with --abandon tears down the claimed binding" \
+  "$CLI teardown-binding --repo-slug '$TDSLUG' --session TD --fence '$TDF' --binding '$BID' --abandon --no-artifacts >/dev/null"
+ok "teardown-binding revoked the binding record" \
+  "python3 -c \"import json;d=json.load(open('$TDRD/bindings/$BID.json'));import sys;sys.exit(0 if d['status']=='revoked' else 1)\""
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
