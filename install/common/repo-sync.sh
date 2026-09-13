@@ -126,14 +126,33 @@ pre_status="$(git -C "$repo" status --porcelain)" || inspect_fail
 # change inside a file that stays "??". Ignored files are deliberately
 # outside this contract (unbounded set; protected by --no-overwrite-ignore
 # refusing before mutation).
+#
+# NUL-delimited listing (git -z) avoids core.quotePath mangling non-ASCII
+# names; a temp file (not a pipe) preserves the git command's exit status
+# and lets the loop set variables in the current shell. Entries are
+# characterized without dereferencing, so untracked symlinks (dangling,
+# retargeted, or pointing at directories) are inspected safely instead of
+# failing or aliasing on hash-object's dereferenced content.
 untracked_digest() {
-    local files f h out=""
-    files="$(git -C "$repo" ls-files --others --exclude-standard)" || return 1
-    while IFS= read -r f; do
+    local f h out="" tmp rc
+    tmp="$(mktemp)" || return 1
+    git -C "$repo" ls-files --others --exclude-standard -z >"$tmp"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$tmp"
+        return 1
+    fi
+    while IFS= read -r -d '' f; do
         [ -n "$f" ] || continue
-        h="$(git -C "$repo" hash-object -- "$f")" || return 1
+        if [ -L "$repo/$f" ]; then
+            h="link:$(readlink -- "$repo/$f")" || { rm -f "$tmp"; return 1; }
+        elif [ -f "$repo/$f" ]; then
+            h="$(git -C "$repo" hash-object -- "$f")" || { rm -f "$tmp"; return 1; }
+        else
+            h="special"
+        fi
         out="$out$f:$h"$'\n'
-    done <<<"$files"
+    done <"$tmp"
+    rm -f "$tmp"
     printf '%s' "$out"
 }
 pre_untracked="$(untracked_digest)" || inspect_fail

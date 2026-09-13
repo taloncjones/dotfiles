@@ -24,7 +24,7 @@ REPO="$(pwd)"
 STUB_BIN="$TMP/bin"
 mkdir -p "$STUB_BIN"
 for tool in bash sh git mkdir rm ln mv cp cat grep sed awk dirname basename \
-        chmod touch printf env ls; do
+        chmod touch printf env ls mktemp readlink; do
     p="$(command -v "$tool" 2>/dev/null)" && ln -s "$p" "$STUB_BIN/$tool" 2>/dev/null
 done
 REAL_GIT="$(command -v git)"
@@ -437,6 +437,41 @@ if [ "$RC" -eq 0 ] && [ "$(head_of "$TMP/localup/clone")" = "$maintip" ]; then
     pass "local dot upstream fast-forwards without fetch"
 else
     fail "local dot upstream fast-forwards without fetch (rc=$RC)"
+fi
+
+# --- 25. untracked symlink + non-ASCII filename do not block a safe ff ---
+new_fixture nastynames
+advance_origin nastynames
+ln -s /nonexistent-target "$TMP/nastynames/clone/dangling-link"
+nastyfile="$TMP/nastynames/clone/re\xcc\x81sume\xcc\x81.txt"
+printf 'notes\n' >"$(printf '%b' "$nastyfile")"
+tip="$(head_of "$TMP/nastynames/work")"
+run_sync "$TMP/nastynames/clone"
+if [ "$RC" -eq 0 ] && [ "$(head_of "$TMP/nastynames/clone")" = "$tip" ] \
+    && [ -L "$TMP/nastynames/clone/dangling-link" ] \
+    && [ "$(readlink "$TMP/nastynames/clone/dangling-link")" = "/nonexistent-target" ] \
+    && [ "$(cat "$(printf '%b' "$nastyfile")")" = "notes" ]; then
+    pass "untracked symlink and non-ASCII filename survive fast-forward"
+else
+    fail "untracked symlink and non-ASCII filename survive fast-forward (rc=$RC)"
+fi
+
+# --- 26. retargeted untracked symlink on a failed merge is caught as 30 ---
+new_fixture linkmut
+advance_origin linkmut
+ln -s target-a "$TMP/linkmut/clone/link"
+make_wrapper "$TMP/w-linkmut" '
+case "$*" in *" merge "*)
+    repo=""; [ "$1" = "-C" ] && repo="$2"
+    rm -f "$repo/link"
+    ln -s target-b "$repo/link"
+    exit 1 ;;
+esac'
+run_sync_wrapped "$TMP/w-linkmut" "$TMP/linkmut/clone"
+if [ "$RC" -eq 30 ] && grep -q 'uncertain state' "$TMP/out"; then
+    pass "retargeted untracked symlink on failed merge exits 30, not 28"
+else
+    fail "retargeted untracked symlink on failed merge exits 30, not 28 (rc=$RC)"
 fi
 
 # --- usage errors ---
