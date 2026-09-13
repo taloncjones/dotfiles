@@ -1905,6 +1905,19 @@ def latest_native_attempt(task, phase):
     return worker
 
 
+def has_attempt_rows(task, phase):
+    """True when ANY phase-matching worker row exists, valid or not.
+
+    latest_native_attempt answers "is there a well-formed dispatched
+    attempt"; this answers "was anything ever dispatched" -- the
+    null-attempt envelope paths must use this one, so a malformed row
+    can never be laundered into "no attempt"."""
+    if not isinstance(task, dict) or not isinstance(task.get("workers"), list):
+        return False
+    return any(isinstance(w, dict) and w.get("phase") == phase
+               for w in task["workers"])
+
+
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
@@ -2584,6 +2597,14 @@ def _main(argv=None) -> int:
                         _require(isinstance(task, dict)
                                  and task.get("review_head_sha") == done["reviewed_head_sha"],
                                  "review emit must name the dispatched review head")
+                        # Bind the approval to its base: record the dispatched base
+                        # so a later base-swap on the task record cannot let this
+                        # verdict integrate against a different base (Fix 4).
+                        _require(isinstance(task.get("base_sha"), str)
+                                 and SHA40_RE.fullmatch(task["base_sha"]),
+                                 "binding-scoped review emits require the dispatched "
+                                 "base on the task record")
+                        done["review_base_sha"] = task["base_sha"]
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
                 # Closes the overwrite-the-rejection path at one head: a binding-
@@ -2606,6 +2627,51 @@ def _main(argv=None) -> int:
                         _require(False,
                                  "a same-revision review verdict cannot be replaced; "
                                  "re-dispatch the review at a new head")
+                    # Per-head verdict journal: authoritative memory of every
+                    # verdict emitted at each reviewed head across re-dispatches.
+                    # The latest-record check above only remembers the last
+                    # verdict; this scan remembers all of them, so a rejection at
+                    # H cannot be laundered by dispatching H2 and returning to H.
+                    # Append-only and never pruned in this slice; 4.9 teardown
+                    # owns the journal's lifecycle.
+                    entry = {
+                        "reviewed_head_sha": done["reviewed_head_sha"],
+                        "outcome": done["outcome"],
+                        "reviewer_session_id": done.get("reviewer_session_id"),
+                        "blocking_count": done.get("blocking_count"),
+                        "findings_ref": done.get("findings_ref"),
+                        "review_base_sha": done["review_base_sha"],
+                        "ts": done["ts"],
+                    }
+                    gate_keys = ("outcome", "reviewer_session_id",
+                                 "blocking_count", "findings_ref",
+                                 "review_base_sha")
+                    journal = base / "tasks" / f"{ns.task_id}.review-log.jsonl"
+                    try:
+                        raw_journal = read_payload_text(journal)
+                    except FileNotFoundError:
+                        raw_journal = ""
+                    except (OSError, ValueError):
+                        _require(False, "review journal is unreadable")
+                    for line in raw_journal.splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            prior_entry = json.loads(line)
+                        except ValueError:
+                            _require(False, "review journal is unreadable")
+                        if (isinstance(prior_entry, dict)
+                                and prior_entry.get("reviewed_head_sha")
+                                == entry["reviewed_head_sha"]
+                                and any(prior_entry.get(k) != entry[k]
+                                        for k in gate_keys)):
+                            _require(False,
+                                     "a same-revision review verdict cannot be "
+                                     "replaced; re-dispatch the review at a new head")
+                    append_payload(
+                        journal,
+                        (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
+                    )
                 write_json_atomic(out, done)
         else:
             write_json_atomic(out, done)
@@ -2671,7 +2737,7 @@ def _main(argv=None) -> int:
                 _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
                          "envelope attempt does not match the dispatched attempt")
             else:
-                _require(latest_native_attempt(task, "implement") is None,
+                _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if rec["summary"]["outcome"] == "pr_ready":
                 pr = rec["summary"]["pr"]
@@ -2696,6 +2762,8 @@ def _main(argv=None) -> int:
                 _require(review.get("reviewer_session_id") == ap["reviewer_session_id"]
                          and review.get("runtime") == ap["reviewer_runtime"],
                          "approval identity does not match the review record")
+                _require(review.get("review_base_sha") == rec["summary"]["expected_base_sha"],
+                         "approval does not cover the expected base")
                 _require(ap["reviewer_session_id"] not in (
                              lease.get("session_id") if lease else None,
                              rec_b["expected_session_id"],
@@ -2756,7 +2824,7 @@ def _main(argv=None) -> int:
                          and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
                          "envelope attempt no longer matches the dispatched attempt")
             else:
-                _require(impl is None,
+                _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if summary["outcome"] == "pr_ready":
                 _require(isinstance(ns.base_sha, str)
@@ -2795,6 +2863,8 @@ def _main(argv=None) -> int:
                          "review attempt must not run in the implement pane")
                 _require(summary["expected_base_sha"] == task.get("base_sha"),
                          "expected base no longer matches the dispatched base")
+                _require(review.get("review_base_sha") == summary["expected_base_sha"],
+                         "approval does not cover the expected base")
                 _require(ap["reviewer_session_id"] not in (
                              (lease or {}).get("session_id"),
                              rec_b["expected_session_id"],

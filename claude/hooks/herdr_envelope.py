@@ -110,7 +110,9 @@ def _valid_pr(pr):
     if type(pr["number"]) is not int or pr["number"] <= 0:
         return False
     # A ref-safe branch (git ref syntax subset): no whitespace, within the
-    # length cap, and none of the sequences git itself forbids in a ref.
+    # length cap, none of the sequences git itself forbids in a ref, and no
+    # slash-separated component ending in ".lock" (git forbids a .lock suffix
+    # on any ref path component, not just the whole ref).
     branch = pr["branch"]
     if not (isinstance(branch, str) and _BRANCH_RE.fullmatch(branch)):
         return False
@@ -118,7 +120,8 @@ def _valid_pr(pr):
         ".." in branch
         or "//" in branch
         or "/." in branch
-        or branch.endswith(("/", ".", ".lock"))
+        or branch.endswith(("/", "."))
+        or any(part.endswith(".lock") for part in branch.split("/"))
     ):
         return False
     if not (isinstance(pr["head_sha"], str) and SHA40_RE.fullmatch(pr["head_sha"])):
