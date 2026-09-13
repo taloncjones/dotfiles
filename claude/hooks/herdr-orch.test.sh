@@ -2839,7 +2839,8 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-3 --workspace w9 \
    --agent rev-proj-3 --reviewed-head-sha h1 --outcome approved \
-   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40"
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" \
+   --reviewer-session R1
 test -f "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-3.review.json"
 test ! -e "$root/herdr-orch/$LF_SLUG/tasks/PROJ-3.review.json"
 SH
@@ -2876,7 +2877,8 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-7 --workspace w1 \
    --agent rev-proj-7 --reviewed-head-sha h1 --outcome approved \
-   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" \
+   --reviewer-session R1 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-7.review.json"
 SH
 
@@ -3007,6 +3009,49 @@ try:
     e.read_envelope(rd,other); raise AssertionError("binding_id mismatch accepted")
 except ValueError: pass
 PY
+
+check "emit-review --binding requires and records reviewer_session_id; plain path unchanged" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ri.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id PROJ-5 \
+   --json '{"task_id":"PROJ-5","workers":[{"role":"review","launch_id":"L1","phase":"review","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+# binding-scoped review emit WITHOUT --reviewer-session -> refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-5 --workspace w1 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --blocking-count 0 \
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-5.review.json"
+# WITH --reviewer-session -> succeeds and records it
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-5 --workspace w1 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --blocking-count 0 \
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" \
+   --reviewer-session R1
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["reviewer_session_id"] == "R1", rec
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-5.review.json"
+# plain (non-binding) review emit still works with no flag, record has no field
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --task-id PROJ-6 --workspace w1 --agent rev-p6 \
+   --outcome approved --reviewed-head-sha "$SHA40" --blocking-count 0
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert "reviewer_session_id" not in rec, rec
+' "$root/herdr-orch/$LF_SLUG/tasks/PROJ-6.review.json"
+SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

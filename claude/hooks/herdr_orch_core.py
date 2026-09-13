@@ -2138,6 +2138,7 @@ def _main(argv=None) -> int:
         emitter.add_argument("--binding", default=None)
     er.add_argument("--findings-ref", default=None)
     er.add_argument("--blocking-count", type=int, default=0)
+    er.add_argument("--reviewer-session", default=None)
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
@@ -2490,6 +2491,13 @@ def _main(argv=None) -> int:
             }
             if ns.findings_ref:
                 done["findings_ref"] = ns.findings_ref
+            if getattr(ns, "binding", None) is not None:
+                _require(
+                    isinstance(ns.reviewer_session, str) and bool(ns.reviewer_session),
+                    "a binding-scoped review emit requires --reviewer-session",
+                )
+            if ns.reviewer_session:
+                done["reviewer_session_id"] = ns.reviewer_session
             # A distinct file so a review verdict never clobbers the impl
             # completion record -- the two coexist and are read independently.
             out = base / "tasks" / f"{ns.task_id}.review.json"
