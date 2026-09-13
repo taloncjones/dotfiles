@@ -107,8 +107,9 @@ scenario, and concrete fix. End with one verdict. Do not invoke skills,
 partners, or external actions.
 EOF
 printf '\nBase: %s\n\n' "$BASE" >>"$PROMPT_FILE"
-sed -n '/^## Classes/,$p' \
-  "$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md" >>"$PROMPT_FILE"
+RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
+grep -q '^## Classes' "$RUBRIC" || { echo "rubric Classes heading missing" >&2; exit 2; }
+sed -n '/^## Classes/,$p' "$RUBRIC" >>"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk normal \
   --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
@@ -116,9 +117,9 @@ uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk 
 
 For a scoped round, build the prompt from the prior findings and the fix
 diff instead (`$PREV_HEAD` is the previously reviewed head from the last
-posted marker, `$FINDINGS_FILE` the prior round's findings table saved
-locally; the diff read from the source repository is a read, not a
-mutation):
+posted marker, `$HEAD` the newly frozen committed head this round reviews,
+`$FINDINGS_FILE` the prior round's findings table saved locally; the diff
+read from the source repository is a read, not a mutation):
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-codex.XXXXXX")
@@ -133,7 +134,8 @@ printf '\nPrior reviewed head: %s\nCurrent head: %s\n\nPrior findings:\n' \
   "$PREV_HEAD" "$HEAD" >>"$PROMPT_FILE"
 cat "$FINDINGS_FILE" >>"$PROMPT_FILE"
 printf '\nFix diff:\n' >>"$PROMPT_FILE"
-git -C "$REPO" diff "$PREV_HEAD..$HEAD" >>"$PROMPT_FILE"
+git -C "$REPO" -c diff.external= diff --no-ext-diff --no-textconv \
+  "$PREV_HEAD..$HEAD" >>"$PROMPT_FILE" || { echo "fix diff failed" >&2; exit 2; }
 uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk normal \
   --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
@@ -181,7 +183,8 @@ One pass is not a gate. Two round types:
 - **Scoped round**: freeze the committed head; both independent halves
   (fresh Claude reviewer AND Codex runner -- never only the half that
   raised a finding) receive the prior round's findings table and the
-  cumulative fix diff (prior reviewed head to new head). Each half returns
+  fix diff since the last posted round (prior reviewed head to new
+  head). Each half returns
   a per-finding verdict, ADDRESSED or NOT-ADDRESSED with one-line
   evidence, plus any new actionable findings in the fix diff only. Skip
   the attacker/skeptic unless a fix touched the sensitive paths that
@@ -192,7 +195,10 @@ One pass is not a gate. Two round types:
 attacker, skeptic, scoped halves -- counts only when its runtime
 artifact exists: the Codex runner's structured result (session id,
 success status) or the dispatched Claude reviewer's agent result or
-report file. A narrated dispatch with no artifact is not a dispatch. A
+report file. In a Codex-led run (the codex/skills adapter reviews
+in-session rather than through a nested runner), the Codex half's
+evidence is that session's own bounded findings output plus its resolved
+route metadata. A narrated dispatch with no artifact is not a dispatch. A
 round claiming completion without an artifact for every required seat
 is incomplete, never clean. Cite each seat's artifact (runner session
 id or report path) in the round's comment.
@@ -219,13 +225,15 @@ Sequence:
    finding):
    - **fix-regression** -- introduced by a fix commit. When provenance is
      disputed or cannot be established against the round-1 tree, classify
-     as fix-regression. Fix it, then return to step 3.
-   - **new-surface** -- present since round 1; a rubric miss. Fix it, and
-     grow the rubric: in the rubric's own repository add or generalize
-     the class in the same commit as the fix; from any other repository
-     record the missed class and update the rubric as a separate
-     authorized dotfiles change. Then return to step 3. New-surface
-     findings never count toward divergence.
+     as fix-regression. Fix it (repeating step 2's post-then-fix order),
+     then return to step 3.
+   - **new-surface** -- present since round 1; a rubric miss. Fix it
+     (repeating step 2's post-then-fix order), and grow the rubric: in
+     the rubric's own repository add or generalize the class in the same
+     commit as the fix; from any other repository record the missed
+     class and update the rubric as a separate authorized dotfiles
+     change. Then return to step 3. New-surface findings never count
+     toward divergence.
 
    **Divergence:** two complete rounds in one loop that each contain at
    least one fix-regression finding. Stop and escalate for a structural
