@@ -2246,6 +2246,9 @@ def _main(argv=None) -> int:
     ie.add_argument("--binding", required=True)
     ie.add_argument("--base-sha", default=None)
     ie.add_argument("--head-sha", default=None)
+    ea = add("emit-artifacts", "--task-id", fenced=True)
+    ea.add_argument("--binding", required=True)
+    ea.add_argument("--file", action="append", default=[], required=True)
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
@@ -2905,6 +2908,102 @@ def _main(argv=None) -> int:
             create_payload_dir(out.parent)
             write_json_atomic(out, rec)
         return 0
+
+    if ns.cmd == "emit-artifacts":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+        _require(0 < len(ns.file) <= envelope.ARTIFACTS_MAX_ENTRIES,
+                 "between 1 and 32 --file arguments required")
+        names = [os.path.basename(p) for p in ns.file]
+        _require(len(set(names)) == len(names), "duplicate artifact name")
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd) as tx:
+            require_not_consumed(rd, ns.binding)
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(rec_b["status"] == "claimed", "binding is not claimed")
+            _require(
+                tx.lead_check(ns.session, ns.fence, rec_b["workspace_root"], ns.binding),
+                "emitter is not the live lease holder for this binding",
+            )
+            _require(ns.task_id == rec_b["task_id"],
+                     "manifest task does not match the binding")
+            store = envelope.artifact_store(rd, ns.binding)
+            _require(contained(store, state_root()), "escapes state root")
+            create_payload_dir(store)
+            # STAGE 1 -- read and validate EVERY source before touching the
+            # store: a failure on the third source must not have already
+            # replaced the first artifact's previously preserved bytes.
+            staged = []
+            total = 0
+            for src, name in zip(ns.file, names):
+                _require(os.path.isabs(src), "artifact source must be absolute")
+                try:
+                    # O_NONBLOCK so a FIFO source cannot block open() while we
+                    # hold the global owner lock; the regular-file check runs
+                    # on the fd before any read.
+                    fd = os.open(src, os.O_RDONLY | os.O_NONBLOCK
+                                 | getattr(os, "O_NOFOLLOW", 0))
+                except OSError:
+                    _require(False, "artifact source is unreadable")
+                try:
+                    st = os.fstat(fd)
+                    _require(stat.S_ISREG(st.st_mode),
+                             "artifact source must be a regular file")
+                    _require(st.st_size <= envelope.ARTIFACT_MAX_FILE_BYTES,
+                             "artifact source exceeds the per-file bound")
+                    chunks = []
+                    while True:
+                        chunk = os.read(fd, 65536)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+                finally:
+                    os.close(fd)
+                _require(len(data) <= envelope.ARTIFACT_MAX_FILE_BYTES,
+                         "artifact source exceeds the per-file bound")
+                total += len(data)
+                _require(total <= envelope.ARTIFACTS_MAX_TOTAL_BYTES,
+                         "artifacts exceed the total size bound")
+                staged.append((name, data))
+            rec = {
+                "schema_version": 1,
+                "binding_id": ns.binding,
+                "task_id": ns.task_id,
+                "artifacts": [{
+                    "name": name,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "bytes": len(data),
+                } for name, data in staged],
+                "ts": now_iso(),
+            }
+            _require(envelope.valid_artifacts(rec), "invalid artifacts manifest")
+            out = envelope.artifacts_path(rd, ns.binding)
+            _require(contained(out, state_root()), "escapes state root")
+            # STAGE 2 -- write every file through an exclusive, unpredictable
+            # temp name (O_EXCL + O_NOFOLLOW: a planted symlink at a
+            # guessable temp path must fail, never truncate its target).
+            for name, data in staged:
+                tmp = store / f".tmp-{secrets.token_hex(8)}"
+                tfd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                              | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                try:
+                    os.write(tfd, data)
+                    os.fsync(tfd)
+                finally:
+                    os.close(tfd)
+                os.replace(tmp, store / name)
+            # STAGE 3 -- publish the manifest, THEN drop obsolete store files
+            # (a crash before this leaves the prior manifest pointing at its
+            # own still-intact bytes plus new files it does not reference).
+            write_json_atomic(out, rec)
+            keep = {name for name, _ in staged}
+            for existing in payload_files(store, "*"):
+                if existing.name not in keep:
+                    existing.unlink()
+        return 0
+
     if ns.cmd == "integrate-envelope":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")

@@ -4438,6 +4438,86 @@ assert json.load(open(sys.argv[1]))["status"] == "claimed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
 SH
 
+check "emit-artifacts copies files, computes digests, refuses bad inputs" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-art1.git
+root=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SRC=$(mktemp -d)
+printf 'handoff body' > "$SRC/handoff.md"
+printf 'plan body' > "$SRC/plan.md"
+CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+    --task-id td-x --file "$SRC/handoff.md" --file "$SRC/plan.md"
+ORIG_SHA=$(CLAUDE_CONFIG_DIR="$root" python3 -c '
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/handoff.md")
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import hashlib, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+bid = sys.argv[2]
+rec = envelope.read_artifacts(rd, bid)
+assert rec["task_id"] == "td-x", rec
+assert {a["name"] for a in rec["artifacts"]} == {"handoff.md", "plan.md"}, rec
+store = envelope.artifact_store(rd, bid)
+for art in rec["artifacts"]:
+    data = (store / art["name"]).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == art["sha256"], art
+    assert len(data) == art["bytes"], art
+stored = {p.name for p in store.iterdir() if p.is_file()}
+assert stored == {"handoff.md", "plan.md"}, stored
+' "$LF_SLUG" "$bid"
+# launcher identity is not the lease holder:
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session L1 --fence "$f" \
+    --binding "$bid" --task-id td-x --file "$SRC/handoff.md" 2>err; then exit 1; fi
+grep -q "not the live lease holder" err
+# duplicate basenames refuse:
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+    --file "$SRC/handoff.md" --file "$SRC/handoff.md" 2>err; then exit 1; fi
+grep -q "duplicate artifact name" err
+# a symlink source refuses (no-follow):
+ln -s /etc/passwd "$SRC/link.md"
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+    --file "$SRC/link.md" 2>err; then exit 1; fi
+# a FIFO source refuses without hanging (O_NONBLOCK + regular-file check):
+mkfifo "$SRC/pipe.md"
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+    --file "$SRC/pipe.md" 2>err; then exit 1; fi
+grep -q "regular file" err
+# a failed batch leaves prior preserved bytes intact: re-emit with a CHANGED
+# handoff.md plus an unreadable second source; after the refusal the stored
+# handoff.md still hashes to the ORIGINAL manifest digest.
+printf 'changed body' > "$SRC/handoff.md"
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+    --file "$SRC/handoff.md" --file "$SRC/absent.md" 2>err; then exit 1; fi
+python3 -c '
+import hashlib, sys
+data = open(sys.argv[1], "rb").read()
+assert hashlib.sha256(data).hexdigest() == sys.argv[2], hashlib.sha256(data).hexdigest()
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/handoff.md" "$ORIG_SHA"
+# task mismatch:
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id other-task \
+    --file "$SRC/handoff.md" 2>err; then exit 1; fi
+grep -q "does not match the binding" err
+SH
+
 check "emit-review journal: an entry with the wrong shape (null, empty object) fails closed" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr-shape.git
 root=$(mktemp -d)

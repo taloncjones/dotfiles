@@ -332,3 +332,72 @@ def read_consumed(rd, binding_id):
     if not valid_consumed(rec) or rec["binding_id"] != binding_id:
         raise ValueError("invalid consumption record")
     return rec
+
+
+ARTIFACTS_MAX_RAW = 16384
+ARTIFACTS_MAX_ENTRIES = 32
+ARTIFACT_MAX_FILE_BYTES = 2 * 1024 * 1024
+ARTIFACTS_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+ARTIFACT_KEYS = frozenset(("name", "sha256", "bytes"))
+ARTIFACTS_TOP_KEYS = frozenset(
+    ("schema_version", "binding_id", "task_id", "artifacts", "ts")
+)
+
+
+def _valid_artifact_name(name):
+    return (
+        isinstance(name, str)
+        and 0 < len(name) <= 200
+        and "/" not in name
+        and "\x00" not in name
+        and name not in (".", "..")
+    )
+
+
+def artifacts_path(rd, binding_id):
+    if not isinstance(binding_id, str) or not _BINDING_ID_RE.fullmatch(binding_id):
+        raise ValueError("invalid binding id")
+    return Path(rd) / "leads" / binding_id / "artifacts.json"
+
+
+def artifact_store(rd, binding_id):
+    if not isinstance(binding_id, str) or not _BINDING_ID_RE.fullmatch(binding_id):
+        raise ValueError("invalid binding id")
+    return Path(rd) / "leads" / binding_id / "artifacts"
+
+
+def valid_artifacts(rec):
+    if not isinstance(rec, dict) or set(rec) != ARTIFACTS_TOP_KEYS:
+        return False
+    if type(rec["schema_version"]) is not int or rec["schema_version"] != 1:
+        return False
+    if not (isinstance(rec["binding_id"], str)
+            and _BINDING_ID_RE.fullmatch(rec["binding_id"])):
+        return False
+    if not (isinstance(rec["task_id"], str) and _SEGMENT_RE.fullmatch(rec["task_id"])):
+        return False
+    arts = rec["artifacts"]
+    if not isinstance(arts, list) or not 1 <= len(arts) <= ARTIFACTS_MAX_ENTRIES:
+        return False
+    for art in arts:
+        if not isinstance(art, dict) or set(art) != ARTIFACT_KEYS:
+            return False
+        if not _valid_artifact_name(art["name"]):
+            return False
+        if not (isinstance(art["sha256"], str)
+                and _SHA256_RE.fullmatch(art["sha256"])):
+            return False
+        if type(art["bytes"]) is not int or art["bytes"] < 0:
+            return False
+    return _nonempty(rec["ts"])
+
+
+def read_artifacts(rd, binding_id):
+    """The stored artifacts manifest, None if absent; ValueError on corrupt."""
+    rec = _read_bounded(artifacts_path(rd, binding_id), ARTIFACTS_MAX_RAW,
+                        "artifacts manifest")
+    if rec is None:
+        return None
+    if not valid_artifacts(rec) or rec["binding_id"] != binding_id:
+        raise ValueError("invalid artifacts manifest")
+    return rec
