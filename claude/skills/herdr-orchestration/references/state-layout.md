@@ -73,15 +73,15 @@ STATE_ROOT/
         owner.json                    # mirror of the lead's per-workspace lease
         tasks/                        # lead-scoped task/done/review records
         workspaces/                   # lead-scoped workspace index records
-        envelope.json             # versioned terminal return envelope
-                                  # (schema_version 1; outcome pr_ready|
-                                  # blocked|failed|cancelled; monotonic
-                                  # sequence; size-capped, REJECT not strip;
-                                  # written only by emit-envelope under the
-                                  # owner lock; consumed once by the
-                                  # launcher's integrate-envelope, which
-                                  # transitions the binding claimed ->
-                                  # completed after an expected-base check)
+        envelope.json                 # versioned terminal return envelope
+                                      # (schema_version 1; outcome pr_ready|
+                                      # blocked|failed|cancelled; monotonic
+                                      # sequence; size-capped, REJECT not strip;
+                                      # written only by emit-envelope under the
+                                      # owner lock; consumed once by the
+                                      # launcher's integrate-envelope, which
+                                      # transitions the binding claimed ->
+                                      # completed after an expected-base check)
     think/
       <think_id>.question.md          # orchestrator-written brief (input contract)
       <think_id>.launch.json          # wrapper-written, create-exclusive, before launch (liveness)

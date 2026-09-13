@@ -1826,6 +1826,16 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
 ATTEMPT_FIELDS = ("launch_id", "phase", "runtime", "workspace_id", "pane_id", "source_head_sha")
 
 
+def _no_dup_pairs(pairs):
+    """object_pairs_hook that rejects duplicate keys in a JSON object."""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("duplicate key")
+        d[k] = v
+    return d
+
+
 def attempt_matches(task, done, phase, workspace):
     """Native history requires the latest row; wholly legacy history stays readable."""
     workers = task.get("workers", [])
@@ -2568,6 +2578,24 @@ def _main(argv=None) -> int:
                              "binding-scoped emit requires a recorded native attempt")
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
+                # Closes the overwrite-the-rejection path at one head: a binding-
+                # scoped review verdict at a given reviewed_head_sha cannot be
+                # replaced by a different outcome or a different reviewer session.
+                # Identity authentication of the reviewer session is a recorded
+                # follow-up. Identical re-emit stays allowed; a record at a
+                # different head may be overwritten freely.
+                if ns.cmd == "emit-review" and getattr(ns, "binding", None) is not None:
+                    try:
+                        prior = json.loads(read_payload_text(out))
+                    except (OSError, ValueError):
+                        prior = None
+                    if isinstance(prior, dict) and prior.get("reviewed_head_sha") == done["reviewed_head_sha"] and (
+                        prior.get("outcome") != done["outcome"]
+                        or prior.get("reviewer_session_id") != done.get("reviewer_session_id")
+                    ):
+                        _require(False,
+                                 "a same-revision review verdict cannot be replaced; "
+                                 "re-dispatch the review at a new head")
                 write_json_atomic(out, done)
         else:
             write_json_atomic(out, done)
@@ -2575,8 +2603,10 @@ def _main(argv=None) -> int:
     if ns.cmd == "emit-envelope":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+        _require(len(ns.json.encode()) <= envelope.ENVELOPE_MAX_RAW,
+                 "envelope json exceeds the raw size bound")
         try:
-            supplied = json.loads(ns.json)
+            supplied = json.loads(ns.json, object_pairs_hook=_no_dup_pairs)
         except ValueError:
             supplied = None
         _require(
@@ -2596,7 +2626,10 @@ def _main(argv=None) -> int:
                 tx.lead_check(ns.session, ns.fence, rec_b["workspace_root"], ns.binding),
                 "emitter is not the live lease holder for this binding",
             )
-            lease = tx.lead_read(rec_b["workspace_root"])
+            try:
+                lease = tx.lead_read(rec_b["workspace_root"])
+            except ValueError:
+                _require(False, "workspace lease is unreadable")
             rec = {
                 "schema_version": 1,
                 "binding_id": ns.binding,
@@ -2616,12 +2649,17 @@ def _main(argv=None) -> int:
                 task = json.loads(read_payload_text(base / "tasks" / f"{rec['task_id']}.json"))
             except (OSError, ValueError):
                 task = None
-            impl = latest_native_attempt(task, "implement")
-            _require(impl is not None,
-                     "envelope requires a recorded native implement attempt")
-            att = rec["attempt"]
-            _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
-                     "envelope attempt does not match the dispatched attempt")
+            # A null attempt (schema guarantees outcome != pr_ready) is a
+            # terminal handback before any dispatched implement attempt: the
+            # lease, binding, and sequence checks still run, but there is no
+            # native attempt to ground against.
+            if rec["attempt"] is not None:
+                impl = latest_native_attempt(task, "implement")
+                _require(impl is not None,
+                         "envelope requires a recorded native implement attempt")
+                att = rec["attempt"]
+                _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
+                         "envelope attempt does not match the dispatched attempt")
             if rec["summary"]["outcome"] == "pr_ready":
                 pr = rec["summary"]["pr"]
                 ap = pr["approval"]
@@ -2632,9 +2670,8 @@ def _main(argv=None) -> int:
                 review_att = latest_native_attempt(task, "review")
                 _require(review_att is not None,
                          "pr_ready requires a recorded native review attempt")
-                _require((review_att["launch_id"], review_att["pane_id"])
-                         != (impl["launch_id"], impl["pane_id"]),
-                         "review attempt must not be the implement attempt")
+                _require(review_att["pane_id"] != impl["pane_id"],
+                         "review attempt must not run in the implement pane")
                 try:
                     review = json.loads(read_payload_text(base / "tasks" / f"{rec['task_id']}.review.json"))
                 except (OSError, ValueError):
@@ -2683,6 +2720,9 @@ def _main(argv=None) -> int:
                 lease = tx.lead_read(rec_b["workspace_root"])
             except ValueError:
                 _require(False, "workspace lease is unreadable")
+            if lease is not None:
+                _require(coordination._valid_lead_lease(lease),
+                         "workspace lease is malformed")
             _require(lease is None or lease.get("binding_id") == ns.binding,
                      "workspace lease supersedes this binding")
             summary = env["summary"]
@@ -2713,15 +2753,28 @@ def _main(argv=None) -> int:
                 # Native grounding is mandatory at integrate too: a task record
                 # stripped of its worker rows must not fall back to the legacy-
                 # permissive branch inside attempt_matches/is_reviewed.
-                _require(latest_native_attempt(task, "implement") is not None
-                         and latest_native_attempt(task, "review") is not None,
+                impl = latest_native_attempt(task, "implement")
+                review_att = latest_native_attempt(task, "review")
+                _require(impl is not None and review_att is not None,
                          "integration requires recorded native attempts")
                 ap = pr["approval"]
-                # Reviewer independence is enforced at emit-envelope (the
-                # envelope is writable only through that transaction, which
-                # re-checks independence on every re-emit); integrate only
-                # re-checks identity-match and staleness against the review
-                # record recorded at that time.
+                # Defense-in-depth re-checks of the emit-time gates (grounding,
+                # staleness, independence) against the CURRENT task/review
+                # records, so a record rewritten after emit is refused.
+                # Reviewer-session authentication against a real dispatch is a
+                # recorded follow-up.
+                _require(env["attempt"] is not None
+                         and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
+                         "envelope attempt no longer matches the dispatched attempt")
+                _require(review_att["pane_id"] != impl["pane_id"],
+                         "review attempt must not run in the implement pane")
+                _require(summary["expected_base_sha"] == task.get("base_sha"),
+                         "expected base no longer matches the dispatched base")
+                _require(ap["reviewer_session_id"] not in (
+                             (lease or {}).get("session_id"),
+                             rec_b["expected_session_id"],
+                             rec_b["parent"]["session_id"]),
+                         "reviewer is not independent of the lead or launcher")
                 _require(isinstance(review, dict)
                          and is_reviewed(task, review, pr["head_sha"],
                                          review.get("workspace_id"))

@@ -10,7 +10,9 @@ REJECT it, never strip it down.
 """
 
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -24,9 +26,11 @@ _SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 OUTCOMES = ("pr_ready", "blocked", "failed", "cancelled")
 FOLLOW_UP_KINDS = ("todo", "handoff", "task")
 ENVELOPE_MAX_BYTES = 4096
+ENVELOPE_MAX_RAW = ENVELOPE_MAX_BYTES * 4
 ENVELOPE_MAX_STR = 500
 ENVELOPE_MAX_FOLLOW_UPS = 8
 _REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+-]{0,199}\Z")
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/+-]{0,199}\Z")
 
 _ATTEMPT_KEYS = {
     "launch_id",
@@ -57,6 +61,11 @@ def _nonempty(value):
 
 def _capped(value):
     return isinstance(value, str) and 0 < len(value) <= ENVELOPE_MAX_STR
+
+
+def _valid_reason(reason):
+    # A capped reason string carrying no control characters (C0 or DEL).
+    return _capped(reason) and not any(ord(c) < 32 or ord(c) == 127 for c in reason)
 
 
 def _valid_attempt(att):
@@ -104,7 +113,12 @@ def _valid_pr(pr):
         return False
     if type(pr["number"]) is not int or pr["number"] <= 0:
         return False
-    if not _capped(pr["branch"]):
+    # A ref-safe branch: no whitespace, no "..", within the length cap.
+    if not (
+        isinstance(pr["branch"], str)
+        and _BRANCH_RE.fullmatch(pr["branch"])
+        and ".." not in pr["branch"]
+    ):
         return False
     if not (isinstance(pr["head_sha"], str) and SHA40_RE.fullmatch(pr["head_sha"])):
         return False
@@ -135,11 +149,18 @@ def _valid_summary(summary):
     if pr is not None or ebs is not None:
         return False
     if outcome == "cancelled":
-        return reason is None or _capped(reason)
-    return _capped(reason)  # blocked | failed
+        return reason is None or _valid_reason(reason)
+    return _valid_reason(reason)  # blocked | failed
 
 
 def valid_envelope(rec):
+    """True when rec is a well-formed return envelope.
+
+    A null attempt marks a terminal outcome reached before any dispatched
+    implement attempt: it is allowed for blocked/failed/cancelled but never
+    for pr_ready, which keeps a mandatory full attempt. A non-null attempt is
+    validated by _valid_attempt unchanged.
+    """
     if not isinstance(rec, dict) or set(rec) != _TOP_KEYS:
         return False
     if type(rec["schema_version"]) is not int or rec["schema_version"] != 1:
@@ -151,7 +172,11 @@ def valid_envelope(rec):
         return False
     if not (isinstance(rec["task_id"], str) and _SEGMENT_RE.fullmatch(rec["task_id"])):
         return False
-    if not _valid_attempt(rec["attempt"]):
+    if rec["attempt"] is None:
+        summary = rec["summary"]
+        if isinstance(summary, dict) and summary.get("outcome") == "pr_ready":
+            return False
+    elif not _valid_attempt(rec["attempt"]):
         return False
     if type(rec["fence"]) is not int or rec["fence"] <= 0:
         return False
@@ -181,6 +206,16 @@ def read_envelope(rd, binding_id):
     only. Callers hold the global owner lock.
     """
     path = envelope_path(rd, binding_id)
+    # Bound parser input while the caller holds the owner lock; _read still
+    # enforces no-follow / regular-file at open time.
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and (
+        not stat.S_ISREG(st.st_mode) or st.st_size > ENVELOPE_MAX_RAW
+    ):
+        raise ValueError("corrupt return envelope")
     try:
         rec = coordination._read(path)
     except ValueError as exc:
