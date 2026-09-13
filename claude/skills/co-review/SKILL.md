@@ -79,9 +79,19 @@ is incomplete, never a clean review.
 
 ## Claude-led dispatch
 
-Claude reviews `snapshot.claude_root` through its native `/code-review` flow.
-That worktree is based at the pinned base and has the reviewed tree applied to
-its index. It is the Claude half, not a substitute for Codex.
+The Claude half MUST be performed by a fresh Claude instance -- a dispatched
+reviewer subagent or the `/code-review` flow that spawns fresh review agents --
+pointed at `snapshot.claude_root`, which is based at the pinned base with the
+reviewed tree applied to its index. The implementing or authoring session MUST
+NOT review its own diff inline; "the diff is small, I'll just review it
+myself" is exactly the biased self-review this gate exists to prevent. Give
+the fresh reviewer only the round's defined inputs -- for a complete round the
+frozen snapshot, the base, and the failure-class rubric
+(`references/failure-classes.md` in this skill directory); for a scoped round
+additionally the prior findings table and the fix diff -- never the authoring
+session's rationalizations. It is the Claude half, not a substitute for
+Codex. Controller disk-verification of a fix is not a substitute for either
+half.
 
 The independent Codex finder runs from `snapshot.codex_root` through the shared
 runtime runner. It selects the policy model and effort and returns structured
@@ -89,11 +99,41 @@ runtime metadata; this skill never restates a route table.
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-codex.XXXXXX")
-cat >"$PROMPT_FILE" <<EOF
-Review only the frozen change against base $BASE. Report each actionable issue
+cat >"$PROMPT_FILE" <<'EOF'
+Review only the frozen change against the base commit named below. Probe
+every failure class in the rubric appended below against this diff, then any
+further issues. Report each actionable issue as severity, file:line, failure
+scenario, and concrete fix. End with one verdict. Do not invoke skills,
+partners, or external actions.
+EOF
+printf '\nBase: %s\n\n' "$BASE" >>"$PROMPT_FILE"
+sed -n '/^## Classes/,$p' \
+  "$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md" >>"$PROMPT_FILE"
+uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk normal \
+  --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$PROMPT_FILE"
+```
+
+For a scoped round, build the prompt from the prior findings and the fix
+diff instead (`$PREV_HEAD` is the previously reviewed head from the last
+posted marker, `$FINDINGS_FILE` the prior round's findings table saved
+locally; the diff read from the source repository is a read, not a
+mutation):
+
+```bash
+PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-codex.XXXXXX")
+cat >"$PROMPT_FILE" <<'EOF'
+Scoped re-review of the frozen change. For each prior finding listed below,
+return ADDRESSED or NOT-ADDRESSED against the frozen tree with one line of
+evidence. Then report any new actionable issue in the fix diff below ONLY,
 as severity, file:line, failure scenario, and concrete fix. End with one
 verdict. Do not invoke skills, partners, or external actions.
 EOF
+printf '\nPrior reviewed head: %s\nCurrent head: %s\n\nPrior findings:\n' \
+  "$PREV_HEAD" "$HEAD" >>"$PROMPT_FILE"
+cat "$FINDINGS_FILE" >>"$PROMPT_FILE"
+printf '\nFix diff:\n' >>"$PROMPT_FILE"
+git -C "$REPO" diff "$PREV_HEAD..$HEAD" >>"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk normal \
   --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
@@ -130,31 +170,97 @@ snapshot if it refuses cleanup.
 
 ## Re-review loop
 
-One pass is not a gate. A **complete round** = freeze the committed head, run both
-finders (Claude `/code-review` + the Codex runner), plus any bounded attacker or
-skeptic required by the frozen paths, plus the skeptic verification of
-high-severity findings. A round that leaves any required finder or verification
-incomplete cannot approve (co-review's "incomplete, never a clean review" rule).
+One pass is not a gate. Two round types:
 
-1. Run a complete round.
-2. Post that round's comment first -- the verdict table plus the hidden marker at
-   the reviewed head (see "Review provenance marker") -- **before** committing any
-   fix for the round. Then apply confirmed fixes with verified repros, re-run the
-   affected tests, and commit and push. Posting before the fix commits keeps the
-   marker's `sha` (the reviewed head) above its own fixes on the PR timeline
-   rather than buried beneath them.
-3. Re-freeze the new committed head and run another complete round. Repeat.
-4. Return **APPROVE** only when a complete round yields zero unresolved
-   actionable findings. A finding that reappears unfixed is still actionable --
-   not a dismissible "duplicate". "Duplicate/non-actionable" means only: already
-   fixed and re-surfaced against old code, explicitly confirmed wontfix, or
-   out-of-scope for this change.
-5. Bound it: at most **5 complete rounds total** (the first round plus up to 4
-   re-reviews). Print each round's actionable-finding count. Escalate -- stop and
-   ask for a structural fix -- at the cap without APPROVE, or earlier when the
-   only remaining findings are genuinely non-actionable. Do not hard-stop merely
-   because a round's count failed to strictly decrease: real bugs can persist
-   across rounds.
+- **Complete round**: freeze the committed head; both finders -- the fresh
+  Claude reviewer and the Codex runner -- review the whole frozen diff,
+  probing every class in `references/failure-classes.md`; plus any bounded
+  attacker or skeptic required by the frozen paths; plus skeptic
+  verification of high-severity findings. A round that leaves any required
+  finder or verification incomplete cannot approve.
+- **Scoped round**: freeze the committed head; both independent halves
+  (fresh Claude reviewer AND Codex runner -- never only the half that
+  raised a finding) receive the prior round's findings table and the
+  cumulative fix diff (prior reviewed head to new head). Each half returns
+  a per-finding verdict, ADDRESSED or NOT-ADDRESSED with one-line
+  evidence, plus any new actionable findings in the fix diff only. Skip
+  the attacker/skeptic unless a fix touched the sensitive paths that
+  trigger them. For a trivial fix the fresh Claude pass may be a
+  cheap-tier reviewer, but it must exist.
+
+**Seat evidence rule.** Every seat in every round -- finder halves,
+attacker, skeptic, scoped halves -- counts only when its runtime
+artifact exists: the Codex runner's structured result (session id,
+success status) or the dispatched Claude reviewer's agent result or
+report file. A narrated dispatch with no artifact is not a dispatch. A
+round claiming completion without an artifact for every required seat
+is incomplete, never clean. Cite each seat's artifact (runner session
+id or report path) in the round's comment.
+
+Sequence:
+
+0. **Pre-freeze self-audit.** Before round 1, the author walks
+   `references/failure-classes.md` against their own diff and fixes what
+   it catches. Not a review round; posts nothing.
+1. **Round 1: complete round.** Any clean complete round -- round 1
+   included -- terminates the loop with APPROVE (zero actionable
+   findings, clean tree).
+2. Post the round's comment first (findings table + marker,
+   verdict=CHANGES) -- **before** committing any fix -- then apply
+   confirmed fixes with verified repros, re-run the affected tests,
+   commit and push.
+3. **Scoped round** at the new committed head. Any NOT-ADDRESSED verdict
+   or new finding: fix (repeating step 2's post-then-fix order) and run
+   another scoped round. A clean scoped round advances to the final
+   complete round.
+4. **Final complete round** at the committed head. Zero actionable
+   findings = APPROVE. Otherwise classify each finding per distinct
+   defect (both halves reporting the same underlying defect is one
+   finding):
+   - **fix-regression** -- introduced by a fix commit. When provenance is
+     disputed or cannot be established against the round-1 tree, classify
+     as fix-regression. Fix it, then return to step 3.
+   - **new-surface** -- present since round 1; a rubric miss. Fix it, and
+     grow the rubric: in the rubric's own repository add or generalize
+     the class in the same commit as the fix; from any other repository
+     record the missed class and update the rubric as a separate
+     authorized dotfiles change. Then return to step 3. New-surface
+     findings never count toward divergence.
+
+   **Divergence:** two complete rounds in one loop that each contain at
+   least one fix-regression finding. Stop and escalate for a structural
+   fix.
+
+5. **Caps:** at most 3 complete rounds and at most 3 scoped rounds per
+   PR. Print each round's type and actionable count. The cap check
+   applies to the round about to start: a clean scoped round always
+   advances to the final complete round while complete-round capacity
+   remains, even with the scoped cap exhausted. Stop and escalate only
+   when the next required round would exceed its own type's cap without
+   APPROVE. Real bugs can persist across rounds: never hard-stop merely
+   because a count failed to strictly decrease; the caps and the
+   divergence rule are the only stop conditions.
+
+A finding that reappears unfixed is still actionable -- not a dismissible
+"duplicate". "Duplicate/non-actionable" means only: already fixed and
+re-surfaced against old code, explicitly confirmed wontfix, or
+out-of-scope for this change.
+
+Worked examples (trace each against the sequence above):
+
+- **Clean round 1:** complete round finds nothing, tree clean -> APPROVE.
+  1 round.
+- **Happy path:** round 1 (complete) finds 3 issues -> post, fix -> round
+  2 (scoped) all ADDRESSED, no new findings -> round 3 (final complete)
+  clean -> APPROVE. 3 rounds.
+- **Scoped cap exhausted:** rounds 2-4 are scoped (a fix kept leaving one
+  NOT-ADDRESSED); round 4 comes back clean. Scoped cap (3) is now spent,
+  but the next required round is complete and only 1 complete round has
+  run -> advance to the final complete round. Clean -> APPROVE.
+- **Divergence:** final complete round finds a defect introduced by a fix
+  (fix-regression #1) -> fix -> scoped round clean -> second final
+  complete round finds another fix-introduced defect (fix-regression in a
+  second complete round) -> divergence -> stop, escalate.
 
 ## Coworker PR review (`--comment`)
 
