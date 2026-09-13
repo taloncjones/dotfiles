@@ -587,6 +587,148 @@ with c.owner_transaction(rd) as tx:
             self.assertFalse(tx.check("A", fence))
             self.assertFalse(tx.refresh("A", fence))
 
+    def test_lead_release_records_generation_and_allows_reclaim(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        b2 = "ldb-" + "2" * 32
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            fence1 = tx.lead_claim("lead-s1", "h", 1, ws, b1)
+            self.assertEqual(fence1, 1)
+            self.assertEqual(tx.lead_read(ws)["generation"], 1)
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertEqual(
+                entry, {"generation": 1, "binding_id": b1, "last_fence": 1}
+            )
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertTrue(tx.lead_release(ws, expected_binding=b1))
+            self.assertIsNone(tx.lead_read(ws))
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertEqual(
+                entry, {"generation": 1, "binding_id": None, "last_fence": 1}
+            )
+            self.assertFalse(tx.lead_release(ws, expected_binding=b1))  # idempotent
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            fence2 = tx.lead_claim("lead-s2", "h", 1, ws, b2)
+            self.assertEqual(fence2, 2)  # fence chain continues past the release
+            self.assertEqual(tx.lead_read(ws)["generation"], 2)  # fresh generation
+
+    def test_lead_release_refuses_wrong_binding_and_corrupt_needs_force(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            with self.assertRaises(ValueError):
+                tx.lead_release(ws, expected_binding="ldb-" + "9" * 32)
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        slug_dir = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo"
+        (slug_dir / name).write_text("not json")
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            with self.assertRaises(ValueError):
+                tx.lead_release(ws, expected_binding=b1)
+            self.assertTrue(tx.lead_release(ws, force=True))
+
+    def test_deleted_lease_without_release_still_raises(self):
+        ws = tempfile.mkdtemp()
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, "ldb-" + "1" * 32)
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        (Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name).unlink()
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            with self.assertRaises(ValueError):
+                tx.lead_claim("lead-s2", "h", 1, ws, "ldb-" + "2" * 32)
+
+    def test_stale_takeover_by_other_binding_bumps_generation(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        b2 = "ldb-" + "2" * 32
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+        # age the lease so a foreign takeover is allowed
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        p = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name
+        rec = json.loads(p.read_text())
+        rec["heartbeat_ts"] = 0
+        p.write_text(json.dumps(rec))
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            fence = tx.lead_claim("lead-s2", "h", 1, ws, b2, stale_secs=1)
+            self.assertEqual(fence, 2)
+            self.assertEqual(tx.lead_read(ws)["generation"], 2)  # fresh occupancy
+        # same-binding same-session re-claim keeps its generation
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s2", "h", 1, ws, b2)
+            self.assertEqual(tx.lead_read(ws)["generation"], 2)
+
+    def test_lead_release_refuses_foreign_registry_occupancy(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        b2 = "ldb-" + "2" * 32
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+        # B2 takes over the stale lease, then B2's lease file is deleted
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        p = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name
+        rec = json.loads(p.read_text())
+        rec["heartbeat_ts"] = 0
+        p.write_text(json.dumps(rec))
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s2", "h", 1, ws, b2, stale_secs=1)
+        p.unlink()
+        # releasing B1 must not clear B2's registry occupancy, force or not
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            with self.assertRaises(ValueError):
+                tx.lead_release(ws, expected_binding=b1)
+            with self.assertRaises(ValueError):
+                tx.lead_release(ws, expected_binding=b1, force=True)
+            # the occupant itself may still release
+            self.assertFalse(tx.lead_release(ws, expected_binding=b2))
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertIsNone(entry["binding_id"])
+
+    def test_registry_rejects_malformed_lead_ws(self):
+        ws = tempfile.mkdtemp()
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, "ldb-" + "1" * 32)
+        reg = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "bindings.json"
+        data = json.loads(reg.read_text())
+        data["repo"]["lead_ws"] = {"zz": {"generation": 0}}
+        reg.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            with coordination.owner_transaction(
+                self.rd, canonical_id="canonical", expected_slug="repo"
+            ):
+                pass
+
 
 class AttemptTests(unittest.TestCase):
     def test_latest_attempt_rejects_old_completion_and_review(self):
