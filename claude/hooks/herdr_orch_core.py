@@ -2162,6 +2162,10 @@ def _main(argv=None) -> int:
     er.add_argument("--reviewer-session", default=None)
     ee = add("emit-envelope", "--json", fenced=True)
     ee.add_argument("--binding", required=True)
+    ie = add("integrate-envelope", fenced=True)
+    ie.add_argument("--binding", required=True)
+    ie.add_argument("--base-sha", default=None)
+    ie.add_argument("--head-sha", default=None)
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
@@ -2644,6 +2648,82 @@ def _main(argv=None) -> int:
             _require(contained(out, state_root()), "escapes state root")
             create_payload_dir(out.parent)
             write_json_atomic(out, rec)
+        return 0
+    if ns.cmd == "integrate-envelope":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+        rd = repo_dir(ns.repo_slug)
+        # owner_transaction serializes integration: one accept at a time (R10).
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(tx.current.get("control_tier", "launcher") == "launcher",
+                     "only a launcher owner integrates envelopes")
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(rec_b["status"] == "claimed",
+                     "binding is not claimed (already integrated or revoked)")
+            env = envelope.read_envelope(rd, ns.binding)
+            _require(env is not None, "no return envelope for this binding")
+            _require(env["task_id"] == rec_b["task_id"],
+                     "envelope task does not match the binding")
+            # A still-claimed binding superseded on its workspace must not
+            # integrate: a live lease naming another binding wins. An absent
+            # lease is normal (the lead exited after emitting); an unreadable
+            # one fails closed.
+            try:
+                lease = tx.lead_read(rec_b["workspace_root"])
+            except ValueError:
+                _require(False, "workspace lease is unreadable")
+            _require(lease is None or lease.get("binding_id") == ns.binding,
+                     "workspace lease supersedes this binding")
+            summary = env["summary"]
+            if summary["outcome"] == "pr_ready":
+                _require(isinstance(ns.base_sha, str)
+                         and SHA40_RE.fullmatch(ns.base_sha),
+                         "integrating pr_ready requires --base-sha (live base observation)")
+                _require(isinstance(ns.head_sha, str)
+                         and SHA40_RE.fullmatch(ns.head_sha),
+                         "integrating pr_ready requires --head-sha (live branch head observation)")
+                pr = summary["pr"]
+                _require(pr["repo_id"] == rec_b["repo_id"],
+                         "envelope PR repository does not match the binding")
+                if summary["expected_base_sha"] != ns.base_sha:
+                    sys.stderr.write("[X] base moved since review; revalidate "
+                                     "(rebase + fresh review) before integrating\n")
+                    return 3
+                if pr["head_sha"] != ns.head_sha:
+                    sys.stderr.write("[X] branch head moved since review; a fresh "
+                                     "review at the new head is required\n")
+                    return 3
+                base = rd / "leads" / ns.binding
+                try:
+                    task = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.json"))
+                    review = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.review.json"))
+                except (OSError, ValueError):
+                    task, review = None, None
+                # Native grounding is mandatory at integrate too: a task record
+                # stripped of its worker rows must not fall back to the legacy-
+                # permissive branch inside attempt_matches/is_reviewed.
+                _require(latest_native_attempt(task, "implement") is not None
+                         and latest_native_attempt(task, "review") is not None,
+                         "integration requires recorded native attempts")
+                ap = pr["approval"]
+                _require(isinstance(review, dict)
+                         and is_reviewed(task, review, pr["head_sha"],
+                                         review.get("workspace_id"))
+                         and review.get("reviewer_session_id") == ap["reviewer_session_id"]
+                         and review.get("runtime") == ap["reviewer_runtime"],
+                         "approval is stale or does not match the review record")
+            write_json_atomic(
+                bindings.binding_path(rd, ns.binding),
+                dict(rec_b, status="completed", updated_ts=now_iso()),
+            )
+        print(json.dumps({
+            "binding_id": env["binding_id"],
+            "task_id": env["task_id"],
+            "outcome": summary["outcome"],
+            "sequence": env["sequence"],
+            "pr": summary["pr"],
+        }, separators=(",", ":")))
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
