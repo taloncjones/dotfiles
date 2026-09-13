@@ -2212,6 +2212,7 @@ def _main(argv=None) -> int:
     er.add_argument("--findings-ref", default=None)
     er.add_argument("--blocking-count", type=int, default=0)
     er.add_argument("--reviewer-session", default=None)
+    er.add_argument("--reviewed-base-sha", default=None)
     ee = add("emit-envelope", "--json", fenced=True)
     ee.add_argument("--binding", required=True)
     ie = add("integrate-envelope", fenced=True)
@@ -2626,14 +2627,27 @@ def _main(argv=None) -> int:
                         _require(isinstance(task, dict)
                                  and task.get("review_head_sha") == done["reviewed_head_sha"],
                                  "review emit must name the dispatched review head")
-                        # Bind the approval to its base: record the dispatched base
-                        # so a later base-swap on the task record cannot let this
-                        # verdict integrate against a different base (Fix 4).
+                        # Bind the approval to its base. The base on the task
+                        # record is mutable state, not the reviewer's own
+                        # observation -- a base rewritten while the reviewer is
+                        # in flight would mislabel a genuine approval. The
+                        # reviewer instead asserts the base it reviewed, and
+                        # that assertion must equal the dispatched base at
+                        # emit time, closing the window where a mid-review
+                        # base rewrite could launder the approval onto a base
+                        # the reviewer never saw.
                         _require(isinstance(task.get("base_sha"), str)
                                  and SHA40_RE.fullmatch(task["base_sha"]),
                                  "binding-scoped review emits require the dispatched "
                                  "base on the task record")
-                        done["review_base_sha"] = task["base_sha"]
+                        _require(isinstance(ns.reviewed_base_sha, str)
+                                 and SHA40_RE.fullmatch(ns.reviewed_base_sha),
+                                 "a binding-scoped review emit requires "
+                                 "--reviewed-base-sha (the base the reviewer "
+                                 "reviewed)")
+                        _require(ns.reviewed_base_sha == task.get("base_sha"),
+                                 "reviewed base does not match the dispatched base")
+                        done["review_base_sha"] = ns.reviewed_base_sha
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
                 # Closes the overwrite-the-rejection path at one head: a binding-
