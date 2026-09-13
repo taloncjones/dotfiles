@@ -5109,6 +5109,40 @@ rec = envelope.read_teardown(rd, sys.argv[2])
 assert json.dumps([rec["envelope_sha256"], rec["journal_sha256"]], sort_keys=True) == sys.argv[3], rec
 assert rec["lease_released"] is True, rec
 ' "$LF_SLUG" "$bid" "$ORIG"
+
+# Digest-merge conflict refusal: envelope.json was pruned above, so the
+# manifest's retained envelope_sha256 is the only surviving record of it.
+# Recreating it with DIFFERENT valid content must refuse -- surviving
+# content must never silently overwrite a recorded digest.
+python3 -c '
+import json, sys
+path, bid = sys.argv[1], sys.argv[2]
+rec = {
+    "schema_version": 1,
+    "binding_id": bid,
+    "task_id": "td-x",
+    "attempt": None,
+    "fence": 1,
+    "sequence": 2,
+    "ts": "2026-01-01T00:00:00Z",
+    "summary": {"outcome": "blocked", "pr": None, "expected_base_sha": None,
+                "reason": "tampered", "follow_ups": []},
+}
+json.dump(rec, open(path, "w"))
+' "$LEAD_DIR/envelope.json" "$bid"
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>err; then exit 1; fi
+grep -q "surviving content conflicts" err
+rm -f "$LEAD_DIR/envelope.json"
+
+# Same refusal for a journal-key conflict: the review-log was also pruned;
+# recreating it with different bytes must refuse rather than silently
+# replace the retained journal digest for td-x.
+printf 'tampered review-log line\n' > "$LEAD_DIR/tasks/td-x.review-log.jsonl"
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>err; then exit 1; fi
+grep -q "surviving content conflicts" err
+rm -f "$LEAD_DIR/tasks/td-x.review-log.jsonl"
 SH
 
 check "teardown abandon path and descendant gate" <<'SH'
