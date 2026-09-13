@@ -401,3 +401,69 @@ def read_artifacts(rd, binding_id):
     if not valid_artifacts(rec) or rec["binding_id"] != binding_id:
         raise ValueError("invalid artifacts manifest")
     return rec
+
+
+TEARDOWN_MAX_RAW = 16384
+TEARDOWN_MODES = ("complete", "abandon")
+TEARDOWN_KEYS = frozenset((
+    "schema_version", "binding_id", "mode", "envelope_sha256",
+    "journal_sha256", "artifacts_present", "lease_released",
+    "generation", "ts",
+))
+
+
+def teardown_path(rd, binding_id):
+    if not isinstance(binding_id, str) or not _BINDING_ID_RE.fullmatch(binding_id):
+        raise ValueError("invalid binding id")
+    return Path(rd) / "leads" / binding_id / "teardown.json"
+
+
+def valid_teardown(rec):
+    """True when rec is a well-formed idempotent-teardown manifest.
+
+    journal_sha256 maps a task id (_SEGMENT_RE) to its review-log digest
+    (_SHA256_RE); it may be empty (no review journal ever written).
+    envelope_sha256 and generation are nullable: a binding torn down before
+    any envelope was emitted, or before its workspace was ever claimed,
+    carries no such value."""
+    if not isinstance(rec, dict) or set(rec) != TEARDOWN_KEYS:
+        return False
+    if type(rec["schema_version"]) is not int or rec["schema_version"] != 1:
+        return False
+    if not (isinstance(rec["binding_id"], str)
+            and _BINDING_ID_RE.fullmatch(rec["binding_id"])):
+        return False
+    if rec["mode"] not in TEARDOWN_MODES:
+        return False
+    env_sha = rec["envelope_sha256"]
+    if env_sha is not None and not (
+        isinstance(env_sha, str) and _SHA256_RE.fullmatch(env_sha)
+    ):
+        return False
+    journal = rec["journal_sha256"]
+    if not isinstance(journal, dict):
+        return False
+    for tid, digest in journal.items():
+        if not (isinstance(tid, str) and _SEGMENT_RE.fullmatch(tid)):
+            return False
+        if not (isinstance(digest, str) and _SHA256_RE.fullmatch(digest)):
+            return False
+    if type(rec["artifacts_present"]) is not bool:
+        return False
+    if type(rec["lease_released"]) is not bool:
+        return False
+    generation = rec["generation"]
+    if generation is not None and (type(generation) is not int or generation < 1):
+        return False
+    return _nonempty(rec["ts"])
+
+
+def read_teardown(rd, binding_id):
+    """The stored teardown manifest, None if absent; ValueError on corrupt."""
+    rec = _read_bounded(teardown_path(rd, binding_id), TEARDOWN_MAX_RAW,
+                        "teardown manifest")
+    if rec is None:
+        return None
+    if not valid_teardown(rec) or rec["binding_id"] != binding_id:
+        raise ValueError("invalid teardown manifest")
+    return rec

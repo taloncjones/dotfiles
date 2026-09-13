@@ -4955,5 +4955,325 @@ assert rec.get("status") != "claimed", rec
 ' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-mal.json"
 SH
 
+check "teardown completes: artifact gate, lease release, manifest, prune" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-complete.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+BASE40=$(printf 'b%.0s' $(seq 1 40))
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
+   --reviewer-session R1
+SRC=$(mktemp -d)
+printf 'handoff body' > "$SRC/handoff.md"
+printf 'plan body' > "$SRC/plan.md"
+CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+    --task-id td-x --file "$SRC/handoff.md" --file "$SRC/plan.md"
+CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "completed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+MAIN_SLUG="$LF_SLUG"
+MAIN_WS="$LF_WS"
+
+# A SECOND repo/binding, artifact-less but otherwise completed, exercises
+# the artifact gate. A distinct origin/slug (not just a distinct payload
+# root) avoids colliding with the main fixture's shared coordination
+# registry (bindings.json, lead leases are keyed by repo slug only).
+lead_fixture https://example.com/repo-td-complete-noart.git
+f2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L2 --host h --pid 3)
+bid2=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L2 --fence "$f2" --task-id td-y \
+   --workspace-root "$LF_WS" --expected-session S2)
+lf2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S2 --host h --pid 4 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid2")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S2 --fence "$lf2" --binding "$bid2" --task-id td-y \
+   --json '{"task_id":"td-y","workers":[{"role":"mech","launch_id":"L3","phase":"implement","runtime":"claude","workspace_id":"w3","pane_id":"pane3","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
+   --repo-slug "$LF_SLUG" --session S2 --fence "$lf2" --binding "$bid2" \
+   --json '{"task_id":"td-y","attempt":{"launch_id":"L3","phase":"implement","runtime":"claude","workspace_id":"w3","pane_id":"pane3","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --binding "$bid2"
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --binding "$bid2" 2>err; then exit 1; fi
+grep -q "no artifacts manifest" err
+LF_SLUG="$MAIN_SLUG"
+LF_WS="$MAIN_WS"
+
+# Main fixture: teardown succeeds outright (the descendant history above is
+# fully settled: workers[-1] is the review row and tasks/td-x.review.json
+# matches it exactly, so it never appears in the descendant list).
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid"
+
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+if [ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ]; then exit 1; fi
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] is None, entry
+' "$LF_SLUG" "$KEY"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+bid = sys.argv[2]
+env = envelope.read_envelope(rd, bid)
+rec = envelope.read_teardown(rd, bid)
+assert rec["mode"] == "complete", rec
+assert rec["lease_released"] is True, rec
+assert rec["envelope_sha256"] == envelope.envelope_digest(env), rec
+' "$LF_SLUG" "$bid"
+
+# Re-run: exit 0, lease_released STILL true.
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+rec = envelope.read_teardown(rd, sys.argv[2])
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bid"
+
+# Tamper an artifact store file's bytes: re-run fails on the digest gate.
+ART="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/handoff.md"
+cp "$ART" "$ART.orig"
+printf 'TAMPERED' > "$ART"
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>err; then exit 1; fi
+grep -q "does not match its digest" err
+cp "$ART.orig" "$ART"
+
+# --prune: envelope.json and the review-log journal are gone; the
+# consumption record, artifacts store, and teardown manifest survive.
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --prune
+LEAD_DIR="$root/herdr-orch/$LF_SLUG/leads/$bid"
+[ ! -e "$LEAD_DIR/envelope.json" ] || exit 1
+[ ! -e "$LEAD_DIR/tasks/td-x.review-log.jsonl" ] || exit 1
+[ -e "$LEAD_DIR/envelope.consumed.json" ] || exit 1
+[ -e "$LEAD_DIR/artifacts/handoff.md" ] || exit 1
+[ -e "$LEAD_DIR/teardown.json" ] || exit 1
+
+# Re-run AFTER prune: exit 0, and the manifest still carries the ORIGINAL
+# envelope_sha256 and journal digests (a merge, never an overwrite).
+ORIG=$(CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+rec = envelope.read_teardown(rd, sys.argv[2])
+print(json.dumps([rec["envelope_sha256"], rec["journal_sha256"]], sort_keys=True))
+' "$LF_SLUG" "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+rec = envelope.read_teardown(rd, sys.argv[2])
+assert json.dumps([rec["envelope_sha256"], rec["journal_sha256"]], sort_keys=True) == sys.argv[3], rec
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bid" "$ORIG"
+SH
+
+check "teardown abandon path and descendant gate" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-abandon.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+
+# No .done.json for the latest (implement) row: outstanding, named by pane.
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>err; then exit 1; fi
+grep -q "outstanding descendants" err
+grep -q "pane1" err
+
+# Tamper the task record (direct file write) to hold a worker row with only
+# {"phase": "implement"}: missing the native identity tuple -> "<unreadable>".
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json"
+cp "$TASK" "$TASK.orig"
+python3 -c '
+import json, sys
+path = sys.argv[1]
+task = json.load(open(path))
+task["workers"].append({"phase": "implement"})
+json.dump(task, open(path, "w"))
+' "$TASK"
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>err; then exit 1; fi
+grep -q "<unreadable>" err
+cp "$TASK.orig" "$TASK"
+
+# Restored record plus --descendants-terminated: teardown succeeds.
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon --descendants-terminated
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "revoked"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+rec = envelope.read_teardown(rd, sys.argv[2])
+assert rec["lease_released"] is True, rec
+assert rec["mode"] == "abandon", rec
+' "$LF_SLUG" "$bid"
+
+# A fresh claimed binding without --abandon fails outright.
+bid2=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-z \
+   --workspace-root "$LF_WS" --expected-session S2)
+lf2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S2 --host h --pid 3 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid2")
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid2" 2>err; then exit 1; fi
+grep -q "only with --abandon" err
+SH
+
+check "teardown leaves a successor's lease untouched" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-succ.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bidA=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-a \
+   --workspace-root "$LF_WS" --expected-session SA)
+lfA=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SA --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidA")
+bidB=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-b \
+   --workspace-root "$LF_WS" --expected-session SB)
+# B takes over A's workspace lease via a stale takeover; A's binding stays
+# "claimed" (nothing writes to it), so teardown of A needs --abandon.
+lfB=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SB --host h --pid 3 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0)
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidA" --abandon)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rec = json.loads(sys.stdin.read())
+assert rec["lease_released"] is False, rec
+'
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "revoked"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bidA.json"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+rec = envelope.read_teardown(rd, sys.argv[2])
+assert rec["lease_released"] is False, rec
+' "$LF_SLUG" "$bidA"
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+' "$LF_SLUG" "$KEY" "$bidB"
+SH
+
+check "missing-own teardown records the release it performed" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-missing.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+rm "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon --descendants-terminated)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rec = json.loads(sys.stdin.read())
+assert rec["lease_released"] is True, rec
+'
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rd = core.repo_dir(sys.argv[1])
+rec = envelope.read_teardown(rd, sys.argv[2])
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bid"
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] is None, entry
+' "$LF_SLUG" "$KEY"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

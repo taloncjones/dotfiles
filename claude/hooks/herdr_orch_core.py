@@ -2092,6 +2092,81 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     )
 
 
+DESCENDANT_PHASES = ("plan", "implement", "review")
+_SETTLE_SUFFIX = {"plan": ".done.json", "implement": ".done.json",
+                  "review": ".review.json"}
+
+
+def _attempt_settled(att, settle):
+    """The settlement record covers this exact attempt row.
+
+    Compares the FULL ATTEMPT_FIELDS tuple directly against the selected
+    row. Deliberately NOT attempt_matches: its native last-row-phase rule
+    reports a settled implement attempt as unmatched forever once a review
+    row follows it. No legacy field-subset rule here: an identity-less row
+    would settle vacuously, and binding-scoped write-task only accepts
+    native rows anyway -- the caller rejects non-native rows outright."""
+    if not isinstance(settle, dict):
+        return False
+    return all(
+        _nonempty_str(att.get(key)) and settle.get(key) == att[key]
+        for key in ATTEMPT_FIELDS
+    )
+
+
+def outstanding_descendants(rd, binding_id):
+    """Pane ids of dispatched attempts not yet settled by their phase record.
+
+    Only the FINAL worker row (workers[-1]) gates: appending a successor
+    dispatch row is the lead's own durable, binding-scoped assertion that
+    the prior pane's occupancy ended -- the same supersession model
+    redispatch already uses -- and it is what makes the shared
+    tasks/<t>.done.json (one file for plan and implement settlements)
+    sound: the single settlement record only ever needs to prove the
+    newest attempt. plan/implement rows settle through tasks/<t>.done.json,
+    review rows through tasks/<t>.review.json. Fail closed: an unreadable
+    or malformed task record, a worker row that is not a dict with a known
+    phase, or any row missing the native identity tuple (binding-scoped
+    dispatch history is native-only) marks the binding
+    unreadable-outstanding -- teardown must never treat unreadable state
+    as terminated."""
+    base = rd / "leads" / binding_id
+    panes = set()
+    for tf in payload_files(base / "tasks", "*.json"):
+        if tf.name.endswith((".done.json", ".review.json")):
+            continue
+        try:
+            task = json.loads(read_payload_text(tf))
+        except (OSError, ValueError):
+            return ["<unreadable>"]
+        if not _valid_task_shape(task):
+            return ["<unreadable>"]
+        tid = tf.name[: -len(".json")]
+        workers = task.get("workers") or []
+        for w in workers:
+            if (
+                not isinstance(w, dict)
+                or w.get("phase") not in DESCENDANT_PHASES
+                or "runtime" not in w
+                or not all(_nonempty_str(w.get(key)) for key in ATTEMPT_FIELDS)
+            ):
+                return ["<unreadable>"]
+        if not workers:
+            continue
+        att = workers[-1]
+        try:
+            settle = json.loads(read_payload_text(
+                base / "tasks" / f"{tid}{_SETTLE_SUFFIX[att['phase']]}"
+            ))
+        except FileNotFoundError:
+            settle = None
+        except (OSError, ValueError):
+            return ["<unreadable>"]
+        if not _attempt_settled(att, settle):
+            panes.add(att["pane_id"])
+    return sorted(panes)
+
+
 def _require(cond, msg) -> None:
     if not cond:
         sys.stderr.write(f"[X] {msg}\n")
@@ -2249,6 +2324,12 @@ def _main(argv=None) -> int:
     ea = add("emit-artifacts", "--task-id", fenced=True)
     ea.add_argument("--binding", required=True)
     ea.add_argument("--file", action="append", default=[], required=True)
+    tb = add("teardown-binding", fenced=True)
+    tb.add_argument("--binding", required=True)
+    tb.add_argument("--abandon", action="store_true")
+    tb.add_argument("--no-artifacts", action="store_true")
+    tb.add_argument("--descendants-terminated", action="store_true")
+    tb.add_argument("--prune", action="store_true")
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
@@ -3002,6 +3083,256 @@ def _main(argv=None) -> int:
             for existing in payload_files(store, "*"):
                 if existing.name not in keep:
                     existing.unlink()
+        return 0
+
+    if ns.cmd == "teardown-binding":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(tx.current.get("control_tier", "launcher") == "launcher",
+                     "only a launcher owner tears down a binding")
+            # 1. unknown binding refuses outright.
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            status = rec_b["status"]
+
+            # 2. mode/transition routing (read-only; the actual transition
+            # happens at step 9, after every validation below has passed).
+            will_revoke = False
+            mode = None
+            if status == "issued":
+                mode = "abandon"
+                will_revoke = True
+            elif status == "claimed":
+                _require(
+                    ns.abandon,
+                    "a claimed binding tears down only with --abandon (integrate first)",
+                )
+                mode = "abandon"
+                will_revoke = True
+            elif status == "completed":
+                mode = "complete"
+            # else "revoked": mode resolved below, from a prior manifest if any.
+
+            # 3. read manifest inputs -- no mutation past this point until
+            # step 7. A validation failure here must not free the workspace.
+            try:
+                prior = envelope.read_teardown(rd, ns.binding)
+            except ValueError:
+                _require(False, "teardown manifest is unreadable")
+            if mode is None:
+                mode = prior["mode"] if prior is not None else "abandon"
+            try:
+                env = envelope.read_envelope(rd, ns.binding)
+            except ValueError:
+                _require(False, "return envelope is unreadable")
+            env_digest = envelope.envelope_digest(env) if env is not None else None
+            try:
+                artifacts_manifest = envelope.read_artifacts(rd, ns.binding)
+            except ValueError:
+                _require(False, "artifacts manifest is unreadable")
+
+            journal = {}
+            base = rd / "leads" / ns.binding
+            for jf in payload_files(base / "tasks", "*.review-log.jsonl"):
+                tid = jf.name[: -len(".review-log.jsonl")]
+                try:
+                    journal[tid] = hashlib.sha256(read_payload_bytes(jf)).hexdigest()
+                except OSError:
+                    _require(False, "review journal is unreadable")
+
+            # Digest merge -- a re-run after --prune must not overwrite
+            # retained audit digests with None/{}. Conflicts are checked
+            # against the LIVE values before the fallback/merge below.
+            if prior is not None:
+                _require(
+                    env_digest is None or prior["envelope_sha256"] is None
+                    or env_digest == prior["envelope_sha256"],
+                    "surviving content conflicts with the recorded teardown digest",
+                )
+                for tid, digest in journal.items():
+                    prior_digest = prior["journal_sha256"].get(tid)
+                    _require(
+                        prior_digest is None or prior_digest == digest,
+                        "surviving content conflicts with the recorded teardown digest",
+                    )
+                env_digest = env_digest or prior["envelope_sha256"]
+                journal = {**prior["journal_sha256"], **journal}
+
+            entry_before = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
+                coordination.lead_lease_key(rec_b["workspace_root"])
+            )
+            generation = (
+                entry_before["generation"] if entry_before is not None
+                else (prior["generation"] if prior is not None else None)
+            )
+
+            out = envelope.teardown_path(rd, ns.binding)
+            prospective = {
+                "schema_version": 1,
+                "binding_id": ns.binding,
+                "mode": mode,
+                "envelope_sha256": env_digest,
+                "journal_sha256": journal,
+                "artifacts_present": artifacts_manifest is not None
+                                     or bool(prior and prior["artifacts_present"]),
+                "lease_released": False,
+                "generation": generation,
+                "ts": now_iso(),
+            }
+            _require(envelope.valid_teardown(prospective), "invalid teardown manifest")
+            _require(contained(out, state_root()), "escapes state root")
+
+            # 4. artifact gate: verified bytes, never a caller assertion.
+            if mode == "complete" and not ns.no_artifacts:
+                _require(
+                    artifacts_manifest is not None,
+                    "no artifacts manifest; run emit-artifacts or pass --no-artifacts",
+                )
+                store = envelope.artifact_store(rd, ns.binding)
+                for art in artifacts_manifest["artifacts"]:
+                    path = store / art["name"]
+                    ok = False
+                    data = b""
+                    try:
+                        with coordination.payload_parent(path) as (parent, name):
+                            fd = os.open(
+                                name,
+                                os.O_RDONLY | os.O_NONBLOCK
+                                | getattr(os, "O_NOFOLLOW", 0),
+                                dir_fd=parent,
+                            )
+                            try:
+                                st = os.fstat(fd)
+                                ok = (
+                                    stat.S_ISREG(st.st_mode)
+                                    and st.st_size <= envelope.ARTIFACT_MAX_FILE_BYTES
+                                )
+                                if ok:
+                                    chunks = []
+                                    total = 0
+                                    while True:
+                                        chunk = os.read(fd, 65536)
+                                        if not chunk:
+                                            break
+                                        total += len(chunk)
+                                        if total > envelope.ARTIFACT_MAX_FILE_BYTES:
+                                            ok = False
+                                            break
+                                        chunks.append(chunk)
+                                    data = b"".join(chunks)
+                            finally:
+                                os.close(fd)
+                    except (OSError, ValueError):
+                        ok = False
+                    _require(
+                        ok
+                        and len(data) == art["bytes"]
+                        and hashlib.sha256(data).hexdigest() == art["sha256"],
+                        f"recorded artifact {art['name']} is missing or "
+                        "does not match its digest",
+                    )
+
+            # 5. descendants gate.
+            desc = outstanding_descendants(rd, ns.binding)
+            _require(
+                not desc or ns.descendants_terminated,
+                "outstanding descendants " + ",".join(desc)
+                + "; terminate panes then pass --descendants-terminated",
+            )
+
+            # 6. lease classification -- still read-only.
+            try:
+                lease = tx.lead_read(rec_b["workspace_root"])
+                lease_corrupt = False
+            except ValueError:
+                lease = None
+                lease_corrupt = True
+            if lease is not None and not coordination._valid_lead_lease(lease):
+                lease_corrupt = True
+            entry = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
+                coordination.lead_lease_key(rec_b["workspace_root"])
+            )
+            lease_valid = lease is not None and not lease_corrupt
+
+            if (lease_valid and lease["binding_id"] != ns.binding) or (
+                entry is not None and entry["binding_id"] not in (None, ns.binding)
+            ):
+                # A successor occupies this workspace: never touch it.
+                release_action = None
+            elif entry is not None and entry["binding_id"] is None and lease is None:
+                # Already released.
+                release_action = None
+            elif (lease_valid and lease["binding_id"] == ns.binding) or (
+                lease is None and not lease_corrupt
+                and entry is not None and entry["binding_id"] == ns.binding
+            ):
+                release_action = "normal"
+            elif lease_corrupt:
+                _require(ns.abandon, "corrupt lease requires --abandon")
+                release_action = "force"
+            else:
+                # Never claimed at all: nothing to release.
+                release_action = None
+
+            # 7. release -- first mutation.
+            if release_action == "normal":
+                tx.lead_release(rec_b["workspace_root"], expected_binding=ns.binding)
+            elif release_action == "force":
+                tx.lead_release(
+                    rec_b["workspace_root"], expected_binding=ns.binding, force=True,
+                )
+
+            # 8. manifest write. lease_released is derived from the
+            # POST-release registry state, never from lead_release's return
+            # value (which reports only whether a FILE was removed -- false
+            # for a missing-own release that cleared occupancy).
+            entry_after = tx.bindings[tx.slug].get("lead_ws", {}).get(
+                coordination.lead_lease_key(rec_b["workspace_root"])
+            )
+            lease_released = (
+                (entry_after is not None and entry_after["binding_id"] is None)
+                or bool(prior and prior["lease_released"])
+            )
+            rec_t = {
+                "schema_version": 1,
+                "binding_id": ns.binding,
+                "mode": mode,
+                "envelope_sha256": env_digest,
+                "journal_sha256": journal,
+                "artifacts_present": artifacts_manifest is not None
+                                     or bool(prior and prior["artifacts_present"]),
+                "lease_released": lease_released,
+                "generation": generation,
+                "ts": now_iso(),
+            }
+            write_json_atomic(out, rec_t)
+
+            # 9. binding transition for issued/claimed.
+            if will_revoke:
+                write_json_atomic(
+                    bindings.binding_path(rd, ns.binding),
+                    dict(rec_b, status="revoked", updated_ts=now_iso()),
+                )
+
+            # 10. --prune, last: the binding is terminal in every path here.
+            if ns.prune:
+                try:
+                    envelope.envelope_path(rd, ns.binding).unlink()
+                except FileNotFoundError:
+                    pass
+                for jf in payload_files(base / "tasks", "*.review-log.jsonl"):
+                    try:
+                        jf.unlink()
+                    except FileNotFoundError:
+                        pass
+        print(json.dumps({
+            "binding_id": ns.binding,
+            "mode": mode,
+            "lease_released": rec_t["lease_released"],
+            "pruned": bool(ns.prune),
+        }, separators=(",", ":")))
         return 0
 
     if ns.cmd == "integrate-envelope":
