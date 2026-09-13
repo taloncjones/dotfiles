@@ -627,9 +627,8 @@ with c.owner_transaction(rd) as tx:
             tx.lead_claim("lead-s1", "h", 1, ws, b1)
         with coordination.owner_transaction(
             self.rd, canonical_id="canonical", expected_slug="repo"
-        ) as tx:
-            with self.assertRaises(ValueError):
-                tx.lead_release(ws, expected_binding="ldb-" + "9" * 32)
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_release(ws, expected_binding="ldb-" + "9" * 32)
         name = "lead-" + coordination.lead_lease_key(ws) + ".json"
         slug_dir = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo"
         (slug_dir / name).write_text("not json")
@@ -650,9 +649,8 @@ with c.owner_transaction(rd) as tx:
         (Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name).unlink()
         with coordination.owner_transaction(
             self.rd, canonical_id="canonical", expected_slug="repo"
-        ) as tx:
-            with self.assertRaises(ValueError):
-                tx.lead_claim("lead-s2", "h", 1, ws, "ldb-" + "2" * 32)
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_claim("lead-s2", "h", 1, ws, "ldb-" + "2" * 32)
 
     def test_stale_takeover_by_other_binding_bumps_generation(self):
         ws = tempfile.mkdtemp()
@@ -723,11 +721,10 @@ with c.owner_transaction(rd) as tx:
         data = json.loads(reg.read_text())
         data["repo"]["lead_ws"] = {"zz": {"generation": 0}}
         reg.write_text(json.dumps(data))
-        with self.assertRaises(ValueError):
-            with coordination.owner_transaction(
-                self.rd, canonical_id="canonical", expected_slug="repo"
-            ):
-                pass
+        with self.assertRaises(ValueError), coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ):
+            pass
 
 
 class AttemptTests(unittest.TestCase):

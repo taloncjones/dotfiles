@@ -319,7 +319,9 @@ def _read_bounded(path, cap, label):
     if not isinstance(rec, dict):
         # A file holding JSON null (or any non-object) must be corrupt, not
         # "absent": absence is signaled only by FileNotFoundError above.
-        raise ValueError(f"corrupt {label}")
+        # ValueError (not TypeError) matches every other corrupt-record
+        # signal in this reader and what callers catch.
+        raise ValueError(f"corrupt {label}")  # noqa: TRY004
     return rec
 
 

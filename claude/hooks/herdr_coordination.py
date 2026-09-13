@@ -706,14 +706,13 @@ class OwnerTransaction:
         seen = self.bindings[self.slug].get("lead_seen", [])
         ws_map = self.bindings[self.slug].get("lead_ws", {})
         entry = ws_map.get(key)
-        if old is None and key in seen:
-            if entry is None or entry["binding_id"] is not None:
-                # A lease that has existed must not silently restart: either
-                # it predates generation tracking, or it vanished without a
-                # recorded lead_release. Explicit recovery required.
-                raise ValueError(
-                    "initialized lead lease is missing; explicit recovery required"
-                )
+        if old is None and key in seen and (entry is None or entry["binding_id"] is not None):
+            # A lease that has existed must not silently restart: either
+            # it predates generation tracking, or it vanished without a
+            # recorded lead_release. Explicit recovery required.
+            raise ValueError(
+                "initialized lead lease is missing; explicit recovery required"
+            )
         if old is not None and not _valid_lead_lease(old):
             raise ValueError("corrupt lead lease; explicit recovery required")
         if (
