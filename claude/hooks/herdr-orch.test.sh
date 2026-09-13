@@ -2891,5 +2891,122 @@ test ! -e "$esc/tasks"
 test ! -e "$esc"
 SH
 
+check "envelope: each outcome round-trips valid_envelope; strict keys enforced" <<PY
+$LOAD
+import importlib.util as iu
+espec=iu.spec_from_file_location("env","claude/hooks/herdr_envelope.py")
+e=iu.module_from_spec(espec);espec.loader.exec_module(e)
+SHA="a"*40
+def base(outcome, pr=None, ebs=None, reason=None, fu=None):
+    return {"schema_version":1,"binding_id":"ldb-"+"0"*32,"task_id":"PROJ-1",
+        "attempt":{"launch_id":"L1","phase":"implement","runtime":"claude",
+                   "workspace_id":"w1","pane_id":"p1","source_head_sha":SHA},
+        "fence":1,"sequence":1,"ts":"2026-09-12T00:00:00Z",
+        "summary":{"outcome":outcome,"pr":pr,"expected_base_sha":ebs,
+                   "reason":reason,"follow_ups":fu if fu is not None else []}}
+PR={"repo_id":None,"number":7,"branch":"b","head_sha":SHA,
+    "approval":{"reviewer_session_id":"R1","reviewer_runtime":"claude",
+                "reviewed_head_sha":SHA}}
+assert e.valid_envelope(base("pr_ready", pr=PR, ebs=SHA))
+assert e.valid_envelope(base("blocked", reason="waiting on decision"))
+assert e.valid_envelope(base("failed", reason="suite red"))
+assert e.valid_envelope(base("cancelled"))
+assert e.valid_envelope(base("cancelled", reason="superseded"))
+# unused fields must be explicitly null, not absent and not populated
+bad=base("blocked", reason="r"); bad["summary"]["pr"]=PR
+assert not e.valid_envelope(bad)
+bad=base("pr_ready", pr=PR, ebs=SHA); del bad["summary"]["reason"]
+assert not e.valid_envelope(bad)
+bad=base("pr_ready", pr=PR, ebs=SHA); bad["summary"]["extra"]="x"
+assert not e.valid_envelope(bad)
+bad=base("pr_ready", pr=dict(PR, extra=1), ebs=SHA)
+assert not e.valid_envelope(bad)
+bad=base("pr_ready", pr=PR, ebs=SHA); bad["extra"]="x"
+assert not e.valid_envelope(bad)
+# identity / enum / shape failures
+assert not e.valid_envelope(base("shipped"))
+assert not e.valid_envelope(dict(base("cancelled"), schema_version=2))
+assert not e.valid_envelope(dict(base("cancelled"), binding_id="ldb-xyz"))
+assert not e.valid_envelope(dict(base("cancelled"), sequence=0))
+assert not e.valid_envelope(dict(base("cancelled"), fence=0))
+att=dict(base("cancelled")["attempt"], phase="review")
+assert not e.valid_envelope(dict(base("cancelled"), attempt=att))
+PY
+
+check "envelope: staleness, caps, and follow_up shape reject deterministically" <<PY
+$LOAD
+import importlib.util as iu, json
+espec=iu.spec_from_file_location("env","claude/hooks/herdr_envelope.py")
+e=iu.module_from_spec(espec);espec.loader.exec_module(e)
+SHA="a"*40; SHB="b"*40
+def base(outcome, pr=None, ebs=None, reason=None, fu=None):
+    return {"schema_version":1,"binding_id":"ldb-"+"0"*32,"task_id":"PROJ-1",
+        "attempt":{"launch_id":"L1","phase":"implement","runtime":"claude",
+                   "workspace_id":"w1","pane_id":"p1","source_head_sha":SHA},
+        "fence":1,"sequence":1,"ts":"2026-09-12T00:00:00Z",
+        "summary":{"outcome":outcome,"pr":pr,"expected_base_sha":ebs,
+                   "reason":reason,"follow_ups":fu if fu is not None else []}}
+stale={"repo_id":None,"number":7,"branch":"b","head_sha":SHA,
+       "approval":{"reviewer_session_id":"R1","reviewer_runtime":"claude",
+                   "reviewed_head_sha":SHB}}
+assert not e.valid_envelope(base("pr_ready", pr=stale, ebs=SHA))
+assert not e.valid_envelope(base("blocked", reason="x"*(e.ENVELOPE_MAX_STR+1)))
+fus=[{"kind":"todo","ref":"t%d"%i} for i in range(e.ENVELOPE_MAX_FOLLOW_UPS+1)]
+assert not e.valid_envelope(base("blocked", reason="r", fu=fus))
+assert not e.valid_envelope(base("blocked", reason="r", fu=[{"kind":"note","ref":"x"}]))
+assert not e.valid_envelope(base("blocked", reason="r", fu=[{"kind":"todo"}]))
+assert not e.valid_envelope(base("blocked", reason="r", fu=["free text"]))
+ok=base("blocked", reason="r", fu=[{"kind":"todo","ref":"td-1"},{"kind":"handoff","ref":"h-1"}])
+assert e.valid_envelope(ok)
+# free-text refs rejected: a reference is an identifier, never prose
+assert not e.valid_envelope(base("blocked", reason="r",
+    fu=[{"kind":"todo","ref":"a private conversation body"}]))
+assert not e.valid_envelope(base("blocked", reason="r",
+    fu=[{"kind":"todo","ref":"x"*201}]))
+# byte cap fires unconditionally: attempt strings have no per-leaf cap, so a
+# long launch_id pushes the record past ENVELOPE_MAX_BYTES while every other
+# check stays green
+over=base("blocked", reason="r")
+over["attempt"]=dict(over["attempt"], launch_id="L"*e.ENVELOPE_MAX_BYTES)
+assert not e.valid_envelope(over)
+assert len(json.dumps(base("cancelled"),separators=(",",":")).encode()) < e.ENVELOPE_MAX_BYTES
+PY
+
+check "envelope: path validation and fail-closed read" <<PY
+$LOAD
+import importlib.util as iu, json, pathlib
+espec=iu.spec_from_file_location("env","claude/hooks/herdr_envelope.py")
+e=iu.module_from_spec(espec);espec.loader.exec_module(e)
+rd=pathlib.Path(tempfile.mkdtemp())
+bid="ldb-"+"0"*32
+try:
+    e.envelope_path(rd,"ldb-short"); raise AssertionError("accepted bad id")
+except ValueError: pass
+assert e.read_envelope(rd,bid) is None
+p=e.envelope_path(rd,bid); p.parent.mkdir(parents=True)
+p.write_text("{not json")
+try:
+    e.read_envelope(rd,bid); raise AssertionError("read corrupt")
+except ValueError: pass
+p.write_text(json.dumps({"schema_version":1,"binding_id":bid}))
+try:
+    e.read_envelope(rd,bid); raise AssertionError("read invalid")
+except ValueError: pass
+SHA="a"*40
+rec={"schema_version":1,"binding_id":bid,"task_id":"PROJ-1",
+     "attempt":{"launch_id":"L1","phase":"implement","runtime":"claude",
+                "workspace_id":"w1","pane_id":"p1","source_head_sha":SHA},
+     "fence":1,"sequence":1,"ts":"t",
+     "summary":{"outcome":"cancelled","pr":None,"expected_base_sha":None,
+                "reason":None,"follow_ups":[]}}
+p.write_text(json.dumps(rec))
+assert e.read_envelope(rd,bid)["sequence"] == 1
+other="ldb-"+"1"*32
+q=e.envelope_path(rd,other); q.parent.mkdir(parents=True); q.write_text(json.dumps(rec))
+try:
+    e.read_envelope(rd,other); raise AssertionError("binding_id mismatch accepted")
+except ValueError: pass
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
