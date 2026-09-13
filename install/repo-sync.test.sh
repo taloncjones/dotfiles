@@ -445,5 +445,21 @@ run_sync --bogus-flag
 run_sync --require-branch
 [ "$RC" -eq 2 ] && pass "missing flag value exits 2" || fail "missing flag value exits 2 (rc=$RC)"
 
+# --- call-site wiring (static) ---
+# NB: the old code was `git -C "$DOTFILES" pull --ff-only`, which does NOT
+# contain the literal "git pull" -- match the pull verb itself.
+grep -q 'install/common/repo-sync.sh" --require-branch main' "$REPAIR" \
+    && pass "repair delegates step 1 to repo-sync with main policy" \
+    || fail "repair delegates step 1 to repo-sync with main policy"
+! grep -qE '(^|[^[:alnum:]_-])pull([^[:alnum:]_-]|$)' "$REPAIR" \
+    && pass "repair no longer pulls directly" \
+    || fail "repair no longer pulls directly"
+grep -qF '|| sync_status=$?' "$REPAIR" \
+    && pass "repair captures sync status set -e safely" \
+    || fail "repair captures sync status set -e safely"
+grep -q '"\$sync_status" -eq 30' "$REPAIR" \
+    && pass "repair stops on uncertain sync state" \
+    || fail "repair stops on uncertain sync state"
+
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
