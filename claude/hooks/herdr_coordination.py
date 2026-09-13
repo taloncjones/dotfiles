@@ -372,12 +372,18 @@ class OwnerTransaction:
             or any(
                 not isinstance(k, str)
                 or not isinstance(v, dict)
-                or set(v) != {"generation", "binding_id", "last_fence"}
+                or not ({"generation", "binding_id", "last_fence"}
+                        <= set(v)
+                        <= {"generation", "binding_id", "last_fence",
+                            "released_binding"})
                 or type(v["generation"]) is not int
                 or v["generation"] < 1
                 or not (v["binding_id"] is None
                         or (isinstance(v["binding_id"], str)
                             and _BINDING_ID.fullmatch(v["binding_id"])))
+                or not (v.get("released_binding") is None
+                        or (isinstance(v["released_binding"], str)
+                            and _BINDING_ID.fullmatch(v["released_binding"])))
                 or type(v["last_fence"]) is not int
                 or v["last_fence"] < 1
                 for k, v in item.get("lead_ws", {}).items()
@@ -897,13 +903,25 @@ class OwnerTransaction:
             finally:
                 os.close(parent)
         seen = self.bindings[self.slug].get("lead_seen", [])
+        # The released occupant rides the SAME atomic registry write as the
+        # release itself ("released_binding"): a caller's follow-up audit
+        # write can fail without losing binding-specific release evidence.
+        # The next lead_claim writes a fresh entry, clearing it.
+        released_binding = expected_binding
+        if released_binding is None:
+            released_binding = (
+                (old or {}).get("binding_id")
+                or (entry["binding_id"] if entry else None)
+                or (entry or {}).get("released_binding")
+            )
         updated = dict(
             self.bindings[self.slug],
             lead_seen=sorted({*seen, key}),
             lead_ws=dict(
                 ws_map,
                 **{key: {"generation": generation, "binding_id": None,
-                         "last_fence": last_fence}},
+                         "last_fence": last_fence,
+                         "released_binding": released_binding}},
             ),
         )
         self.bindings = dict(self.bindings, **{self.slug: updated})

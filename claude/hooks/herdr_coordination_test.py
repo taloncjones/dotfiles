@@ -607,8 +607,10 @@ with c.owner_transaction(rd) as tx:
             self.assertTrue(tx.lead_release(ws, expected_binding=b1))
             self.assertIsNone(tx.lead_read(ws))
             entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            # the released occupant rides the same atomic registry write
             self.assertEqual(
-                entry, {"generation": 1, "binding_id": None, "last_fence": 1}
+                entry, {"generation": 1, "binding_id": None, "last_fence": 1,
+                        "released_binding": b1}
             )
             self.assertFalse(tx.lead_release(ws, expected_binding=b1))  # idempotent
         with coordination.owner_transaction(
@@ -617,6 +619,8 @@ with c.owner_transaction(rd) as tx:
             fence2 = tx.lead_claim("lead-s2", "h", 1, ws, b2)
             self.assertEqual(fence2, 2)  # fence chain continues past the release
             self.assertEqual(tx.lead_read(ws)["generation"], 2)  # fresh generation
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertNotIn("released_binding", entry)  # cleared by the claim
 
     def test_lead_release_refuses_wrong_binding_and_corrupt_needs_force(self):
         ws = tempfile.mkdtemp()

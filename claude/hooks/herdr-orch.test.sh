@@ -5983,5 +5983,128 @@ assert hashlib.sha256(data).hexdigest() == art["sha256"], art
 ' "$LF_SLUG" "$bid"
 SH
 
+check "teardown retry recovers from the registry when every post-release write fails" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-atomic.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+# crash at the FIRST write after lead_release (the receipt): the release
+# evidence must already be durable, riding the registry write itself.
+CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$f" <<'EOF'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+slug, bid, f = sys.argv[1:4]
+rd = core.repo_dir(slug)
+orig_wja = core.write_json_atomic
+def boom(path, data):
+    raise OSError("simulated crash on any post-release payload write")
+core.write_json_atomic = boom
+rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
+                "--fence", f, "--binding", bid, "--abandon",
+                "--descendants-terminated"])
+core.write_json_atomic = orig_wja
+assert rc == 2, rc
+# neither the receipt nor the manifest landed
+assert envelope.read_release(rd, bid) is None
+assert envelope.read_teardown(rd, bid) is None
+EOF
+python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+key = coordination.lead_lease_key(os.path.realpath(sys.argv[2]))
+entry = data[sys.argv[1]]["lead_ws"][key]
+assert entry["binding_id"] is None, entry
+assert entry["released_binding"] == sys.argv[3], entry
+assert entry["generation"] == 1, entry
+' "$LF_SLUG" "$LF_WS" "$bid"
+# retry: audit fields recover from the atomic registry evidence alone
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
+   --abandon --descendants-terminated
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rec = envelope.read_teardown(core.repo_dir(sys.argv[1]), sys.argv[2])
+assert rec["generation"] == 1, rec
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bid"
+SH
+
+check "reconcile release evidence survives a failed receipt write" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rl-atomic.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["heartbeat_ts"] = 0
+json.dump(rec, open(path, "w"))
+' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+f2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L2 --host h --pid 3 --stale-secs 0)
+# reconcile --apply with the receipt write failing: the release itself is
+# atomic with its released_binding evidence in the registry.
+CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$f2" <<'EOF'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+slug, f2 = sys.argv[1:3]
+orig_wja = core.write_json_atomic
+def boom(path, data):
+    if str(path).endswith("release.json"):
+        raise OSError("simulated crash on the receipt write")
+    return orig_wja(path, data)
+core.write_json_atomic = boom
+rc = core.main(["reconcile-leads", "--repo-slug", slug, "--session", "L2",
+                "--fence", f2, "--apply"])
+core.write_json_atomic = orig_wja
+assert rc == 2, rc
+EOF
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] is None, entry
+assert entry["released_binding"] == sys.argv[3], entry
+' "$LF_SLUG" "$KEY" "$bid"
+# a later teardown of the reconcile-released binding records its fields
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --binding "$bid"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rec = envelope.read_teardown(core.repo_dir(sys.argv[1]), sys.argv[2])
+assert rec["generation"] == 1, rec
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bid"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

@@ -3234,11 +3234,20 @@ def _main(argv=None) -> int:
             )
             if entry_before is not None and entry_before["binding_id"] == ns.binding:
                 generation = entry_before["generation"]
+            elif (
+                entry_before is not None
+                and entry_before["binding_id"] is None
+                and entry_before.get("released_binding") == ns.binding
+            ):
+                # The registry's own atomic release evidence: written in the
+                # same bindings.json update as the release, so no follow-up
+                # write failure can lose it.
+                generation = entry_before["generation"]
             elif prior is not None:
                 generation = prior["generation"]
             elif receipt is not None:
-                # The durable receipt written alongside this binding's own
-                # release: the retry path when the release landed but the
+                # The convenience receipt written after this binding's own
+                # release: a retry path when the release landed but the
                 # manifest publication then failed.
                 generation = receipt["generation"]
             else:
@@ -3387,12 +3396,16 @@ def _main(argv=None) -> int:
             # POST-release registry state, never from lead_release's return
             # value (which reports only whether a FILE was removed -- false
             # for a missing-own release that cleared occupancy). It counts
-            # only a release THIS run performed for ns.binding, a prior
-            # manifest's recorded release, or this binding's own release
-            # receipt: a cleared occupancy left behind by another binding's
-            # release is not this binding's evidence.
+            # only a release THIS run performed for ns.binding, the
+            # registry's atomic released_binding evidence naming ns.binding,
+            # a prior manifest's recorded release, or this binding's own
+            # release receipt: a cleared occupancy left behind by another
+            # binding's release is not this binding's evidence.
             lease_released = (
                 released_now
+                or (entry_after is not None
+                    and entry_after["binding_id"] is None
+                    and entry_after.get("released_binding") == ns.binding)
                 or bool(prior and prior["lease_released"])
                 or receipt is not None
             )
