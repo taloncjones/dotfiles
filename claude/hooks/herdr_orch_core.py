@@ -2918,6 +2918,16 @@ def _main(argv=None) -> int:
                          "workspace lease is malformed")
             _require(lease is None or lease.get("binding_id") == ns.binding,
                      "workspace lease supersedes this binding")
+            # The lease file alone is not proof of occupancy: deleting a
+            # successor's lease must not re-enable a predecessor's claimed
+            # binding. The registry's lead_ws entry survives file deletion
+            # and durably names the current occupant.
+            ws_entry = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
+                coordination.lead_lease_key(rec_b["workspace_root"])
+            )
+            _require(ws_entry is not None
+                     and ws_entry["binding_id"] == ns.binding,
+                     "workspace occupancy superseded this binding")
             summary = env["summary"]
             base = rd / "leads" / ns.binding
             try:
