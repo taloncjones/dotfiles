@@ -88,15 +88,21 @@ plugins=(
     zsh-autosuggestions
 )
 
-# Rebuild the completion dump if it's older than 24h, otherwise reuse the cache
+# Rebuild the completion dump if it's older than 24h, otherwise reuse the cache.
+# Anonymous function with emulate -L: on `reload` (re-sourcing after plugins ran)
+# the shell can have bareglobqual unset, which turns a bare (N.mh+24) qualifier
+# into a hard "no matches found" error; local zsh emulation restores defaults.
 autoload -Uz compinit
-_zcompdump_stale=(~/.zcompdump(N.mh+24))
-if (( ${#_zcompdump_stale} )); then
-  compinit
-else
-  compinit -C
-fi
-unset _zcompdump_stale
+() {
+  emulate -L zsh
+  local -a stale
+  stale=( ~/.zcompdump(N.mh+24) )
+  if (( ${#stale} )); then
+    compinit
+  else
+    compinit -C
+  fi
+}
 
 source $ZSH/oh-my-zsh.sh
 
