@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_runtime
 import herdr_bindings as bindings
 import herdr_coordination as coordination
+import herdr_envelope as envelope
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
 from workflow_context import account_scope, atomic_json_at, repository_context
@@ -1825,6 +1826,45 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
 ATTEMPT_FIELDS = ("launch_id", "phase", "runtime", "workspace_id", "pane_id", "source_head_sha")
 
 
+def _no_dup_pairs(pairs):
+    """object_pairs_hook that rejects duplicate keys in a JSON object."""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("duplicate key")
+        d[k] = v
+    return d
+
+
+REVIEW_JOURNAL_KEYS = frozenset((
+    "reviewed_head_sha", "outcome", "reviewer_session_id",
+    "blocking_count", "findings_ref", "review_base_sha", "ts",
+))
+
+
+def _valid_review_journal_entry(entry) -> bool:
+    """A journal row must be exactly the recorded verdict shape; anything
+    else (missing/extra keys, wrong types) is treated as unreadable so a
+    corrupt row can never be silently skipped past."""
+    if not isinstance(entry, dict) or set(entry) != REVIEW_JOURNAL_KEYS:
+        return False
+    if not (_nonempty_str(entry["reviewed_head_sha"])
+            and SHA40_RE.fullmatch(entry["reviewed_head_sha"])):
+        return False
+    if not (_nonempty_str(entry["review_base_sha"])
+            and SHA40_RE.fullmatch(entry["review_base_sha"])):
+        return False
+    if not _nonempty_str(entry["outcome"]):
+        return False
+    if not _nonempty_str(entry["reviewer_session_id"]):
+        return False
+    if type(entry["blocking_count"]) is not int:
+        return False
+    if entry["findings_ref"] is not None and not isinstance(entry["findings_ref"], str):
+        return False
+    return _nonempty_str(entry["ts"])
+
+
 def attempt_matches(task, done, phase, workspace):
     """Native history requires the latest row; wholly legacy history stays readable."""
     workers = task.get("workers", [])
@@ -1872,6 +1912,54 @@ def has_native_attempt(task, phase) -> bool:
         return False
     worker = matching[-1]
     return "runtime" in worker and all(_nonempty_str(worker.get(key)) for key in ATTEMPT_FIELDS)
+
+
+def latest_native_attempt(task, phase):
+    """Last phase-matching worker row, only if it is a fully populated
+    native attempt. Unlike attempt_matches this does not require the row
+    to be the task's last row overall: an envelope grounds its implement
+    attempt while a later review attempt legitimately follows it. Returns
+    None (never a legacy fallback) when no such native row exists."""
+    if not isinstance(task, dict) or not isinstance(task.get("workers"), list):
+        return None
+    matching = [w for w in task["workers"]
+                if isinstance(w, dict) and w.get("phase") == phase]
+    if not matching:
+        return None
+    worker = matching[-1]
+    if "runtime" not in worker:
+        return None
+    if not all(_nonempty_str(worker.get(key)) for key in ATTEMPT_FIELDS):
+        return None
+    return worker
+
+
+def has_attempt_rows(task, phase):
+    """True when ANY phase-matching worker row exists, valid or not.
+
+    latest_native_attempt answers "is there a well-formed dispatched
+    attempt"; this answers "was anything ever dispatched" -- the
+    null-attempt envelope paths must use this one, so a malformed row
+    can never be laundered into "no attempt"."""
+    if not isinstance(task, dict) or not isinstance(task.get("workers"), list):
+        return False
+    return any(isinstance(w, dict) and w.get("phase") == phase
+               for w in task["workers"])
+
+
+def _valid_task_shape(task) -> bool:
+    """True when task parses to a dict whose workers is a list in which
+    every element is a dict carrying a phase key. Used at the null-attempt
+    gates alongside a separate file-presence flag, so a task file holding
+    JSON null (parsed value None despite the file existing), a non-dict, a
+    non-list workers, or any worker row missing a phase key all fail closed
+    as malformed rather than being read as "nothing dispatched"."""
+    if not isinstance(task, dict):
+        return False
+    workers = task.get("workers")
+    if not isinstance(workers, list):
+        return False
+    return all(isinstance(w, dict) and "phase" in w for w in workers)
 
 
 def is_completed(task, done, live_head_sha, workspace) -> bool:
@@ -2138,6 +2226,14 @@ def _main(argv=None) -> int:
         emitter.add_argument("--binding", default=None)
     er.add_argument("--findings-ref", default=None)
     er.add_argument("--blocking-count", type=int, default=0)
+    er.add_argument("--reviewer-session", default=None)
+    er.add_argument("--reviewed-base-sha", default=None)
+    ee = add("emit-envelope", "--json", fenced=True)
+    ee.add_argument("--binding", required=True)
+    ie = add("integrate-envelope", fenced=True)
+    ie.add_argument("--binding", required=True)
+    ie.add_argument("--base-sha", default=None)
+    ie.add_argument("--head-sha", default=None)
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
@@ -2232,8 +2328,41 @@ def _main(argv=None) -> int:
                 isinstance(rec, dict) and rec.get("task_id") == ns.task_id,
                 "task json must be a JSON object whose task_id equals --task-id",
             )
+            dest = base / "tasks" / f"{ns.task_id}.json"
+            if ns.binding is not None:
+                # Dispatch history is append-only for binding-scoped tasks so a
+                # superseded attempt can never be erased to revive an older
+                # envelope (the P1 revival scenario): every prior worker row
+                # must survive, in order, as a prefix of the new list. Other
+                # fields (status, base_sha, review_head_sha, ...) stay freely
+                # updatable -- base_sha mutation is a legitimate rebase-
+                # redispatch, its abuse closed separately by the approval-base
+                # binding check at emit/integrate.
+                try:
+                    prior_raw = read_payload_text(dest)
+                    prior_present = True
+                except FileNotFoundError:
+                    prior_raw = None
+                    prior_present = False
+                except OSError:
+                    _require(False, "task record is unreadable")
+                if prior_present:
+                    try:
+                        prior = json.loads(prior_raw)
+                    except ValueError:
+                        _require(False, "task record is unreadable")
+                    _require(_valid_task_shape(prior), "task record is malformed")
+                    prior_workers = prior.get("workers")
+                    new_workers = rec.get("workers")
+                    _require(
+                        isinstance(new_workers, list)
+                        and len(new_workers) >= len(prior_workers)
+                        and all(new_workers[i] == prior_workers[i]
+                                for i in range(len(prior_workers))),
+                        "binding-scoped dispatch history is append-only",
+                    )
             create_payload_dir(base / "tasks")
-            write_json_atomic(base / "tasks" / f"{ns.task_id}.json", rec)
+            write_json_atomic(dest, rec)
             return 0
     if ns.cmd == "write-index":
         with _fenced_scoped(ns) as (rd, base):
@@ -2337,6 +2466,16 @@ def _main(argv=None) -> int:
             )
             rec = bindings.read_binding(rd, ns.binding)
             _require(rec is not None, "unknown dispatch binding")
+            # completed is reachable only through the gated integrate-envelope
+            # path (expected-base/head/approval checks); this generic verb
+            # must not let a launcher shortcut those checks (herdr_bindings.
+            # TRANSITIONS still allows claimed -> completed structurally,
+            # integrate-envelope writes that transition directly under the
+            # same launcher fence).
+            _require(
+                ns.status != "completed",
+                "completed is reached only through integrate-envelope",
+            )
             _require(
                 bindings.can_transition(rec["status"], ns.status),
                 f"illegal binding transition {rec['status']} -> {ns.status}",
@@ -2490,6 +2629,13 @@ def _main(argv=None) -> int:
             }
             if ns.findings_ref:
                 done["findings_ref"] = ns.findings_ref
+            if getattr(ns, "binding", None) is not None:
+                _require(
+                    isinstance(ns.reviewer_session, str) and bool(ns.reviewer_session),
+                    "a binding-scoped review emit requires --reviewer-session",
+                )
+            if ns.reviewer_session:
+                done["reviewer_session_id"] = ns.reviewer_session
             # A distinct file so a review verdict never clobbers the impl
             # completion record -- the two coexist and are read independently.
             out = base / "tasks" / f"{ns.task_id}.review.json"
@@ -2521,11 +2667,362 @@ def _main(argv=None) -> int:
                 if getattr(ns, "binding", None) is not None:
                     _require(has_native_attempt(task, done["phase"]),
                              "binding-scoped emit requires a recorded native attempt")
+                    if ns.cmd == "emit-review":
+                        # Dispatched-head pinning: a binding-scoped review verdict
+                        # must name the currently dispatched review head, closing
+                        # the intermediate-head dance (approved@H2 then approved@H
+                        # while the task still dispatches H).
+                        _require(isinstance(task, dict)
+                                 and task.get("review_head_sha") == done["reviewed_head_sha"],
+                                 "review emit must name the dispatched review head")
+                        # Bind the approval to its base. The base on the task
+                        # record is mutable state, not the reviewer's own
+                        # observation -- a base rewritten while the reviewer is
+                        # in flight would mislabel a genuine approval. The
+                        # reviewer instead asserts the base it reviewed, and
+                        # that assertion must equal the dispatched base at
+                        # emit time, closing the window where a mid-review
+                        # base rewrite could launder the approval onto a base
+                        # the reviewer never saw.
+                        _require(isinstance(task.get("base_sha"), str)
+                                 and SHA40_RE.fullmatch(task["base_sha"]),
+                                 "binding-scoped review emits require the dispatched "
+                                 "base on the task record")
+                        _require(isinstance(ns.reviewed_base_sha, str)
+                                 and SHA40_RE.fullmatch(ns.reviewed_base_sha),
+                                 "a binding-scoped review emit requires "
+                                 "--reviewed-base-sha (the base the reviewer "
+                                 "reviewed)")
+                        _require(ns.reviewed_base_sha == task.get("base_sha"),
+                                 "reviewed base does not match the dispatched base")
+                        done["review_base_sha"] = ns.reviewed_base_sha
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
+                # Closes the overwrite-the-rejection path at one head: a binding-
+                # scoped review verdict at a given reviewed_head_sha cannot be
+                # replaced by a different outcome or a different reviewer session.
+                # Identity authentication of the reviewer session is a recorded
+                # follow-up. Identical re-emit stays allowed; a record at a
+                # different head may be overwritten freely.
+                if ns.cmd == "emit-review" and getattr(ns, "binding", None) is not None:
+                    try:
+                        prior = json.loads(read_payload_text(out))
+                    except (OSError, ValueError):
+                        prior = None
+                    if isinstance(prior, dict) and prior.get("reviewed_head_sha") == done["reviewed_head_sha"] and (
+                        prior.get("outcome") != done["outcome"]
+                        or prior.get("reviewer_session_id") != done.get("reviewer_session_id")
+                        or prior.get("blocking_count") != done.get("blocking_count")
+                        or prior.get("findings_ref") != done.get("findings_ref")
+                    ):
+                        _require(False,
+                                 "a same-revision review verdict cannot be replaced; "
+                                 "re-dispatch the review at a new head")
+                    # Per-head verdict journal: authoritative memory of every
+                    # verdict emitted at each reviewed head across re-dispatches.
+                    # The latest-record check above only remembers the last
+                    # verdict; this scan remembers all of them, so a rejection at
+                    # H cannot be laundered by dispatching H2 and returning to H.
+                    # Append-only and never pruned in this slice; 4.9 teardown
+                    # owns the journal's lifecycle.
+                    entry = {
+                        "reviewed_head_sha": done["reviewed_head_sha"],
+                        "outcome": done["outcome"],
+                        "reviewer_session_id": done.get("reviewer_session_id"),
+                        "blocking_count": done.get("blocking_count"),
+                        "findings_ref": done.get("findings_ref"),
+                        "review_base_sha": done["review_base_sha"],
+                        "ts": done["ts"],
+                    }
+                    gate_keys = ("outcome", "reviewer_session_id",
+                                 "blocking_count", "findings_ref",
+                                 "review_base_sha")
+                    journal = base / "tasks" / f"{ns.task_id}.review-log.jsonl"
+                    try:
+                        raw_journal = read_payload_text(journal)
+                    except FileNotFoundError:
+                        raw_journal = ""
+                    except (OSError, ValueError):
+                        _require(False, "review journal is unreadable")
+                    for line in raw_journal.splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            prior_entry = json.loads(line, object_pairs_hook=_no_dup_pairs)
+                        except ValueError:
+                            _require(False, "review journal is unreadable")
+                        _require(_valid_review_journal_entry(prior_entry),
+                                 "review journal is unreadable")
+                        if (prior_entry.get("reviewed_head_sha")
+                                == entry["reviewed_head_sha"]
+                                and any(prior_entry.get(k) != entry[k]
+                                        for k in gate_keys)):
+                            _require(False,
+                                     "a same-revision review verdict cannot be "
+                                     "replaced; re-dispatch the review at a new head")
+                    _require(_valid_review_journal_entry(entry),
+                             "review emit does not form a valid journal entry")
+                    append_payload(
+                        journal,
+                        (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
+                    )
                 write_json_atomic(out, done)
         else:
             write_json_atomic(out, done)
+        return 0
+    if ns.cmd == "emit-envelope":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+        _require(len(ns.json.encode()) <= envelope.ENVELOPE_MAX_RAW,
+                 "envelope json exceeds the raw size bound")
+        try:
+            supplied = json.loads(ns.json, object_pairs_hook=_no_dup_pairs)
+        except ValueError:
+            supplied = None
+        _require(
+            isinstance(supplied, dict)
+            and set(supplied) == {"task_id", "attempt", "sequence", "summary"},
+            "envelope json must supply exactly task_id, attempt, sequence, summary",
+        )
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd) as tx:
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(rec_b["status"] == "claimed", "binding is not claimed")
+            # lead_check covers session, fence, account_id, and pins the fence
+            # to this binding generation (herdr_coordination.py:738-755); the
+            # raw lease read stays only to feed the independence comparison.
+            _require(
+                tx.lead_check(ns.session, ns.fence, rec_b["workspace_root"], ns.binding),
+                "emitter is not the live lease holder for this binding",
+            )
+            try:
+                lease = tx.lead_read(rec_b["workspace_root"])
+            except ValueError:
+                _require(False, "workspace lease is unreadable")
+            rec = {
+                "schema_version": 1,
+                "binding_id": ns.binding,
+                "task_id": supplied["task_id"],
+                "attempt": supplied["attempt"],
+                "fence": ns.fence,
+                "sequence": supplied["sequence"],
+                "ts": now_iso(),
+                "summary": supplied["summary"],
+            }
+            _require(envelope.valid_envelope(rec),
+                     "invalid or oversized return envelope (REJECTED, not stripped)")
+            _require(rec["task_id"] == rec_b["task_id"],
+                     "envelope task does not match the binding")
+            base = rd / "leads" / ns.binding
+            try:
+                task_raw = read_payload_text(base / "tasks" / f"{rec['task_id']}.json")
+                task_present = True
+            except FileNotFoundError:
+                task_raw = None
+                task_present = False
+            except OSError:
+                _require(False, "task record is unreadable")
+            if task_present:
+                try:
+                    task = json.loads(task_raw)
+                except ValueError:
+                    _require(False, "task record is unreadable")
+            else:
+                task = None
+            # "Nothing dispatched" and "a dispatched attempt grounds this
+            # envelope" both need the task record to actually be shaped like
+            # a task: a file holding JSON null, a non-dict, a non-list
+            # workers, or a worker row missing phase all fail closed here
+            # rather than being read via latest_native_attempt/has_attempt_rows.
+            _require(not task_present or _valid_task_shape(task),
+                     "task record is malformed")
+            # A null attempt (schema guarantees outcome != pr_ready) is a
+            # terminal handback before any dispatched implement attempt: the
+            # lease, binding, and sequence checks still run, but there is no
+            # native attempt to ground against.
+            if rec["attempt"] is not None:
+                impl = latest_native_attempt(task, "implement")
+                _require(impl is not None,
+                         "envelope requires a recorded native implement attempt")
+                att = rec["attempt"]
+                _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
+                         "envelope attempt does not match the dispatched attempt")
+            else:
+                _require(not has_attempt_rows(task, "implement"),
+                         "a null-attempt envelope is only for tasks with no dispatched implement attempt")
+            if rec["summary"]["outcome"] == "pr_ready":
+                pr = rec["summary"]["pr"]
+                ap = pr["approval"]
+                _require(pr["repo_id"] == rec_b["repo_id"],
+                         "envelope PR repository does not match the binding")
+                _require(rec["summary"]["expected_base_sha"] == task.get("base_sha"),
+                         "expected base does not match the dispatched base")
+                review_att = latest_native_attempt(task, "review")
+                _require(review_att is not None,
+                         "pr_ready requires a recorded native review attempt")
+                _require(review_att["pane_id"] != impl["pane_id"],
+                         "review attempt must not run in the implement pane")
+                try:
+                    review = json.loads(read_payload_text(base / "tasks" / f"{rec['task_id']}.review.json"))
+                except (OSError, ValueError):
+                    review = None
+                _require(isinstance(review, dict)
+                         and is_reviewed(task, review, pr["head_sha"],
+                                         review.get("workspace_id")),
+                         "pr_ready requires a non-stale recorded approval")
+                _require(review.get("reviewer_session_id") == ap["reviewer_session_id"]
+                         and review.get("runtime") == ap["reviewer_runtime"],
+                         "approval identity does not match the review record")
+                _require(review.get("review_base_sha") == rec["summary"]["expected_base_sha"],
+                         "approval does not cover the expected base")
+                _require(ap["reviewer_session_id"] not in (
+                             lease.get("session_id") if lease else None,
+                             rec_b["expected_session_id"],
+                             rec_b["parent"]["session_id"]),
+                         "reviewer is not independent of the lead or launcher")
+            prior = envelope.read_envelope(rd, ns.binding)
+            _require(prior is None or rec["sequence"] > prior["sequence"],
+                     "duplicate or stale envelope sequence")
+            out = envelope.envelope_path(rd, ns.binding)
+            _require(contained(out, state_root()), "escapes state root")
+            create_payload_dir(out.parent)
+            write_json_atomic(out, rec)
+        return 0
+    if ns.cmd == "integrate-envelope":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+        rd = repo_dir(ns.repo_slug)
+        # owner_transaction serializes integration: one accept at a time (R10).
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(tx.current.get("control_tier", "launcher") == "launcher",
+                     "only a launcher owner integrates envelopes")
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(rec_b["status"] == "claimed",
+                     "binding is not claimed (already integrated or revoked)")
+            env = envelope.read_envelope(rd, ns.binding)
+            _require(env is not None, "no return envelope for this binding")
+            _require(env["task_id"] == rec_b["task_id"],
+                     "envelope task does not match the binding")
+            # A still-claimed binding superseded on its workspace must not
+            # integrate: a live lease naming another binding wins. An absent
+            # lease is normal (the lead exited after emitting); an unreadable
+            # one fails closed.
+            try:
+                lease = tx.lead_read(rec_b["workspace_root"])
+            except ValueError:
+                _require(False, "workspace lease is unreadable")
+            if lease is not None:
+                _require(coordination._valid_lead_lease(lease),
+                         "workspace lease is malformed")
+            _require(lease is None or lease.get("binding_id") == ns.binding,
+                     "workspace lease supersedes this binding")
+            summary = env["summary"]
+            base = rd / "leads" / ns.binding
+            try:
+                task_raw = read_payload_text(base / "tasks" / f"{env['task_id']}.json")
+                task_present = True
+            except FileNotFoundError:
+                task_raw = None
+                task_present = False
+            except OSError:
+                _require(False, "task record is unreadable")
+            if task_present:
+                try:
+                    task = json.loads(task_raw)
+                except ValueError:
+                    _require(False, "task record is unreadable")
+            else:
+                task = None
+            # Attempt grounding applies to EVERY outcome (defense-in-depth against
+            # a task record rewritten -- or a successor attempt recorded -- after
+            # emit): a non-null envelope attempt must still match the CURRENT
+            # latest native implement row; a null-attempt envelope requires the
+            # task (if any) to carry no native implement attempt. A stale blocked
+            # envelope for attempt I1 is refused once a successor I2 is recorded.
+            # See emit-envelope: only a genuinely absent task, or a well-formed
+            # shape with no attempt rows, counts as "nothing dispatched" here --
+            # and the same shape check grounds the non-null branch too, before
+            # latest_native_attempt is consulted.
+            _require(not task_present or _valid_task_shape(task),
+                     "task record is malformed")
+            impl = latest_native_attempt(task, "implement")
+            if env["attempt"] is not None:
+                _require(impl is not None
+                         and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
+                         "envelope attempt no longer matches the dispatched attempt")
+            else:
+                _require(not has_attempt_rows(task, "implement"),
+                         "a null-attempt envelope is only for tasks with no dispatched implement attempt")
+            if summary["outcome"] == "pr_ready":
+                _require(isinstance(ns.base_sha, str)
+                         and SHA40_RE.fullmatch(ns.base_sha),
+                         "integrating pr_ready requires --base-sha (live base observation)")
+                _require(isinstance(ns.head_sha, str)
+                         and SHA40_RE.fullmatch(ns.head_sha),
+                         "integrating pr_ready requires --head-sha (live branch head observation)")
+                pr = summary["pr"]
+                _require(pr["repo_id"] == rec_b["repo_id"],
+                         "envelope PR repository does not match the binding")
+                if summary["expected_base_sha"] != ns.base_sha:
+                    sys.stderr.write("[X] base moved since review; revalidate "
+                                     "(rebase + fresh review) before integrating\n")
+                    return 3
+                if pr["head_sha"] != ns.head_sha:
+                    sys.stderr.write("[X] branch head moved since review; a fresh "
+                                     "review at the new head is required\n")
+                    return 3
+                try:
+                    review = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.review.json"))
+                except (OSError, ValueError):
+                    review = None
+                _require(isinstance(review, dict),
+                         "approval record is missing or unreadable")
+                # Native grounding is mandatory at integrate too: a task record
+                # stripped of its worker rows must not fall back to the legacy-
+                # permissive branch inside attempt_matches/is_reviewed. The
+                # implement-attempt match is enforced above for every outcome;
+                # pr_ready adds the review attempt, staleness, and independence.
+                # Reviewer-session authentication against a real dispatch is a
+                # recorded follow-up.
+                review_att = latest_native_attempt(task, "review")
+                _require(impl is not None and review_att is not None,
+                         "integration requires recorded native attempts")
+                ap = pr["approval"]
+                _require(review_att["pane_id"] != impl["pane_id"],
+                         "review attempt must not run in the implement pane")
+                _require(summary["expected_base_sha"] == task.get("base_sha"),
+                         "expected base no longer matches the dispatched base")
+                _require(review.get("review_base_sha") == summary["expected_base_sha"],
+                         "approval does not cover the expected base")
+                _require(ap["reviewer_session_id"] not in (
+                             (lease or {}).get("session_id"),
+                             rec_b["expected_session_id"],
+                             rec_b["parent"]["session_id"]),
+                         "reviewer is not independent of the lead or launcher")
+                # Independence at emit excludes the ORIGINAL launcher; after a
+                # launcher rotation the reviewer could BE the current launcher,
+                # so the integrating session is excluded here.
+                _require(ap["reviewer_session_id"] != ns.session,
+                         "the integrating launcher cannot be the reviewer of record")
+                _require(isinstance(review, dict)
+                         and is_reviewed(task, review, pr["head_sha"],
+                                         review.get("workspace_id"))
+                         and review.get("reviewer_session_id") == ap["reviewer_session_id"]
+                         and review.get("runtime") == ap["reviewer_runtime"],
+                         "approval is stale or does not match the review record")
+            write_json_atomic(
+                bindings.binding_path(rd, ns.binding),
+                dict(rec_b, status="completed", updated_ts=now_iso()),
+            )
+        print(json.dumps({
+            "binding_id": env["binding_id"],
+            "task_id": env["task_id"],
+            "outcome": summary["outcome"],
+            "sequence": env["sequence"],
+            "pr": summary["pr"],
+        }, separators=(",", ":")))
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
