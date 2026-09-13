@@ -132,7 +132,9 @@ pre_status="$(git -C "$repo" status --porcelain)" || inspect_fail
 # and lets the loop set variables in the current shell. Entries are
 # characterized without dereferencing, so untracked symlinks (dangling,
 # retargeted, or pointing at directories) are inspected safely instead of
-# failing or aliasing on hash-object's dereferenced content.
+# failing or aliasing on hash-object's dereferenced content. hash-object
+# uses --no-filters so a raw-content mutation (e.g. line-ending rewrite
+# under core.autocrlf=true) cannot hash identically to the original.
 untracked_digest() {
     local f h out="" tmp rc
     tmp="$(mktemp)" || return 1
@@ -146,7 +148,7 @@ untracked_digest() {
         if [ -L "$repo/$f" ]; then
             h="link:$(readlink -- "$repo/$f")" || { rm -f "$tmp"; return 1; }
         elif [ -f "$repo/$f" ]; then
-            h="$(git -C "$repo" hash-object -- "$f")" || { rm -f "$tmp"; return 1; }
+            h="$(git -C "$repo" hash-object --no-filters -- "$f")" || { rm -f "$tmp"; return 1; }
         else
             h="special"
         fi

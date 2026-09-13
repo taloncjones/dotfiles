@@ -474,6 +474,24 @@ else
     fail "retargeted untracked symlink on failed merge exits 30, not 28 (rc=$RC)"
 fi
 
+# --- 27. raw line-ending mutation under core.autocrlf is not filtered away ---
+new_fixture crlfmut
+advance_origin crlfmut
+git_fix -C "$TMP/crlfmut/clone" config core.autocrlf true
+printf 'line one\nline two\n' >"$TMP/crlfmut/clone/note.txt"
+make_wrapper "$TMP/w-crlfmut" '
+case "$*" in *" merge "*)
+    repo=""; [ "$1" = "-C" ] && repo="$2"
+    printf "line one\r\nline two\r\n" >"$repo/note.txt"
+    exit 1 ;;
+esac'
+run_sync_wrapped "$TMP/w-crlfmut" "$TMP/crlfmut/clone"
+if [ "$RC" -eq 30 ] && grep -q 'uncertain state' "$TMP/out"; then
+    pass "raw CRLF rewrite under core.autocrlf exits 30, not 28"
+else
+    fail "raw CRLF rewrite under core.autocrlf exits 30, not 28 (rc=$RC)"
+fi
+
 # --- usage errors ---
 run_sync --bogus-flag
 [ "$RC" -eq 2 ] && pass "unknown flag exits 2" || fail "unknown flag exits 2 (rc=$RC)"
