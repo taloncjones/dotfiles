@@ -784,6 +784,71 @@ with c.owner_transaction(rd) as tx:
         ) as tx, self.assertRaises(ValueError):
             tx.lead_claim("lead-s1", "h", 1, ws, b1)
 
+    def test_fence_high_water_holds_against_replayed_lease(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        p = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 1)
+        saved = p.read_text()  # fence-1 lease
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 2)
+        # replay the fence-1 lease: the next claim must clear the registry
+        # high-water (last_fence 2), never reissue fence 2
+        p.write_text(saved)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 3)
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertEqual(entry["last_fence"], 3)
+        # replay again and RELEASE: registry counters never move backward
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 4)
+        p.write_text(saved)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_release(ws, expected_binding=b1)
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertEqual(entry["last_fence"], 4)
+            self.assertEqual(entry["generation"], 1)
+            self.assertEqual(entry["released_binding"], b1)
+
+    def test_lead_check_requires_registry_backing(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        b2 = "ldb-" + "2" * 32
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        p = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            f1 = tx.lead_claim("lead-s1", "h", 1, ws, b1)
+        saved = p.read_text()
+        rec = json.loads(p.read_text())
+        rec["heartbeat_ts"] = 0
+        p.write_text(json.dumps(rec))
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s2", "h", 1, ws, b2, stale_secs=1)
+        # replayed predecessor lease: file matches the caller's identity but
+        # the registry names the successor -- lead_check must refuse
+        p.write_text(saved)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertFalse(tx.lead_check("lead-s1", f1, ws, binding_id=b1))
+            self.assertFalse(tx.lead_check("lead-s1", f1, ws))
+
     def test_registry_rejects_malformed_lead_ws(self):
         ws = tempfile.mkdtemp()
         with coordination.owner_transaction(

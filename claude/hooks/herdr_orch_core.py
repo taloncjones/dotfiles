@@ -2201,6 +2201,20 @@ def outstanding_descendants(rd, binding_id):
     return sorted(panes)
 
 
+def _binding_is_fresh(rec_b, stale_secs):
+    """True when the binding record's own timestamp is younger than
+    stale_secs. An unparsable timestamp counts as old (fail toward
+    reclamation); a future timestamp counts as fresh (operator repairs)."""
+    ts = rec_b.get("updated_ts") or rec_b.get("created_ts")
+    try:
+        parsed = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except (TypeError, ValueError):
+        return False
+    return time.time() - parsed.timestamp() <= stale_secs
+
+
 def _require(cond, msg) -> None:
     if not cond:
         sys.stderr.write(f"[X] {msg}\n")
@@ -3060,12 +3074,13 @@ def _main(argv=None) -> int:
             for src, name in zip(ns.file, names):
                 _require(os.path.isabs(src), "artifact source must be absolute")
                 try:
-                    # O_NONBLOCK so a FIFO source cannot block open() while we
-                    # hold the global owner lock; the regular-file check runs
-                    # on the fd before any read.
-                    fd = os.open(src, os.O_RDONLY | os.O_NONBLOCK
-                                 | getattr(os, "O_NOFOLLOW", 0))
-                except OSError:
+                    # Component-wise no-follow (a symlinked PARENT must not
+                    # redirect which bytes get preserved), O_NONBLOCK so a
+                    # FIFO source cannot block open() while we hold the
+                    # global owner lock; the regular-file check runs on the
+                    # fd before any read.
+                    fd = envelope._open_nofollow(src)
+                except (OSError, ValueError):
                     _require(False, "artifact source is unreadable")
                 try:
                     st = os.fstat(fd)
@@ -3176,6 +3191,19 @@ def _main(argv=None) -> int:
                 mode = "complete"
             # else "revoked": mode resolved below, from a prior manifest if any.
 
+            # A consumption record marks an integration in flight (or one
+            # whose binding transition crashed): revoking now would strand
+            # the resumable integrate-envelope. Finish it instead.
+            try:
+                consumed_rec = envelope.read_consumed(rd, ns.binding)
+            except ValueError:
+                _require(False, "consumption record is unreadable")
+            _require(
+                not (will_revoke and consumed_rec is not None),
+                "binding has a consumption record; resume integrate-envelope "
+                "instead of --abandon",
+            )
+
             # 3. read manifest inputs -- no mutation past this point until
             # step 7. A validation failure here must not free the workspace.
             try:
@@ -3267,6 +3295,16 @@ def _main(argv=None) -> int:
                 "ts": now_iso(),
             }
             _require(envelope.valid_teardown(prospective), "invalid teardown manifest")
+            # Publish only what the bounded reader accepts, checked BEFORE
+            # any release or prune: a manifest the retry cannot re-read
+            # must never be the last copy of pruned audit digests.
+            # (lease_released may flip to true in the final record; "false"
+            # here is the longer spelling, so this size is the upper bound.)
+            serialized = (
+                json.dumps(prospective, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            _require(len(serialized) <= envelope.TEARDOWN_MAX_RAW,
+                     "teardown manifest exceeds the size bound")
             _require(contained(out, state_root()), "escapes state root")
 
             # 4. artifact gate: verified bytes, never a caller assertion.
@@ -3388,9 +3426,15 @@ def _main(argv=None) -> int:
             if release_action == "normal":
                 tx.lead_release(rec_b["workspace_root"], expected_binding=ns.binding)
             elif release_action == "force":
-                tx.lead_release(
-                    rec_b["workspace_root"], expected_binding=ns.binding, force=True,
-                )
+                try:
+                    tx.lead_release(
+                        rec_b["workspace_root"], expected_binding=ns.binding,
+                        force=True,
+                    )
+                except ValueError as exc:
+                    # e.g. a corrupt lease with no registry entry behind it:
+                    # a clean refusal, never a traceback.
+                    _require(False, f"cannot release corrupt lease: {exc}")
             entry_after = tx.bindings[tx.slug].get("lead_ws", {}).get(
                 coordination.lead_lease_key(rec_b["workspace_root"])
             )
@@ -3404,18 +3448,18 @@ def _main(argv=None) -> int:
             # POST-release registry state, never from lead_release's return
             # value (which reports only whether a FILE was removed -- false
             # for a missing-own release that cleared occupancy). It counts
-            # only a release THIS run performed for ns.binding, the
-            # registry's atomic released_binding evidence naming ns.binding,
-            # a prior manifest's recorded release, or this binding's own
-            # release receipt: a cleared occupancy left behind by another
-            # binding's release is not this binding's evidence.
+            # ONLY confirmed evidence: a release THIS run performed for
+            # ns.binding, the registry's atomic released_binding naming
+            # ns.binding, or a prior manifest's recorded release. The
+            # write-ahead receipt is intent, never proof -- it may recover
+            # the generation, but a receipt written before a release that
+            # never happened must not read as lease_released true.
             lease_released = (
                 released_now
                 or (entry_after is not None
                     and entry_after["binding_id"] is None
                     and entry_after.get("released_binding") == ns.binding)
                 or bool(prior and prior["lease_released"])
-                or receipt is not None
             )
             rec_t = {
                 "schema_version": 1,
@@ -3528,7 +3572,15 @@ def _main(argv=None) -> int:
                     state = "stale"
                 desc = outstanding_descendants(rd, bid)
                 action = "none"
-                if ns.apply and state != "live":
+                # A freshly issued, never-claimed binding is not abandoned
+                # state: its lead simply has not claimed yet. Age-gate on
+                # the record's own timestamp with the same threshold the
+                # lease heartbeats use before revoking it.
+                fresh_issued = (
+                    rec_b["status"] == "issued"
+                    and _binding_is_fresh(rec_b, ns.stale_secs)
+                )
+                if ns.apply and state != "live" and not fresh_issued:
                     revoked_now = False
                     if rec_b["status"] in ("issued", "claimed"):
                         write_json_atomic(
@@ -3638,100 +3690,107 @@ def _main(argv=None) -> int:
                          and consumed["envelope_sha256"] == digest,
                          "consumed record does not match the stored envelope")
             summary = env["summary"]
-            if not resumed:
-                base = rd / "leads" / ns.binding
+            # Live revalidation runs on EVERY integrate, resumed
+            # included: the digest pin above proves the envelope is
+            # the consumed one, not that the world it described still
+            # holds. Base/head observations, attempt grounding,
+            # approval staleness, and integrating-launcher
+            # independence are re-checked before completion either
+            # way; only the consumption record write is one-shot.
+            base = rd / "leads" / ns.binding
+            try:
+                task_raw = read_payload_text(base / "tasks" / f"{env['task_id']}.json")
+                task_present = True
+            except FileNotFoundError:
+                task_raw = None
+                task_present = False
+            except OSError:
+                _require(False, "task record is unreadable")
+            if task_present:
                 try:
-                    task_raw = read_payload_text(base / "tasks" / f"{env['task_id']}.json")
-                    task_present = True
-                except FileNotFoundError:
-                    task_raw = None
-                    task_present = False
-                except OSError:
+                    task = json.loads(task_raw)
+                except ValueError:
                     _require(False, "task record is unreadable")
-                if task_present:
-                    try:
-                        task = json.loads(task_raw)
-                    except ValueError:
-                        _require(False, "task record is unreadable")
-                else:
-                    task = None
-                # Attempt grounding applies to EVERY outcome (defense-in-depth against
-                # a task record rewritten -- or a successor attempt recorded -- after
-                # emit): a non-null envelope attempt must still match the CURRENT
-                # latest native implement row; a null-attempt envelope requires the
-                # task (if any) to carry no native implement attempt. A stale blocked
-                # envelope for attempt I1 is refused once a successor I2 is recorded.
-                # See emit-envelope: only a genuinely absent task, or a well-formed
-                # shape with no attempt rows, counts as "nothing dispatched" here --
-                # and the same shape check grounds the non-null branch too, before
-                # latest_native_attempt is consulted.
-                _require(not task_present or _valid_task_shape(task),
-                         "task record is malformed")
-                impl = latest_native_attempt(task, "implement")
-                if env["attempt"] is not None:
-                    _require(impl is not None
-                             and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
-                             "envelope attempt no longer matches the dispatched attempt")
-                else:
-                    _require(not has_attempt_rows(task, "implement"),
-                             "a null-attempt envelope is only for tasks with no dispatched implement attempt")
-                if summary["outcome"] == "pr_ready":
-                    _require(isinstance(ns.base_sha, str)
-                             and SHA40_RE.fullmatch(ns.base_sha),
-                             "integrating pr_ready requires --base-sha (live base observation)")
-                    _require(isinstance(ns.head_sha, str)
-                             and SHA40_RE.fullmatch(ns.head_sha),
-                             "integrating pr_ready requires --head-sha (live branch head observation)")
-                    pr = summary["pr"]
-                    _require(pr["repo_id"] == rec_b["repo_id"],
-                             "envelope PR repository does not match the binding")
-                    if summary["expected_base_sha"] != ns.base_sha:
-                        sys.stderr.write("[X] base moved since review; revalidate "
-                                         "(rebase + fresh review) before integrating\n")
-                        return 3
-                    if pr["head_sha"] != ns.head_sha:
-                        sys.stderr.write("[X] branch head moved since review; a fresh "
-                                         "review at the new head is required\n")
-                        return 3
-                    try:
-                        review = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.review.json"))
-                    except (OSError, ValueError):
-                        review = None
-                    _require(isinstance(review, dict),
-                             "approval record is missing or unreadable")
-                    # Native grounding is mandatory at integrate too: a task record
-                    # stripped of its worker rows must not fall back to the legacy-
-                    # permissive branch inside attempt_matches/is_reviewed. The
-                    # implement-attempt match is enforced above for every outcome;
-                    # pr_ready adds the review attempt, staleness, and independence.
-                    # Reviewer-session authentication against a real dispatch is a
-                    # recorded follow-up.
-                    review_att = latest_native_attempt(task, "review")
-                    _require(impl is not None and review_att is not None,
-                             "integration requires recorded native attempts")
-                    ap = pr["approval"]
-                    _require(review_att["pane_id"] != impl["pane_id"],
-                             "review attempt must not run in the implement pane")
-                    _require(summary["expected_base_sha"] == task.get("base_sha"),
-                             "expected base no longer matches the dispatched base")
-                    _require(review.get("review_base_sha") == summary["expected_base_sha"],
-                             "approval does not cover the expected base")
-                    _require(ap["reviewer_session_id"] not in (
-                                 (lease or {}).get("session_id"),
-                                 rec_b["expected_session_id"],
-                                 rec_b["parent"]["session_id"]),
-                             "reviewer is not independent of the lead or launcher")
-                    # Independence at emit excludes the ORIGINAL launcher; after a
-                    # launcher rotation the reviewer could BE the current launcher,
-                    # so the integrating session is excluded here.
-                    _require(ap["reviewer_session_id"] != ns.session,
-                             "the integrating launcher cannot be the reviewer of record")
-                    _require(isinstance(review, dict)
-                             and is_reviewed(task, review, pr["head_sha"],
-                                             review.get("workspace_id"))
-                             and review.get("reviewer_session_id") == ap["reviewer_session_id"]
-                             and review.get("runtime") == ap["reviewer_runtime"],
-                             "approval is stale or does not match the review record")
+            else:
+                task = None
+            # Attempt grounding applies to EVERY outcome (defense-in-depth against
+            # a task record rewritten -- or a successor attempt recorded -- after
+            # emit): a non-null envelope attempt must still match the CURRENT
+            # latest native implement row; a null-attempt envelope requires the
+            # task (if any) to carry no native implement attempt. A stale blocked
+            # envelope for attempt I1 is refused once a successor I2 is recorded.
+            # See emit-envelope: only a genuinely absent task, or a well-formed
+            # shape with no attempt rows, counts as "nothing dispatched" here --
+            # and the same shape check grounds the non-null branch too, before
+            # latest_native_attempt is consulted.
+            _require(not task_present or _valid_task_shape(task),
+                     "task record is malformed")
+            impl = latest_native_attempt(task, "implement")
+            if env["attempt"] is not None:
+                _require(impl is not None
+                         and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
+                         "envelope attempt no longer matches the dispatched attempt")
+            else:
+                _require(not has_attempt_rows(task, "implement"),
+                         "a null-attempt envelope is only for tasks with no dispatched implement attempt")
+            if summary["outcome"] == "pr_ready":
+                _require(isinstance(ns.base_sha, str)
+                         and SHA40_RE.fullmatch(ns.base_sha),
+                         "integrating pr_ready requires --base-sha (live base observation)")
+                _require(isinstance(ns.head_sha, str)
+                         and SHA40_RE.fullmatch(ns.head_sha),
+                         "integrating pr_ready requires --head-sha (live branch head observation)")
+                pr = summary["pr"]
+                _require(pr["repo_id"] == rec_b["repo_id"],
+                         "envelope PR repository does not match the binding")
+                if summary["expected_base_sha"] != ns.base_sha:
+                    sys.stderr.write("[X] base moved since review; revalidate "
+                                     "(rebase + fresh review) before integrating\n")
+                    return 3
+                if pr["head_sha"] != ns.head_sha:
+                    sys.stderr.write("[X] branch head moved since review; a fresh "
+                                     "review at the new head is required\n")
+                    return 3
+                try:
+                    review = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.review.json"))
+                except (OSError, ValueError):
+                    review = None
+                _require(isinstance(review, dict),
+                         "approval record is missing or unreadable")
+                # Native grounding is mandatory at integrate too: a task record
+                # stripped of its worker rows must not fall back to the legacy-
+                # permissive branch inside attempt_matches/is_reviewed. The
+                # implement-attempt match is enforced above for every outcome;
+                # pr_ready adds the review attempt, staleness, and independence.
+                # Reviewer-session authentication against a real dispatch is a
+                # recorded follow-up.
+                review_att = latest_native_attempt(task, "review")
+                _require(impl is not None and review_att is not None,
+                         "integration requires recorded native attempts")
+                ap = pr["approval"]
+                _require(review_att["pane_id"] != impl["pane_id"],
+                         "review attempt must not run in the implement pane")
+                _require(summary["expected_base_sha"] == task.get("base_sha"),
+                         "expected base no longer matches the dispatched base")
+                _require(review.get("review_base_sha") == summary["expected_base_sha"],
+                         "approval does not cover the expected base")
+                _require(ap["reviewer_session_id"] not in (
+                             (lease or {}).get("session_id"),
+                             rec_b["expected_session_id"],
+                             rec_b["parent"]["session_id"]),
+                         "reviewer is not independent of the lead or launcher")
+                # Independence at emit excludes the ORIGINAL launcher; after a
+                # launcher rotation the reviewer could BE the current launcher,
+                # so the integrating session is excluded here.
+                _require(ap["reviewer_session_id"] != ns.session,
+                         "the integrating launcher cannot be the reviewer of record")
+                _require(isinstance(review, dict)
+                         and is_reviewed(task, review, pr["head_sha"],
+                                         review.get("workspace_id"))
+                         and review.get("reviewer_session_id") == ap["reviewer_session_id"]
+                         and review.get("runtime") == ap["reviewer_runtime"],
+                         "approval is stale or does not match the review record")
+            if not resumed:
                 out = envelope.consumed_path(rd, ns.binding)
                 _require(contained(out, state_root()), "escapes state root")
                 write_json_atomic(out, {

@@ -751,10 +751,15 @@ class OwnerTransaction:
         ):
             return None
         if old:
-            fence = old["fence"] + 1
-            prior_generation = old.get("generation") or (
-                entry["generation"] if entry else 1
-            )
+            # High-water clamp against the durable registry: a replayed
+            # lease file carrying an older fence must never make the chain
+            # reissue a fence at or below the entry's recorded last_fence.
+            floor = entry["last_fence"] if entry else 0
+            fence = max(old["fence"], floor) + 1
+            prior_generation = max(
+                old.get("generation") or 0,
+                entry["generation"] if entry else 0,
+            ) or 1
             # A stale takeover by a DIFFERENT binding is a fresh occupancy of
             # the path and gets a fresh generation; the same binding
             # re-claiming its own workspace keeps its generation.
@@ -809,10 +814,13 @@ class OwnerTransaction:
             lease = self.lead_read(workspace_root)
         except ValueError:
             return False
+        if lease is None or not _valid_lead_lease(lease):
+            return False
+        entry = self.bindings[self.slug].get("lead_ws", {}).get(
+            lead_lease_key(workspace_root)
+        )
         return (
             type(fence) is int
-            and lease is not None
-            and _valid_lead_lease(lease)
             and lease["session_id"] == session
             and lease["fence"] == fence
             and lease.get("account_id") == self.account_id
@@ -820,6 +828,15 @@ class OwnerTransaction:
             # the same workspace must not authorize under a predecessor's
             # still-claimed binding.
             and (binding_id is None or lease["binding_id"] == binding_id)
+            # The durable registry outranks the lease file everywhere: the
+            # entry must name this lease's binding at this exact fence and
+            # generation, or a replayed predecessor lease could authorize
+            # lead-fenced writes into a superseded namespace.
+            and entry is not None
+            and entry["binding_id"] == lease["binding_id"]
+            and entry["last_fence"] == lease["fence"]
+            and (lease.get("generation") is None
+                 or entry["generation"] == lease["generation"])
         )
 
     def lead_refresh(self, session, fence, workspace_root):
@@ -879,10 +896,26 @@ class OwnerTransaction:
             # Registry occupancy outranks the (possibly deleted or corrupt)
             # lease file; force does not override another binding's occupancy.
             raise ValueError("workspace is occupied by another binding")
-        last_fence = old["fence"] if old else (entry["last_fence"] if entry else None)
-        generation = (old or {}).get("generation") or (
-            entry["generation"] if entry else None
-        )
+        # High-water: the registry entry's counters never move backward,
+        # even when the lease file being released is a replayed older copy.
+        fences = [
+            v
+            for v in (
+                old["fence"] if old else None,
+                entry["last_fence"] if entry else None,
+            )
+            if v is not None
+        ]
+        last_fence = max(fences) if fences else None
+        gens = [
+            v
+            for v in (
+                (old or {}).get("generation"),
+                entry["generation"] if entry else None,
+            )
+            if v is not None
+        ]
+        generation = max(gens) if gens else None
         if last_fence is None or generation is None:
             # No readable fence to resume from: a never-claimed workspace is a
             # no-op; anything else (pre-generation legacy, corrupt without
