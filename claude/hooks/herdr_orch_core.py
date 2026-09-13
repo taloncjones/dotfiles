@@ -1836,6 +1836,35 @@ def _no_dup_pairs(pairs):
     return d
 
 
+REVIEW_JOURNAL_KEYS = frozenset((
+    "reviewed_head_sha", "outcome", "reviewer_session_id",
+    "blocking_count", "findings_ref", "review_base_sha", "ts",
+))
+
+
+def _valid_review_journal_entry(entry) -> bool:
+    """A journal row must be exactly the recorded verdict shape; anything
+    else (missing/extra keys, wrong types) is treated as unreadable so a
+    corrupt row can never be silently skipped past."""
+    if not isinstance(entry, dict) or set(entry) != REVIEW_JOURNAL_KEYS:
+        return False
+    if not (_nonempty_str(entry["reviewed_head_sha"])
+            and SHA40_RE.fullmatch(entry["reviewed_head_sha"])):
+        return False
+    if not (_nonempty_str(entry["review_base_sha"])
+            and SHA40_RE.fullmatch(entry["review_base_sha"])):
+        return False
+    if not _nonempty_str(entry["outcome"]):
+        return False
+    if not _nonempty_str(entry["reviewer_session_id"]):
+        return False
+    if type(entry["blocking_count"]) is not int:
+        return False
+    if entry["findings_ref"] is not None and not isinstance(entry["findings_ref"], str):
+        return False
+    return _nonempty_str(entry["ts"])
+
+
 def attempt_matches(task, done, phase, workspace):
     """Native history requires the latest row; wholly legacy history stays readable."""
     workers = task.get("workers", [])
@@ -2657,11 +2686,12 @@ def _main(argv=None) -> int:
                         if not line.strip():
                             continue
                         try:
-                            prior_entry = json.loads(line)
+                            prior_entry = json.loads(line, object_pairs_hook=_no_dup_pairs)
                         except ValueError:
                             _require(False, "review journal is unreadable")
-                        if (isinstance(prior_entry, dict)
-                                and prior_entry.get("reviewed_head_sha")
+                        _require(_valid_review_journal_entry(prior_entry),
+                                 "review journal is unreadable")
+                        if (prior_entry.get("reviewed_head_sha")
                                 == entry["reviewed_head_sha"]
                                 and any(prior_entry.get(k) != entry[k]
                                         for k in gate_keys)):
@@ -2723,8 +2753,10 @@ def _main(argv=None) -> int:
             base = rd / "leads" / ns.binding
             try:
                 task = json.loads(read_payload_text(base / "tasks" / f"{rec['task_id']}.json"))
-            except (OSError, ValueError):
+            except FileNotFoundError:
                 task = None
+            except (OSError, ValueError):
+                _require(False, "task record is unreadable")
             # A null attempt (schema guarantees outcome != pr_ready) is a
             # terminal handback before any dispatched implement attempt: the
             # lease, binding, and sequence checks still run, but there is no
@@ -2737,6 +2769,9 @@ def _main(argv=None) -> int:
                 _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
                          "envelope attempt does not match the dispatched attempt")
             else:
+                _require(task is None or (isinstance(task, dict)
+                                           and isinstance(task.get("workers"), list)),
+                         "task record is malformed")
                 _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if rec["summary"]["outcome"] == "pr_ready":
@@ -2810,8 +2845,10 @@ def _main(argv=None) -> int:
             base = rd / "leads" / ns.binding
             try:
                 task = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.json"))
-            except (OSError, ValueError):
+            except FileNotFoundError:
                 task = None
+            except (OSError, ValueError):
+                _require(False, "task record is unreadable")
             # Attempt grounding applies to EVERY outcome (defense-in-depth against
             # a task record rewritten -- or a successor attempt recorded -- after
             # emit): a non-null envelope attempt must still match the CURRENT
@@ -2824,6 +2861,9 @@ def _main(argv=None) -> int:
                          and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
                          "envelope attempt no longer matches the dispatched attempt")
             else:
+                _require(task is None or (isinstance(task, dict)
+                                           and isinstance(task.get("workers"), list)),
+                         "task record is malformed")
                 _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if summary["outcome"] == "pr_ready":
@@ -2848,6 +2888,8 @@ def _main(argv=None) -> int:
                     review = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.review.json"))
                 except (OSError, ValueError):
                     review = None
+                _require(isinstance(review, dict),
+                         "approval record is missing or unreadable")
                 # Native grounding is mandatory at integrate too: a task record
                 # stripped of its worker rows must not fall back to the legacy-
                 # permissive branch inside attempt_matches/is_reviewed. The
