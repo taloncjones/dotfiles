@@ -54,13 +54,48 @@ The independent Claude half runs from `snapshot.claude_root` through native
 derive account choice from a temporary worktree or preserve an unrelated
 inherited account variable.
 
+Build the prompt per round type, mirroring the canonical policy's inputs.
+Complete round -- whole diff plus the rubric (fail loudly if the rubric
+heading is missing):
+
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-claude.XXXXXX")
-cat >"$PROMPT_FILE" <<EOF
-/code-review the frozen change against base $BASE. Report each actionable issue
+cat >"$PROMPT_FILE" <<'EOF'
+/code-review the frozen change against the base commit named below. Probe
+every failure class in the rubric appended below against this diff, then any
+further issues. Report each actionable issue as severity, file:line, failure
+scenario, and concrete fix. End with one verdict. Do not invoke co-review,
+another partner, or external actions.
+EOF
+printf '\nBase: %s\n\n' "$BASE" >>"$PROMPT_FILE"
+RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
+grep -q '^## Classes' "$RUBRIC" || { echo "rubric Classes heading missing" >&2; exit 2; }
+sed -n '/^## Classes/,$p' "$RUBRIC" >>"$PROMPT_FILE"
+uv run --no-project python "$RUNNER" run --runtime claude --role reviewer --risk normal \
+  --provisional --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$PROMPT_FILE"
+```
+
+Scoped round -- prior findings plus the fix diff only (`$PREV_HEAD` the
+previously reviewed head from the last posted marker, `$HEAD` this round's
+frozen committed head, `$FINDINGS_FILE` the prior round's findings table):
+
+```bash
+PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-claude.XXXXXX")
+cat >"$PROMPT_FILE" <<'EOF'
+Scoped re-review of the frozen change. For each prior finding listed below,
+return ADDRESSED or NOT-ADDRESSED against the frozen tree with one line of
+evidence. Then report any new actionable issue in the fix diff below ONLY,
 as severity, file:line, failure scenario, and concrete fix. End with one
 verdict. Do not invoke co-review, another partner, or external actions.
 EOF
+printf '\nPrior reviewed head: %s\nCurrent head: %s\n\nPrior findings:\n' \
+  "$PREV_HEAD" "$HEAD" >>"$PROMPT_FILE"
+test -s "$FINDINGS_FILE" || { echo "prior findings file missing or empty" >&2; exit 2; }
+cat "$FINDINGS_FILE" >>"$PROMPT_FILE" || { echo "appending findings failed" >&2; exit 2; }
+printf '\nFix diff:\n' >>"$PROMPT_FILE"
+git -C "$REPO" -c diff.external= diff --no-ext-diff --no-textconv \
+  "$PREV_HEAD..$HEAD" >>"$PROMPT_FILE" || { echo "fix diff failed" >&2; exit 2; }
 uv run --no-project python "$RUNNER" run --runtime claude --role reviewer --risk normal \
   --provisional --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"

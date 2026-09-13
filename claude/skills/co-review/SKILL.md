@@ -132,7 +132,8 @@ verdict. Do not invoke skills, partners, or external actions.
 EOF
 printf '\nPrior reviewed head: %s\nCurrent head: %s\n\nPrior findings:\n' \
   "$PREV_HEAD" "$HEAD" >>"$PROMPT_FILE"
-cat "$FINDINGS_FILE" >>"$PROMPT_FILE"
+test -s "$FINDINGS_FILE" || { echo "prior findings file missing or empty" >&2; exit 2; }
+cat "$FINDINGS_FILE" >>"$PROMPT_FILE" || { echo "appending findings failed" >&2; exit 2; }
 printf '\nFix diff:\n' >>"$PROMPT_FILE"
 git -C "$REPO" -c diff.external= diff --no-ext-diff --no-textconv \
   "$PREV_HEAD..$HEAD" >>"$PROMPT_FILE" || { echo "fix diff failed" >&2; exit 2; }
