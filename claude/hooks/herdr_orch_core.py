@@ -769,6 +769,37 @@ def create_payload_dir(path):
         pass
 
 
+def artifact_store_name(name, sha256):
+    """Store filename for one artifact: digest-prefixed (versioned) so a
+    re-emit that changes a name's content writes a NEW store file and the
+    prior manifest's referenced bytes are never replaced in place -- an
+    interruption at any point leaves the prior manifest fully consistent."""
+    return f"{sha256[:16]}-{name}"
+
+
+def _read_fd_capped(fd, cap):
+    """Read fd to EOF, refusing past cap bytes: a source that grows after
+    its fstat size check must not bypass the memory bound mid-read."""
+    chunks = []
+    size = 0
+    while True:
+        chunk = os.read(fd, min(65536, cap + 1 - size))
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > cap:
+            raise ValueError("source exceeds the size cap")
+        chunks.append(chunk)
+
+
+def _write_fd_all(fd, data):
+    """Write ALL of data: os.write may write short, and a short write
+    published as complete would store bytes disagreeing with their digest."""
+    offset = 0
+    while offset < len(data):
+        offset += os.write(fd, data[offset:])
+
+
 def append_payload(path, data):
     with coordination.payload_parent(path, create=True) as (parent, name):
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=parent)
@@ -2468,6 +2499,8 @@ def _main(argv=None) -> int:
             return 0
     if ns.cmd == "write-index":
         with _fenced_scoped(ns) as (rd, base):
+            if ns.binding is not None:
+                require_not_consumed(rd, ns.binding)
             _require(valid_workspace_id(ns.workspace), "invalid workspace")
             try:
                 rec = json.loads(ns.json)
@@ -3037,13 +3070,13 @@ def _main(argv=None) -> int:
                              "artifact source must be a regular file")
                     _require(st.st_size <= envelope.ARTIFACT_MAX_FILE_BYTES,
                              "artifact source exceeds the per-file bound")
-                    chunks = []
-                    while True:
-                        chunk = os.read(fd, 65536)
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-                    data = b"".join(chunks)
+                    try:
+                        data = _read_fd_capped(
+                            fd, envelope.ARTIFACT_MAX_FILE_BYTES
+                        )
+                    except ValueError:
+                        _require(False,
+                                 "artifact source exceeds the per-file bound")
                 finally:
                     os.close(fd)
                 _require(len(data) <= envelope.ARTIFACT_MAX_FILE_BYTES,
@@ -3064,29 +3097,53 @@ def _main(argv=None) -> int:
                 "ts": now_iso(),
             }
             _require(envelope.valid_artifacts(rec), "invalid artifacts manifest")
+            serialized = (
+                json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            _require(len(serialized) <= envelope.ARTIFACTS_MAX_RAW,
+                     "artifacts manifest exceeds the size bound")
             out = envelope.artifacts_path(rd, ns.binding)
             _require(contained(out, state_root()), "escapes state root")
-            # STAGE 2 -- write every file through an exclusive, unpredictable
-            # temp name (O_EXCL + O_NOFOLLOW: a planted symlink at a
-            # guessable temp path must fail, never truncate its target).
-            for name, data in staged:
-                tmp = store / f".tmp-{secrets.token_hex(8)}"
-                tfd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                              | getattr(os, "O_NOFOLLOW", 0), 0o600)
-                try:
-                    os.write(tfd, data)
-                    os.fsync(tfd)
-                finally:
-                    os.close(tfd)
-                os.replace(tmp, store / name)
-            # STAGE 3 -- publish the manifest, THEN drop obsolete store files
-            # (a crash before this leaves the prior manifest pointing at its
-            # own still-intact bytes plus new files it does not reference).
-            write_json_atomic(out, rec)
-            keep = {name for name, _ in staged}
-            for existing in payload_files(store, "*"):
-                if existing.name not in keep:
-                    existing.unlink()
+            # STAGE 2 -- write every file under its digest-prefixed
+            # (versioned) store name, descriptor-relative to ONE held
+            # no-follow store handle: swapping artifacts/ for a symlink
+            # mid-staging cannot redirect a single create/replace/unlink,
+            # and a name from the prior manifest is never overwritten in
+            # place (its bytes survive any interruption). Temp names are
+            # exclusive and unpredictable (O_EXCL + O_NOFOLLOW: a planted
+            # symlink at a guessable temp path must fail, never truncate
+            # its target) and are unlinked on any failure.
+            with coordination.payload_parent(store / ".anchor") as (sfd, _):
+                for (name, data), art in zip(staged, rec["artifacts"]):
+                    final = artifact_store_name(name, art["sha256"])
+                    tmp = f".tmp-{secrets.token_hex(8)}"
+                    tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                  | getattr(os, "O_NOFOLLOW", 0), 0o600,
+                                  dir_fd=sfd)
+                    try:
+                        try:
+                            _write_fd_all(tfd, data)
+                            os.fsync(tfd)
+                        finally:
+                            os.close(tfd)
+                        os.replace(tmp, final, src_dir_fd=sfd, dst_dir_fd=sfd)
+                    except BaseException:
+                        with contextlib.suppress(OSError):
+                            os.unlink(tmp, dir_fd=sfd)
+                        raise
+                # STAGE 3 -- publish the manifest, THEN drop store files it
+                # does not reference (a crash before this leaves the prior
+                # manifest pointing at its own still-intact bytes plus new
+                # files it does not reference; stray temps sweep here too).
+                write_json_atomic(out, rec)
+                keep = {
+                    artifact_store_name(a["name"], a["sha256"])
+                    for a in rec["artifacts"]
+                }
+                for existing in os.listdir(sfd):
+                    if existing not in keep:
+                        with contextlib.suppress(FileNotFoundError):
+                            os.unlink(existing, dir_fd=sfd)
         return 0
 
     if ns.cmd == "teardown-binding":
@@ -3164,13 +3221,19 @@ def _main(argv=None) -> int:
                 env_digest = env_digest or prior["envelope_sha256"]
                 journal = {**prior["journal_sha256"], **journal}
 
+            # Audit fields derive only from evidence belonging to THIS
+            # binding: the lead_ws entry counts when it names ns.binding; a
+            # retry after a successor claimed the workspace preserves the
+            # prior manifest's value instead of adopting the successor's.
             entry_before = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
                 coordination.lead_lease_key(rec_b["workspace_root"])
             )
-            generation = (
-                entry_before["generation"] if entry_before is not None
-                else (prior["generation"] if prior is not None else None)
-            )
+            if entry_before is not None and entry_before["binding_id"] == ns.binding:
+                generation = entry_before["generation"]
+            elif prior is not None:
+                generation = prior["generation"]
+            else:
+                generation = None
 
             out = envelope.teardown_path(rd, ns.binding)
             prospective = {
@@ -3196,7 +3259,7 @@ def _main(argv=None) -> int:
                 )
                 store = envelope.artifact_store(rd, ns.binding)
                 for art in artifacts_manifest["artifacts"]:
-                    path = store / art["name"]
+                    path = store / artifact_store_name(art["name"], art["sha256"])
                     ok = False
                     data = b""
                     try:
@@ -3291,12 +3354,17 @@ def _main(argv=None) -> int:
             # 8. manifest write. lease_released is derived from the
             # POST-release registry state, never from lead_release's return
             # value (which reports only whether a FILE was removed -- false
-            # for a missing-own release that cleared occupancy).
+            # for a missing-own release that cleared occupancy). It counts
+            # only a release THIS run performed for ns.binding (or a prior
+            # manifest's recorded release): a cleared occupancy left behind
+            # by another binding's release is not this binding's evidence.
             entry_after = tx.bindings[tx.slug].get("lead_ws", {}).get(
                 coordination.lead_lease_key(rec_b["workspace_root"])
             )
             lease_released = (
-                (entry_after is not None and entry_after["binding_id"] is None)
+                (release_action is not None
+                 and entry_after is not None
+                 and entry_after["binding_id"] is None)
                 or bool(prior and prior["lease_released"])
             )
             rec_t = {
@@ -3321,14 +3389,20 @@ def _main(argv=None) -> int:
                 )
 
             # 10. --prune, last: the binding is terminal in every path here.
+            # Unlinks are descriptor-relative through a no-follow parent so a
+            # directory swapped for a symlink cannot redirect the removal.
             if ns.prune:
                 try:
-                    envelope.envelope_path(rd, ns.binding).unlink()
+                    with coordination.payload_parent(
+                        envelope.envelope_path(rd, ns.binding)
+                    ) as (parent, name):
+                        os.unlink(name, dir_fd=parent)
                 except FileNotFoundError:
                     pass
                 for jf in payload_files(base / "tasks", "*.review-log.jsonl"):
                     try:
-                        jf.unlink()
+                        with coordination.payload_parent(jf) as (parent, name):
+                            os.unlink(name, dir_fd=parent)
                     except FileNotFoundError:
                         pass
         print(json.dumps({
@@ -3386,7 +3460,13 @@ def _main(argv=None) -> int:
                     lease_ok = lease is None or coordination._valid_lead_lease(lease)
                 except ValueError:
                     lease, lease_ok = None, False
-                if not lease_ok:
+                if entry is not None and entry["binding_id"] not in (None, bid):
+                    # Registry occupancy by ANOTHER binding outranks whatever
+                    # the lease file says (teardown's successor-occupied
+                    # skip): classify superseded up front so apply never
+                    # attempts -- and never dies on -- a foreign release.
+                    state = "superseded"
+                elif not lease_ok:
                     state = "corrupt"
                 elif lease is None:
                     state = "missing-own" if own_entry else "missing"
@@ -3411,12 +3491,21 @@ def _main(argv=None) -> int:
                         if desc and not ns.descendants_terminated:
                             action = "needs-descendant-termination"
                         else:
-                            tx.lead_release(
-                                ws,
-                                expected_binding=bid,
-                                force=(state == "corrupt"),
-                            )
-                            action = "revoked+released" if revoked_now else "released"
+                            # A release this verb cannot perform (e.g. a
+                            # legacy lease with no recorded generation) is
+                            # reported per row, never allowed to abort the
+                            # scan after earlier rows' mutations landed.
+                            try:
+                                tx.lead_release(
+                                    ws,
+                                    expected_binding=bid,
+                                    force=(state == "corrupt"),
+                                )
+                            except ValueError:
+                                action = "needs-manual-repair"
+                            else:
+                                action = ("revoked+released" if revoked_now
+                                          else "released")
                 rows.append({"binding_id": bid, "task_id": rec_b["task_id"],
                              "status": rec_b["status"], "workspace_root": ws,
                              "lease": state, "descendants": desc, "action": action})

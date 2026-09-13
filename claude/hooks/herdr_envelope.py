@@ -9,11 +9,13 @@ module). An oversized or out-of-scope record is invalid -- the caller must
 REJECT it, never strip it down.
 """
 
+import errno
 import hashlib
 import json
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -221,21 +223,67 @@ def _no_dup_pairs(pairs):
     return d
 
 
+def _open_nofollow(path):
+    """Open path read-only with EVERY component opened O_NOFOLLOW through a
+    held directory descriptor (the same walk coordination's readers use, kept
+    local because this module deliberately imports no sibling). A symlink in
+    any component -- not just the final one -- raises ValueError; an absent
+    component raises FileNotFoundError. The caller owns the returned fd."""
+    target = Path(path)
+    if not target.name or ".." in target.parts:
+        raise ValueError("state path must be a file without parent traversal")
+    if sys.platform == "darwin" and len(target.parts) > 1:
+        alias = target.parts[1]
+        if alias in ("tmp", "var") and Path("/", alias).resolve() == Path(
+            "/private", alias
+        ):
+            target = Path("/private", *target.parts[1:])
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    if target.is_absolute():
+        fd = os.open(target.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        parts = target.parts[1:-1]
+    else:
+        fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+        parts = target.parts[:-1]
+    try:
+        for part in parts:
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError("state path contains a symlink") from exc
+                raise
+            os.close(fd)
+            fd = child
+        try:
+            return os.open(
+                target.name,
+                os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=fd,
+            )
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ValueError("state path contains a symlink") from exc
+            raise
+    finally:
+        os.close(fd)
+
+
 def read_envelope(rd, binding_id):
     """The stored envelope, None if absent; ValueError on corrupt or invalid.
 
-    Self-contained bounded read: no-follow, nonblocking, regular-file only,
-    size-capped, and duplicate-key-rejecting. Callers hold the global owner
-    lock. This module never imports core, so the tiny no-dup hook is
-    duplicated here rather than shared.
+    Self-contained bounded read: no-follow on every path component,
+    nonblocking, regular-file only, size-capped, and duplicate-key-rejecting.
+    Callers hold the global owner lock. This module never imports core, so
+    the tiny no-dup hook is duplicated here rather than shared.
     """
     path = envelope_path(rd, binding_id)
     try:
-        fd = os.open(
-            str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-        )
+        fd = _open_nofollow(path)
     except FileNotFoundError:
         return None
+    except ValueError as exc:
+        raise ValueError("corrupt return envelope") from exc
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > ENVELOPE_MAX_RAW:
@@ -293,11 +341,11 @@ def _read_bounded(path, cap, label):
     """Bounded no-follow read shared by the consumption/artifact readers;
     same discipline as read_envelope. None if absent; ValueError on corrupt."""
     try:
-        fd = os.open(
-            str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-        )
+        fd = _open_nofollow(path)
     except FileNotFoundError:
         return None
+    except ValueError as exc:
+        raise ValueError(f"corrupt {label}") from exc
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > cap:

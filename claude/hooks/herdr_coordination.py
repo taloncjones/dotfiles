@@ -715,6 +715,24 @@ class OwnerTransaction:
             )
         if old is not None and not _valid_lead_lease(old):
             raise ValueError("corrupt lead lease; explicit recovery required")
+        if old is not None and entry is not None:
+            # Registry occupancy outranks the lease file (lead_release's
+            # philosophy): a restored or replayed lease file that disagrees
+            # with the durable lead_ws entry must never rebuild an old
+            # occupancy, displace a successor, or roll the generation back.
+            if entry["binding_id"] != old["binding_id"]:
+                raise ValueError(
+                    "lead lease disagrees with registry occupancy; "
+                    "explicit recovery required"
+                )
+            if (
+                old.get("generation") is not None
+                and entry["generation"] > old["generation"]
+            ):
+                raise ValueError(
+                    "lead lease generation is behind the registry; "
+                    "explicit recovery required"
+                )
         if (
             old
             and time.time() - old["heartbeat_ts"] <= stale_secs

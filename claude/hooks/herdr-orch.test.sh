@@ -3580,6 +3580,10 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-
    --json '{"task_id":"td-x","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}],"status":"blocked"}' \
    2>err; then exit 1; fi
 grep -q "writes are frozen" err
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-index \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --workspace w1 \
+   --json '{"workspace_id":"w1"}' 2>err; then exit 1; fi
+grep -q "writes are frozen" err
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w1 \
    --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
@@ -4456,10 +4460,9 @@ printf 'plan body' > "$SRC/plan.md"
 CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
     --task-id td-x --file "$SRC/handoff.md" --file "$SRC/plan.md"
-ORIG_SHA=$(CLAUDE_CONFIG_DIR="$root" python3 -c '
-import hashlib, sys
-print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
-' "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/handoff.md")
+ORIG_SHA=$(python3 -c '
+import hashlib
+print(hashlib.sha256(b"handoff body").hexdigest())')
 CLAUDE_CONFIG_DIR="$root" python3 -c '
 import hashlib, sys
 sys.path.insert(0, "claude/hooks")
@@ -4472,11 +4475,12 @@ assert rec["task_id"] == "td-x", rec
 assert {a["name"] for a in rec["artifacts"]} == {"handoff.md", "plan.md"}, rec
 store = envelope.artifact_store(rd, bid)
 for art in rec["artifacts"]:
-    data = (store / art["name"]).read_bytes()
+    data = (store / core.artifact_store_name(art["name"], art["sha256"])).read_bytes()
     assert hashlib.sha256(data).hexdigest() == art["sha256"], art
     assert len(data) == art["bytes"], art
 stored = {p.name for p in store.iterdir() if p.is_file()}
-assert stored == {"handoff.md", "plan.md"}, stored
+expected = {core.artifact_store_name(a["name"], a["sha256"]) for a in rec["artifacts"]}
+assert stored == expected, stored
 ' "$LF_SLUG" "$bid"
 # launcher identity is not the lease holder:
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
@@ -4506,11 +4510,24 @@ printf 'changed body' > "$SRC/handoff.md"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
     --file "$SRC/handoff.md" --file "$SRC/absent.md" 2>err; then exit 1; fi
+PREFIX=$(printf '%s' "$ORIG_SHA" | cut -c1-16)
 python3 -c '
 import hashlib, sys
 data = open(sys.argv[1], "rb").read()
 assert hashlib.sha256(data).hexdigest() == sys.argv[2], hashlib.sha256(data).hexdigest()
-' "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/handoff.md" "$ORIG_SHA"
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/$PREFIX-handoff.md" "$ORIG_SHA"
+# the store swapped for a symlink refuses before any byte lands outside it:
+STORE="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts"
+EVIL=$(mktemp -d)
+mv "$STORE" "$STORE.real"
+ln -s "$EVIL" "$STORE"
+printf 'handoff body' > "$SRC/handoff.md"
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+    --file "$SRC/handoff.md" 2>err; then exit 1; fi
+[ -z "$(ls -A "$EVIL")" ] || exit 1
+rm "$STORE"
+mv "$STORE.real" "$STORE"
 # task mismatch:
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id other-task \
@@ -5067,7 +5084,8 @@ assert rec["lease_released"] is True, rec
 ' "$LF_SLUG" "$bid"
 
 # Tamper an artifact store file's bytes: re-run fails on the digest gate.
-ART="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/handoff.md"
+HP=$(python3 -c 'import hashlib; print(hashlib.sha256(b"handoff body").hexdigest()[:16])')
+ART="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/$HP-handoff.md"
 cp "$ART" "$ART.orig"
 printf 'TAMPERED' > "$ART"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
@@ -5083,7 +5101,7 @@ LEAD_DIR="$root/herdr-orch/$LF_SLUG/leads/$bid"
 [ ! -e "$LEAD_DIR/envelope.json" ] || exit 1
 [ ! -e "$LEAD_DIR/tasks/td-x.review-log.jsonl" ] || exit 1
 [ -e "$LEAD_DIR/envelope.consumed.json" ] || exit 1
-[ -e "$LEAD_DIR/artifacts/handoff.md" ] || exit 1
+[ -e "$LEAD_DIR/artifacts/$HP-handoff.md" ] || exit 1
 [ -e "$LEAD_DIR/teardown.json" ] || exit 1
 
 # Re-run AFTER prune: exit 0, and the manifest still carries the ORIGINAL
@@ -5531,6 +5549,343 @@ if CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --sessi
 grep -q "$GARBAGE_ID" err
 AFTER=$(cat "$root/herdr-orch/$LF_SLUG/bindings/$bid3.json")
 [ "$BEFORE" = "$AFTER" ] || exit 1
+SH
+
+check "envelope readers refuse a symlinked binding directory" <<PY
+$LOAD
+import importlib.util as iu
+espec=iu.spec_from_file_location("env","claude/hooks/herdr_envelope.py")
+e=iu.module_from_spec(espec);espec.loader.exec_module(e)
+rd = tempfile.mkdtemp()
+bid = "ldb-" + "0" * 32
+env_rec = {"schema_version": 1, "binding_id": bid, "task_id": "PROJ-1",
+           "attempt": None, "fence": 1, "sequence": 1,
+           "ts": "2026-01-01T00:00:00Z",
+           "summary": {"outcome": "blocked", "pr": None,
+                       "expected_base_sha": None, "reason": "waiting",
+                       "follow_ups": []}}
+con_rec = {"schema_version": 1, "binding_id": bid, "sequence": 1,
+           "envelope_sha256": "0" * 64, "outcome": "blocked",
+           "integrated_by": "L1", "fence": 1, "ts": "2026-01-01T00:00:00Z"}
+# control: through a REAL directory chain both records read back fine
+real = e.envelope_path(rd, bid).parent
+real.mkdir(parents=True)
+e.envelope_path(rd, bid).write_text(json.dumps(env_rec))
+e.consumed_path(rd, bid).write_text(json.dumps(con_rec))
+assert e.read_envelope(rd, bid) == env_rec
+assert e.read_consumed(rd, bid) == con_rec
+# swap the binding dir for a symlink to an external dir holding the same
+# VALID records: every reader must refuse (symlinked parent component),
+# never serve the external content as authentic state.
+evil = tempfile.mkdtemp()
+forged = {
+    "envelope.json": env_rec,
+    "envelope.consumed.json": con_rec,
+    "artifacts.json": {
+        "schema_version": 1, "binding_id": bid, "task_id": "PROJ-1",
+        "artifacts": [{"name": "a.md", "sha256": "0" * 64, "bytes": 1}],
+        "ts": "t"},
+    "teardown.json": {
+        "schema_version": 1, "binding_id": bid, "mode": "abandon",
+        "envelope_sha256": None, "journal_sha256": {},
+        "artifacts_present": False, "lease_released": False,
+        "generation": None, "ts": "t"},
+}
+for fname, rec in forged.items():
+    with open(os.path.join(evil, fname), "w") as fh:
+        json.dump(rec, fh)
+import shutil
+shutil.rmtree(real)
+os.symlink(evil, real)
+for reader in (e.read_envelope, e.read_consumed, e.read_artifacts,
+               e.read_teardown):
+    try:
+        reader(rd, bid)
+        raise AssertionError(f"{reader.__name__} followed a symlinked dir")
+    except ValueError:
+        pass
+PY
+
+check "_read_fd_capped and _write_fd_all enforce their bounds" <<PY
+$LOAD
+d = tempfile.mkdtemp()
+p = os.path.join(d, "data.bin")
+with open(p, "wb") as fh:
+    fh.write(b"x" * 100)
+fd = os.open(p, os.O_RDONLY)
+try:
+    try:
+        c._read_fd_capped(fd, 50)
+        raise AssertionError("read past the cap")
+    except ValueError:
+        pass
+finally:
+    os.close(fd)
+fd = os.open(p, os.O_RDONLY)
+try:
+    assert c._read_fd_capped(fd, 100) == b"x" * 100
+finally:
+    os.close(fd)
+# a short-writing os.write (at most 7 bytes per call) must still land the
+# full buffer through _write_fd_all
+real_write = os.write
+q = os.path.join(d, "out.bin")
+fd = os.open(q, os.O_WRONLY | os.O_CREAT, 0o600)
+try:
+    os.write = lambda f, data: real_write(f, bytes(data[:7]))
+    c._write_fd_all(fd, b"abcdefghij" * 123)
+finally:
+    os.write = real_write
+    os.close(fd)
+with open(q, "rb") as fh:
+    assert fh.read() == b"abcdefghij" * 123
+PY
+
+check "emit-artifacts: interruption never breaks the published manifest" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-art-crash.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SRC=$(mktemp -d)
+printf 'v1 body' > "$SRC/handoff.md"
+CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+    --task-id td-x --file "$SRC/handoff.md"
+printf 'new one' > "$SRC/new1.md"
+printf 'new two' > "$SRC/new2.md"
+CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$lf" "$SRC" <<'EOF'
+import hashlib, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+slug, bid, lf, src = sys.argv[1:5]
+rd = core.repo_dir(slug)
+store = envelope.artifact_store(rd, bid)
+before = envelope.read_artifacts(rd, bid)
+def blobs():
+    return sorted(p.name for p in store.iterdir())
+args = ["emit-artifacts", "--repo-slug", slug, "--session", "S1",
+        "--fence", lf, "--binding", bid, "--task-id", "td-x",
+        "--file", src + "/new1.md", "--file", src + "/new2.md"]
+# (i) crash while writing the SECOND new blob: the temp is swept, nothing
+# is published, the prior manifest and its bytes are untouched.
+orig_write_all = core._write_fd_all
+calls = {"n": 0}
+def boom_write(fd, data):
+    calls["n"] += 1
+    if calls["n"] >= 2:
+        raise OSError("simulated write failure")
+    return orig_write_all(fd, data)
+core._write_fd_all = boom_write
+assert core.main(list(args)) == 2
+core._write_fd_all = orig_write_all
+assert envelope.read_artifacts(rd, bid) == before
+assert not [n for n in blobs() if n.startswith(".tmp-")], blobs()
+# (ii) crash BETWEEN blob publication and manifest publication: the prior
+# manifest still reads back, its referenced bytes still match, no temps.
+orig_wja = core.write_json_atomic
+def boom_manifest(path, data):
+    if str(path).endswith("artifacts.json"):
+        raise OSError("simulated crash before manifest publish")
+    return orig_wja(path, data)
+core.write_json_atomic = boom_manifest
+assert core.main(list(args)) == 2
+core.write_json_atomic = orig_wja
+assert envelope.read_artifacts(rd, bid) == before
+for art in before["artifacts"]:
+    data = (store / core.artifact_store_name(art["name"], art["sha256"])).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == art["sha256"], art
+assert not [n for n in blobs() if n.startswith(".tmp-")], blobs()
+# (iii) a clean re-run publishes and sweeps everything unreferenced.
+assert core.main(list(args)) == 0
+final = envelope.read_artifacts(rd, bid)
+names = {core.artifact_store_name(a["name"], a["sha256"])
+         for a in final["artifacts"]}
+assert {a["name"] for a in final["artifacts"]} == {"new1.md", "new2.md"}
+assert set(blobs()) == names, blobs()
+EOF
+SH
+
+check "emit-artifacts refuses a manifest exceeding the reader size cap" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-art-cap.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+TID=$(python3 -c 'print("t" * 17000)')
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id "$TID" \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SRC=$(mktemp -d)
+printf 'body' > "$SRC/a.md"
+if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
+    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+    --task-id "$TID" --file "$SRC/a.md" 2>err; then exit 1; fi
+grep -q "manifest exceeds the size bound" err
+# nothing was published: no manifest, empty store
+[ ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts.json" ] || exit 1
+[ -z "$(ls -A "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts")" ] || exit 1
+SH
+
+check "teardown retry after a successor claim preserves the audit fields" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-retry.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bidA=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-a \
+   --workspace-root "$LF_WS" --expected-session SA)
+lfA=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SA --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidA")
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidA" --abandon --descendants-terminated
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rec = envelope.read_teardown(core.repo_dir(sys.argv[1]), sys.argv[2])
+assert rec["generation"] == 1, rec
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bidA"
+# a successor claims the same workspace: generation advances to 2
+bidB=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-b \
+   --workspace-root "$LF_WS" --expected-session SB)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SB --host h --pid 3 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidB" >/dev/null
+# retry A's teardown: the manifest must keep A's generation (1) and its
+# recorded release, never adopt the successor's occupancy as A's evidence.
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidA"
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+rec = envelope.read_teardown(core.repo_dir(sys.argv[1]), sys.argv[2])
+assert rec["generation"] == 1, rec
+assert rec["lease_released"] is True, rec
+' "$LF_SLUG" "$bidA"
+# and B's occupancy is untouched
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+assert entry["generation"] == 2, entry
+' "$LF_SLUG" "$KEY" "$bidB"
+SH
+
+check "reconcile-leads --apply survives foreign occupancy and reports needs-manual-repair" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rl-repair.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+git -C "$LF_REPO" worktree add -q "$LF_WSBASE/wt2"
+LF_WS2="$LF_WSBASE/wt2"
+# Row 1: A claimed on ws1; B stale-takes-over ws1 (registry names B); B's
+# binding is then completed (its row drops out of the scan) and ws1's lease
+# file is corrupted. A's row must classify superseded, never attempt (and
+# die on) a foreign release.
+bidA=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-a \
+   --workspace-root "$LF_WS" --expected-session SA)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SA --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidA" >/dev/null
+bidB=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-b \
+   --workspace-root "$LF_WS" --expected-session SB)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SB --host h --pid 3 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0 >/dev/null
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["status"] = "completed"
+json.dump(rec, open(path, "w"))
+' "$root/herdr-orch/$LF_SLUG/bindings/$bidB.json"
+KEY1=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+printf 'not json' > "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY1.json"
+# Row 2: C claimed on ws2 with a LEGACY lease (no generation) and no
+# registry lead_ws entry: its release refuses, and the row must report
+# needs-manual-repair instead of aborting the scan.
+bidC=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-c \
+   --workspace-root "$LF_WS2" --expected-session SC)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SC --host h --pid 4 --control-tier lead \
+   --workspace-root "$LF_WS2" --binding "$bidC" >/dev/null
+KEY2=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS2")
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+del rec["generation"]
+rec["heartbeat_ts"] = 0
+json.dump(rec, open(path, "w"))
+' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY2.json"
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+reg = coordination.coordination_root() / "bindings.json"
+data = json.loads(reg.read_text())
+del data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+reg.write_text(json.dumps(data))
+' "$LF_SLUG" "$KEY2"
+f2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L2 --host h --pid 5 --stale-secs 0)
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["lease"] == "superseded", rows
+assert rows[sys.argv[1]]["action"] == "revoked", rows
+assert rows[sys.argv[2]]["action"] == "needs-manual-repair", rows
+' "$bidA" "$bidC"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "revoked"
+assert json.load(open(sys.argv[2]))["status"] == "revoked"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bidA.json" "$root/herdr-orch/$LF_SLUG/bindings/$bidC.json"
+# ws1's corrupt lease bytes and B's registry occupancy are untouched
+[ "$(cat "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY1.json")" = "not json" ] || exit 1
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+' "$LF_SLUG" "$KEY1" "$bidB"
+# a retry does not wedge: the run still exits 0
+CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply >/dev/null
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

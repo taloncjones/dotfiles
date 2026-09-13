@@ -711,6 +711,75 @@ with c.owner_transaction(rd) as tx:
             entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
             self.assertIsNone(entry["binding_id"])
 
+    def test_lease_replay_refused_against_registry_occupancy(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        b2 = "ldb-" + "2" * 32
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        p = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name
+        saved = p.read_text()  # predecessor lease at generation 1
+        # age the lease so B2 may take the workspace over
+        rec = json.loads(p.read_text())
+        rec["heartbeat_ts"] = 0
+        p.write_text(json.dumps(rec))
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s2", "h", 1, ws, b2, stale_secs=1)
+        # replay: restore B1's saved lease file over B2's; the registry
+        # (naming B2) outranks it, so any claim must refuse outright
+        p.write_text(saved)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+        # registry occupancy is unchanged by the refused replay
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertEqual(entry["binding_id"], b2)
+            self.assertEqual(entry["generation"], 2)
+
+    def test_lease_replay_generation_rollback_refused(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        b2 = "ldb-" + "2" * 32
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        p = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name
+
+        def age():
+            rec = json.loads(p.read_text())
+            rec["heartbeat_ts"] = 0
+            p.write_text(json.dumps(rec))
+
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)  # generation 1
+        saved = p.read_text()
+        age()
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s2", "h", 1, ws, b2, stale_secs=1)  # gen 2
+        age()
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            tx.lead_claim("lead-s1", "h", 1, ws, b1, stale_secs=1)  # gen 3
+        # replay B1's ORIGINAL generation-1 lease: same binding as the
+        # registry names, but its generation is behind -- refuse.
+        p.write_text(saved)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+
     def test_registry_rejects_malformed_lead_ws(self):
         ws = tempfile.mkdtemp()
         with coordination.owner_transaction(
