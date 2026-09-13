@@ -5983,7 +5983,7 @@ assert hashlib.sha256(data).hexdigest() == art["sha256"], art
 ' "$LF_SLUG" "$bid"
 SH
 
-check "teardown retry recovers from the registry when every post-release write fails" <<'SH'
+check "write-ahead receipt: failed orderings recover, successor claim included" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-atomic.git
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d)
@@ -5994,8 +5994,8 @@ bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
 CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bid" >/dev/null
-# crash at the FIRST write after lead_release (the receipt): the release
-# evidence must already be durable, riding the registry write itself.
+# Ordering half: the receipt is written BEFORE the release, so a failed
+# receipt write must leave the occupancy fully intact (nothing released).
 CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$f" <<'EOF'
 import sys
 sys.path.insert(0, "claude/hooks")
@@ -6005,29 +6005,70 @@ slug, bid, f = sys.argv[1:4]
 rd = core.repo_dir(slug)
 orig_wja = core.write_json_atomic
 def boom(path, data):
-    raise OSError("simulated crash on any post-release payload write")
+    raise OSError("simulated crash on every payload write")
 core.write_json_atomic = boom
 rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
                 "--fence", f, "--binding", bid, "--abandon",
                 "--descendants-terminated"])
 core.write_json_atomic = orig_wja
 assert rc == 2, rc
-# neither the receipt nor the manifest landed
 assert envelope.read_release(rd, bid) is None
 assert envelope.read_teardown(rd, bid) is None
 EOF
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
 python3 -c '
-import json, os, sys
+import json, sys
 sys.path.insert(0, "claude/hooks")
 import herdr_coordination as coordination
 data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
-key = coordination.lead_lease_key(os.path.realpath(sys.argv[2]))
-entry = data[sys.argv[1]]["lead_ws"][key]
-assert entry["binding_id"] is None, entry
-assert entry["released_binding"] == sys.argv[3], entry
-assert entry["generation"] == 1, entry
-' "$LF_SLUG" "$LF_WS" "$bid"
-# retry: audit fields recover from the atomic registry evidence alone
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+' "$LF_SLUG" "$KEY" "$bid"
+# Survival half: receipt + release land, EVERY post-release write fails,
+# then a successor claim erases the registry released_binding evidence --
+# the retry must still recover from the write-ahead receipt.
+CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$f" <<'EOF'
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_envelope as envelope
+import herdr_orch_core as core
+slug, bid, f = sys.argv[1:4]
+rd = core.repo_dir(slug)
+orig_wja = core.write_json_atomic
+def boom(path, data):
+    if str(path).endswith("teardown.json"):
+        raise OSError("simulated crash on every post-release write")
+    return orig_wja(path, data)
+core.write_json_atomic = boom
+rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
+                "--fence", f, "--binding", bid, "--abandon",
+                "--descendants-terminated"])
+core.write_json_atomic = orig_wja
+assert rc == 2, rc
+receipt = envelope.read_release(rd, bid)
+assert receipt is not None and receipt["generation"] == 1, receipt
+assert envelope.read_teardown(rd, bid) is None
+EOF
+bid2=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-y \
+   --workspace-root "$LF_WS" --expected-session S2)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S2 --host h --pid 3 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid2" >/dev/null
+# the fresh claim erased released_binding from the registry entry
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+assert "released_binding" not in entry, entry
+' "$LF_SLUG" "$KEY" "$bid2"
 CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
    --abandon --descendants-terminated
@@ -6065,8 +6106,8 @@ rec["heartbeat_ts"] = 0
 json.dump(rec, open(path, "w"))
 ' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
 f2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L2 --host h --pid 3 --stale-secs 0)
-# reconcile --apply with the receipt write failing: the release itself is
-# atomic with its released_binding evidence in the registry.
+# reconcile --apply with the WRITE-AHEAD receipt failing: nothing is
+# released for that row (occupancy intact), and a clean retry releases.
 CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$f2" <<'EOF'
 import sys
 sys.path.insert(0, "claude/hooks")
@@ -6083,6 +6124,23 @@ rc = core.main(["reconcile-leads", "--repo-slug", slug, "--session", "L2",
 core.write_json_atomic = orig_wja
 assert rc == 2, rc
 EOF
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+' "$LF_SLUG" "$KEY" "$bid"
+# clean retry: the revoked binding still owns the entry, so it is selected
+# again; the receipt lands, then the release, atomically evidenced.
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "released", rows
+' "$bid"
 python3 -c '
 import json, sys
 sys.path.insert(0, "claude/hooks")

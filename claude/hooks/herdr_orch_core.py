@@ -3234,6 +3234,8 @@ def _main(argv=None) -> int:
             )
             if entry_before is not None and entry_before["binding_id"] == ns.binding:
                 generation = entry_before["generation"]
+            elif prior is not None:
+                generation = prior["generation"]
             elif (
                 entry_before is not None
                 and entry_before["binding_id"] is None
@@ -3243,12 +3245,10 @@ def _main(argv=None) -> int:
                 # same bindings.json update as the release, so no follow-up
                 # write failure can lose it.
                 generation = entry_before["generation"]
-            elif prior is not None:
-                generation = prior["generation"]
             elif receipt is not None:
-                # The convenience receipt written after this binding's own
-                # release: a retry path when the release landed but the
-                # manifest publication then failed.
+                # The write-ahead receipt published before this binding's
+                # own release: the fallback that survives a successor claim
+                # erasing the registry's released_binding evidence.
                 generation = receipt["generation"]
             else:
                 generation = None
@@ -3361,11 +3361,30 @@ def _main(argv=None) -> int:
                 # Never claimed at all: nothing to release.
                 release_action = None
 
-            # 7. release -- first mutation -- immediately followed by a
-            # durable per-binding receipt of the released generation, in the
-            # SAME transaction: if the manifest publication below then
-            # fails, a retry recovers its audit fields from the receipt
-            # instead of writing generation null / lease_released false.
+            # 7. release. The receipt is a WRITE-AHEAD intent record,
+            # published BEFORE the release: a failed receipt write releases
+            # nothing (clean retry); a failed release after it is re-run by
+            # the retry; once the release lands, the per-binding receipt
+            # under leads/<binding>/ survives even a successor claim erasing
+            # the registry's released_binding evidence.
+            if release_action is not None and receipt is None:
+                ahead_gen = None
+                if entry is not None and entry["binding_id"] == ns.binding:
+                    ahead_gen = entry["generation"]
+                elif lease_valid and lease["binding_id"] == ns.binding:
+                    ahead_gen = lease.get("generation")
+                if ahead_gen is not None:
+                    receipt = {
+                        "schema_version": 1,
+                        "binding_id": ns.binding,
+                        "generation": ahead_gen,
+                        "ts": now_iso(),
+                    }
+                    _require(envelope.valid_release(receipt),
+                             "invalid release receipt")
+                    rp = envelope.release_path(rd, ns.binding)
+                    _require(contained(rp, state_root()), "escapes state root")
+                    write_json_atomic(rp, receipt)
             if release_action == "normal":
                 tx.lead_release(rec_b["workspace_root"], expected_binding=ns.binding)
             elif release_action == "force":
@@ -3380,17 +3399,6 @@ def _main(argv=None) -> int:
                 and entry_after is not None
                 and entry_after["binding_id"] is None
             )
-            if released_now and receipt is None:
-                receipt = {
-                    "schema_version": 1,
-                    "binding_id": ns.binding,
-                    "generation": entry_after["generation"],
-                    "ts": now_iso(),
-                }
-                _require(envelope.valid_release(receipt), "invalid release receipt")
-                rp = envelope.release_path(rd, ns.binding)
-                _require(contained(rp, state_root()), "escapes state root")
-                write_json_atomic(rp, receipt)
 
             # 8. manifest write. lease_released is derived from the
             # POST-release registry state, never from lead_release's return
@@ -3537,6 +3545,32 @@ def _main(argv=None) -> int:
                             # legacy lease with no recorded generation) is
                             # reported per row, never allowed to abort the
                             # scan after earlier rows' mutations landed.
+                            # WRITE-AHEAD receipt before the release (same
+                            # ordering as teardown): a failed receipt write
+                            # releases nothing; once the release lands, the
+                            # per-binding receipt survives a successor claim
+                            # erasing the registry's released_binding. A
+                            # corrupt existing receipt is left for manual
+                            # repair, never overwritten.
+                            try:
+                                rcpt = envelope.read_release(rd, bid)
+                            except ValueError:
+                                rcpt = "corrupt"
+                            ahead_gen = None
+                            if entry is not None and entry["binding_id"] == bid:
+                                ahead_gen = entry["generation"]
+                            elif lease is not None and lease.get("binding_id") == bid:
+                                ahead_gen = lease.get("generation")
+                            if rcpt is None and ahead_gen is not None:
+                                rp = envelope.release_path(rd, bid)
+                                _require(contained(rp, state_root()),
+                                         "escapes state root")
+                                write_json_atomic(rp, {
+                                    "schema_version": 1,
+                                    "binding_id": bid,
+                                    "generation": ahead_gen,
+                                    "ts": now_iso(),
+                                })
                             try:
                                 tx.lead_release(
                                     ws,
@@ -3546,29 +3580,6 @@ def _main(argv=None) -> int:
                             except ValueError:
                                 action = "needs-manual-repair"
                             else:
-                                # Same durable receipt teardown writes with
-                                # its release: a later teardown of this
-                                # binding recovers generation/lease_released
-                                # from it. A corrupt existing receipt is
-                                # left for manual repair, never overwritten.
-                                entry_after = tx.bindings[tx.slug].get(
-                                    "lead_ws", {}
-                                ).get(coordination.lead_lease_key(ws))
-                                try:
-                                    rcpt = envelope.read_release(rd, bid)
-                                except ValueError:
-                                    rcpt = "corrupt"
-                                if (rcpt is None and entry_after is not None
-                                        and entry_after["binding_id"] is None):
-                                    rp = envelope.release_path(rd, bid)
-                                    _require(contained(rp, state_root()),
-                                             "escapes state root")
-                                    write_json_atomic(rp, {
-                                        "schema_version": 1,
-                                        "binding_id": bid,
-                                        "generation": entry_after["generation"],
-                                        "ts": now_iso(),
-                                    })
                                 action = ("revoked+released" if revoked_now
                                           else "released")
                 rows.append({"binding_id": bid, "task_id": rec_b["task_id"],
