@@ -1947,6 +1947,21 @@ def has_attempt_rows(task, phase):
                for w in task["workers"])
 
 
+def _valid_task_shape(task) -> bool:
+    """True when task parses to a dict whose workers is a list in which
+    every element is a dict carrying a phase key. Used at the null-attempt
+    gates alongside a separate file-presence flag, so a task file holding
+    JSON null (parsed value None despite the file existing), a non-dict, a
+    non-list workers, or any worker row missing a phase key all fail closed
+    as malformed rather than being read as "nothing dispatched"."""
+    if not isinstance(task, dict):
+        return False
+    workers = task.get("workers")
+    if not isinstance(workers, list):
+        return False
+    return all(isinstance(w, dict) and "phase" in w for w in workers)
+
+
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
@@ -2712,6 +2727,8 @@ def _main(argv=None) -> int:
                             _require(False,
                                      "a same-revision review verdict cannot be "
                                      "replaced; re-dispatch the review at a new head")
+                    _require(_valid_review_journal_entry(entry),
+                             "review emit does not form a valid journal entry")
                     append_payload(
                         journal,
                         (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
@@ -2766,11 +2783,20 @@ def _main(argv=None) -> int:
                      "envelope task does not match the binding")
             base = rd / "leads" / ns.binding
             try:
-                task = json.loads(read_payload_text(base / "tasks" / f"{rec['task_id']}.json"))
+                task_raw = read_payload_text(base / "tasks" / f"{rec['task_id']}.json")
+                task_present = True
             except FileNotFoundError:
-                task = None
-            except (OSError, ValueError):
+                task_raw = None
+                task_present = False
+            except OSError:
                 _require(False, "task record is unreadable")
+            if task_present:
+                try:
+                    task = json.loads(task_raw)
+                except ValueError:
+                    _require(False, "task record is unreadable")
+            else:
+                task = None
             # A null attempt (schema guarantees outcome != pr_ready) is a
             # terminal handback before any dispatched implement attempt: the
             # lease, binding, and sequence checks still run, but there is no
@@ -2783,8 +2809,12 @@ def _main(argv=None) -> int:
                 _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
                          "envelope attempt does not match the dispatched attempt")
             else:
-                _require(task is None or (isinstance(task, dict)
-                                           and isinstance(task.get("workers"), list)),
+                # "Nothing dispatched" is only the task genuinely being
+                # absent, or a well-formed shape with no attempt rows. A
+                # file holding JSON null, a non-dict, a non-list workers,
+                # or a worker row missing phase all fail closed here rather
+                # than being read as an empty task.
+                _require(not task_present or _valid_task_shape(task),
                          "task record is malformed")
                 _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
@@ -2858,11 +2888,20 @@ def _main(argv=None) -> int:
             summary = env["summary"]
             base = rd / "leads" / ns.binding
             try:
-                task = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.json"))
+                task_raw = read_payload_text(base / "tasks" / f"{env['task_id']}.json")
+                task_present = True
             except FileNotFoundError:
-                task = None
-            except (OSError, ValueError):
+                task_raw = None
+                task_present = False
+            except OSError:
                 _require(False, "task record is unreadable")
+            if task_present:
+                try:
+                    task = json.loads(task_raw)
+                except ValueError:
+                    _require(False, "task record is unreadable")
+            else:
+                task = None
             # Attempt grounding applies to EVERY outcome (defense-in-depth against
             # a task record rewritten -- or a successor attempt recorded -- after
             # emit): a non-null envelope attempt must still match the CURRENT
@@ -2875,8 +2914,10 @@ def _main(argv=None) -> int:
                          and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
                          "envelope attempt no longer matches the dispatched attempt")
             else:
-                _require(task is None or (isinstance(task, dict)
-                                           and isinstance(task.get("workers"), list)),
+                # See emit-envelope: only a genuinely absent task, or a
+                # well-formed shape with no attempt rows, counts as
+                # "nothing dispatched" here.
+                _require(not task_present or _valid_task_shape(task),
                          "task record is malformed")
                 _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
@@ -2926,6 +2967,11 @@ def _main(argv=None) -> int:
                              rec_b["expected_session_id"],
                              rec_b["parent"]["session_id"]),
                          "reviewer is not independent of the lead or launcher")
+                # Independence at emit excludes the ORIGINAL launcher; after a
+                # launcher rotation the reviewer could BE the current launcher,
+                # so the integrating session is excluded here.
+                _require(ap["reviewer_session_id"] != ns.session,
+                         "the integrating launcher cannot be the reviewer of record")
                 _require(isinstance(review, dict)
                          and is_reviewed(task, review, pr["head_sha"],
                                          review.get("workspace_id"))

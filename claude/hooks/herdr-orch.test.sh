@@ -2833,12 +2833,13 @@ lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py clai
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bid")
 SHA40=$(printf 'a%.0s' $(seq 1 40))
+HEAD40=$(printf 'b%.0s' $(seq 1 40))
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id PROJ-3 \
-   --json '{"task_id":"PROJ-3","base_sha":"'"$SHA40"'","review_head_sha":"h1","workers":[{"role":"mech","launch_id":"L1","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+   --json '{"task_id":"PROJ-3","base_sha":"'"$SHA40"'","review_head_sha":"'"$HEAD40"'","workers":[{"role":"mech","launch_id":"L1","phase":"review","runtime":"claude","workspace_id":"w9","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-3 --workspace w9 \
-   --agent rev-proj-3 --reviewed-head-sha h1 --reviewed-base-sha "$SHA40" --outcome approved \
+   --agent rev-proj-3 --reviewed-head-sha "$HEAD40" --reviewed-base-sha "$SHA40" --outcome approved \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" \
    --reviewer-session R1
 test -f "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-3.review.json"
@@ -4298,6 +4299,164 @@ esac
 python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "null-attempt gates: only file-absent or a well-formed empty task counts as nothing dispatched" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-nag.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+task_file="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json"
+NULL_ENV='{"task_id":"td-x","attempt":null,"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+# task file present but holds a literal JSON null -> malformed, not absent
+mkdir -p "$(dirname "$task_file")"
+python3 -c 'import sys; open(sys.argv[1], "w").write("null")' "$task_file"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json "$NULL_ENV" 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.json"
+# workers is a list, but the one row is not a dict -> malformed
+python3 -c 'import sys, json; json.dump({"task_id": "td-x", "workers": [None]}, open(sys.argv[1], "w"))' "$task_file"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json "$NULL_ENV" 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.json"
+# a worker row without a phase key -> malformed
+python3 -c 'import sys, json; json.dump({"task_id": "td-x", "workers": [{"runtime": "claude"}]}, open(sys.argv[1], "w"))' "$task_file"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json "$NULL_ENV" 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.json"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "null-attempt gates: integrate-envelope also refuses a task record that turned malformed" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-nag-ig.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+# emit a valid null-attempt envelope while the task is genuinely absent
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-x","attempt":null,"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+# the task record then appears, holding a literal JSON null
+task_file="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json"
+mkdir -p "$(dirname "$task_file")"
+python3 -c 'import sys; open(sys.argv[1], "w").write("null")' "$task_file"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>/dev/null; then exit 1; fi
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "emit-review --binding: a non-40hex dispatched review head refuses before the journal is touched" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr-loose.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+BASE=$(printf 'b%.0s' $(seq 1 40))
+LOOSE=$(printf 'h1%.0s' $(seq 1 19))  # 38 chars, not a 40hex sha
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$LOOSE"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$BASE"'"}]}'
+journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$LOOSE" --reviewed-base-sha "$BASE" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$BASE" \
+   --reviewer-session R1 2>/dev/null; then exit 1; fi
+test ! -e "$journal"
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
+# a proper dispatch at a 40hex head still emits cleanly afterward (no bricking)
+H40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H40"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$BASE"'"}]}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$H40" --reviewed-base-sha "$BASE" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$BASE" \
+   --reviewer-session R1
+test -f "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
+test -f "$journal"
+SH
+
+check "integrate-envelope: the integrating launcher cannot be the reviewer, even after a rotation" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rot-launcher.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+REPO_ID=$(CLAUDE_CONFIG_DIR="$root" python3 -c "
+import sys
+sys.path.insert(0, 'claude/hooks')
+import herdr_orch_core as c
+import herdr_bindings as bindings
+print(bindings.read_binding(c.repo_dir('$LF_SLUG'), '$bid')['repo_id'])
+")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+BASE40=$(printf 'b%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+# reviewer RVR is independent of the original launcher L1 and lead S1
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
+   --reviewer-session RVR
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"pr_ready","pr":{"repo_id":"'"$REPO_ID"'","number":9,"branch":"talon/td-x","head_sha":"'"$SHA40"'","approval":{"reviewer_session_id":"RVR","reviewer_runtime":"claude","reviewed_head_sha":"'"$SHA40"'"}},"expected_base_sha":"'"$BASE40"'","reason":null,"follow_ups":[]}}'
+# launcher rotates: session RVR takes over the launcher owner slot (fresh fence)
+rf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session RVR --host h --pid 3 --stale-secs 0)
+# RVR is now the live launcher AND the recorded reviewer -> integrate refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
+   --repo-slug "$LF_SLUG" --session RVR --fence "$rf" --binding "$bid" \
+   --base-sha "$BASE40" --head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+# a further takeover by a different launcher session L2 integrates cleanly
+l2f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L2 --host h --pid 4 --stale-secs 0)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L2 --fence "$l2f" --binding "$bid" \
+   --base-sha "$BASE40" --head-sha "$SHA40"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "completed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
 SH
 
