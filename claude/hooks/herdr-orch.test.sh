@@ -3199,9 +3199,20 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-e
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
    --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"paneX","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}' 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.json"
-CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
-   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+# Dropping the implement row entirely is dispatch-history tampering that
+# write-task's append-only guard now refuses, so this exercises the tamper
+# path directly (a raw file write) rather than through the CLI.
+python3 -c '
+import json, sys
+json.dump(
+    {"task_id": "td-x", "workers": [
+        {"role": "review", "launch_id": "L2", "phase": "review",
+         "runtime": "claude", "workspace_id": "w2", "pane_id": "pane2",
+         "source_head_sha": sys.argv[2]},
+    ]},
+    open(sys.argv[1], "w"),
+)
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json" "$SHA40"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
    --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}' 2>/dev/null; then exit 1; fi
@@ -3724,10 +3735,11 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-r
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H2" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
-# advance the dispatched review head to H2, then approved@H2 succeeds
+# advance the dispatched review head to H2 (the new attempt is appended, not
+# substituted -- dispatch history is append-only); approved@H2 then succeeds
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$H"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$H"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H2" --reviewed-base-sha "$H" --blocking-count 0 \
@@ -3902,11 +3914,26 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-revi
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
    --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"pr_ready","pr":{"repo_id":"'"$REPO_ID"'","number":9,"branch":"talon/td-x","head_sha":"'"$SHA40"'","approval":{"reviewer_session_id":"R1","reviewer_runtime":"claude","reviewed_head_sha":"'"$SHA40"'"}},"expected_base_sha":"'"$BASE40"'","reason":null,"follow_ups":[]}}'
-# rewrite the implement row's pane_id after emit, so the envelope attempt no
-# longer matches the dispatched attempt
-CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
-   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","status":"completed","base_sha":"'"$BASE40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"paneZ","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+# Rewrite the implement row's pane_id in place after emit, so the envelope
+# attempt no longer matches the dispatched attempt. This is exactly the
+# history-tampering write-task's append-only guard now refuses, so exercise
+# the tamper path directly (a raw file write).
+python3 -c '
+import json, sys
+json.dump(
+    {"task_id": "td-x", "status": "completed",
+     "base_sha": sys.argv[2], "review_head_sha": sys.argv[3],
+     "workers": [
+        {"role": "mech", "launch_id": "L1", "phase": "implement",
+         "runtime": "claude", "workspace_id": "w1", "pane_id": "paneZ",
+         "source_head_sha": sys.argv[3]},
+        {"role": "review", "launch_id": "L2", "phase": "review",
+         "runtime": "claude", "workspace_id": "w2", "pane_id": "pane2",
+         "source_head_sha": sys.argv[3]},
+     ]},
+    open(sys.argv[1], "w"),
+)
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json" "$BASE40" "$SHA40"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
    --base-sha "$BASE40" --head-sha "$SHA40" 2>/dev/null; then exit 1; fi
@@ -3974,20 +4001,22 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-revi
    --agent rev-td-x --outcome changes-requested --reviewed-head-sha "$H" --reviewed-base-sha "$BASE" --blocking-count 2 \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
    --reviewer-session R1
-# dispatch advances to H2 (base unchanged); approved@H2 succeeds
+# dispatch advances to H2 (base unchanged, new attempt appended); approved@H2
+# succeeds
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H2"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}]}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H2" --reviewed-base-sha "$BASE" --blocking-count 0 \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H2" \
    --reviewer-session R1
-# dispatch returns to H; approved@H is refused -- the journal still remembers the
-# changes-requested verdict at H, though the latest .review.json record is the H2 approval
+# dispatch returns to H (again appended, not substituted); approved@H is
+# refused -- the journal still remembers the changes-requested verdict at H,
+# though the latest .review.json record is the H2 approval
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$BASE" --blocking-count 0 \
@@ -4458,6 +4487,157 @@ python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "completed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "write-task --binding: dispatch history is append-only" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-append-only.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-ao \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+I1='{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}'
+I2='{"role":"mech","launch_id":"I2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}'
+I1MOD='{"role":"mech","launch_id":"I1-tampered","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-ao \
+   --json '{"task_id":"td-ao","workers":['"$I1"']}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-ao \
+   --json '{"task_id":"td-ao","workers":['"$I1"','"$I2"']}'
+# dropping I1 (a shorter, divergent list) is refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-ao \
+   --json '{"task_id":"td-ao","workers":['"$I2"']}' 2>/dev/null; then exit 1; fi
+# wiping history to an empty list is refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-ao \
+   --json '{"task_id":"td-ao","workers":[]}' 2>/dev/null; then exit 1; fi
+# a same-length list with the first element altered is refused
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-ao \
+   --json '{"task_id":"td-ao","workers":['"$I1MOD"','"$I2"']}' 2>/dev/null; then exit 1; fi
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert [w["launch_id"] for w in rec["workers"]] == ["I1", "I2"], rec
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-ao.json"
+SH
+
+check "write-task --binding: append-only closes the envelope revival regression" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-revival.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-rv \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+I1='{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}'
+I2='{"role":"mech","launch_id":"I2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}'
+# implement attempt I1 recorded, a blocked envelope is grounded to it
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-rv \
+   --json '{"task_id":"td-rv","workers":['"$I1"']}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-rv","attempt":{"launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+# successor I2 is appended -- integrate is refused, the envelope no longer
+# matches the latest native implement row
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-rv \
+   --json '{"task_id":"td-rv","workers":['"$I1"','"$I2"']}'
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>/dev/null; then exit 1; fi
+# attempting to restore workers to just [I1] -- reviving the older, already-
+# rejected envelope -- is refused as non-append-only history
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-rv \
+   --json '{"task_id":"td-rv","workers":['"$I1"']}' 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>/dev/null; then exit 1; fi
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "emit/integrate-envelope: workers-shape validation applies to the non-null grounding branch too" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-shape-sym.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+# binding A: a task carrying a valid I1 row plus a trailing phaseless row
+# refuses a non-null emit-envelope grounded to I1
+bidA=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-shA \
+   --workspace-root "$LF_WS" --expected-session SA)
+lfA=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SA --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidA")
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session SA --fence "$lfA" --binding "$bidA" --task-id td-shA \
+   --json '{"task_id":"td-shA","workers":[{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+# a phaseless row is dispatch-history tampering write-task's append-only
+# guard would refuse; append it via a direct file write (the tamper path)
+python3 -c '
+import json, sys
+json.dump(
+    {"task_id": "td-shA", "workers": [
+        {"role": "mech", "launch_id": "I1", "phase": "implement",
+         "runtime": "claude", "workspace_id": "w1", "pane_id": "pane1",
+         "source_head_sha": sys.argv[2]},
+        {"runtime": "claude"},
+    ]},
+    open(sys.argv[1], "w"),
+)
+' "$root/herdr-orch/$LF_SLUG/leads/$bidA/tasks/td-shA.json" "$SHA40"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session SA --fence "$lfA" --binding "$bidA" \
+   --json '{"task_id":"td-shA","attempt":{"launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}' 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bidA/envelope.json"
+# binding B: emit succeeds against a well-formed task, then the task is
+# corrupted the same way before integrate -- integrate is refused, binding
+# stays claimed
+bidB=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-shB \
+   --workspace-root "$LF_WS" --expected-session SB)
+lfB=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SB --host h --pid 3 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session SB --fence "$lfB" --binding "$bidB" --task-id td-shB \
+   --json '{"task_id":"td-shB","workers":[{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
+   --repo-slug "$LF_SLUG" --session SB --fence "$lfB" --binding "$bidB" \
+   --json '{"task_id":"td-shB","attempt":{"launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+python3 -c '
+import json, sys
+json.dump(
+    {"task_id": "td-shB", "workers": [
+        {"role": "mech", "launch_id": "I1", "phase": "implement",
+         "runtime": "claude", "workspace_id": "w1", "pane_id": "pane1",
+         "source_head_sha": sys.argv[2]},
+        {"runtime": "claude"},
+    ]},
+    open(sys.argv[1], "w"),
+)
+' "$root/herdr-orch/$LF_SLUG/leads/$bidB/tasks/td-shB.json" "$SHA40"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidB" 2>/dev/null; then exit 1; fi
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bidB.json"
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

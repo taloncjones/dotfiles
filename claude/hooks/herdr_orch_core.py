@@ -2328,8 +2328,43 @@ def _main(argv=None) -> int:
                 isinstance(rec, dict) and rec.get("task_id") == ns.task_id,
                 "task json must be a JSON object whose task_id equals --task-id",
             )
+            dest = base / "tasks" / f"{ns.task_id}.json"
+            if ns.binding is not None:
+                # Dispatch history is append-only for binding-scoped tasks so a
+                # superseded attempt can never be erased to revive an older
+                # envelope (the P1 revival scenario): every prior worker row
+                # must survive, in order, as a prefix of the new list. Other
+                # fields (status, base_sha, review_head_sha, ...) stay freely
+                # updatable -- base_sha mutation is a legitimate rebase-
+                # redispatch, its abuse closed separately by the approval-base
+                # binding check at emit/integrate.
+                try:
+                    prior_raw = read_payload_text(dest)
+                    prior_present = True
+                except FileNotFoundError:
+                    prior_raw = None
+                    prior_present = False
+                except OSError:
+                    _require(False, "task record is unreadable")
+                if prior_present:
+                    try:
+                        prior = json.loads(prior_raw)
+                    except ValueError:
+                        _require(False, "task record is unreadable")
+                    prior_workers = prior.get("workers") if isinstance(prior, dict) else None
+                    if isinstance(prior, dict) and isinstance(prior_workers, list):
+                        new_workers = rec.get("workers")
+                        _require(
+                            isinstance(new_workers, list)
+                            and len(new_workers) >= len(prior_workers)
+                            and all(new_workers[i] == prior_workers[i]
+                                    for i in range(len(prior_workers))),
+                            "binding-scoped dispatch history is append-only",
+                        )
+                    else:
+                        _require(False, "task record is malformed")
             create_payload_dir(base / "tasks")
-            write_json_atomic(base / "tasks" / f"{ns.task_id}.json", rec)
+            write_json_atomic(dest, rec)
             return 0
     if ns.cmd == "write-index":
         with _fenced_scoped(ns) as (rd, base):
@@ -2797,6 +2832,13 @@ def _main(argv=None) -> int:
                     _require(False, "task record is unreadable")
             else:
                 task = None
+            # "Nothing dispatched" and "a dispatched attempt grounds this
+            # envelope" both need the task record to actually be shaped like
+            # a task: a file holding JSON null, a non-dict, a non-list
+            # workers, or a worker row missing phase all fail closed here
+            # rather than being read via latest_native_attempt/has_attempt_rows.
+            _require(not task_present or _valid_task_shape(task),
+                     "task record is malformed")
             # A null attempt (schema guarantees outcome != pr_ready) is a
             # terminal handback before any dispatched implement attempt: the
             # lease, binding, and sequence checks still run, but there is no
@@ -2809,13 +2851,6 @@ def _main(argv=None) -> int:
                 _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
                          "envelope attempt does not match the dispatched attempt")
             else:
-                # "Nothing dispatched" is only the task genuinely being
-                # absent, or a well-formed shape with no attempt rows. A
-                # file holding JSON null, a non-dict, a non-list workers,
-                # or a worker row missing phase all fail closed here rather
-                # than being read as an empty task.
-                _require(not task_present or _valid_task_shape(task),
-                         "task record is malformed")
                 _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if rec["summary"]["outcome"] == "pr_ready":
@@ -2908,17 +2943,18 @@ def _main(argv=None) -> int:
             # latest native implement row; a null-attempt envelope requires the
             # task (if any) to carry no native implement attempt. A stale blocked
             # envelope for attempt I1 is refused once a successor I2 is recorded.
+            # See emit-envelope: only a genuinely absent task, or a well-formed
+            # shape with no attempt rows, counts as "nothing dispatched" here --
+            # and the same shape check grounds the non-null branch too, before
+            # latest_native_attempt is consulted.
+            _require(not task_present or _valid_task_shape(task),
+                     "task record is malformed")
             impl = latest_native_attempt(task, "implement")
             if env["attempt"] is not None:
                 _require(impl is not None
                          and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
                          "envelope attempt no longer matches the dispatched attempt")
             else:
-                # See emit-envelope: only a genuinely absent task, or a
-                # well-formed shape with no attempt rows, counts as
-                # "nothing dispatched" here.
-                _require(not task_present or _valid_task_shape(task),
-                         "task record is malformed")
                 _require(not has_attempt_rows(task, "implement"),
                          "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if summary["outcome"] == "pr_ready":
