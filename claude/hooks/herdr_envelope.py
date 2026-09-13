@@ -13,11 +13,7 @@ import json
 import os
 import re
 import stat
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import herdr_coordination as coordination
 
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 _BINDING_ID_RE = re.compile(r"ldb-[0-9a-f]{32}\Z")
@@ -113,11 +109,16 @@ def _valid_pr(pr):
         return False
     if type(pr["number"]) is not int or pr["number"] <= 0:
         return False
-    # A ref-safe branch: no whitespace, no "..", within the length cap.
-    if not (
-        isinstance(pr["branch"], str)
-        and _BRANCH_RE.fullmatch(pr["branch"])
-        and ".." not in pr["branch"]
+    # A ref-safe branch (git ref syntax subset): no whitespace, within the
+    # length cap, and none of the sequences git itself forbids in a ref.
+    branch = pr["branch"]
+    if not (isinstance(branch, str) and _BRANCH_RE.fullmatch(branch)):
+        return False
+    if (
+        ".." in branch
+        or "//" in branch
+        or "/." in branch
+        or branch.endswith(("/", ".", ".lock"))
     ):
         return False
     if not (isinstance(pr["head_sha"], str) and SHA40_RE.fullmatch(pr["head_sha"])):
@@ -199,29 +200,49 @@ def envelope_path(rd, binding_id):
     return Path(rd) / "leads" / binding_id / "envelope.json"
 
 
+def _no_dup_pairs(pairs):
+    """object_pairs_hook that rejects duplicate keys in a JSON object."""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("duplicate key")
+        d[k] = v
+    return d
+
+
 def read_envelope(rd, binding_id):
     """The stored envelope, None if absent; ValueError on corrupt or invalid.
 
-    Reads through coordination._read: no-follow, nonblocking, regular-file
-    only. Callers hold the global owner lock.
+    Self-contained bounded read: no-follow, nonblocking, regular-file only,
+    size-capped, and duplicate-key-rejecting. Callers hold the global owner
+    lock. This module never imports core, so the tiny no-dup hook is
+    duplicated here rather than shared.
     """
     path = envelope_path(rd, binding_id)
-    # Bound parser input while the caller holds the owner lock; _read still
-    # enforces no-follow / regular-file at open time.
     try:
-        st = os.lstat(path)
+        fd = os.open(
+            str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+        )
     except FileNotFoundError:
-        st = None
-    if st is not None and (
-        not stat.S_ISREG(st.st_mode) or st.st_size > ENVELOPE_MAX_RAW
-    ):
-        raise ValueError("corrupt return envelope")
-    try:
-        rec = coordination._read(path)
-    except ValueError as exc:
-        raise ValueError("corrupt return envelope") from exc
-    if rec is None:
         return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > ENVELOPE_MAX_RAW:
+            raise ValueError("corrupt return envelope")
+        raw = b""
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            raw += chunk
+            if len(raw) > ENVELOPE_MAX_RAW:
+                raise ValueError("corrupt return envelope")
+    finally:
+        os.close(fd)
+    try:
+        rec = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_dup_pairs)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("corrupt return envelope") from exc
     if not valid_envelope(rec) or rec["binding_id"] != binding_id:
         raise ValueError("invalid return envelope")
     return rec

@@ -2576,6 +2576,14 @@ def _main(argv=None) -> int:
                 if getattr(ns, "binding", None) is not None:
                     _require(has_native_attempt(task, done["phase"]),
                              "binding-scoped emit requires a recorded native attempt")
+                    if ns.cmd == "emit-review":
+                        # Dispatched-head pinning: a binding-scoped review verdict
+                        # must name the currently dispatched review head, closing
+                        # the intermediate-head dance (approved@H2 then approved@H
+                        # while the task still dispatches H).
+                        _require(isinstance(task, dict)
+                                 and task.get("review_head_sha") == done["reviewed_head_sha"],
+                                 "review emit must name the dispatched review head")
                 _require(isinstance(task, dict) and attempt_matches(task, done, done["phase"], ns.workspace),
                          "result does not match the current dispatched attempt")
                 # Closes the overwrite-the-rejection path at one head: a binding-
@@ -2592,6 +2600,8 @@ def _main(argv=None) -> int:
                     if isinstance(prior, dict) and prior.get("reviewed_head_sha") == done["reviewed_head_sha"] and (
                         prior.get("outcome") != done["outcome"]
                         or prior.get("reviewer_session_id") != done.get("reviewer_session_id")
+                        or prior.get("blocking_count") != done.get("blocking_count")
+                        or prior.get("findings_ref") != done.get("findings_ref")
                     ):
                         _require(False,
                                  "a same-revision review verdict cannot be replaced; "
@@ -2660,6 +2670,9 @@ def _main(argv=None) -> int:
                 att = rec["attempt"]
                 _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
                          "envelope attempt does not match the dispatched attempt")
+            else:
+                _require(latest_native_attempt(task, "implement") is None,
+                         "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if rec["summary"]["outcome"] == "pr_ready":
                 pr = rec["summary"]["pr"]
                 ap = pr["approval"]
@@ -2726,6 +2739,25 @@ def _main(argv=None) -> int:
             _require(lease is None or lease.get("binding_id") == ns.binding,
                      "workspace lease supersedes this binding")
             summary = env["summary"]
+            base = rd / "leads" / ns.binding
+            try:
+                task = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.json"))
+            except (OSError, ValueError):
+                task = None
+            # Attempt grounding applies to EVERY outcome (defense-in-depth against
+            # a task record rewritten -- or a successor attempt recorded -- after
+            # emit): a non-null envelope attempt must still match the CURRENT
+            # latest native implement row; a null-attempt envelope requires the
+            # task (if any) to carry no native implement attempt. A stale blocked
+            # envelope for attempt I1 is refused once a successor I2 is recorded.
+            impl = latest_native_attempt(task, "implement")
+            if env["attempt"] is not None:
+                _require(impl is not None
+                         and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
+                         "envelope attempt no longer matches the dispatched attempt")
+            else:
+                _require(impl is None,
+                         "a null-attempt envelope is only for tasks with no dispatched implement attempt")
             if summary["outcome"] == "pr_ready":
                 _require(isinstance(ns.base_sha, str)
                          and SHA40_RE.fullmatch(ns.base_sha),
@@ -2744,28 +2776,21 @@ def _main(argv=None) -> int:
                     sys.stderr.write("[X] branch head moved since review; a fresh "
                                      "review at the new head is required\n")
                     return 3
-                base = rd / "leads" / ns.binding
                 try:
-                    task = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.json"))
                     review = json.loads(read_payload_text(base / "tasks" / f"{env['task_id']}.review.json"))
                 except (OSError, ValueError):
-                    task, review = None, None
+                    review = None
                 # Native grounding is mandatory at integrate too: a task record
                 # stripped of its worker rows must not fall back to the legacy-
-                # permissive branch inside attempt_matches/is_reviewed.
-                impl = latest_native_attempt(task, "implement")
+                # permissive branch inside attempt_matches/is_reviewed. The
+                # implement-attempt match is enforced above for every outcome;
+                # pr_ready adds the review attempt, staleness, and independence.
+                # Reviewer-session authentication against a real dispatch is a
+                # recorded follow-up.
                 review_att = latest_native_attempt(task, "review")
                 _require(impl is not None and review_att is not None,
                          "integration requires recorded native attempts")
                 ap = pr["approval"]
-                # Defense-in-depth re-checks of the emit-time gates (grounding,
-                # staleness, independence) against the CURRENT task/review
-                # records, so a record rewritten after emit is refused.
-                # Reviewer-session authentication against a real dispatch is a
-                # recorded follow-up.
-                _require(env["attempt"] is not None
-                         and all(env["attempt"][k] == impl[k] for k in ATTEMPT_FIELDS),
-                         "envelope attempt no longer matches the dispatched attempt")
                 _require(review_att["pane_id"] != impl["pane_id"],
                          "review attempt must not run in the implement pane")
                 _require(summary["expected_base_sha"] == task.get("base_sha"),
