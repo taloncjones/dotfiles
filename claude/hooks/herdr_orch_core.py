@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_runtime
 import herdr_bindings as bindings
 import herdr_coordination as coordination
+import herdr_envelope as envelope
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
 from workflow_context import account_scope, atomic_json_at, repository_context
@@ -1874,6 +1875,26 @@ def has_native_attempt(task, phase) -> bool:
     return "runtime" in worker and all(_nonempty_str(worker.get(key)) for key in ATTEMPT_FIELDS)
 
 
+def latest_native_attempt(task, phase):
+    """Last phase-matching worker row, only if it is a fully populated
+    native attempt. Unlike attempt_matches this does not require the row
+    to be the task's last row overall: an envelope grounds its implement
+    attempt while a later review attempt legitimately follows it. Returns
+    None (never a legacy fallback) when no such native row exists."""
+    if not isinstance(task, dict) or not isinstance(task.get("workers"), list):
+        return None
+    matching = [w for w in task["workers"]
+                if isinstance(w, dict) and w.get("phase") == phase]
+    if not matching:
+        return None
+    worker = matching[-1]
+    if "runtime" not in worker:
+        return None
+    if not all(_nonempty_str(worker.get(key)) for key in ATTEMPT_FIELDS):
+        return None
+    return worker
+
+
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
@@ -2139,6 +2160,8 @@ def _main(argv=None) -> int:
     er.add_argument("--findings-ref", default=None)
     er.add_argument("--blocking-count", type=int, default=0)
     er.add_argument("--reviewer-session", default=None)
+    ee = add("emit-envelope", "--json", fenced=True)
+    ee.add_argument("--binding", required=True)
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
@@ -2534,6 +2557,93 @@ def _main(argv=None) -> int:
                 write_json_atomic(out, done)
         else:
             write_json_atomic(out, done)
+        return 0
+    if ns.cmd == "emit-envelope":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(bindings.BINDING_ID_RE.fullmatch(ns.binding), "invalid binding id")
+        try:
+            supplied = json.loads(ns.json)
+        except ValueError:
+            supplied = None
+        _require(
+            isinstance(supplied, dict)
+            and set(supplied) == {"task_id", "attempt", "sequence", "summary"},
+            "envelope json must supply exactly task_id, attempt, sequence, summary",
+        )
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd) as tx:
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(rec_b["status"] == "claimed", "binding is not claimed")
+            # lead_check covers session, fence, account_id, and pins the fence
+            # to this binding generation (herdr_coordination.py:738-755); the
+            # raw lease read stays only to feed the independence comparison.
+            _require(
+                tx.lead_check(ns.session, ns.fence, rec_b["workspace_root"], ns.binding),
+                "emitter is not the live lease holder for this binding",
+            )
+            lease = tx.lead_read(rec_b["workspace_root"])
+            rec = {
+                "schema_version": 1,
+                "binding_id": ns.binding,
+                "task_id": supplied["task_id"],
+                "attempt": supplied["attempt"],
+                "fence": ns.fence,
+                "sequence": supplied["sequence"],
+                "ts": now_iso(),
+                "summary": supplied["summary"],
+            }
+            _require(envelope.valid_envelope(rec),
+                     "invalid or oversized return envelope (REJECTED, not stripped)")
+            _require(rec["task_id"] == rec_b["task_id"],
+                     "envelope task does not match the binding")
+            base = rd / "leads" / ns.binding
+            try:
+                task = json.loads(read_payload_text(base / "tasks" / f"{rec['task_id']}.json"))
+            except (OSError, ValueError):
+                task = None
+            impl = latest_native_attempt(task, "implement")
+            _require(impl is not None,
+                     "envelope requires a recorded native implement attempt")
+            att = rec["attempt"]
+            _require(all(att[key] == impl[key] for key in ATTEMPT_FIELDS),
+                     "envelope attempt does not match the dispatched attempt")
+            if rec["summary"]["outcome"] == "pr_ready":
+                pr = rec["summary"]["pr"]
+                ap = pr["approval"]
+                _require(pr["repo_id"] == rec_b["repo_id"],
+                         "envelope PR repository does not match the binding")
+                _require(rec["summary"]["expected_base_sha"] == task.get("base_sha"),
+                         "expected base does not match the dispatched base")
+                review_att = latest_native_attempt(task, "review")
+                _require(review_att is not None,
+                         "pr_ready requires a recorded native review attempt")
+                _require((review_att["launch_id"], review_att["pane_id"])
+                         != (impl["launch_id"], impl["pane_id"]),
+                         "review attempt must not be the implement attempt")
+                try:
+                    review = json.loads(read_payload_text(base / "tasks" / f"{rec['task_id']}.review.json"))
+                except (OSError, ValueError):
+                    review = None
+                _require(isinstance(review, dict)
+                         and is_reviewed(task, review, pr["head_sha"],
+                                         review.get("workspace_id")),
+                         "pr_ready requires a non-stale recorded approval")
+                _require(review.get("reviewer_session_id") == ap["reviewer_session_id"]
+                         and review.get("runtime") == ap["reviewer_runtime"],
+                         "approval identity does not match the review record")
+                _require(ap["reviewer_session_id"] not in (
+                             lease.get("session_id") if lease else None,
+                             rec_b["expected_session_id"],
+                             rec_b["parent"]["session_id"]),
+                         "reviewer is not independent of the lead or launcher")
+            prior = envelope.read_envelope(rd, ns.binding)
+            _require(prior is None or rec["sequence"] > prior["sequence"],
+                     "duplicate or stale envelope sequence")
+            out = envelope.envelope_path(rd, ns.binding)
+            _require(contained(out, state_root()), "escapes state root")
+            create_payload_dir(out.parent)
+            write_json_atomic(out, rec)
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
