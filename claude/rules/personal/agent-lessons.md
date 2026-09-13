@@ -29,3 +29,5 @@ is the staging tier, not an archive.
   comments, ledgers) comes from rev-parse, not pattern completion.
 - (2026-09) A worker never commits with failing tests: fix or report
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
+- (2026-09) A content-flagged adversarial run with no output is incomplete, not
+  clean: retry once with defensive review framing before counting the seat.
