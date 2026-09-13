@@ -2330,6 +2330,10 @@ def _main(argv=None) -> int:
     tb.add_argument("--no-artifacts", action="store_true")
     tb.add_argument("--descendants-terminated", action="store_true")
     tb.add_argument("--prune", action="store_true")
+    rl = add("reconcile-leads", fenced=True)
+    rl.add_argument("--apply", action="store_true")
+    rl.add_argument("--stale-secs", type=int, default=900)
+    rl.add_argument("--descendants-terminated", action="store_true")
     add("status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
@@ -3333,6 +3337,90 @@ def _main(argv=None) -> int:
             "lease_released": rec_t["lease_released"],
             "pruned": bool(ns.prune),
         }, separators=(",", ":")))
+        return 0
+
+    if ns.cmd == "reconcile-leads":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        rows = []
+        with owner_transaction(rd, ns.session, ns.fence) as tx:
+            _require(tx.current.get("control_tier", "launcher") == "launcher",
+                     "only a launcher owner reconciles leads")
+            ws_map = tx.bindings[tx.slug].get("lead_ws", {})
+            scanned = []
+            for bf in sorted(payload_files(rd / "bindings", "*.json")):
+                bid = bf.name[: -len(".json")]
+                try:
+                    rec_b = bindings.read_binding(rd, bid)
+                except ValueError:
+                    rec_b = "corrupt"
+                if rec_b is None:
+                    # read_binding returns None for an ABSENT file; this file
+                    # was just enumerated, so None means its content parsed to
+                    # JSON null -- corrupt, not skippable. (A non-slug filename
+                    # that fails binding_path's id check raises ValueError and
+                    # is already "corrupt" above.)
+                    rec_b = "corrupt"
+                scanned.append((bid, rec_b))
+            corrupt_ids = [bid for bid, rec_b in scanned if rec_b == "corrupt"]
+            _require(not (ns.apply and corrupt_ids),
+                     "corrupt binding record " + ",".join(corrupt_ids)
+                     + "; repair or remove it before apply")
+            for bid, rec_b in scanned:
+                if rec_b == "corrupt":
+                    rows.append({"binding_id": bid, "task_id": None, "status": "corrupt",
+                                 "workspace_root": None, "lease": "corrupt",
+                                 "descendants": [], "action": "none"})
+                    continue
+                if rec_b is None:
+                    continue
+                ws = rec_b["workspace_root"]
+                entry = ws_map.get(coordination.lead_lease_key(ws))
+                own_entry = entry is not None and entry["binding_id"] == bid
+                if rec_b["status"] not in ("issued", "claimed") and not (
+                    rec_b["status"] == "revoked" and own_entry
+                ):
+                    continue
+                try:
+                    lease = tx.lead_read(ws)
+                    lease_ok = lease is None or coordination._valid_lead_lease(lease)
+                except ValueError:
+                    lease, lease_ok = None, False
+                if not lease_ok:
+                    state = "corrupt"
+                elif lease is None:
+                    state = "missing-own" if own_entry else "missing"
+                elif lease["binding_id"] != bid:
+                    state = "superseded"
+                elif time.time() - lease["heartbeat_ts"] <= ns.stale_secs:
+                    state = "live"
+                else:
+                    state = "stale"
+                desc = outstanding_descendants(rd, bid)
+                action = "none"
+                if ns.apply and state != "live":
+                    revoked_now = False
+                    if rec_b["status"] in ("issued", "claimed"):
+                        write_json_atomic(
+                            bindings.binding_path(rd, bid),
+                            dict(rec_b, status="revoked", updated_ts=now_iso()),
+                        )
+                        revoked_now = True
+                        action = "revoked"
+                    if state in ("stale", "corrupt", "missing-own"):
+                        if desc and not ns.descendants_terminated:
+                            action = "needs-descendant-termination"
+                        else:
+                            tx.lead_release(
+                                ws,
+                                expected_binding=bid,
+                                force=(state == "corrupt"),
+                            )
+                            action = "revoked+released" if revoked_now else "released"
+                rows.append({"binding_id": bid, "task_id": rec_b["task_id"],
+                             "status": rec_b["status"], "workspace_root": ws,
+                             "lease": state, "descendants": desc, "action": action})
+        print(json.dumps({"bindings": rows}, separators=(",", ":")))
         return 0
 
     if ns.cmd == "integrate-envelope":
