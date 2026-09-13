@@ -58,6 +58,7 @@ sh install/codex-surfaces.test.sh
 sh install/codex-roles.test.sh
 sh install/codex-stop-hook.test.sh
 sh install/ai-update.test.sh
+sh install/repo-sync.test.sh
 sh claude/hooks/settings-drift-check.test.sh
 "
 

@@ -42,10 +42,22 @@ function update() {    # update([--ai]) will update the dotfiles installation; -
 	# navigate to dotfile install directory
 	dotfiles
 
-	# pull new version from origin (non-fatal: both scopes still run the
-	# installer even when the pull fails, e.g. offline)
+	# guarded fetch + fast-forward (repo-sync.sh): non-fatal for both scopes
+	# -- the installer still runs from the current checkout when the sync
+	# exits with a classified skip status (usage error 2, or the documented
+	# 20-29 range: not-a-worktree, detached, wrong branch, no upstream,
+	# offline, ahead, diverged, dirty, refused-ff, or a pre-merge inspection
+	# failure). Any other status -- including 30 (unverified after a merge
+	# attempt) and an unclassified status such as 143 from a SIGTERM mid-run,
+	# where verification never ran -- aborts before the installer: installing
+	# from an unverified checkout could propagate a half-updated tree into ~.
 	local pull_status=0
-	git pull || pull_status=$?
+	bash "$DOTFILEDIR/install/common/repo-sync.sh" "$DOTFILEDIR" || pull_status=$?
+	if (( pull_status != 0 && pull_status != 2 && (pull_status < 20 || pull_status > 29) )); then
+		cd $currentdir
+		echo "[X] update aborted: sync exited $pull_status without verified state; inspect $DOTFILEDIR"
+		return $pull_status
+	fi
 
 	local install_status=0
 	if [[ "$scope" == "ai" ]]; then
