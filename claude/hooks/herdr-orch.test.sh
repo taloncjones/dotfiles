@@ -5855,9 +5855,11 @@ import herdr_coordination as coordination
 print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
 printf 'not json' > "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY1.json"
 # Row 2: C claimed on ws2 with a LEGACY lease (no generation) and no
-# registry lead_ws entry: its release refuses, and the row must report
-# revoked+needs-manual-repair (the landed revoke is never hidden)
-# instead of aborting the scan.
+# registry lead_ws entry. A lease with no corroborating registry entry is
+# uncorroborated authority: reconcile must NOT revoke or release from it
+# (registry loss is a manual-repair situation, not a revoke trigger), so
+# the row reports needs-manual-repair with no mutation and the scan
+# continues past it.
 bidC=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-c \
    --workspace-root "$LF_WS2" --expected-session SC)
@@ -5892,12 +5894,14 @@ import json, sys
 rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
 assert rows[sys.argv[1]]["lease"] == "superseded", rows
 assert rows[sys.argv[1]]["action"] == "revoked", rows
-assert rows[sys.argv[2]]["action"] == "revoked+needs-manual-repair", rows
+assert rows[sys.argv[2]]["action"] == "needs-manual-repair", rows
 ' "$bidA" "$bidC"
 python3 -c '
 import json, sys
+# td-a (foreign occupancy) is revoked; td-c (uncorroborated lease, no
+# registry entry) is left untouched for manual repair, still claimed.
 assert json.load(open(sys.argv[1]))["status"] == "revoked"
-assert json.load(open(sys.argv[2]))["status"] == "revoked"
+assert json.load(open(sys.argv[2]))["status"] == "claimed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bidA.json" "$root/herdr-orch/$LF_SLUG/bindings/$bidC.json"
 # ws1's corrupt lease bytes and B's registry occupancy are untouched
 [ "$(cat "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY1.json")" = "not json" ] || exit 1
@@ -6982,6 +6986,75 @@ data = json.loads((coordination.coordination_root() / "bindings.json").read_text
 entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
 assert entry["binding_id"] == sys.argv[3], entry
 ' "$LF_SLUG" "$KEY" "$bid"
+SH
+
+check "consumption freeze is status-independent: a replayed issued record cannot be revoked or released" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-f3-issued.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" >/dev/null
+BREC="$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+# replay the binding's ORIGINAL issued record while the consumption record
+# stays durable: status is a replayable per-binding file, so the freeze
+# must key on the consumption record, not the status. Age its timestamp so
+# reconcile does not treat it as a fresh never-claimed issue and reaches
+# the revoke/release path the consumption record must block.
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["status"] = "issued"
+rec["updated_ts"] = "2020-01-01T00:00:00Z"
+json.dump(rec, open(path, "w"))
+' "$BREC"
+# verb half: issued -> revoked is refused while the record exists
+if CLAUDE_CONFIG_DIR="$root" $CLI set-binding-status \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
+   --status revoked 2>err; then exit 1; fi
+grep -q "resume integrate-envelope" err
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "issued"
+' "$BREC"
+# reconcile half: the issued+consumed row is repair-only, never revoked or
+# released, and the lease/registry stay untouched
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["heartbeat_ts"] = 0
+json.dump(rec, open(path, "w"))
+' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "needs-manual-repair", rows
+' "$bid"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "issued"
+' "$BREC"
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
 SH
 
 check "teardown: consumed record pins the envelope and stands in when it is absent" <<'SH'

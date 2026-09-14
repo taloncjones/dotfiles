@@ -750,6 +750,25 @@ with c.owner_transaction(rd) as tx:
             self.assertEqual(entry["binding_id"], b2)
             self.assertEqual(entry["generation"], 2)
 
+    def test_lease_without_registry_entry_refused(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 1)
+        # wipe the registry lead_ws entry, leaving the lease file behind: a
+        # lease standing alone (restored/replayed over a lost entry) is
+        # uncorroborated authority and must not bootstrap a claim
+        reg = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "bindings.json"
+        data = json.loads(reg.read_text())
+        data["repo"]["lead_ws"] = {}
+        reg.write_text(json.dumps(data))
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+
     def test_lease_replay_generation_rollback_refused(self):
         ws = tempfile.mkdtemp()
         b1 = "ldb-" + "1" * 32
@@ -800,9 +819,10 @@ with c.owner_transaction(rd) as tx:
             self.rd, canonical_id="canonical", expected_slug="repo"
         ) as tx:
             self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 2)
+        current = p.read_text()  # fence-2 lease (matches the registry)
         # replay the fence-1 lease and age it: its fence disagrees with the
-        # registry (last_fence 2), so a foreign heartbeat-based takeover
-        # must raise instead of trusting the replayed file's staleness
+        # registry (last_fence 2), so a heartbeat-based takeover must raise
+        # instead of trusting the replayed file's staleness
         rec = json.loads(saved)
         rec["heartbeat_ts"] = 0
         p.write_text(json.dumps(rec))
@@ -810,8 +830,16 @@ with c.owner_transaction(rd) as tx:
             self.rd, canonical_id="canonical", expected_slug="repo"
         ) as tx, self.assertRaises(ValueError):
             tx.lead_claim("lead-s2", "h", 1, ws, b2, stale_secs=1)
-        # registry occupancy is unchanged by the refused takeover, and the
-        # holder itself still recovers through the same-identity clamp
+        # the SAME identity replaying its own stale fence-1 lease is refused
+        # too -- the lease's identity cannot vouch for a counter the registry
+        # does not corroborate (this is the displaced-holder reclaim window)
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
+        # registry occupancy is unchanged by the refused replays, and a
+        # genuine re-claim carrying the CURRENT-counter lease still works
+        p.write_text(current)
         with coordination.owner_transaction(
             self.rd, canonical_id="canonical", expected_slug="repo"
         ) as tx:
@@ -834,27 +862,30 @@ with c.owner_transaction(rd) as tx:
             self.rd, canonical_id="canonical", expected_slug="repo"
         ) as tx:
             self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 2)
-        # replay the fence-1 lease: the next claim must clear the registry
-        # high-water (last_fence 2), never reissue fence 2
+        # replay the fence-1 lease: it disagrees with the registry high-water
+        # (last_fence 2), so the next claim REFUSES rather than clamping and
+        # reissuing -- a replayed older lease is never a claim base, and the
+        # registry counter cannot be walked backward through one
         p.write_text(saved)
         with coordination.owner_transaction(
             self.rd, canonical_id="canonical", expected_slug="repo"
-        ) as tx:
-            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 3)
-            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
-            self.assertEqual(entry["last_fence"], 3)
-        # replay again and RELEASE: registry counters never move backward
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_claim("lead-s1", "h", 1, ws, b1)
         with coordination.owner_transaction(
             self.rd, canonical_id="canonical", expected_slug="repo"
         ) as tx:
-            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 4)
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertEqual(entry["last_fence"], 2)
+        # lead_release, unlike claim, takes the max of the lease and registry
+        # counters, so a replayed older lease on disk at release time still
+        # never rolls last_fence back
         p.write_text(saved)
         with coordination.owner_transaction(
             self.rd, canonical_id="canonical", expected_slug="repo"
         ) as tx:
             tx.lead_release(ws, expected_binding=b1)
             entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
-            self.assertEqual(entry["last_fence"], 4)
+            self.assertEqual(entry["last_fence"], 2)
             self.assertEqual(entry["generation"], 1)
             self.assertEqual(entry["releases"], {"1": b1})
 

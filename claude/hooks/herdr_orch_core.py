@@ -2700,11 +2700,16 @@ def _main(argv=None) -> int:
                 ns.status != "completed",
                 "completed is reached only through integrate-envelope",
             )
-            if rec["status"] == "claimed":
+            if rec["status"] == "claimed" or ns.status == "revoked":
                 # A consumption record marks an integration in flight (or
-                # one whose completed transition crashed): any transition
-                # out of claimed would strand the resumable
-                # integrate-envelope. Unreadable fails closed.
+                # one whose completed transition crashed). The freeze keys
+                # on the consumption RECORD, never on the binding status:
+                # status lives in a replayable per-binding file, so a
+                # restored "issued" record must not open an issued ->
+                # revoked path that strands the resumable integration. Any
+                # transition out of claimed, or into the terminal revoked
+                # state from any source status, is refused while a record
+                # exists. Unreadable fails closed.
                 try:
                     consumed = envelope.read_consumed(rd, ns.binding)
                 except (ValueError, OSError):
@@ -3316,9 +3321,10 @@ def _main(argv=None) -> int:
             # The consumption freeze extends past will_revoke: a binding
             # ALREADY revoked while holding a consumption record is a
             # bypassed or crashed revocation, and releasing+pruning it
-            # would launder the frozen evidence away. Explicit recovery
-            # (a fresh claimed transition to resume integrate-envelope,
-            # or manual repair) is the only exit.
+            # would launder the frozen evidence away. revoked is terminal
+            # (no verb transitions out of it), so the only exit is
+            # out-of-band manual repair that restores the claimed record
+            # before integrate-envelope can resume.
             _require(
                 not (status == "revoked" and consumed_rec is not None),
                 "revoked binding holds a consumption record; "
@@ -3763,6 +3769,19 @@ def _main(argv=None) -> int:
                             "lease": state, "descendants": desc,
                             "action": "needs-manual-repair"})
                         continue
+                    if entry is None and lease is not None:
+                        # A lease file with NO corroborating registry entry
+                        # is uncorroborated authority: its counters and
+                        # identity vouch only for themselves. lead_claim
+                        # refuses the same shape; reconcile must not revoke
+                        # or release from it either (it would attribute a
+                        # release from the lease alone). Manual repair only.
+                        rows.append({
+                            "binding_id": bid, "task_id": rec_b["task_id"],
+                            "status": rec_b["status"], "workspace_root": ws,
+                            "lease": state, "descendants": desc,
+                            "action": "needs-manual-repair"})
+                        continue
                     if "<unreadable>" in desc:
                         rows.append({
                             "binding_id": bid, "task_id": rec_b["task_id"],
@@ -3781,22 +3800,22 @@ def _main(argv=None) -> int:
                             "lease": state, "descendants": desc,
                             "action": "needs-manual-repair"})
                         continue
-                    if consumed is not None and rec_b["status"] == "claimed":
+                    if consumed is not None:
+                        # A consumption record is frozen integration evidence
+                        # regardless of the binding's (replayable) status. A
+                        # claimed binding resumes integrate-envelope; any
+                        # other status -- a replayed "issued" record, or an
+                        # already-revoked one that cannot resume (that verb
+                        # requires claimed) -- needs manual repair. Never
+                        # revoke or release a consumed binding here, whatever
+                        # its status file says.
                         rows.append({
                             "binding_id": bid, "task_id": rec_b["task_id"],
                             "status": rec_b["status"], "workspace_root": ws,
                             "lease": state, "descendants": desc,
-                            "action": "needs-integration-resume"})
-                        continue
-                    if consumed is not None and rec_b["status"] == "revoked":
-                        # A revoked binding cannot resume integrate-envelope
-                        # (that verb requires claimed), so its frozen
-                        # consumption record is never released here either.
-                        rows.append({
-                            "binding_id": bid, "task_id": rec_b["task_id"],
-                            "status": rec_b["status"], "workspace_root": ws,
-                            "lease": state, "descendants": desc,
-                            "action": "needs-manual-repair"})
+                            "action": ("needs-integration-resume"
+                                       if rec_b["status"] == "claimed"
+                                       else "needs-manual-repair")})
                         continue
                     revoked_now = False
                     if rec_b["status"] in ("issued", "claimed"):
@@ -3871,7 +3890,7 @@ def _main(argv=None) -> int:
                 try:
                     done_env = envelope.read_envelope(rd, ns.binding)
                     done_consumed = envelope.read_consumed(rd, ns.binding)
-                except ValueError:
+                except (ValueError, OSError):
                     done_env = done_consumed = None
                 if (
                     done_env is not None
@@ -3889,8 +3908,12 @@ def _main(argv=None) -> int:
                         "pr": done_env["summary"]["pr"],
                     }, separators=(",", ":")))
                     return 0
+                # A completed binding whose evidence does NOT match (pruned,
+                # tampered, or a replayed mismatch) is not an idempotent
+                # success; it falls through to the refusal below.
             _require(rec_b["status"] == "claimed",
-                     "binding is not claimed (already integrated or revoked)")
+                     "binding is not claimed (completed evidence does not "
+                     "match, or already revoked)")
             env = envelope.read_envelope(rd, ns.binding)
             _require(env is not None, "no return envelope for this binding")
             _require(env["task_id"] == rec_b["task_id"],

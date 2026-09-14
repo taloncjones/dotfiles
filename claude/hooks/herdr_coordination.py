@@ -775,6 +775,18 @@ class OwnerTransaction:
             )
         if old is not None and not _valid_lead_lease(old):
             raise ValueError("corrupt lead lease; explicit recovery required")
+        if old is not None and entry is None:
+            # A lease file with NO corroborating registry entry is
+            # uncorroborated authority: a genuine first-ever claim has
+            # neither a lease nor an entry, and every later claim writes the
+            # entry atomically with the lease. A lease standing alone can
+            # only be a restored/replayed file over a wiped or never-written
+            # entry; its identity and counters vouch only for themselves, so
+            # it may bootstrap nothing.
+            raise ValueError(
+                "lead lease has no corroborating registry entry; "
+                "explicit recovery required"
+            )
         if old is not None and entry is not None:
             # Registry occupancy outranks the lease file (lead_release's
             # philosophy): a restored or replayed lease file that disagrees
@@ -797,24 +809,20 @@ class OwnerTransaction:
             old is not None
             and entry is not None
             and (
-                old["session_id"] != session
-                or old.get("runtime", "claude") != runtime
-                or old.get("thread_id") != thread_id
-                or old.get("account_id") != self.account_id
-            )
-            and (
                 old["fence"] != entry["last_fence"]
                 or old.get("generation") != entry["generation"]
             )
         ):
-            # Claim-path sibling of reconcile's replayed-lease rule: a
-            # heartbeat-based takeover may only displace the lease the
-            # registry corroborates at its exact fence and generation. A
-            # mismatched on-disk lease is a replayed older copy, not the
-            # live lead's record -- its heartbeat proves nothing, so no
-            # staleness decision may be made from it. The same-identity
-            # re-claim path keeps its high-water clamp instead (the
-            # holder's own replayed file never grants anyone else access).
+            # Claim-path sibling of reconcile's replayed-lease rule, applied
+            # UNCONDITIONALLY: the on-disk lease may drive any decision
+            # (staleness, identity match, high-water seeding) only when the
+            # registry corroborates it at its exact fence AND generation. A
+            # mismatched lease is a replayed older copy -- and the lease's
+            # own identity fields cannot vouch for it, so this gate never
+            # exempts a same-identity caller: a displaced holder replaying
+            # its own stale lease must not reclaim past a live successor.
+            # A genuine same-holder re-claim carries the current-counter
+            # lease and passes; the high-water clamp below then advances it.
             raise ValueError(
                 "lead lease disagrees with the registry fence/generation; "
                 "explicit recovery required"
