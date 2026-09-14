@@ -785,6 +785,41 @@ with c.owner_transaction(rd) as tx:
         ) as tx, self.assertRaises(ValueError):
             tx.lead_claim("lead-s1", "h", 1, ws, b1)
 
+    def test_replayed_lease_blocks_heartbeat_takeover(self):
+        ws = tempfile.mkdtemp()
+        b1 = "ldb-" + "1" * 32
+        b2 = "ldb-" + "2" * 32
+        name = "lead-" + coordination.lead_lease_key(ws) + ".json"
+        p = Path(os.environ["HERDR_COORDINATION_ROOT"]) / "repo" / name
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 1)
+        saved = p.read_text()  # fence-1 lease
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 2)
+        # replay the fence-1 lease and age it: its fence disagrees with the
+        # registry (last_fence 2), so a foreign heartbeat-based takeover
+        # must raise instead of trusting the replayed file's staleness
+        rec = json.loads(saved)
+        rec["heartbeat_ts"] = 0
+        p.write_text(json.dumps(rec))
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx, self.assertRaises(ValueError):
+            tx.lead_claim("lead-s2", "h", 1, ws, b2, stale_secs=1)
+        # registry occupancy is unchanged by the refused takeover, and the
+        # holder itself still recovers through the same-identity clamp
+        with coordination.owner_transaction(
+            self.rd, canonical_id="canonical", expected_slug="repo"
+        ) as tx:
+            entry = tx.bindings[tx.slug]["lead_ws"][coordination.lead_lease_key(ws)]
+            self.assertEqual(entry["binding_id"], b1)
+            self.assertEqual(entry["last_fence"], 2)
+            self.assertEqual(tx.lead_claim("lead-s1", "h", 1, ws, b1), 3)
+
     def test_fence_high_water_holds_against_replayed_lease(self):
         ws = tempfile.mkdtemp()
         b1 = "ldb-" + "1" * 32

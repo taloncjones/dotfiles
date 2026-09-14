@@ -794,6 +794,32 @@ class OwnerTransaction:
                     "explicit recovery required"
                 )
         if (
+            old is not None
+            and entry is not None
+            and (
+                old["session_id"] != session
+                or old.get("runtime", "claude") != runtime
+                or old.get("thread_id") != thread_id
+                or old.get("account_id") != self.account_id
+            )
+            and (
+                old["fence"] != entry["last_fence"]
+                or old.get("generation") != entry["generation"]
+            )
+        ):
+            # Claim-path sibling of reconcile's replayed-lease rule: a
+            # heartbeat-based takeover may only displace the lease the
+            # registry corroborates at its exact fence and generation. A
+            # mismatched on-disk lease is a replayed older copy, not the
+            # live lead's record -- its heartbeat proves nothing, so no
+            # staleness decision may be made from it. The same-identity
+            # re-claim path keeps its high-water clamp instead (the
+            # holder's own replayed file never grants anyone else access).
+            raise ValueError(
+                "lead lease disagrees with the registry fence/generation; "
+                "explicit recovery required"
+            )
+        if (
             old
             and time.time() - old["heartbeat_ts"] <= stale_secs
             and (

@@ -500,7 +500,7 @@ ok "teardown-binding refuses a bad fence" \
 ok "reconcile-leads refuses a bad fence" \
   "! $CLI reconcile-leads --repo-slug '$TDSLUG' --session TD --fence 999999 2>/dev/null"
 ok "emit-artifacts refuses a bad fence" \
-  "! $CLI emit-artifacts --repo-slug '$TDSLUG' --session TD --fence 999999 --task-id PROJ-TD --binding '$BID' --file 'x=$ARTF' 2>/dev/null"
+  "! $CLI emit-artifacts --repo-slug '$TDSLUG' --session TD --fence 999999 --task-id PROJ-TD --binding '$BID' --file \"\$ARTF\" 2>/dev/null"
 
 ok "teardown-binding refuses a claimed binding without --abandon (integrate first)" \
   "err=\$($CLI teardown-binding --repo-slug '$TDSLUG' --session TD --fence '$TDF' --binding '$BID' 2>&1 >/dev/null) || true; printf '%s' \"\$err\" | grep -q 'integrate first'"

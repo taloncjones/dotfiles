@@ -1807,6 +1807,40 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
             entry = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
                 coordination.lead_lease_key(workspace_root)
             )
+            if entry is not None and binding_id in entry.get("releases", {}).values():
+                # The append-only ledger already attributes a release of this
+                # binding on this workspace: re-claiming would reactivate a
+                # released-but-unrevoked binding (the teardown retry then
+                # completes the revocation with no new occupancy appearing).
+                raise ValueError(
+                    "binding was already released on this workspace; "
+                    "issue a new binding"
+                )
+            try:
+                surviving = tx.lead_read(workspace_root)
+            except ValueError:
+                surviving = None
+            if (
+                surviving is not None
+                and coordination._valid_lead_lease(surviving)
+                and surviving["binding_id"] != binding_id
+            ):
+                # A claim under a different binding would displace this
+                # lease's occupant. Cross-account occupancy is never
+                # inspected (the occupant's consumption record lives in ITS
+                # payload scope, not the claimant's), and a lease with no
+                # corroborating registry entry is unattested evidence of who
+                # occupies the path: both refuse, stale or not.
+                if surviving.get("account_id") != tx.account_id:
+                    raise ValueError(
+                        "occupant belongs to another account scope; "
+                        "explicit recovery required"
+                    )
+                if entry is None:
+                    raise ValueError(
+                        "surviving lease has no corroborating registry "
+                        "entry; explicit recovery required"
+                    )
             if entry is not None and entry["binding_id"] not in (None, binding_id):
                 # A takeover would displace the occupant; an occupant holding
                 # a consumption record is mid-integration (or its completed
@@ -2666,6 +2700,20 @@ def _main(argv=None) -> int:
                 ns.status != "completed",
                 "completed is reached only through integrate-envelope",
             )
+            if rec["status"] == "claimed":
+                # A consumption record marks an integration in flight (or
+                # one whose completed transition crashed): any transition
+                # out of claimed would strand the resumable
+                # integrate-envelope. Unreadable fails closed.
+                try:
+                    consumed = envelope.read_consumed(rd, ns.binding)
+                except (ValueError, OSError):
+                    consumed = "unreadable"
+                _require(
+                    consumed is None,
+                    "binding has a consumption record; "
+                    "resume integrate-envelope",
+                )
             _require(
                 bindings.can_transition(rec["status"], ns.status),
                 f"illegal binding transition {rec['status']} -> {ns.status}",
@@ -2851,6 +2899,22 @@ def _main(argv=None) -> int:
                         and lease.get("binding_id") == ns.binding,
                         "workspace lease is missing, superseded, or a "
                         "legacy/no-generation record",
+                    )
+                    # The same registry-occupancy match lead_check enforces:
+                    # the durable lead_ws entry must name this lease's
+                    # binding at this exact fence and generation, or a
+                    # replayed predecessor lease could publish stale worker
+                    # records at the source.
+                    ws_entry = tx.bindings.get(tx.slug, {}).get(
+                        "lead_ws", {}
+                    ).get(coordination.lead_lease_key(rec_b["workspace_root"]))
+                    _require(
+                        ws_entry is not None
+                        and ws_entry["binding_id"] == lease["binding_id"]
+                        and ws_entry["last_fence"] == lease["fence"]
+                        and (lease.get("generation") is None
+                             or ws_entry["generation"] == lease["generation"]),
+                        "workspace occupancy does not corroborate the lease",
                     )
                 try:
                     task = json.loads(read_payload_text(base / "tasks" / f"{ns.task_id}.json"))
@@ -3188,16 +3252,23 @@ def _main(argv=None) -> int:
                         with contextlib.suppress(OSError):
                             os.unlink(tmp, dir_fd=sfd)
                         raise
-                # STAGE 3 -- publish the manifest, THEN drop store files it
-                # does not reference (a crash before this leaves the prior
-                # manifest pointing at its own still-intact bytes plus new
-                # files it does not reference; stray temps sweep here too).
+                # STAGE 3 -- durability order: every blob's bytes are
+                # fsynced above; fsync the store DIRECTORY so its entries
+                # are durable BEFORE the manifest that names them, publish
+                # the manifest, THEN drop store files it does not reference
+                # (a crash before the publish leaves the prior manifest
+                # pointing at its own still-intact bytes plus new files it
+                # does not reference; stray temps sweep here too), and
+                # fsync the directory again so the sweep's unlinks are
+                # durable. Never sweep before the new manifest is durable.
+                os.fsync(sfd)
                 write_json_atomic(out, rec)
                 keep = {artifact_blob_name(a["sha256"]) for a in rec["artifacts"]}
                 for existing in os.listdir(sfd):
                     if existing not in keep:
                         with contextlib.suppress(FileNotFoundError):
                             os.unlink(existing, dir_fd=sfd)
+                os.fsync(sfd)
         return 0
 
     if ns.cmd == "teardown-binding":
@@ -3242,6 +3313,17 @@ def _main(argv=None) -> int:
                 "binding has a consumption record; resume integrate-envelope "
                 "instead of --abandon",
             )
+            # The consumption freeze extends past will_revoke: a binding
+            # ALREADY revoked while holding a consumption record is a
+            # bypassed or crashed revocation, and releasing+pruning it
+            # would launder the frozen evidence away. Explicit recovery
+            # (a fresh claimed transition to resume integrate-envelope,
+            # or manual repair) is the only exit.
+            _require(
+                not (status == "revoked" and consumed_rec is not None),
+                "revoked binding holds a consumption record; "
+                "explicit recovery required",
+            )
 
             # 3. read manifest inputs -- no mutation past this point until
             # step 7. A validation failure here must not free the workspace.
@@ -3256,6 +3338,21 @@ def _main(argv=None) -> int:
             except ValueError:
                 _require(False, "return envelope is unreadable")
             env_digest = envelope.envelope_digest(env) if env is not None else None
+            # A consumption record pins the envelope evidence, checked
+            # BEFORE any release, manifest write, or prune: surviving
+            # envelope bytes must BE the consumed ones (sequence and
+            # digest), and when the envelope is gone the consumed digest
+            # is authoritative for the manifest -- a conflicting
+            # prior-manifest digest then refuses through the merge check
+            # below.
+            if consumed_rec is not None and env is not None:
+                _require(
+                    env["sequence"] == consumed_rec["sequence"]
+                    and env_digest == consumed_rec["envelope_sha256"],
+                    "surviving envelope does not match the consumption record",
+                )
+            if consumed_rec is not None and env is None:
+                env_digest = consumed_rec["envelope_sha256"]
             try:
                 artifacts_manifest = envelope.read_artifacts(rd, ns.binding)
             except ValueError:
@@ -3432,7 +3529,14 @@ def _main(argv=None) -> int:
             # already-released entry the call only removes a leftover or
             # replayed lease file and mutates nothing.
             if release_action == "normal":
-                tx.lead_release(rec_b["workspace_root"], expected_binding=ns.binding)
+                try:
+                    tx.lead_release(
+                        rec_b["workspace_root"], expected_binding=ns.binding
+                    )
+                except ValueError as exc:
+                    # e.g. a legacy lease with no recorded generation: a
+                    # clean refusal, never a traceback.
+                    _require(False, f"cannot release lease: {exc}")
             elif release_action == "force":
                 try:
                     tx.lead_release(
@@ -3444,21 +3548,22 @@ def _main(argv=None) -> int:
                     # a clean refusal, never a traceback.
                     _require(False, f"cannot release corrupt lease: {exc}")
             # 8. manifest write, from POST-release registry state.
-            # lease_released counts ONLY confirmed evidence: the ledger
-            # attributing a generation to ns.binding, or a prior manifest's
-            # recorded release. Never lead_release's return value or a bare
-            # file removal: replay cleanup (entry already released, ledger
-            # naming a successor) removes a file yet proves nothing for
-            # ns.binding. The generation is likewise recomputed after the
-            # release so a release this run performed is reflected, and the
-            # final record is re-validated and re-checked against the size
-            # bound before it is written.
+            # lease_released is LEDGER-ONLY: true iff the post-release
+            # registry ledger attributes a generation to ns.binding. Never
+            # lead_release's return value or a bare file removal (replay
+            # cleanup removes a file yet proves nothing for ns.binding),
+            # and never a prior manifest's boolean -- a forged or stale
+            # manifest must not vouch for a release the durable ledger
+            # does not show. The prior manifest keeps only its generation
+            # recovery role, ledger-first. The generation is recomputed
+            # after the release so a release this run performed is
+            # reflected, and the final record is re-validated and
+            # re-checked against the size bound before it is written.
             entry_after = tx.bindings[tx.slug].get("lead_ws", {}).get(
                 coordination.lead_lease_key(rec_b["workspace_root"])
             )
             lease_released = (
                 ns.binding in (entry_after or {}).get("releases", {}).values()
-                or bool(prior and prior["lease_released"])
             )
             final_generation = _binding_generation(entry_after, ns.binding)
             if final_generation is None and prior is not None:
@@ -3596,6 +3701,18 @@ def _main(argv=None) -> int:
                     state = "missing-own" if own_entry else "missing"
                 elif lease["binding_id"] != bid:
                     state = "superseded"
+                elif entry is not None and (
+                    lease["fence"] != entry["last_fence"]
+                    or lease.get("generation") != entry["generation"]
+                ):
+                    # The lease file disagrees with the registry's durable
+                    # counters: a replayed older lease, not the live lead's
+                    # record -- never a staleness (revoke/release)
+                    # candidate. Boundary: a byte-identical same-fence
+                    # replay with a stale heartbeat is indistinguishable
+                    # without a durable heartbeat high-water mark; recorded
+                    # as a follow-up, not fixed here.
+                    state = "replayed-lease"
                 else:
                     # Defensive: heartbeat arithmetic on a value validation
                     # somehow let through must corrupt THIS row, never abort
@@ -3630,13 +3747,22 @@ def _main(argv=None) -> int:
                     else:
                         action = "cleaned-replayed-lease"
                 elif ns.apply and state != "live" and not fresh_issued:
-                    # Ordered refusals BEFORE any revoke or release: an
-                    # unreadable descendant record is not terminated state
-                    # (the flag asserts terminated panes, nothing more), and
-                    # a claimed binding holding a consumption record is a
-                    # resumable integration -- revoking either would strand
-                    # or destroy evidence. Unreadable consumption records
-                    # fail closed the same way.
+                    # Ordered refusals BEFORE any revoke or release: a
+                    # replayed lease is not the live lead's record (no
+                    # heartbeat decision may be made from it), an unreadable
+                    # descendant record is not terminated state (the flag
+                    # asserts terminated panes, nothing more), and a claimed
+                    # OR revoked binding holding a consumption record is
+                    # frozen integration evidence -- revoking or releasing
+                    # any of these would strand or destroy evidence.
+                    # Unreadable consumption records fail closed the same way.
+                    if state == "replayed-lease":
+                        rows.append({
+                            "binding_id": bid, "task_id": rec_b["task_id"],
+                            "status": rec_b["status"], "workspace_root": ws,
+                            "lease": state, "descendants": desc,
+                            "action": "needs-manual-repair"})
+                        continue
                     if "<unreadable>" in desc:
                         rows.append({
                             "binding_id": bid, "task_id": rec_b["task_id"],
@@ -3661,6 +3787,16 @@ def _main(argv=None) -> int:
                             "status": rec_b["status"], "workspace_root": ws,
                             "lease": state, "descendants": desc,
                             "action": "needs-integration-resume"})
+                        continue
+                    if consumed is not None and rec_b["status"] == "revoked":
+                        # A revoked binding cannot resume integrate-envelope
+                        # (that verb requires claimed), so its frozen
+                        # consumption record is never released here either.
+                        rows.append({
+                            "binding_id": bid, "task_id": rec_b["task_id"],
+                            "status": rec_b["status"], "workspace_root": ws,
+                            "lease": state, "descendants": desc,
+                            "action": "needs-manual-repair"})
                         continue
                     revoked_now = False
                     if rec_b["status"] in ("issued", "claimed"):
@@ -3687,7 +3823,11 @@ def _main(argv=None) -> int:
                                     force=(state == "corrupt"),
                                 )
                             except ValueError:
-                                action = "needs-manual-repair"
+                                # Never hide a revoke that already landed
+                                # behind a repair-only action.
+                                action = ("revoked+needs-manual-repair"
+                                          if revoked_now
+                                          else "needs-manual-repair")
                             else:
                                 # A release that actually attributed this
                                 # binding reads back from the post-call
@@ -3722,6 +3862,33 @@ def _main(argv=None) -> int:
                      "only a launcher owner integrates envelopes")
             rec_b = bindings.read_binding(rd, ns.binding)
             _require(rec_b is not None, "unknown dispatch binding")
+            if rec_b["status"] == "completed":
+                # Idempotent retry: a caller that crashed after the
+                # completed transition re-runs integrate. ONLY when the
+                # one-shot consumption record matches the stored envelope
+                # exactly (sequence and digest) is the recorded success
+                # reported; anything else refuses below as before.
+                try:
+                    done_env = envelope.read_envelope(rd, ns.binding)
+                    done_consumed = envelope.read_consumed(rd, ns.binding)
+                except ValueError:
+                    done_env = done_consumed = None
+                if (
+                    done_env is not None
+                    and done_consumed is not None
+                    and done_env["task_id"] == rec_b["task_id"]
+                    and done_consumed["sequence"] == done_env["sequence"]
+                    and done_consumed["envelope_sha256"]
+                    == envelope.envelope_digest(done_env)
+                ):
+                    print(json.dumps({
+                        "binding_id": done_env["binding_id"],
+                        "task_id": done_env["task_id"],
+                        "outcome": done_env["summary"]["outcome"],
+                        "sequence": done_env["sequence"],
+                        "pr": done_env["summary"]["pr"],
+                    }, separators=(",", ":")))
+                    return 0
             _require(rec_b["status"] == "claimed",
                      "binding is not claimed (already integrated or revoked)")
             env = envelope.read_envelope(rd, ns.binding)
@@ -3748,8 +3915,10 @@ def _main(argv=None) -> int:
             ws_entry = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
                 coordination.lead_lease_key(rec_b["workspace_root"])
             )
-            _require(ws_entry is not None
-                     and ws_entry["binding_id"] == ns.binding,
+            _require(ws_entry is not None,
+                     "no registry occupancy for this workspace (the binding "
+                     "predates the registry); explicit recovery required")
+            _require(ws_entry["binding_id"] == ns.binding,
                      "workspace occupancy superseded this binding")
             try:
                 consumed = envelope.read_consumed(rd, ns.binding)
