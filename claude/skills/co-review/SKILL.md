@@ -86,12 +86,25 @@ reviewed tree applied to its index. The implementing or authoring session MUST
 NOT review its own diff inline; "the diff is small, I'll just review it
 myself" is exactly the biased self-review this gate exists to prevent. Give
 the fresh reviewer only the round's defined inputs -- for a complete round the
-frozen snapshot, the base, and the failure-class rubric
-(`references/failure-classes.md` in this skill directory); for a scoped round
-additionally the prior findings table and the fix diff -- never the authoring
-session's rationalizations. It is the Claude half, not a substitute for
+frozen snapshot, the base, the failure-class rubric
+(`references/failure-classes.md` in this skill directory), and the
+deferral digest when deferred lineages exist; for a scoped round
+additionally the prior round's open blocking lineages and the fix diff
+-- never the authoring session's rationalizations. It is the Claude half, not a substitute for
 Codex. Controller disk-verification of a fix is not a substitute for either
 half.
+
+Decorrelate the two finder halves' reading order in a complete round.
+Mechanism: from the frozen diff's changed paths, build two reading-order
+lists -- one in natural diff order (`git diff --name-only <base>`
+order), one grouped by subsystem (directory or module grouping the
+orchestrator picks when freezing the round and records in the ledger).
+Append one list to each half's prompt as "Read and probe the changed
+paths in this order". Both halves still read the same frozen snapshot;
+only the prescribed traversal differs. Structured reordering measurably
+changes which defects a reviewer finds; random shuffling degrades
+reviewer accuracy and is not used. Attacker and skeptic receive no
+reading-order list.
 
 The independent Codex finder runs from `snapshot.codex_root` through the shared
 runtime runner. It selects the policy model and effort and returns structured
@@ -115,20 +128,35 @@ uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk 
   --prompt-file "$PROMPT_FILE"
 ```
 
+When deferred lineages exist, append the deferral digest (see "Finding
+lineages and deferrals") to the prompt before dispatch; the digest is
+context to prevent re-derivation, never a review target.
+
 For a scoped round, build the prompt from the prior findings and the fix
 diff instead (`$PREV_HEAD` is the previously reviewed head from the last
 posted marker, `$HEAD` the newly frozen committed head this round reviews,
-`$FINDINGS_FILE` the prior round's findings table saved locally; the diff
+`$FINDINGS_FILE` the prior round's OPEN BLOCKING lineages only, saved
+locally -- deferred and resolved lineages never enter the review-target
+table; they travel in the deferral digest; the diff
 read from the source repository is a read, not a mutation):
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-codex.XXXXXX")
 cat >"$PROMPT_FILE" <<'EOF'
-Scoped re-review of the frozen change. For each prior finding listed below,
-return ADDRESSED or NOT-ADDRESSED against the frozen tree with one line of
-evidence. Then report any new actionable issue in the fix diff below ONLY,
-as severity, file:line, failure scenario, and concrete fix. End with one
-verdict. Do not invoke skills, partners, or external actions.
+Scoped re-review of the frozen change. For each OPEN BLOCKING prior finding
+listed below, return ADDRESSED or NOT-ADDRESSED against the frozen tree
+with one line of evidence; deferred lineages appear only in the digest and
+are not review targets, but if your in-scope review yields new evidence, a
+severity escalation, or fix-regression implication for one, report it.
+Then complete your review scope over the fix diff below ONLY -- do not
+stop at the first finding. If the fixed subsystem
+still contains failure orderings, enumerate every one you can construct.
+Zero or one residual is a complete answer only when you also list the
+changed mechanisms and the failure orderings you examined (file
+references included) -- a bare completion sentence is not scope evidence;
+when several residuals exist, report them all. Report each as severity,
+file:line, failure scenario, and concrete fix. End with one verdict. Do
+not invoke skills, partners, or external actions.
 EOF
 printf '\nPrior reviewed head: %s\nCurrent head: %s\n\nPrior findings:\n' \
   "$PREV_HEAD" "$HEAD" >>"$PROMPT_FILE"
@@ -141,6 +169,10 @@ uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk 
   --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
+
+When deferred lineages exist, append the deferral digest (see "Finding
+lineages and deferrals") to the prompt before dispatch; the digest is
+context to prevent re-derivation, never a review target.
 
 Use the runner only; do not launch a generic or nested Codex CLI review. Pass
 `--risk critical` only for explicitly critical review risk, never diff size.
@@ -171,6 +203,45 @@ Cleanup refuses foreign roots, marker mismatches, modified trees, ignored or
 untracked snapshot files, and unexpected owned-output entries. Preserve the
 snapshot if it refuses cleanup.
 
+## Fix-plan gate
+
+After any round whose verdict leaves blocking findings, and before
+dispatching the fix implementer, run one fix-plan review turn -- but only
+while the loop still authorizes another fix wave (never after the caps
+are spent or after a divergence or escalation exit):
+
+1. Write a fix-design note per affected subsystem: the intended fix
+   mechanism for each blocking finding, referenced by lineage ID --
+   design, not code.
+2. Spend one read-only Codex turn (shared runner, role `reviewer`) on the
+   note with this instruction: "Assume this design is implemented
+   correctly. Enumerate every remaining failure ordering you can
+   construct. If the failure family is not closed, name the minimal
+   design change that closes it."
+3. Fold the response into the fix plan. Every concrete residual failure
+   ordering the gate surfaces enters the lineage ledger as a finding of
+   the round that triggered the gate, continuing that round's lineage
+   ordinals, with that round as its discovery round
+   and the blocking status its severity earns there; dismissing one
+   requires recorded evidence disproving the scenario -- a disagreement
+   ruling alone cannot discharge it. Rule any disagreement as the
+   orchestrator and record the ruling in the round ledger. One turn, no
+   iteration; then dispatch the implementer.
+
+The gate consumes no round cap. Its seat evidence is the runner session
+id plus the enumeration text in the ledger. On failure or timeout, retry
+once with a longer timeout (at least 1.5x the first; 600s -> 900s is the
+reference pair); on a second failure, perform the enumeration yourself
+and record the seat as FAILED in the ledger TOGETHER WITH both failure
+artifacts (each attempt's runner result or timeout evidence and its
+timeout setting -- a FAILED entry without both artifacts is not a FAILED
+entry). A FAILED gate does not discharge independent scrutiny of the fix
+design: name the affected subsystems as priority probe targets in the
+next round's seat prompts, so the design the partner never reviewed gets
+independent eyes in review. Never block the loop on partner
+availability, and never start implementation without either a completed
+gate or a recorded FAILED entry.
+
 ## Re-review loop
 
 One pass is not a gate. Two round types:
@@ -183,8 +254,8 @@ One pass is not a gate. Two round types:
   finder or verification incomplete cannot approve.
 - **Scoped round**: freeze the committed head; both independent halves
   (fresh Claude reviewer AND Codex runner -- never only the half that
-  raised a finding) receive the prior round's findings table and the
-  fix diff since the last posted round (prior reviewed head to new
+  raised a finding) receive the prior round's open blocking lineages and
+  the fix diff since the last posted round (prior reviewed head to new
   head). Each half returns
   a per-finding verdict, ADDRESSED or NOT-ADDRESSED with one-line
   evidence, plus any new actionable findings in the fix diff only. Skip
@@ -209,21 +280,25 @@ Sequence:
 0. **Pre-freeze self-audit.** Before round 1, the author walks
    `references/failure-classes.md` against their own diff and fixes what
    it catches. Not a review round; posts nothing.
-1. **Round 1: complete round.** Any clean complete round -- round 1
-   included -- terminates the loop with APPROVE (zero actionable
-   findings, clean tree).
+1. **Round 1: complete round.** Any complete round with zero effective
+   blockers -- round 1 included -- terminates the loop with APPROVE
+   ((a) clean, (b) empty, clean tree); floor-deferred and advisory
+   lineages do not block, and surface at the branch gate.
 2. Post the round's comment first (findings table + marker,
    verdict=CHANGES) -- **before** committing any fix -- then apply
    confirmed fixes with verified repros, re-run the affected tests,
    commit and push.
 3. **Scoped round** at the new committed head. Any NOT-ADDRESSED verdict
-   or new finding: fix (repeating step 2's post-then-fix order) and run
-   another scoped round. A clean scoped round advances to the final
-   complete round.
-4. **Final complete round** at the committed head. Zero actionable
-   findings = APPROVE. Otherwise classify each finding per distinct
-   defect (both halves reporting the same underlying defect is one
-   finding):
+   on an open blocking lineage, or any new finding that is an effective
+   blocker under the current round's floor: fix (repeating step 2's
+   post-then-fix order) and run another scoped round. New findings the
+   floor defers enter the deferral digest instead. A clean scoped round
+   advances to the final complete round.
+4. **Final complete round** at the committed head. Zero effective
+   blockers = APPROVE. Findings the round's floor defers enter the
+   deferral digest, not this classification. Otherwise classify each
+   effective blocker per distinct defect (both halves reporting the same
+   underlying defect is one finding):
    - **fix-regression** -- introduced by a fix commit. When provenance is
      disputed or cannot be established against the round-1 tree, classify
      as fix-regression. Fix it (repeating step 2's post-then-fix order),
@@ -240,6 +315,14 @@ Sequence:
    least one fix-regression finding. Stop and escalate for a structural
    fix.
 
+   **RECOMMEND SPLIT:** when a complete round's blocking findings cluster
+   across more than one subsystem or evidence model, the round output MAY
+   include a `RECOMMEND SPLIT` line naming the seams. The orchestrator
+   raises the split question with the user immediately after the round
+   that emits the line -- any complete round, not only the escalation
+   exit -- and the loop pauses on that answer before spending further
+   rounds. This is a decision point, not a new loop state.
+
 5. **Caps:** at most 3 complete rounds and at most 3 scoped rounds per
    PR. Print each round's type and actionable count. The cap check
    applies to the round about to start: a clean scoped round always
@@ -249,6 +332,123 @@ Sequence:
    APPROVE. Real bugs can persist across rounds: never hard-stop merely
    because a count failed to strictly decrease; the caps and the
    divergence rule are the only stop conditions.
+
+### Finding lineages and deferrals
+
+THE LEDGER: one append-only markdown file, `round-ledger.md`, in a
+loop-owned session directory that OUTLIVES the per-round output
+directories -- a sibling of them, never inside one, because `prepare`
+requires an empty output directory and `cleanup` removes the output
+directory after verifying it holds only its own four entries. Every
+round of the loop appends to that same file. It carries -- per
+round -- the round index and type, the frozen head, the seat artifacts,
+the decorrelation grouping, every lineage row (ID, severity, status,
+blocking, category), fix-plan gate rulings and enumeration text (or the
+FAILED entry with both failure artifacts), and the verdict with its
+(a)/(b) components. Each completed round's comment reproduces its rows,
+so the PR carries a durable copy; a resumed loop reconstructs effective
+blockers from the ledger and re-verifies them against the live tree
+before continuing (never from memory of prior sessions).
+
+The orchestrator assigns every distinct finding a stable lineage ID at
+the round's merge/dedup step (round + ordinal, e.g. R1-F3). Seats report
+findings; they never mint IDs. Re-reviews, fix waves, ledgers, and
+digests refer to lineages, not re-derived descriptions; a finding whose
+code moved keeps its lineage. Two seat reports with the same root cause
+merge into the earlier lineage; the merged lineage retains every source
+report's location and failure scenario, and closes only when every
+retained scenario is verified fixed -- reports needing independent
+repairs stay separate, cross-linked lineages. A finding that splits into distinct root
+causes gets new IDs cross-referenced to the parent; children of an
+unresolved BLOCKING parent inherit the parent's blocking obligation and
+original discovery round (the floor treats them at the parent's age,
+never as fresh findings), and the parent closes only when every child is
+resolved. A finding is a FIX-REGRESSION iff any fix-wave commit in this
+loop introduced its defect -- either absent from the round-1 frozen tree
+and introduced by a fix wave, or RESOLVED earlier in this loop and
+restored by a later fix wave (reintroduction reopens the original
+lineage as blocking, never a fresh deferrable finding). Discovery round
+is irrelevant: delayed discovery never downgrades a regression to a
+deferrable new finding.
+When provenance is disputed or cannot be established against the
+round-1 tree, classify as fix-regression, and the finding keeps blocking
+status until any classification dispute resolves -- ambiguity never
+defers.
+
+Advisory findings (minor/low/nit) are recorded once with status DEFERRED
+and are not re-checked in later rounds. Deferred lineages -- advisory or
+DEFERRED-BY-FLOOR -- are never silently dropped: inject them into every
+subsequent seat prompt as a deferral digest, and surface them once at
+the branch gate as a wrap-up note for the author. The digest text
+itself carries the reopen exception -- it reads: "Previously ruled, do
+not re-derive or re-litigate the lineages below. Suppress only
+unchanged duplicate reports: if your in-scope review yields new
+evidence, a severity escalation, or fix-regression implication for any
+of them, report it." -- followed by one line per lineage (ID, severity,
+one-line summary, ruling). Prompts that exclude deferred lineages as
+review targets carry the same exception.
+
+Reopen rules: ONE seat reopens a deferred lineage immediately when its
+evidence makes the finding blocking under the current round's policy (an
+escalation to a severity the round's floor treats as blocking, or
+implication in a fix-regression) -- evidence, not vote counting, is the
+trigger. Re-raises that remain non-blocking under the current policy
+reopen only when TWO independent seats have re-raised the same lineage;
+those re-raises accumulate across all later rounds. Either reopen path
+transitions the lineage to open-and-blocking: it enters verdict
+component (b) as an unresolved effective blocker and the floor cannot
+defer it again. Deferral suppresses duplicate reporting, never
+investigation -- a seat that independently finds new evidence about a
+deferred lineage while reviewing its scope reports it. Deferral never
+suppresses newly blocking evidence.
+
+### Round-indexed blocking floor and verdict
+
+- Rounds 1-2: all major/high/critical findings block (current behavior).
+- Round 3 onward (complete or scoped): only (a) HIGH/critical findings,
+  (b) fix-regressions of any severity, and (c) already-open blocking
+  lineages can block. A NEW major-severity finding is recorded with its
+  severity intact, status DEFERRED-BY-FLOOR, Blocking=no, and enters the
+  deferral digest instead of forcing a fix wave.
+- HIGH/critical findings are never capped and never deferred, at any
+  round index. Everything the floor defers surfaces at the branch gate
+  and is subject to the reopen rules in "Finding lineages and deferrals"
+  above.
+- Severity fails closed at every round index: a finding whose severity
+  is unrecognized (anything outside
+  critical/high/major/minor/low/nit/advisory),
+  missing, or disputed between seats is blocking and never
+  floor-deferrable until clarified. A lineage's recorded severity is the
+  maximum any seat reported, lowered only by a skeptic disproof -- the
+  orchestrator never downgrades a seat's severity on its own.
+
+The round verdict is two-part:
+
+- (a) `coworker_review.verdict_from_findings` (script unchanged) computes
+  the severity component over ONLY rows whose effective status is
+  open-and-blocking. Rows with status DEFERRED, DEFERRED-BY-FLOOR, or
+  RESOLVED are excluded from the helper's input entirely; they live in
+  the ledger, never in the verdict input.
+- (b) the orchestrator forces REQUEST CHANGES whenever any UNRESOLVED
+  EFFECTIVE BLOCKER exists regardless of severity: an open
+  fix-regression lineage, a finding whose classification is disputed
+  (ambiguity never defers), an unresolved child carrying an inherited
+  blocking obligation, or a deferred lineage reopened under the reopen
+  rules -- any open-and-blocking lineage whose severity the (a) helper
+  would treat as advisory belongs in (b).
+
+APPROVE requires both (a) clean and (b) empty. The ledger persists, per
+round: the round index, each deferred lineage with severity, each
+effective-blocker lineage with its category, and the resulting verdict.
+
+Examples: a round-3 COMPLETE-round table whose only finding is a
+floor-deferred major is APPROVE ((a) sees no rows, (b) empty) and the
+major surfaces at the branch gate (a clean scoped round still advances
+to the final complete round; only a complete round emits APPROVE). A
+round whose only open finding is a minor fix-regression is REQUEST
+CHANGES ((a) clean, (b) fires). A round whose only open finding
+is an advisory-severity item under classification dispute is REQUEST
+CHANGES until the dispute resolves.
 
 A finding that reappears unfixed is still actionable -- not a dismissible
 "duplicate". "Duplicate/non-actionable" means only: already fixed and
@@ -336,9 +536,12 @@ bullets), then the hidden currency marker as its own unindented top-level line:
 ```markdown
 ### Co-review round <n>
 
-| Severity | File:line       | Issue | Fix |
-| -------- | --------------- | ----- | --- |
-| HIGH     | path/file.py:42 | ...   | ... |
+| Lineage | Severity | File:line       | Issue | Status | Fix |
+| ------- | -------- | --------------- | ----- | ------ | --- |
+| R1-F1   | HIGH     | path/file.py:42 | ...   | open   | ... |
+
+(Status: open, RESOLVED, DEFERRED, or DEFERRED-BY-FLOOR -- deferred rows
+stay visible in the durable record.)
 
 (or "No actionable findings." when the round is clean)
 
@@ -347,7 +550,8 @@ bullets), then the hidden currency marker as its own unindented top-level line:
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `verdict` APPROVE only on a
-zero-actionable complete round.
+complete round with zero effective blockers ((a) clean, (b) empty);
+deferred lineages do not forfeit APPROVE.
 
 **Emit APPROVE only for a snapshot that equals the committed head.** `prepare`
 folds staged and unstaged changes into the reviewed tree, but the marker's `sha`
