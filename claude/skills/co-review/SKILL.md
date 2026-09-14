@@ -88,7 +88,8 @@ myself" is exactly the biased self-review this gate exists to prevent. Give
 the fresh reviewer only the round's defined inputs -- for a complete round the
 frozen snapshot, the base, and the failure-class rubric
 (`references/failure-classes.md` in this skill directory); for a scoped round
-additionally the prior findings table and the fix diff -- never the authoring
+additionally the prior round's open blocking lineages, the deferral
+digest, and the fix diff -- never the authoring
 session's rationalizations. It is the Claude half, not a substitute for
 Codex. Controller disk-verification of a fix is not a substitute for either
 half.
@@ -358,7 +359,8 @@ suppresses newly blocking evidence.
   deferral digest instead of forcing a fix wave.
 - HIGH/critical findings are never capped and never deferred, at any
   round index. Everything the floor defers surfaces at the branch gate
-  and is subject to the reopen rules below.
+  and is subject to the reopen rules in "Finding lineages and deferrals"
+  above.
 
 The round verdict is two-part:
 
