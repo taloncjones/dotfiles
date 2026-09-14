@@ -147,8 +147,9 @@ Scoped re-review of the frozen change. For each OPEN BLOCKING prior finding
 listed below, return ADDRESSED or NOT-ADDRESSED against the frozen tree
 with one line of evidence; deferred lineages appear only in the digest and
 are not review targets, but if your in-scope review yields new evidence, a
-severity escalation, or fix-regression implication for one, report it. Then complete your review scope over the fix diff
-below ONLY -- do not stop at the first finding. If the fixed subsystem
+severity escalation, or fix-regression implication for one, report it.
+Then complete your review scope over the fix diff below ONLY -- do not
+stop at the first finding. If the fixed subsystem
 still contains failure orderings, enumerate every one you can construct.
 Zero or one residual is a complete answer only when you also list the
 changed mechanisms and the failure orderings you examined (file
