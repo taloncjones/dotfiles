@@ -171,6 +171,32 @@ Cleanup refuses foreign roots, marker mismatches, modified trees, ignored or
 untracked snapshot files, and unexpected owned-output entries. Preserve the
 snapshot if it refuses cleanup.
 
+## Fix-plan gate
+
+After any round whose verdict leaves blocking findings, and before
+dispatching the fix implementer, run one fix-plan review turn -- but only
+while the loop still authorizes another fix wave (never after the caps
+are spent or after a divergence or escalation exit):
+
+1. Write a fix-design note per affected subsystem: the intended fix
+   mechanism for each blocking finding, referenced by lineage ID --
+   design, not code.
+2. Spend one read-only Codex turn (shared runner, role `reviewer`) on the
+   note with this instruction: "Assume this design is implemented
+   correctly. Enumerate every remaining failure ordering you can
+   construct. If the failure family is not closed, name the minimal
+   design change that closes it."
+3. Fold the response into the fix plan. Rule any disagreement as the
+   orchestrator and record the ruling in the round ledger. One turn, no
+   iteration; then dispatch the implementer.
+
+The gate consumes no round cap. Its seat evidence is the runner session
+id plus the enumeration text in the ledger. On failure or timeout, retry
+once with a longer timeout; on a second failure, perform the enumeration
+yourself, record the seat as FAILED in the ledger, and proceed. Never
+block the loop on partner availability, and never start implementation
+without either a completed gate or a recorded FAILED entry.
+
 ## Re-review loop
 
 One pass is not a gate. Two round types:
@@ -209,21 +235,25 @@ Sequence:
 0. **Pre-freeze self-audit.** Before round 1, the author walks
    `references/failure-classes.md` against their own diff and fixes what
    it catches. Not a review round; posts nothing.
-1. **Round 1: complete round.** Any clean complete round -- round 1
-   included -- terminates the loop with APPROVE (zero actionable
-   findings, clean tree).
+1. **Round 1: complete round.** Any complete round with zero effective
+   blockers -- round 1 included -- terminates the loop with APPROVE
+   ((a) clean, (b) empty, clean tree); floor-deferred and advisory
+   lineages do not block, and surface at the branch gate.
 2. Post the round's comment first (findings table + marker,
    verdict=CHANGES) -- **before** committing any fix -- then apply
    confirmed fixes with verified repros, re-run the affected tests,
    commit and push.
 3. **Scoped round** at the new committed head. Any NOT-ADDRESSED verdict
-   or new finding: fix (repeating step 2's post-then-fix order) and run
-   another scoped round. A clean scoped round advances to the final
-   complete round.
-4. **Final complete round** at the committed head. Zero actionable
-   findings = APPROVE. Otherwise classify each finding per distinct
-   defect (both halves reporting the same underlying defect is one
-   finding):
+   on an open blocking lineage, or any new finding that is an effective
+   blocker under the current round's floor: fix (repeating step 2's
+   post-then-fix order) and run another scoped round. New findings the
+   floor defers enter the deferral digest instead. A clean scoped round
+   advances to the final complete round.
+4. **Final complete round** at the committed head. Zero effective
+   blockers = APPROVE. Findings the round's floor defers enter the
+   deferral digest, not this classification. Otherwise classify each
+   effective blocker per distinct defect (both halves reporting the same
+   underlying defect is one finding):
    - **fix-regression** -- introduced by a fix commit. When provenance is
      disputed or cannot be established against the round-1 tree, classify
      as fix-regression. Fix it (repeating step 2's post-then-fix order),
@@ -249,6 +279,42 @@ Sequence:
    APPROVE. Real bugs can persist across rounds: never hard-stop merely
    because a count failed to strictly decrease; the caps and the
    divergence rule are the only stop conditions.
+
+### Round-indexed blocking floor and verdict
+
+- Rounds 1-2: all major/high/critical findings block (current behavior).
+- Round 3 onward (complete or scoped): only (a) HIGH/critical findings,
+  (b) fix-regressions of any severity, and (c) already-open blocking
+  lineages can block. A NEW major-severity finding is recorded with its
+  severity intact, status DEFERRED-BY-FLOOR, Blocking=no, and enters the
+  deferral digest instead of forcing a fix wave.
+- HIGH/critical findings are never capped and never deferred, at any
+  round index. Everything the floor defers surfaces at the branch gate
+  and is subject to the reopen rules below.
+
+The round verdict is two-part:
+
+- (a) `coworker_review.verdict_from_findings` (script unchanged) computes
+  the severity component over ONLY rows whose effective status is
+  open-and-blocking. Rows with status DEFERRED, DEFERRED-BY-FLOOR, or
+  RESOLVED are excluded from the helper's input entirely; they live in
+  the ledger, never in the verdict input.
+- (b) the orchestrator forces REQUEST CHANGES whenever any UNRESOLVED
+  EFFECTIVE BLOCKER exists regardless of severity: an open
+  fix-regression lineage, a finding whose classification is disputed
+  (ambiguity never defers), or an unresolved child carrying an inherited
+  blocking obligation.
+
+APPROVE requires both (a) clean and (b) empty. The ledger persists, per
+round: the round index, each deferred lineage with severity, each
+effective-blocker lineage with its category, and the resulting verdict.
+
+Examples: a round-3 table whose only finding is a floor-deferred major is
+APPROVE ((a) sees no rows, (b) empty) and the major surfaces at the
+branch gate. A round whose only open finding is a minor fix-regression is
+REQUEST CHANGES ((a) clean, (b) fires). A round whose only open finding
+is an advisory-severity item under classification dispute is REQUEST
+CHANGES until the dispute resolves.
 
 A finding that reappears unfixed is still actionable -- not a dismissible
 "duplicate". "Duplicate/non-actionable" means only: already fixed and
@@ -347,7 +413,8 @@ bullets), then the hidden currency marker as its own unindented top-level line:
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `verdict` APPROVE only on a
-zero-actionable complete round.
+complete round with zero effective blockers ((a) clean, (b) empty);
+deferred lineages do not forfeit APPROVE.
 
 **Emit APPROVE only for a snapshot that equals the committed head.** `prepare`
 folds staged and unstaged changes into the reviewed tree, but the marker's `sha`
