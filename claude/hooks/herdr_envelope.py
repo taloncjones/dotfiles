@@ -508,44 +508,6 @@ def valid_teardown(rec):
     return _nonempty(rec["ts"])
 
 
-RELEASE_MAX_RAW = 4096
-RELEASE_KEYS = frozenset(("schema_version", "binding_id", "generation", "ts"))
-
-
-def release_path(rd, binding_id):
-    if not isinstance(binding_id, str) or not _BINDING_ID_RE.fullmatch(binding_id):
-        raise ValueError("invalid binding id")
-    return Path(rd) / "leads" / binding_id / "release.json"
-
-
-def valid_release(rec):
-    """True when rec is a well-formed lease-release receipt: the durable
-    record, written in the same transaction as the release itself, of the
-    generation this binding released -- so a teardown retry whose manifest
-    publication failed can still recover its audit fields from evidence
-    belonging to this binding."""
-    return (
-        isinstance(rec, dict)
-        and set(rec) == RELEASE_KEYS
-        and type(rec["schema_version"]) is int and rec["schema_version"] == 1
-        and isinstance(rec["binding_id"], str)
-        and bool(_BINDING_ID_RE.fullmatch(rec["binding_id"]))
-        and type(rec["generation"]) is int and rec["generation"] >= 1
-        and _nonempty(rec["ts"])
-    )
-
-
-def read_release(rd, binding_id):
-    """The stored release receipt, None if absent; ValueError on corrupt."""
-    rec = _read_bounded(release_path(rd, binding_id), RELEASE_MAX_RAW,
-                        "release receipt")
-    if rec is None:
-        return None
-    if not valid_release(rec) or rec["binding_id"] != binding_id:
-        raise ValueError("invalid release receipt")
-    return rec
-
-
 def read_teardown(rd, binding_id):
     """The stored teardown manifest, None if absent; ValueError on corrupt."""
     rec = _read_bounded(teardown_path(rd, binding_id), TEARDOWN_MAX_RAW,

@@ -5206,7 +5206,7 @@ json.dump(task, open(path, "w"))
 ' "$TASK"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>err; then exit 1; fi
-grep -q "<unreadable>" err
+grep -q "descendant records are unreadable" err
 cp "$TASK.orig" "$TASK"
 
 # Restored record plus --descendants-terminated: teardown succeeds.
@@ -5895,7 +5895,7 @@ assert entry["binding_id"] == sys.argv[3], entry
 CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply >/dev/null
 SH
 
-check "teardown retry after failed manifest publication recovers from the release receipt" <<'SH'
+check "teardown retry after failed manifest publication recovers from the ledger" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-receipt.git
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d)
@@ -5925,11 +5925,9 @@ rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
                 "--descendants-terminated"])
 core.write_json_atomic = orig_wja
 assert rc == 2, rc
-# the release landed durably with its receipt; no manifest exists yet
-receipt = envelope.read_release(rd, bid)
-assert receipt is not None and receipt["generation"] == 1, receipt
 assert envelope.read_teardown(rd, bid) is None
 EOF
+# the release landed atomically WITH its ledger attribution
 python3 -c '
 import json, sys
 sys.path.insert(0, "claude/hooks")
@@ -5939,8 +5937,9 @@ data = json.loads((coordination.coordination_root() / "bindings.json").read_text
 key = coordination.lead_lease_key(os.path.realpath(sys.argv[2]))
 entry = data[sys.argv[1]]["lead_ws"][key]
 assert entry["binding_id"] is None, entry
-' "$LF_SLUG" "$LF_WS"
-# retry: audit fields recover from the receipt, never null/false
+assert entry["releases"] == {"1": sys.argv[3]}, entry
+' "$LF_SLUG" "$LF_WS" "$bid"
+# retry: audit fields recover from the post-release ledger, never null/false
 CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
    --abandon --descendants-terminated
@@ -5992,7 +5991,7 @@ assert hashlib.sha256(data).hexdigest() == art["sha256"], art
 ' "$LF_SLUG" "$bid"
 SH
 
-check "write-ahead receipt: failed orderings recover, successor claim included" <<'SH'
+check "release ledger survives post-release write failures and a successor claim" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-td-atomic.git
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d)
@@ -6003,43 +6002,7 @@ bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
 CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bid" >/dev/null
-# Ordering half: the receipt is written BEFORE the release, so a failed
-# receipt write must leave the occupancy fully intact (nothing released).
-CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$f" <<'EOF'
-import sys
-sys.path.insert(0, "claude/hooks")
-import herdr_envelope as envelope
-import herdr_orch_core as core
-slug, bid, f = sys.argv[1:4]
-rd = core.repo_dir(slug)
-orig_wja = core.write_json_atomic
-def boom(path, data):
-    raise OSError("simulated crash on every payload write")
-core.write_json_atomic = boom
-rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
-                "--fence", f, "--binding", bid, "--abandon",
-                "--descendants-terminated"])
-core.write_json_atomic = orig_wja
-assert rc == 2, rc
-assert envelope.read_release(rd, bid) is None
-assert envelope.read_teardown(rd, bid) is None
-EOF
-KEY=$(python3 -c '
-import os, sys; sys.path.insert(0, "claude/hooks")
-import herdr_coordination as coordination
-print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
-[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
-python3 -c '
-import json, sys
-sys.path.insert(0, "claude/hooks")
-import herdr_coordination as coordination
-data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
-entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
-assert entry["binding_id"] == sys.argv[3], entry
-' "$LF_SLUG" "$KEY" "$bid"
-# Survival half: receipt + release land, EVERY post-release write fails,
-# then a successor claim erases the registry released_binding evidence --
-# the retry must still recover from the write-ahead receipt.
+# release lands with its ledger attribution; EVERY post-release write fails
 CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$f" <<'EOF'
 import sys
 sys.path.insert(0, "claude/hooks")
@@ -6058,17 +6021,30 @@ rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
                 "--descendants-terminated"])
 core.write_json_atomic = orig_wja
 assert rc == 2, rc
-receipt = envelope.read_release(rd, bid)
-assert receipt is not None and receipt["generation"] == 1, receipt
 assert envelope.read_teardown(rd, bid) is None
 EOF
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] is None, entry
+assert entry["releases"] == {"1": sys.argv[3]}, entry
+' "$LF_SLUG" "$KEY" "$bid"
+# a successor claims the workspace: the mutable occupancy is rewritten but
+# the append-only ledger is PRESERVED -- the erasure the retired receipt
+# existed to survive no longer happens.
 bid2=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-y \
    --workspace-root "$LF_WS" --expected-session S2)
 CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S2 --host h --pid 3 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bid2" >/dev/null
-# the fresh claim erased released_binding from the registry entry
 python3 -c '
 import json, sys
 sys.path.insert(0, "claude/hooks")
@@ -6077,7 +6053,9 @@ data = json.loads((coordination.coordination_root() / "bindings.json").read_text
 entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
 assert entry["binding_id"] == sys.argv[3], entry
 assert "released_binding" not in entry, entry
-' "$LF_SLUG" "$KEY" "$bid2"
+assert entry["releases"] == {"1": sys.argv[4]}, entry
+' "$LF_SLUG" "$KEY" "$bid2" "$bid"
+# retry: the ledger proves the release across the successor claim
 CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
    --abandon --descendants-terminated
@@ -6087,15 +6065,12 @@ sys.path.insert(0, "claude/hooks")
 import herdr_envelope as envelope
 import herdr_orch_core as core
 rec = envelope.read_teardown(core.repo_dir(sys.argv[1]), sys.argv[2])
-# generation recovers from the write-ahead receipt; lease_released does
-# NOT: the receipt is intent, not proof, and the successor claim erased
-# the registry evidence -- fail closed to false.
 assert rec["generation"] == 1, rec
-assert rec["lease_released"] is False, rec
+assert rec["lease_released"] is True, rec
 ' "$LF_SLUG" "$bid"
 SH
 
-check "reconcile release evidence survives a failed receipt write" <<'SH'
+check "reconcile release lands atomically with its ledger attribution" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rl-atomic.git
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d)
@@ -6118,40 +6093,13 @@ rec["heartbeat_ts"] = 0
 json.dump(rec, open(path, "w"))
 ' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
 f2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L2 --host h --pid 3 --stale-secs 0)
-# reconcile --apply with the WRITE-AHEAD receipt failing: nothing is
-# released for that row (occupancy intact), and a clean retry releases.
-CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$f2" <<'EOF'
-import sys
-sys.path.insert(0, "claude/hooks")
-import herdr_orch_core as core
-slug, f2 = sys.argv[1:3]
-orig_wja = core.write_json_atomic
-def boom(path, data):
-    if str(path).endswith("release.json"):
-        raise OSError("simulated crash on the receipt write")
-    return orig_wja(path, data)
-core.write_json_atomic = boom
-rc = core.main(["reconcile-leads", "--repo-slug", slug, "--session", "L2",
-                "--fence", f2, "--apply"])
-core.write_json_atomic = orig_wja
-assert rc == 2, rc
-EOF
-[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
-python3 -c '
-import json, sys
-sys.path.insert(0, "claude/hooks")
-import herdr_coordination as coordination
-data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
-entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
-assert entry["binding_id"] == sys.argv[3], entry
-' "$LF_SLUG" "$KEY" "$bid"
-# clean retry: the revoked binding still owns the entry, so it is selected
-# again; the receipt lands, then the release, atomically evidenced.
+# the stale row is revoked and released; the release and its attribution
+# are ONE registry write, so the ledger names the binding immediately.
 out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply)
 printf '%s' "$out" | python3 -c '
 import json, sys
 rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
-assert rows[sys.argv[1]]["action"] == "released", rows
+assert rows[sys.argv[1]]["action"] == "revoked+released", rows
 ' "$bid"
 python3 -c '
 import json, sys
@@ -6160,7 +6108,8 @@ import herdr_coordination as coordination
 data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
 entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
 assert entry["binding_id"] is None, entry
-assert entry["released_binding"] == sys.argv[3], entry
+assert "released_binding" not in entry, entry
+assert entry["releases"] == {"1": sys.argv[3]}, entry
 ' "$LF_SLUG" "$KEY" "$bid"
 # a later teardown of the reconcile-released binding records its fields
 CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
@@ -6286,7 +6235,7 @@ assert json.load(open(sys.argv[1]))["status"] == "completed"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
 SH
 
-check "receipt without a release never records lease_released true" <<'SH'
+check "failed release leaves no evidence; a displaced binding reads false" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-f5-intent.git
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d)
@@ -6297,15 +6246,14 @@ bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
 CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bid" >/dev/null
-# interrupt AFTER the write-ahead receipt, BEFORE the release itself
+# the release itself fails: no intent record exists, so NOTHING claims a
+# release happened -- occupancy and ledger are exactly as before.
 CLAUDE_CONFIG_DIR="$root" python3 - "$LF_SLUG" "$bid" "$f" <<'EOF'
 import sys
 sys.path.insert(0, "claude/hooks")
 import herdr_coordination as coordination
-import herdr_envelope as envelope
 import herdr_orch_core as core
 slug, bid, f = sys.argv[1:4]
-rd = core.repo_dir(slug)
 orig = coordination.OwnerTransaction.lead_release
 def boom(self, *args, **kwargs):
     raise ValueError("simulated release failure")
@@ -6315,8 +6263,6 @@ rc = core.main(["teardown-binding", "--repo-slug", slug, "--session", "L1",
                 "--descendants-terminated"])
 coordination.OwnerTransaction.lead_release = orig
 assert rc == 2, rc
-receipt = envelope.read_release(rd, bid)
-assert receipt is not None and receipt["generation"] == 1, receipt
 EOF
 KEY=$(python3 -c '
 import os, sys; sys.path.insert(0, "claude/hooks")
@@ -6329,6 +6275,7 @@ import herdr_coordination as coordination
 data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
 entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
 assert entry["binding_id"] == sys.argv[3], entry
+assert "releases" not in entry, entry
 ' "$LF_SLUG" "$KEY" "$bid"
 # B stale-takes-over the never-released workspace
 python3 -c '
@@ -6344,8 +6291,8 @@ bidB=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
 CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SB --host h --pid 3 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0 >/dev/null
-# retry: generation may recover from the receipt (intent), lease_released
-# must stay false -- A was displaced, never released.
+# retry: A was displaced, never released -- the ledger never named it, so
+# generation stays null and lease_released stays false. No invented history.
 CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
    --abandon --descendants-terminated
@@ -6355,7 +6302,7 @@ sys.path.insert(0, "claude/hooks")
 import herdr_envelope as envelope
 import herdr_orch_core as core
 rec = envelope.read_teardown(core.repo_dir(sys.argv[1]), sys.argv[2])
-assert rec["generation"] == 1, rec
+assert rec["generation"] is None, rec
 assert rec["lease_released"] is False, rec
 ' "$LF_SLUG" "$bid"
 SH
@@ -6506,6 +6453,314 @@ python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "revoked"
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "reconcile never revokes or releases a claimed binding with a consumption record" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-g1-consumed.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid"
+# crash window: consumed durable, completed transition lost
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["status"] = "claimed"
+json.dump(rec, open(path, "w"))
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["heartbeat_ts"] = 0
+json.dump(rec, open(path, "w"))
+' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+# claimed + consumed: the row is resumable integration, never reclaimable
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "needs-integration-resume", rows
+' "$bid"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
+# an UNREADABLE consumption record fails closed to manual repair, no mutation
+printf 'not json' > "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.consumed.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "needs-manual-repair", rows
+' "$bid"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+' "$LF_SLUG" "$KEY" "$bid"
+SH
+
+check "integrate-envelope refuses a consumption record exceeding the reader cap" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-g2-cap.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+LONG=$(python3 -c 'print("L" * 4200)')
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session "$LONG" --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session "$LONG" --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+# integrated_by carries the 4200-char launcher session: the record would
+# exceed the bounded reader's cap, so the writer must refuse it up front.
+if CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
+   --repo-slug "$LF_SLUG" --session "$LONG" --fence "$f" --binding "$bid" 2>err; then exit 1; fi
+grep -q "consumption record exceeds the size bound" err
+[ ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.consumed.json" ] || exit 1
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "reconcile-leads refuses a negative --stale-secs before any row" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-g5-neg.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+if CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply --stale-secs -1 2>err; then exit 1; fi
+grep -q "must be non-negative" err
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "reconcile cleans a replayed lease of a terminal binding, ledger untouched" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-a6-replay.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+LEASE="$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+cp "$LEASE" "$LEASE.saved"
+CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
+   --abandon --descendants-terminated
+# replay the pre-release lease file over the released, revoked workspace
+cp "$LEASE.saved" "$LEASE"
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "cleaned-replayed-lease", rows
+' "$bid"
+[ ! -e "$LEASE" ] || exit 1
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] is None, entry
+assert entry["releases"] == {"1": sys.argv[3]}, entry
+' "$LF_SLUG" "$KEY" "$bid"
+# with the file gone, the terminal row drops out of the scan entirely
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert sys.argv[1] not in rows, rows
+' "$bid"
+SH
+
+check "claim refuses a stale takeover displacing a consumed occupant" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-a7-takeover.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}'
+CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid"
+# crash window: consumed durable, completed transition lost; lease goes stale
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["status"] = "claimed"
+json.dump(rec, open(path, "w"))
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["heartbeat_ts"] = 0
+json.dump(rec, open(path, "w"))
+' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+bid2=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-y \
+   --workspace-root "$LF_WS" --expected-session S2)
+if CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S2 --host h --pid 3 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid2" --stale-secs 0 2>err; then exit 1; fi
+grep -q "occupant has a consumption record" err
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] == sys.argv[3], entry
+' "$LF_SLUG" "$KEY" "$bid"
+SH
+
+check "unreadable descendant records refuse teardown and reconcile mutation" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-a11-desc.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+mkdir -p "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks"
+printf 'not json' > "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-bad.json"
+# teardown: the sentinel refuses even WITH --descendants-terminated (the
+# flag asserts terminated panes, not ignorable records)
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
+   --abandon --descendants-terminated 2>err; then exit 1; fi
+grep -q "descendant records are unreadable" err
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
+# reconcile: same sentinel classifies needs-manual-repair before revocation
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["heartbeat_ts"] = 0
+json.dump(rec, open(path, "w"))
+' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply --descendants-terminated)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "needs-manual-repair", rows
+' "$bid"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
+SH
+
+check "reconcile releases through a list-shaped lease without crashing" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-g4-list.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+# a lease that parses to a LIST: valid JSON, wrong shape -- classify
+# corrupt and release with force, never call dict methods on it
+printf '[1, 2]' > "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["lease"] == "corrupt", rows
+assert rows[sys.argv[1]]["action"] == "revoked+released", rows
+' "$bid"
+python3 -c '
+import json, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+data = json.loads((coordination.coordination_root() / "bindings.json").read_text())
+entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
+assert entry["binding_id"] is None, entry
+assert entry["releases"] == {"1": sys.argv[3]}, entry
+' "$LF_SLUG" "$KEY" "$bid"
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

@@ -1792,7 +1792,10 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                     and coordination._valid_lead_lease(lease)
                     and lease.get("binding_id") == binding_id
                 ):
-                    raise ValueError("binding generation is superseded; a new binding is required")
+                    raise ValueError(
+                        "workspace lease is missing, superseded, or a "
+                        "legacy/no-generation record; a new binding is required"
+                    )
             if context is None:
                 raise ValueError("a lead claim requires repository context")
             if not workspace_provenance_ok(workspace_root, context):
@@ -1801,6 +1804,25 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                 )
             if rec["repo_id"] is not None and rec["repo_id"] != context["repo_id"]:
                 raise ValueError("binding names a different repository identity")
+            entry = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
+                coordination.lead_lease_key(workspace_root)
+            )
+            if entry is not None and entry["binding_id"] not in (None, binding_id):
+                # A takeover would displace the occupant; an occupant holding
+                # a consumption record is mid-integration (or its completed
+                # transition crashed) and displacing it strands the resumable
+                # integrate-envelope. An unreadable record fails closed.
+                try:
+                    occupant_consumed = envelope.read_consumed(
+                        Path(rd), entry["binding_id"]
+                    )
+                except (ValueError, OSError):
+                    occupant_consumed = "unreadable"
+                if occupant_consumed is not None:
+                    raise ValueError(
+                        "occupant has a consumption record; "
+                        "resume integrate-envelope"
+                    )
             fence = tx.lead_claim(session_id, host, sock_pid if reason == "ok" else pid,
                                   workspace_root, binding_id, stale_secs,
                                   runtime=runtime, thread_id=thread_id)
@@ -2199,6 +2221,22 @@ def outstanding_descendants(rd, binding_id):
         if not _attempt_settled(att, settle):
             panes.add(att["pane_id"])
     return sorted(panes)
+
+
+def _binding_generation(entry, binding_id):
+    """The generation evidence a lead_ws entry holds for binding_id: the
+    append-only release ledger's highest generation naming the binding when
+    any exist, else the entry's own occupancy. None when the entry carries
+    no evidence for this binding (absent, or occupied/released by others)."""
+    if entry is None:
+        return None
+    owned = [int(g) for g, b in entry.get("releases", {}).items()
+             if b == binding_id]
+    if owned:
+        return max(owned)
+    if entry["binding_id"] == binding_id:
+        return entry["generation"]
+    return None
 
 
 def _binding_is_fresh(rec_b, stale_secs):
@@ -2811,7 +2849,8 @@ def _main(argv=None) -> int:
                         lease is not None
                         and coordination._valid_lead_lease(lease)
                         and lease.get("binding_id") == ns.binding,
-                        "binding generation is superseded or lease is missing",
+                        "workspace lease is missing, superseded, or a "
+                        "legacy/no-generation record",
                     )
                 try:
                     task = json.loads(read_payload_text(base / "tasks" / f"{ns.task_id}.json"))
@@ -3221,10 +3260,6 @@ def _main(argv=None) -> int:
                 artifacts_manifest = envelope.read_artifacts(rd, ns.binding)
             except ValueError:
                 _require(False, "artifacts manifest is unreadable")
-            try:
-                receipt = envelope.read_release(rd, ns.binding)
-            except ValueError:
-                _require(False, "release receipt is unreadable")
 
             journal = {}
             base = rd / "leads" / ns.binding
@@ -3254,32 +3289,17 @@ def _main(argv=None) -> int:
                 journal = {**prior["journal_sha256"], **journal}
 
             # Audit fields derive only from evidence belonging to THIS
-            # binding: the lead_ws entry counts when it names ns.binding; a
-            # retry after a successor claimed the workspace preserves the
-            # prior manifest's value instead of adopting the successor's.
+            # binding: the entry's append-only release ledger and its own
+            # occupancy (the ledger survives successor claims, so a retry
+            # never adopts the successor's occupancy as ns.binding's). This
+            # pre-release value feeds the size gate below; the FINAL record
+            # recomputes it post-release (step 8).
             entry_before = tx.bindings.get(tx.slug, {}).get("lead_ws", {}).get(
                 coordination.lead_lease_key(rec_b["workspace_root"])
             )
-            if entry_before is not None and entry_before["binding_id"] == ns.binding:
-                generation = entry_before["generation"]
-            elif prior is not None:
+            generation = _binding_generation(entry_before, ns.binding)
+            if generation is None and prior is not None:
                 generation = prior["generation"]
-            elif (
-                entry_before is not None
-                and entry_before["binding_id"] is None
-                and entry_before.get("released_binding") == ns.binding
-            ):
-                # The registry's own atomic release evidence: written in the
-                # same bindings.json update as the release, so no follow-up
-                # write failure can lose it.
-                generation = entry_before["generation"]
-            elif receipt is not None:
-                # The write-ahead receipt published before this binding's
-                # own release: the fallback that survives a successor claim
-                # erasing the registry's released_binding evidence.
-                generation = receipt["generation"]
-            else:
-                generation = None
 
             out = envelope.teardown_path(rd, ns.binding)
             prospective = {
@@ -3299,7 +3319,8 @@ def _main(argv=None) -> int:
             # any release or prune: a manifest the retry cannot re-read
             # must never be the last copy of pruned audit digests.
             # (lease_released may flip to true in the final record; "false"
-            # here is the longer spelling, so this size is the upper bound.)
+            # here is the longer spelling, so this size is the upper bound.
+            # The final record is size-checked again before its write.)
             serialized = (
                 json.dumps(prospective, sort_keys=True, separators=(",", ":")) + "\n"
             ).encode()
@@ -3357,8 +3378,12 @@ def _main(argv=None) -> int:
                         "does not match its digest",
                     )
 
-            # 5. descendants gate.
+            # 5. descendants gate. The "<unreadable>" sentinel is not a
+            # pane: --descendants-terminated asserts the operator terminated
+            # PANES, not that unreadable dispatch records may be ignored.
             desc = outstanding_descendants(rd, ns.binding)
+            _require("<unreadable>" not in desc,
+                     "descendant records are unreadable; repair before teardown")
             _require(
                 not desc or ns.descendants_terminated,
                 "outstanding descendants " + ",".join(desc)
@@ -3399,30 +3424,13 @@ def _main(argv=None) -> int:
                 # Never claimed at all: nothing to release.
                 release_action = None
 
-            # 7. release. The receipt is a WRITE-AHEAD intent record,
-            # published BEFORE the release: a failed receipt write releases
-            # nothing (clean retry); a failed release after it is re-run by
-            # the retry; once the release lands, the per-binding receipt
-            # under leads/<binding>/ survives even a successor claim erasing
-            # the registry's released_binding evidence.
-            if release_action is not None and receipt is None:
-                ahead_gen = None
-                if entry is not None and entry["binding_id"] == ns.binding:
-                    ahead_gen = entry["generation"]
-                elif lease_valid and lease["binding_id"] == ns.binding:
-                    ahead_gen = lease.get("generation")
-                if ahead_gen is not None:
-                    receipt = {
-                        "schema_version": 1,
-                        "binding_id": ns.binding,
-                        "generation": ahead_gen,
-                        "ts": now_iso(),
-                    }
-                    _require(envelope.valid_release(receipt),
-                             "invalid release receipt")
-                    rp = envelope.release_path(rd, ns.binding)
-                    _require(contained(rp, state_root()), "escapes state root")
-                    write_json_atomic(rp, receipt)
+            # 7. release. Attribution is the entry's append-only ledger,
+            # written by lead_release in the SAME atomic registry write that
+            # clears the occupancy -- there is no separate intent record and
+            # no ordering to get wrong. A failed release leaves the
+            # occupancy (and its evidence) intact for a clean retry; on an
+            # already-released entry the call only removes a leftover or
+            # replayed lease file and mutates nothing.
             if release_action == "normal":
                 tx.lead_release(rec_b["workspace_root"], expected_binding=ns.binding)
             elif release_action == "force":
@@ -3435,32 +3443,26 @@ def _main(argv=None) -> int:
                     # e.g. a corrupt lease with no registry entry behind it:
                     # a clean refusal, never a traceback.
                     _require(False, f"cannot release corrupt lease: {exc}")
+            # 8. manifest write, from POST-release registry state.
+            # lease_released counts ONLY confirmed evidence: the ledger
+            # attributing a generation to ns.binding, or a prior manifest's
+            # recorded release. Never lead_release's return value or a bare
+            # file removal: replay cleanup (entry already released, ledger
+            # naming a successor) removes a file yet proves nothing for
+            # ns.binding. The generation is likewise recomputed after the
+            # release so a release this run performed is reflected, and the
+            # final record is re-validated and re-checked against the size
+            # bound before it is written.
             entry_after = tx.bindings[tx.slug].get("lead_ws", {}).get(
                 coordination.lead_lease_key(rec_b["workspace_root"])
             )
-            released_now = (
-                release_action is not None
-                and entry_after is not None
-                and entry_after["binding_id"] is None
-            )
-
-            # 8. manifest write. lease_released is derived from the
-            # POST-release registry state, never from lead_release's return
-            # value (which reports only whether a FILE was removed -- false
-            # for a missing-own release that cleared occupancy). It counts
-            # ONLY confirmed evidence: a release THIS run performed for
-            # ns.binding, the registry's atomic released_binding naming
-            # ns.binding, or a prior manifest's recorded release. The
-            # write-ahead receipt is intent, never proof -- it may recover
-            # the generation, but a receipt written before a release that
-            # never happened must not read as lease_released true.
             lease_released = (
-                released_now
-                or (entry_after is not None
-                    and entry_after["binding_id"] is None
-                    and entry_after.get("released_binding") == ns.binding)
+                ns.binding in (entry_after or {}).get("releases", {}).values()
                 or bool(prior and prior["lease_released"])
             )
+            final_generation = _binding_generation(entry_after, ns.binding)
+            if final_generation is None and prior is not None:
+                final_generation = prior["generation"]
             rec_t = {
                 "schema_version": 1,
                 "binding_id": ns.binding,
@@ -3470,9 +3472,15 @@ def _main(argv=None) -> int:
                 "artifacts_present": artifacts_manifest is not None
                                      or bool(prior and prior["artifacts_present"]),
                 "lease_released": lease_released,
-                "generation": generation,
+                "generation": final_generation,
                 "ts": now_iso(),
             }
+            _require(envelope.valid_teardown(rec_t), "invalid teardown manifest")
+            serialized = (
+                json.dumps(rec_t, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            _require(len(serialized) <= envelope.TEARDOWN_MAX_RAW,
+                     "teardown manifest exceeds the size bound")
             write_json_atomic(out, rec_t)
 
             # 9. binding transition for issued/claimed.
@@ -3509,6 +3517,9 @@ def _main(argv=None) -> int:
 
     if ns.cmd == "reconcile-leads":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        # A negative threshold would misclassify every lease; refuse before
+        # the owner transaction opens, so nothing is touched.
+        _require(ns.stale_secs >= 0, "--stale-secs must be non-negative")
         rd = repo_dir(ns.repo_slug)
         rows = []
         with owner_transaction(rd, ns.session, ns.fence) as tx:
@@ -3545,15 +3556,34 @@ def _main(argv=None) -> int:
                 ws = rec_b["workspace_root"]
                 entry = ws_map.get(coordination.lead_lease_key(ws))
                 own_entry = entry is not None and entry["binding_id"] == bid
-                if rec_b["status"] not in ("issued", "claimed") and not (
+                include = rec_b["status"] in ("issued", "claimed") or (
                     rec_b["status"] == "revoked" and own_entry
-                ):
-                    continue
+                )
                 try:
                     lease = tx.lead_read(ws)
                     lease_ok = lease is None or coordination._valid_lead_lease(lease)
                 except ValueError:
                     lease, lease_ok = None, False
+                if not lease_ok:
+                    # Normalize corrupt lease content to None here, once: no
+                    # later code may call dict methods on a list-shaped (or
+                    # otherwise malformed) lease.
+                    lease = None
+                # A terminal binding with a REPLAYED lease file: the entry
+                # is released and the ledger attributes a generation to this
+                # binding, yet a lease file naming it is back on disk. Apply
+                # unlinks the file through the cleanup-only release path;
+                # the ledger is never touched.
+                replayed_lease = (
+                    rec_b["status"] in ("revoked", "completed")
+                    and entry is not None
+                    and entry["binding_id"] is None
+                    and bid in entry.get("releases", {}).values()
+                    and lease is not None
+                    and lease.get("binding_id") == bid
+                )
+                if not include and not replayed_lease:
+                    continue
                 if entry is not None and entry["binding_id"] not in (None, bid):
                     # Registry occupancy by ANOTHER binding outranks whatever
                     # the lease file says (teardown's successor-occupied
@@ -3566,10 +3596,22 @@ def _main(argv=None) -> int:
                     state = "missing-own" if own_entry else "missing"
                 elif lease["binding_id"] != bid:
                     state = "superseded"
-                elif time.time() - lease["heartbeat_ts"] <= ns.stale_secs:
-                    state = "live"
                 else:
-                    state = "stale"
+                    # Defensive: heartbeat arithmetic on a value validation
+                    # somehow let through must corrupt THIS row, never abort
+                    # the scan after earlier rows' mutations landed.
+                    try:
+                        fresh_lease = (
+                            time.time() - lease["heartbeat_ts"] <= ns.stale_secs
+                        )
+                    except (TypeError, OverflowError):
+                        fresh_lease = None
+                    if fresh_lease is None:
+                        state = "corrupt"
+                    elif fresh_lease:
+                        state = "live"
+                    else:
+                        state = "stale"
                 desc = outstanding_descendants(rd, bid)
                 action = "none"
                 # A freshly issued, never-claimed binding is not abandoned
@@ -3580,7 +3622,46 @@ def _main(argv=None) -> int:
                     rec_b["status"] == "issued"
                     and _binding_is_fresh(rec_b, ns.stale_secs)
                 )
-                if ns.apply and state != "live" and not fresh_issued:
+                if ns.apply and replayed_lease:
+                    try:
+                        tx.lead_release(ws, expected_binding=bid)
+                    except ValueError:
+                        action = "needs-manual-repair"
+                    else:
+                        action = "cleaned-replayed-lease"
+                elif ns.apply and state != "live" and not fresh_issued:
+                    # Ordered refusals BEFORE any revoke or release: an
+                    # unreadable descendant record is not terminated state
+                    # (the flag asserts terminated panes, nothing more), and
+                    # a claimed binding holding a consumption record is a
+                    # resumable integration -- revoking either would strand
+                    # or destroy evidence. Unreadable consumption records
+                    # fail closed the same way.
+                    if "<unreadable>" in desc:
+                        rows.append({
+                            "binding_id": bid, "task_id": rec_b["task_id"],
+                            "status": rec_b["status"], "workspace_root": ws,
+                            "lease": state, "descendants": desc,
+                            "action": "needs-manual-repair"})
+                        continue
+                    try:
+                        consumed = envelope.read_consumed(rd, bid)
+                    except (ValueError, OSError):
+                        consumed = "unreadable"
+                    if consumed == "unreadable":
+                        rows.append({
+                            "binding_id": bid, "task_id": rec_b["task_id"],
+                            "status": rec_b["status"], "workspace_root": ws,
+                            "lease": state, "descendants": desc,
+                            "action": "needs-manual-repair"})
+                        continue
+                    if consumed is not None and rec_b["status"] == "claimed":
+                        rows.append({
+                            "binding_id": bid, "task_id": rec_b["task_id"],
+                            "status": rec_b["status"], "workspace_root": ws,
+                            "lease": state, "descendants": desc,
+                            "action": "needs-integration-resume"})
+                        continue
                     revoked_now = False
                     if rec_b["status"] in ("issued", "claimed"):
                         write_json_atomic(
@@ -3597,32 +3678,8 @@ def _main(argv=None) -> int:
                             # legacy lease with no recorded generation) is
                             # reported per row, never allowed to abort the
                             # scan after earlier rows' mutations landed.
-                            # WRITE-AHEAD receipt before the release (same
-                            # ordering as teardown): a failed receipt write
-                            # releases nothing; once the release lands, the
-                            # per-binding receipt survives a successor claim
-                            # erasing the registry's released_binding. A
-                            # corrupt existing receipt is left for manual
-                            # repair, never overwritten.
-                            try:
-                                rcpt = envelope.read_release(rd, bid)
-                            except ValueError:
-                                rcpt = "corrupt"
-                            ahead_gen = None
-                            if entry is not None and entry["binding_id"] == bid:
-                                ahead_gen = entry["generation"]
-                            elif lease is not None and lease.get("binding_id") == bid:
-                                ahead_gen = lease.get("generation")
-                            if rcpt is None and ahead_gen is not None:
-                                rp = envelope.release_path(rd, bid)
-                                _require(contained(rp, state_root()),
-                                         "escapes state root")
-                                write_json_atomic(rp, {
-                                    "schema_version": 1,
-                                    "binding_id": bid,
-                                    "generation": ahead_gen,
-                                    "ts": now_iso(),
-                                })
+                            # Attribution rides lead_release's own atomic
+                            # registry write; there is no separate receipt.
                             try:
                                 tx.lead_release(
                                     ws,
@@ -3632,8 +3689,23 @@ def _main(argv=None) -> int:
                             except ValueError:
                                 action = "needs-manual-repair"
                             else:
-                                action = ("revoked+released" if revoked_now
-                                          else "released")
+                                # A release that actually attributed this
+                                # binding reads back from the post-call
+                                # ledger; a bare file unlink does not.
+                                entry_after = tx.bindings[tx.slug].get(
+                                    "lead_ws", {}
+                                ).get(coordination.lead_lease_key(ws))
+                                attributed = bid in (
+                                    (entry_after or {}).get("releases", {})
+                                    .values()
+                                )
+                                if attributed:
+                                    action = ("revoked+released" if revoked_now
+                                              else "released")
+                                else:
+                                    action = ("revoked+cleaned-replayed-lease"
+                                              if revoked_now
+                                              else "cleaned-replayed-lease")
                 rows.append({"binding_id": bid, "task_id": rec_b["task_id"],
                              "status": rec_b["status"], "workspace_root": ws,
                              "lease": state, "descendants": desc, "action": action})
@@ -3793,7 +3865,7 @@ def _main(argv=None) -> int:
             if not resumed:
                 out = envelope.consumed_path(rd, ns.binding)
                 _require(contained(out, state_root()), "escapes state root")
-                write_json_atomic(out, {
+                rec_c = {
                     "schema_version": 1,
                     "binding_id": ns.binding,
                     "sequence": env["sequence"],
@@ -3802,7 +3874,18 @@ def _main(argv=None) -> int:
                     "integrated_by": ns.session,
                     "fence": ns.fence,
                     "ts": now_iso(),
-                })
+                }
+                # Size parity with the bounded reader (the teardown-manifest
+                # pattern): a record the resume path cannot re-read must
+                # never be written. Encoded bytes include the trailing
+                # newline the atomic writer appends.
+                serialized_c = (
+                    json.dumps(rec_c, sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                ).encode()
+                _require(len(serialized_c) <= envelope.CONSUMED_MAX_RAW,
+                         "consumption record exceeds the size bound")
+                write_json_atomic(out, rec_c)
             write_json_atomic(
                 bindings.binding_path(rd, ns.binding),
                 dict(rec_b, status="completed", updated_ts=now_iso()),
