@@ -103,8 +103,8 @@ Append one list to each half's prompt as "Read and probe the changed
 paths in this order". Both halves still read the same frozen snapshot;
 only the prescribed traversal differs. Structured reordering measurably
 changes which defects a reviewer finds; random shuffling degrades
-reviewer accuracy and is not used. Attacker and skeptic inputs are
-unchanged.
+reviewer accuracy and is not used. Attacker and skeptic receive no
+reading-order list.
 
 The independent Codex finder runs from `snapshot.codex_root` through the shared
 runtime runner. It selects the policy model and effort and returns structured
@@ -146,7 +146,8 @@ cat >"$PROMPT_FILE" <<'EOF'
 Scoped re-review of the frozen change. For each OPEN BLOCKING prior finding
 listed below, return ADDRESSED or NOT-ADDRESSED against the frozen tree
 with one line of evidence; deferred lineages appear only in the digest and
-are not review targets. Then complete your review scope over the fix diff
+are not review targets, but if your in-scope review yields new evidence, a
+severity escalation, or fix-regression implication for one, report it. Then complete your review scope over the fix diff
 below ONLY -- do not stop at the first finding. If the fixed subsystem
 still contains failure orderings, enumerate every one you can construct.
 Zero or one residual is a complete answer only when you also list the
@@ -219,7 +220,7 @@ are spent or after a divergence or escalation exit):
 3. Fold the response into the fix plan. Every concrete residual failure
    ordering the gate surfaces enters the lineage ledger as a finding of
    the round that triggered the gate, continuing that round's lineage
-   ordinals, with that round's discovery index
+   ordinals, with that round as its discovery round
    and the blocking status its severity earns there; dismissing one
    requires recorded evidence disproving the scenario -- a disagreement
    ruling alone cannot discharge it. Rule any disagreement as the
@@ -228,7 +229,7 @@ are spent or after a divergence or escalation exit):
 
 The gate consumes no round cap. Its seat evidence is the runner session
 id plus the enumeration text in the ledger. On failure or timeout, retry
-once with a longer timeout (at least 1.5x the first; 540s -> 900s is the
+once with a longer timeout (at least 1.5x the first; 600s -> 900s is the
 reference pair); on a second failure, perform the enumeration yourself
 and record the seat as FAILED in the ledger TOGETHER WITH both failure
 artifacts (each attempt's runner result or timeout evidence and its
@@ -376,10 +377,15 @@ defers.
 Advisory findings (minor/low/nit) are recorded once with status DEFERRED
 and are not re-checked in later rounds. Deferred lineages -- advisory or
 DEFERRED-BY-FLOOR -- are never silently dropped: inject them into every
-subsequent seat prompt as a deferral digest ("Previously ruled, do not
-re-derive or re-litigate:" followed by one line per lineage: ID,
-severity, one-line summary, ruling), and surface them once at the branch
-gate as a wrap-up note for the author.
+subsequent seat prompt as a deferral digest, and surface them once at
+the branch gate as a wrap-up note for the author. The digest text
+itself carries the reopen exception -- it reads: "Previously ruled, do
+not re-derive or re-litigate the lineages below. Suppress only
+unchanged duplicate reports: if your in-scope review yields new
+evidence, a severity escalation, or fix-regression implication for any
+of them, report it." -- followed by one line per lineage (ID, severity,
+one-line summary, ruling). Prompts that exclude deferred lineages as
+review targets carry the same exception.
 
 Reopen rules: ONE seat reopens a deferred lineage immediately when its
 evidence makes the finding blocking under the current round's policy (an
@@ -408,7 +414,8 @@ suppresses newly blocking evidence.
   and is subject to the reopen rules in "Finding lineages and deferrals"
   above.
 - Severity fails closed at every round index: a finding whose severity
-  is unrecognized (anything outside critical/high/major/minor/low/nit),
+  is unrecognized (anything outside
+  critical/high/major/minor/low/nit/advisory),
   missing, or disputed between seats is blocking and never
   floor-deferrable until clarified. A lineage's recorded severity is the
   maximum any seat reported, lowered only by a skeptic disproof -- the
@@ -424,8 +431,10 @@ The round verdict is two-part:
 - (b) the orchestrator forces REQUEST CHANGES whenever any UNRESOLVED
   EFFECTIVE BLOCKER exists regardless of severity: an open
   fix-regression lineage, a finding whose classification is disputed
-  (ambiguity never defers), or an unresolved child carrying an inherited
-  blocking obligation.
+  (ambiguity never defers), an unresolved child carrying an inherited
+  blocking obligation, or a deferred lineage reopened under the reopen
+  rules -- any open-and-blocking lineage whose severity the (a) helper
+  would treat as advisory belongs in (b).
 
 APPROVE requires both (a) clean and (b) empty. The ledger persists, per
 round: the round index, each deferred lineage with severity, each
@@ -434,8 +443,9 @@ effective-blocker lineage with its category, and the resulting verdict.
 Examples: a round-3 COMPLETE-round table whose only finding is a
 floor-deferred major is APPROVE ((a) sees no rows, (b) empty) and the
 major surfaces at the branch gate (a clean scoped round still advances
-to the final complete round; only a complete round emits APPROVE). A round whose only open finding is a minor fix-regression is
-REQUEST CHANGES ((a) clean, (b) fires). A round whose only open finding
+to the final complete round; only a complete round emits APPROVE). A
+round whose only open finding is a minor fix-regression is REQUEST
+CHANGES ((a) clean, (b) fires). A round whose only open finding
 is an advisory-severity item under classification dispute is REQUEST
 CHANGES until the dispute resolves.
 
