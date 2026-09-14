@@ -37,7 +37,8 @@ _worktree_ is a linked `git worktree` checkout; _hydration_ is the
   state -- it overwrites `core.hooksPath`, writes through the `~/.codex/AGENTS.md`
   symlink into this repo, and leaves nameless agent files. Both direct sync
   and its old wrapper are retired. Use native `ecc-install`/`ecc-update` and
-  the diagnostics in repo CLAUDE.md, "Codex plugin integration".
+  the diagnostics in the `dotfiles-architecture-contract` skill's "Codex
+  plugin integration" reference section.
 - [WARNING] Never "fix" a cloud container's git identity by copying the
   signing block from `~/.gitconfig-personal` -- `op-ssh-sign` needs 1Password
   and every commit would fail. `bootstrap-cloud.sh` `reattribute_git_identity`
