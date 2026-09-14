@@ -99,8 +99,9 @@ Instruct the fresh reviewer to report each actionable issue as severity,
 file:line, failure scenario, concrete fix, and `ASSUMES: <the
 configuration or state that must hold for this to fire>` -- the
 precondition, not a restatement of the failure. A finding with no
-`ASSUMES` line is treated as reachability `unknown`, which blocks; the
-reviewer never rules on reachability itself, only states what it
+`ASSUMES` line is treated as reachability `unknown`, which does not
+envelope-defer -- the round's floor still applies; the reviewer never
+rules on reachability itself, only states what it
 assumed.
 
 Decorrelate the two finder halves' reading order in a complete round.
@@ -360,9 +361,9 @@ directory after verifying it holds only its own four entries. Every
 round of the loop appends to that same file. It carries -- per
 round -- the round index and type, the frozen head, the seat artifacts,
 the decorrelation grouping, every lineage row (ID, severity, status,
-blocking, category), fix-plan gate rulings and enumeration text (or the
-FAILED entry with both failure artifacts), and the verdict with its
-(a)/(b) components. Each completed round's comment reproduces its rows,
+blocking, category, reachability, evidence), fix-plan gate rulings and
+enumeration text (or the FAILED entry with both failure artifacts), and
+the verdict with its (a)/(b) components. Each completed round's comment reproduces its rows,
 so the PR carries a durable copy; a resumed loop reconstructs effective
 blockers from the ledger and re-verifies them against the live tree
 before continuing (never from memory of prior sessions).
@@ -408,9 +409,11 @@ cited evidence (an executed probe, a registry or configuration
 enumeration, or a named guard that refuses first) recorded in the ledger
 and reproduced in the round's posted comment; `unknown` -- the default,
 not established. An `unreachable` ruling asserted without evidence is
-invalid and the lineage stays blocking. A ruling disputed between seats
-stays blocking until the dispute resolves, mirroring the existing
-severity rule.
+invalid and the lineage stays blocking. Seats never rule on reachability;
+they state `ASSUMES` lines. When seats state conflicting `ASSUMES` lines
+about the same lineage -- disagreeing about whether a configuration is
+supported or reachable -- the lineage stays blocking until the
+disagreement resolves, mirroring the existing severity rule.
 
 **Durability and authority.** The ruling inherits the ledger's existing
 authority rather than adding a new one: `round-ledger.md` is
@@ -419,9 +422,9 @@ projections of it, and on disagreement the ledger wins. A ruling is in
 force only once it is recorded in the ledger together with its
 evidence -- an `unreachable` ruling whose evidence was produced but not
 recorded (an interrupted probe, a lost runner result) is not a ruling,
-and the lineage stays `unknown`, which blocks; there is no
-partially-deferred state, the row is written with ruling and evidence
-together or neither. A resumed loop re-verifies envelope rulings against
+and the lineage stays `unknown`, which does not envelope-defer -- the
+round's floor still applies; there is no partially-deferred state, the
+row is written with ruling and evidence together or neither. A resumed loop re-verifies envelope rulings against
 the live tree, exactly as it already re-verifies effective blockers from
 the ledger rather than from memory of prior sessions.
 
@@ -438,8 +441,8 @@ not re-derive or re-litigate the lineages below. Suppress only
 unchanged duplicate reports: if your in-scope review yields new
 evidence, a severity escalation, or fix-regression implication for any
 of them, report it." -- followed by one line per lineage (ID, severity,
-one-line summary, ruling). Prompts that exclude deferred lineages as
-review targets carry the same exception.
+one-line summary, ruling, reachability, evidence). Prompts that exclude
+deferred lineages as review targets carry the same exception.
 
 Reopen rules: ONE seat reopens a deferred lineage immediately when its
 evidence makes the finding blocking under the current round's policy (an
@@ -611,13 +614,15 @@ bullets), then the hidden currency marker as its own unindented top-level line:
 ```markdown
 ### Co-review round <n>
 
-| Lineage | Severity | File:line       | Issue | Status | Fix |
-| ------- | -------- | --------------- | ----- | ------ | --- |
-| R1-F1   | HIGH     | path/file.py:42 | ...   | open   | ... |
+| Lineage | Severity | File:line       | Issue | Status | Reachability | Fix |
+| ------- | -------- | --------------- | ----- | ------ | ------------ | --- |
+| R1-F1   | HIGH     | path/file.py:42 | ...   | open   | unknown      | ... |
 
 (Status: open, RESOLVED, DEFERRED, DEFERRED-BY-FLOOR, or
 DEFERRED-BY-ENVELOPE -- deferred rows stay visible in the durable
-record.)
+record. Reachability: reachable, unreachable, or unknown, folded together
+with its evidence -- e.g. "unreachable: <cited evidence>" -- so a human
+reading the comment sees the ruling and what it rests on in one place.)
 
 (or "No actionable findings." when the round is clean)
 

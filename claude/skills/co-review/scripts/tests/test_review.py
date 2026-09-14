@@ -29,7 +29,7 @@ class ReviewHelperTests(unittest.TestCase):
         self.run_git("config", "user.name", "Fixture")
         self.run_git("config", "user.email", "fixture@example.invalid")
         (self.repo / "tracked.txt").write_text("base\n")
-        (self.repo / ".gitignore").write_text("ignored.tmp\n")
+        (self.repo / ".gitignore").write_text("ignored.tmp\n.pytest_cache/\n")
         self.run_git("add", "tracked.txt", ".gitignore")
         self.run_git("commit", "-qm", "fixture: Base")
         self.base = self.git("rev-parse", "HEAD")
@@ -361,6 +361,14 @@ class ReviewHelperTests(unittest.TestCase):
             cache.write_bytes(b"\x00")
             stray = snapshot / "stray.pyc"
             stray.write_bytes(b"\x00")
+            # .pytest_cache/ is listed in the fixture's .gitignore (setUp), so
+            # this artifact is BOTH disposable-named AND git-ignored, unlike
+            # .venv/__pycache__/stray.pyc above, which are disposable-named
+            # but NOT git-ignored. Tolerance is name-scoped, not
+            # ignored-scoped: both cases must survive.
+            ignored_cache = snapshot / ".pytest_cache" / "v" / "cache.txt"
+            ignored_cache.parent.mkdir(parents=True)
+            ignored_cache.write_text("cached\n")
 
             self.command("cleanup", "--manifest", str(manifest_path))
 
