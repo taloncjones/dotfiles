@@ -31,3 +31,5 @@ is the staging tier, not an archive.
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
   clean: retry once with defensive review framing before counting the seat.
+- (2026-09) rm/git-meta guards reject unexpanded variables: pass literal
+  absolute paths, never "$VAR/sub", and split cd-chains into git -C calls.
