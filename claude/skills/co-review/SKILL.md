@@ -93,6 +93,13 @@ session's rationalizations. It is the Claude half, not a substitute for
 Codex. Controller disk-verification of a fix is not a substitute for either
 half.
 
+Decorrelate the two finder halves' inputs in a complete round: give one
+half the diff in natural diff order and the other the same diff grouped
+by subsystem (pick the grouping when freezing the round and record it in
+the ledger). Structured reordering measurably changes which defects a
+reviewer finds; random shuffling degrades reviewer accuracy and is not
+used. Attacker and skeptic inputs are unchanged.
+
 The independent Codex finder runs from `snapshot.codex_root` through the shared
 runtime runner. It selects the policy model and effort and returns structured
 runtime metadata; this skill never restates a route table.
@@ -115,20 +122,32 @@ uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk 
   --prompt-file "$PROMPT_FILE"
 ```
 
+When deferred lineages exist, append the deferral digest (see "Finding
+lineages and deferrals") to the prompt before dispatch; the digest is
+context to prevent re-derivation, never a review target.
+
 For a scoped round, build the prompt from the prior findings and the fix
 diff instead (`$PREV_HEAD` is the previously reviewed head from the last
 posted marker, `$HEAD` the newly frozen committed head this round reviews,
-`$FINDINGS_FILE` the prior round's findings table saved locally; the diff
+`$FINDINGS_FILE` the prior round's OPEN BLOCKING lineages only, saved
+locally -- deferred and resolved lineages never enter the review-target
+table; they travel in the deferral digest; the diff
 read from the source repository is a read, not a mutation):
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-codex.XXXXXX")
 cat >"$PROMPT_FILE" <<'EOF'
-Scoped re-review of the frozen change. For each prior finding listed below,
-return ADDRESSED or NOT-ADDRESSED against the frozen tree with one line of
-evidence. Then report any new actionable issue in the fix diff below ONLY,
-as severity, file:line, failure scenario, and concrete fix. End with one
-verdict. Do not invoke skills, partners, or external actions.
+Scoped re-review of the frozen change. For each OPEN BLOCKING prior finding
+listed below, return ADDRESSED or NOT-ADDRESSED against the frozen tree
+with one line of evidence; deferred lineages appear only in the digest and
+are not review targets. Then complete your review scope over the fix diff
+below ONLY -- do not stop at the first finding. If the fixed subsystem
+still contains failure orderings, enumerate every one you can construct.
+Zero or one residual is a complete answer only when you also state
+explicitly that you completed the scope; when several residuals exist,
+report them all. Report each as severity, file:line, failure scenario, and
+concrete fix. End with one verdict. Do not invoke skills, partners, or
+external actions.
 EOF
 printf '\nPrior reviewed head: %s\nCurrent head: %s\n\nPrior findings:\n' \
   "$PREV_HEAD" "$HEAD" >>"$PROMPT_FILE"
@@ -141,6 +160,10 @@ uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk 
   --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
+
+When deferred lineages exist, append the deferral digest (see "Finding
+lineages and deferrals") to the prompt before dispatch; the digest is
+context to prevent re-derivation, never a review target.
 
 Use the runner only; do not launch a generic or nested Codex CLI review. Pass
 `--risk critical` only for explicitly critical review risk, never diff size.
@@ -209,8 +232,8 @@ One pass is not a gate. Two round types:
   finder or verification incomplete cannot approve.
 - **Scoped round**: freeze the committed head; both independent halves
   (fresh Claude reviewer AND Codex runner -- never only the half that
-  raised a finding) receive the prior round's findings table and the
-  fix diff since the last posted round (prior reviewed head to new
+  raised a finding) receive the prior round's open blocking lineages and
+  the fix diff since the last posted round (prior reviewed head to new
   head). Each half returns
   a per-finding verdict, ADDRESSED or NOT-ADDRESSED with one-line
   evidence, plus any new actionable findings in the fix diff only. Skip
