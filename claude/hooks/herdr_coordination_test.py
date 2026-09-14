@@ -1052,7 +1052,7 @@ with c.owner_transaction(rd) as tx:
             "host": "h",
             "pid": 3,
             "fence": 1,
-            "heartbeat_ts": 2**53,
+            "heartbeat_ts": time.time(),
             "runtime": "claude",
             "thread_id": None,
             "account_id": "acc",
@@ -1061,8 +1061,18 @@ with c.owner_transaction(rd) as tx:
             "binding_id": "ldb-" + "0" * 32,
         }
         self.assertTrue(coordination._valid_lead_lease(rec))
+        # A large FINITE float far past any real clock (a never-stale
+        # sentinel) is valid: float subtraction never overflows on it.
+        self.assertTrue(coordination._valid_lead_lease(dict(rec, heartbeat_ts=9e18)))
+        self.assertTrue(coordination._valid_lead_lease(dict(rec, heartbeat_ts=1e300)))
+        # The values that must be rejected are the ones that break staleness
+        # arithmetic: an int too large to convert to float (OverflowError),
+        # a value above the bound, and non-finite floats.
         self.assertFalse(
-            coordination._valid_lead_lease(dict(rec, heartbeat_ts=2**53 + 1))
+            coordination._valid_lead_lease(dict(rec, heartbeat_ts=10**400))
+        )
+        self.assertFalse(
+            coordination._valid_lead_lease(dict(rec, heartbeat_ts=1e301))
         )
         self.assertFalse(
             coordination._valid_lead_lease(dict(rec, heartbeat_ts=float("inf")))

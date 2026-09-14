@@ -238,10 +238,16 @@ def _valid_lead_lease(rec):
         and rec.get("control_tier") == "lead"
         and isinstance(rec.get("binding_id"), str)
         and bool(_BINDING_ID.fullmatch(rec["binding_id"]))
-        # Bound the heartbeat to a sane range (2**53 is far past any real
-        # clock): staleness arithmetic on an absurd value read from disk
-        # must never overflow inside a scan.
-        and rec["heartbeat_ts"] <= 2**53
+        # Bound the heartbeat so staleness arithmetic (time.time() -
+        # heartbeat_ts) can never overflow inside a scan. _valid_owner
+        # already admits any non-negative int or finite float; the only
+        # value that overflows the float subtraction is an int too large to
+        # convert to float, so the bound need only exclude those. 1e300 sits
+        # safely below the float ceiling yet far past any real clock or
+        # far-future sentinel; the int-vs-float comparison is exact, so an
+        # absurd int (e.g. 10**400) is rejected here without itself
+        # overflowing.
+        and rec["heartbeat_ts"] <= 1e300
         and ("generation" not in rec
              or (type(rec["generation"]) is int and rec["generation"] >= 1))
     )
