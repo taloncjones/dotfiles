@@ -87,53 +87,7 @@ is the equivalent.
 
 **Codex plugin integration:**
 
-ECC and Superpowers use native, independent plugin installations in both runtimes. Claude installs `ecc@ecc` and `superpowers@claude-plugins-official` into both account config dirs. Codex stages self-contained copies from separate upstream checkouts under `~/.local/share/dotfiles/codex-workflows`, then installs `ecc@dotfiles-workflows` and `superpowers@dotfiles-workflows`. Never run ECC's `sync-ecc-to-codex.sh` on a dotfiles-managed machine: it mutates shared `AGENTS.md`, MCP, agent, and git-hook surfaces. `install/common/link.sh` continues to sweep stale direct skill/agent mirrors from older installs.
-
-`install/common/codex-surfaces.py` reconciles native discovery during install and
-update. It disables proven duplicate skill copies and incompatible or inert
-Claude-only imports of `security-guidance`, `code-review`, and `code-simplifier`;
-custom or compatible implementations are preserved. It supplies
-`skills.max_context_tokens = 10000` only when unset; an explicit budget wins.
-The helper preserves skill files and unrelated configuration. Unsupported TOML
-layouts fail without being rewritten. Optional installer reconciliation warns
-and continues; explicit plugin lifecycle commands still report failure.
-Managed skill linking preserves existing real files and directories, including
-their contents, and warns instead of replacing them; inspect those destinations
-before moving custom content to make room for a managed symlink.
-
-Shared `handoff`, `kickoff`, `todos`, `repo-recall`, and `post-merge` skills link
-from `claude/skills` into Codex. Codex review and Herd entrypoints live in
-`codex/skills`. Helpers resolve paths from these installed sources, not the
-repository being worked on. `workflow_context.py` owns repository/account
-identity; handoff history is account/repository/task scoped. Never copy a
-personal handoff into a work account's state.
-
-`install/common/codex-roles.py` migrates only byte-exact historical managed ECC
-roles to Luna/medium explorer, Terra/medium documentation research, and
-Astra/high reviewer. Custom role files and model choices remain untouched;
-`--check --codex-home <path>` previews its decision. Repo-owned `codex/AGENTS.md`
-does not carry a copied upstream ECC instruction block.
-
-Plugin staging records upstream revision and payload digest independently of
-the wrapper version. A Codex ECC cache directory named `2.0.0` can contain a
-current upstream payload; verify installed bytes/provenance before declaring
-it stale. Automatic ECC Plan Canvas session/stop hooks are narrowly disabled.
-Managed hook state is account-scoped; a manually started Canvas server still
-needs its own account-specific state directory and port.
-
-Run the helper with `--check` to preview changes or `--apply` to write them.
-`--focus --apply` opts into the core ECC catalog in `codex/ecc-skills.txt`;
-subsequent updates retain that choice. Explicit skill overrides are preserved.
-To leave focused discovery, remove the complete `[[skills.config]]` blocks
-marked `# dotfiles-managed: ecc-focus` and their marker comments, then reconcile
-without `--focus`. Proven duplicates remain disabled. The compatibility checks
-run again on later updates; simply re-enabling an incompatible import does not
-opt it out.
-
-Restart Claude or Codex after changing plugin or hook configuration. A running
-session may retain old registrations, including across compaction. Verify a fresh
-Codex process with a harmless tool call and final response: startup alone does
-not exercise PostToolUse or Stop.
+ECC and Superpowers use native, independent plugin installations in both runtimes (Claude: `ecc@ecc` + `superpowers@claude-plugins-official` in both account config dirs; Codex: self-contained staged copies installed as `*@dotfiles-workflows`). Never run ECC's `sync-ecc-to-codex.sh` on a dotfiles-managed machine: it mutates shared `AGENTS.md`, MCP, agent, and git-hook surfaces. Never copy a personal handoff into a work account's state. Full reconciliation mechanics (`codex-surfaces.py`, `codex-roles.py`, shared skill linking, staging provenance, `--focus` mode, restart caveats): load the `dotfiles-architecture-contract` skill.
 
 **Herdr (agent terminal multiplexer):**
 
@@ -148,14 +102,6 @@ agent-state detection works without the integration (screen manifest); if the
 integration is ever wanted, it needs the installer-owned pattern (post-reconcile
 idempotent install step) plus a gitignore entry for the generated script.
 
-**ZSH structure:**
-
-- `zsh/.zshrc` - Main config, sources other files
-- `zsh/aliases.zsh` - Platform-conditional aliases
-- `zsh/functions.zsh` - Shell functions
-- `zsh/scripts/` - Modular utilities (airpods, cheat, geoip, info)
-- `zsh/theme.zsh` - Custom prompt theme
-
 ## Code Standards
 
 - Shell scripts: `#!/usr/bin/env bash` or `#!/bin/zsh`
@@ -166,8 +112,3 @@ idempotent install step) plus a gitignore entry for the generated script.
 Format: `<scope>: <summary>` (imperative mood, <75 chars)
 
 Examples: `zsh: Add geoip lookup function`, `install: Fix Brewfile path`
-
-## Adding Packages
-
-CLI tools (all platforms): `install/common/Brewfile.rb`
-macOS apps: `install/macos/Brewfile.rb`

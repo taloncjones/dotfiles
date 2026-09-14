@@ -1,6 +1,17 @@
 ---
 name: dotfiles-debugging-playbook
-description: Symptom-to-fix triage for this dotfiles repo. Load when something is BROKEN and you need to diagnose it -- plugin skills/commands missing from a session, settings.json truncated, dangling or write-through symlinks, "git refuses to commit" or wrong commit identity, SSH offering the wrong key, a guard hook blocking a commit, a cloud session missing its config, blank statusline, dead hooks, zsh nags, prettier rewriting files unexpectedly, or a worktree missing .todos/.planning. Trigger phrases: "why is X missing", "commit blocked", "hook didn't run", "wrong identity", "symlink broken", "plugin not installed". NOT for routine operation (dotfiles-run-and-operate), proving healthy state from first principles (dotfiles-verification-toolkit), or the history of past investigations (dotfiles-failure-archaeology).
+description: >-
+  Symptom-to-fix triage for this dotfiles repo. Load when something is BROKEN
+  and you need to diagnose it -- plugin skills/commands missing from a session,
+  settings.json truncated, dangling or write-through symlinks, "git refuses to
+  commit" or wrong commit identity, SSH offering the wrong key, a guard hook
+  blocking a commit, a cloud session missing its config, blank statusline, dead
+  hooks, zsh nags, prettier rewriting files unexpectedly, or a worktree missing
+  .todos/.planning. Trigger phrases: "why is X missing", "commit blocked",
+  "hook didn't run", "wrong identity", "symlink broken", "plugin not
+  installed". NOT for routine operation (dotfiles-run-and-operate), proving
+  healthy state from first principles (dotfiles-verification-toolkit), or the
+  history of past investigations (dotfiles-failure-archaeology).
 ---
 
 # Dotfiles Debugging Playbook
@@ -320,7 +331,7 @@ ls -ld /path/to/main/.todos                  # main must actually have .todos/
 
 | Finding                                               | Cause                                                                                                                                       | Fix                                                                                                   |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `core.hooksPath` wrong/absent                         | Something rewrote it (the classic culprit: running ECC's sync script directly -- see warnings)                                              | Re-link `~/.gitconfig` (`dotfiles-repair`); use native `ecc-install`/`ecc-update` only                                 |
+| `core.hooksPath` wrong/absent                         | Something rewrote it (the classic culprit: running ECC's sync script directly -- see warnings)                                              | Re-link `~/.gitconfig` (`dotfiles-repair`); use native `ecc-install`/`ecc-update` only                |
 | Hook fired but printed `WARN: .todos has wrong shape` | Existing dir/symlink does not match the canonical symlink; hook refuses destructive replace by default                                      | Re-run checkout with `GSD_HOOK_REPAIR=1` (destructive -- rsync worktree-unique content to main FIRST) |
 | Hook printed `workspace mode detected`                | `.planning/config.json` declares `"mode": "workspace"` or phases/PROJECT.md exist -- hydration is skipped by design; leftover symlinks warn | `GSD_HOOK_ISOLATE=1` converts leftover symlinks to per-worktree copies                                |
 | No output at all                                      | File checkout (not branch), or `.git` is a directory (main checkout), or main has no `.todos/`                                              | Expected no-ops -- see the guard chain at the top of `git/hooks/post-checkout`                        |
