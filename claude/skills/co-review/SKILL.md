@@ -218,7 +218,8 @@ are spent or after a divergence or escalation exit):
    design change that closes it."
 3. Fold the response into the fix plan. Every concrete residual failure
    ordering the gate surfaces enters the lineage ledger as a finding of
-   the round that triggered the gate, with that round's discovery index
+   the round that triggered the gate, continuing that round's lineage
+   ordinals, with that round's discovery index
    and the blocking status its severity earns there; dismissing one
    requires recorded evidence disproving the scenario -- a disagreement
    ruling alone cannot discharge it. Rule any disagreement as the
@@ -332,8 +333,12 @@ Sequence:
 
 ### Finding lineages and deferrals
 
-THE LEDGER: one append-only markdown file, `round-ledger.md`, in the
-review output directory alongside the round's manifest, carrying -- per
+THE LEDGER: one append-only markdown file, `round-ledger.md`, in a
+loop-owned session directory that OUTLIVES the per-round output
+directories -- a sibling of them, never inside one, because `prepare`
+requires an empty output directory and `cleanup` removes the output
+directory after verifying it holds only its own four entries. Every
+round of the loop appends to that same file. It carries -- per
 round -- the round index and type, the frozen head, the seat artifacts,
 the decorrelation grouping, every lineage row (ID, severity, status,
 blocking, category), fix-plan gate rulings and enumeration text (or the
