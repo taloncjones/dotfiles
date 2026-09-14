@@ -474,10 +474,11 @@ blocks, and is ruled afresh.
   lineages can block. A NEW major-severity finding is recorded with its
   severity intact, status DEFERRED-BY-FLOOR, Blocking=no, and enters the
   deferral digest instead of forcing a fix wave.
-- HIGH/critical findings are never capped and never deferred, at any
-  round index. Everything the floor defers surfaces at the branch gate
-  and is subject to the reopen rules in "Finding lineages and deferrals"
-  above.
+- HIGH/critical findings are never capped and never deferred by the
+  floor, at any round index (an unreachable ruling can still defer them
+  under "Finding lineages and deferrals" above). Everything the floor
+  defers surfaces at the branch gate and is subject to the reopen rules
+  in "Finding lineages and deferrals" above.
 - Severity fails closed at every round index: a finding whose severity
   is unrecognized (anything outside
   critical/high/major/minor/low/nit/advisory),
