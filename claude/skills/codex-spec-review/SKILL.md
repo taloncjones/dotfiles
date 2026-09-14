@@ -48,22 +48,28 @@ Validate the returned absolute path and SHA-256 before dispatch. Review the
 frozen specification for ambiguity, contradictory requirements, missing
 acceptance criteria, boundary cases, scope, security, privacy, rollback, and
 external dependencies.
-Probe recovery semantics explicitly: for every crash window the design
-claims to survive, require the spec to name the durable evidence that
-survives it and every actor that can destroy or rewrite that evidence.
-Flag oversized slices as findings: a slice that introduces more than one
-evidence model (one set of durable artifacts consulted for an authority
-decision) or more than three new multi-write sequences (2+ durable writes
-that must survive interruption between them) is a slice-splitting signal;
-slices with no durable-write behavior are exempt. Require bounded severity/location/problem/fix output
-and one verdict. Empty, malformed, or failed output is incomplete.
+Probe recovery semantics explicitly: independently enumerate the
+interruption windows the design's durable writes and authority
+transitions imply -- including windows the specification never mentions
+-- and for each require the spec to name the durable evidence that
+survives it, every actor that can destroy or rewrite that evidence, and
+the recovery behavior; missing coverage is a finding, whether or not the
+spec claims crash survival. Flag an oversized scope as a finding: a
+specification that as a whole introduces more than one evidence model
+(one set of durable artifacts consulted for an authority decision) or
+more than three new multi-write sequences (2+ durable writes that must
+survive interruption between them) is a slice-splitting signal;
+specifications with no durable-write behavior are exempt.
+
+Require bounded severity/location/problem/fix output and one verdict.
+Empty, malformed, or failed output is incomplete.
 
 Resolve the independent Codex reviewer model and effort with
 the shared runtime runner:
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-spec-review.XXXXXX")
-printf '%s\n' "Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Probe recovery semantics: for every crash window the design claims to survive, require the spec to name the durable evidence that survives it and every actor that can destroy or rewrite that evidence. Flag oversized slices as findings: more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; slices with no durable-write behavior are exempt. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+printf '%s\n' "Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Probe recovery semantics: independently enumerate the interruption windows the design's durable writes and authority transitions imply, including windows the specification never mentions, and for each require the spec to name the durable evidence that survives it, every actor that can destroy or rewrite that evidence, and the recovery behavior; missing coverage is a finding. Flag an oversized scope as a finding: a specification that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; specifications with no durable-write behavior are exempt. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \

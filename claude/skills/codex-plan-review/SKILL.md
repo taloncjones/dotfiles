@@ -51,9 +51,9 @@ frozen file and bounded optional repository context. Request severity, location,
 failure scenario, concrete fix, and one verdict. Empty output, an execution
 error, or a response without the required verdict is incomplete, never approval.
 
-Flag oversized slices as findings: a plan whose tasks introduce more than
-one evidence model (one set of durable artifacts consulted for an
-authority decision) or more than three new multi-write sequences (2+
+Flag an oversized scope as a finding: a plan that as a whole introduces
+more than one evidence model (one set of durable artifacts consulted for
+an authority decision) or more than three new multi-write sequences (2+
 durable writes that must survive interruption between them) is a
 slice-splitting signal; plans with no durable-write behavior are exempt.
 
@@ -62,7 +62,7 @@ the shared runtime runner:
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-plan-review.XXXXXX")
-printf '%s\n' "Review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Flag oversized slices as findings: tasks introducing more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) are a slice-splitting signal; plans with no durable-write behavior are exempt. Return severity, location, failure scenario, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+printf '%s\n' "Review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Flag an oversized scope as a finding: a plan that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; plans with no durable-write behavior are exempt. Return severity, location, failure scenario, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
