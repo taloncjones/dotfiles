@@ -335,6 +335,58 @@ class ReviewHelperTests(unittest.TestCase):
 
             self.assertTrue(ignored.exists())
 
+    def test_cleanup_tolerates_disposable_execution_artifacts(self) -> None:
+        for snapshot_key in ("codex_root", "claude_root"):
+            output = self.root / f"disposable-{snapshot_key}"
+            result = self.command(
+                "prepare",
+                "--repo",
+                str(self.repo),
+                "--base",
+                self.base,
+                "--output-dir",
+                str(output),
+            )
+            manifest_path = Path(json.loads(result.stdout)["manifest"])
+            manifest = json.loads(manifest_path.read_text())
+            snapshot = Path(manifest["snapshot"][snapshot_key])
+            interpreter = self.root / f"system-python-{snapshot_key}"
+            interpreter.write_text("#!/bin/sh\n")
+            venv_binary = snapshot / ".venv" / "bin" / "python"
+            venv_binary.parent.mkdir(parents=True)
+            # A real virtualenv links its interpreter rather than copying it.
+            venv_binary.symlink_to(interpreter)
+            cache = snapshot / "pkg" / "__pycache__" / "mod.cpython-313.pyc"
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b"\x00")
+            stray = snapshot / "stray.pyc"
+            stray.write_bytes(b"\x00")
+
+            self.command("cleanup", "--manifest", str(manifest_path))
+
+            self.assertFalse(output.exists())
+            # The link was removed; the interpreter it pointed at was not.
+            self.assertTrue(interpreter.exists())
+
+    def test_verify_still_refuses_disposable_execution_artifacts(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        cache = snapshot / "__pycache__" / "mod.cpython-313.pyc"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"\x00")
+
+        self.command("verify", "--manifest", str(manifest_path), expect=2)
+
+    def test_cleanup_refuses_non_ignored_untracked_paths(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        stray = snapshot / "operator-notes.md"
+        stray.write_text("keep\n")
+
+        self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertTrue(stray.exists())
+
     def test_artifact_requires_explicit_repo_scoped_target_and_freezes_content(
         self,
     ) -> None:

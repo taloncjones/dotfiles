@@ -10,7 +10,7 @@ import secrets
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
@@ -208,6 +208,25 @@ def status_porcelain(repo: Path) -> bytes:
     return git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 
 
+# Interpreter and tool caches a reviewing seat creates by executing the code
+# under review. Regenerated on demand and never a seat's only copy of
+# anything, so cleanup may delete them. Closed by design: any other ignored
+# path still refuses, because a git-ignored file can hold a probe result or
+# operator data. Widening this list is a reviewed code change.
+DISPOSABLE_DIRECTORY_NAMES = frozenset(
+    {".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+)
+DISPOSABLE_SUFFIXES = (".pyc", ".pyo")
+
+
+def is_disposable_artifact(relative_path: str) -> bool:
+    """True when a repository-relative path is a disposable execution artifact."""
+    parts = PurePosixPath(relative_path).parts
+    if any(part in DISPOSABLE_DIRECTORY_NAMES for part in parts):
+        return True
+    return relative_path.endswith(DISPOSABLE_SUFFIXES)
+
+
 def untracked_paths(repo: Path, *, include_ignored: bool = False) -> set[str]:
     arguments = ["ls-files", "--others", "--exclude-standard", "-z"]
     entries = git(repo, *arguments)
@@ -235,7 +254,11 @@ def tree_contains(repo: Path, tree: str, path: str) -> bool:
 
 
 def no_untracked_or_unstaged(
-    repo: Path, *, expected_tree: str, expected_head: str
+    repo: Path,
+    *,
+    expected_tree: str,
+    expected_head: str,
+    tolerate_disposable: bool = False,
 ) -> None:
     if full_commit(repo, "HEAD") != expected_head:
         raise ReviewError("snapshot head changed")
@@ -251,7 +274,12 @@ def no_untracked_or_unstaged(
         raise ReviewError("cannot inspect snapshot worktree")
     if changed.returncode == 1:
         raise ReviewError("snapshot has unexpected unstaged changes")
-    if untracked_paths(repo, include_ignored=True):
+    unexpected = untracked_paths(repo, include_ignored=True)
+    if tolerate_disposable:
+        unexpected = {
+            path for path in unexpected if not is_disposable_artifact(path)
+        }
+    if unexpected:
         raise ReviewError("snapshot has unexpected untracked paths")
 
 
@@ -304,7 +332,9 @@ def load_manifest(path_value: str) -> tuple[Path, dict[str, Any], Path]:
     return path, manifest, output_dir
 
 
-def verify_manifest(path_value: str) -> tuple[Path, dict[str, Any], Path]:
+def verify_manifest(
+    path_value: str, *, tolerate_disposable: bool = False
+) -> tuple[Path, dict[str, Any], Path]:
     path, manifest, output_dir = load_manifest(path_value)
     try:
         source = manifest["source"]
@@ -325,9 +355,13 @@ def verify_manifest(path_value: str) -> tuple[Path, dict[str, Any], Path]:
         codex_root,
         expected_tree=snapshot["codex_tree"],
         expected_head=snapshot["snapshot_head"],
+        tolerate_disposable=tolerate_disposable,
     )
     no_untracked_or_unstaged(
-        claude_root, expected_tree=snapshot["claude_tree"], expected_head=source["base"]
+        claude_root,
+        expected_tree=snapshot["claude_tree"],
+        expected_head=source["base"],
+        tolerate_disposable=tolerate_disposable,
     )
     return path, manifest, output_dir
 
@@ -643,13 +677,23 @@ def artifact(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cleanup(args: argparse.Namespace) -> dict[str, Any]:
-    manifest_path, manifest, output_dir = verify_manifest(args.manifest)
+    manifest_path, manifest, output_dir = verify_manifest(
+        args.manifest, tolerate_disposable=True
+    )
     repo = Path(manifest["source"]["root"])
     claude_root = Path(manifest["snapshot"]["claude_root"])
     codex_root = Path(manifest["snapshot"]["codex_root"])
     marker = output_dir / manifest["ownership"]["marker"]
     if set(output_dir.iterdir()) != {manifest_path, marker, codex_root, claude_root}:
         raise ReviewError("owned output directory contains unexpected paths")
+    for root in (claude_root, codex_root):
+        for relative in untracked_paths(root, include_ignored=True):
+            if not is_disposable_artifact(relative):
+                continue
+            target = root / relative
+            if target.is_dir() and not target.is_symlink():
+                continue
+            target.unlink()
     git(claude_root, "reset", "--hard", manifest["source"]["base"])
     git(repo, "worktree", "remove", str(claude_root))
     git(repo, "worktree", "remove", str(codex_root))
