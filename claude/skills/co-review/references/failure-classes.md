@@ -1,5 +1,10 @@
 # Co-Review Failure Classes
 
+Matching a class below establishes that a defect exists, not that it
+blocks. Reachability is ruled separately by the orchestrator: a defect in
+code no supported configuration reaches is recorded at its true severity
+and does not block.
+
 Round-1 finders probe EVERY class below against the frozen diff, not just
 the classes the diff superficially suggests. The pre-freeze self-audit
 walks the same list. One line per entry; keep entries concrete enough to

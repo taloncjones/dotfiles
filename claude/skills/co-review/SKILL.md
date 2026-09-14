@@ -92,7 +92,16 @@ deferral digest when deferred lineages exist; for a scoped round
 additionally the prior round's open blocking lineages and the fix diff
 -- never the authoring session's rationalizations. It is the Claude half, not a substitute for
 Codex. Controller disk-verification of a fix is not a substitute for either
-half.
+half. A seat that executes the code under review creates virtualenvs
+outside the snapshot roots.
+
+Instruct the fresh reviewer to report each actionable issue as severity,
+file:line, failure scenario, concrete fix, and `ASSUMES: <the
+configuration or state that must hold for this to fire>` -- the
+precondition, not a restatement of the failure. A finding with no
+`ASSUMES` line is treated as reachability `unknown`, which blocks; the
+reviewer never rules on reachability itself, only states what it
+assumed.
 
 Decorrelate the two finder halves' reading order in a complete round.
 Mechanism: from the frozen diff's changed paths, build two reading-order
@@ -116,8 +125,10 @@ cat >"$PROMPT_FILE" <<'EOF'
 Review only the frozen change against the base commit named below. Probe
 every failure class in the rubric appended below against this diff, then any
 further issues. Report each actionable issue as severity, file:line, failure
-scenario, and concrete fix. End with one verdict. Do not invoke skills,
-partners, or external actions.
+scenario, concrete fix, and ASSUMES: <the configuration or state that must
+hold for this to fire> -- the precondition, not a restatement of the
+failure. A finding with no ASSUMES line is treated as reachability unknown.
+End with one verdict. Do not invoke skills, partners, or external actions.
 EOF
 printf '\nBase: %s\n\n' "$BASE" >>"$PROMPT_FILE"
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
@@ -155,8 +166,11 @@ Zero or one residual is a complete answer only when you also list the
 changed mechanisms and the failure orderings you examined (file
 references included) -- a bare completion sentence is not scope evidence;
 when several residuals exist, report them all. Report each as severity,
-file:line, failure scenario, and concrete fix. End with one verdict. Do
-not invoke skills, partners, or external actions.
+file:line, failure scenario, concrete fix, and ASSUMES: <the configuration
+or state that must hold for this to fire> -- the precondition, not a
+restatement of the failure. A finding with no ASSUMES line is treated as
+reachability unknown. End with one verdict. Do not invoke skills, partners,
+or external actions.
 EOF
 printf '\nPrior reviewed head: %s\nCurrent head: %s\n\nPrior findings:\n' \
   "$PREV_HEAD" "$HEAD" >>"$PROMPT_FILE"
@@ -184,9 +198,12 @@ the independent pass incomplete.
 
 Run at most one attacker when frozen changed paths affect auth, authorization,
 validation, permission, credentials, tokens, signatures, secrets, or a review
-or guard hook. It states a concrete bypass scenario. Run at most one skeptic to
-reproduce high-severity findings and mark each confirmed, disproved, or
-uncertain. Resolve each fresh Codex role through `agent_runtime.resolve_route`
+or guard hook. It states a concrete bypass scenario, plus an `ASSUMES: <the
+configuration or state that must hold for this to fire>` line; a bypass
+scenario with no `ASSUMES` line is treated as reachability `unknown`. Run at
+most one skeptic to reproduce high-severity findings and mark each
+confirmed, disproved, or uncertain, likewise stating what it assumed. Resolve
+each fresh Codex role through `agent_runtime.resolve_route`
 with role `reviewer` or `skeptic`; never select a model or effort ad hoc.
 
 Merge only findings checked against the frozen files. Retain uncertain or
@@ -375,11 +392,38 @@ round-1 tree, classify as fix-regression, and the finding keeps blocking
 status until any classification dispute resolves -- ambiguity never
 defers.
 
+At the same merge/dedup step, the orchestrator rules each lineage's
+reachability: `reachable` -- some supported configuration reaches it;
+`unreachable` -- no supported configuration reaches it, which requires
+cited evidence (an executed probe, a registry or configuration
+enumeration, or a named guard that refuses first) recorded in the ledger
+and reproduced in the round's posted comment; `unknown` -- the default,
+not established. An `unreachable` ruling asserted without evidence is
+invalid and the lineage stays blocking. A ruling disputed between seats
+stays blocking until the dispute resolves, mirroring the existing
+severity rule.
+
+**Durability and authority.** The ruling inherits the ledger's existing
+authority rather than adding a new one: `round-ledger.md` is
+authoritative, the posted comment and the deferral digest are
+projections of it, and on disagreement the ledger wins. A ruling is in
+force only once it is recorded in the ledger together with its
+evidence -- an `unreachable` ruling whose evidence was produced but not
+recorded (an interrupted probe, a lost runner result) is not a ruling,
+and the lineage stays `unknown`, which blocks; there is no
+partially-deferred state, the row is written with ruling and evidence
+together or neither. A resumed loop re-verifies envelope rulings against
+the live tree, exactly as it already re-verifies effective blockers from
+the ledger rather than from memory of prior sessions.
+
 Advisory findings (minor/low/nit) are recorded once with status DEFERRED
-and are not re-checked in later rounds. Deferred lineages -- advisory or
-DEFERRED-BY-FLOOR -- are never silently dropped: inject them into every
-subsequent seat prompt as a deferral digest, and surface them once at
-the branch gate as a wrap-up note for the author. The digest text
+and are not re-checked in later rounds. Deferred lineages -- advisory,
+DEFERRED-BY-FLOOR, or DEFERRED-BY-ENVELOPE -- are never silently dropped:
+inject them into every subsequent seat prompt as a deferral digest, and
+surface them once at the branch gate as a wrap-up note for the author. A
+DEFERRED-BY-ENVELOPE lineage carries its reachability ruling and its
+evidence binding (the reviewed tree and the named configuration) into the
+digest alongside the other lineages. The digest text
 itself carries the reopen exception -- it reads: "Previously ruled, do
 not re-derive or re-litigate the lineages below. Suppress only
 unchanged duplicate reports: if your in-scope review yields new
@@ -402,6 +446,17 @@ investigation -- a seat that independently finds new evidence about a
 deferred lineage while reviewing its scope reports it. Deferral never
 suppresses newly blocking evidence.
 
+A DEFERRED-BY-ENVELOPE lineage is subject to every rule above, plus one
+new trigger: evidence that the envelope changed reopens the lineage
+immediately, as a single-seat reopen. A second pack type shipping, a
+registry gaining an entry, or a guard being removed are envelope changes.
+An `unreachable` ruling is bound to the evidence that produced it -- the
+reviewed tree and the named configuration. Before a later round reuses a
+deferral, it re-checks that the cited evidence still holds against the
+current tree and configuration; evidence that no longer holds does not
+carry the deferral forward -- the lineage returns to `unknown`, which
+blocks, and is ruled afresh.
+
 ### Round-indexed blocking floor and verdict
 
 - Rounds 1-2: all major/high/critical findings block (current behavior).
@@ -421,14 +476,22 @@ suppresses newly blocking evidence.
   floor-deferrable until clarified. A lineage's recorded severity is the
   maximum any seat reported, lowered only by a skeptic disproof -- the
   orchestrator never downgrades a seat's severity on its own.
+- Envelope deferral is orthogonal to the round-indexed floor, and unlike
+  the floor it can defer a HIGH or critical finding. The floor's rule
+  that HIGH/critical is never capped concerns severity ageing across
+  rounds; the envelope concerns whether the code is reachable at all. A
+  HIGH defect in unreachable code is still a HIGH defect, and it still
+  does not block a merge. The evidence requirement named in "Finding
+  lineages and deferrals" above is what makes this safe, and it is the
+  only thing that does.
 
 The round verdict is two-part:
 
 - (a) `coworker_review.verdict_from_findings` (script unchanged) computes
   the severity component over ONLY rows whose effective status is
-  open-and-blocking. Rows with status DEFERRED, DEFERRED-BY-FLOOR, or
-  RESOLVED are excluded from the helper's input entirely; they live in
-  the ledger, never in the verdict input.
+  open-and-blocking. Rows with status DEFERRED, DEFERRED-BY-FLOOR,
+  DEFERRED-BY-ENVELOPE, or RESOLVED are excluded from the helper's input
+  entirely; they live in the ledger, never in the verdict input.
 - (b) the orchestrator forces REQUEST CHANGES whenever any UNRESOLVED
   EFFECTIVE BLOCKER exists regardless of severity: an open
   fix-regression lineage, a finding whose classification is disputed
@@ -540,8 +603,9 @@ bullets), then the hidden currency marker as its own unindented top-level line:
 | ------- | -------- | --------------- | ----- | ------ | --- |
 | R1-F1   | HIGH     | path/file.py:42 | ...   | open   | ... |
 
-(Status: open, RESOLVED, DEFERRED, or DEFERRED-BY-FLOOR -- deferred rows
-stay visible in the durable record.)
+(Status: open, RESOLVED, DEFERRED, DEFERRED-BY-FLOOR, or
+DEFERRED-BY-ENVELOPE -- deferred rows stay visible in the durable
+record.)
 
 (or "No actionable findings." when the round is clean)
 
