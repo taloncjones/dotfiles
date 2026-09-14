@@ -270,6 +270,13 @@ Sequence:
    least one fix-regression finding. Stop and escalate for a structural
    fix.
 
+   **RECOMMEND SPLIT:** when a complete round's blocking findings cluster
+   across more than one subsystem or evidence model, the round output MAY
+   include a `RECOMMEND SPLIT` line naming the seams. The orchestrator
+   then decides at the escalation exit, with the user, whether to split
+   the branch instead of spending further rounds. This extends the
+   divergence-escalation exit; it is not a new loop state.
+
 5. **Caps:** at most 3 complete rounds and at most 3 scoped rounds per
    PR. Print each round's type and actionable count. The cap check
    applies to the round about to start: a clean scoped round always
@@ -279,6 +286,44 @@ Sequence:
    APPROVE. Real bugs can persist across rounds: never hard-stop merely
    because a count failed to strictly decrease; the caps and the
    divergence rule are the only stop conditions.
+
+### Finding lineages and deferrals
+
+The orchestrator assigns every distinct finding a stable lineage ID at
+the round's merge/dedup step (round + ordinal, e.g. R1-F3). Seats report
+findings; they never mint IDs. Re-reviews, fix waves, ledgers, and
+digests refer to lineages, not re-derived descriptions; a finding whose
+code moved keeps its lineage. Two seat reports with the same root cause
+merge into the earlier lineage. A finding that splits into distinct root
+causes gets new IDs cross-referenced to the parent; children of an
+unresolved BLOCKING parent inherit the parent's blocking obligation and
+original discovery round (the floor treats them at the parent's age,
+never as fresh findings), and the parent closes only when every child is
+resolved. A finding is a FIX-REGRESSION iff its defect is absent from
+the round-1 frozen tree and was introduced by any fix-wave commit in
+this loop, regardless of which later round discovers it -- delayed
+discovery never downgrades a regression to a deferrable new finding.
+When provenance is disputed or cannot be established against the
+round-1 tree, classify as fix-regression, and the finding keeps blocking
+status until any classification dispute resolves -- ambiguity never
+defers.
+
+Advisory findings (minor/low/nit) are recorded once with status DEFERRED
+and are not re-checked in later rounds. Deferred lineages -- advisory or
+DEFERRED-BY-FLOOR -- are never silently dropped: inject them into every
+subsequent seat prompt as a deferral digest ("Previously ruled, do not
+re-derive or re-litigate:" followed by one line per lineage: ID,
+severity, one-line summary, ruling), and surface them once at the branch
+gate as a wrap-up note for the author.
+
+Reopen rules: ONE seat reopens a deferred lineage immediately when its
+evidence makes the finding blocking under the current round's policy (an
+escalation to a severity the round's floor treats as blocking, or
+implication in a fix-regression) -- evidence, not vote counting, is the
+trigger. Re-raises that remain non-blocking under the current policy
+reopen only when TWO independent seats have re-raised the same lineage;
+those re-raises accumulate across all later rounds. Deferral never
+suppresses newly blocking evidence.
 
 ### Round-indexed blocking floor and verdict
 
