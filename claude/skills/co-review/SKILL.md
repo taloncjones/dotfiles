@@ -392,6 +392,15 @@ round-1 tree, classify as fix-regression, and the finding keeps blocking
 status until any classification dispute resolves -- ambiguity never
 defers.
 
+This is one of two provenance questions, and each names its baseline.
+Fix-regression, above, is answered against the round-1 tree: did a fix
+wave in this loop introduce the defect. The other question -- whether
+the change introduced a defect or it predates the change -- is answered
+against the **merge-base** of the head and the target branch. A commit
+inside the reviewed change is never "pre-existing", however many earlier
+rounds ran against it. A provenance claim that does not name its
+baseline is incomplete.
+
 At the same merge/dedup step, the orchestrator rules each lineage's
 reachability: `reachable` -- some supported configuration reaches it;
 `unreachable` -- no supported configuration reaches it, which requires
@@ -583,7 +592,9 @@ current_base_ref, current_base_ref_tip, is_ancestor)`. On `full`, re-diff the wh
 every still-open prior finding against the new tree -- an incremental diff
 alone can miss a finding whose surrounding code moved. The verdict always
 gates on all currently-open blocking findings, not just the ones from this
-round's diff.
+round's diff. A prior reviewed head is not a provenance baseline: on a
+rebased branch it may not be an ancestor of the current head, and it is in
+any case part of the change under review.
 
 This mode never emits the own-PR currency marker (`co-review: ...` from
 "Review provenance marker" below). A coworker's PR is not your pr-ready gate.
