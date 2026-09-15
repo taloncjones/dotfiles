@@ -352,6 +352,51 @@ The examples above include legacy rows. Every new native dispatch has
 current-phase attempt's complete tuple. Partial native tuples are invalid;
 legacy fallback applies only to records that predate native attempts.
 
+`write-task` enforces that contract at the writer for every row NEW in a write,
+so no write can add a row whose SHAPE its readers reject. Identity field values
+are still only checked at settlement: `_native_worker_row` requires each
+attempt field to be a non-empty string, while `attempt_matches` additionally
+requires `runtime` to be `claude` or `codex` and `source_head_sha` to match
+`SHA40_RE`. A row with `runtime: "other"` is therefore accepted by the writer
+and later refused at settlement -- by `emit-done` or `emit-review` depending on
+its phase, which share the `attempt_matches` gate -- so it never settles. The
+one value the writer does check is `phase`, which must be in
+`DESCENDANT_PHASES`. A first write that omits
+`workers` persists `[]` rather than a record carrying no `workers` key. A later
+write that omits `workers` inherits the prior list rather than clearing it, so
+only an explicit list can change dispatch history. New rows must carry a
+`phase` on the unbound path and the full native tuple on the binding-scoped
+path.
+
+The pass-through of a row its reader would refuse is binding-scoped only. On
+that path the append-only prefix is inherited unchanged and is not re-checked,
+which keeps a record holding a pre-contract legacy row writable rather than
+stranding it. Such a record is still persisted with that legacy row, and
+`outstanding_descendants` still reads it as `<unreadable>`, so teardown stays
+blocked until the row itself is repaired. An unbound write that omits `workers`
+also inherits its prior rows unchecked, but that branch first requires
+`_valid_task_shape(prior)`, so those rows are reader-valid by construction.
+
+Two pre-contract record shapes need a manual repair, and both are recoverable
+on the unbound path only. A record whose `workers` holds a row with no `phase`,
+and a record persisted with no `workers` key at all, are both refused whichever
+route is taken. For the phase-less row, supplying the record in full trips the
+new-row rule and omitting `workers` trips the prior-shape check. For the record
+with no `workers` key, supplying it verbatim IS the omit route, so both spellings
+trip the prior-shape check. Recover by editing the record -- add a
+`phase` to every stale row, or insert `"workers": []` -- then write it
+explicitly. The unbound path has no append-only prefix, so a corrected explicit
+list is accepted. On the binding-scoped path neither route works and
+`teardown-binding` refuses before `--descendants-terminated` is consulted, so
+the record must be repaired on disk first.
+
+A refused dispatch row records nothing. Panes are dispatched before their row
+is written, so a `write-task` that exits 2 on a worker row leaves a live pane
+with no entry in the task record -- and `outstanding_descendants` is teardown's
+only evidence of descendants. Terminate the pane or correct and re-write the
+row before tearing the binding down; teardown cannot see an attempt that was
+never recorded.
+
 Planning has a separate `plan_artifacts` list in both task and completion:
 exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.
 `confirm-plan` verifies hashes, selected payload containment, and current
