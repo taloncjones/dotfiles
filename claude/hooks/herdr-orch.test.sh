@@ -7408,5 +7408,96 @@ if $CLI write-task --repo-slug slug-rj --task-id td-r --session S --fence "$F" \
 test ! -e "$CLAUDE_CONFIG_DIR/herdr-orch/slug-rj/tasks/td-r.json"
 SH
 
+check "teardown clears a binding whose task was written but never dispatched" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-wt.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 \
+   --control-tier lead --workspace-root "$LF_WS" --binding "$bid")
+# The binding's task is written, but no worker is ever dispatched.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
+   --task-id td-x --json '{"task_id":"td-x","status":"pending"}'
+python3 -c "
+import json
+d=json.load(open('$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json'))
+assert d['workers']==[], d
+"
+# Before the fix this refused with 'descendant records are unreadable'.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon
+python3 -c "
+import importlib.util, pathlib
+s=importlib.util.spec_from_file_location('core','claude/hooks/herdr_orch_core.py')
+c=importlib.util.module_from_spec(s); s.loader.exec_module(c)
+rec=c.bindings.read_binding(pathlib.Path('$root/herdr-orch/$LF_SLUG'), '$bid')
+assert rec['status']=='revoked', rec
+"
+SH
+
+check "write-task bound path requires native rows" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-nr.git
+root=$(mktemp -d)
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 \
+   --control-tier lead --workspace-root "$LF_WS" --binding "$bid")
+# A phased-but-not-native row is refused on the bound path.
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-n \
+   --json '{"task_id":"td-n","workers":[{"role":"impl","phase":"implement"}]}' 2>/dev/null; then exit 1; fi
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-n.json"
+# The full native row is accepted, and its pane is reported, not <unreadable>.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-n \
+   --json '{"task_id":"td-n","workers":[{"role":"impl","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"p1","source_head_sha":"'"$SHA40"'"}]}'
+python3 -c "
+import importlib.util, pathlib
+s=importlib.util.spec_from_file_location('core','claude/hooks/herdr_orch_core.py')
+c=importlib.util.module_from_spec(s); s.loader.exec_module(c)
+d=c.outstanding_descendants(pathlib.Path('$root/herdr-orch/$LF_SLUG'), '$bid')
+assert d==['p1'], d
+"
+SH
+
+check "write-task resolution and publication are one critical section" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-cs"; mkdir -p "$RD/tasks"
+F=$($CLI claim-owner --repo-slug slug-cs --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-cs --task-id td-s --session S --fence "$F" \
+  --json '{"task_id":"td-s","workers":[{"role":"impl","phase":"implement"}]}'
+# Race an APPEND against a status-only write that inherits. Unlocked, the
+# status write could read the one-row record, then publish after the append
+# lands, dropping the second row. Under the owner lock it must observe
+# whichever record committed first, so no row is ever lost.
+$CLI write-task --repo-slug slug-cs --task-id td-s --session S --fence "$F" \
+  --json '{"task_id":"td-s","workers":[{"role":"impl","phase":"implement"},{"role":"review","phase":"review"}]}' &
+append_pid=$!
+$CLI write-task --repo-slug slug-cs --task-id td-s --session S --fence "$F" \
+  --json '{"task_id":"td-s","status":"b"}' &
+status_pid=$!
+wait "$append_pid"
+wait "$status_pid"
+python3 -c "
+import json
+d=json.load(open('$RD/tasks/td-s.json'))
+rows=[r['role'] for r in d['workers']]
+assert rows in (['impl'], ['impl','review']), d
+if d.get('status')=='b' and rows==['impl']:
+    raise AssertionError('status write landed after the append and dropped a row: '+repr(d))
+"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
