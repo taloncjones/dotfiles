@@ -347,5 +347,35 @@ class FailClosedSelectionTests(unittest.TestCase):
         self.assertEqual(decision, "PASS", reason)
 
 
+class TargetTipTests(unittest.TestCase):
+    TIP = "e" * 40
+
+    def _marker_with_tip(self, tip=None, verdict="APPROVE"):
+        tail = f" target_tip={tip}" if tip else ""
+        return (
+            f"<!-- co-review: sha={SHA_A} base={BASE_A} base_ref={REF} "
+            f"verdict={verdict} round=1{tail} -->"
+        )
+
+    def test_marker_without_target_tip_still_parses(self):
+        got = gate.select_marker([comment("| x |\n" + self._marker_with_tip())], ME)
+        self.assertIsNone(got["target_tip"])
+
+    def test_marker_with_target_tip_parses(self):
+        body = "| x |\n" + self._marker_with_tip(self.TIP)
+        got = gate.select_marker([comment(body)], ME)
+        self.assertEqual(got["target_tip"], self.TIP)
+
+    def test_gate_ignores_target_tip_entirely(self):
+        body = "| x |\n" + self._marker_with_tip(self.TIP)
+        decision, reason = gate.decide([comment(body)], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS", reason)
+
+    def test_malformed_target_tip_does_not_parse_as_a_marker(self):
+        body = "| x |\n" + self._marker_with_tip("nothex")
+        decision, _ = gate.decide([comment(body)], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

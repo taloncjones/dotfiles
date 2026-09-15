@@ -9,8 +9,11 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>\d+) -->$"
+    r"round=(?P<round>\d+)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))? -->$"
 )
+# target_tip records the target-branch tip the review compared against. It is
+# for the reader: decide() never compares it, so an approval does not expire
+# when the target moves. A target change that breaks the PR is CI's job.
 # The candidate prefix -- checked with a plain startswith, not derived from
 # MARKER_RE, so a truncated marker is still recognized as "a round comment
 # that failed to parse" instead of falling through as ordinary text and
