@@ -2107,8 +2107,9 @@ def read_prior_task(dest):
     except (OSError, ValueError, RecursionError):
         # RecursionError is a RuntimeError, not a ValueError, so deeply nested
         # JSON would otherwise escape and crash the repair path instead of
-        # being replaced. CPython 3.12 made the scanner iterative, so this is
-        # only reachable on older interpreters -- macOS system python3 is 3.9.
+        # replacing the record. Reachable wherever the decoder recurses: the
+        # pure-Python scanner always does, and CPython before 3.12 does even
+        # with the C accelerator -- macOS system python3 is 3.9.
         # read_payload_text raises ValueError for a non-regular file and
         # UnicodeDecodeError for non-UTF-8 bytes, so both must be caught or an
         # unbound explicit repair -- which never read the record before -- dies
@@ -2189,8 +2190,11 @@ def resolve_task_workers(rec, prior, bound):
             prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
             "bound task record is malformed; write-task cannot repair it"
             if bound else
-            "task record is unreadable or malformed; add a phase to every "
-            "prior row and pass the list explicitly",
+            # One string for all four inputs that reach here -- corrupt,
+            # non-dict, non-list workers, or a row missing phase. Naming the
+            # rows would misadvise the first three, which have none to fix.
+            "task record is unreadable or malformed; pass an explicit "
+            "workers list, with a phase on every row",
         )
         workers = prior["workers"]
         inherited = len(workers)

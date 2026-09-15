@@ -454,6 +454,29 @@ for _exc in (ValueError("payload directory was replaced"),
 # With no transaction set the asserts are no-ops and the record reads normally.
 assert c.read_prior_task(_dest) == {"task_id": "T", "workers": []}
 
+# RecursionError is a RuntimeError, so it needs its own clause. This Python's
+# C-accelerated decoder never raises it, so stub the read: a real deeply nested
+# fixture would not exercise the branch, and narrowing the tuple back would
+# otherwise pass green.
+_real_read = c.read_payload_text
+def _deep_read(path):
+    raise RecursionError("maximum recursion depth exceeded")
+
+c.read_payload_text = _deep_read
+try:
+    assert c.read_prior_task(_dest) is c.PRIOR_CORRUPT
+    # A stale transaction still wins over the corrupt classification.
+    c.coordination._LOCAL.transaction = _StubTxn(ValueError("replaced"))
+    try:
+        c.read_prior_task(_dest)
+        raise AssertionError("a stale transaction must propagate")
+    except ValueError:
+        pass
+    finally:
+        c.coordination._LOCAL.transaction = None
+finally:
+    c.read_payload_text = _real_read
+
 # Row rule on a first write: unbound needs a phase key, bound the full tuple.
 loose = [{"role": "review"}]
 phased = [{"role": "review", "phase": "review"}]
