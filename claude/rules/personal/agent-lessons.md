@@ -31,3 +31,13 @@ is the staging tier, not an archive.
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
   clean: retry once with defensive review framing before counting the seat.
+- (2026-09) Editing a shared module means running its CONSUMERS' suites too:
+  a subsystem-green change still broke a consumer the full repo gate caught.
+- (2026-09) A protected main makes a local merge unshippable: open the PR
+  first, so co-review round comments and markers land on it, then merge there.
+- (2026-09) A completion-enforcing hook is not user consent: hold the gated
+  action, say you are blocked once, and wait instead of restating.
+- (2026-09) Never cite code anchors from memory in a plan: grep-verify that
+  every referenced test case or symbol exists before a worker is sent to it.
+- (2026-09) Verify external CLI syntax against its help/docs before writing it
+  into a skill: unverified gh fields and flag combinations shipped broken.
