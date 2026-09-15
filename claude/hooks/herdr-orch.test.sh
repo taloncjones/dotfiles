@@ -382,9 +382,9 @@ try:
 except SystemExit as exc:
     assert exc.code == 2, exc.code
 
-# On the BOUND path that repair does NOT exist: the explicit list is refused
-# against a corrupt prior, because the append-only prefix check still applies.
-# Pinned so the limitation is asserted rather than implied.
+# On the BOUND path that repair does NOT exist: the malformed-prior check
+# refuses before the append-only comparison is ever reached. Pinned so the
+# limitation is asserted rather than implied.
 for payload in ({"task_id": "T", "workers": []},
                 {"task_id": "T", "workers": [native_row]}):
     try:
@@ -392,6 +392,36 @@ for payload in ({"task_id": "T", "workers": []},
         raise AssertionError("bound corrupt prior must not be repairable")
     except SystemExit as exc:
         assert exc.code == 2, exc.code
+
+# The append-only comparison lives in the resolver, so substituting a row at an
+# inherited index is refused by the function itself rather than only by its
+# caller -- otherwise index 0 would be assumed inherited and face no rule.
+try:
+    c.resolve_task_workers(
+        {"task_id": "T", "workers": [{"bad": 1}, native_row]}, legacy, True)
+    raise AssertionError("a substituted prefix row must be refused")
+except SystemExit as exc:
+    assert exc.code == 2, exc.code
+
+# Truncating the history is refused for the same reason.
+try:
+    c.resolve_task_workers({"task_id": "T", "workers": []}, legacy, True)
+    raise AssertionError("a truncated history must be refused")
+except SystemExit as exc:
+    assert exc.code == 2, exc.code
+
+# The prefix persisted is the RECORD's own rows, not the caller's copy: `==`
+# holds between 1 and True, so an accepted prefix could otherwise change type.
+typed = {"task_id": "T", "workers": [{"phase": "implement", "flag": 1}]}
+kept = c.resolve_task_workers(
+    {"task_id": "T", "workers": [{"phase": "implement", "flag": True}]},
+    typed, False)
+assert kept == [{"phase": "implement", "flag": True}], kept
+bound_kept = c.resolve_task_workers(
+    {"task_id": "T", "workers": [{"phase": "implement", "flag": True}]},
+    typed, True)
+assert not isinstance(bound_kept[0]["flag"], bool), bound_kept
+assert bound_kept[0]["flag"] == 1, bound_kept
 
 # Row rule on a first write: unbound needs a phase key, bound the full tuple.
 loose = [{"role": "review"}]
@@ -7514,10 +7544,12 @@ assert len(d['workers'])==2, d
 assert d['workers'][0]=={'phase':'implement','launch_id':'I1'}, d
 assert d['workers'][1]['launch_id']=='L2', d
 "
-# Forward-only still holds: a NEW non-native row is refused.
+# Forward-only still holds: a NEW non-native row is refused, and by the row
+# rule rather than by some unrelated guard such as a stale fence.
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-l \
-   --json '{"task_id":"td-l","workers":[{"phase":"implement","launch_id":"I1"},{"role":"impl","launch_id":"L2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"p2","source_head_sha":"'"$SHA40"'"},{"phase":"review","launch_id":"I3"}]}' 2>/dev/null; then exit 1; fi
+   --json '{"task_id":"td-l","workers":[{"phase":"implement","launch_id":"I1"},{"role":"impl","launch_id":"L2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"p2","source_head_sha":"'"$SHA40"'"},{"phase":"review","launch_id":"I3"}]}' 2>"$root/e3"; then exit 1; fi
+grep -q 'new task workers must be native dispatch rows' "$root/e3"
 SH
 
 check "write-task bound path requires native rows" <<'SH'

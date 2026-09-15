@@ -352,14 +352,21 @@ The examples above include legacy rows. Every new native dispatch has
 current-phase attempt's complete tuple. Partial native tuples are invalid;
 legacy fallback applies only to records that predate native attempts.
 
-`write-task` enforces that contract at the writer, so a record its readers
-reject can no longer be persisted. A first write that omits `workers` persists
-`[]` rather than a record carrying no `workers` key. A later write that omits
-`workers` inherits the prior list rather than clearing it, so only an explicit
-list can change dispatch history. Rows that are NEW in a write must carry a
+`write-task` enforces that contract at the writer for every row NEW in a write,
+so no write can add a row its readers reject. A first write that omits
+`workers` persists `[]` rather than a record carrying no `workers` key. A later
+write that omits `workers` inherits the prior list rather than clearing it, so
+only an explicit list can change dispatch history. New rows must carry a
 `phase` on the unbound path and the full native tuple on the binding-scoped
-path; rows inherited as the append-only prefix pass through unchanged, which
-keeps a record holding a pre-contract legacy row writable.
+path.
+
+The pass-through is binding-scoped only. On that path the append-only prefix is
+inherited unchanged and is not re-checked, which keeps a record holding a
+pre-contract legacy row writable rather than stranding it. Such a record is
+still persisted with that legacy row, and `outstanding_descendants` still reads
+it as `<unreadable>`, so teardown stays blocked until the row itself is
+repaired. The unbound path has no append-only prefix and re-checks every
+supplied row.
 
 Planning has a separate `plan_artifacts` list in both task and completion:
 exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.

@@ -2094,14 +2094,20 @@ def read_prior_task(dest):
     the record between two separate reads and slip an unvalidated row past a
     prefix check performed against the newer, shorter list."""
     try:
-        raw = read_payload_text(dest)
+        return json.loads(read_payload_text(dest))
     except FileNotFoundError:
         return PRIOR_ABSENT
-    except OSError:
-        return PRIOR_CORRUPT
-    try:
-        return json.loads(raw)
-    except ValueError:
+    except (OSError, ValueError):
+        # read_payload_text raises ValueError for a non-regular file and
+        # UnicodeDecodeError for non-UTF-8 bytes, so both must be caught or an
+        # unbound explicit repair -- which never read the record before -- dies
+        # on a codec message instead of refusing usefully. But payload_parent
+        # also asserts the owner transaction, and that failure surfaces as
+        # ValueError too. Re-assert before classifying: if the transaction is
+        # no longer current the error was never about this record's bytes, and
+        # calling it corrupt would let an unbound repair overwrite an intact
+        # record once the transaction recovered.
+        coordination.assert_transaction_current()
         return PRIOR_CORRUPT
 
 
@@ -2128,9 +2134,14 @@ def resolve_task_workers(rec, prior, bound):
     which is native-only.
 
     Repairing a record through an explicit list is an UNBOUND-path property.
-    On the bound path the append-only prefix check still applies, so a
-    malformed bound record has no repair payload; recovering one needs a
-    fenced operation this verb does not provide."""
+    A malformed BOUND record is refused outright by the malformed-prior check
+    below, so it has no repair payload; recovering one needs a fenced
+    operation this verb does not provide.
+
+    Binding-scoped dispatch history is append-only, and that check lives here
+    rather than in the caller: it is what establishes which rows are inherited,
+    so splitting the two would let a payload substitute a row at an inherited
+    index and face no rule at all."""
     if "workers" in rec:
         workers = rec["workers"]
         _require(isinstance(workers, list), "task workers must be a list")
@@ -2140,7 +2151,25 @@ def resolve_task_workers(rec, prior, bound):
                 prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
                 "bound task record is malformed; write-task cannot repair it",
             )
-            inherited = len(prior["workers"])
+            # Dispatch history is append-only so a superseded attempt can never
+            # be erased to revive an older envelope (the P1 revival scenario):
+            # every prior worker row must survive, in order, as a prefix of the
+            # new list. Other fields (status, base_sha, review_head_sha, ...)
+            # stay freely updatable -- base_sha mutation is a legitimate
+            # rebase-redispatch, its abuse closed separately by the
+            # approval-base binding check at emit/integrate.
+            prior_workers = prior["workers"]
+            _require(
+                len(workers) >= len(prior_workers)
+                and all(workers[i] == prior_workers[i]
+                        for i in range(len(prior_workers))),
+                "binding-scoped dispatch history is append-only",
+            )
+            inherited = len(prior_workers)
+            # Persist the prior rows themselves, not the caller's copies of
+            # them: `==` holds between True and 1, so an accepted prefix can
+            # still differ from the record in JSON value types.
+            workers = prior_workers + workers[inherited:]
         source = "task workers"
     else:
         if prior is PRIOR_ABSENT:
@@ -2659,25 +2688,6 @@ def _main(argv=None) -> int:
             # validate the workers list before publishing, so an omitted key
             # inherits prior dispatch history rather than asserting none.
             rec["workers"] = resolve_task_workers(rec, prior, bound)
-            if bound and prior is not PRIOR_ABSENT:
-                # Dispatch history is append-only for binding-scoped tasks so a
-                # superseded attempt can never be erased to revive an older
-                # envelope (the P1 revival scenario): every prior worker row
-                # must survive, in order, as a prefix of the new list. Other
-                # fields (status, base_sha, review_head_sha, ...) stay freely
-                # updatable -- base_sha mutation is a legitimate rebase-
-                # redispatch, its abuse closed separately by the approval-base
-                # binding check at emit/integrate.
-                # resolve_task_workers already refused a corrupt or malformed
-                # prior on this path, so prior["workers"] is a list here.
-                prior_workers = prior["workers"]
-                new_workers = rec["workers"]
-                _require(
-                    len(new_workers) >= len(prior_workers)
-                    and all(new_workers[i] == prior_workers[i]
-                            for i in range(len(prior_workers))),
-                    "binding-scoped dispatch history is append-only",
-                )
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
             return 0
