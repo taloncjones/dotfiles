@@ -395,6 +395,71 @@ class ReviewHelperTests(unittest.TestCase):
 
         self.assertTrue(stray.exists())
 
+    def test_cleanup_reports_unlink_failure_as_review_error(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        cache_dir = snapshot / "pkg" / "__pycache__"
+        cache_dir.mkdir(parents=True)
+        cache = cache_dir / "mod.cpython-313.pyc"
+        cache.write_bytes(b"\x00")
+        cache_dir.chmod(0o555)
+        try:
+            result = self.command(
+                "cleanup", "--manifest", str(manifest_path), expect=2
+            )
+            self.assertIn(str(cache), result.stdout + result.stderr)
+        finally:
+            cache_dir.chmod(0o755)
+        self.assertTrue(cache.exists())
+
+    def test_cleanup_refuses_a_regular_file_named_dot_venv(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        stray = snapshot / ".venv"
+        stray.write_text("operator data\n")
+
+        self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertTrue(stray.exists())
+
+    def test_cleanup_refuses_a_nested_git_repository(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        nested = snapshot / ".venv" / "src" / "pkg"
+        nested.mkdir(parents=True)
+        env = {"HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(
+            ["git", "-C", str(nested), "init", "-q"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        subprocess.run(
+            ["git", "-C", str(nested), "config", "user.name", "Fixture"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        subprocess.run(
+            ["git", "-C", str(nested), "config", "user.email", "fixture@example.invalid"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        (nested / "work.txt").write_text("uncommitted work\n")
+        subprocess.run(
+            ["git", "-C", str(nested), "add", "work.txt"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        subprocess.run(
+            ["git", "-C", str(nested), "commit", "-qm", "nested"],
+            check=True,
+            env={**os.environ, **env},
+        )
+
+        self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertTrue((nested / "work.txt").exists())
+        self.assertTrue((nested / ".git").exists())
+
     def test_artifact_requires_explicit_repo_scoped_target_and_freezes_content(
         self,
     ) -> None:

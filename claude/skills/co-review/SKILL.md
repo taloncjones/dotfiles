@@ -120,6 +120,12 @@ The independent Codex finder runs from `snapshot.codex_root` through the shared
 runtime runner. It selects the policy model and effort and returns structured
 runtime metadata; this skill never restates a route table.
 
+When deferred lineages exist, append the deferral digest (see "Finding
+lineages and deferrals") to the prompt -- built into `$DEFERRAL_DIGEST_FILE`,
+checked to contain every deferred lineage -- **before** the runner
+invocation below; the digest is context to prevent re-derivation, never a
+review target.
+
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-codex.XXXXXX")
 cat >"$PROMPT_FILE" <<'EOF'
@@ -135,14 +141,14 @@ printf '\nBase: %s\n\n' "$BASE" >>"$PROMPT_FILE"
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 grep -q '^## Classes' "$RUBRIC" || { echo "rubric Classes heading missing" >&2; exit 2; }
 sed -n '/^## Classes/,$p' "$RUBRIC" >>"$PROMPT_FILE"
+if [ -n "${DEFERRAL_DIGEST_FILE:-}" ]; then
+  test -s "$DEFERRAL_DIGEST_FILE" || { echo "deferral digest missing or empty" >&2; exit 2; }
+  cat "$DEFERRAL_DIGEST_FILE" >>"$PROMPT_FILE" || { echo "appending deferral digest failed" >&2; exit 2; }
+fi
 uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk normal \
   --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
-
-When deferred lineages exist, append the deferral digest (see "Finding
-lineages and deferrals") to the prompt before dispatch; the digest is
-context to prevent re-derivation, never a review target.
 
 For a scoped round, build the prompt from the prior findings and the fix
 diff instead (`$PREV_HEAD` is the previously reviewed head from the last
@@ -151,6 +157,12 @@ posted marker, `$HEAD` the newly frozen committed head this round reviews,
 locally -- deferred and resolved lineages never enter the review-target
 table; they travel in the deferral digest; the diff
 read from the source repository is a read, not a mutation):
+
+When deferred lineages exist, append the deferral digest (see "Finding
+lineages and deferrals") to the prompt -- built into `$DEFERRAL_DIGEST_FILE`,
+checked to contain every deferred lineage -- **before** the runner
+invocation below; the digest is context to prevent re-derivation, never a
+review target.
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/co-review-codex.XXXXXX")
@@ -180,14 +192,14 @@ cat "$FINDINGS_FILE" >>"$PROMPT_FILE" || { echo "appending findings failed" >&2;
 printf '\nFix diff:\n' >>"$PROMPT_FILE"
 git -C "$REPO" -c diff.external= diff --no-ext-diff --no-textconv \
   "$PREV_HEAD..$HEAD" >>"$PROMPT_FILE" || { echo "fix diff failed" >&2; exit 2; }
+if [ -n "${DEFERRAL_DIGEST_FILE:-}" ]; then
+  test -s "$DEFERRAL_DIGEST_FILE" || { echo "deferral digest missing or empty" >&2; exit 2; }
+  cat "$DEFERRAL_DIGEST_FILE" >>"$PROMPT_FILE" || { echo "appending deferral digest failed" >&2; exit 2; }
+fi
 uv run --no-project python "$RUNNER" run --runtime codex --role reviewer --risk normal \
   --provisional --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
-
-When deferred lineages exist, append the deferral digest (see "Finding
-lineages and deferrals") to the prompt before dispatch; the digest is
-context to prevent re-derivation, never a review target.
 
 Use the runner only; do not launch a generic or nested Codex CLI review. Pass
 `--risk critical` only for explicitly critical review risk, never diff size.
@@ -405,11 +417,19 @@ baseline is incomplete.
 At the same merge/dedup step, the orchestrator rules each lineage's
 reachability: `reachable` -- some supported configuration reaches it;
 `unreachable` -- no supported configuration reaches it, which requires
-cited evidence (an executed probe, a registry or configuration
-enumeration, or a named guard that refuses first) recorded in the ledger
-and reproduced in the round's posted comment; `unknown` -- the default,
-not established. An `unreachable` ruling asserted without evidence is
-invalid and the lineage stays blocking. Seats never rule on reachability;
+cited evidence recorded in the ledger and reproduced in the round's posted
+comment; `unknown` -- the default, not established. The cited evidence
+must itself be determinable from the frozen tree -- an executed probe
+against the frozen snapshot, an enumeration of a registry or configuration
+file committed in that tree, or a named guard that refuses first in that
+tree's code -- never a live external registry, a running service, or
+anything else that could change with no accompanying commit. Anything
+that could change the ruling must itself be a commit that moves the head,
+so that a changed external fact cannot silently invalidate a standing
+APPROVE. Where the evidence genuinely cannot be derived from the tree, the
+ruling is not available and the lineage stays `unknown`. An `unreachable`
+ruling asserted without evidence is invalid and the lineage stays
+blocking. Seats never rule on reachability;
 they state `ASSUMES` lines. When seats state conflicting `ASSUMES` lines
 about the same lineage -- disagreeing about whether a configuration is
 supported or reachable -- the lineage stays blocking until the
@@ -624,15 +644,21 @@ record. Reachability: reachable, unreachable, or unknown, folded together
 with its evidence -- e.g. "unreachable: <cited evidence>" -- so a human
 reading the comment sees the ruling and what it rests on in one place.)
 
-(or "No actionable findings." when the round is clean)
+(or "No actionable findings." only when the round has no lineage rows at
+all -- an approving comment with any deferred lineage must still list every
+one of them, with its reachability and evidence, even though the round
+otherwise passes)
 
-<!-- co-review: sha=<reviewed-head-sha> base=<resolved-merge-base> base_ref=<baseRefName> verdict=<APPROVE|CHANGES> round=<n> -->
+<!-- co-review: sha=<reviewed-head-sha> base=<resolved-merge-base> base_ref=<baseRefName> verdict=<APPROVE|CHANGES> round=<n> deferred=<n> -->
 ```
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `verdict` APPROVE only on a
 complete round with zero effective blockers ((a) clean, (b) empty);
-deferred lineages do not forfeit APPROVE.
+deferred lineages do not forfeit APPROVE. `deferred` is the number of
+lineages deferred in that round (envelope or floor) -- so a reader of the
+marker alone, without the comment body, learns the approval was not
+unconditional.
 
 **Emit APPROVE only for a snapshot that equals the committed head.** `prepare`
 folds staged and unstaged changes into the reviewed tree, but the marker's `sha`

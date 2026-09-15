@@ -221,8 +221,17 @@ DISPOSABLE_SUFFIXES = (".pyc", ".pyo")
 
 def is_disposable_artifact(relative_path: str) -> bool:
     """True when a repository-relative path is a disposable execution artifact."""
+    if relative_path.endswith("/"):
+        # A nested git repository is reported this way by
+        # `git ls-files --others --ignored`; never treat it as disposable,
+        # or cleanup destroys the checkout and any uncommitted work in it.
+        return False
     parts = PurePosixPath(relative_path).parts
-    if any(part in DISPOSABLE_DIRECTORY_NAMES for part in parts):
+    # Only a NON-FINAL segment counts: a disposable name must actually be a
+    # containing directory. A path that IS just ".venv", or that ends with a
+    # disposable directory name as its last component, is a regular file and
+    # is never disposable, matching the module's operator-data protection.
+    if any(part in DISPOSABLE_DIRECTORY_NAMES for part in parts[:-1]):
         return True
     return relative_path.endswith(DISPOSABLE_SUFFIXES)
 
@@ -687,13 +696,30 @@ def cleanup(args: argparse.Namespace) -> dict[str, Any]:
     if set(output_dir.iterdir()) != {manifest_path, marker, codex_root, claude_root}:
         raise ReviewError("owned output directory contains unexpected paths")
     for root in (claude_root, codex_root):
+        resolved_root = root.resolve()
         for relative in untracked_paths(root, include_ignored=True):
             if not is_disposable_artifact(relative):
                 continue
             target = root / relative
             if target.is_dir() and not target.is_symlink():
                 continue
-            target.unlink()
+            # Resolve the PARENT directory only -- never the leaf, so a
+            # disposable leaf symlink still gets unlinked even when its own
+            # target lives outside the snapshot. A parent that a swapped
+            # directory has redirected outside the snapshot root is skipped.
+            resolved_parent = target.parent.resolve()
+            if resolved_parent != resolved_root and (
+                resolved_root not in resolved_parent.parents
+            ):
+                continue
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise ReviewError(
+                    f"cannot remove disposable artifact: {target}"
+                ) from error
     git(claude_root, "reset", "--hard", manifest["source"]["base"])
     git(repo, "worktree", "remove", str(claude_root))
     git(repo, "worktree", "remove", str(codex_root))

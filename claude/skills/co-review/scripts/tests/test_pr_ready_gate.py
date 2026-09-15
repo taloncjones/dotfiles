@@ -18,10 +18,11 @@ REF = "main"
 ME = {"me"}
 
 
-def marker(sha=SHA_A, base=BASE_A, base_ref=REF, verdict="APPROVE", rnd=1):
+def marker(sha=SHA_A, base=BASE_A, base_ref=REF, verdict="APPROVE", rnd=1, deferred=None):
+    suffix = "" if deferred is None else f" deferred={deferred}"
     return (
         f"<!-- co-review: sha={sha} base={base} base_ref={base_ref} "
-        f"verdict={verdict} round={rnd} -->"
+        f"verdict={verdict} round={rnd}{suffix} -->"
     )
 
 
@@ -197,6 +198,27 @@ class DecideTests(unittest.TestCase):
         verdict, why = gate.decide([older, newer], ME, SHA_A, BASE_A, REF)
         self.assertEqual(verdict, "FAIL")
         self.assertIn("fail closed", why)
+
+    def test_pass_marker_with_no_deferred_field_still_parses(self):
+        # Markers written before this field existed must still parse and pass.
+        verdict, why = gate.decide([comment(marker())], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(verdict, "PASS")
+        self.assertNotIn("deferred", why)
+
+    def test_pass_deferred_zero_is_an_ordinary_pass(self):
+        verdict, why = gate.decide(
+            [comment(marker(deferred=0))], ME, SHA_A, BASE_A, REF
+        )
+        self.assertEqual(verdict, "PASS")
+        self.assertNotIn("deferred", why)
+
+    def test_pass_deferred_count_named_in_reason(self):
+        verdict, why = gate.decide(
+            [comment(marker(deferred=2))], ME, SHA_A, BASE_A, REF
+        )
+        self.assertEqual(verdict, "PASS")
+        self.assertIn("2", why)
+        self.assertIn("deferred", why)
 
 
 class CliTests(unittest.TestCase):

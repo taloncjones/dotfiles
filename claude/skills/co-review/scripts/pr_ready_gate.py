@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>\d+) -->$"
+    r"round=(?P<round>\d+)(?: deferred=(?P<deferred>\d+))? -->$"
 )
 # A fence opener may be indented up to 3 spaces and carry an info string.
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}([`~])\1{2,}")
@@ -136,6 +136,14 @@ def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):
         return ("FAIL", "co-review base != current target base; re-run co-review")
     if marker["base_ref"] != base_ref:
         return ("FAIL", "co-review target branch changed (retarget); re-run co-review")
+    deferred = marker.get("deferred")
+    if deferred is not None and int(deferred) > 0:
+        return (
+            "PASS",
+            "co-review APPROVE is current for this head and target "
+            f"(deferred={deferred}: {deferred} lineage(s) deferred as "
+            "unreachable this round; see the Reachability column)",
+        )
     return ("PASS", "co-review APPROVE is current for this head and target")
 
 
