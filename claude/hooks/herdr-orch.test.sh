@@ -1514,9 +1514,9 @@ CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-s"; mkdir -p "$RD/tasks" "$RD/workspaces"
 F=$($CLI claim-owner --repo-slug slug-s --session S --host h --pid 1)
 $CLI write-task --repo-slug slug-s --task-id td-a --session S --fence "$F" \
-  --json '{"task_id":"td-a","status":"in-progress","workers":[{"role":"mech","launch_id":"L1"},{"role":"impl"}]}'
+  --json '{"task_id":"td-a","status":"in-progress","workers":[{"role":"mech","launch_id":"L1","phase":"implement"},{"role":"impl","phase":"implement"}]}'
 $CLI write-task --repo-slug slug-s --task-id td-b --session S --fence "$F" \
-  --json '{"task_id":"td-b","status":"in-progress","workers":[{"role":"review"}]}'
+  --json '{"task_id":"td-b","status":"in-progress","workers":[{"role":"review","phase":"review"}]}'
 printf '%s\n' '{"v":1,"kind":"start","task_id":"td-a","launch_id":"L1","ts":"t"}' \
   '{"v":1,"kind":"end","task_id":"td-a","launch_id":"L1","num_turns":17,"total_cost_usd":0.42,"ts":"t"}' > "$RD/tasks/td-a.spend.jsonl"
 printf '{"v":1,"kind":"start","task_id":"td-z","launch_id":"L9","ts":"t"}\n' > "$RD/tasks/td-z.spend.jsonl"
@@ -2260,7 +2260,7 @@ L think-incident-20260903120000 incident 600 "2026-09-03T12:00:00Z"
 printf '{"v":1,"trunc' > "$RD/think/think-other-20260904130000.answer.json"
 printf '{"v":2,"think_id":"think-other-20260904140000"}' > "$RD/think/think-other-20260904140000.answer.json"
 $CLI write-task --repo-slug slug-st --task-id PROJ-1 --session S --fence "$F" \
-  --json '{"task_id":"PROJ-1","status":"in-progress","workers":[{"role":"impl","phase":"plan","model":"fable"},{"role":"impl","phase":"implement","model":"sonnet","effort":null},{"role":"review","model":"opus","effort":"high"}]}'
+  --json '{"task_id":"PROJ-1","status":"in-progress","workers":[{"role":"impl","phase":"plan","model":"fable"},{"role":"impl","phase":"implement","model":"sonnet","effort":null},{"role":"review","phase":"review","model":"opus","effort":"high"}]}'
 $CLI status --repo-slug slug-st | python3 -c "
 import json,sys;s=json.load(sys.stdin);t=s['_think']
 assert t=={'launches':5,'answered':2,'unanswered':1,'usd':1.52,'turns':9,'usd_today':7.52,'live':['think-decompose-20260904125900'],'lost':['think-incident-20260903120000'],'skipped_files':2,'corrupt':[]},t   # usd = actual spend; usd_today = committed (reserved) spend
@@ -4350,7 +4350,17 @@ lfA=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py cla
    --workspace-root "$LF_WS" --binding "$bidA")
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session SA --fence "$lfA" --binding "$bidA" --task-id td-a \
-   --json '{"task_id":"td-a","workers":[{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"phase":"implement","launch_id":"I2"}]}'
+   --json '{"task_id":"td-a","workers":[{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+# write-task now refuses a non-native row, so the malformed I2 row is injected
+# directly: this check is about emit-envelope failing closed on a record
+# corrupted out of band, which the writer rule does not replace.
+python3 -c '
+import json, sys
+path = sys.argv[1]
+record = json.load(open(path))
+record["workers"].append({"phase": "implement", "launch_id": "I2"})
+json.dump(record, open(path, "w"))
+' "$root/herdr-orch/$LF_SLUG/leads/$bidA/tasks/td-a.json"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
    --repo-slug "$LF_SLUG" --session SA --fence "$lfA" --binding "$bidA" \
    --json '{"task_id":"td-a","attempt":null,"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}' 2>/dev/null; then exit 1; fi
@@ -4371,7 +4381,15 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-enve
    --json '{"task_id":"td-b","attempt":null,"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"blocked before dispatch","follow_ups":[]}}'
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session SB --fence "$lfB" --binding "$bidB" --task-id td-b \
-   --json '{"task_id":"td-b","workers":[{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"phase":"implement","launch_id":"I2"}]}'
+   --json '{"task_id":"td-b","workers":[{"role":"mech","launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+# Same out-of-band corruption as binding A, after the envelope was emitted.
+python3 -c '
+import json, sys
+path = sys.argv[1]
+record = json.load(open(path))
+record["workers"].append({"phase": "implement", "launch_id": "I2"})
+json.dump(record, open(path, "w"))
+' "$root/herdr-orch/$LF_SLUG/leads/$bidB/tasks/td-b.json"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidB" 2>/dev/null; then exit 1; fi
 python3 -c '
@@ -7345,6 +7363,49 @@ entry = data[sys.argv[1]]["lead_ws"][sys.argv[2]]
 assert entry["binding_id"] is None, entry
 assert entry["releases"] == {"1": sys.argv[3]}, entry
 ' "$LF_SLUG" "$KEY" "$bid"
+SH
+
+check "write-task carries prior workers forward on an unbound status-only write" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-cf"; mkdir -p "$RD/tasks"
+F=$($CLI claim-owner --repo-slug slug-cf --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-cf --task-id td-c --session S --fence "$F" \
+  --json '{"task_id":"td-c","status":"in-progress","workers":[{"role":"impl","phase":"implement"}]}'
+$CLI write-task --repo-slug slug-cf --task-id td-c --session S --fence "$F" \
+  --json '{"task_id":"td-c","status":"completed"}'
+python3 -c "
+import json
+d=json.load(open('$RD/tasks/td-c.json'))
+assert d['status']=='completed', d
+assert d['workers']==[{'role':'impl','phase':'implement'}], d
+"
+SH
+
+check "write-task first write with no workers persists an empty list" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-fw"; mkdir -p "$RD/tasks"
+F=$($CLI claim-owner --repo-slug slug-fw --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-fw --task-id td-f --session S --fence "$F" \
+  --json '{"task_id":"td-f","status":"pending"}'
+python3 -c "
+import json
+d=json.load(open('$RD/tasks/td-f.json'))
+assert d['workers']==[], d
+assert d['status']=='pending', d
+"
+SH
+
+check "write-task refuses a non-list workers and a row without a phase" <<'SH'
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-rj --session S --host h --pid 1)
+if $CLI write-task --repo-slug slug-rj --task-id td-r --session S --fence "$F" \
+  --json '{"task_id":"td-r","workers":"nope"}' 2>/dev/null; then exit 1; fi
+if $CLI write-task --repo-slug slug-rj --task-id td-r --session S --fence "$F" \
+  --json '{"task_id":"td-r","workers":[{"role":"impl"}]}' 2>/dev/null; then exit 1; fi
+test ! -e "$CLAUDE_CONFIG_DIR/herdr-orch/slug-rj/tasks/td-r.json"
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

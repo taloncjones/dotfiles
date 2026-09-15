@@ -2608,7 +2608,12 @@ def _main(argv=None) -> int:
                 "task json must be a JSON object whose task_id equals --task-id",
             )
             dest = base / "tasks" / f"{ns.task_id}.json"
-            if ns.binding is not None:
+            bound = ns.binding is not None
+            # The record readers reject is never persisted: resolve and
+            # validate the workers list before publishing, so an omitted key
+            # inherits prior dispatch history rather than asserting none.
+            rec["workers"] = resolve_task_workers(rec, dest, bound)
+            if bound:
                 # Dispatch history is append-only for binding-scoped tasks so a
                 # superseded attempt can never be erased to revive an older
                 # envelope (the P1 revival scenario): every prior worker row
@@ -2621,7 +2626,6 @@ def _main(argv=None) -> int:
                     prior_raw = read_payload_text(dest)
                     prior_present = True
                 except FileNotFoundError:
-                    prior_raw = None
                     prior_present = False
                 except OSError:
                     _require(False, "task record is unreadable")
@@ -2631,11 +2635,10 @@ def _main(argv=None) -> int:
                     except ValueError:
                         _require(False, "task record is unreadable")
                     _require(_valid_task_shape(prior), "task record is malformed")
-                    prior_workers = prior.get("workers")
-                    new_workers = rec.get("workers")
+                    prior_workers = prior["workers"]
+                    new_workers = rec["workers"]
                     _require(
-                        isinstance(new_workers, list)
-                        and len(new_workers) >= len(prior_workers)
+                        len(new_workers) >= len(prior_workers)
                         and all(new_workers[i] == prior_workers[i]
                                 for i in range(len(prior_workers))),
                         "binding-scoped dispatch history is append-only",
