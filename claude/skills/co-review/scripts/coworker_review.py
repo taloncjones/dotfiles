@@ -1,7 +1,8 @@
 """Coworker-PR review pure logic: verdict, marker, and re-review scope.
 
 No fixes are applied in this mode. The marker is namespaced 'co-review-coworker:'
-so the pr-ready currency gate (anchored to 'co-review: ') can never consume it.
+so the pr-ready currency gate (anchored to the colon-terminated MARKER_PREFIX,
+'<!-- co-review:') can never consume it.
 """
 from __future__ import annotations
 
