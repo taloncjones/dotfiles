@@ -37,6 +37,11 @@ assert "co-review prevents nested Codex CLI reviews" \
     rg -q 'Do not run `codex exec`' codex/skills/co-review/SKILL.md
 assert "co-review uses the Claude native review flow" \
     rg -q '/code-review' codex/skills/co-review/SKILL.md
+# Tripwire for finder-side discharge. The phrase lives INSIDE the carried-blocker
+# prompt instruction, so a prompt that lets the finder rule a carried finding
+# ADDRESSED cannot be reinstated while this still matches.
+assert "co-review denies the finder any discharge authority" \
+    rg -q 'you discharge nothing' codex/skills/co-review/SKILL.md
 assert "Claude co-review routes model and effort through the shared runtime" \
     rg -q 'agent_runtime' claude/skills/co-review/SKILL.md
 assert "Claude co-review freezes and verifies its input" \
