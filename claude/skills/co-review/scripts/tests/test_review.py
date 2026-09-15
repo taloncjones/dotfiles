@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import os
 import shlex
@@ -11,10 +13,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "review.py"
 DOTFILES_ROOT = SCRIPT.parents[4]
+
+# Loaded in-process (rather than only invoked via subprocess) so tests can
+# patch a seam to inject drift mid-call, e.g. between verify_manifest and
+# the worktree removal it gates.
+_SPEC = importlib.util.spec_from_file_location("review_under_test", SCRIPT)
+review = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(review)
 
 
 class ReviewHelperTests(unittest.TestCase):
@@ -29,7 +39,7 @@ class ReviewHelperTests(unittest.TestCase):
         self.run_git("config", "user.name", "Fixture")
         self.run_git("config", "user.email", "fixture@example.invalid")
         (self.repo / "tracked.txt").write_text("base\n")
-        (self.repo / ".gitignore").write_text("ignored.tmp\n")
+        (self.repo / ".gitignore").write_text("ignored.tmp\n.pytest_cache/\n")
         self.run_git("add", "tracked.txt", ".gitignore")
         self.run_git("commit", "-qm", "fixture: Base")
         self.base = self.git("rev-parse", "HEAD")
@@ -334,6 +344,174 @@ class ReviewHelperTests(unittest.TestCase):
             self.command("cleanup", "--manifest", str(manifest_path), expect=2)
 
             self.assertTrue(ignored.exists())
+
+    def test_cleanup_tolerates_disposable_execution_artifacts(self) -> None:
+        for snapshot_key in ("codex_root", "claude_root"):
+            output = self.root / f"disposable-{snapshot_key}"
+            result = self.command(
+                "prepare",
+                "--repo",
+                str(self.repo),
+                "--base",
+                self.base,
+                "--output-dir",
+                str(output),
+            )
+            manifest_path = Path(json.loads(result.stdout)["manifest"])
+            manifest = json.loads(manifest_path.read_text())
+            snapshot = Path(manifest["snapshot"][snapshot_key])
+            interpreter = self.root / f"system-python-{snapshot_key}"
+            interpreter.write_text("#!/bin/sh\n")
+            venv_binary = snapshot / ".venv" / "bin" / "python"
+            venv_binary.parent.mkdir(parents=True)
+            # A real virtualenv links its interpreter rather than copying it.
+            venv_binary.symlink_to(interpreter)
+            cache = snapshot / "pkg" / "__pycache__" / "mod.cpython-313.pyc"
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b"\x00")
+            stray = snapshot / "stray.pyc"
+            stray.write_bytes(b"\x00")
+            # .pytest_cache/ is listed in the fixture's .gitignore (setUp), so
+            # this artifact is BOTH disposable-named AND git-ignored, unlike
+            # .venv/__pycache__/stray.pyc above, which are disposable-named
+            # but NOT git-ignored. Tolerance is name-scoped, not
+            # ignored-scoped: both cases must survive.
+            ignored_cache = snapshot / ".pytest_cache" / "v" / "cache.txt"
+            ignored_cache.parent.mkdir(parents=True)
+            ignored_cache.write_text("cached\n")
+
+            self.command("cleanup", "--manifest", str(manifest_path))
+
+            self.assertFalse(output.exists())
+            # The link was removed; the interpreter it pointed at was not.
+            self.assertTrue(interpreter.exists())
+
+    def test_verify_still_refuses_disposable_execution_artifacts(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        cache = snapshot / "__pycache__" / "mod.cpython-313.pyc"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"\x00")
+
+        self.command("verify", "--manifest", str(manifest_path), expect=2)
+
+    def test_cleanup_refuses_non_ignored_untracked_paths(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        stray = snapshot / "operator-notes.md"
+        stray.write_text("keep\n")
+
+        self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertTrue(stray.exists())
+
+    def test_cleanup_refuses_a_regular_file_named_dot_venv(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        stray = snapshot / ".venv"
+        stray.write_text("operator data\n")
+
+        self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertTrue(stray.exists())
+
+    def test_cleanup_refuses_a_nested_git_repository(self) -> None:
+        manifest_path, manifest = self.prepare()
+        snapshot = Path(manifest["snapshot"]["codex_root"])
+        nested = snapshot / ".venv" / "src" / "pkg"
+        nested.mkdir(parents=True)
+        env = {"HOME": str(self.home), "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(
+            ["git", "-C", str(nested), "init", "-q"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        subprocess.run(
+            ["git", "-C", str(nested), "config", "user.name", "Fixture"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        subprocess.run(
+            ["git", "-C", str(nested), "config", "user.email", "fixture@example.invalid"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        (nested / "work.txt").write_text("uncommitted work\n")
+        subprocess.run(
+            ["git", "-C", str(nested), "add", "work.txt"],
+            check=True,
+            env={**os.environ, **env},
+        )
+        subprocess.run(
+            ["git", "-C", str(nested), "commit", "-qm", "nested"],
+            check=True,
+            env={**os.environ, **env},
+        )
+
+        self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertTrue((nested / "work.txt").exists())
+        self.assertTrue((nested / ".git").exists())
+
+    def test_cleanup_refuses_drift_arriving_after_verification(self) -> None:
+        # remove_snapshot_worktree tries a plain `git worktree remove` first
+        # specifically so content that drifts into a snapshot between
+        # verify_manifest and the actual removal is still refused, rather
+        # than force-deleted by the tolerant check verify_manifest already
+        # ran. Patch verify_manifest itself as the seam: call the real
+        # implementation, then drop a non-disposable untracked file into the
+        # snapshot the instant verification finishes, before cleanup reaches
+        # the removal step.
+        manifest_path, manifest = self.prepare()
+        codex_root = Path(manifest["snapshot"]["codex_root"])
+        drifted = codex_root / "late-arriving-notes.md"
+        real_verify_manifest = review.verify_manifest
+
+        def verify_then_drift(*args: object, **kwargs: object):
+            result = real_verify_manifest(*args, **kwargs)
+            drifted.write_text("arrived after verification\n")
+            return result
+
+        with mock.patch.object(
+            review, "verify_manifest", side_effect=verify_then_drift
+        ):
+            with self.assertRaises(review.ReviewError):
+                review.cleanup(argparse.Namespace(manifest=str(manifest_path)))
+
+        self.assertTrue(drifted.exists())
+
+    def test_cleanup_refuses_a_populated_submodule(self) -> None:
+        # A gitlink (mode 160000) entry whose directory is populated on disk
+        # is invisible to untracked_paths() (which does not recurse into a
+        # submodule) and to `git diff --quiet` on the superproject, so
+        # cleanup must refuse it explicitly via populated_submodule() rather
+        # than silently deleting an initialized submodule's contents.
+        # Written directly as a gitlink entry (no real submodule, no
+        # network) per populated_submodule()'s own contract: any tracked
+        # 160000 entry whose directory exists and is non-empty counts.
+        gitlink_sha = self.git("rev-parse", "HEAD")
+        self.run_git(
+            "update-index", "--add", "--cacheinfo", f"160000,{gitlink_sha},vendor/lib"
+        )
+        self.run_git("commit", "-qm", "fixture: Add gitlink")
+        self.base = self.git("rev-parse", "HEAD")
+        # The fixture's own working tree must have the (empty) gitlink
+        # directory present too, or `git diff` reports it as an unstaged
+        # submodule deletion -- prepare() would then capture that deletion
+        # and drop the gitlink from the snapshot tree entirely.
+        (self.repo / "vendor" / "lib").mkdir(parents=True)
+
+        manifest_path, manifest = self.prepare()
+        for snapshot_key in ("codex_root", "claude_root"):
+            submodule_dir = Path(manifest["snapshot"][snapshot_key]) / "vendor" / "lib"
+            self.assertTrue(submodule_dir.is_dir())
+            (submodule_dir / "checked-out-file.txt").write_text("submodule content\n")
+
+        self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        for snapshot_key in ("codex_root", "claude_root"):
+            submodule_dir = Path(manifest["snapshot"][snapshot_key]) / "vendor" / "lib"
+            self.assertTrue((submodule_dir / "checked-out-file.txt").exists())
 
     def test_artifact_requires_explicit_repo_scoped_target_and_freezes_content(
         self,
