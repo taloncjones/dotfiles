@@ -32,7 +32,7 @@ origin_repo=$(git remote get-url origin)   # normalize to owner/repo:
 [ -n "$base_repo" ] && [ "$origin_repo_normalized" = "$base_repo" ] || STOP
 # --slurp gives one array PER PAGE wrapped in an outer array; pipe to external
 # jq to flatten (gh rejects --slurp together with -q/--jq).
-gh api --paginate --slurp repos/{owner}/{repo}/issues/{number}/comments \
+gh api --paginate --slurp "repos/{owner}/{repo}/issues/<number>/comments" \
   | jq '[.[][] | {author: .user.login, created_at, id, body}]' > comments.json
 uv run --no-project python <co-review>/scripts/review.py resolve-base \
   --repo "$PWD" --base-ref <baseRefName> --head <headRefOid>   # -> {base}
