@@ -49,6 +49,9 @@ head, retarget, missing/CHANGES marker, or ANY lookup/API error -- the gate
 fails closed), **STOP**: report "re-run co-review" and do not run the steps below
 or post any Jira/PR-body updates.
 
+A PASS licenses merging THAT head. Pass the marker's `sha` to
+`gh pr merge --match-head-commit` so the server enforces it.
+
 **Step 1: Verify PR exists**
 
 ```bash

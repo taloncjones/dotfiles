@@ -67,7 +67,11 @@ only proposes whatever cleanup is actually left.
 
 4. **Merge gate (human).** Present a one-screen summary: findings fixed, test
    results, CI state, version change. Ask for explicit confirmation, then
-   **squash-merge** via `gh pr merge --squash`.
+   **squash-merge** via `gh pr merge --squash --match-head-commit <the marker's sha>`.
+
+   `--match-head-commit` makes the server refuse the merge if the head moved after
+   the gate passed. A local re-read before merging is not enough: an ordinary push
+   between the read and the merge call would consume an unreviewed head.
 
    If branch protection requires an external approval that is not yet in, do
    not poll with model turns — start a zero-token background wait
