@@ -9,8 +9,14 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>\d+)(?: deferred=(?P<deferred>\d{1,6}))? -->$"
+    r"round=(?P<round>\d+)(?: deferred=(?P<deferred>\d+))? -->$"
 )
+# The deferred digit run is matched unbounded so a marker-shaped line always
+# matches and stays visible to selection/ordering/ambiguity handling -- a
+# regex-level bound made an oversized count fail to match AT ALL, which let
+# an older marker win by default. Validity of the count is judged later, in
+# decide(), against this same bound, before it ever reaches int().
+MAX_DEFERRED_DIGITS = 6
 # A fence opener may be indented up to 3 spaces and carry an info string.
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}([`~])\1{2,}")
 # Markdown recognizes only CRLF/CR/LF as line breaks; str.splitlines() also
@@ -142,6 +148,17 @@ def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):
             "PASS",
             "co-review APPROVE is current for this head and target "
             "(legacy marker: no deferred field, deferral count unknown)",
+        )
+    if len(deferred) > MAX_DEFERRED_DIGITS:
+        # A marker-shaped line with an oversized count still reached
+        # selection and won ordering/ambiguity on its own terms; it must
+        # produce a structured FAIL here rather than an unguarded int()
+        # call (which can itself raise on a very long digit string) and
+        # rather than silently disappearing the way an unmatched line would.
+        return (
+            "FAIL",
+            "co-review marker deferred count is invalid (exceeds "
+            f"{MAX_DEFERRED_DIGITS} digits); re-run co-review",
         )
     count = int(deferred)
     if count == 0:

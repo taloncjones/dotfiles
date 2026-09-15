@@ -685,6 +685,65 @@ def artifact(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def populated_submodule(root: Path) -> str | None:
+    """Path of the first tracked, populated submodule under root, else None.
+
+    `untracked_paths()` does not recurse into a tracked submodule, and the
+    superproject's `git diff --quiet` does not see ignored files inside one
+    either -- so a submodule holding ignored content (a `.env`, a seat's
+    probe output) is invisible to every check above and would pass
+    verification without that content ever being inventoried or approved.
+    A gitlink entry is mode 160000 in `git ls-files -s`; treat its directory
+    as populated when it exists and has any entry on disk.
+    """
+    entries = git(root, "ls-files", "-s", "-z")
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, path_bytes = entry.partition(b"\t")
+        mode = meta.split(b" ", 1)[0]
+        if mode != b"160000":
+            continue
+        directory = root / path_bytes.decode()
+        if directory.is_dir() and any(directory.iterdir()):
+            return path_bytes.decode()
+    return None
+
+
+def remove_snapshot_worktree(
+    repo: Path,
+    root: Path,
+    *,
+    expected_tree: str,
+    expected_head: str,
+) -> None:
+    """Remove one snapshot worktree, letting git's own gate run first.
+
+    Plain `git worktree remove` performs its OWN cleanliness check at the
+    instant of removal. Trying it first means anything that drifted into
+    the snapshot between verify_manifest and this call -- a tracked edit, a
+    non-disposable untracked file, a newly created nested repository -- is
+    still refused, because git's check is not skipped, only tried before the
+    tolerant one. Only when the plain attempt fails do we re-run the same
+    tolerant check verify_manifest used (immediately before forcing), so the
+    forced path is bounded by a check taken right at the point of use, not
+    by the earlier verify_manifest pass. If that re-check raises, it
+    propagates: cleanup must refuse rather than force.
+    """
+    try:
+        git(repo, "worktree", "remove", str(root))
+        return
+    except ReviewError:
+        pass
+    no_untracked_or_unstaged(
+        root,
+        expected_tree=expected_tree,
+        expected_head=expected_head,
+        tolerate_disposable=True,
+    )
+    git(repo, "worktree", "remove", "--force", str(root))
+
+
 def cleanup(args: argparse.Namespace) -> dict[str, Any]:
     manifest_path, manifest, output_dir = verify_manifest(
         args.manifest, tolerate_disposable=True
@@ -695,17 +754,26 @@ def cleanup(args: argparse.Namespace) -> dict[str, Any]:
     marker = output_dir / manifest["ownership"]["marker"]
     if set(output_dir.iterdir()) != {manifest_path, marker, codex_root, claude_root}:
         raise ReviewError("owned output directory contains unexpected paths")
+    for root in (codex_root, claude_root):
+        submodule = populated_submodule(root)
+        if submodule is not None:
+            raise ReviewError(
+                f"populated submodule is not eligible for cleanup: {submodule}"
+            )
     git(claude_root, "reset", "--hard", manifest["source"]["base"])
-    # verify_manifest(..., tolerate_disposable=True) above already refused
-    # unless every untracked path in both snapshots is an allow-listed
-    # disposable artifact (is_disposable_artifact), so --force here only
-    # removes content that check just approved -- it is not forcing past a
-    # guard, the guard already ran. Without --force, `git worktree remove`
-    # refuses whenever a seat executed code (a .venv or __pycache__ is
-    # untracked-and-not-ignored on any machine lacking a global Python
-    # ignore file), which is the ordinary case this cleanup exists for.
-    git(repo, "worktree", "remove", "--force", str(claude_root))
-    git(repo, "worktree", "remove", "--force", str(codex_root))
+    snapshot = manifest["snapshot"]
+    remove_snapshot_worktree(
+        repo,
+        claude_root,
+        expected_tree=snapshot["claude_tree"],
+        expected_head=manifest["source"]["base"],
+    )
+    remove_snapshot_worktree(
+        repo,
+        codex_root,
+        expected_tree=snapshot["codex_tree"],
+        expected_head=snapshot["snapshot_head"],
+    )
     marker.unlink()
     manifest_path.unlink()
     shutil.rmtree(output_dir)

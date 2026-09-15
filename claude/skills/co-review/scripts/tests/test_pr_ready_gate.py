@@ -228,15 +228,66 @@ class DecideTests(unittest.TestCase):
         # must not claim a reason the count does not carry.
         self.assertNotIn("unreachable", why)
 
-    def test_oversized_deferred_digit_run_fails_to_match_marker(self):
-        # A trusted marker carrying a several-thousand-digit deferred count
-        # must not crash int() conversion; it should simply fail to match
-        # the marker pattern (bounded to 6 digits) so the gate falls back
-        # to "no marker" rather than raising.
+    def test_oversized_deferred_digit_run_fails_closed_not_invisible(self):
+        # A trusted marker carrying an oversized deferred count is still
+        # marker-SHAPED and must be found, selected, and matched against the
+        # current head/base/base_ref -- it must not vanish from the regex
+        # (an invisible marker is exactly what let an older approval win by
+        # default in the prior regression). Once selected on a currently
+        # valid target, the invalid count itself must produce a structured
+        # FAIL, never an unguarded int() crash and never a silent pass.
         oversized = marker(deferred="1" * 7)
         verdict, why = gate.decide([comment(oversized)], ME, SHA_A, BASE_A, REF)
         self.assertEqual(verdict, "FAIL")
+        self.assertIn("deferred count is invalid", why)
+        self.assertNotIn("no trusted co-review marker", why)
+
+    def test_older_approve_then_newer_oversized_changes_fails(self):
+        # An older valid APPROVE followed by a newer CHANGES carrying an
+        # oversized (but shape-valid) deferred count must not let the older
+        # APPROVE win: the newer marker must be seen, selected as latest,
+        # and fail the gate on its own verdict.
+        older = comment(
+            marker(sha=SHA_A, verdict="APPROVE"),
+            created_at="2026-09-11T09:00:00Z", cid=1,
+        )
+        newer = comment(
+            marker(sha=SHA_A, verdict="CHANGES", deferred="0" * 7),
+            created_at="2026-09-11T10:00:00Z", cid=2,
+        )
+        verdict, why = gate.decide([older, newer], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("APPROVE", why)
+
+    def test_valid_approve_plus_oversized_changes_one_comment_stays_ambiguous(self):
+        # Two marker-shaped lines in one comment -- one a valid APPROVE, one
+        # an oversized CHANGES -- must still be treated as ambiguous (both now
+        # match the marker shape), not resolved by the oversized one silently
+        # dropping out of the running.
+        body = marker(verdict="APPROVE") + "\n" + marker(
+            verdict="CHANGES", deferred="9" * 7
+        )
+        self.assertIsNone(gate.select_marker([comment(body)], ME))
+        verdict, why = gate.decide([comment(body)], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(verdict, "FAIL")
         self.assertIn("run co-review", why)
+
+    def test_older_current_approve_then_newer_oversized_wrong_target_fails(self):
+        # An older current approval followed by a newer oversized approval
+        # naming a different target (a different sha) must not revive the
+        # older one: the newer marker must be seen and selected, and must
+        # fail as stale against the current head.
+        older = comment(
+            marker(sha=SHA_A, verdict="APPROVE"),
+            created_at="2026-09-11T09:00:00Z", cid=1,
+        )
+        newer = comment(
+            marker(sha=SHA_B, verdict="APPROVE", deferred="1" * 7),
+            created_at="2026-09-11T10:00:00Z", cid=2,
+        )
+        verdict, why = gate.decide([older, newer], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("stale", why)
 
 
 class CliTests(unittest.TestCase):
