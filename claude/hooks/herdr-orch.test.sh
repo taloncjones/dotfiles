@@ -335,6 +335,7 @@ SH
 
 check "write-task resolver: carry-forward, [] on first write, new-row rule only" <<PY
 $LOAD
+import pathlib
 ABSENT = c.PRIOR_ABSENT
 CORRUPT = c.PRIOR_CORRUPT
 rows = [{"role": "impl", "phase": "implement"}]
@@ -396,32 +397,60 @@ for payload in ({"task_id": "T", "workers": []},
 # The append-only comparison lives in the resolver, so substituting a row at an
 # inherited index is refused by the function itself rather than only by its
 # caller -- otherwise index 0 would be assumed inherited and face no rule.
-try:
-    c.resolve_task_workers(
-        {"task_id": "T", "workers": [{"bad": 1}, native_row]}, legacy, True)
-    raise AssertionError("a substituted prefix row must be refused")
-except SystemExit as exc:
-    assert exc.code == 2, exc.code
-
-# Truncating the history is refused for the same reason.
-try:
-    c.resolve_task_workers({"task_id": "T", "workers": []}, legacy, True)
-    raise AssertionError("a truncated history must be refused")
-except SystemExit as exc:
-    assert exc.code == 2, exc.code
+# Assert WHICH guard fires: every _require exits 2, so a bare code check would
+# still pass if some earlier check started firing instead.
+import contextlib, io
+for label, payload in (
+    ("substituted prefix row", {"task_id": "T", "workers": [{"bad": 1}, native_row]}),
+    ("truncated history", {"task_id": "T", "workers": []}),
+):
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            c.resolve_task_workers(payload, legacy, True)
+        raise AssertionError(label + " must be refused")
+    except SystemExit as exc:
+        assert exc.code == 2, exc.code
+    assert "append-only" in err.getvalue(), (label, err.getvalue())
 
 # The prefix persisted is the RECORD's own rows, not the caller's copy: `==`
 # holds between 1 and True, so an accepted prefix could otherwise change type.
+# Asserted as a CONTRAST, because `kept == [...True...]` holds either way.
 typed = {"task_id": "T", "workers": [{"phase": "implement", "flag": 1}]}
-kept = c.resolve_task_workers(
-    {"task_id": "T", "workers": [{"phase": "implement", "flag": True}]},
-    typed, False)
-assert kept == [{"phase": "implement", "flag": True}], kept
-bound_kept = c.resolve_task_workers(
-    {"task_id": "T", "workers": [{"phase": "implement", "flag": True}]},
-    typed, True)
+supplied = {"task_id": "T", "workers": [{"phase": "implement", "flag": True}]}
+# Unbound never consults prior, so it returns the caller's bool unchanged.
+kept = c.resolve_task_workers(supplied, typed, False)
+assert isinstance(kept[0]["flag"], bool), kept
+# Bound inherits the record's own row, so the stored int survives.
+bound_kept = c.resolve_task_workers(supplied, typed, True)
 assert not isinstance(bound_kept[0]["flag"], bool), bound_kept
 assert bound_kept[0]["flag"] == 1, bound_kept
+
+# The transaction re-assertion in read_prior_task is the half of the R2-F1 fix
+# that stops an unbound repair overwriting an intact record. Pin both branches:
+# a failing transaction must propagate, never become a record sentinel.
+class _StubTxn:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def assert_current(self):
+        raise self.exc
+
+_dest = pathlib.Path(tempfile.mkdtemp()) / "T.json"
+_dest.write_text(json.dumps({"task_id": "T", "workers": []}))
+for _exc in (ValueError("payload directory was replaced"),
+             FileNotFoundError(2, "No such file or directory")):
+    c.coordination._LOCAL.transaction = _StubTxn(_exc)
+    try:
+        got = c.read_prior_task(_dest)
+        raise AssertionError(
+            f"a failing transaction must propagate, got {got!r}")
+    except (ValueError, OSError):
+        pass
+    finally:
+        c.coordination._LOCAL.transaction = None
+# With no transaction set the asserts are no-ops and the record reads normally.
+assert c.read_prior_task(_dest) == {"task_id": "T", "workers": []}
 
 # Row rule on a first write: unbound needs a phase key, bound the full tuple.
 loose = [{"role": "review"}]

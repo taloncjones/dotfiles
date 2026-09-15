@@ -2096,6 +2096,13 @@ def read_prior_task(dest):
     try:
         return json.loads(read_payload_text(dest))
     except FileNotFoundError:
+        # assert_current opens the account payload dir and the coordination
+        # lock, so a MISSING one raises FileNotFoundError from here too. Left
+        # unchecked that reads as "no prior record" and an intact history is
+        # treated as a first write -- on the unbound path an explicit list
+        # would then overwrite it. Re-assert so only a genuinely absent task
+        # file reaches PRIOR_ABSENT.
+        coordination.assert_transaction_current()
         return PRIOR_ABSENT
     except (OSError, ValueError):
         # read_payload_text raises ValueError for a non-regular file and
@@ -2682,7 +2689,8 @@ def _main(argv=None) -> int:
             dest = base / "tasks" / f"{ns.task_id}.json"
             bound = ns.binding is not None
             # One snapshot of the existing record serves both the row rule and
-            # the append-only check below, so the two cannot disagree.
+            # the append-only check, which run together inside
+            # resolve_task_workers, so the two cannot disagree.
             prior = read_prior_task(dest)
             # The record readers reject is never persisted: resolve and
             # validate the workers list before publishing, so an omitted key
