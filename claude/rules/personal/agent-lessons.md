@@ -41,5 +41,5 @@ is the staging tier, not an archive.
   every referenced test case or symbol exists before a worker is sent to it.
 - (2026-09) Verify external CLI syntax against its help/docs before writing it
   into a skill: unverified gh fields and flag combinations shipped broken.
-- (2026-09) rm/git-meta guards reject unexpanded variables: pass literal
-  absolute paths, never "$VAR/sub", and split cd-chains into git -C calls.
+- (2026-09) Grep a suite's stderr: a passing suite can hide command-not-found.
+- (2026-09) Settle a factual review dispute by executing the case, not by rank.
