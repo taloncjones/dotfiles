@@ -221,6 +221,22 @@ class CliTests(unittest.TestCase):
 
 
 class FailClosedSelectionTests(unittest.TestCase):
+    def test_truncated_at_colon_does_not_expose_older_approve(self):
+        # Truncated one character earlier still: right at the discriminating
+        # colon, with no trailing space at all. The candidate prefix must be
+        # the colon-terminated form, not the marker's longer literal opening
+        # (which has a trailing space before "sha="), or this one character
+        # of truncation slips through as ordinary text.
+        comments = [
+            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment("<!-- co-review:", created_at="2026-09-11T11:00:00Z", cid=2),
+        ]
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker(comments, ME)
+        decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+        self.assertIn("ambiguous or unparsable", reason)
+
     def test_truncated_before_sha_does_not_expose_older_approve(self):
         # Truncated so early that the prefix itself is cut mid-token ("...sh").
         # Reproduces the leak this task closes: a naive candidate check

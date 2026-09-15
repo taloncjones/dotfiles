@@ -21,10 +21,12 @@ COWORKER_MARKER_RE = re.compile(
     r"base_ref_tip=(?P<base_ref_tip>[0-9a-f]{40}) "
     r"verdict=(?P<verdict>APPROVE|CHANGES) round=(?P<round>\d+) -->$"
 )
-# See pr_ready_gate.MARKER_PREFIX: a literal, unparsed prefix so a truncated
-# coworker marker is still recognized as "a round comment that failed to
-# parse" rather than falling through as ordinary text.
-COWORKER_MARKER_PREFIX = "<!-- co-review-coworker: "
+# See pr_ready_gate.MARKER_PREFIX: the shortest prefix that unambiguously
+# identifies this family (up to and including the discriminating colon), not
+# the marker's longer literal opening. Do not lengthen this back toward
+# "<!-- co-review-coworker: " -- that reopens the truncation leak this
+# constant exists to close.
+COWORKER_MARKER_PREFIX = "<!-- co-review-coworker:"
 
 
 def build_marker(sha, base, base_ref, base_ref_tip, verdict, rnd) -> str:

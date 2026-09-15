@@ -11,12 +11,20 @@ MARKER_RE = re.compile(
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
     r"round=(?P<round>\d+) -->$"
 )
-# The literal, unparsed prefix that marks a line as belonging to this marker
-# family -- checked with a plain startswith, not derived from MARKER_RE, so a
-# truncated marker (cut off anywhere after this prefix) is still recognized as
-# "a round comment that failed to parse" instead of falling through as
-# ordinary text and letting selection revive an older comment.
-MARKER_PREFIX = "<!-- co-review: "
+# The candidate prefix -- checked with a plain startswith, not derived from
+# MARKER_RE, so a truncated marker is still recognized as "a round comment
+# that failed to parse" instead of falling through as ordinary text and
+# letting selection revive an older comment.
+#
+# Deliberately shorter than the marker's literal opening ("<!-- co-review: ",
+# with a trailing space before "sha="): it is the SHORTEST prefix that still
+# unambiguously identifies this family, i.e. up to and including the colon
+# that distinguishes it from "<!-- co-review-coworker:". Anything shorter
+# cannot be attributed to a family at all, which is the right place to stop --
+# do not "tidy" this back to the longer literal, that reopens the truncation
+# leak this constant exists to close (a marker cut off right at the colon
+# would then score as ordinary text, not a malformed round comment).
+MARKER_PREFIX = "<!-- co-review:"
 # A fence opener may be indented up to 3 spaces and carry an info string.
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}([`~])\1{2,}")
 # Markdown recognizes only CRLF/CR/LF as line breaks; str.splitlines() also
