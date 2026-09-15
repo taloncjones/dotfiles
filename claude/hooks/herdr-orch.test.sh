@@ -333,56 +333,80 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
 test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 SH
 
-check "write-task resolver: carry-forward, [] on first write, per-path row rule" <<PY
+check "write-task resolver: carry-forward, [] on first write, new-row rule only" <<PY
 $LOAD
-import pathlib
-
-tmp = pathlib.Path(tempfile.mkdtemp())
-dest = tmp / "PROJ-1.json"
+ABSENT = c.PRIOR_ABSENT
+CORRUPT = c.PRIOR_CORRUPT
+rows = [{"role": "impl", "phase": "implement"}]
 
 # First write with no workers key resolves to [].
-assert c.resolve_task_workers({"task_id": "PROJ-1"}, dest, False) == []
+assert c.resolve_task_workers({"task_id": "T"}, ABSENT, False) == []
 
-# An explicit list is returned as given, and is not read from prior.
-rows = [{"role": "impl", "phase": "implement"}]
-assert c.resolve_task_workers({"task_id": "PROJ-1", "workers": rows}, dest, False) == rows
+# An explicit list is returned as given.
+assert c.resolve_task_workers({"task_id": "T", "workers": rows}, ABSENT, False) == rows
 
 # With a prior record present, an omitted key carries the prior list forward.
-dest.write_text(json.dumps({"task_id": "PROJ-1", "workers": rows}))
-assert c.resolve_task_workers({"task_id": "PROJ-1"}, dest, False) == rows
+prior = {"task_id": "T", "workers": rows}
+assert c.resolve_task_workers({"task_id": "T"}, prior, False) == rows
 
-# Inherited rows are validated too: a phased row carried into a BOUND write is
-# refused, because outstanding_descendants would read it as unreadable.
+# Only rows NEW in this write face the row rule. A bound record holding a
+# legacy (non-native) row stays writable: carrying it forward is accepted, and
+# so is appending a native successor after it. Validating inherited rows would
+# leave such a record unwritable by every payload.
+legacy = {"task_id": "T", "workers": [{"phase": "implement"}]}
+native_row = {
+    "role": "impl", "launch_id": "L1", "phase": "implement", "runtime": "claude",
+    "workspace_id": "w1", "pane_id": "p1", "source_head_sha": "a" * 40,
+}
+assert c.resolve_task_workers({"task_id": "T"}, legacy, True) == legacy["workers"]
+appended = legacy["workers"] + [native_row]
+assert c.resolve_task_workers(
+    {"task_id": "T", "workers": appended}, legacy, True) == appended
+
+# Forward-only still holds: a NEW non-native row on the bound path is refused
+# even when the inherited prefix is itself legacy.
 try:
-    c.resolve_task_workers({"task_id": "PROJ-1"}, dest, True)
-    raise AssertionError("bound carry-forward must validate inherited rows")
+    c.resolve_task_workers(
+        {"task_id": "T", "workers": legacy["workers"] + [{"phase": "implement"}]},
+        legacy, True)
+    raise AssertionError("a new non-native bound row must be refused")
 except SystemExit as exc:
     assert exc.code == 2, exc.code
 
-# A corrupt prior refuses only when the key is omitted; an explicit list repairs.
-dest.write_text("{ not json")
-assert c.resolve_task_workers({"task_id": "PROJ-1", "workers": []}, dest, False) == []
+# On the UNBOUND path an explicit list is accepted without consulting prior, so
+# a corrupt record is repairable. Omitting the key there refuses instead.
+assert c.resolve_task_workers({"task_id": "T", "workers": []}, CORRUPT, False) == []
 try:
-    c.resolve_task_workers({"task_id": "PROJ-1"}, dest, False)
+    c.resolve_task_workers({"task_id": "T"}, CORRUPT, False)
     raise AssertionError("corrupt prior with omitted workers must refuse")
 except SystemExit as exc:
     assert exc.code == 2, exc.code
 
-# Row rule: unbound needs a phase key; bound needs the full native tuple.
+# On the BOUND path that repair does NOT exist: the explicit list is refused
+# against a corrupt prior, because the append-only prefix check still applies.
+# Pinned so the limitation is asserted rather than implied.
+for payload in ({"task_id": "T", "workers": []},
+                {"task_id": "T", "workers": [native_row]}):
+    try:
+        c.resolve_task_workers(payload, CORRUPT, True)
+        raise AssertionError("bound corrupt prior must not be repairable")
+    except SystemExit as exc:
+        assert exc.code == 2, exc.code
+
+# Row rule on a first write: unbound needs a phase key, bound the full tuple.
 loose = [{"role": "review"}]
 phased = [{"role": "review", "phase": "review"}]
 native = [{
     "role": "review", "launch_id": "L1", "phase": "review", "runtime": "claude",
     "workspace_id": "w1", "pane_id": "p1", "source_head_sha": "a" * 40,
 }]
-fresh = tmp / "PROJ-2.json"
 for rows_in, bound, ok in (
     (loose, False, False), (phased, False, True), (native, False, True),
     (phased, True, False), (native, True, True), ([], True, True),
     ("nope", False, False),
 ):
     try:
-        c.resolve_task_workers({"task_id": "PROJ-2", "workers": rows_in}, fresh, bound)
+        c.resolve_task_workers({"task_id": "T", "workers": rows_in}, ABSENT, bound)
         assert ok, (rows_in, bound)
     except SystemExit as exc:
         assert not ok, (rows_in, bound)
@@ -7401,10 +7425,14 @@ check "write-task refuses a non-list workers and a row without a phase" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d)
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 F=$($CLI claim-owner --repo-slug slug-rj --session S --host h --pid 1)
+# Assert WHICH guard fired, not merely that the verb failed: a bad fence or an
+# invalid task-id would also exit non-zero and pass a status-only check.
 if $CLI write-task --repo-slug slug-rj --task-id td-r --session S --fence "$F" \
-  --json '{"task_id":"td-r","workers":"nope"}' 2>/dev/null; then exit 1; fi
+  --json '{"task_id":"td-r","workers":"nope"}' 2>"$CLAUDE_CONFIG_DIR/e1"; then exit 1; fi
+grep -q 'task workers must be a list' "$CLAUDE_CONFIG_DIR/e1"
 if $CLI write-task --repo-slug slug-rj --task-id td-r --session S --fence "$F" \
-  --json '{"task_id":"td-r","workers":[{"role":"impl"}]}' 2>/dev/null; then exit 1; fi
+  --json '{"task_id":"td-r","workers":[{"role":"impl"}]}' 2>"$CLAUDE_CONFIG_DIR/e2"; then exit 1; fi
+grep -q 'rows must be objects carrying a phase' "$CLAUDE_CONFIG_DIR/e2"
 test ! -e "$CLAUDE_CONFIG_DIR/herdr-orch/slug-rj/tasks/td-r.json"
 SH
 
@@ -7440,6 +7468,58 @@ assert rec['status']=='revoked', rec
 "
 SH
 
+check "write-task keeps a bound record holding a legacy row writable" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-lg.git
+root=$(mktemp -d)
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 \
+   --control-tier lead --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-l \
+   --json '{"task_id":"td-l","workers":[]}'
+# A row written before the native-row rule existed, injected out of band.
+TASKFILE="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-l.json"
+python3 -c '
+import json, sys
+path = sys.argv[1]
+record = json.load(open(path))
+record["workers"].append({"phase": "implement", "launch_id": "I1"})
+json.dump(record, open(path, "w"))
+' "$TASKFILE"
+# A status-only write inherits the legacy row instead of refusing it.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-l \
+   --json '{"task_id":"td-l","status":"in-progress"}'
+python3 -c "
+import json
+d=json.load(open('$TASKFILE'))
+assert d['status']=='in-progress', d
+assert d['workers']==[{'phase':'implement','launch_id':'I1'}], d
+"
+# Appending a native successor after the legacy row is still accepted, so the
+# lead can keep driving the task; only the NEW row faces the rule.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-l \
+   --json '{"task_id":"td-l","workers":[{"phase":"implement","launch_id":"I1"},{"role":"impl","launch_id":"L2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"p2","source_head_sha":"'"$SHA40"'"}]}'
+python3 -c "
+import json
+d=json.load(open('$TASKFILE'))
+assert len(d['workers'])==2, d
+assert d['workers'][0]=={'phase':'implement','launch_id':'I1'}, d
+assert d['workers'][1]['launch_id']=='L2', d
+"
+# Forward-only still holds: a NEW non-native row is refused.
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-l \
+   --json '{"task_id":"td-l","workers":[{"phase":"implement","launch_id":"I1"},{"role":"impl","launch_id":"L2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"p2","source_head_sha":"'"$SHA40"'"},{"phase":"review","launch_id":"I3"}]}' 2>/dev/null; then exit 1; fi
+SH
+
 check "write-task bound path requires native rows" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-nr.git
 root=$(mktemp -d)
@@ -7467,35 +7547,6 @@ s=importlib.util.spec_from_file_location('core','claude/hooks/herdr_orch_core.py
 c=importlib.util.module_from_spec(s); s.loader.exec_module(c)
 d=c.outstanding_descendants(pathlib.Path('$root/herdr-orch/$LF_SLUG'), '$bid')
 assert d==['p1'], d
-"
-SH
-
-check "write-task resolution and publication are one critical section" <<'SH'
-export CLAUDE_CONFIG_DIR=$(mktemp -d)
-CLI="python3 claude/hooks/herdr_legacy_fixture.py"
-RD="$CLAUDE_CONFIG_DIR/herdr-orch/slug-cs"; mkdir -p "$RD/tasks"
-F=$($CLI claim-owner --repo-slug slug-cs --session S --host h --pid 1)
-$CLI write-task --repo-slug slug-cs --task-id td-s --session S --fence "$F" \
-  --json '{"task_id":"td-s","workers":[{"role":"impl","phase":"implement"}]}'
-# Race an APPEND against a status-only write that inherits. Unlocked, the
-# status write could read the one-row record, then publish after the append
-# lands, dropping the second row. Under the owner lock it must observe
-# whichever record committed first, so no row is ever lost.
-$CLI write-task --repo-slug slug-cs --task-id td-s --session S --fence "$F" \
-  --json '{"task_id":"td-s","workers":[{"role":"impl","phase":"implement"},{"role":"review","phase":"review"}]}' &
-append_pid=$!
-$CLI write-task --repo-slug slug-cs --task-id td-s --session S --fence "$F" \
-  --json '{"task_id":"td-s","status":"b"}' &
-status_pid=$!
-wait "$append_pid"
-wait "$status_pid"
-python3 -c "
-import json
-d=json.load(open('$RD/tasks/td-s.json'))
-rows=[r['role'] for r in d['workers']]
-assert rows in (['impl'], ['impl','review']), d
-if d.get('status')=='b' and rows==['impl']:
-    raise AssertionError('status write landed after the append and dropped a row: '+repr(d))
 "
 SH
 

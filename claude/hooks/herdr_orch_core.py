@@ -2080,43 +2080,86 @@ def _native_worker_row(row) -> bool:
     return all(_nonempty_str(row.get(key)) for key in ATTEMPT_FIELDS)
 
 
-def resolve_task_workers(rec, dest, bound):
+PRIOR_ABSENT = object()
+PRIOR_CORRUPT = object()
+
+
+def read_prior_task(dest):
+    """The parsed prior task record, PRIOR_ABSENT when no file exists, or
+    PRIOR_CORRUPT when one exists but cannot be read or parsed.
+
+    Read once per write-task invocation and reused for both the row rule and
+    the append-only prefix check, so those two cannot observe different
+    content. flock is advisory: a writer ignoring it could otherwise replace
+    the record between two separate reads and slip an unvalidated row past a
+    prefix check performed against the newer, shorter list."""
+    try:
+        raw = read_payload_text(dest)
+    except FileNotFoundError:
+        return PRIOR_ABSENT
+    except OSError:
+        return PRIOR_CORRUPT
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return PRIOR_CORRUPT
+
+
+def resolve_task_workers(rec, prior, bound):
     """Resolve the workers list write-task should persist for `rec`.
 
-    A present list is taken as given, so an explicit list repairs a corrupt
-    record without the writer having to read it. An absent key carries the
-    prior record's list forward -- resolving to [] only when no prior file
-    exists -- so an omitted key can never launder a dispatched record into
-    "no attempt", and refuses when a prior exists but cannot be read or is
-    malformed.
+    `prior` is this invocation's single snapshot of the existing record, from
+    read_prior_task.
 
-    Supplied and inherited rows pass through the same rule, so carry-forward
-    can never smuggle in a row the write itself would have been refused for.
+    An absent workers key carries the prior list forward -- resolving to []
+    only when no prior file exists -- so an omitted key can never launder a
+    dispatched record into "no attempt".
+
+    Only rows NEW in this write are checked against the row rule; rows
+    inherited as the append-only prefix pass through untouched. Validating
+    inherited rows would brick any record holding a row written before the
+    rule existed: every payload would fail either the row rule or the
+    append-only prefix check, leaving a binding that can no longer be written
+    by any verb. Forward-only enforcement still holds -- a record can never
+    gain a row the rule would refuse.
+
     The rule is per path because the readers differ: an unbound record is read
     by _valid_task_shape, a bound one additionally by outstanding_descendants,
-    which is native-only."""
+    which is native-only.
+
+    Repairing a record through an explicit list is an UNBOUND-path property.
+    On the bound path the append-only prefix check still applies, so a
+    malformed bound record has no repair payload; recovering one needs a
+    fenced operation this verb does not provide."""
     if "workers" in rec:
         workers = rec["workers"]
+        _require(isinstance(workers, list), "task workers must be a list")
+        inherited = 0
+        if bound and prior is not PRIOR_ABSENT:
+            _require(
+                prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
+                "bound task record is malformed; write-task cannot repair it",
+            )
+            inherited = len(prior["workers"])
         source = "task workers"
     else:
-        try:
-            prior = json.loads(read_payload_text(dest))
-        except FileNotFoundError:
+        if prior is PRIOR_ABSENT:
             return []
-        except (OSError, ValueError):
-            _require(False, "task record is unreadable; pass an explicit workers list")
         _require(
-            _valid_task_shape(prior),
-            "task record is malformed; pass an explicit workers list",
+            prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
+            "bound task record is malformed; write-task cannot repair it"
+            if bound else
+            "task record is unreadable or malformed; pass an explicit "
+            "workers list",
         )
         workers = prior["workers"]
+        inherited = len(workers)
         source = "inherited task workers"
-    _require(isinstance(workers, list), f"{source} must be a list")
     _require(
         all((_native_worker_row if bound else _phased_worker_row)(row)
-            for row in workers),
-        f"{source} must be native dispatch rows" if bound
-        else f"{source} rows must be objects carrying a phase",
+            for row in workers[inherited:]),
+        f"new {source} must be native dispatch rows" if bound
+        else f"new {source} rows must be objects carrying a phase",
     )
     return workers
 
@@ -2609,11 +2652,14 @@ def _main(argv=None) -> int:
             )
             dest = base / "tasks" / f"{ns.task_id}.json"
             bound = ns.binding is not None
+            # One snapshot of the existing record serves both the row rule and
+            # the append-only check below, so the two cannot disagree.
+            prior = read_prior_task(dest)
             # The record readers reject is never persisted: resolve and
             # validate the workers list before publishing, so an omitted key
             # inherits prior dispatch history rather than asserting none.
-            rec["workers"] = resolve_task_workers(rec, dest, bound)
-            if bound:
+            rec["workers"] = resolve_task_workers(rec, prior, bound)
+            if bound and prior is not PRIOR_ABSENT:
                 # Dispatch history is append-only for binding-scoped tasks so a
                 # superseded attempt can never be erased to revive an older
                 # envelope (the P1 revival scenario): every prior worker row
@@ -2622,27 +2668,16 @@ def _main(argv=None) -> int:
                 # updatable -- base_sha mutation is a legitimate rebase-
                 # redispatch, its abuse closed separately by the approval-base
                 # binding check at emit/integrate.
-                try:
-                    prior_raw = read_payload_text(dest)
-                    prior_present = True
-                except FileNotFoundError:
-                    prior_present = False
-                except OSError:
-                    _require(False, "task record is unreadable")
-                if prior_present:
-                    try:
-                        prior = json.loads(prior_raw)
-                    except ValueError:
-                        _require(False, "task record is unreadable")
-                    _require(_valid_task_shape(prior), "task record is malformed")
-                    prior_workers = prior["workers"]
-                    new_workers = rec["workers"]
-                    _require(
-                        len(new_workers) >= len(prior_workers)
-                        and all(new_workers[i] == prior_workers[i]
-                                for i in range(len(prior_workers))),
-                        "binding-scoped dispatch history is append-only",
-                    )
+                # resolve_task_workers already refused a corrupt or malformed
+                # prior on this path, so prior["workers"] is a list here.
+                prior_workers = prior["workers"]
+                new_workers = rec["workers"]
+                _require(
+                    len(new_workers) >= len(prior_workers)
+                    and all(new_workers[i] == prior_workers[i]
+                            for i in range(len(prior_workers))),
+                    "binding-scoped dispatch history is append-only",
+                )
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
             return 0

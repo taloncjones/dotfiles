@@ -352,6 +352,15 @@ The examples above include legacy rows. Every new native dispatch has
 current-phase attempt's complete tuple. Partial native tuples are invalid;
 legacy fallback applies only to records that predate native attempts.
 
+`write-task` enforces that contract at the writer, so a record its readers
+reject can no longer be persisted. A first write that omits `workers` persists
+`[]` rather than a record carrying no `workers` key. A later write that omits
+`workers` inherits the prior list rather than clearing it, so only an explicit
+list can change dispatch history. Rows that are NEW in a write must carry a
+`phase` on the unbound path and the full native tuple on the binding-scoped
+path; rows inherited as the append-only prefix pass through unchanged, which
+keeps a record holding a pre-contract legacy row writable.
+
 Planning has a separate `plan_artifacts` list in both task and completion:
 exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.
 `confirm-plan` verifies hashes, selected payload containment, and current
