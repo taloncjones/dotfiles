@@ -95,6 +95,18 @@ def coordination_slugs():
     return sorted(n for n in names if _SLUG.fullmatch(n))
 
 
+def _no_dup_pairs(pairs):
+    """object_pairs_hook that rejects duplicate keys in a JSON object: two
+    spellings of one registry key would let the parser silently pick a
+    loser, so the record is corrupt, never a choice."""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError("duplicate key")
+        d[k] = v
+    return d
+
+
 def _read_at(parent, name):
     try:
         fd = os.open(
@@ -105,7 +117,7 @@ def _read_at(parent, name):
         with os.fdopen(fd, "r") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise ValueError("coordination metadata must be a regular file")
-            return json.load(stream)
+            return json.load(stream, object_pairs_hook=_no_dup_pairs)
     except FileNotFoundError:
         return None
     except (ValueError, OSError) as exc:
@@ -215,6 +227,7 @@ def _valid_owner(value):
 
 
 _BINDING_ID = re.compile(r"ldb-[0-9a-f]{32}\Z")
+_GENERATION_KEY = re.compile(r"[1-9][0-9]*\Z")
 
 
 def _valid_lead_lease(rec):
@@ -225,7 +238,62 @@ def _valid_lead_lease(rec):
         and rec.get("control_tier") == "lead"
         and isinstance(rec.get("binding_id"), str)
         and bool(_BINDING_ID.fullmatch(rec["binding_id"]))
+        # Bound the heartbeat so staleness arithmetic (time.time() -
+        # heartbeat_ts) can never overflow inside a scan. _valid_owner
+        # already admits any non-negative int or finite float; the only
+        # value that overflows the float subtraction is an int too large to
+        # convert to float, so the bound need only exclude those. 1e300 sits
+        # safely below the float ceiling yet far past any real clock or
+        # far-future sentinel; the int-vs-float comparison is exact, so an
+        # absurd int (e.g. 10**400) is rejected here without itself
+        # overflowing.
+        and rec["heartbeat_ts"] <= 1e300
+        and ("generation" not in rec
+             or (type(rec["generation"]) is int and rec["generation"] >= 1))
     )
+
+
+def _valid_lead_ws_entry(v):
+    """One lead_ws registry entry. `releases` is the append-only release
+    ledger: each key is a generation (canonical positive decimal string)
+    mapped to the binding that occupied the workspace for that generation
+    and released it, written only by lead_release in the same atomic
+    registry write that clears the occupancy. Keys never exceed the entry's
+    generation, and the CURRENT generation may not appear while the entry
+    is occupied (release and occupancy-clear are one event).
+    `released_binding` is the retired mutable field: read-tolerated so
+    stray pre-ledger state cannot brick the registry, but never written
+    and never consulted for attribution or proof."""
+    if not isinstance(v, dict):
+        return False
+    if not ({"generation", "binding_id", "last_fence"}
+            <= set(v)
+            <= {"generation", "binding_id", "last_fence",
+                "released_binding", "releases"}):
+        return False
+    if type(v["generation"]) is not int or v["generation"] < 1:
+        return False
+    if not (v["binding_id"] is None
+            or (isinstance(v["binding_id"], str)
+                and _BINDING_ID.fullmatch(v["binding_id"]))):
+        return False
+    if not (v.get("released_binding") is None
+            or (isinstance(v["released_binding"], str)
+                and _BINDING_ID.fullmatch(v["released_binding"]))):
+        return False
+    if type(v["last_fence"]) is not int or v["last_fence"] < 1:
+        return False
+    releases = v.get("releases", {})
+    if not isinstance(releases, dict):
+        return False
+    for gen_key, released in releases.items():
+        if not isinstance(gen_key, str) or not _GENERATION_KEY.fullmatch(gen_key):
+            return False
+        if int(gen_key) > v["generation"]:
+            return False
+        if not (isinstance(released, str) and _BINDING_ID.fullmatch(released)):
+            return False
+    return v["binding_id"] is None or str(v["generation"]) not in releases
 
 
 def _owner_metadata(value):
@@ -348,7 +416,16 @@ class OwnerTransaction:
         self.assert_current()
         bindings = _read_at(registry_fd, "bindings.json")
         if bindings is None:
-            bindings = {}
+            # _read_at returns None for BOTH an absent file and a file whose
+            # content parsed to JSON null. Only genuine absence may read as
+            # an empty registry; a null registry file is corrupt.
+            try:
+                os.stat("bindings.json", dir_fd=registry_fd,
+                        follow_symlinks=False)
+            except FileNotFoundError:
+                bindings = {}
+            else:
+                raise ValueError("corrupt repository bindings")
         if not isinstance(bindings, dict) or any(
             not isinstance(key, str)
             or not isinstance(item, dict)
@@ -366,6 +443,11 @@ class OwnerTransaction:
             )
             or not isinstance(item.get("lead_seen", []), list)
             or any(not isinstance(k, str) for k in item.get("lead_seen", []))
+            or not isinstance(item.get("lead_ws", {}), dict)
+            or any(
+                not isinstance(k, str) or not _valid_lead_ws_entry(v)
+                for k, v in item.get("lead_ws", {}).items()
+            )
             for key, item in bindings.items()
         ):
             raise ValueError("corrupt repository bindings")
@@ -688,15 +770,69 @@ class OwnerTransaction:
         old = self.lead_read(workspace_root)
         key = lead_lease_key(workspace_root)
         seen = self.bindings[self.slug].get("lead_seen", [])
-        if old is None and key in seen:
-            # Symmetric to owner_initialized on the slug lease: a lease that
-            # has existed must not silently restart at fence 1, or an old
-            # fence becomes valid again after the file is deleted or nulled.
+        ws_map = self.bindings[self.slug].get("lead_ws", {})
+        entry = ws_map.get(key)
+        if old is None and key in seen and (entry is None or entry["binding_id"] is not None):
+            # A lease that has existed must not silently restart: either
+            # it predates generation tracking, or it vanished without a
+            # recorded lead_release. Explicit recovery required.
             raise ValueError(
                 "initialized lead lease is missing; explicit recovery required"
             )
         if old is not None and not _valid_lead_lease(old):
             raise ValueError("corrupt lead lease; explicit recovery required")
+        if old is not None and entry is None:
+            # A lease file with NO corroborating registry entry is
+            # uncorroborated authority: a genuine first-ever claim has
+            # neither a lease nor an entry, and every later claim writes the
+            # entry atomically with the lease. A lease standing alone can
+            # only be a restored/replayed file over a wiped or never-written
+            # entry; its identity and counters vouch only for themselves, so
+            # it may bootstrap nothing.
+            raise ValueError(
+                "lead lease has no corroborating registry entry; "
+                "explicit recovery required"
+            )
+        if old is not None and entry is not None:
+            # Registry occupancy outranks the lease file (lead_release's
+            # philosophy): a restored or replayed lease file that disagrees
+            # with the durable lead_ws entry must never rebuild an old
+            # occupancy, displace a successor, or roll the generation back.
+            if entry["binding_id"] != old["binding_id"]:
+                raise ValueError(
+                    "lead lease disagrees with registry occupancy; "
+                    "explicit recovery required"
+                )
+            if (
+                old.get("generation") is not None
+                and entry["generation"] > old["generation"]
+            ):
+                raise ValueError(
+                    "lead lease generation is behind the registry; "
+                    "explicit recovery required"
+                )
+        if (
+            old is not None
+            and entry is not None
+            and (
+                old["fence"] != entry["last_fence"]
+                or old.get("generation") != entry["generation"]
+            )
+        ):
+            # Claim-path sibling of reconcile's replayed-lease rule, applied
+            # UNCONDITIONALLY: the on-disk lease may drive any decision
+            # (staleness, identity match, high-water seeding) only when the
+            # registry corroborates it at its exact fence AND generation. A
+            # mismatched lease is a replayed older copy -- and the lease's
+            # own identity fields cannot vouch for it, so this gate never
+            # exempts a same-identity caller: a displaced holder replaying
+            # its own stale lease must not reclaim past a live successor.
+            # A genuine same-holder re-claim carries the current-counter
+            # lease and passes; the high-water clamp below then advances it.
+            raise ValueError(
+                "lead lease disagrees with the registry fence/generation; "
+                "explicit recovery required"
+            )
         if (
             old
             and time.time() - old["heartbeat_ts"] <= stale_secs
@@ -708,11 +844,45 @@ class OwnerTransaction:
             )
         ):
             return None
-        fence = old["fence"] + 1 if old else 1
-        if key not in seen:
-            updated = dict(self.bindings[self.slug], lead_seen=sorted({*seen, key}))
-            self.bindings = dict(self.bindings, **{self.slug: updated})
-            atomic_json_at(self.registry_fd, "bindings.json", self.bindings)
+        if old:
+            # High-water clamp against the durable registry: a replayed
+            # lease file carrying an older fence must never make the chain
+            # reissue a fence at or below the entry's recorded last_fence.
+            floor = entry["last_fence"] if entry else 0
+            fence = max(old["fence"], floor) + 1
+            prior_generation = max(
+                old.get("generation") or 0,
+                entry["generation"] if entry else 0,
+            ) or 1
+            # A stale takeover by a DIFFERENT binding is a fresh occupancy of
+            # the path and gets a fresh generation; the same binding
+            # re-claiming its own workspace keeps its generation.
+            generation = (
+                prior_generation if old["binding_id"] == binding_id
+                else prior_generation + 1
+            )
+        elif entry is not None:
+            # cleanly released occupancy: resume the fence chain, fresh generation
+            fence = entry["last_fence"] + 1
+            generation = entry["generation"] + 1
+        else:
+            fence = 1
+            generation = 1
+        occupancy = {"generation": generation, "binding_id": binding_id,
+                     "last_fence": fence}
+        if entry is not None and entry.get("releases"):
+            # The append-only release ledger survives a successor claim;
+            # only the mutable occupancy fields are rewritten. (The retired
+            # mutable released_binding is dropped, as before -- that erasure
+            # is exactly what the ledger replaces.)
+            occupancy["releases"] = entry["releases"]
+        updated = dict(
+            self.bindings[self.slug],
+            lead_seen=sorted({*seen, key}),
+            lead_ws=dict(ws_map, **{key: occupancy}),
+        )
+        self.bindings = dict(self.bindings, **{self.slug: updated})
+        atomic_json_at(self.registry_fd, "bindings.json", self.bindings)
         record = {
             "schema_version": 1,
             "session_id": session,
@@ -726,6 +896,7 @@ class OwnerTransaction:
             "control_tier": "lead",
             "workspace_root": workspace_root,
             "binding_id": binding_id,
+            "generation": generation,
         }
         parent = self._owner_parent(create=True)
         try:
@@ -741,10 +912,13 @@ class OwnerTransaction:
             lease = self.lead_read(workspace_root)
         except ValueError:
             return False
+        if lease is None or not _valid_lead_lease(lease):
+            return False
+        entry = self.bindings[self.slug].get("lead_ws", {}).get(
+            lead_lease_key(workspace_root)
+        )
         return (
             type(fence) is int
-            and lease is not None
-            and _valid_lead_lease(lease)
             and lease["session_id"] == session
             and lease["fence"] == fence
             and lease.get("account_id") == self.account_id
@@ -752,6 +926,15 @@ class OwnerTransaction:
             # the same workspace must not authorize under a predecessor's
             # still-claimed binding.
             and (binding_id is None or lease["binding_id"] == binding_id)
+            # The durable registry outranks the lease file everywhere: the
+            # entry must name this lease's binding at this exact fence and
+            # generation, or a replayed predecessor lease could authorize
+            # lead-fenced writes into a superseded namespace.
+            and entry is not None
+            and entry["binding_id"] == lease["binding_id"]
+            and entry["last_fence"] == lease["fence"]
+            and (lease.get("generation") is None
+                 or entry["generation"] == lease["generation"])
         )
 
     def lead_refresh(self, session, fence, workspace_root):
@@ -765,6 +948,179 @@ class OwnerTransaction:
         finally:
             os.close(parent)
         return True
+
+    def lead_release(self, workspace_root, expected_binding=None, force=False):
+        """Remove a workspace's lead lease and durably record the release.
+
+        The explicit-recovery counterpart to lead_claim's missing-initialized
+        refusal: after lead_release, a later claim on the same path resumes
+        the fence chain with a fresh generation instead of raising. Returns
+        True when a lease file was removed, False when nothing was on disk
+        (idempotent re-run). A valid lease naming a different binding is
+        refused unless expected_binding is None; a corrupt lease requires
+        force=True (the caller asserts operator-level recovery). The registry
+        occupancy is checked INDEPENDENTLY of the lease file: when the file
+        is absent or corrupt, a lead_ws entry naming a binding other than
+        expected_binding refuses the release even with force -- deleting a
+        successor's lease must never let a predecessor's teardown clear the
+        successor's occupancy.
+
+        Release attribution is the entry's append-only ledger ("releases":
+        generation -> binding), written ONLY here, in the SAME atomic
+        registry write that clears the occupancy, and only on the
+        occupied->released transition. An already-released entry is
+        cleanup-only: a leftover or replayed lease file is removed, but
+        nothing is appended and nothing is rewritten -- a replayed
+        predecessor teardown can never rewrite attribution."""
+        name = self._lead_name(workspace_root)
+        key = lead_lease_key(workspace_root)
+        self.assert_current()
+        try:
+            old = self.lead_read(workspace_root)
+        except ValueError:
+            old = None
+            if not force:
+                raise ValueError("corrupt lead lease; pass force to release")
+        if old is not None and not _valid_lead_lease(old):
+            if not force:
+                raise ValueError("corrupt lead lease; pass force to release")
+            old = None
+        if (
+            old is not None
+            and expected_binding is not None
+            and old["binding_id"] != expected_binding
+        ):
+            raise ValueError("lease names a different binding")
+        ws_map = self.bindings[self.slug].get("lead_ws", {})
+        entry = ws_map.get(key)
+        if (
+            entry is not None
+            and entry["binding_id"] is not None
+            and old is not None
+            and old["binding_id"] != entry["binding_id"]
+        ):
+            # The registry determines attribution for an occupied entry; a
+            # valid lease naming a DIFFERENT binding is conflicting evidence
+            # (a replayed file, or a torn claim), never a source to pair
+            # with the registry's generation -- even with no expectation.
+            raise ValueError(
+                "lease conflicts with registry occupancy; "
+                "explicit recovery required"
+            )
+        if (
+            entry is not None
+            and entry["binding_id"] is not None
+            and expected_binding is not None
+            and entry["binding_id"] != expected_binding
+        ):
+            # Registry occupancy outranks the (possibly deleted or corrupt)
+            # lease file; force does not override another binding's occupancy.
+            raise ValueError("workspace is occupied by another binding")
+        if entry is not None and entry["binding_id"] is None:
+            # Already released: cleanup-only. Remove a leftover/replayed
+            # lease file if present, but never touch the entry or its
+            # ledger -- appending here would invent history for a
+            # generation whose occupied->released transition this call
+            # never observed.
+            return self._unlink_lease(name)
+        # High-water: the registry entry's counters never move backward,
+        # even when the lease file being released is a replayed older copy.
+        fences = [
+            v
+            for v in (
+                old["fence"] if old else None,
+                entry["last_fence"] if entry else None,
+            )
+            if v is not None
+        ]
+        last_fence = max(fences) if fences else None
+        gens = [
+            v
+            for v in (
+                (old or {}).get("generation"),
+                entry["generation"] if entry else None,
+            )
+            if v is not None
+        ]
+        generation = max(gens) if gens else None
+        if last_fence is None or generation is None:
+            # No readable fence to resume from: a never-claimed workspace is a
+            # no-op; anything else (pre-generation legacy, corrupt without
+            # registry backing) needs explicit repair, not a silent release.
+            if entry is None and old is None and not self._lease_file_exists(name):
+                return False
+            if last_fence is not None and generation is None:
+                raise ValueError(
+                    "legacy lease has no recorded generation; "
+                    "explicit recovery required"
+                )
+            raise ValueError("release requires a recorded fence; explicit recovery")
+        seen = self.bindings[self.slug].get("lead_seen", [])
+        # Attribution rides the SAME atomic registry write as the release.
+        # For an occupied entry the registry is the authority: its binding
+        # at its generation (a lease's identity is never paired with the
+        # registry's generation). With no entry at all, the caller's
+        # expectation or the lease file is the only evidence. First-writer-
+        # wins: an existing ledger key is never overwritten.
+        if entry is not None:
+            released_binding = entry["binding_id"]
+            released_generation = entry["generation"]
+        else:
+            released_binding = expected_binding
+            if released_binding is None:
+                released_binding = (old or {}).get("binding_id")
+            released_generation = generation
+        releases = dict((entry or {}).get("releases", {}))
+        if released_binding is not None and str(released_generation) not in releases:
+            releases[str(released_generation)] = released_binding
+        released_entry = {"generation": generation, "binding_id": None,
+                          "last_fence": last_fence}
+        if releases:
+            released_entry["releases"] = releases
+        updated = dict(
+            self.bindings[self.slug],
+            lead_seen=sorted({*seen, key}),
+            lead_ws=dict(ws_map, **{key: released_entry}),
+        )
+        if entry is None:
+            # No registry entry backs this release: the lease file is the
+            # ONLY evidence, so the entry+ledger write must land BEFORE the
+            # unlink -- a crash between the two must never destroy it.
+            self.bindings = dict(self.bindings, **{self.slug: updated})
+            atomic_json_at(self.registry_fd, "bindings.json", self.bindings)
+            return self._unlink_lease(name)
+        # An entry exists: it survives a crash after the unlink, and the
+        # retry re-runs the release, so unlink-then-registry stays.
+        removed = self._unlink_lease(name)
+        self.bindings = dict(self.bindings, **{self.slug: updated})
+        atomic_json_at(self.registry_fd, "bindings.json", self.bindings)
+        return removed
+
+    def _unlink_lease(self, name):
+        parent = self._owner_parent()
+        if parent is None:
+            return False
+        try:
+            self.assert_current()
+            try:
+                os.unlink(name, dir_fd=parent)
+                return True
+            except FileNotFoundError:
+                return False
+        finally:
+            os.close(parent)
+
+    def _lease_file_exists(self, name):
+        parent = self._owner_parent()
+        if parent is None:
+            return False
+        try:
+            os.stat(name, dir_fd=parent, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(parent)
 
 
 @contextlib.contextmanager
