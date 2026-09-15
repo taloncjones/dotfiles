@@ -174,9 +174,9 @@ purposes. Absence of evidence is never refutation.
 REFUTED findings are dropped outright: never recorded, never carried forward.
 CONFIRMED and UNRESOLVED findings are posted.
 
-Apply confirmed fixes within existing user authorization; otherwise ask before
-editing source files. After all readers finish, remove only this run's
-snapshots:
+Apply confirmed fixes within existing user authorization, after the round's
+comment is posted (see Rounds and continuity); otherwise ask before editing
+source files. After all readers finish, remove only this run's snapshots:
 
 ```bash
 uv run --no-project python "$REVIEW_HELPER" cleanup --manifest "$MANIFEST"
@@ -224,6 +224,11 @@ Post the round's comment first (findings table + marker), **before** committing
 any fix; then apply confirmed fixes with verified repros, re-run the affected
 tests, commit, push, and run the next round at the new head. A round that
 leaves no blocking finding ends the loop with APPROVE.
+
+When a round's blocking findings cluster across more than one subsystem, the
+round output MAY carry a `RECOMMEND SPLIT` line naming the seams; raise the
+split question with the user immediately after that round and pause the loop on
+their answer.
 
 **Seat evidence rule.** Every seat -- both finder halves, the attacker, the
 verification seat -- counts only when its runtime artifact exists: the Codex
@@ -334,9 +339,9 @@ fails the gate closed. It is never skipped in favour of an older comment,
 because skipping it would let a truncated CHANGES expose a superseded APPROVE.
 
 The marker line must be exactly one per comment, unindented, and outside the
-table and any code fence, so `scripts/pr_ready_gate.py` accepts it -- the gate
-and `ship`'s resume rule ignore quoted, fenced, indented, multiply-markered, or
-other-author comments.
+table and any code fence, so `scripts/pr_ready_gate.py` accepts it. A quoted,
+fenced, indented or other-author marker is invisible to the gate; a latest
+comment carrying more than one marker line fails the gate closed.
 
 **Emit APPROVE only for a snapshot that equals the committed head.** `prepare`
 folds staged and unstaged changes into the reviewed tree, but the marker's `sha`

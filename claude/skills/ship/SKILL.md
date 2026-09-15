@@ -48,8 +48,7 @@ only proposes whatever cleanup is actually left.
 1. **Co-review.** Invoke the `co-review` skill on the target PR and run its
    bounded re-review loop to APPROVE: fix all confirmed findings with verified
    repros, re-run affected tests, push, then re-freeze and re-review until a
-   complete round is clean (bounded by co-review's own per-type round caps;
-   escalate if it does not converge).
+   round leaves no blocking finding; escalate if it does not converge.
    Compute the PR target with `gh pr view --json baseRefName` and pass
    `--base-ref <baseRefName>` so the review diffs against the real merge-base;
    warn if a supplied or local base diverges from the resolved target. Every PR
