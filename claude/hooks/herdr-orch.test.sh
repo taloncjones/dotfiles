@@ -333,6 +333,62 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
 test -f "$root/herdr-orch/slug-x/tasks/PROJ-1.json"
 SH
 
+check "write-task resolver: carry-forward, [] on first write, per-path row rule" <<PY
+$LOAD
+import pathlib
+
+tmp = pathlib.Path(tempfile.mkdtemp())
+dest = tmp / "PROJ-1.json"
+
+# First write with no workers key resolves to [].
+assert c.resolve_task_workers({"task_id": "PROJ-1"}, dest, False) == []
+
+# An explicit list is returned as given, and is not read from prior.
+rows = [{"role": "impl", "phase": "implement"}]
+assert c.resolve_task_workers({"task_id": "PROJ-1", "workers": rows}, dest, False) == rows
+
+# With a prior record present, an omitted key carries the prior list forward.
+dest.write_text(json.dumps({"task_id": "PROJ-1", "workers": rows}))
+assert c.resolve_task_workers({"task_id": "PROJ-1"}, dest, False) == rows
+
+# Inherited rows are validated too: a phased row carried into a BOUND write is
+# refused, because outstanding_descendants would read it as unreadable.
+try:
+    c.resolve_task_workers({"task_id": "PROJ-1"}, dest, True)
+    raise AssertionError("bound carry-forward must validate inherited rows")
+except SystemExit as exc:
+    assert exc.code == 2, exc.code
+
+# A corrupt prior refuses only when the key is omitted; an explicit list repairs.
+dest.write_text("{ not json")
+assert c.resolve_task_workers({"task_id": "PROJ-1", "workers": []}, dest, False) == []
+try:
+    c.resolve_task_workers({"task_id": "PROJ-1"}, dest, False)
+    raise AssertionError("corrupt prior with omitted workers must refuse")
+except SystemExit as exc:
+    assert exc.code == 2, exc.code
+
+# Row rule: unbound needs a phase key; bound needs the full native tuple.
+loose = [{"role": "review"}]
+phased = [{"role": "review", "phase": "review"}]
+native = [{
+    "role": "review", "launch_id": "L1", "phase": "review", "runtime": "claude",
+    "workspace_id": "w1", "pane_id": "p1", "source_head_sha": "a" * 40,
+}]
+fresh = tmp / "PROJ-2.json"
+for rows_in, bound, ok in (
+    (loose, False, False), (phased, False, True), (native, False, True),
+    (phased, True, False), (native, True, True), ([], True, True),
+    ("nope", False, False),
+):
+    try:
+        c.resolve_task_workers({"task_id": "PROJ-2", "workers": rows_in}, fresh, bound)
+        assert ok, (rows_in, bound)
+    except SystemExit as exc:
+        assert not ok, (rows_in, bound)
+        assert exc.code == 2, exc.code
+PY
+
 check "CLI write-index rejects a non-dict payload (would orphan the workspace)" <<'SH'
 root=$(mktemp -d)
 f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \

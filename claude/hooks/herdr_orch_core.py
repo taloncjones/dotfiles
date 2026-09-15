@@ -2064,6 +2064,63 @@ def _valid_task_shape(task) -> bool:
     return all(isinstance(w, dict) and "phase" in w for w in workers)
 
 
+def _phased_worker_row(row) -> bool:
+    """The unbound row rule, matching what _valid_task_shape requires."""
+    return isinstance(row, dict) and "phase" in row
+
+
+def _native_worker_row(row) -> bool:
+    """The bound row rule: the native dispatch identity that
+    outstanding_descendants requires of binding-scoped history -- a known
+    phase, a runtime key, and a non-empty string for every attempt field."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("phase") not in DESCENDANT_PHASES or "runtime" not in row:
+        return False
+    return all(_nonempty_str(row.get(key)) for key in ATTEMPT_FIELDS)
+
+
+def resolve_task_workers(rec, dest, bound):
+    """Resolve the workers list write-task should persist for `rec`.
+
+    A present list is taken as given, so an explicit list repairs a corrupt
+    record without the writer having to read it. An absent key carries the
+    prior record's list forward -- resolving to [] only when no prior file
+    exists -- so an omitted key can never launder a dispatched record into
+    "no attempt", and refuses when a prior exists but cannot be read or is
+    malformed.
+
+    Supplied and inherited rows pass through the same rule, so carry-forward
+    can never smuggle in a row the write itself would have been refused for.
+    The rule is per path because the readers differ: an unbound record is read
+    by _valid_task_shape, a bound one additionally by outstanding_descendants,
+    which is native-only."""
+    if "workers" in rec:
+        workers = rec["workers"]
+        source = "task workers"
+    else:
+        try:
+            prior = json.loads(read_payload_text(dest))
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError):
+            _require(False, "task record is unreadable; pass an explicit workers list")
+        _require(
+            _valid_task_shape(prior),
+            "task record is malformed; pass an explicit workers list",
+        )
+        workers = prior["workers"]
+        source = "inherited task workers"
+    _require(isinstance(workers, list), f"{source} must be a list")
+    _require(
+        all((_native_worker_row if bound else _phased_worker_row)(row)
+            for row in workers),
+        f"{source} must be native dispatch rows" if bound
+        else f"{source} rows must be objects carrying a phase",
+    )
+    return workers
+
+
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
