@@ -221,6 +221,33 @@ class CliTests(unittest.TestCase):
 
 
 class FailClosedSelectionTests(unittest.TestCase):
+    def test_truncated_before_sha_does_not_expose_older_approve(self):
+        # Truncated so early that the prefix itself is cut mid-token ("...sh").
+        # Reproduces the leak this task closes: a naive candidate check
+        # derived from the marker regex loses the prefix match here and lets
+        # selection fall through to the older APPROVE.
+        comments = [
+            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment("<!-- co-review: sh", created_at="2026-09-11T11:00:00Z", cid=2),
+        ]
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker(comments, ME)
+        decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+        self.assertIn("ambiguous or unparsable", reason)
+
+    def test_truncated_at_bare_prefix_does_not_expose_older_approve(self):
+        # Truncated to exactly the literal prefix, nothing after it.
+        comments = [
+            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment("<!-- co-review: ", created_at="2026-09-11T11:00:00Z", cid=2),
+        ]
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker(comments, ME)
+        decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+        self.assertIn("ambiguous or unparsable", reason)
+
     def test_truncated_latest_changes_does_not_expose_older_approve(self):
         comments = [
             comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),

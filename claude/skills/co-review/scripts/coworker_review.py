@@ -21,6 +21,10 @@ COWORKER_MARKER_RE = re.compile(
     r"base_ref_tip=(?P<base_ref_tip>[0-9a-f]{40}) "
     r"verdict=(?P<verdict>APPROVE|CHANGES) round=(?P<round>\d+) -->$"
 )
+# See pr_ready_gate.MARKER_PREFIX: a literal, unparsed prefix so a truncated
+# coworker marker is still recognized as "a round comment that failed to
+# parse" rather than falling through as ordinary text.
+COWORKER_MARKER_PREFIX = "<!-- co-review-coworker: "
 
 
 def build_marker(sha, base, base_ref, base_ref_tip, verdict, rnd) -> str:
@@ -32,7 +36,13 @@ def build_marker(sha, base, base_ref, base_ref_tip, verdict, rnd) -> str:
 
 def select_coworker_marker(comments, trusted_authors):
     """Latest trusted single coworker marker, or None. Fail-closed."""
-    return _gate.select_marker(comments, set(trusted_authors), COWORKER_MARKER_RE)
+    return _gate.select_marker(
+        comments,
+        set(trusted_authors),
+        COWORKER_MARKER_RE,
+        COWORKER_MARKER_PREFIX,
+        require_findings=False,
+    )
 
 
 # Severity drives blocking. Anything not a recognized advisory level is

@@ -11,6 +11,12 @@ MARKER_RE = re.compile(
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
     r"round=(?P<round>\d+) -->$"
 )
+# The literal, unparsed prefix that marks a line as belonging to this marker
+# family -- checked with a plain startswith, not derived from MARKER_RE, so a
+# truncated marker (cut off anywhere after this prefix) is still recognized as
+# "a round comment that failed to parse" instead of falling through as
+# ordinary text and letting selection revive an older comment.
+MARKER_PREFIX = "<!-- co-review: "
 # A fence opener may be indented up to 3 spaces and carry an info string.
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}([`~])\1{2,}")
 # Markdown recognizes only CRLF/CR/LF as line breaks; str.splitlines() also
@@ -19,19 +25,6 @@ _FENCE_OPEN_RE = re.compile(r"^ {0,3}([`~])\1{2,}")
 _LINE_RE = re.compile(r"\r\n|\r|\n")
 
 _NO_FINDINGS = "No actionable findings."
-
-
-def _candidate_re_for(marker_re: re.Pattern) -> re.Pattern:
-    """A regex that matches marker_re's own family shape, whether or not the
-    line fully parses.
-
-    Derived from marker_re's fixed prefix (up to its first named group) rather
-    than hardcoded, because this module reuses select_marker/_scan_body for
-    more than one marker family (coworker_review.py passes its own
-    COWORKER_MARKER_RE). A fixed prefix would either miss that family's
-    truncated markers or, worse, mistake one family's marker for the other's.
-    """
-    return re.compile(marker_re.pattern.split("(?P<", 1)[0])
 
 
 class GateInputError(Exception):
@@ -96,33 +89,35 @@ def _top_level_lines(body: str):
         yield raw
 
 
-def _scan_body(body: str, marker_re=MARKER_RE) -> tuple[int, list[dict]]:
+def _scan_body(
+    body: str, marker_re=MARKER_RE, prefix: str = MARKER_PREFIX
+) -> tuple[int, list[dict]]:
     """(marker-shaped line count, valid markers) on top-level lines.
 
-    The count includes lines that begin like a marker but do not parse, which
-    is what lets selection tell "this is a malformed round comment" apart from
-    "this is an ordinary comment".
+    The count includes lines that begin with ``prefix`` but do not parse as
+    marker_re, which is what lets selection tell "this is a malformed round
+    comment" apart from "this is an ordinary comment". ``prefix`` is a plain
+    literal, not derived from marker_re, so a marker truncated anywhere after
+    the prefix -- even mid-prefix-adjacent text -- still counts as a
+    candidate instead of silently reading as ordinary text.
     """
-    candidate_re = _candidate_re_for(marker_re)
     candidates = 0
     found: list[dict] = []
     for raw in _top_level_lines(body):
         # The marker must sit at column 0: any leading whitespace (space or tab,
-        # in any mix) is Markdown code indentation. Matching the unstripped line
-        # against an anchored pattern enforces that; allow only trailing space.
-        line = raw.rstrip(" \t")  # ASCII trailing space only
-        if not candidate_re.match(line):
+        # in any mix) is Markdown code indentation. Checking the unstripped raw
+        # line enforces that. The candidate check must run before any trailing
+        # strip: a marker truncated to exactly `prefix` ends in the prefix's
+        # own trailing space, and stripping first would eat that space and
+        # miss the candidate.
+        if not raw.startswith(prefix):
             continue
         candidates += 1
+        line = raw.rstrip(" \t")  # ASCII trailing space only, for the $-anchored match
         hit = marker_re.match(line)
         if hit:
             found.append(hit.groupdict())
     return candidates, found
-
-
-def _markers_in_body(body: str, marker_re=MARKER_RE) -> list[dict]:
-    """Every valid marker on an unindented, unquoted, unfenced top-level line."""
-    return _scan_body(body, marker_re)[1]
 
 
 def _has_findings_body(body: str) -> bool:
@@ -154,12 +149,22 @@ def _parse_instant(value) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def select_marker(comments, trusted_authors: set[str], marker_re=MARKER_RE) -> dict | None:
+def select_marker(
+    comments,
+    trusted_authors: set[str],
+    marker_re=MARKER_RE,
+    prefix: str = MARKER_PREFIX,
+    require_findings: bool = True,
+) -> dict | None:
     """Latest trusted round comment's marker, or None. Fail-closed.
 
     Selection precedes validation. The newest trusted comment that looks like a
-    round comment wins; if it is malformed, that is an error, never a reason to
-    fall back to an older -- possibly approving -- comment.
+    round comment (starts with ``prefix``) wins; if it is malformed, that is an
+    error, never a reason to fall back to an older -- possibly approving --
+    comment. ``require_findings`` gates the findings-table check: it applies to
+    the pr-ready currency marker's round comments, not to other marker
+    families (e.g. coworker-review markers) that share this scanner but do not
+    carry that convention.
     """
     if not isinstance(comments, list):
         raise GateInputError("comments must be a JSON array")
@@ -170,7 +175,7 @@ def select_marker(comments, trusted_authors: set[str], marker_re=MARKER_RE) -> d
         if entry.get("author") not in trusted_authors:
             continue
         body = entry.get("body", "") or ""
-        shaped, markers = _scan_body(body, marker_re)
+        shaped, markers = _scan_body(body, marker_re, prefix)
         if shaped == 0:
             continue  # an ordinary comment, not a round comment
         instant = _parse_instant(entry.get("created_at"))
@@ -187,10 +192,7 @@ def select_marker(comments, trusted_authors: set[str], marker_re=MARKER_RE) -> d
     _, _, shaped, markers, body = candidates[-1]
     if shaped != 1 or len(markers) != 1:
         raise GateInputError("latest co-review comment has an ambiguous or unparsable marker")
-    # The findings-table convention belongs to the pr-ready currency marker's
-    # round comments; other marker families sharing this scanner (the
-    # coworker-review marker) do not carry that convention.
-    if marker_re is MARKER_RE and not _has_findings_body(body):
+    if require_findings and not _has_findings_body(body):
         raise GateInputError("latest co-review comment has a marker but no findings table")
     return markers[0]
 
