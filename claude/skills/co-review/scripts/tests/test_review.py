@@ -395,23 +395,6 @@ class ReviewHelperTests(unittest.TestCase):
 
         self.assertTrue(stray.exists())
 
-    def test_cleanup_reports_unlink_failure_as_review_error(self) -> None:
-        manifest_path, manifest = self.prepare()
-        snapshot = Path(manifest["snapshot"]["codex_root"])
-        cache_dir = snapshot / "pkg" / "__pycache__"
-        cache_dir.mkdir(parents=True)
-        cache = cache_dir / "mod.cpython-313.pyc"
-        cache.write_bytes(b"\x00")
-        cache_dir.chmod(0o555)
-        try:
-            result = self.command(
-                "cleanup", "--manifest", str(manifest_path), expect=2
-            )
-            self.assertIn(str(cache), result.stdout + result.stderr)
-        finally:
-            cache_dir.chmod(0o755)
-        self.assertTrue(cache.exists())
-
     def test_cleanup_refuses_a_regular_file_named_dot_venv(self) -> None:
         manifest_path, manifest = self.prepare()
         snapshot = Path(manifest["snapshot"]["codex_root"])

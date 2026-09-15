@@ -695,34 +695,17 @@ def cleanup(args: argparse.Namespace) -> dict[str, Any]:
     marker = output_dir / manifest["ownership"]["marker"]
     if set(output_dir.iterdir()) != {manifest_path, marker, codex_root, claude_root}:
         raise ReviewError("owned output directory contains unexpected paths")
-    for root in (claude_root, codex_root):
-        resolved_root = root.resolve()
-        for relative in untracked_paths(root, include_ignored=True):
-            if not is_disposable_artifact(relative):
-                continue
-            target = root / relative
-            if target.is_dir() and not target.is_symlink():
-                continue
-            # Resolve the PARENT directory only -- never the leaf, so a
-            # disposable leaf symlink still gets unlinked even when its own
-            # target lives outside the snapshot. A parent that a swapped
-            # directory has redirected outside the snapshot root is skipped.
-            resolved_parent = target.parent.resolve()
-            if resolved_parent != resolved_root and (
-                resolved_root not in resolved_parent.parents
-            ):
-                continue
-            try:
-                target.unlink()
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                raise ReviewError(
-                    f"cannot remove disposable artifact: {target}"
-                ) from error
     git(claude_root, "reset", "--hard", manifest["source"]["base"])
-    git(repo, "worktree", "remove", str(claude_root))
-    git(repo, "worktree", "remove", str(codex_root))
+    # verify_manifest(..., tolerate_disposable=True) above already refused
+    # unless every untracked path in both snapshots is an allow-listed
+    # disposable artifact (is_disposable_artifact), so --force here only
+    # removes content that check just approved -- it is not forcing past a
+    # guard, the guard already ran. Without --force, `git worktree remove`
+    # refuses whenever a seat executed code (a .venv or __pycache__ is
+    # untracked-and-not-ignored on any machine lacking a global Python
+    # ignore file), which is the ordinary case this cleanup exists for.
+    git(repo, "worktree", "remove", "--force", str(claude_root))
+    git(repo, "worktree", "remove", "--force", str(codex_root))
     marker.unlink()
     manifest_path.unlink()
     shutil.rmtree(output_dir)

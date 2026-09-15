@@ -199,18 +199,22 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(verdict, "FAIL")
         self.assertIn("fail closed", why)
 
-    def test_pass_marker_with_no_deferred_field_still_parses(self):
-        # Markers written before this field existed must still parse and pass.
+    def test_pass_marker_with_no_deferred_field_is_legacy_unknown(self):
+        # Markers written before this field existed must still parse and pass,
+        # but the reason must say the deferral count is unknown rather than
+        # imply it was zero -- absent is not the same as zero.
         verdict, why = gate.decide([comment(marker())], ME, SHA_A, BASE_A, REF)
         self.assertEqual(verdict, "PASS")
-        self.assertNotIn("deferred", why)
+        self.assertIn("legacy", why)
+        self.assertIn("unknown", why)
 
     def test_pass_deferred_zero_is_an_ordinary_pass(self):
         verdict, why = gate.decide(
             [comment(marker(deferred=0))], ME, SHA_A, BASE_A, REF
         )
         self.assertEqual(verdict, "PASS")
-        self.assertNotIn("deferred", why)
+        self.assertIn("nothing deferred", why)
+        self.assertNotIn("legacy", why)
 
     def test_pass_deferred_count_named_in_reason(self):
         verdict, why = gate.decide(
@@ -219,6 +223,20 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(verdict, "PASS")
         self.assertIn("2", why)
         self.assertIn("deferred", why)
+        # The count covers envelope AND floor deferrals; a reachable major
+        # deferred by the round floor is not "unreachable", so the reason
+        # must not claim a reason the count does not carry.
+        self.assertNotIn("unreachable", why)
+
+    def test_oversized_deferred_digit_run_fails_to_match_marker(self):
+        # A trusted marker carrying a several-thousand-digit deferred count
+        # must not crash int() conversion; it should simply fail to match
+        # the marker pattern (bounded to 6 digits) so the gate falls back
+        # to "no marker" rather than raising.
+        oversized = marker(deferred="1" * 7)
+        verdict, why = gate.decide([comment(oversized)], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("run co-review", why)
 
 
 class CliTests(unittest.TestCase):
