@@ -310,12 +310,26 @@ marker as its own unindented top-level line:
 | -------- | --------------- | ----- | ------ | --- |
 | HIGH     | path/file.py:42 | ...   | open   | ... |
 
+Seats: <runner session ids / report paths>. Grouping: <subsystem order>.
+
 (Status is open, or RESOLVED for a carried blocker the verification seat
 discharged this round; "No actionable findings." replaces the table when the
 round is clean.)
 
 <!-- co-review: sha=<head> base=<merge-base> base_ref=<branch> verdict=<APPROVE|CHANGES> round=<n> target_tip=<tip> -->
 ```
+
+The `Seats:` line carries the seat-evidence rule's citations and the round's
+subsystem grouping. It is gate-neutral: a top-level line that does not begin
+with the marker prefix is ignored by the marker scanner, and the `|` table row
+(or the clean sentence) already satisfies the gate's findings-body check.
+
+The findings body is matched mechanically, not read. `pr_ready_gate.py` accepts
+only an unindented top-level line that begins with `|`, or one equal to the
+literal `No actionable findings.` byte for byte. Bolding that sentence,
+dropping its period, indenting it, or rewording it fails the gate closed: it
+reports a marker with no findings table, /pr-ready says re-run co-review, and
+rerunning a clean round reproduces the same failure every time.
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `round` the count of prior
