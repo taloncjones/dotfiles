@@ -649,16 +649,13 @@ all -- an approving comment with any deferred lineage must still list every
 one of them, with its reachability and evidence, even though the round
 otherwise passes)
 
-<!-- co-review: sha=<reviewed-head-sha> base=<resolved-merge-base> base_ref=<baseRefName> verdict=<APPROVE|CHANGES> round=<n> deferred=<n> -->
+<!-- co-review: sha=<reviewed-head-sha> base=<resolved-merge-base> base_ref=<baseRefName> verdict=<APPROVE|CHANGES> round=<n> -->
 ```
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `verdict` APPROVE only on a
 complete round with zero effective blockers ((a) clean, (b) empty);
-deferred lineages do not forfeit APPROVE. `deferred` is the number of
-lineages deferred in that round (envelope or floor) -- so a reader of the
-marker alone, without the comment body, learns the approval was not
-unconditional.
+deferred lineages do not forfeit APPROVE.
 
 **Emit APPROVE only for a snapshot that equals the committed head.** `prepare`
 folds staged and unstaged changes into the reviewed tree, but the marker's `sha`
