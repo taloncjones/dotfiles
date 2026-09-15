@@ -353,7 +353,12 @@ current-phase attempt's complete tuple. Partial native tuples are invalid;
 legacy fallback applies only to records that predate native attempts.
 
 `write-task` enforces that contract at the writer for every row NEW in a write,
-so no write can add a row its readers reject. A first write that omits
+so no write can add a row whose SHAPE its readers reject. Identity field values
+are still only checked at settlement: `_native_worker_row` requires each
+attempt field to be a non-empty string, while `attempt_matches` additionally
+requires `runtime` to be `claude` or `codex` and `source_head_sha` to match
+`SHA40_RE`. A row with `runtime: "other"` is therefore accepted by the writer
+and later refused by `emit-done`, so it never settles. A first write that omits
 `workers` persists `[]` rather than a record carrying no `workers` key. A later
 write that omits `workers` inherits the prior list rather than clearing it, so
 only an explicit list can change dispatch history. New rows must carry a
@@ -368,6 +373,17 @@ stranding it. Such a record is still persisted with that legacy row, and
 blocked until the row itself is repaired. An unbound write that omits `workers`
 also inherits its prior rows unchecked, but that branch first requires
 `_valid_task_shape(prior)`, so those rows are reader-valid by construction.
+
+Two pre-contract record shapes need a manual repair, and both are recoverable
+on the unbound path only. A record whose `workers` holds a row with no `phase`,
+and a record persisted with no `workers` key at all, are both refused whichever
+route is taken: supplying the full record trips the new-row rule, and omitting
+`workers` trips the prior-shape check. Recover by editing the record -- add a
+`phase` to every stale row, or insert `"workers": []` -- then write it
+explicitly. The unbound path has no append-only prefix, so a corrected explicit
+list is accepted. On the binding-scoped path neither route works and
+`teardown-binding` refuses before `--descendants-terminated` is consulted, so
+the record must be repaired on disk first.
 
 A refused dispatch row records nothing. Panes are dispatched before their row
 is written, so a `write-task` that exits 2 on a worker row leaves a live pane
