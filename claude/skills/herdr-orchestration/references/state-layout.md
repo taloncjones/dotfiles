@@ -360,13 +360,21 @@ only an explicit list can change dispatch history. New rows must carry a
 `phase` on the unbound path and the full native tuple on the binding-scoped
 path.
 
-The pass-through is binding-scoped only. On that path the append-only prefix is
-inherited unchanged and is not re-checked, which keeps a record holding a
-pre-contract legacy row writable rather than stranding it. Such a record is
-still persisted with that legacy row, and `outstanding_descendants` still reads
-it as `<unreadable>`, so teardown stays blocked until the row itself is
-repaired. The unbound path has no append-only prefix and re-checks every
-supplied row.
+The pass-through of a row its reader would refuse is binding-scoped only. On
+that path the append-only prefix is inherited unchanged and is not re-checked,
+which keeps a record holding a pre-contract legacy row writable rather than
+stranding it. Such a record is still persisted with that legacy row, and
+`outstanding_descendants` still reads it as `<unreadable>`, so teardown stays
+blocked until the row itself is repaired. An unbound write that omits `workers`
+also inherits its prior rows unchecked, but that branch first requires
+`_valid_task_shape(prior)`, so those rows are reader-valid by construction.
+
+A refused dispatch row records nothing. Panes are dispatched before their row
+is written, so a `write-task` that exits 2 on a worker row leaves a live pane
+with no entry in the task record -- and `outstanding_descendants` is teardown's
+only evidence of descendants. Terminate the pane or correct and re-write the
+row before tearing the binding down; teardown cannot see an attempt that was
+never recorded.
 
 Planning has a separate `plan_artifacts` list in both task and completion:
 exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.

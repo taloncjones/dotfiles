@@ -413,9 +413,11 @@ for label, payload in (
         assert exc.code == 2, exc.code
     assert "append-only" in err.getvalue(), (label, err.getvalue())
 
-# The prefix persisted is the RECORD's own rows, not the caller's copy: `==`
+# The prefix persisted is the RECORD's own rows, not the caller's copy: '=='
 # holds between 1 and True, so an accepted prefix could otherwise change type.
-# Asserted as a CONTRAST, because `kept == [...True...]` holds either way.
+# Asserted as a CONTRAST, because an equality against the True row would hold
+# either way. Keep backticks out of this block: the heredoc is unquoted, so
+# the shell would run backticked text as a command substitution.
 typed = {"task_id": "T", "workers": [{"phase": "implement", "flag": 1}]}
 supplied = {"task_id": "T", "workers": [{"phase": "implement", "flag": True}]}
 # Unbound never consults prior, so it returns the caller's bool unchanged.
@@ -4446,7 +4448,11 @@ json.dump(record, open(path, "w"))
 ' "$root/herdr-orch/$LF_SLUG/leads/$bidA/tasks/td-a.json"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
    --repo-slug "$LF_SLUG" --session SA --fence "$lfA" --binding "$bidA" \
-   --json '{"task_id":"td-a","attempt":null,"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}' 2>/dev/null; then exit 1; fi
+   --json '{"task_id":"td-a","attempt":null,"sequence":1,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"waiting","follow_ups":[]}}' 2>"$root/eA"; then exit 1; fi
+# The injected row must be what refuses it, not a stale fence or bad binding:
+# has_attempt_rows counts it as a dispatched attempt, so the null-attempt
+# envelope is rejected.
+grep -q 'null-attempt envelope is only for tasks with no dispatched implement attempt' "$root/eA"
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bidA/envelope.json"
 # binding B: a valid null-attempt envelope on a rowless task, THEN a malformed row
 # appears -> integrate is refused, binding stays claimed
@@ -4474,7 +4480,9 @@ record["workers"].append({"phase": "implement", "launch_id": "I2"})
 json.dump(record, open(path, "w"))
 ' "$root/herdr-orch/$LF_SLUG/leads/$bidB/tasks/td-b.json"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidB" 2>/dev/null; then exit 1; fi
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidB" 2>"$root/eB"; then exit 1; fi
+# Same: the injected row is the refusal, not some unrelated guard.
+grep -q 'null-attempt envelope is only for tasks with no dispatched implement attempt' "$root/eB"
 python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "claimed"
