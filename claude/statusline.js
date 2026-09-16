@@ -5,6 +5,9 @@
 //
 // In terminals that render OSC 8 hyperlinks the branch/worktree label is
 // clickable: it opens that checkout's root in the editor owning the terminal.
+// Claude Code's TUI captures the mouse, so a bare click never reaches the
+// terminal -- hold shift to hand the click over. Confirmed in Ghostty on
+// macOS, where cmd-shift-click on the label opens VS Code on that worktree.
 //
 // The git segment reflects the session's ANCHORED dir (workspace.current_dir),
 // never whatever a Bash command last `cd`'d into -- per-command cwd resets and
