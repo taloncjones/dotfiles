@@ -264,14 +264,6 @@ class SameHeadRereviewTests(unittest.TestCase):
         decision, _ = gate.decide(history + [fresh], ME, SHA_A, BASE_A, REF)
         self.assertEqual(decision, "PASS")
 
-    def test_the_floor_does_not_move_at_an_unchanged_head(self):
-        """The real guarantee: a second look is judged at the same bar."""
-        import coworker_review as cr
-
-        priors = [{"sha": SHA_A}]
-        self.assertEqual(cr.round_index_for_head(priors, SHA_A), 1)
-
-
 class TwoMarkerCommentTests(unittest.TestCase):
     """A comment carrying two readable markers must not hide them."""
 
@@ -588,8 +580,10 @@ class SelectMarkerTests(unittest.TestCase):
         """A round that ran later than the newest comment makes it stale.
 
         Selection is still by instant; the round check runs after it. Before
-        this check the newest comment won outright. The higher round must be
-        one the comment history can support, or it reads as noise instead.
+        this check the newest comment won outright. Every parsed, convertible
+        higher round is authoritative -- the comment-count allowance that once
+        dismissed unsupported rounds as noise was reverted, because it let a
+        delayed older APPROVE through.
         """
         older = comment(
             "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),

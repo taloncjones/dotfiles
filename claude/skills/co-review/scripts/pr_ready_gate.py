@@ -341,6 +341,9 @@ def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
         # disagreement the removed four-digit bound created.
         str(nxt)
     except ValueError:
+        # Do not interpolate `highest` itself -- at this boundary it is
+        # thousands of digits, and formatting it is the very operation that
+        # just failed.
         raise GateInputError(
             "co-review round numbering is exhausted; correct the comment "
             "claiming the highest round"
@@ -371,6 +374,7 @@ def _check_round_currency(selected: dict, candidates) -> None:
     replay it would catch.
     """
     selected_round = _marker_round(selected)
+
     # Bounding a claimed round by the comment count was tried and REVERTED. It
     # let a miscounted round-4 CHANGES be dismissed as noise, so a delayed
     # round-1 APPROVE passed -- trading a fail-closed wedge for a fail-open,
@@ -388,7 +392,7 @@ def _check_round_currency(selected: dict, candidates) -> None:
     # is editing or deleting the offending comment, which the error names. A
     # retry of the CURRENT round needs no special handling: it carries the same
     # round and the same verdict, so neither branch below fires.
-    for _, _, _, markers, _ in candidates:
+    for _, cid, _, markers, _ in candidates:
         # Iterate the PARSED markers, not one per comment. Skipping a whole
         # comment when it did not carry exactly one marker also hid a comment
         # carrying TWO readable markers, and those were then invisible here
@@ -399,12 +403,12 @@ def _check_round_currency(selected: dict, candidates) -> None:
         for other in markers:
             if other is selected:
                 continue
-            other_round = _marker_round(other)
+            other_round = _marker_round(other, cid)
             if other_round > selected_round:
                 raise GateInputError(
-                    "a later co-review round exists; the newest comment is "
-                    "stale (if that round number is a miscount, correct or "
-                    "delete that comment)"
+                    "a later co-review round exists (comment "
+                    f"{cid}); the newest comment is stale (if that round "
+                    "number is a miscount, correct or delete that comment)"
                 )
             if (
                 other_round == selected_round

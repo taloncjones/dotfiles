@@ -204,11 +204,19 @@ seat-disputed severity blocks at every round. An UNRESOLVED finding blocks
 exactly as a CONFIRMED one of its severity does. Findings the floor does not
 block are posted with Blocking=no and are NOT carried forward.
 
-Number the round with `pr_ready_gate.next_round_number(comments, {gh_user})`.
+Number the round with
+`pr_ready_gate.next_round_number(comments, {pr_author, gh_user})`.
 That is the publication ordinal and it stays monotonic even when the history is
 unreadable -- which is NOT the same number as the floor's round index below.
 Resetting both together wedges the PR: a round published after an unreadable
 history would claim a round already passed, and no pushed commit would clear it.
+
+**Use the same trusted set the gate uses** -- the PR author plus the
+authenticated `gh` user -- for numbering, history, the carried set and
+readiness. Reading the history with a narrower set than the gate trusts means
+publishing a round the gate then rejects as stale: a co-reviewer numbering only
+from their own comments restarts at 1 while the author's round 2 sits on the
+PR, and the baseline history misses evidence the gate can see.
 
 `all_markers` RAISES when any trusted marker on the PR is unparsable or has no
 findings table: such a history cannot be read safely, since a malformed first
@@ -218,7 +226,8 @@ reset the published round number; take that from `next_round_number`, which
 tolerates the same malformed markers. Resetting both is what would wedge the PR.
 
 Derive the round's inputs from the whole marker history, not from the latest
-marker: `pr_ready_gate.all_markers(comments, {gh_user})` returns every parsed
+marker: `pr_ready_gate.all_markers(comments, {pr_author, gh_user})` returns
+every parsed
 trusted marker in publication order, which is what `round_index_for_head` and
 `baseline_ok_from_markers` both take. `coworker_review.baseline_ok_from_markers`
 checks the first marker records a `baseline` and every later one repeats it;
@@ -483,7 +492,8 @@ the same failure every time.
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `round` whatever
-`pr_ready_gate.next_round_number(comments, {gh_user})` returns, and `verdict`
+`pr_ready_gate.next_round_number(comments, {pr_author, gh_user})` returns, and
+`verdict`
 APPROVE only when the round leaves no blocking finding and no undischarged
 carried blocker.
 
@@ -546,8 +556,11 @@ So the gate's equal-round check is NOT what guards this case -- it guards two
 publications racing at one ordinal. Do not rely on it to catch a re-review.
 
 An over-claimed round is cleared by the next round, which publishes a higher
-ordinal. Only a round that cannot be READ at all -- unconvertible to a number --
-stops every reader, and that comment has to be corrected.
+ordinal. Only a round that cannot be READ at all stops every reader, and that comment
+has to be corrected. Two shapes do it: a round no reader can convert to a
+number, and a round whose SUCCESSOR cannot be written -- at the interpreter's
+decimal-conversion boundary the highest round converts and the next one does
+not, so numbering is exhausted and the comment claiming it must be corrected.
 
 Two ways of softening this were tried and both reverted, for the same reason.
 Bounding a claimed round by the comment count let a miscounted higher round be
