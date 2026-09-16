@@ -7642,5 +7642,83 @@ assert d==['p1'], d
 "
 SH
 
+check "task-lead-status reports disabled and refuses admission on a fresh root" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-tls.git
+root=$(mktemp -d)
+out=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO")
+printf '%s' "$out" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["gate_enabled"] is False, d
+assert d["admit"] is False, d
+assert d["required"] == 1, d
+assert d["core"] == 1 and d["guard"] == 1, d
+assert isinstance(d["gate_reason"], str) and d["gate_reason"], d
+assert isinstance(d["admit_reason"], str) and d["admit_reason"], d
+'
+SH
+
+check "task-lead-status agrees with what a real claim would do" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-tlsa.git
+root=$(mktemp -d)
+# An enabled, fully-capable, identity-bearing gate. status must report
+# admit:true here, and a real claim must succeed. The two must never disagree:
+# status omitting repo_id while the claim path supplies it would produce
+# admit:false from status and a successful claim, which is worse than useless.
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+slug, repo = sys.argv[1:3]
+ctx = core.repository_context(repo)
+scope = core.account_scope(ctx["root"], "claude")
+rd = core.repo_dir(slug); rd.mkdir(parents=True, exist_ok=True)
+core.write_json_atomic(rd / "task-lead-gate.json", {
+    "schema_version": 1, "repo_slug": slug, "repo_id": ctx["repo_id"],
+    "account_id": scope["account_id"], "enabled": True})
+skill = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "skills", "herdr-orchestration")
+os.makedirs(skill, exist_ok=True)
+open(os.path.join(skill, "SKILL.md"), "w").write(
+    chr(60) + "!-- herdr-capabilities: " + json.dumps({"marker_version":1,"capability":1}) + " --" + chr(62) + chr(10))
+' "$LF_SLUG" "$LF_REPO"
+out=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO")
+printf '%s' "$out" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["gate_enabled"] is True, d
+assert d["admit"] is True, d
+'
+# Status said admit:true. Now prove a REAL claim agrees. Without this the test
+# only exercises the status handler, and the two could still diverge -- which
+# is the exact defect this case exists to catch. NO_SEED keeps the fixture from
+# overwriting the identity-bearing gate with a repo_id:None one.
+f=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-agree \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+test -n "$lf"
+python3 -c '
+import json, os, sys
+root, bid, slug = sys.argv[1:4]
+rec = json.load(open(os.path.join(root, "herdr-orch", slug, "bindings", bid + ".json")))
+assert rec["status"] == "claimed", rec
+gate = json.load(open(os.path.join(root, "herdr-orch", slug, "task-lead-gate.json")))
+assert gate["repo_id"] is not None, gate
+' "$root" "$bid" "$LF_SLUG"
+SH
+
+check "task-lead-status exits 0 even when leads are not admissible" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-tls0.git
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" >/dev/null
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

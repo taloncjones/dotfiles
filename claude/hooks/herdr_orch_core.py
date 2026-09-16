@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_runtime
 import herdr_bindings as bindings
+import herdr_capabilities as herdr_caps
 import herdr_coordination as coordination
 import herdr_envelope as envelope
 
@@ -2599,6 +2600,7 @@ def _main(argv=None) -> int:
     rl.add_argument("--stale-secs", type=int, default=900)
     rl.add_argument("--descendants-terminated", action="store_true")
     add("status")
+    add("task-lead-status")
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
@@ -4297,6 +4299,31 @@ def _main(argv=None) -> int:
         }
         print(json.dumps(result))
         return 0
+    if ns.cmd == "task-lead-status":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        context = repository_context(ns.repo_path or os.getcwd())
+        scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
+        config_dir = Path(scope["account_root"])
+        admit, admit_reason, levels = task_lead_admission(
+            rd, ns.repo_slug, scope["account_id"], config_dir,
+            context.get("repo_id")
+        )
+        enabled, gate_reason = herdr_caps.gate_enabled(
+            rd, ns.repo_slug, scope["account_id"], context.get("repo_id"))
+        print(json.dumps({
+            "gate_enabled": enabled,
+            "gate_reason": gate_reason,
+            "core": levels["core"],
+            "guard": levels["guard"],
+            "procedure": levels["procedure"],
+            "required": levels["required"],
+            "account_id": scope["account_id"],
+            "repo_slug": ns.repo_slug,
+            "admit": admit,
+            "admit_reason": admit_reason,
+        }, sort_keys=True))
+        return 0
     if ns.cmd == "should-dispatch-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -4618,6 +4645,37 @@ def _main(argv=None) -> int:
                 return 2
         return run_think(rd, ns, question, launch, add_dirs)
     return 2
+
+
+def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):
+    """(admit, reason, levels) for a lead claim in this repository.
+
+    Reads three advertised levels -- core's own constant, guard's constant
+    from the shared module, and the installed procedure's marker -- plus the
+    gate record. Refuses unless all three meet REQUIRED_CAPABILITY and the
+    gate is enabled. See the activation gate design, section 4.1, for why
+    core reads guard's constant and what that does and does not prove.
+    """
+    procedure = herdr_caps.procedure_capability(config_dir)
+    levels = {
+        "core": herdr_caps.CORE_CAPABILITY,
+        "guard": herdr_caps.GUARD_CAPABILITY,
+        "procedure": procedure,
+        "required": herdr_caps.REQUIRED_CAPABILITY,
+    }
+    enabled, reason = herdr_caps.gate_enabled(rd, repo_slug, account_id, repo_id)
+    if not enabled:
+        return False, reason, levels
+    for name in ("core", "guard", "procedure"):
+        level = levels[name]
+        if level is None:
+            return False, f"{name} advertises no usable capability", levels
+        if level < herdr_caps.REQUIRED_CAPABILITY:
+            return False, (
+                f"{name} advertises capability {level} "
+                f"below the required {herdr_caps.REQUIRED_CAPABILITY}"
+            ), levels
+    return True, "task-lead dispatch is admissible", levels
 
 
 def main(argv=None) -> int:
