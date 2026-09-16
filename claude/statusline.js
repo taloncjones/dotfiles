@@ -3,6 +3,9 @@
 // Shows: model | current in-progress todo | directory + git branch/worktree |
 // context-window meter.
 //
+// In terminals that render OSC 8 hyperlinks the branch/worktree label is
+// clickable: it opens that checkout's root in the editor owning the terminal.
+//
 // The git segment reflects the session's ANCHORED dir (workspace.current_dir),
 // never whatever a Bash command last `cd`'d into -- per-command cwd resets and
 // is invisible to this render process. Enter worktrees via the native worktree
@@ -32,6 +35,55 @@ const BOLD = "\x1b[1m";
 // Marker shown before the branch name when the cwd is a linked worktree, so a
 // glance tells you you are not in the main checkout.
 const WORKTREE_GLYPH = "⑂";
+
+// Terminals known to render OSC 8 hyperlinks. Everywhere else the label stays
+// plain text rather than risk a terminal echoing the raw escape.
+const HYPERLINK_TERMS = new Set([
+  "vscode",
+  "iTerm.app",
+  "WezTerm",
+  "ghostty",
+  "Hyper",
+]);
+
+/**
+ * Whether the branch label can carry a clickable OSC 8 hyperlink.
+ * tmux requires explicit passthrough for OSC 8, so opt out inside it instead
+ * of emitting escapes the multiplexer may mangle. STATUSLINE_NO_LINKS=1 forces
+ * the plain-text form everywhere.
+ */
+function supportsHyperlinks(env = process.env) {
+  if (env.STATUSLINE_NO_LINKS) return false;
+  if (env.TMUX) return false;
+  return HYPERLINK_TERMS.has(env.TERM_PROGRAM || "");
+}
+
+/**
+ * URL scheme of the editor owning this terminal. Every VS Code fork reports
+ * TERM_PROGRAM=vscode, so the app path in the git-askpass shim disambiguates
+ * them; plain VS Code is the fallback.
+ */
+function editorScheme(env = process.env) {
+  const app = env.VSCODE_GIT_ASKPASS_MAIN || "";
+  if (/cursor/i.test(app)) return "cursor";
+  if (/windsurf/i.test(app)) return "windsurf";
+  return "vscode";
+}
+
+/**
+ * Editor URI that opens `dir` as a folder, e.g.
+ * 'vscode://file/Users/me/repo'. encodeURI leaves '#' and '?' alone, which
+ * would truncate the path, so escape those two explicitly.
+ */
+function editorFolderUri(dir, env = process.env) {
+  const encoded = encodeURI(dir).replace(/#/g, "%23").replace(/\?/g, "%3F");
+  return `${editorScheme(env)}://file${encoded}`;
+}
+
+/** Wrap `text` in an OSC 8 hyperlink pointing at `uri`. */
+function hyperlink(text, uri) {
+  return `\x1b]8;;${uri}\x1b\\${text}\x1b]8;;\x1b\\`;
+}
 
 /**
  * Find the activeForm of the most recent in-progress todo for this session.
@@ -117,7 +169,16 @@ function readGitInfo(dir) {
     } catch (e) {
       dirty = false;
     }
-    return { branch, dirty, isWorktree, repoName };
+    // Root of THIS checkout (the linked worktree's own dir, not the main
+    // checkout), used as the hyperlink target. Kept in its own try because it
+    // fails in a bare repo, where the rest of the segment still renders.
+    let root = "";
+    try {
+      root = run(["rev-parse", "--show-toplevel"]);
+    } catch (e) {
+      root = "";
+    }
+    return { branch, dirty, isWorktree, repoName, root };
   } catch (e) {
     return null; // not a git repo, or git not on PATH
   }
@@ -162,7 +223,14 @@ function buildDirSegment(dir) {
   if (!git) return `${DIM}${path.basename(dir)}${RESET}`;
   const wt = git.isWorktree ? `${WORKTREE_GLYPH} ` : "";
   const flag = git.dirty ? "*" : "";
-  return `${DIM}${git.repoName}  ${wt}${git.branch}${flag}${RESET}`;
+  let branchLabel = `${wt}${git.branch}${flag}`;
+  if (git.root && supportsHyperlinks()) {
+    // Click the branch to open this checkout in the editor. Every linked
+    // worktree is its own folder, so this is the shortest path from "which
+    // branch is this session on" to its files.
+    branchLabel = hyperlink(branchLabel, editorFolderUri(git.root));
+  }
+  return `${DIM}${git.repoName}  ${branchLabel}${RESET}`;
 }
 
 function render(data) {
@@ -217,6 +285,10 @@ module.exports = {
   readActiveTask,
   readGitInfo,
   buildDirSegment,
+  supportsHyperlinks,
+  editorScheme,
+  editorFolderUri,
+  hyperlink,
 };
 
 if (require.main === module) main();
