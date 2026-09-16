@@ -464,11 +464,19 @@ the same failure every time.
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `round` whatever
-`coworker_review.round_index_for_head(all_markers, head)` returns -- do not
-restate the rule as a formula, because a head that an earlier round already
-reviewed keeps THAT round's ordinal rather than taking a new one -- and
-`verdict` APPROVE only when the round leaves no blocking finding and no
-undischarged carried blocker.
+`pr_ready_gate.next_round_number(comments, {gh_user})` returns, and `verdict`
+APPROVE only when the round leaves no blocking finding and no undischarged
+carried blocker.
+
+**Two different numbers, and mixing them wedges the PR.** `round` is the
+PUBLICATION ordinal: it only ever goes up, so the currency check can tell a
+replay of an older publication from the current one. The FLOOR's index is
+`coworker_review.round_index_for_head(all_markers, head)`, which is evidence of
+progress and deliberately does NOT only go up -- a head an earlier round already
+reviewed keeps that round's ordinal, and an unreadable history falls back to 1.
+Publishing the floor's index as `round` republishes a number the PR has already
+used, and the gate then rejects it as a contradiction no pushed commit can
+clear. `round` comes from `next_round_number`, always.
 
 
 `target_tip` is the target branch tip the review compared against, recorded for

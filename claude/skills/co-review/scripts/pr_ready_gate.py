@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>[1-9]\d*)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
+    r"round=(?P<round>[1-9]\d{0,3})(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
     r"(?: baseline=(?P<baseline>[0-9a-f]{40}))? -->$"
 )
 # target_tip records the target-branch tip the review compared against. It is
@@ -269,14 +269,31 @@ def all_markers(comments, trusted_authors, marker_re=MARKER_RE,
     found.sort(key=lambda item: (item[0], item[1]))
     markers = [marker for _, _, marker in found]
     if markers:
-        latest_round = _marker_round(markers[-1])
-        for other in markers[:-1]:
-            if _marker_round(other) > latest_round:
-                raise GateInputError(
-                    "co-review history is not current; an earlier marker "
-                    "claims a later round than the newest one"
-                )
+        _check_history_currency(markers[-1], markers[:-1])
     return markers
+
+
+def _check_history_currency(latest: dict, others) -> None:
+    """The same currency rules ``select_marker`` applies, over a history.
+
+    Both readers have to agree about what a usable history is. When they did
+    not, a history ``select_marker`` refuses -- two verdicts at one round --
+    still fed the floor, which narrowed on it and approved a finding that
+    should have blocked.
+    """
+    latest_round = _marker_round(latest)
+    for other in others:
+        other_round = _marker_round(other)
+        if other_round > latest_round:
+            raise GateInputError(
+                "co-review history is not current; an earlier marker claims a "
+                "later round than the newest one"
+            )
+        if other_round == latest_round and other["verdict"] != latest["verdict"]:
+            raise GateInputError(
+                "co-review history contradicts itself; one round carries two "
+                "verdicts"
+            )
 
 
 def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,

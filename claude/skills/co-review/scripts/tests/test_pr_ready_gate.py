@@ -76,6 +76,53 @@ class HistoryCurrencyTests(unittest.TestCase):
         self.assertEqual(len(gate.all_markers([r1, r2], ME)), 2)
 
 
+class HistoryParityTests(unittest.TestCase):
+    """all_markers and select_marker must agree on what a usable history is."""
+
+    def test_same_round_conflicting_verdicts_make_the_history_unusable(self):
+        """select_marker refuses this, so the floor must not narrow on it."""
+        at_a = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        at_b = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([at_a, at_b], ME)
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([at_a, at_b], ME)
+
+    def test_a_same_round_retry_is_usable_by_both(self):
+        first = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        retry = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        self.assertEqual(len(gate.all_markers([first, retry], ME)), 2)
+        self.assertEqual(
+            gate.decide([first, retry], ME, SHA_A, BASE_A, REF)[0], "PASS"
+        )
+
+
+class RoundBoundsTests(unittest.TestCase):
+    def test_an_unreadably_large_round_does_not_parse(self):
+        """Both readers must agree; a round neither can convert is not a round."""
+        huge = marker(verdict="APPROVE", rnd="9" * 5000)
+        self.assertIsNone(gate.MARKER_RE.match(huge))
+
+    def test_a_four_digit_round_still_parses(self):
+        self.assertIsNotNone(gate.MARKER_RE.match(marker(rnd=9999)))
+
+
 class NextRoundNumberTests(unittest.TestCase):
     """The publication ordinal stays monotonic when the floor's index cannot."""
 

@@ -90,17 +90,18 @@ def floor_for_round(round_index, *, baseline_ok: bool = False) -> int:
         # negatives are strings like "no" and "unknown", and every one of those
         # is truthy.
         return _FLOOR_BY_ROUND[1]
+    # Accept an ordinal, not anything int() will consume. Truncation is the
+    # danger: 2.5, Decimal("2.5") and Fraction(5, 2) all become 2 and narrow
+    # the floor on a number that was never a round ordinal. Allowing only real
+    # ints and digit strings rules out every fractional type at once, and takes
+    # float('inf') and float('nan') with them.
     if isinstance(round_index, bool):
         return _FLOOR_BY_ROUND[1]
-    if isinstance(round_index, float) and not round_index.is_integer():
-        # int() truncates, which would narrow on a number that was never a
-        # round ordinal at all.
-        return _FLOOR_BY_ROUND[1]
-    try:
-        index = int(round_index)
-    except (TypeError, ValueError, OverflowError):
-        # OverflowError is float('inf'): unusable, so it takes the strict
-        # floor like any other unusable index rather than crashing the round.
+    if isinstance(round_index, int):
+        index = round_index
+    elif isinstance(round_index, str) and round_index.strip().isdigit():
+        index = int(round_index.strip())
+    else:
         return _FLOOR_BY_ROUND[1]
     if index < 1:
         return _FLOOR_BY_ROUND[1]

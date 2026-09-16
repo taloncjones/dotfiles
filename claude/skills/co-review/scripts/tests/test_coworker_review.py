@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "coworker_review.py"
@@ -416,6 +418,20 @@ class BaselineProducer(unittest.TestCase):
     def test_a_later_marker_dropping_it_means_no_narrowing(self):
         markers = [{"baseline": "1" * 40}, {}]
         self.assertFalse(cr.baseline_ok_from_markers(markers))
+
+
+class FractionalOrdinals(unittest.TestCase):
+    """int() truncates, so a fractional index would narrow on a non-ordinal."""
+
+    def test_no_fractional_numeric_type_narrows(self):
+        for value in (2.5, Decimal("2.5"), Fraction(5, 2)):
+            self.assertEqual(
+                cr.floor_for_round(value, baseline_ok=True), 1, repr(value)
+            )
+
+    def test_real_ordinals_still_narrow(self):
+        self.assertEqual(cr.floor_for_round(3, baseline_ok=True), 3)
+        self.assertEqual(cr.floor_for_round("3", baseline_ok=True), 3)
 
 
 class UnusableRoundIndex(unittest.TestCase):
