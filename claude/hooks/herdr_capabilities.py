@@ -106,12 +106,12 @@ def gate_enabled(rd, repo_slug, account_id, repo_id=None):
     (`rec["repo_id"] is not None and rec["repo_id"] != context["repo_id"]`).
     This follows that convention rather than inventing a second one.
     """
-    path = gate_path(rd)
     try:
+        path = gate_path(rd)
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return False, "gate record absent"
-    except (OSError, ValueError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
         return False, f"gate record unreadable: {exc}"
     try:
         rec = json.loads(raw)

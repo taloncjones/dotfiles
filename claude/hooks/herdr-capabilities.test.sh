@@ -184,5 +184,14 @@ assert ok is False, (ok, why)
 sys.exit(0)
 PY
 
+check "gate: non-path payload root is disabled, not an error" <<PY
+$LOAD
+for bad in (None, 12345, [], object()):
+    ok, why = k.gate_enabled(bad, "slug-a", "acct-1")
+    assert ok is False, (bad, ok, why)
+    assert isinstance(why, str) and why, (bad, why)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
