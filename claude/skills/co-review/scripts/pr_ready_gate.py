@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>\d+)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
+    r"round=(?P<round>[1-9]\d*)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
     r"(?: baseline=(?P<baseline>[0-9a-f]{40}))? -->$"
 )
 # target_tip records the target-branch tip the review compared against. It is
@@ -175,6 +175,7 @@ def select_marker(
     marker_re=MARKER_RE,
     prefix: str = MARKER_PREFIX,
     require_findings: bool = True,
+    check_round_currency: bool = True,
 ) -> dict | None:
     """Latest trusted round comment's marker, or None. Fail-closed.
 
@@ -215,8 +216,58 @@ def select_marker(
     if require_findings and not _has_findings_body(body):
         raise GateInputError("latest co-review comment has a marker but no findings table")
     selected = markers[0]
-    _check_round_currency(selected, candidates)
+    if check_round_currency:
+        _check_round_currency(selected, candidates)
     return selected
+
+
+def all_markers(comments, trusted_authors, marker_re=MARKER_RE,
+                prefix: str = MARKER_PREFIX,
+                require_findings: bool = True) -> list[dict]:
+    """Every parsed trusted marker on the PR, in publication order.
+
+    The floor's inputs -- the round index and the baseline guard -- are
+    properties of the whole marker history, not of the latest marker, and
+    ``select_marker`` deliberately returns only the latest. Without this the
+    caller has to rebuild the history by hand, which is the self-declared
+    bookkeeping the round check exists to distrust.
+
+    An unparsable or findings-less trusted marker makes the whole history
+    unusable and raises. Skipping it would let the floor narrow on a history
+    the gate itself would refuse: a malformed FIRST marker would drop out, the
+    second would be read as the first, and its baseline accepted as the PR's.
+    Callers needing only the floor's inputs treat the error as "no narrowing"
+    -- round 1, ``baseline_ok=False`` -- the same strict answer an empty
+    history gives.
+    """
+    if not isinstance(comments, list):
+        raise GateInputError("comments must be a JSON array")
+    found = []
+    for entry in comments:
+        if not isinstance(entry, dict):
+            raise GateInputError("each comment must be an object")
+        if entry.get("author") not in trusted_authors:
+            continue
+        shaped, markers = _scan_body(entry.get("body", "") or "", marker_re, prefix)
+        if shaped == 0:
+            continue
+        instant = _parse_instant(entry.get("created_at"))
+        cid = entry.get("id")
+        if instant is None or not isinstance(cid, int):
+            raise GateInputError("marker comment has invalid created_at/id")
+        if shaped != 1 or len(markers) != 1:
+            raise GateInputError(
+                "co-review history contains an unparsable marker; "
+                "the floor cannot narrow on it"
+            )
+        if require_findings and not _has_findings_body(entry.get("body", "") or ""):
+            raise GateInputError(
+                "co-review history contains a marker with no findings table; "
+                "an incomplete round does not advance the floor"
+            )
+        found.append((instant, cid, markers[0]))
+    found.sort(key=lambda item: (item[0], item[1]))
+    return [marker for _, _, marker in found]
 
 
 def _check_round_currency(selected: dict, candidates) -> None:
@@ -242,6 +293,17 @@ def _check_round_currency(selected: dict, candidates) -> None:
     replay it would catch.
     """
     selected_round = _marker_round(selected)
+    # Bounding a claimed round by the comment count was tried and REVERTED. It
+    # let a miscounted round-4 CHANGES be dismissed as noise, so a delayed
+    # round-1 APPROVE passed -- trading a fail-closed wedge for a fail-open,
+    # which is the wrong direction. It also made the gate non-deterministic:
+    # an ignored marker became authoritative once enough comments accumulated
+    # to support its number.
+    #
+    # An over-claimed round therefore does wedge the PR, deliberately. Recovery
+    # is editing or deleting the offending comment, which the error names. The
+    # common benign case that used to trip this -- a publish retry -- no longer
+    # reaches here, because identical markers are collapsed before selection.
     for _, _, shaped, markers, _ in candidates:
         if shaped != 1 or len(markers) != 1:
             continue  # unparsable: see the residual in this docstring
@@ -251,9 +313,29 @@ def _check_round_currency(selected: dict, candidates) -> None:
         other_round = _marker_round(other)
         if other_round > selected_round:
             raise GateInputError(
-                "a later co-review round exists; the newest comment is stale"
+                "a later co-review round exists; the newest comment is stale "
+                "(if that round number is a miscount, correct or delete that "
+                "comment)"
             )
         if other_round == selected_round and other["verdict"] != selected["verdict"]:
+            # One round reaches one verdict, so two verdicts at one round is
+            # contradictory evidence and the safe reading is the blocking one.
+            #
+            # Deliberately NOT scoped to a matching base/base_ref. Scoping it
+            # that way was tried so a retargeted PR could be re-reviewed at
+            # the same head, and it reopened a fail-open: an APPROVE published
+            # late against a target the PR has since returned to no longer
+            # conflicted with the CHANGES published against the other target
+            # in between. A retarget now costs a pushed commit to earn a fresh
+            # round, which is recoverable; the fail-open was not.
+            #
+            # Only the verdict is compared. Extending this to sha/base/base_ref
+            # was considered and declined: re-posting a round against a new
+            # head is bookkeeping sloppiness rather than a fail-open, the
+            # dangerous form is already caught by decide()'s sha == head check,
+            # and comparing sha here makes two same-round markers on different
+            # heads unselectable -- which is exactly how comment ordering is
+            # exercised when two comments share a timestamp.
             raise GateInputError(
                 "co-review round has conflicting verdicts; re-run co-review"
             )

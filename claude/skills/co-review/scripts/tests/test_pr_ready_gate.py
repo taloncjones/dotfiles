@@ -40,6 +40,159 @@ def marker_with(trailing, sha=SHA_A, verdict="APPROVE", rnd=1):
     )
 
 
+class RetargetRecoveryTests(unittest.TestCase):
+    """A retarget is a new review of the same head, not a contradiction."""
+
+    def test_a_fresh_review_after_retarget_fails_closed(self):
+        """Deliberate. Scoping the conflict check to a matching base_ref let an
+        APPROVE published late against a target the PR had returned to stop
+        conflicting with the CHANGES posted against the other target between
+        them. Recovery here is a pushed commit, which earns a fresh round."""
+        against_main = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        against_release = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1, base_ref="release"),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide(
+            [against_main, against_release], ME, SHA_A, BASE_A, "release"
+        )
+        self.assertEqual(decision, "FAIL")
+
+    def test_same_target_conflicting_verdicts_still_fail_closed(self):
+        changes = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        approve = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([changes, approve], ME)
+
+
+class AllMarkersTests(unittest.TestCase):
+    """The floor's inputs need the whole history, not the latest marker."""
+
+    def test_returns_every_trusted_marker_in_publication_order(self):
+        first = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        second = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        markers = gate.all_markers([second, first], ME)
+        self.assertEqual([m["sha"] for m in markers], [SHA_A, SHA_B])
+
+    def test_untrusted_authors_are_excluded(self):
+        mine = comment("| x |\n" + marker(), cid=1)
+        theirs = comment("| y |\n" + marker(sha=SHA_B), author="someone", cid=2)
+        self.assertEqual(len(gate.all_markers([mine, theirs], ME)), 1)
+
+    def test_an_unparsable_marker_makes_the_history_unusable(self):
+        """Skipping it would let a malformed FIRST marker drop out, so the
+        second would be read as the first and its baseline taken as the PR's."""
+        broken = comment(
+            "<!-- co-review: sha=xyz -->", created_at="2026-09-11T10:00:00Z", cid=1
+        )
+        good = comment(
+            "| y |\n" + marker(sha=SHA_B),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([broken, good], ME)
+
+
+class RepublishTests(unittest.TestCase):
+    """A retry of the current round is benign; a replay of an older one is not."""
+
+    def test_replayed_older_round_fails_closed(self):
+        """Round 2 is on the PR, so the replayed round-1 APPROVE is stale."""
+        r1 = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| y |\n" + marker(verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([r1, r2, replay], ME)
+
+    def test_retry_of_the_current_round_stays_benign(self):
+        first = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        retry = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([first, retry], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
+
+    def test_an_overclaimed_round_wedges_and_says_how_to_recover(self):
+        """Deliberate: a fail-closed wedge beats the fail-open it replaced.
+
+        Bounding the claim by the comment count let a miscounted higher round
+        be dismissed as noise, which let a delayed older APPROVE through.
+        """
+        inflated = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=9999),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        current = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, reason = gate.decide([inflated, current], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+        self.assertIn("delete that comment", reason)
+
+    def test_a_miscounted_higher_round_is_never_dismissed_as_noise(self):
+        """The fail-open this replaced: round 4 ignored, stale round 1 passes."""
+        r1 = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        miscounted = comment(
+            "| y |\n" + marker(verdict="CHANGES", rnd=4),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        decision, _ = gate.decide([r1, miscounted, replay], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+
+
 class BaselineFieldTests(unittest.TestCase):
     """baseline is optional, trails target_tip, and the gate never reads it."""
 
@@ -166,10 +319,11 @@ class SelectMarkerTests(unittest.TestCase):
         """A round that ran later than the newest comment makes it stale.
 
         Selection is still by instant; the round check runs after it. Before
-        this check the newest comment won outright.
+        this check the newest comment won outright. The higher round must be
+        one the comment history can support, or it reads as noise instead.
         """
         older = comment(
-            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=5),
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
             created_at="2026-09-11T10:00:00Z",
             cid=1,
         )
