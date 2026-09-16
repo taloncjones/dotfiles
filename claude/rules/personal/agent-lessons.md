@@ -19,8 +19,8 @@ is the staging tier, not an archive.
 
 - (2026-09) Headless workers and reviewers: preserve the intended account
   explicitly before entering temporary worktrees; verify launch readiness.
-- (2026-09) Check the actual shell: zsh does not split unquoted variables
-  and uses `pipestatus`; prefer arrays or explicit arguments.
+- (2026-09) Shell variables: zsh does not word-split unquoted expansions and
+  uses `pipestatus`; rm/git-meta guards reject them -- pass literal paths.
 - (2026-09) An orchestrator session dispatches; it edits repo files only for
   a small change the human approved this turn. Larger: todo + kickoff.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
