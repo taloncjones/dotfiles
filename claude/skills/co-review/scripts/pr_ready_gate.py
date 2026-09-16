@@ -210,14 +210,14 @@ def select_marker(
     if not candidates:
         return None
     candidates.sort(key=lambda item: (item[0], item[1]))
-    _, _, shaped, markers, body = candidates[-1]
+    _, selected_cid, shaped, markers, body = candidates[-1]
     if shaped != 1 or len(markers) != 1:
         raise GateInputError("latest co-review comment has an ambiguous or unparsable marker")
     if require_findings and not _has_findings_body(body):
         raise GateInputError("latest co-review comment has a marker but no findings table")
     selected = markers[0]
     if check_round_currency:
-        _check_round_currency(selected, candidates)
+        _check_round_currency(selected, candidates, selected_cid)
     return selected
 
 
@@ -268,12 +268,12 @@ def all_markers(comments, trusted_authors, marker_re=MARKER_RE,
         found.append((instant, cid, markers[0]))
     found.sort(key=lambda item: (item[0], item[1]))
     markers = [marker for _, _, marker in found]
-    if markers:
-        _check_history_currency(markers[-1], markers[:-1])
+    if found:
+        _check_history_currency(found[-1], found[:-1])
     return markers
 
 
-def _check_history_currency(latest: dict, others) -> None:
+def _check_history_currency(latest_entry, others) -> None:
     """The same currency rules ``select_marker`` applies, over a history.
 
     Both readers have to agree about what a usable history is. When they did
@@ -281,18 +281,19 @@ def _check_history_currency(latest: dict, others) -> None:
     still fed the floor, which narrowed on it and approved a finding that
     should have blocked.
     """
-    latest_round = _marker_round(latest)
-    for other in others:
-        other_round = _marker_round(other)
+    _, latest_cid, latest = latest_entry
+    latest_round = _marker_round(latest, latest_cid)
+    for _, cid, other in others:
+        other_round = _marker_round(other, cid)
         if other_round > latest_round:
             raise GateInputError(
-                "co-review history is not current; an earlier marker claims a "
+                f"co-review history is not current; comment {cid} claims a "
                 "later round than the newest one"
             )
         if other_round == latest_round and other["verdict"] != latest["verdict"]:
             raise GateInputError(
-                "co-review history contradicts itself; one round carries two "
-                "verdicts"
+                f"co-review history contradicts itself; comment {cid} and "
+                f"comment {latest_cid} carry one round with two verdicts"
             )
 
 
@@ -314,6 +315,7 @@ def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
     if not isinstance(comments, list):
         raise GateInputError("comments must be a JSON array")
     highest = 0
+    highest_cid = None
     for entry in comments:
         if not isinstance(entry, dict) or entry.get("author") not in trusted_authors:
             continue
@@ -331,7 +333,9 @@ def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
             # authoritative, so a replay of the round below it passed. Bounding
             # the field instead just moved the asymmetry to the bound, where
             # the publisher emitted a number its own parser refused.
-            highest = max(highest, _marker_round(marker, entry.get("id")))
+            this = _marker_round(marker, entry.get("id"))
+            if this > highest:
+                highest, highest_cid = this, entry.get("id")
     nxt = highest + 1
     try:
         # The successor has to survive being written into a marker. At the
@@ -345,13 +349,13 @@ def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
         # thousands of digits, and formatting it is the very operation that
         # just failed.
         raise GateInputError(
-            "co-review round numbering is exhausted; correct the comment "
-            "claiming the highest round"
+            "co-review round numbering is exhausted; correct comment "
+            f"{highest_cid}, which claims the highest round"
         ) from None
     return nxt
 
 
-def _check_round_currency(selected: dict, candidates) -> None:
+def _check_round_currency(selected: dict, candidates, selected_cid=None) -> None:
     """Fail closed when another marker contradicts the selected one.
 
     The newest comment by creation instant still governs selection, but a
@@ -373,7 +377,7 @@ def _check_round_currency(selected: dict, candidates) -> None:
     comment, which is a strictly more common and more benign event than the
     replay it would catch.
     """
-    selected_round = _marker_round(selected)
+    selected_round = _marker_round(selected, selected_cid)
 
     # Bounding a claimed round by the comment count was tried and REVERTED. It
     # let a miscounted round-4 CHANGES be dismissed as noise, so a delayed

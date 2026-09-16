@@ -76,6 +76,60 @@ class HistoryCurrencyTests(unittest.TestCase):
         self.assertEqual(len(gate.all_markers([r1, r2], ME)), 2)
 
 
+class ErrorsNameTheComment(unittest.TestCase):
+    """The operator is told to correct a comment, so the error must name one."""
+
+    def test_a_stale_round_names_the_later_comment(self):
+        older = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=5),
+            created_at="2026-09-11T10:00:00Z",
+            cid=91,
+        )
+        newer = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=92,
+        )
+        _, reason = gate.decide([older, newer], ME, SHA_A, BASE_A, REF)
+        self.assertIn("comment 91", reason)
+
+    def test_an_unusable_round_on_the_newest_comment_names_it(self):
+        bad = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd="9" * 5000),
+            created_at="2026-09-11T10:00:00Z",
+            cid=77,
+        )
+        _, reason = gate.decide([bad], ME, SHA_A, BASE_A, REF)
+        self.assertIn("comment 77", reason)
+
+    def test_an_unusable_history_names_the_comment(self):
+        bad = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 5000),
+            created_at="2026-09-11T10:00:00Z",
+            cid=31,
+        )
+        good = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=32,
+        )
+        with self.assertRaises(gate.GateInputError) as caught:
+            gate.all_markers([bad, good], ME)
+        self.assertIn("comment 31", str(caught.exception))
+
+    def test_exhaustion_names_the_comment_not_the_number(self):
+        at_limit = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 4300),
+            created_at="2026-09-11T10:00:00Z",
+            cid=44,
+        )
+        with self.assertRaises(gate.GateInputError) as caught:
+            gate.next_round_number([at_limit], ME)
+        message = str(caught.exception)
+        self.assertIn("comment 44", message)
+        self.assertLess(len(message), 200)
+
+
 class RoundNumberingExhaustionTests(unittest.TestCase):
     """The publisher must never emit a number its own reader refuses."""
 

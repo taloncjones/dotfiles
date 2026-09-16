@@ -238,6 +238,13 @@ def is_blocking(
     through still blocks when it is high or above and the seat says the change
     introduced it -- that is the one thing a late round still cares about.
     """
+    if not require_carried:
+        # Reading these at all is the co-review opt-in, and it has to be the
+        # opt-in on BOTH entry points. verdict_from_findings already neutralizes
+        # them without the flag; honouring them here regardless would split the
+        # published Blocking column from the verdict again -- latently, since
+        # the coworker family calls this bare, but it is the same defect.
+        carried, discharged = False, None
     if require_carried and carried is ABSENT:
         # A co-review row is malformed without its Carried cell, and a
         # malformed row blocks. Checked FIRST so absence cannot instead be
@@ -362,8 +369,8 @@ def verdict_from_findings(
                 # status field that merely happened to be present on one of its
                 # rows would change its behaviour -- which this change promises
                 # not to do.
-                carried=row.get("carried", ABSENT) if require_carried else False,
-                discharged=row.get("status") if require_carried else None,
+                carried=row.get("carried", ABSENT),
+                discharged=row.get("status"),
                 require_carried=require_carried,
                 baseline_ok=baseline_ok,
             )

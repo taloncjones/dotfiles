@@ -388,16 +388,16 @@ class StatusCellVerbatim(unittest.TestCase):
     def test_resolved_clears_the_row(self):
         self.assertFalse(
             cr.is_blocking(
-                "major", round_index=2, carried="yes",
-                discharged="RESOLVED", baseline_ok=True,
+                "major", round_index=2, carried="yes", discharged="RESOLVED",
+                baseline_ok=True, require_carried=True,
             )
         )
 
     def test_open_does_not(self):
         self.assertTrue(
             cr.is_blocking(
-                "major", round_index=2, carried="yes",
-                discharged="open", baseline_ok=True,
+                "major", round_index=2, carried="yes", discharged="open",
+                baseline_ok=True, require_carried=True,
             )
         )
 
@@ -411,17 +411,23 @@ class BlockingAgreesWithVerdict(unittest.TestCase):
 
     def test_a_no_cell_reads_the_same_both_ways(self):
         row = {"severity": "minor", "carried": "no"}
-        self.assertFalse(cr.is_blocking(row["severity"], carried=row["carried"]))
+        self.assertFalse(cr.is_blocking(
+                row["severity"], carried=row["carried"], require_carried=True
+            ))
         self.assertEqual(cr.verdict_from_findings([row], require_carried=True), "APPROVE")
 
     def test_a_yes_cell_reads_the_same_both_ways(self):
         row = {"severity": "minor", "carried": "yes"}
-        self.assertTrue(cr.is_blocking(row["severity"], carried=row["carried"]))
+        self.assertTrue(cr.is_blocking(
+                row["severity"], carried=row["carried"], require_carried=True
+            ))
         self.assertEqual(cr.verdict_from_findings([row], require_carried=True), "CHANGES")
 
     def test_a_malformed_carried_cell_blocks_both_ways(self):
         row = {"severity": "minor", "carried": []}
-        self.assertTrue(cr.is_blocking(row["severity"], carried=row["carried"]))
+        self.assertTrue(cr.is_blocking(
+                row["severity"], carried=row["carried"], require_carried=True
+            ))
         self.assertEqual(cr.verdict_from_findings([row], require_carried=True), "CHANGES")
 
 
