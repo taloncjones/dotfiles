@@ -95,5 +95,94 @@ assert k.procedure_capability(object()) is None
 sys.exit(0)
 PY
 
+check "gate: absence means disabled" <<PY
+$LOAD
+rd = pathlib.Path(tempfile.mkdtemp())
+ok, why = k.gate_enabled(rd, "slug-a", "acct-1")
+assert ok is False, (ok, why)
+assert "absent" in why, why
+sys.exit(0)
+PY
+
+check "gate: a well-formed enabled record with matching identity is enabled" <<PY
+$LOAD
+rd = pathlib.Path(tempfile.mkdtemp())
+(rd / "task-lead-gate.json").write_text(json.dumps({
+    "schema_version": 1, "repo_slug": "slug-a", "repo_id": None,
+    "account_id": "acct-1", "enabled": True}))
+ok, why = k.gate_enabled(rd, "slug-a", "acct-1")
+assert ok is True, (ok, why)
+sys.exit(0)
+PY
+
+check "gate: malformed, wrong-version, and non-bool enabled all disable" <<PY
+$LOAD
+def gate(payload):
+    rd = pathlib.Path(tempfile.mkdtemp())
+    (rd / "task-lead-gate.json").write_text(payload)
+    return k.gate_enabled(rd, "slug-a", "acct-1")
+assert gate("{not json")[0] is False
+assert gate("[]")[0] is False
+base = {"schema_version": 1, "repo_slug": "slug-a", "repo_id": None,
+        "account_id": "acct-1", "enabled": True}
+assert gate(json.dumps(dict(base, schema_version=2)))[0] is False
+assert gate(json.dumps(dict(base, enabled="yes")))[0] is False
+sys.exit(0)
+PY
+
+check "gate: identity mismatch disables, with a distinct reason" <<PY
+$LOAD
+rd = pathlib.Path(tempfile.mkdtemp())
+(rd / "task-lead-gate.json").write_text(json.dumps({
+    "schema_version": 1, "repo_slug": "slug-a", "repo_id": None,
+    "account_id": "acct-1", "enabled": True}))
+ok_slug, why_slug = k.gate_enabled(rd, "slug-b", "acct-1")
+ok_acct, why_acct = k.gate_enabled(rd, "slug-a", "acct-2")
+assert ok_slug is False and "slug" in why_slug, (ok_slug, why_slug)
+assert ok_acct is False and "account" in why_acct, (ok_acct, why_acct)
+sys.exit(0)
+PY
+
+check "gate: an explicitly disabled record is disabled" <<PY
+$LOAD
+rd = pathlib.Path(tempfile.mkdtemp())
+(rd / "task-lead-gate.json").write_text(json.dumps({
+    "schema_version": 1, "repo_slug": "slug-a", "repo_id": None,
+    "account_id": "acct-1", "enabled": False}))
+ok, why = k.gate_enabled(rd, "slug-a", "acct-1")
+assert ok is False and "disabled" in why, (ok, why)
+sys.exit(0)
+PY
+
+check "gate: repo_id matching is nullable but fails closed when uncorroborated" <<PY
+$LOAD
+def gate(stated, expected):
+    rd = pathlib.Path(tempfile.mkdtemp())
+    (rd / "task-lead-gate.json").write_text(json.dumps({
+        "schema_version": 1, "repo_slug": "slug-a", "repo_id": stated,
+        "account_id": "acct-1", "enabled": True}))
+    return k.gate_enabled(rd, "slug-a", "acct-1", expected)
+assert gate(None, None)[0] is True
+assert gate(None, "rid-1")[0] is True
+assert gate("rid-1", "rid-1")[0] is True
+assert gate("rid-1", "rid-2")[0] is False
+ok, why = gate("rid-1", None)
+assert ok is False and "corroborate" in why, (ok, why)
+ok, why = gate(123, "rid-1")
+assert ok is False and "malformed" in why, (ok, why)
+sys.exit(0)
+PY
+
+check "gate: an orphaned temporary file is inert" <<PY
+$LOAD
+rd = pathlib.Path(tempfile.mkdtemp())
+(rd / ".task-lead-gate.json.tmp12345").write_text(json.dumps({
+    "schema_version": 1, "repo_slug": "slug-a", "repo_id": None,
+    "account_id": "acct-1", "enabled": True}))
+ok, why = k.gate_enabled(rd, "slug-a", "acct-1")
+assert ok is False, (ok, why)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
