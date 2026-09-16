@@ -286,6 +286,35 @@ class MalformedRows(unittest.TestCase):
             self.assertTrue(cr.is_carried(value), repr(value))
 
 
+class AbsentCarriedCell(unittest.TestCase):
+    """A co-review row without its Carried cell is malformed, not uncarried."""
+
+    def test_a_missing_cell_blocks_for_co_review(self):
+        row = [{"severity": "major", "fix_regression": "no", "status": "open"}]
+        self.assertEqual(
+            cr.verdict_from_findings(
+                row, round_index=3, baseline_ok=True, require_carried=True
+            ),
+            "CHANGES",
+        )
+
+    def test_the_coworker_family_has_no_such_column(self):
+        self.assertEqual(cr.verdict_from_findings([{"severity": "minor"}]), "APPROVE")
+        self.assertEqual(cr.verdict_from_findings([{"severity": "major"}]), "CHANGES")
+
+
+class DischargeIsForCarriedRows(unittest.TestCase):
+    """A round publishes before its fixes land, so a fresh row cannot be RESOLVED."""
+
+    def test_a_fresh_resolved_critical_still_blocks(self):
+        row = [{"severity": "critical", "carried": "no", "status": "RESOLVED"}]
+        self.assertEqual(cr.verdict_from_findings(row), "CHANGES")
+
+    def test_a_carried_resolved_row_still_clears(self):
+        row = [{"severity": "critical", "carried": "yes", "status": "RESOLVED"}]
+        self.assertEqual(cr.verdict_from_findings(row), "APPROVE")
+
+
 class StatusCellVerbatim(unittest.TestCase):
     """is_blocking takes the Status cell, like the other columns."""
 

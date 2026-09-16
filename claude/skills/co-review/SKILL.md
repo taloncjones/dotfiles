@@ -232,7 +232,15 @@ cell>, baseline_ok=<bool>)` and the round's verdict from
 `coworker_review.verdict_from_findings(findings, round_index=<n>,
 baseline_ok=<bool>)`. Every cell goes in verbatim; the helper normalizes each
 one, and both calls read them the same way, so the `Blocking` column you
-publish cannot disagree with the verdict you publish beside it. An unusable round index falls back to
+publish cannot disagree with the verdict you publish beside it.
+
+Build each `findings` row with exactly these four keys -- `severity`,
+`fix_regression`, `carried`, `status` -- holding the `Severity`, `Regression`,
+`Carried` and `Status` cells. The key names are not the column names; keying a
+row by the column names instead leaves every cell unread, and the round then
+publishes an all-`Blocking=no` table under a CHANGES verdict that re-runs
+identically forever. Pass `require_carried=True` so a row missing its `Carried`
+cell blocks rather than silently reading as not carried. An unusable round index falls back to
 the round-1 floor: an unknown round must never silently stop blocking on real
 defects.
 
@@ -509,23 +517,22 @@ HIGHER round than the selected one, the newest comment is stale and the gate
 fails closed; if one carries the SAME round with a different verdict, the round
 contradicts itself and the gate fails closed.
 
-**A round cannot change its own verdict at a head an earlier round already
-reviewed.** A head keeps the ordinal of the round that first reviewed it, so a
-second review of that head posts the same `round=`, and two verdicts at one
-round fail the gate closed. This matters because the verification seat may
-discharge a carried blocker on the ground that a necessary premise is now
-enforced against, which needs no commit -- so a round genuinely can want to run
-at an unchanged head.
+**Re-reviewing an unchanged head does not narrow anything, and does not clear
+what the last round found.** The verification seat may discharge a carried
+blocker because a necessary premise is now enforced against, which needs no
+commit, so a round genuinely can run at an unchanged head. Two things hold it
+honest, and neither is the round number:
 
-Recovery is to push a commit, so the next round runs at a NEW head. Do not
-recover by deleting the older round comment: that comment holds the `Blocking`
-column the next round rebuilds its carried set from, and removing it also
-shifts every later `round_index_for_head` result.
+- The FLOOR does not move. `round_index_for_head` returns the ordinal of the
+  round that first reviewed that head, so a second look at it is judged at the
+  same bar as the first.
+- The carried set does not empty. Every previous-round row with `Blocking=yes`
+  and `Status` not `RESOLVED` is carried in with `Carried=yes`, and a carried
+  row blocks whatever the floor says until the seat discharges it.
 
-This is fail-closed by choice. Letting a later same-round comment supersede an
-earlier one would fix the wedge and reopen the replay it was added to close: a
-delayed APPROVE would once again bury a CHANGES. A wedge costs one commit; the
-fail-open costs an unreviewed merge.
+The published `round` still increments, because it is the publication ordinal.
+So the gate's equal-round check is NOT what guards this case -- it guards two
+publications racing at one ordinal. Do not rely on it to catch a re-review.
 
 A miscounted round therefore wedges the PR, and that is deliberate. Bounding a
 claimed round by the comment count was tried and reverted: it let a miscounted

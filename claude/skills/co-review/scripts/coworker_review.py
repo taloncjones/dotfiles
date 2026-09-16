@@ -209,8 +209,8 @@ def is_blocking(
     *,
     round_index=1,
     fix_regression=None,
-    carried: bool = False,
-    discharged: bool = False,
+    carried: object = False,
+    discharged: object = None,
     baseline_ok: bool = False,
 ) -> bool:
     """True when this finding blocks at this round (fail closed).
@@ -228,12 +228,17 @@ def is_blocking(
     through still blocks when it is high or above and the seat says the change
     introduced it -- that is the one thing a late round still cares about.
     """
-    if _is_discharged(discharged):
+    if _is_discharged(discharged) and is_carried(carried):
         # The seat verified the failure path is repaired. The published table
         # keeps the row so the thread stays a complete record, but a repaired
         # finding does not block on its severity either -- checking this before
         # severity is what makes "RESOLVED" mean resolved rather than "resolved
         # unless it happens to be critical".
+        #
+        # Scoped to carried rows. A round publishes BEFORE its fixes are
+        # committed, so a fresh finding cannot honestly be RESOLVED, and
+        # without this one mislabelled Status cell on a fresh critical would
+        # buy a clean round.
         return False
     if is_carried(carried):
         # Checked BEFORE severity classification. Downgrading a carried blocker
@@ -285,7 +290,11 @@ def _is_discharged(status) -> bool:
 
 
 def verdict_from_findings(
-    findings, *, round_index=1, baseline_ok: bool = False
+    findings,
+    *,
+    round_index=1,
+    baseline_ok: bool = False,
+    require_carried: bool = False,
 ) -> str:
     """CHANGES if any finding blocks at this round, else APPROVE.
 
@@ -293,6 +302,16 @@ def verdict_from_findings(
     fields, not a caller-set flag, so the conversion is what the tests
     exercise. A missing 'fix_regression' is read as True: an unclassified
     finding is one the seat could not rule on, and those block.
+
+    Rows are dicts keyed 'severity', 'fix_regression', 'carried' and 'status'.
+
+    ``require_carried`` says the rows come from a co-review round table, where
+    every row carries a Carried cell: an absent one is a malformed row and
+    blocks, like every other absent cell here. The coworker-review family has
+    no Carried column at all, so it leaves this False and absence means what it
+    says. Without the distinction an absent key silently un-carried a blocker
+    while ``is_blocking`` -- fed the same row's cell directly -- still reported
+    it blocking, so a published table could read Blocking=yes beside APPROVE.
     """
     return (
         "CHANGES"
@@ -301,7 +320,11 @@ def verdict_from_findings(
                 row.get("severity"),
                 round_index=round_index,
                 fix_regression=row.get("fix_regression"),
-                carried=row.get("carried", False),
+                carried=(
+                    row.get("carried")
+                    if require_carried
+                    else row.get("carried", False)
+                ),
                 discharged=row.get("status"),
                 baseline_ok=baseline_ok,
             )
