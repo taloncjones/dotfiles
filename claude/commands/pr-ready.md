@@ -45,9 +45,19 @@ uv run --no-project python <co-review>/scripts/pr_ready_gate.py \
 PASS requires origin's real fetch URL == the PR base repository, and the latest
 trusted marker `verdict=APPROVE`, `sha == headRefOid`, `base == resolved base`,
 and `base_ref == baseRefName`. On FAIL (base-repo mismatch/unresolved, stale
-head, retarget, missing/CHANGES marker, or ANY lookup/API error -- the gate
-fails closed), **STOP**: report "re-run co-review" and do not run the steps below
+head, retarget, missing/CHANGES marker, a stale or self-contradicting round, or
+ANY lookup/API error -- the gate fails closed), **STOP** and do not run the steps below
 or post any Jira/PR-body updates.
+
+Report "re-run co-review" for the ordinary failures, including a stale or
+self-contradicting round: the next round publishes a NEW ordinal from
+`next_round_number`, so re-reviewing clears it without needing a pushed commit,
+provided the round carries its blockers forward. No commit is required.
+
+The exception is a comment whose round cannot be read at all -- unconvertible,
+or claiming a round no later round can exceed. Re-review cannot clear that,
+because every reader refuses the history. Report that the offending comment
+must be corrected; the gate's error names it by comment id where it can.
 
 A PASS licenses merging THAT head. Pass the marker's `sha` to
 `gh pr merge --match-head-commit` so the server enforces it.

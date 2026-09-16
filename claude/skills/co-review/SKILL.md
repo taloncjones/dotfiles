@@ -188,10 +188,157 @@ snapshot if it refuses cleanup.
 
 ## Blocking
 
-Major, high and critical findings block. Minor, low, nit and advisory do not.
-An unrecognized, missing, or seat-disputed severity blocks. An UNRESOLVED
-finding blocks exactly as a CONFIRMED one of its severity does. The floor does
-not vary by round in this slice.
+The bar to block rises with the round. After a round or two the useful question
+stops being "is anything wrong" and becomes "is this functional", and without
+narrowing a PR can be held indefinitely by findings that are real, minor and
+endless.
+
+| Round | Blocks                                        |
+| ----- | --------------------------------------------- |
+| 1     | major, high, critical                         |
+| 2     | high, critical                                |
+| 3+    | critical; high only as a fix-regression       |
+
+Minor, low, nit and advisory never block. An unrecognized, missing, or
+seat-disputed severity blocks at every round. An UNRESOLVED finding blocks
+exactly as a CONFIRMED one of its severity does. Findings the floor does not
+block are posted with Blocking=no and are NOT carried forward.
+
+Number the round with
+`pr_ready_gate.next_round_number(comments, {pr_author, gh_user})`.
+That is the publication ordinal and it stays monotonic even when the history is
+unreadable -- which is NOT the same number as the floor's round index below.
+Resetting both together wedges the PR: a round published after an unreadable
+history would claim a round already passed, and no pushed commit would clear it.
+
+**Use the same trusted set the gate uses** -- the PR author plus the
+authenticated `gh` user -- for numbering, history, the carried set and
+readiness. Reading the history with a narrower set than the gate trusts means
+publishing a round the gate then rejects as stale: a co-reviewer numbering only
+from their own comments restarts at 1 while the author's round 2 sits on the
+PR, and the baseline history misses evidence the gate can see.
+
+`all_markers` RAISES when any trusted marker on the PR is unparsable or has no
+findings table: such a history cannot be read safely, since a malformed first
+marker would drop out and the second would be taken for the first. Catch it and
+review at the strict floor -- round index 1 and `baseline_ok=False`. Do NOT also
+reset the published round number; take that from `next_round_number`, which
+tolerates the same malformed markers. Resetting both is what would wedge the PR.
+
+Derive the round's inputs from the whole marker history, not from the latest
+marker: `pr_ready_gate.all_markers(comments, {pr_author, gh_user})` returns
+every parsed
+trusted marker in publication order, which is what `round_index_for_head` and
+`baseline_ok_from_markers` both take. `coworker_review.baseline_ok_from_markers`
+checks the first marker records a `baseline` and every later one repeats it;
+AND its answer with your own check that the baseline tree is readable, since
+that needs a repository rather than a marker.
+
+Do not apply the table by hand. Each finding's blocking value comes from
+`coworker_review.is_blocking(severity, round_index=<n>,
+fix_regression=<Regression cell>, carried=<Carried cell>, discharged=<Status
+cell>, baseline_ok=<bool>, require_carried=True)` and the round's verdict from
+`coworker_review.verdict_from_findings(findings, round_index=<n>,
+baseline_ok=<bool>, require_carried=True)`. Pass `require_carried=True` to
+BOTH: it makes a row missing its `Carried` cell block instead of reading as not
+carried, and passing it to only one of them is exactly what lets the published
+column disagree with the verdict. Omit the `carried=` argument entirely when
+the cell is absent rather than substituting a value for it. Every cell goes in verbatim; the helper normalizes each
+one, and both calls read them the same way, so the `Blocking` column you
+publish cannot disagree with the verdict you publish beside it.
+
+Build each `findings` row with exactly these four keys -- `severity`,
+`fix_regression`, `carried`, `status` -- holding the `Severity`, `Regression`,
+`Carried` and `Status` cells. The key names are not the column names; keying a
+row by the column names instead leaves every cell unread, and the round then
+publishes an all-`Blocking=no` table under a CHANGES verdict that re-runs
+identically forever. An unusable round index falls back to
+the round-1 floor: an unknown round must never silently stop blocking on real
+defects.
+
+Pass the seat's answer through verbatim -- `yes`, `no`, or `unknown`. The
+helper normalizes it. Only an explicit `no` (or `False`) narrows; `unknown`, an
+empty cell and a missing column all block. Do not pre-convert the cell to a
+bool: `bool("no")` is True, which would make the narrowing inert.
+
+**The round index counts DISTINCT REVIEWED HEADS, not round comments.** Derive
+it with `coworker_review.round_index_for_head(prior_markers, head)`, passing the
+prior markers in publication order. The floor may only narrow on evidence that
+the PR moved, and a comment count is not that evidence: re-running the review on
+an unchanged tree, or a publish retry, would otherwise narrow the floor without
+a single line of code changing -- letting any major finding be cleared by
+spending one more round and fixing nothing. A round that reviews a head an
+earlier round already reviewed is not a new round.
+
+A head keeps the ordinal of the round that FIRST reviewed it, so returning to an
+earlier head does not hand it a later round's looser floor: a fresh major found
+after a rollback to head A is judged at A's own round, not at the round reached
+by examining B and C.
+
+**A carried blocker outranks the floor.** Pass `carried=True` for every finding
+carried from a previous round. Only the verification seat discharges a carried
+blocker, on frozen-tree repair evidence; the floor rising is not a discharge and
+must never act as one.
+
+Build the carried set by READING the previous round's `Blocking` column, never
+by recomputing it. Recomputing at the current round's index is the bug: a
+round-1 major re-evaluated at round 2 comes back non-blocking, so it would drop
+out of the carried set and clear itself with nothing fixed. The published
+comment is the durable record precisely so the next round does not have to
+recompute what an earlier round decided.
+
+Carry every previous-round row whose `Blocking` is `yes`, and set `Carried=yes`
+on it this round. Do NOT also exclude rows whose `Status` is `RESOLVED`. That
+conjunct looks like a safety check and is the opposite: `is_blocking` already
+returns False for a genuinely discharged row, so `Blocking=yes` implies the row
+was not discharged. Its only effect is on the row the discharge guard
+deliberately produces -- a fresh finding mislabelled `Status=RESOLVED`, which
+publishes `Blocking=yes, Carried=no` precisely so it keeps blocking. Excluding
+it drops that finding from the carried set, the next round rediscovers it as
+fresh, and at a risen floor it no longer blocks. A major survives round 1 and
+clears at round 2 with nothing fixed.
+
+Pass `Carried` through verbatim, exactly like `Regression`: the helper
+normalizes it, and only an explicit `no` clears it. Do not pre-convert the cell
+to a bool -- `bool("no")` is True, which would mark every row carried and make
+the floor inert. `baseline_ok` is the exception: it is a real boolean the caller
+computes, and only the literal `True` permits narrowing.
+
+### Fix-regression
+
+A finding is a fix-regression when its failure scenario is reachable in the
+current frozen tree and was NOT reachable at the baseline tree. It is a
+question about the scenario, not about a line: a repair can change a callee
+while the finding cites an unchanged caller, and author dates survive
+cherry-picks, so line age and commit timestamps decide nothing.
+
+The verification seat answers it -- the same seat that already reasons about
+reachability -- and records the answer in the round table's `Regression`
+column as `yes`, `no`, or `unknown`. `unknown`, a missing column, and a
+baseline tree that cannot be read are all treated as `yes`, so an unclassified
+finding blocks. A baseline sha is not a guarantee its tree still exists: a
+force-push, a pruned ref or garbage collection can remove the objects, and the
+seat checks the tree is readable before narrowing.
+
+### Baseline
+
+The PR's FIRST trusted marker records `baseline=<sha>`, the head round 1
+reviewed, which equals that marker's own `sha`. Every later round COPIES that
+value from the first marker and never recomputes it.
+
+If the first marker is absent, unreadable, or later markers disagree about
+`baseline`, the floor does not narrow: every round blocks at the round-1 level.
+Contradictory evidence fails closed to the strictest floor.
+
+This guard is mechanized, not advisory: read the first trusted marker's
+`baseline`, confirm every later marker carries the same value, confirm the tree
+it names is readable, and pass the result as `baseline_ok`. When it is false,
+`floor_for_round` returns the round-1 floor whatever the round index says.
+
+**`baseline_ok` defaults to False.** Narrowing requires positive evidence, so a
+round that forgets to validate the baseline gets the strict floor rather than
+silent narrowing. Every PR whose markers predate this field reviews at the
+strict floor by construction, which is the intended behaviour, not a gap.
 
 ## Rounds and continuity
 
@@ -281,6 +428,11 @@ major/high/critical findings are blocking, minor/low/nit/advisory are
 advisory, and an unrecognized severity fails closed to blocking. Fill each
 row's `Blocking` column with `coworker_review.is_blocking(severity)`.
 
+Call both WITHOUT a round: the coworker review has no progressive floor, and
+the round-1 floor with no regression concept is deliberately its contract. That
+is why the floor parameters are keyword-only with round-1 defaults -- the
+co-review rounds pass them, this family does not.
+
 Re-review scope: read the latest trusted coworker marker with
 `coworker_review.select_coworker_marker(comments, {gh_user})`; compute
 `is_ancestor` via `git merge-base --is-ancestor <prev_sha> <new_head>`; then
@@ -306,17 +458,22 @@ marker as its own unindented top-level line:
 ```markdown
 ### Co-review round <n>
 
-| Severity | File:line       | Issue | Status | Fix |
-| -------- | --------------- | ----- | ------ | --- |
-| HIGH     | path/file.py:42 | ...   | open   | ... |
+| Severity | File:line       | Issue | Status | Blocking | Carried | Regression | Fix |
+| -------- | --------------- | ----- | ------ | -------- | ------- | ---------- | --- |
+| HIGH     | path/file.py:42 | ...   | open   | yes      | no      | yes        | ... |
 
 Seats: <runner session ids / report paths>. Grouping: <subsystem order>.
 
 (Status is open, or RESOLVED for a carried blocker the verification seat
 discharged this round; "No actionable findings." replaces the table when the
-round is clean.)
+round is clean. `Blocking` is what `is_blocking` returned for this row THIS
+round, recorded so the next round can rebuild its carried set by reading rather
+than recomputing. `Carried` marks a row held over from an earlier round, and is
+what `carried=` is set from. `Regression` is the verification seat's
+fix-regression answer -- `yes`, `no`, or `unknown` -- and only changes whether a
+finding blocks from round 3 on; `unknown` and a missing column both block.)
 
-<!-- co-review: sha=<head> base=<merge-base> base_ref=<branch> verdict=<APPROVE|CHANGES> round=<n> target_tip=<tip> -->
+<!-- co-review: sha=<head> base=<merge-base> base_ref=<branch> verdict=<APPROVE|CHANGES> round=<n> target_tip=<tip> baseline=<round-1 head> -->
 ```
 
 The `Seats:` line carries the seat-evidence rule's citations and the round's
@@ -334,15 +491,38 @@ table, /pr-ready says re-run co-review, and rerunning a clean round reproduces
 the same failure every time.
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
-`--base-ref`, `base_ref` the PR target branch, `round` the count of prior
-trusted markers on the PR plus one, and `verdict` APPROVE only when the round
-leaves no blocking finding and no undischarged carried blocker.
+`--base-ref`, `base_ref` the PR target branch, `round` whatever
+`pr_ready_gate.next_round_number(comments, {pr_author, gh_user})` returns, and
+`verdict`
+APPROVE only when the round leaves no blocking finding and no undischarged
+carried blocker.
+
+**Two different numbers, and mixing them wedges the PR.** `round` is the
+PUBLICATION ordinal: it only ever goes up, so the currency check can tell a
+replay of an older publication from the current one. The FLOOR's index is
+`coworker_review.round_index_for_head(all_markers, head)`, which is evidence of
+progress and deliberately does NOT only go up -- a head an earlier round already
+reviewed keeps that round's ordinal, and an unreadable history falls back to 1.
+Publishing the floor's index as `round` republishes a number the PR has already
+used, and the gate then rejects it as a contradiction no pushed commit can
+clear. `round` comes from `next_round_number`, always.
+
 
 `target_tip` is the target branch tip the review compared against, recorded for
-the reader. It is the LAST field, after `round`: appending keeps every marker
-written before this change parseable, and that order is the only one the gate's
-regex accepts. The gate never compares `target_tip`, so an approval does not
-expire when the target moves; a target change that breaks the PR is CI's job.
+the reader. The gate never compares it, so an approval does not expire when the
+target moves; a target change that breaks the PR is CI's job.
+
+`baseline` is the head round 1 reviewed. Round 1 writes its own `sha` there;
+every later round copies the first marker's value verbatim. It drives the
+progressive floor during review, and the gate never compares it either, so
+adding it cannot change a gate outcome.
+
+Both are optional and both trail `round`, in the order `round`, `target_tip`,
+`baseline`. That order is the only one the gate's regex accepts, and appending
+this way keeps every marker written before either field existed parseable. A
+malformed value does not match the regex, so the line counts as
+shaped-but-invalid and fails the gate closed when it is the newest comment --
+never skipped in favour of an older one.
 
 `pr_ready_gate.decide()` PASSes on a trusted marker with `verdict=APPROVE`,
 `sha == head`, and matching base and base_ref. The latest trusted round comment
@@ -356,10 +536,41 @@ because skipping it would let a truncated CHANGES expose a superseded APPROVE.
 After selection the gate checks the round. If any marker that parses carries a
 HIGHER round than the selected one, the newest comment is stale and the gate
 fails closed; if one carries the SAME round with a different verdict, the round
-contradicts itself and the gate fails closed. A retried publish of the CURRENT
-round stays benign -- same round, same verdict. A retry of an EARLIER round is
-not: without this check a delayed round-1 APPROVE revives an approval that
-round 2 superseded, which passed the shipped gate until it was fixed.
+contradicts itself and the gate fails closed.
+
+**Re-reviewing an unchanged head does not narrow anything, and does not clear
+what the last round found.** The verification seat may discharge a carried
+blocker because a necessary premise is now enforced against, which needs no
+commit, so a round genuinely can run at an unchanged head. Two things hold it
+honest, and neither is the round number:
+
+- The FLOOR does not move. `round_index_for_head` returns the ordinal of the
+  round that first reviewed that head, so a second look at it is judged at the
+  same bar as the first.
+- The carried set does not empty. Every previous-round row with `Blocking=yes`
+  is carried in with `Carried=yes`, and a carried row blocks whatever the floor
+  says until the seat discharges it.
+
+The published `round` still increments, because it is the publication ordinal.
+So the gate's equal-round check is NOT what guards this case -- it guards two
+publications racing at one ordinal. Do not rely on it to catch a re-review.
+
+An over-claimed round is cleared by the next round, which publishes a higher
+ordinal. Only a round that cannot be READ at all stops every reader, and that comment
+has to be corrected. Two shapes do it: a round no reader can convert to a
+number, and a round whose SUCCESSOR cannot be written -- at the interpreter's
+decimal-conversion boundary the highest round converts and the next one does
+not, so numbering is exhausted and the comment claiming it must be corrected.
+
+Two ways of softening this were tried and both reverted, for the same reason.
+Bounding a claimed round by the comment count let a miscounted higher round be
+dismissed as noise, so a delayed older APPROVE passed. Bounding the field to
+four digits let the publisher emit 10000 while the parser refused it, and the
+unparseable marker was then skipped by the currency check -- the same
+fail-open, one layer down. Each traded a loud, recoverable failure for a silent
+one. A round neither reader can convert now fails closed in BOTH of them, which
+is the property that matters: the publisher and the currency check must never
+disagree about what a round is.
 
 The check compares only markers that parse. A truncated HIGHER-round marker is
 therefore invisible to it, so a delayed lower-round APPROVE can still win in

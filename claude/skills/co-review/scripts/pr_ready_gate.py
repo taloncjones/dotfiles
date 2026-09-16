@@ -9,11 +9,20 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>\d+)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))? -->$"
+    r"round=(?P<round>[1-9]\d*)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
+    r"(?: baseline=(?P<baseline>[0-9a-f]{40}))? -->$"
 )
 # target_tip records the target-branch tip the review compared against. It is
 # for the reader: decide() never compares it, so an approval does not expire
 # when the target moves. A target change that breaks the PR is CI's job.
+#
+# baseline records the head round 1 reviewed, and drives the progressive
+# blocking floor during review. decide() never compares it either, so adding
+# it cannot change a gate outcome. Both optional fields sit AFTER round and in
+# this order: every marker written before either existed still parses.
+# A malformed baseline does not match, so the line counts as shaped-but-invalid
+# and fails the gate closed when it is the newest comment -- it is never
+# skipped in favour of an older one.
 # The candidate prefix -- checked with a plain startswith, not derived from
 # MARKER_RE, so a truncated marker is still recognized as "a round comment
 # that failed to parse" instead of falling through as ordinary text and
@@ -166,6 +175,7 @@ def select_marker(
     marker_re=MARKER_RE,
     prefix: str = MARKER_PREFIX,
     require_findings: bool = True,
+    check_round_currency: bool = True,
 ) -> dict | None:
     """Latest trusted round comment's marker, or None. Fail-closed.
 
@@ -200,17 +210,152 @@ def select_marker(
     if not candidates:
         return None
     candidates.sort(key=lambda item: (item[0], item[1]))
-    _, _, shaped, markers, body = candidates[-1]
+    _, selected_cid, shaped, markers, body = candidates[-1]
     if shaped != 1 or len(markers) != 1:
         raise GateInputError("latest co-review comment has an ambiguous or unparsable marker")
     if require_findings and not _has_findings_body(body):
         raise GateInputError("latest co-review comment has a marker but no findings table")
     selected = markers[0]
-    _check_round_currency(selected, candidates)
+    if check_round_currency:
+        _check_round_currency(selected, candidates, selected_cid)
     return selected
 
 
-def _check_round_currency(selected: dict, candidates) -> None:
+def all_markers(comments, trusted_authors, marker_re=MARKER_RE,
+                prefix: str = MARKER_PREFIX,
+                require_findings: bool = True) -> list[dict]:
+    """Every parsed trusted marker on the PR, in publication order.
+
+    The floor's inputs -- the round index and the baseline guard -- are
+    properties of the whole marker history, not of the latest marker, and
+    ``select_marker`` deliberately returns only the latest. Without this the
+    caller has to rebuild the history by hand, which is the self-declared
+    bookkeeping the round check exists to distrust.
+
+    An unparsable or findings-less trusted marker makes the whole history
+    unusable and raises. Skipping it would let the floor narrow on a history
+    the gate itself would refuse: a malformed FIRST marker would drop out, the
+    second would be read as the first, and its baseline accepted as the PR's.
+    Callers needing only the floor's inputs treat the error as "no narrowing"
+    -- round 1, ``baseline_ok=False`` -- the same strict answer an empty
+    history gives.
+    """
+    if not isinstance(comments, list):
+        raise GateInputError("comments must be a JSON array")
+    found = []
+    for entry in comments:
+        if not isinstance(entry, dict):
+            raise GateInputError("each comment must be an object")
+        if entry.get("author") not in trusted_authors:
+            continue
+        shaped, markers = _scan_body(entry.get("body", "") or "", marker_re, prefix)
+        if shaped == 0:
+            continue
+        instant = _parse_instant(entry.get("created_at"))
+        cid = entry.get("id")
+        if instant is None or not isinstance(cid, int):
+            raise GateInputError("marker comment has invalid created_at/id")
+        if shaped != 1 or len(markers) != 1:
+            raise GateInputError(
+                "co-review history contains an ambiguous or unparsable marker "
+                f"(comment {cid}); the floor cannot narrow on it"
+            )
+        if require_findings and not _has_findings_body(entry.get("body", "") or ""):
+            raise GateInputError(
+                "co-review history contains a marker with no findings table "
+                f"(comment {cid}); an incomplete round does not advance the floor"
+            )
+        found.append((instant, cid, markers[0]))
+    found.sort(key=lambda item: (item[0], item[1]))
+    markers = [marker for _, _, marker in found]
+    if found:
+        _check_history_currency(found[-1], found[:-1])
+    return markers
+
+
+def _check_history_currency(latest_entry, others) -> None:
+    """The same currency rules ``select_marker`` applies, over a history.
+
+    Both readers have to agree about what a usable history is. When they did
+    not, a history ``select_marker`` refuses -- two verdicts at one round --
+    still fed the floor, which narrowed on it and approved a finding that
+    should have blocked.
+    """
+    _, latest_cid, latest = latest_entry
+    latest_round = _marker_round(latest, latest_cid)
+    for _, cid, other in others:
+        other_round = _marker_round(other, cid)
+        if other_round > latest_round:
+            raise GateInputError(
+                f"co-review history is not current; comment {cid} claims a "
+                "later round than the newest one"
+            )
+        if other_round == latest_round and other["verdict"] != latest["verdict"]:
+            raise GateInputError(
+                f"co-review history contradicts itself; comment {cid} and "
+                f"comment {latest_cid} carry one round with two verdicts"
+            )
+
+
+def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
+                      prefix: str = MARKER_PREFIX) -> int:
+    """The number the NEXT round comment should carry.
+
+    This is the publication ordinal, deliberately NOT the floor's round index.
+    The floor's index is evidence of progress and falls back to 1 whenever that
+    evidence is unusable; the published number has to stay monotonic anyway.
+    Resetting both together wedges the PR: a round published after an
+    unreadable history would claim a round the PR has already passed, the
+    currency check would reject it, and pushing a commit would not help because
+    the older marker stays on the PR.
+
+    So this tolerates the malformed markers ``all_markers`` refuses -- it reads
+    the highest round anything trusted on the PR claims, and adds one.
+    """
+    if not isinstance(comments, list):
+        raise GateInputError("comments must be a JSON array")
+    highest = 0
+    highest_cid = None
+    for entry in comments:
+        if not isinstance(entry, dict) or entry.get("author") not in trusted_authors:
+            continue
+        # A shaped-but-unparsable marker carries no round at all, so it is
+        # invisible to the currency check too -- ignoring it here keeps the two
+        # readers symmetric, and is what lets a PR with one old truncated
+        # comment still publish a monotonic round. A marker that PARSES but
+        # whose round will not convert is the asymmetric case, and
+        # _marker_round below fails closed on it in both readers.
+        _, markers = _scan_body(entry.get("body", "") or "", marker_re, prefix)
+        for marker in markers:
+            # Fail closed on a round this cannot convert, rather than skipping
+            # it. Skipping was the asymmetry that mattered: the publisher
+            # ignored an oversized round while the currency check treated it as
+            # authoritative, so a replay of the round below it passed. Bounding
+            # the field instead just moved the asymmetry to the bound, where
+            # the publisher emitted a number its own parser refused.
+            this = _marker_round(marker, entry.get("id"))
+            if this > highest:
+                highest, highest_cid = this, entry.get("id")
+    nxt = highest + 1
+    try:
+        # The successor has to survive being written into a marker. At the
+        # interpreter's decimal-conversion boundary the predecessor converts
+        # and its successor does not, which would publish a number this
+        # module's own reader then refuses -- the same publisher/reader
+        # disagreement the removed four-digit bound created.
+        str(nxt)
+    except ValueError:
+        # Do not interpolate `highest` itself -- at this boundary it is
+        # thousands of digits, and formatting it is the very operation that
+        # just failed.
+        raise GateInputError(
+            "co-review round numbering is exhausted; correct comment "
+            f"{highest_cid}, which claims the highest round"
+        ) from None
+    return nxt
+
+
+def _check_round_currency(selected: dict, candidates, selected_cid=None) -> None:
     """Fail closed when another marker contradicts the selected one.
 
     The newest comment by creation instant still governs selection, but a
@@ -232,30 +377,97 @@ def _check_round_currency(selected: dict, candidates) -> None:
     comment, which is a strictly more common and more benign event than the
     replay it would catch.
     """
-    selected_round = _marker_round(selected)
-    for _, _, shaped, markers, _ in candidates:
-        if shaped != 1 or len(markers) != 1:
-            continue  # unparsable: see the residual in this docstring
-        other = markers[0]
-        if other is selected:
-            continue
-        other_round = _marker_round(other)
-        if other_round > selected_round:
-            raise GateInputError(
-                "a later co-review round exists; the newest comment is stale"
-            )
-        if other_round == selected_round and other["verdict"] != selected["verdict"]:
-            raise GateInputError(
-                "co-review round has conflicting verdicts; re-run co-review"
-            )
+    selected_round = _marker_round(selected, selected_cid)
+
+    # Bounding a claimed round by the comment count was tried and REVERTED. It
+    # let a miscounted round-4 CHANGES be dismissed as noise, so a delayed
+    # round-1 APPROVE passed -- trading a fail-closed wedge for a fail-open,
+    # which is the wrong direction. It also made the gate non-deterministic:
+    # an ignored marker became authoritative once enough comments accumulated
+    # to support its number.
+    #
+    # Collapsing identical markers to their first publication was tried too and
+    # reverted: it re-ordered a candidate BEFORE its findings body was
+    # validated, so a marker-only copy of an older round passed as a benign
+    # retry, and it hid genuinely different reviews that happened to share
+    # those fields. There is no collapsing now.
+    #
+    # An over-claimed round therefore does wedge the PR, deliberately. Recovery
+    # is editing or deleting the offending comment, which the error names. A
+    # retry of the CURRENT round needs no special handling: it carries the same
+    # round and the same verdict, so neither branch below fires.
+    for _, cid, _, markers, _ in candidates:
+        # Iterate the PARSED markers, not one per comment. Skipping a whole
+        # comment when it did not carry exactly one marker also hid a comment
+        # carrying TWO readable markers, and those were then invisible here
+        # while all_markers refused the same history -- so a newest round-1
+        # APPROVE passed with two higher-round CHANGES markers sitting on the
+        # PR. A truncated comment still has no parsed markers, so the
+        # documented residual is unchanged.
+        for other in markers:
+            if other is selected:
+                continue
+            other_round = _marker_round(other, cid)
+            if other_round > selected_round:
+                raise GateInputError(
+                    "a later co-review round exists (comment "
+                    f"{cid}); the newest comment is stale (if that round "
+                    "number is a miscount, correct or delete that comment)"
+                )
+            if (
+                other_round == selected_round
+                and other["verdict"] != selected["verdict"]
+            ):
+                # One round reaches one verdict, so two verdicts at one round is
+                # contradictory evidence and the safe reading is the blocking one.
+                #
+                # Recovery is simply the next round: the published ordinal comes
+                # from next_round_number and always advances, so a fresh round
+                # clears this without a pushed commit. An earlier version of this
+                # comment claimed the opposite -- that a head keeps its ordinal so
+                # a re-review re-contradicts itself -- which was true only while
+                # the marker's round came from the floor index. It does not.
+                #
+                # What keeps a same-head re-review honest is NOT this check: it is
+                # that round_index_for_head returns that head's original ordinal so
+                # the floor does not move, and that the carried set does not empty.
+                # Do not reach for this check to guard that case.
+                #
+                # Deliberately NOT scoped to a matching base/base_ref. Scoping it
+                # that way was tried so a retargeted PR could be re-reviewed at
+                # the same head, and it reopened a fail-open: an APPROVE published
+                # late against a target the PR has since returned to no longer
+                # conflicted with the CHANGES published against the other target
+                # in between. A retarget is cleared by the next round's ordinal,
+                # which is recoverable; the fail-open was not.
+                #
+                # Only the verdict is compared. Extending this to sha/base/base_ref
+                # was considered and declined: re-posting a round against a new
+                # head is bookkeeping sloppiness rather than a fail-open, the
+                # dangerous form is already caught by decide()'s sha == head check,
+                # and comparing sha here makes two same-round markers on different
+                # heads unselectable -- which is exactly how comment ordering is
+                # exercised when two comments share a timestamp.
+                raise GateInputError(
+                    "co-review round has conflicting verdicts; re-run co-review "
+                    "-- the next round publishes a later ordinal"
+                )
 
 
-def _marker_round(marker: dict) -> int:
-    """The marker's round as an int. Fail closed on anything unusable."""
+def _marker_round(marker: dict, cid=None) -> int:
+    """The marker's round as an int. Fail closed on anything unusable.
+
+    ``cid`` names the offending comment when the caller knows it. The operator
+    is told to correct that comment, so an error that cannot name one leaves
+    them hand-scanning the thread.
+    """
     try:
         return int(marker["round"])
     except (KeyError, TypeError, ValueError):
-        raise GateInputError("co-review marker has an unusable round") from None
+        where = f" (comment {cid})" if cid is not None else ""
+        raise GateInputError(
+            f"co-review marker has an unusable round{where}"
+        ) from None
 
 
 def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):

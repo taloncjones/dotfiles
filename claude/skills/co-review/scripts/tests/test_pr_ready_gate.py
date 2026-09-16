@@ -29,6 +29,537 @@ def comment(body, author="me", created_at="2026-09-11T10:00:00Z", cid=1):
     return {"author": author, "created_at": created_at, "id": cid, "body": body}
 
 
+TIP = "e" * 40
+
+
+def marker_with(trailing, sha=SHA_A, verdict="APPROVE", rnd=1):
+    """A marker whose optional trailing fields are written verbatim."""
+    return (
+        f"<!-- co-review: sha={sha} base={BASE_A} base_ref={REF} "
+        f"verdict={verdict} round={rnd}{trailing} -->"
+    )
+
+
+class HistoryCurrencyTests(unittest.TestCase):
+    """The floor must not narrow on a history the gate itself would reject."""
+
+    def test_a_replayed_history_is_not_usable_for_narrowing(self):
+        r1 = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([r1, r2, replay], ME)
+
+    def test_a_current_history_is_usable(self):
+        r1 = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        self.assertEqual(len(gate.all_markers([r1, r2], ME)), 2)
+
+
+class ErrorsNameTheComment(unittest.TestCase):
+    """The operator is told to correct a comment, so the error must name one."""
+
+    def test_a_stale_round_names_the_later_comment(self):
+        older = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=5),
+            created_at="2026-09-11T10:00:00Z",
+            cid=91,
+        )
+        newer = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=92,
+        )
+        _, reason = gate.decide([older, newer], ME, SHA_A, BASE_A, REF)
+        self.assertIn("comment 91", reason)
+
+    def test_an_unusable_round_on_the_newest_comment_names_it(self):
+        bad = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd="9" * 5000),
+            created_at="2026-09-11T10:00:00Z",
+            cid=77,
+        )
+        _, reason = gate.decide([bad], ME, SHA_A, BASE_A, REF)
+        self.assertIn("comment 77", reason)
+
+    def test_an_unusable_history_names_the_comment(self):
+        bad = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 5000),
+            created_at="2026-09-11T10:00:00Z",
+            cid=31,
+        )
+        good = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=32,
+        )
+        with self.assertRaises(gate.GateInputError) as caught:
+            gate.all_markers([bad, good], ME)
+        self.assertIn("comment 31", str(caught.exception))
+
+    def test_exhaustion_names_the_comment_not_the_number(self):
+        at_limit = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 4300),
+            created_at="2026-09-11T10:00:00Z",
+            cid=44,
+        )
+        with self.assertRaises(gate.GateInputError) as caught:
+            gate.next_round_number([at_limit], ME)
+        message = str(caught.exception)
+        self.assertIn("comment 44", message)
+        self.assertLess(len(message), 200)
+
+
+class RoundNumberingExhaustionTests(unittest.TestCase):
+    """The publisher must never emit a number its own reader refuses."""
+
+    def test_an_unserializable_successor_fails_closed(self):
+        at_limit = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 4300),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.next_round_number([at_limit], ME)
+
+
+class HistoryParityTests(unittest.TestCase):
+    """all_markers and select_marker must agree on what a usable history is."""
+
+    def test_same_round_conflicting_verdicts_make_the_history_unusable(self):
+        """select_marker refuses this, so the floor must not narrow on it."""
+        at_a = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        at_b = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([at_a, at_b], ME)
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([at_a, at_b], ME)
+
+    def test_a_same_round_retry_is_usable_by_both(self):
+        first = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        retry = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        self.assertEqual(len(gate.all_markers([first, retry], ME)), 2)
+        self.assertEqual(
+            gate.decide([first, retry], ME, SHA_A, BASE_A, REF)[0], "PASS"
+        )
+
+
+class RoundBoundsTests(unittest.TestCase):
+    """Bounding the field was tried and reverted: it let the publisher emit a
+    number its own parser refused, and the unparseable marker was then skipped
+    by the currency check, so a replay of the round below it passed."""
+
+    def test_both_readers_fail_closed_on_an_unconvertible_round(self):
+        huge = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 5000),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        current = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        self.assertEqual(gate.decide([huge, current], ME, SHA_A, BASE_A, REF)[0], "FAIL")
+        with self.assertRaises(gate.GateInputError):
+            gate.next_round_number([huge, current], ME)
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([huge, current], ME)
+
+    def test_a_round_past_the_old_bound_is_not_a_boundary(self):
+        """9999 -> 10000 used to publish a number the parser rejected."""
+        at_9999 = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=9999),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        self.assertEqual(gate.next_round_number([at_9999], ME), 10000)
+        self.assertIsNotNone(gate.MARKER_RE.match(marker(rnd=10000)))
+
+    def test_the_boundary_replay_fails_closed(self):
+        a = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=9999),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        b = comment(
+            "| y |\n" + marker(verdict="CHANGES", rnd=10000),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=9999),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        self.assertEqual(gate.decide([a, b, replay], ME, SHA_A, BASE_A, REF)[0], "FAIL")
+
+
+class NextRoundNumberTests(unittest.TestCase):
+    """The publication ordinal stays monotonic when the floor's index cannot."""
+
+    def test_first_round_is_one(self):
+        self.assertEqual(gate.next_round_number([], ME), 1)
+
+    def test_it_follows_the_highest_claimed_round(self):
+        r2 = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        self.assertEqual(gate.next_round_number([r2], ME), 3)
+
+    def test_it_tolerates_the_history_all_markers_refuses(self):
+        """Otherwise an unreadable history wedges every later round."""
+        broken = comment(
+            "<!-- co-review: sha=xyz -->",
+            created_at="2026-09-11T09:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([broken, r2], ME)
+        self.assertEqual(gate.next_round_number([broken, r2], ME), 3)
+
+    def test_untrusted_authors_do_not_advance_it(self):
+        theirs = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=9),
+            author="someone",
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        self.assertEqual(gate.next_round_number([theirs], ME), 1)
+
+
+class SameHeadRereviewTests(unittest.TestCase):
+    """What holds a same-head re-review honest is NOT the round check.
+
+    The published ordinal always advances, so two rounds never share one and
+    the equal-round branch cannot be what guards this. The floor not moving
+    (round_index_for_head returns that head's original ordinal) and the carried
+    set not emptying are the actual guarantees.
+    """
+
+    def test_two_verdicts_at_one_ordinal_fail_closed(self):
+        """This guards concurrent publication, not a sequential re-review."""
+        changes = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        approve = comment(
+            "| y |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, reason = gate.decide([changes, approve], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+        self.assertIn("re-run co-review", reason)
+
+    def test_the_next_round_clears_it_at_the_same_head(self):
+        """No pushed commit is needed; the ordinal advances on its own."""
+        changes = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        conflicting = comment(
+            "| y |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        history = [changes, conflicting]
+        self.assertEqual(gate.next_round_number(history, ME), 2)
+        fresh = comment(
+            "| z |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        decision, _ = gate.decide(history + [fresh], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
+
+class TwoMarkerCommentTests(unittest.TestCase):
+    """A comment carrying two readable markers must not hide them."""
+
+    def test_higher_rounds_in_a_two_marker_comment_are_not_invisible(self):
+        older = comment(
+            "| x |\n"
+            + marker(verdict="CHANGES", rnd=2)
+            + "\n"
+            + marker(verdict="CHANGES", rnd=3),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        newest = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([older, newest], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+
+    def test_a_truncated_comment_still_does_not_wedge(self):
+        """The documented residual survives: no parsed markers, nothing compared."""
+        truncated = comment(
+            "<!-- co-review: sha=xyz -->",
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        current = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([truncated, current], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
+
+
+class RetargetRecoveryTests(unittest.TestCase):
+    """A retarget is a new review of the same head, not a contradiction."""
+
+    def test_a_fresh_review_after_retarget_fails_closed(self):
+        """Deliberate. Scoping the conflict check to a matching base_ref let an
+        APPROVE published late against a target the PR had returned to stop
+        conflicting with the CHANGES posted against the other target between
+        them. Recovery is the next round, which publishes a later ordinal -- no
+        pushed commit is needed; see the same-head tests above."""
+        against_main = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        against_release = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1, base_ref="release"),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide(
+            [against_main, against_release], ME, SHA_A, BASE_A, "release"
+        )
+        self.assertEqual(decision, "FAIL")
+
+    def test_same_target_conflicting_verdicts_still_fail_closed(self):
+        changes = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        approve = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([changes, approve], ME)
+
+
+class AllMarkersTests(unittest.TestCase):
+    """The floor's inputs need the whole history, not the latest marker."""
+
+    def test_returns_every_trusted_marker_in_publication_order(self):
+        first = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        second = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        markers = gate.all_markers([second, first], ME)
+        self.assertEqual([m["sha"] for m in markers], [SHA_A, SHA_B])
+
+    def test_untrusted_authors_are_excluded(self):
+        mine = comment("| x |\n" + marker(), cid=1)
+        theirs = comment("| y |\n" + marker(sha=SHA_B), author="someone", cid=2)
+        self.assertEqual(len(gate.all_markers([mine, theirs], ME)), 1)
+
+    def test_an_unparsable_marker_makes_the_history_unusable(self):
+        """Skipping it would let a malformed FIRST marker drop out, so the
+        second would be read as the first and its baseline taken as the PR's."""
+        broken = comment(
+            "<!-- co-review: sha=xyz -->", created_at="2026-09-11T10:00:00Z", cid=1
+        )
+        good = comment(
+            "| y |\n" + marker(sha=SHA_B),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([broken, good], ME)
+
+
+class RepublishTests(unittest.TestCase):
+    """A retry of the current round is benign; a replay of an older one is not."""
+
+    def test_replayed_older_round_fails_closed(self):
+        """Round 2 is on the PR, so the replayed round-1 APPROVE is stale."""
+        r1 = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| y |\n" + marker(verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([r1, r2, replay], ME)
+
+    def test_retry_of_the_current_round_stays_benign(self):
+        first = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        retry = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([first, retry], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
+
+    def test_an_overclaimed_round_wedges_and_says_how_to_recover(self):
+        """Deliberate: a fail-closed wedge beats the fail-open it replaced.
+
+        Bounding the claim by the comment count let a miscounted higher round
+        be dismissed as noise, which let a delayed older APPROVE through.
+        """
+        inflated = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=9999),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        current = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, reason = gate.decide([inflated, current], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+        self.assertIn("delete that comment", reason)
+
+    def test_a_miscounted_higher_round_is_never_dismissed_as_noise(self):
+        """The fail-open this replaced: round 4 ignored, stale round 1 passes."""
+        r1 = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        miscounted = comment(
+            "| y |\n" + marker(verdict="CHANGES", rnd=4),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        decision, _ = gate.decide([r1, miscounted, replay], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+
+
+class BaselineFieldTests(unittest.TestCase):
+    """baseline is optional, trails target_tip, and the gate never reads it."""
+
+    def test_baseline_alone_parses_and_is_exposed(self):
+        body = "| x |\n" + marker_with(f" baseline={SHA_B}")
+        self.assertEqual(
+            gate.select_marker([comment(body)], ME)["baseline"], SHA_B
+        )
+
+    def test_target_tip_then_baseline_parses(self):
+        body = "| x |\n" + marker_with(f" target_tip={TIP} baseline={SHA_B}")
+        selected = gate.select_marker([comment(body)], ME)
+        self.assertEqual(selected["target_tip"], TIP)
+        self.assertEqual(selected["baseline"], SHA_B)
+
+    def test_target_tip_only_still_parses_with_no_baseline(self):
+        body = "| x |\n" + marker_with(f" target_tip={TIP}")
+        selected = gate.select_marker([comment(body)], ME)
+        self.assertEqual(selected["target_tip"], TIP)
+        self.assertIsNone(selected["baseline"])
+
+    def test_marker_written_before_either_field_still_parses(self):
+        body = "| x |\n" + marker_with("")
+        selected = gate.select_marker([comment(body)], ME)
+        self.assertIsNone(selected["target_tip"])
+        self.assertIsNone(selected["baseline"])
+
+    def test_malformed_baseline_fails_closed_as_newest(self):
+        """Shaped but unparsable: never skipped in favour of an older comment."""
+        older = comment(
+            "| x |\n" + marker_with("", verdict="APPROVE"),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        newest = comment(
+            "| y |\n" + marker_with(" baseline=nothex"),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([older, newest], ME)
+
+    def test_baseline_changes_no_gate_decision(self):
+        """decide() reads verdict, sha, base and base_ref -- never baseline."""
+        without = comment("| x |\n" + marker_with(""))
+        with_baseline = comment("| x |\n" + marker_with(f" baseline={SHA_B}"))
+        self.assertEqual(
+            gate.decide([without], ME, SHA_A, BASE_A, REF),
+            gate.decide([with_baseline], ME, SHA_A, BASE_A, REF),
+        )
+
+
 class SelectMarkerTests(unittest.TestCase):
     def test_trusted_approve_selected(self):
         body = "| x |\n" + marker()
@@ -103,10 +634,13 @@ class SelectMarkerTests(unittest.TestCase):
         """A round that ran later than the newest comment makes it stale.
 
         Selection is still by instant; the round check runs after it. Before
-        this check the newest comment won outright.
+        this check the newest comment won outright. Every parsed, convertible
+        higher round is authoritative -- the comment-count allowance that once
+        dismissed unsupported rounds as noise was reverted, because it let a
+        delayed older APPROVE through.
         """
         older = comment(
-            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=5),
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
             created_at="2026-09-11T10:00:00Z",
             cid=1,
         )

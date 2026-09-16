@@ -37,7 +37,11 @@ is the base repo and the latest trusted marker has `verdict=APPROVE`, `sha ==
 headRefOid`, `base == resolved base`, `base_ref == baseRefName` -- the review
 stands; skip step 1 and resume at step 2. Any FAIL (base-repo mismatch, newer
 commit, retarget, missing/CHANGES marker, a stale or self-contradicting round,
-or any lookup error -- the gate fails closed) means re-review.
+or any lookup error -- the gate fails closed) means re-review; the next round
+publishes a new ordinal, so this clears without a pushed commit. The exception
+is a comment whose round cannot be read at all, or whose successor cannot be
+written because numbering is exhausted -- that one has to be corrected before
+any round can publish.
 
 PR already `MERGED` (run died between merge and cleanup)? Jump straight to
 steps 5-6 — `post-merge` is propose-confirm-apply over observed state, so it
