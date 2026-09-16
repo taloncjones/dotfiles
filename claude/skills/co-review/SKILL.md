@@ -346,13 +346,27 @@ expire when the target moves; a target change that breaks the PR is CI's job.
 
 `pr_ready_gate.decide()` PASSes on a trusted marker with `verdict=APPROVE`,
 `sha == head`, and matching base and base_ref. The latest trusted round comment
-by creation instant governs, so a later CHANGES supersedes an earlier APPROVE
-on the same head and a retried publish is benign -- the later copy carries the
-same verdict for the same head. Selection happens BEFORE validation: the gate
-picks the latest marker-bearing comment, then validates it. A malformed latest
+by creation instant governs selection, so a later CHANGES supersedes an earlier
+APPROVE on the same head. Selection happens BEFORE validation: the gate picks
+the latest marker-bearing comment, then validates it. A malformed latest
 comment -- a marker with no findings table, or unusable ordering metadata --
 fails the gate closed. It is never skipped in favour of an older comment,
 because skipping it would let a truncated CHANGES expose a superseded APPROVE.
+
+After selection the gate checks the round. If any marker that parses carries a
+HIGHER round than the selected one, the newest comment is stale and the gate
+fails closed; if one carries the SAME round with a different verdict, the round
+contradicts itself and the gate fails closed. A retried publish of the CURRENT
+round stays benign -- same round, same verdict. A retry of an EARLIER round is
+not: without this check a delayed round-1 APPROVE revives an approval that
+round 2 superseded, which passed the shipped gate until it was fixed.
+
+The check compares only markers that parse. A truncated HIGHER-round marker is
+therefore invisible to it, so a delayed lower-round APPROVE can still win in
+that one case. Closing it would mean failing closed on any unparsable marker
+anywhere on the PR, wedging a PR over a single old truncated comment -- a more
+common and more benign event than the replay. The residual is recorded at the
+check in `scripts/pr_ready_gate.py`.
 
 The marker line must be exactly one per comment, unindented, and outside the
 table and any code fence, so `scripts/pr_ready_gate.py` accepts it. A quoted,

@@ -99,16 +99,97 @@ class SelectMarkerTests(unittest.TestCase):
         with self.assertRaises(gate.GateInputError):
             gate.select_marker([comment(body)], ME)
 
-    def test_latest_by_instant_not_round(self):
+    def test_higher_round_elsewhere_fails_closed(self):
+        """A round that ran later than the newest comment makes it stale.
+
+        Selection is still by instant; the round check runs after it. Before
+        this check the newest comment won outright.
+        """
         older = comment(
             "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=5),
-            created_at="2026-09-11T09:00:00Z", cid=1,
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
         )
         newer = comment(
             "| y |\n" + marker(sha=SHA_B, verdict="CHANGES", rnd=1),
-            created_at="2026-09-11T10:00:00Z", cid=2,
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
         )
-        self.assertEqual(gate.select_marker([older, newer], ME)["verdict"], "CHANGES")
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([older, newer], ME)
+
+    def test_delayed_replay_of_superseded_approve_fails_closed(self):
+        """Round 1 APPROVE, round 2 CHANGES, then a late round-1 publish.
+
+        The replayed APPROVE is newest and names the live head, so without the
+        round check the gate passes with round 2's blockers unresolved.
+        """
+        round1 = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        round2 = comment(
+            "| y |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        decision, _ = gate.decide([round1, round2, replay], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+
+    def test_duplicate_publish_of_latest_round_passes(self):
+        """A retry of the CURRENT round is benign: same round, same verdict."""
+        first = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        retry = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([first, retry], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
+
+    def test_same_round_conflicting_verdicts_fail_closed(self):
+        """One round publishes one verdict; two is contradictory evidence."""
+        changes = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        approve = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([changes, approve], ME)
+
+    def test_truncated_older_comment_does_not_wedge_the_pr(self):
+        """An unparsable OLD comment must not block a current approval.
+
+        This is the reason the round check compares only markers that parse,
+        and the reason the truncated-higher-round replay stays uncovered.
+        """
+        truncated = comment(
+            "<!-- co-review: sha=xyz -->",
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        current = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([truncated, current], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
 
     def test_offset_timestamps_ordered_by_instant(self):
         # 09:30Z is LATER than 11:00+02:00 (== 09:00Z); lexicographic would invert.
