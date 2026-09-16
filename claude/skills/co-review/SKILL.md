@@ -325,11 +325,13 @@ with the marker prefix is ignored by the marker scanner, and the `|` table row
 (or the clean sentence) already satisfies the gate's findings-body check.
 
 The findings body is matched mechanically, not read. `pr_ready_gate.py` accepts
-only an unindented top-level line that begins with `|`, or one equal to the
-literal `No actionable findings.` byte for byte. Bolding that sentence,
-dropping its period, indenting it, or rewording it fails the gate closed: it
-reports a marker with no findings table, /pr-ready says re-run co-review, and
-rerunning a clean round reproduces the same failure every time.
+only a top-level line that begins with `|`, or one equal to the literal
+`No actionable findings.` byte for byte; indenting it four or more spaces, or
+by a tab, puts it in a Markdown code block and it stops counting, though one
+to three spaces are tolerated. Bolding that sentence, dropping its period, or
+rewording it fails the gate closed: it reports a marker with no findings
+table, /pr-ready says re-run co-review, and rerunning a clean round reproduces
+the same failure every time.
 
 `sha` is the frozen committed head, `base` the resolved merge-base from
 `--base-ref`, `base_ref` the PR target branch, `round` the count of prior
