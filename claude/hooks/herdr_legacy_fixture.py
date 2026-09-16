@@ -32,6 +32,47 @@ def claim_legacy_owner(rd, session_id, host, pid, *args, **kwargs):
     return core.claim_owner(rd, session_id, host, pid, *args, **kwargs)
 
 
+def _seed_task_lead_gate(args):
+    """Publish an enabled gate and a capable procedure marker for tests.
+
+    The activation gate ships DISABLED and the shipped procedure advertises
+    capability 0, so an unseeded lead claim is refused. Historical contract
+    tests exercise successful lead claims, so this fixture gives them an
+    environment in which leads genuinely are enabled -- an enabled gate record
+    in the payload root and a capability-1 marker in the config dir the reader
+    resolves. Fixture setup, not a production bypass: the production reader is
+    unchanged and still resolves the account's real config dir.
+    """
+    if os.environ.get("HERDR_FIXTURE_NO_SEED"):
+        return
+
+    def value(flag):
+        return args[args.index(flag) + 1] if flag in args else None
+
+    slug = value("--repo-slug")
+    if not slug or not core.valid_repo_slug(slug):
+        return
+    root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+
+    skill = root / "skills" / "herdr-orchestration"
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(
+        '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n',
+        encoding="utf-8",
+    )
+
+    rd = core.repo_dir(slug)
+    rd.mkdir(parents=True, exist_ok=True)
+    scope = core.account_scope(os.getcwd(), value("--runtime") or "claude")
+    core.write_json_atomic(core.herdr_caps.gate_path(rd), {
+        "schema_version": 1,
+        "repo_slug": slug,
+        "repo_id": None,
+        "account_id": scope["account_id"],
+        "enabled": True,
+    })
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] == "classify-banner" and "--after" not in args:
@@ -71,6 +112,9 @@ def main():
         root = Path(os.environ["CLAUDE_CONFIG_DIR"])
         root.mkdir(parents=True, exist_ok=True)
         os.chdir(root)
+        if args and args[0] == "claim-owner" and "--control-tier" in args:
+            if args[args.index("--control-tier") + 1] == "lead":
+                _seed_task_lead_gate(args)
     return core.main(args)
 
 

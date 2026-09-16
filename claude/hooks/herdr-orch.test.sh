@@ -7720,5 +7720,28 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" >/dev/null
 SH
 
+check "fixture publishes an enabled gate and a capable procedure for a lead claim" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-fx.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-fx \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+python3 -c '
+import json, os, sys
+root, slug = sys.argv[1:3]
+gate = json.load(open(os.path.join(root, "herdr-orch", slug, "task-lead-gate.json")))
+assert gate["enabled"] is True, gate
+assert gate["repo_slug"] == slug, gate
+assert gate["schema_version"] == 1, gate
+marker = open(os.path.join(root, "skills", "herdr-orchestration", "SKILL.md"), encoding="utf-8").read()
+assert "capability:1" in marker.replace(" ", "").replace(chr(34), ""), marker
+' "$root" "$LF_SLUG"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
