@@ -57,7 +57,7 @@ provided the round carries its blockers forward. No commit is required.
 The exception is a comment whose round cannot be read at all -- unconvertible,
 or claiming a round no later round can exceed. Re-review cannot clear that,
 because every reader refuses the history. Report that the offending comment
-must be corrected, and say which one.
+must be corrected; the gate's error names it by comment id where it can.
 
 A PASS licenses merging THAT head. Pass the marker's `sha` to
 `gh pr merge --match-head-commit` so the server enforces it.

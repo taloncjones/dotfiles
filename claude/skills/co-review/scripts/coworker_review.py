@@ -357,9 +357,14 @@ def verdict_from_findings(
                 row.get("severity"),
                 round_index=round_index,
                 fix_regression=row.get("fix_regression"),
-                carried=row.get("carried", ABSENT if require_carried else False),
+                # Reading these at all is the co-review opt-in. The coworker
+                # family's verdict is severity-only, and honouring a carried or
+                # status field that merely happened to be present on one of its
+                # rows would change its behaviour -- which this change promises
+                # not to do.
+                carried=row.get("carried", ABSENT) if require_carried else False,
+                discharged=row.get("status") if require_carried else None,
                 require_carried=require_carried,
-                discharged=row.get("status"),
                 baseline_ok=baseline_ok,
             )
             # A malformed row is not a reason to take down the round. An empty

@@ -76,6 +76,19 @@ class HistoryCurrencyTests(unittest.TestCase):
         self.assertEqual(len(gate.all_markers([r1, r2], ME)), 2)
 
 
+class RoundNumberingExhaustionTests(unittest.TestCase):
+    """The publisher must never emit a number its own reader refuses."""
+
+    def test_an_unserializable_successor_fails_closed(self):
+        at_limit = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 4300),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.next_round_number([at_limit], ME)
+
+
 class HistoryParityTests(unittest.TestCase):
     """all_markers and select_marker must agree on what a usable history is."""
 
@@ -302,7 +315,8 @@ class RetargetRecoveryTests(unittest.TestCase):
         """Deliberate. Scoping the conflict check to a matching base_ref let an
         APPROVE published late against a target the PR had returned to stop
         conflicting with the CHANGES posted against the other target between
-        them. Recovery here is a pushed commit, which earns a fresh round."""
+        them. Recovery is the next round, which publishes a later ordinal -- no
+        pushed commit is needed; see the same-head tests above."""
         against_main = comment(
             "| x |\n" + marker(verdict="CHANGES", rnd=1),
             created_at="2026-09-11T10:00:00Z",

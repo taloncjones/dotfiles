@@ -257,13 +257,13 @@ def all_markers(comments, trusted_authors, marker_re=MARKER_RE,
             raise GateInputError("marker comment has invalid created_at/id")
         if shaped != 1 or len(markers) != 1:
             raise GateInputError(
-                "co-review history contains an unparsable marker; "
-                "the floor cannot narrow on it"
+                "co-review history contains an ambiguous or unparsable marker "
+                f"(comment {cid}); the floor cannot narrow on it"
             )
         if require_findings and not _has_findings_body(entry.get("body", "") or ""):
             raise GateInputError(
-                "co-review history contains a marker with no findings table; "
-                "an incomplete round does not advance the floor"
+                "co-review history contains a marker with no findings table "
+                f"(comment {cid}); an incomplete round does not advance the floor"
             )
         found.append((instant, cid, markers[0]))
     found.sort(key=lambda item: (item[0], item[1]))
@@ -331,8 +331,21 @@ def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
             # authoritative, so a replay of the round below it passed. Bounding
             # the field instead just moved the asymmetry to the bound, where
             # the publisher emitted a number its own parser refused.
-            highest = max(highest, _marker_round(marker))
-    return highest + 1
+            highest = max(highest, _marker_round(marker, entry.get("id")))
+    nxt = highest + 1
+    try:
+        # The successor has to survive being written into a marker. At the
+        # interpreter's decimal-conversion boundary the predecessor converts
+        # and its successor does not, which would publish a number this
+        # module's own reader then refuses -- the same publisher/reader
+        # disagreement the removed four-digit bound created.
+        str(nxt)
+    except ValueError:
+        raise GateInputError(
+            "co-review round numbering is exhausted; correct the comment "
+            "claiming the highest round"
+        ) from None
+    return nxt
 
 
 def _check_round_currency(selected: dict, candidates) -> None:
@@ -433,12 +446,20 @@ def _check_round_currency(selected: dict, candidates) -> None:
                 )
 
 
-def _marker_round(marker: dict) -> int:
-    """The marker's round as an int. Fail closed on anything unusable."""
+def _marker_round(marker: dict, cid=None) -> int:
+    """The marker's round as an int. Fail closed on anything unusable.
+
+    ``cid`` names the offending comment when the caller knows it. The operator
+    is told to correct that comment, so an error that cannot name one leaves
+    them hand-scanning the thread.
+    """
     try:
         return int(marker["round"])
     except (KeyError, TypeError, ValueError):
-        raise GateInputError("co-review marker has an unusable round") from None
+        where = f" (comment {cid})" if cid is not None else ""
+        raise GateInputError(
+            f"co-review marker has an unusable round{where}"
+        ) from None
 
 
 def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):

@@ -261,7 +261,9 @@ class CarriedVocabulary(unittest.TestCase):
 
     def test_a_carried_yes_cell_still_blocks(self):
         self.assertEqual(
-            cr.verdict_from_findings([{"severity": "minor", "carried": "yes"}]),
+            cr.verdict_from_findings(
+                [{"severity": "minor", "carried": "yes"}], require_carried=True
+            ),
             "CHANGES",
         )
 
@@ -301,6 +303,29 @@ class AbsentCarriedCell(unittest.TestCase):
     def test_the_coworker_family_has_no_such_column(self):
         self.assertEqual(cr.verdict_from_findings([{"severity": "minor"}]), "APPROVE")
         self.assertEqual(cr.verdict_from_findings([{"severity": "major"}]), "CHANGES")
+
+
+class CoworkerVerdictIsSeverityOnly(unittest.TestCase):
+    """Reading Carried/Status at all is the co-review opt-in.
+
+    Honouring a carried or status field that merely happened to sit on a
+    coworker row would change that family's verdict, which this change promises
+    not to do.
+    """
+
+    def test_a_resolved_row_does_not_discharge_without_the_opt_in(self):
+        row = [{"severity": "critical", "carried": "yes", "status": "RESOLVED"}]
+        self.assertEqual(cr.verdict_from_findings(row), "CHANGES")
+
+    def test_the_same_row_discharges_with_the_opt_in(self):
+        row = [{"severity": "critical", "carried": "yes", "status": "RESOLVED"}]
+        self.assertEqual(
+            cr.verdict_from_findings(row, require_carried=True), "APPROVE"
+        )
+
+    def test_a_carried_field_does_not_block_without_the_opt_in(self):
+        row = [{"severity": "minor", "carried": "yes"}]
+        self.assertEqual(cr.verdict_from_findings(row), "APPROVE")
 
 
 class DischargeNeedsAffirmativeCarried(unittest.TestCase):
@@ -350,11 +375,11 @@ class DischargeIsForCarriedRows(unittest.TestCase):
 
     def test_a_fresh_resolved_critical_still_blocks(self):
         row = [{"severity": "critical", "carried": "no", "status": "RESOLVED"}]
-        self.assertEqual(cr.verdict_from_findings(row), "CHANGES")
+        self.assertEqual(cr.verdict_from_findings(row, require_carried=True), "CHANGES")
 
     def test_a_carried_resolved_row_still_clears(self):
         row = [{"severity": "critical", "carried": "yes", "status": "RESOLVED"}]
-        self.assertEqual(cr.verdict_from_findings(row), "APPROVE")
+        self.assertEqual(cr.verdict_from_findings(row, require_carried=True), "APPROVE")
 
 
 class StatusCellVerbatim(unittest.TestCase):
@@ -387,17 +412,17 @@ class BlockingAgreesWithVerdict(unittest.TestCase):
     def test_a_no_cell_reads_the_same_both_ways(self):
         row = {"severity": "minor", "carried": "no"}
         self.assertFalse(cr.is_blocking(row["severity"], carried=row["carried"]))
-        self.assertEqual(cr.verdict_from_findings([row]), "APPROVE")
+        self.assertEqual(cr.verdict_from_findings([row], require_carried=True), "APPROVE")
 
     def test_a_yes_cell_reads_the_same_both_ways(self):
         row = {"severity": "minor", "carried": "yes"}
         self.assertTrue(cr.is_blocking(row["severity"], carried=row["carried"]))
-        self.assertEqual(cr.verdict_from_findings([row]), "CHANGES")
+        self.assertEqual(cr.verdict_from_findings([row], require_carried=True), "CHANGES")
 
     def test_a_malformed_carried_cell_blocks_both_ways(self):
         row = {"severity": "minor", "carried": []}
         self.assertTrue(cr.is_blocking(row["severity"], carried=row["carried"]))
-        self.assertEqual(cr.verdict_from_findings([row]), "CHANGES")
+        self.assertEqual(cr.verdict_from_findings([row], require_carried=True), "CHANGES")
 
 
 class DischargedRows(unittest.TestCase):
@@ -406,7 +431,9 @@ class DischargedRows(unittest.TestCase):
     def test_a_resolved_carried_row_stops_blocking(self):
         row = [{"severity": "major", "carried": "yes", "status": "RESOLVED"}]
         self.assertEqual(
-            cr.verdict_from_findings(row, round_index=2, baseline_ok=True),
+            cr.verdict_from_findings(
+                row, round_index=2, baseline_ok=True, require_carried=True
+            ),
             "APPROVE",
         )
 
@@ -414,28 +441,36 @@ class DischargedRows(unittest.TestCase):
         """RESOLVED must mean resolved, not "unless it is critical"."""
         row = [{"severity": "critical", "carried": "yes", "status": "RESOLVED"}]
         self.assertEqual(
-            cr.verdict_from_findings(row, round_index=1, baseline_ok=True),
+            cr.verdict_from_findings(
+                row, round_index=1, baseline_ok=True, require_carried=True
+            ),
             "APPROVE",
         )
 
     def test_a_resolved_high_stops_blocking_at_round_two(self):
         row = [{"severity": "high", "carried": "yes", "status": "RESOLVED"}]
         self.assertEqual(
-            cr.verdict_from_findings(row, round_index=2, baseline_ok=True),
+            cr.verdict_from_findings(
+                row, round_index=2, baseline_ok=True, require_carried=True
+            ),
             "APPROVE",
         )
 
     def test_an_open_carried_row_still_blocks(self):
         row = [{"severity": "major", "carried": "yes", "status": "open"}]
         self.assertEqual(
-            cr.verdict_from_findings(row, round_index=2, baseline_ok=True),
+            cr.verdict_from_findings(
+                row, round_index=2, baseline_ok=True, require_carried=True
+            ),
             "CHANGES",
         )
 
     def test_a_disputed_carried_row_still_blocks(self):
         row = [{"severity": "major", "carried": "yes", "status": "disputed"}]
         self.assertEqual(
-            cr.verdict_from_findings(row, round_index=2, baseline_ok=True),
+            cr.verdict_from_findings(
+                row, round_index=2, baseline_ok=True, require_carried=True
+            ),
             "CHANGES",
         )
 

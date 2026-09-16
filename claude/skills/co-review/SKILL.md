@@ -278,8 +278,16 @@ out of the carried set and clear itself with nothing fixed. The published
 comment is the durable record precisely so the next round does not have to
 recompute what an earlier round decided.
 
-Carry every previous-round row whose `Blocking` is `yes` and whose `Status` is
-not `RESOLVED`, and set `Carried=yes` on it this round.
+Carry every previous-round row whose `Blocking` is `yes`, and set `Carried=yes`
+on it this round. Do NOT also exclude rows whose `Status` is `RESOLVED`. That
+conjunct looks like a safety check and is the opposite: `is_blocking` already
+returns False for a genuinely discharged row, so `Blocking=yes` implies the row
+was not discharged. Its only effect is on the row the discharge guard
+deliberately produces -- a fresh finding mislabelled `Status=RESOLVED`, which
+publishes `Blocking=yes, Carried=no` precisely so it keeps blocking. Excluding
+it drops that finding from the carried set, the next round rediscovers it as
+fresh, and at a risen floor it no longer blocks. A major survives round 1 and
+clears at round 2 with nothing fixed.
 
 Pass `Carried` through verbatim, exactly like `Regression`: the helper
 normalizes it, and only an explicit `no` clears it. Do not pre-convert the cell
@@ -530,8 +538,8 @@ honest, and neither is the round number:
   round that first reviewed that head, so a second look at it is judged at the
   same bar as the first.
 - The carried set does not empty. Every previous-round row with `Blocking=yes`
-  and `Status` not `RESOLVED` is carried in with `Carried=yes`, and a carried
-  row blocks whatever the floor says until the seat discharges it.
+  is carried in with `Carried=yes`, and a carried row blocks whatever the floor
+  says until the seat discharges it.
 
 The published `round` still increments, because it is the publication ordinal.
 So the gate's equal-round check is NOT what guards this case -- it guards two
