@@ -205,7 +205,57 @@ def select_marker(
         raise GateInputError("latest co-review comment has an ambiguous or unparsable marker")
     if require_findings and not _has_findings_body(body):
         raise GateInputError("latest co-review comment has a marker but no findings table")
-    return markers[0]
+    selected = markers[0]
+    _check_round_currency(selected, candidates)
+    return selected
+
+
+def _check_round_currency(selected: dict, candidates) -> None:
+    """Fail closed when another marker contradicts the selected one.
+
+    The newest comment by creation instant still governs selection, but a
+    delayed publish can land an older round after a newer one: round 1
+    APPROVEs head H, round 2 posts CHANGES for H, a late round-1 publish
+    arrives, and without this check the revived APPROVE passes the gate with
+    round 2's blockers unresolved. A retry of the LATEST round stays benign --
+    same round, same verdict -- which is the only case the skill ever claimed
+    was harmless.
+
+    The equal-round check exists because the greater-than check alone would
+    still let a delayed same-round APPROVE supersede a same-round CHANGES,
+    which is the same defect one round index down.
+
+    Only markers that parse are compared. A truncated higher-round marker is
+    invisible here, so a delayed lower-round APPROVE can still win in that
+    case. That residual is deliberate: failing closed on any unparsable marker
+    anywhere on the PR would wedge a PR permanently over one old truncated
+    comment, which is a strictly more common and more benign event than the
+    replay it would catch.
+    """
+    selected_round = _marker_round(selected)
+    for _, _, shaped, markers, _ in candidates:
+        if shaped != 1 or len(markers) != 1:
+            continue  # unparsable: see the residual in this docstring
+        other = markers[0]
+        if other is selected:
+            continue
+        other_round = _marker_round(other)
+        if other_round > selected_round:
+            raise GateInputError(
+                "a later co-review round exists; the newest comment is stale"
+            )
+        if other_round == selected_round and other["verdict"] != selected["verdict"]:
+            raise GateInputError(
+                "co-review round has conflicting verdicts; re-run co-review"
+            )
+
+
+def _marker_round(marker: dict) -> int:
+    """The marker's round as an int. Fail closed on anything unusable."""
+    try:
+        return int(marker["round"])
+    except (KeyError, TypeError, ValueError):
+        raise GateInputError("co-review marker has an unusable round") from None
 
 
 def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):
