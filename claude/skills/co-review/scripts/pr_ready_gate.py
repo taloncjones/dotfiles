@@ -9,11 +9,20 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>\d+)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))? -->$"
+    r"round=(?P<round>\d+)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
+    r"(?: baseline=(?P<baseline>[0-9a-f]{40}))? -->$"
 )
 # target_tip records the target-branch tip the review compared against. It is
 # for the reader: decide() never compares it, so an approval does not expire
 # when the target moves. A target change that breaks the PR is CI's job.
+#
+# baseline records the head round 1 reviewed, and drives the progressive
+# blocking floor during review. decide() never compares it either, so adding
+# it cannot change a gate outcome. Both optional fields sit AFTER round and in
+# this order: every marker written before either existed still parses.
+# A malformed baseline does not match, so the line counts as shaped-but-invalid
+# and fails the gate closed when it is the newest comment -- it is never
+# skipped in favour of an older one.
 # The candidate prefix -- checked with a plain startswith, not derived from
 # MARKER_RE, so a truncated marker is still recognized as "a round comment
 # that failed to parse" instead of falling through as ordinary text and

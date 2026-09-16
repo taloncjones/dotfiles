@@ -29,6 +29,69 @@ def comment(body, author="me", created_at="2026-09-11T10:00:00Z", cid=1):
     return {"author": author, "created_at": created_at, "id": cid, "body": body}
 
 
+TIP = "e" * 40
+
+
+def marker_with(trailing, sha=SHA_A, verdict="APPROVE", rnd=1):
+    """A marker whose optional trailing fields are written verbatim."""
+    return (
+        f"<!-- co-review: sha={sha} base={BASE_A} base_ref={REF} "
+        f"verdict={verdict} round={rnd}{trailing} -->"
+    )
+
+
+class BaselineFieldTests(unittest.TestCase):
+    """baseline is optional, trails target_tip, and the gate never reads it."""
+
+    def test_baseline_alone_parses_and_is_exposed(self):
+        body = "| x |\n" + marker_with(f" baseline={SHA_B}")
+        self.assertEqual(
+            gate.select_marker([comment(body)], ME)["baseline"], SHA_B
+        )
+
+    def test_target_tip_then_baseline_parses(self):
+        body = "| x |\n" + marker_with(f" target_tip={TIP} baseline={SHA_B}")
+        selected = gate.select_marker([comment(body)], ME)
+        self.assertEqual(selected["target_tip"], TIP)
+        self.assertEqual(selected["baseline"], SHA_B)
+
+    def test_target_tip_only_still_parses_with_no_baseline(self):
+        body = "| x |\n" + marker_with(f" target_tip={TIP}")
+        selected = gate.select_marker([comment(body)], ME)
+        self.assertEqual(selected["target_tip"], TIP)
+        self.assertIsNone(selected["baseline"])
+
+    def test_marker_written_before_either_field_still_parses(self):
+        body = "| x |\n" + marker_with("")
+        selected = gate.select_marker([comment(body)], ME)
+        self.assertIsNone(selected["target_tip"])
+        self.assertIsNone(selected["baseline"])
+
+    def test_malformed_baseline_fails_closed_as_newest(self):
+        """Shaped but unparsable: never skipped in favour of an older comment."""
+        older = comment(
+            "| x |\n" + marker_with("", verdict="APPROVE"),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        newest = comment(
+            "| y |\n" + marker_with(" baseline=nothex"),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.select_marker([older, newest], ME)
+
+    def test_baseline_changes_no_gate_decision(self):
+        """decide() reads verdict, sha, base and base_ref -- never baseline."""
+        without = comment("| x |\n" + marker_with(""))
+        with_baseline = comment("| x |\n" + marker_with(f" baseline={SHA_B}"))
+        self.assertEqual(
+            gate.decide([without], ME, SHA_A, BASE_A, REF),
+            gate.decide([with_baseline], ME, SHA_A, BASE_A, REF),
+        )
+
+
 class SelectMarkerTests(unittest.TestCase):
     def test_trusted_approve_selected(self):
         body = "| x |\n" + marker()

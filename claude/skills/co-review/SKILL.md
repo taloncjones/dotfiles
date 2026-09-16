@@ -188,10 +188,54 @@ snapshot if it refuses cleanup.
 
 ## Blocking
 
-Major, high and critical findings block. Minor, low, nit and advisory do not.
-An unrecognized, missing, or seat-disputed severity blocks. An UNRESOLVED
-finding blocks exactly as a CONFIRMED one of its severity does. The floor does
-not vary by round in this slice.
+The bar to block rises with the round. After a round or two the useful question
+stops being "is anything wrong" and becomes "is this functional", and without
+narrowing a PR can be held indefinitely by findings that are real, minor and
+endless.
+
+| Round | Blocks                                        |
+| ----- | --------------------------------------------- |
+| 1     | major, high, critical                         |
+| 2     | high, critical                                |
+| 3+    | critical; high only as a fix-regression       |
+
+Minor, low, nit and advisory never block. An unrecognized, missing, or
+seat-disputed severity blocks at every round. An UNRESOLVED finding blocks
+exactly as a CONFIRMED one of its severity does. Findings the floor does not
+block are posted with Blocking=no and are NOT carried forward.
+
+Do not apply the table by hand. Each finding's blocking value comes from
+`coworker_review.is_blocking(severity, round_index=<n>,
+fix_regression=<seat answer>)` and the round's verdict from
+`coworker_review.verdict_from_findings(findings, round_index=<n>)`. An unusable
+round index falls back to the round-1 floor: an unknown round must never
+silently stop blocking on real defects.
+
+### Fix-regression
+
+A finding is a fix-regression when its failure scenario is reachable in the
+current frozen tree and was NOT reachable at the baseline tree. It is a
+question about the scenario, not about a line: a repair can change a callee
+while the finding cites an unchanged caller, and author dates survive
+cherry-picks, so line age and commit timestamps decide nothing.
+
+The verification seat answers it -- the same seat that already reasons about
+reachability -- and records the answer in the round table's `Regression`
+column as `yes`, `no`, or `unknown`. `unknown`, a missing column, and a
+baseline tree that cannot be read are all treated as `yes`, so an unclassified
+finding blocks. A baseline sha is not a guarantee its tree still exists: a
+force-push, a pruned ref or garbage collection can remove the objects, and the
+seat checks the tree is readable before narrowing.
+
+### Baseline
+
+The PR's FIRST trusted marker records `baseline=<sha>`, the head round 1
+reviewed, which equals that marker's own `sha`. Every later round COPIES that
+value from the first marker and never recomputes it.
+
+If the first marker is absent, unreadable, or later markers disagree about
+`baseline`, the floor does not narrow: every round blocks at the round-1 level.
+Contradictory evidence fails closed to the strictest floor.
 
 ## Rounds and continuity
 
@@ -281,6 +325,11 @@ major/high/critical findings are blocking, minor/low/nit/advisory are
 advisory, and an unrecognized severity fails closed to blocking. Fill each
 row's `Blocking` column with `coworker_review.is_blocking(severity)`.
 
+Call both WITHOUT a round: the coworker review has no progressive floor, and
+the round-1 floor with no regression concept is deliberately its contract. That
+is why the floor parameters are keyword-only with round-1 defaults -- the
+co-review rounds pass them, this family does not.
+
 Re-review scope: read the latest trusted coworker marker with
 `coworker_review.select_coworker_marker(comments, {gh_user})`; compute
 `is_ancestor` via `git merge-base --is-ancestor <prev_sha> <new_head>`; then
@@ -306,17 +355,19 @@ marker as its own unindented top-level line:
 ```markdown
 ### Co-review round <n>
 
-| Severity | File:line       | Issue | Status | Fix |
-| -------- | --------------- | ----- | ------ | --- |
-| HIGH     | path/file.py:42 | ...   | open   | ... |
+| Severity | File:line       | Issue | Status | Regression | Fix |
+| -------- | --------------- | ----- | ------ | ---------- | --- |
+| HIGH     | path/file.py:42 | ...   | open   | yes        | ... |
 
 Seats: <runner session ids / report paths>. Grouping: <subsystem order>.
 
 (Status is open, or RESOLVED for a carried blocker the verification seat
 discharged this round; "No actionable findings." replaces the table when the
-round is clean.)
+round is clean. `Regression` is the verification seat's fix-regression answer
+-- `yes`, `no`, or `unknown` -- and only changes whether a finding blocks from
+round 3 on; `unknown` and a missing column both block.)
 
-<!-- co-review: sha=<head> base=<merge-base> base_ref=<branch> verdict=<APPROVE|CHANGES> round=<n> target_tip=<tip> -->
+<!-- co-review: sha=<head> base=<merge-base> base_ref=<branch> verdict=<APPROVE|CHANGES> round=<n> target_tip=<tip> baseline=<round-1 head> -->
 ```
 
 The `Seats:` line carries the seat-evidence rule's citations and the round's
@@ -339,10 +390,20 @@ trusted markers on the PR plus one, and `verdict` APPROVE only when the round
 leaves no blocking finding and no undischarged carried blocker.
 
 `target_tip` is the target branch tip the review compared against, recorded for
-the reader. It is the LAST field, after `round`: appending keeps every marker
-written before this change parseable, and that order is the only one the gate's
-regex accepts. The gate never compares `target_tip`, so an approval does not
-expire when the target moves; a target change that breaks the PR is CI's job.
+the reader. The gate never compares it, so an approval does not expire when the
+target moves; a target change that breaks the PR is CI's job.
+
+`baseline` is the head round 1 reviewed. Round 1 writes its own `sha` there;
+every later round copies the first marker's value verbatim. It drives the
+progressive floor during review, and the gate never compares it either, so
+adding it cannot change a gate outcome.
+
+Both are optional and both trail `round`, in the order `round`, `target_tip`,
+`baseline`. That order is the only one the gate's regex accepts, and appending
+this way keeps every marker written before either field existed parseable. A
+malformed value does not match the regex, so the line counts as
+shaped-but-invalid and fails the gate closed when it is the newest comment --
+never skipped in favour of an older one.
 
 `pr_ready_gate.decide()` PASSes on a trusted marker with `verdict=APPROVE`,
 `sha == head`, and matching base and base_ref. The latest trusted round comment

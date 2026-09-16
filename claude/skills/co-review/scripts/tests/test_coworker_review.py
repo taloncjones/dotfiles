@@ -37,6 +37,90 @@ class IsBlocking(unittest.TestCase):
         self.assertTrue(cr.is_blocking(""))
 
 
+class ProgressiveFloor(unittest.TestCase):
+    """The bar to block rises with the round index."""
+
+    def test_round_one_blocks_major(self):
+        self.assertTrue(cr.is_blocking("major", round_index=1))
+
+    def test_round_two_does_not_block_major(self):
+        self.assertFalse(cr.is_blocking("major", round_index=2))
+
+    def test_round_two_blocks_high_and_critical(self):
+        self.assertTrue(cr.is_blocking("high", round_index=2))
+        self.assertTrue(cr.is_blocking("critical", round_index=2))
+
+    def test_round_three_blocks_critical_only(self):
+        self.assertTrue(cr.is_blocking("critical", round_index=3))
+        self.assertFalse(cr.is_blocking("high", round_index=3))
+        self.assertFalse(cr.is_blocking("major", round_index=3))
+
+    def test_round_three_blocks_high_when_it_is_a_fix_regression(self):
+        """A late round still cares about defects the fixes introduced."""
+        self.assertTrue(
+            cr.is_blocking("high", round_index=3, fix_regression=True)
+        )
+
+    def test_fix_regression_does_not_promote_major_or_advisory(self):
+        """Only high and above block as a fix-regression."""
+        self.assertFalse(
+            cr.is_blocking("major", round_index=3, fix_regression=True)
+        )
+        self.assertFalse(
+            cr.is_blocking("minor", round_index=3, fix_regression=True)
+        )
+
+    def test_unrecognized_severity_blocks_at_every_round(self):
+        for rnd in (1, 2, 3, 9):
+            self.assertTrue(cr.is_blocking("weird", round_index=rnd), rnd)
+            self.assertTrue(cr.is_blocking(None, round_index=rnd), rnd)
+
+    def test_unusable_round_index_falls_back_to_the_strictest_floor(self):
+        """An unknown round must not silently stop blocking on real defects."""
+        for rnd in (None, "x", 0, -1):
+            self.assertTrue(cr.is_blocking("major", round_index=rnd), rnd)
+
+    def test_later_rounds_keep_the_final_floor(self):
+        self.assertFalse(cr.is_blocking("high", round_index=9))
+        self.assertTrue(cr.is_blocking("critical", round_index=9))
+
+    def test_default_call_is_the_round_one_floor(self):
+        """The coworker family calls the defaults and must not shift."""
+        self.assertTrue(cr.is_blocking("major"))
+        self.assertFalse(cr.is_blocking("minor"))
+        self.assertEqual(cr.floor_for_round(1), cr.floor_for_round(None))
+
+
+class ProgressiveFloorVerdict(unittest.TestCase):
+    def test_major_only_approves_from_round_two(self):
+        findings = [{"severity": "major", "fix_regression": False}]
+        self.assertEqual(
+            cr.verdict_from_findings(findings, round_index=1), "CHANGES"
+        )
+        self.assertEqual(
+            cr.verdict_from_findings(findings, round_index=2), "APPROVE"
+        )
+
+    def test_unclassified_high_blocks_at_round_three(self):
+        """No 'fix_regression' means the seat could not rule; that blocks."""
+        findings = [{"severity": "high"}]
+        self.assertEqual(
+            cr.verdict_from_findings(findings, round_index=3), "CHANGES"
+        )
+
+    def test_confirmed_pre_existing_high_does_not_block_at_round_three(self):
+        findings = [{"severity": "high", "fix_regression": False}]
+        self.assertEqual(
+            cr.verdict_from_findings(findings, round_index=3), "APPROVE"
+        )
+
+    def test_confirmed_regression_high_blocks_at_round_three(self):
+        findings = [{"severity": "high", "fix_regression": True}]
+        self.assertEqual(
+            cr.verdict_from_findings(findings, round_index=3), "CHANGES"
+        )
+
+
 class Verdict(unittest.TestCase):
     def test_empty_is_approve(self):
         self.assertEqual(cr.verdict_from_findings([]), "APPROVE")

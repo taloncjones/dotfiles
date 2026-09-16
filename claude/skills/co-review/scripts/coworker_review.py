@@ -55,20 +55,79 @@ _BLOCKING_SEVERITIES = {"major", "high", "critical"}
 _ADVISORY_SEVERITIES = {"minor", "low", "nit", "advisory"}
 
 
-def is_blocking(severity) -> bool:
-    """True unless severity is a recognized advisory level (fail closed)."""
+# The progressive floor. After a round or two the useful question stops being
+# "is anything wrong" and becomes "is this functional", so the bar to block
+# rises with the round index. Rank order is the severity's strength; a finding
+# blocks when its rank meets the round's floor.
+_SEVERITY_RANK = {"major": 1, "high": 2, "critical": 3}
+_FLOOR_BY_ROUND = {1: 1, 2: 2}
+_FINAL_FLOOR = 3  # round 3 and later: critical only
+
+
+def floor_for_round(round_index) -> int:
+    """Minimum blocking rank for this round. Fail closed to the round-1 floor.
+
+    An unusable round index means the caller could not establish which round
+    this is, and the strictest floor is the safe answer -- never the most
+    permissive one, which would silently stop blocking on real defects.
+    """
+    try:
+        index = int(round_index)
+    except (TypeError, ValueError):
+        return _FLOOR_BY_ROUND[1]
+    if index < 1:
+        return _FLOOR_BY_ROUND[1]
+    return _FLOOR_BY_ROUND.get(index, _FINAL_FLOOR)
+
+
+def is_blocking(severity, *, round_index=1, fix_regression=False) -> bool:
+    """True when this finding blocks at this round (fail closed).
+
+    Anything not a recognized advisory level still blocks at round 1, so a
+    missing or unknown severity can never silently produce APPROVE.
+
+    The parameters are keyword-only with round-1 defaults because this helper
+    is shared with the coworker-review family, which has no progressive floor:
+    the round-1 floor with no regression concept IS the coworker contract, and
+    every existing call site keeps its behaviour untouched.
+
+    ``fix_regression`` is the verification seat's answer to "was this scenario
+    reachable at the baseline tree". A finding the floor would otherwise let
+    through still blocks when it is high or above and the seat says the change
+    introduced it -- that is the one thing a late round still cares about.
+    """
     if not isinstance(severity, str):
         return True
-    return severity.strip().lower() not in _ADVISORY_SEVERITIES
+    rank = _SEVERITY_RANK.get(severity.strip().lower())
+    if rank is None:
+        # Not a recognized severity at all. Advisory levels are known and
+        # never block; anything else is unrecognized and fails closed.
+        return severity.strip().lower() not in _ADVISORY_SEVERITIES
+    if rank >= floor_for_round(round_index):
+        return True
+    return bool(fix_regression) and rank >= _SEVERITY_RANK["high"]
 
 
-def verdict_from_findings(findings) -> str:
-    """CHANGES if any finding's severity is blocking, else APPROVE.
+def verdict_from_findings(findings, *, round_index=1) -> str:
+    """CHANGES if any finding blocks at this round, else APPROVE.
 
-    Blocking is derived from each finding's 'severity' field, not a caller-set
-    flag, so severity-to-blocking conversion is what the tests exercise.
+    Blocking is derived from each finding's 'severity' and 'fix_regression'
+    fields, not a caller-set flag, so the conversion is what the tests
+    exercise. A missing 'fix_regression' is read as True: an unclassified
+    finding is one the seat could not rule on, and those block.
     """
-    return "CHANGES" if any(is_blocking(f.get("severity")) for f in findings) else "APPROVE"
+    return (
+        "CHANGES"
+        if any(
+            is_blocking(
+                f.get("severity"),
+                round_index=round_index,
+                fix_regression=f.get("fix_regression", True),
+            )
+            for f in findings
+        )
+        else "APPROVE"
+    )
 
 
 def decide_review_scope(prev_marker, new_head, current_base_ref, current_base_ref_tip, is_ancestor):
