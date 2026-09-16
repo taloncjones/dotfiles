@@ -193,5 +193,20 @@ for bad in (None, 12345, [], object()):
 sys.exit(0)
 PY
 
+check "shipped SKILL.md declares exactly one marker at capability 0" <<PY
+$LOAD
+text = open("claude/skills/herdr-orchestration/SKILL.md", encoding="utf-8").read()
+cap = k.parse_marker(text)
+assert cap == 0, cap
+sys.exit(0)
+PY
+
+check "shipped procedure is below the required level, so leads cannot be admitted" <<PY
+$LOAD
+text = open("claude/skills/herdr-orchestration/SKILL.md", encoding="utf-8").read()
+assert k.parse_marker(text) < k.REQUIRED_CAPABILITY
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

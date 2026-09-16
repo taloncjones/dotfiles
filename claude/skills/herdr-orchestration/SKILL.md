@@ -3,6 +3,8 @@ name: herdr-orchestration
 description: Use to run a Claude-led standing per-repo orchestrator over Herdr that turns a designated Jira ticket or repo todo into a briefed worker session in a worktree workspace, tracks it through a hook-fed event log, and dispatches an independent reviewer before handing back for merge. Trigger when the user says "kick off <TASK>", "what's queued", "status", or asks the orchestrator to supervise delegated work. Codex participates through bounded UI/prose/review work; requires HERDR_ENV=1.
 ---
 
+<!-- herdr-capabilities: {"marker_version":1,"capability":0} -->
+
 # herdr-orchestration
 
 A Claude-led per-repo orchestrator over Herdr. It turns a designated work item into a
