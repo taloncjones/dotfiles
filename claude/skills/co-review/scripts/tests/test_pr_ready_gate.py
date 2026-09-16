@@ -205,13 +205,16 @@ class NextRoundNumberTests(unittest.TestCase):
 
 
 class SameHeadRereviewTests(unittest.TestCase):
-    """A second review of an already-reviewed head cannot flip the verdict.
+    """What holds a same-head re-review honest is NOT the round check.
 
-    Fail-closed by choice: letting the later same-round comment win would
-    reopen the replay the round check exists to close.
+    The published ordinal always advances, so two rounds never share one and
+    the equal-round branch cannot be what guards this. The floor not moving
+    (round_index_for_head returns that head's original ordinal) and the carried
+    set not emptying are the actual guarantees.
     """
 
-    def test_a_second_verdict_at_the_same_head_fails_closed(self):
+    def test_two_verdicts_at_one_ordinal_fail_closed(self):
+        """This guards concurrent publication, not a sequential re-review."""
         changes = comment(
             "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
             created_at="2026-09-11T10:00:00Z",
@@ -224,21 +227,71 @@ class SameHeadRereviewTests(unittest.TestCase):
         )
         decision, reason = gate.decide([changes, approve], ME, SHA_A, BASE_A, REF)
         self.assertEqual(decision, "FAIL")
-        self.assertIn("new head", reason)
+        self.assertIn("re-run co-review", reason)
 
-    def test_the_recovery_is_a_new_head_not_a_deleted_comment(self):
-        """Pushing a commit earns a new head, so the next round is round 2."""
+    def test_the_next_round_clears_it_at_the_same_head(self):
+        """No pushed commit is needed; the ordinal advances on its own."""
         changes = comment(
             "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
             created_at="2026-09-11T10:00:00Z",
             cid=1,
         )
-        after_push = comment(
-            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=2),
-            created_at="2026-09-11T12:00:00Z",
+        conflicting = comment(
+            "| y |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
             cid=2,
         )
-        decision, _ = gate.decide([changes, after_push], ME, SHA_B, BASE_A, REF)
+        history = [changes, conflicting]
+        self.assertEqual(gate.next_round_number(history, ME), 2)
+        fresh = comment(
+            "| z |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        decision, _ = gate.decide(history + [fresh], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
+
+    def test_the_floor_does_not_move_at_an_unchanged_head(self):
+        """The real guarantee: a second look is judged at the same bar."""
+        import coworker_review as cr
+
+        priors = [{"sha": SHA_A}]
+        self.assertEqual(cr.round_index_for_head(priors, SHA_A), 1)
+
+
+class TwoMarkerCommentTests(unittest.TestCase):
+    """A comment carrying two readable markers must not hide them."""
+
+    def test_higher_rounds_in_a_two_marker_comment_are_not_invisible(self):
+        older = comment(
+            "| x |\n"
+            + marker(verdict="CHANGES", rnd=2)
+            + "\n"
+            + marker(verdict="CHANGES", rnd=3),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        newest = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([older, newest], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+
+    def test_a_truncated_comment_still_does_not_wedge(self):
+        """The documented residual survives: no parsed markers, nothing compared."""
+        truncated = comment(
+            "<!-- co-review: sha=xyz -->",
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        current = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([truncated, current], ME, SHA_A, BASE_A, REF)
         self.assertEqual(decision, "PASS")
 
 

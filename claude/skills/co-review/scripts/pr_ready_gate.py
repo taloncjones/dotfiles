@@ -375,52 +375,62 @@ def _check_round_currency(selected: dict, candidates) -> None:
     # is editing or deleting the offending comment, which the error names. A
     # retry of the CURRENT round needs no special handling: it carries the same
     # round and the same verdict, so neither branch below fires.
-    for _, _, shaped, markers, _ in candidates:
-        if shaped != 1 or len(markers) != 1:
-            continue  # unparsable: see the residual in this docstring
-        other = markers[0]
-        if other is selected:
-            continue
-        other_round = _marker_round(other)
-        if other_round > selected_round:
-            raise GateInputError(
-                "a later co-review round exists; the newest comment is stale "
-                "(if that round number is a miscount, correct or delete that "
-                "comment)"
-            )
-        if other_round == selected_round and other["verdict"] != selected["verdict"]:
-            # One round reaches one verdict, so two verdicts at one round is
-            # contradictory evidence and the safe reading is the blocking one.
-            #
-            # Recovery is a NEW HEAD, not "re-run co-review" and not deleting
-            # the older comment. Re-running at the same head reproduces this
-            # exact state, because a head keeps the ordinal of the round that
-            # first reviewed it -- so the fresh round posts the same round
-            # number and contradicts its predecessor again. Deleting the older
-            # comment does clear it, but that comment holds the Blocking column
-            # the next round rebuilds its carried set from, and removing it also
-            # shifts every later round_index_for_head result. Pushing a commit
-            # costs one commit and destroys no evidence.
-            #
-            # Deliberately NOT scoped to a matching base/base_ref. Scoping it
-            # that way was tried so a retargeted PR could be re-reviewed at
-            # the same head, and it reopened a fail-open: an APPROVE published
-            # late against a target the PR has since returned to no longer
-            # conflicted with the CHANGES published against the other target
-            # in between. A retarget now costs a pushed commit to earn a fresh
-            # round, which is recoverable; the fail-open was not.
-            #
-            # Only the verdict is compared. Extending this to sha/base/base_ref
-            # was considered and declined: re-posting a round against a new
-            # head is bookkeeping sloppiness rather than a fail-open, the
-            # dangerous form is already caught by decide()'s sha == head check,
-            # and comparing sha here makes two same-round markers on different
-            # heads unselectable -- which is exactly how comment ordering is
-            # exercised when two comments share a timestamp.
-            raise GateInputError(
-                "co-review round has conflicting verdicts; push a commit so the "
-                "next round runs at a new head"
-            )
+    for _, _, _, markers, _ in candidates:
+        # Iterate the PARSED markers, not one per comment. Skipping a whole
+        # comment when it did not carry exactly one marker also hid a comment
+        # carrying TWO readable markers, and those were then invisible here
+        # while all_markers refused the same history -- so a newest round-1
+        # APPROVE passed with two higher-round CHANGES markers sitting on the
+        # PR. A truncated comment still has no parsed markers, so the
+        # documented residual is unchanged.
+        for other in markers:
+            if other is selected:
+                continue
+            other_round = _marker_round(other)
+            if other_round > selected_round:
+                raise GateInputError(
+                    "a later co-review round exists; the newest comment is "
+                    "stale (if that round number is a miscount, correct or "
+                    "delete that comment)"
+                )
+            if (
+                other_round == selected_round
+                and other["verdict"] != selected["verdict"]
+            ):
+                # One round reaches one verdict, so two verdicts at one round is
+                # contradictory evidence and the safe reading is the blocking one.
+                #
+                # Recovery is simply the next round: the published ordinal comes
+                # from next_round_number and always advances, so a fresh round
+                # clears this without a pushed commit. An earlier version of this
+                # comment claimed the opposite -- that a head keeps its ordinal so
+                # a re-review re-contradicts itself -- which was true only while
+                # the marker's round came from the floor index. It does not.
+                #
+                # What keeps a same-head re-review honest is NOT this check: it is
+                # that round_index_for_head returns that head's original ordinal so
+                # the floor does not move, and that the carried set does not empty.
+                # Do not reach for this check to guard that case.
+                #
+                # Deliberately NOT scoped to a matching base/base_ref. Scoping it
+                # that way was tried so a retargeted PR could be re-reviewed at
+                # the same head, and it reopened a fail-open: an APPROVE published
+                # late against a target the PR has since returned to no longer
+                # conflicted with the CHANGES published against the other target
+                # in between. A retarget is cleared by the next round's ordinal,
+                # which is recoverable; the fail-open was not.
+                #
+                # Only the verdict is compared. Extending this to sha/base/base_ref
+                # was considered and declined: re-posting a round against a new
+                # head is bookkeeping sloppiness rather than a fail-open, the
+                # dangerous form is already caught by decide()'s sha == head check,
+                # and comparing sha here makes two same-round markers on different
+                # heads unselectable -- which is exactly how comment ordering is
+                # exercised when two comments share a timestamp.
+                raise GateInputError(
+                    "co-review round has conflicting verdicts; re-run co-review "
+                    "-- the next round publishes a later ordinal"
+                )
 
 
 def _marker_round(marker: dict) -> int:

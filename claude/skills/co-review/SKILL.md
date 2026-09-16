@@ -228,9 +228,13 @@ that needs a repository rather than a marker.
 Do not apply the table by hand. Each finding's blocking value comes from
 `coworker_review.is_blocking(severity, round_index=<n>,
 fix_regression=<Regression cell>, carried=<Carried cell>, discharged=<Status
-cell>, baseline_ok=<bool>)` and the round's verdict from
+cell>, baseline_ok=<bool>, require_carried=True)` and the round's verdict from
 `coworker_review.verdict_from_findings(findings, round_index=<n>,
-baseline_ok=<bool>)`. Every cell goes in verbatim; the helper normalizes each
+baseline_ok=<bool>, require_carried=True)`. Pass `require_carried=True` to
+BOTH: it makes a row missing its `Carried` cell block instead of reading as not
+carried, and passing it to only one of them is exactly what lets the published
+column disagree with the verdict. Omit the `carried=` argument entirely when
+the cell is absent rather than substituting a value for it. Every cell goes in verbatim; the helper normalizes each
 one, and both calls read them the same way, so the `Blocking` column you
 publish cannot disagree with the verdict you publish beside it.
 
@@ -239,8 +243,7 @@ Build each `findings` row with exactly these four keys -- `severity`,
 `Carried` and `Status` cells. The key names are not the column names; keying a
 row by the column names instead leaves every cell unread, and the round then
 publishes an all-`Blocking=no` table under a CHANGES verdict that re-runs
-identically forever. Pass `require_carried=True` so a row missing its `Carried`
-cell blocks rather than silently reading as not carried. An unusable round index falls back to
+identically forever. An unusable round index falls back to
 the round-1 floor: an unknown round must never silently stop blocking on real
 defects.
 

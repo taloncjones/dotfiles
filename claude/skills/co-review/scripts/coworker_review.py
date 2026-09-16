@@ -210,14 +210,18 @@ def round_index_for_head(prior_markers, head) -> int:
     return len(order) + 1
 
 
+ABSENT = object()  # "this row had no such cell", distinct from any cell value
+
+
 def is_blocking(
     severity,
     *,
     round_index=1,
     fix_regression=None,
-    carried: object = False,
+    carried: object = ABSENT,
     discharged: object = None,
     baseline_ok: bool = False,
+    require_carried: bool = False,
 ) -> bool:
     """True when this finding blocks at this round (fail closed).
 
@@ -234,6 +238,15 @@ def is_blocking(
     through still blocks when it is high or above and the seat says the change
     introduced it -- that is the one thing a late round still cares about.
     """
+    if require_carried and carried is ABSENT:
+        # A co-review row is malformed without its Carried cell, and a
+        # malformed row blocks. Checked FIRST so absence cannot instead be
+        # routed through the discharge branch below, where it would satisfy
+        # nothing and fall through to severity -- and so this entry point and
+        # verdict_from_findings classify an absent cell identically.
+        return True
+    if carried is ABSENT:
+        carried = False
     if _is_discharged(discharged) and _is_explicitly_carried(carried):
         # The seat verified the failure path is repaired. The published table
         # keeps the row so the thread stays a complete record, but a repaired
@@ -344,11 +357,8 @@ def verdict_from_findings(
                 row.get("severity"),
                 round_index=round_index,
                 fix_regression=row.get("fix_regression"),
-                carried=(
-                    row.get("carried")
-                    if require_carried
-                    else row.get("carried", False)
-                ),
+                carried=row.get("carried", ABSENT if require_carried else False),
+                require_carried=require_carried,
                 discharged=row.get("status"),
                 baseline_ok=baseline_ok,
             )
