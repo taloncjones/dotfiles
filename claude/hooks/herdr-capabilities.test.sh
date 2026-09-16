@@ -87,5 +87,13 @@ assert k.procedure_capability(d) == 1, k.procedure_capability(d)
 sys.exit(0)
 PY
 
+check "procedure_capability: non-path input is unsupported, not an error" <<PY
+$LOAD
+assert k.procedure_capability(None) is None
+assert k.procedure_capability(12345) is None
+assert k.procedure_capability(object()) is None
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

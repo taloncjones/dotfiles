@@ -64,9 +64,9 @@ def procedure_capability(config_dir):
     directory: a compatible sibling file in the current checkout is not
     evidence of what is installed.
     """
-    path = Path(config_dir) / "skills" / "herdr-orchestration" / "SKILL.md"
     try:
+        path = Path(config_dir) / "skills" / "herdr-orchestration" / "SKILL.md"
         text = path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
+    except (OSError, TypeError, ValueError):
         return None
     return parse_marker(text)
