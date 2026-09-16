@@ -491,6 +491,24 @@ HIGHER round than the selected one, the newest comment is stale and the gate
 fails closed; if one carries the SAME round with a different verdict, the round
 contradicts itself and the gate fails closed.
 
+**A round cannot change its own verdict at a head an earlier round already
+reviewed.** A head keeps the ordinal of the round that first reviewed it, so a
+second review of that head posts the same `round=`, and two verdicts at one
+round fail the gate closed. This matters because the verification seat may
+discharge a carried blocker on the ground that a necessary premise is now
+enforced against, which needs no commit -- so a round genuinely can want to run
+at an unchanged head.
+
+Recovery is to push a commit, so the next round runs at a NEW head. Do not
+recover by deleting the older round comment: that comment holds the `Blocking`
+column the next round rebuilds its carried set from, and removing it also
+shifts every later `round_index_for_head` result.
+
+This is fail-closed by choice. Letting a later same-round comment supersede an
+earlier one would fix the wedge and reopen the replay it was added to close: a
+delayed APPROVE would once again bury a CHANGES. A wedge costs one commit; the
+fail-open costs an unreviewed merge.
+
 A miscounted round therefore wedges the PR, and that is deliberate. Bounding a
 claimed round by the comment count was tried and reverted: it let a miscounted
 higher round be dismissed as noise, so a delayed older APPROVE passed, trading a

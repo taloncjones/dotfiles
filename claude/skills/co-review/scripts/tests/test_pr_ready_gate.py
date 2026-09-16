@@ -40,6 +40,44 @@ def marker_with(trailing, sha=SHA_A, verdict="APPROVE", rnd=1):
     )
 
 
+class SameHeadRereviewTests(unittest.TestCase):
+    """A second review of an already-reviewed head cannot flip the verdict.
+
+    Fail-closed by choice: letting the later same-round comment win would
+    reopen the replay the round check exists to close.
+    """
+
+    def test_a_second_verdict_at_the_same_head_fails_closed(self):
+        changes = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        approve = comment(
+            "| y |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        decision, reason = gate.decide([changes, approve], ME, SHA_A, BASE_A, REF)
+        self.assertEqual(decision, "FAIL")
+        self.assertIn("new head", reason)
+
+    def test_the_recovery_is_a_new_head_not_a_deleted_comment(self):
+        """Pushing a commit earns a new head, so the next round is round 2."""
+        changes = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        after_push = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T12:00:00Z",
+            cid=2,
+        )
+        decision, _ = gate.decide([changes, after_push], ME, SHA_B, BASE_A, REF)
+        self.assertEqual(decision, "PASS")
+
+
 class RetargetRecoveryTests(unittest.TestCase):
     """A retarget is a new review of the same head, not a contradiction."""
 

@@ -321,6 +321,16 @@ def _check_round_currency(selected: dict, candidates) -> None:
             # One round reaches one verdict, so two verdicts at one round is
             # contradictory evidence and the safe reading is the blocking one.
             #
+            # Recovery is a NEW HEAD, not "re-run co-review" and not deleting
+            # the older comment. Re-running at the same head reproduces this
+            # exact state, because a head keeps the ordinal of the round that
+            # first reviewed it -- so the fresh round posts the same round
+            # number and contradicts its predecessor again. Deleting the older
+            # comment does clear it, but that comment holds the Blocking column
+            # the next round rebuilds its carried set from, and removing it also
+            # shifts every later round_index_for_head result. Pushing a commit
+            # costs one commit and destroys no evidence.
+            #
             # Deliberately NOT scoped to a matching base/base_ref. Scoping it
             # that way was tried so a retargeted PR could be re-reviewed at
             # the same head, and it reopened a fail-open: an APPROVE published
@@ -337,7 +347,8 @@ def _check_round_currency(selected: dict, candidates) -> None:
             # heads unselectable -- which is exactly how comment ordering is
             # exercised when two comments share a timestamp.
             raise GateInputError(
-                "co-review round has conflicting verdicts; re-run co-review"
+                "co-review round has conflicting verdicts; push a commit so the "
+                "next round runs at a new head"
             )
 
 
