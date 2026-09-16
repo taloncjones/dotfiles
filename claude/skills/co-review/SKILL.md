@@ -204,6 +204,19 @@ seat-disputed severity blocks at every round. An UNRESOLVED finding blocks
 exactly as a CONFIRMED one of its severity does. Findings the floor does not
 block are posted with Blocking=no and are NOT carried forward.
 
+Number the round with `pr_ready_gate.next_round_number(comments, {gh_user})`.
+That is the publication ordinal and it stays monotonic even when the history is
+unreadable -- which is NOT the same number as the floor's round index below.
+Resetting both together wedges the PR: a round published after an unreadable
+history would claim a round already passed, and no pushed commit would clear it.
+
+`all_markers` RAISES when any trusted marker on the PR is unparsable or has no
+findings table: such a history cannot be read safely, since a malformed first
+marker would drop out and the second would be taken for the first. Catch it and
+review at the strict floor -- round index 1 and `baseline_ok=False`. Do NOT also
+reset the published round number; take that from `next_round_number`, which
+tolerates the same malformed markers. Resetting both is what would wedge the PR.
+
 Derive the round's inputs from the whole marker history, not from the latest
 marker: `pr_ready_gate.all_markers(comments, {gh_user})` returns every parsed
 trusted marker in publication order, which is what `round_index_for_head` and
@@ -214,9 +227,12 @@ that needs a repository rather than a marker.
 
 Do not apply the table by hand. Each finding's blocking value comes from
 `coworker_review.is_blocking(severity, round_index=<n>,
-fix_regression=<seat answer>, carried=<bool>, baseline_ok=<bool>)` and the
-round's verdict from `coworker_review.verdict_from_findings(findings,
-round_index=<n>, baseline_ok=<bool>)`. An unusable round index falls back to
+fix_regression=<Regression cell>, carried=<Carried cell>, discharged=<Status
+cell>, baseline_ok=<bool>)` and the round's verdict from
+`coworker_review.verdict_from_findings(findings, round_index=<n>,
+baseline_ok=<bool>)`. Every cell goes in verbatim; the helper normalizes each
+one, and both calls read them the same way, so the `Blocking` column you
+publish cannot disagree with the verdict you publish beside it. An unusable round index falls back to
 the round-1 floor: an unknown round must never silently stop blocking on real
 defects.
 
@@ -479,12 +495,6 @@ the latest marker-bearing comment, then validates it. A malformed latest
 comment -- a marker with no findings table, or unusable ordering metadata --
 fails the gate closed. It is never skipped in favour of an older comment,
 because skipping it would let a truncated CHANGES expose a superseded APPROVE.
-
-Before selection the gate collapses republished markers: a marker carrying the
-same `sha`, `base`, `base_ref`, `verdict` and `round` as an earlier one IS that
-earlier publication and keeps its place in the order. A publish retry therefore
-cannot become authoritative by being newest, whichever round it belongs to, and
-this holds without trusting the self-declared round at all.
 
 After selection the gate checks the round. If any marker that parses carries a
 HIGHER round than the selected one, the newest comment is stale and the gate

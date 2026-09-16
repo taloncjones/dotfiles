@@ -264,11 +264,89 @@ class CarriedVocabulary(unittest.TestCase):
         )
 
 
+class MalformedRows(unittest.TestCase):
+    """A junk row blocks; it does not take down the round."""
+
+    def test_a_non_dict_row_blocks_in_either_position(self):
+        """any() short-circuits, so order must not decide whether it raises."""
+        self.assertEqual(
+            cr.verdict_from_findings([{"severity": "major"}, None]), "CHANGES"
+        )
+        self.assertEqual(
+            cr.verdict_from_findings([None, {"severity": "major"}]), "CHANGES"
+        )
+
+    def test_a_string_row_blocks(self):
+        self.assertEqual(cr.verdict_from_findings(["major"]), "CHANGES")
+
+    def test_a_malformed_carried_cell_is_still_carried(self):
+        for value in (None, 0, [], {}):
+            self.assertTrue(cr.is_carried(value), repr(value))
+
+
+class StatusCellVerbatim(unittest.TestCase):
+    """is_blocking takes the Status cell, like the other columns."""
+
+    def test_resolved_clears_the_row(self):
+        self.assertFalse(
+            cr.is_blocking(
+                "major", round_index=2, carried="yes",
+                discharged="RESOLVED", baseline_ok=True,
+            )
+        )
+
+    def test_open_does_not(self):
+        self.assertTrue(
+            cr.is_blocking(
+                "major", round_index=2, carried="yes",
+                discharged="open", baseline_ok=True,
+            )
+        )
+
+
+class BlockingAgreesWithVerdict(unittest.TestCase):
+    """The Blocking cell and the verdict must not disagree about one row.
+
+    SKILL.md says to pass the table cells verbatim, so the normalizer has to
+    live inside is_blocking rather than at one call site.
+    """
+
+    def test_a_no_cell_reads_the_same_both_ways(self):
+        row = {"severity": "minor", "carried": "no"}
+        self.assertFalse(cr.is_blocking(row["severity"], carried=row["carried"]))
+        self.assertEqual(cr.verdict_from_findings([row]), "APPROVE")
+
+    def test_a_yes_cell_reads_the_same_both_ways(self):
+        row = {"severity": "minor", "carried": "yes"}
+        self.assertTrue(cr.is_blocking(row["severity"], carried=row["carried"]))
+        self.assertEqual(cr.verdict_from_findings([row]), "CHANGES")
+
+    def test_a_malformed_carried_cell_blocks_both_ways(self):
+        row = {"severity": "minor", "carried": []}
+        self.assertTrue(cr.is_blocking(row["severity"], carried=row["carried"]))
+        self.assertEqual(cr.verdict_from_findings([row]), "CHANGES")
+
+
 class DischargedRows(unittest.TestCase):
     """The table keeps discharged rows; the verdict must not count them."""
 
     def test_a_resolved_carried_row_stops_blocking(self):
         row = [{"severity": "major", "carried": "yes", "status": "RESOLVED"}]
+        self.assertEqual(
+            cr.verdict_from_findings(row, round_index=2, baseline_ok=True),
+            "APPROVE",
+        )
+
+    def test_a_resolved_critical_stops_blocking(self):
+        """RESOLVED must mean resolved, not "unless it is critical"."""
+        row = [{"severity": "critical", "carried": "yes", "status": "RESOLVED"}]
+        self.assertEqual(
+            cr.verdict_from_findings(row, round_index=1, baseline_ok=True),
+            "APPROVE",
+        )
+
+    def test_a_resolved_high_stops_blocking_at_round_two(self):
+        row = [{"severity": "high", "carried": "yes", "status": "RESOLVED"}]
         self.assertEqual(
             cr.verdict_from_findings(row, round_index=2, baseline_ok=True),
             "APPROVE",

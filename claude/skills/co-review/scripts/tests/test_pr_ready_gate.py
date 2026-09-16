@@ -40,6 +40,82 @@ def marker_with(trailing, sha=SHA_A, verdict="APPROVE", rnd=1):
     )
 
 
+class HistoryCurrencyTests(unittest.TestCase):
+    """The floor must not narrow on a history the gate itself would reject."""
+
+    def test_a_replayed_history_is_not_usable_for_narrowing(self):
+        r1 = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=1),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([r1, r2, replay], ME)
+
+    def test_a_current_history_is_usable(self):
+        r1 = comment(
+            "| x |\n" + marker(sha=SHA_A, verdict="CHANGES", rnd=1),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| y |\n" + marker(sha=SHA_B, verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        self.assertEqual(len(gate.all_markers([r1, r2], ME)), 2)
+
+
+class NextRoundNumberTests(unittest.TestCase):
+    """The publication ordinal stays monotonic when the floor's index cannot."""
+
+    def test_first_round_is_one(self):
+        self.assertEqual(gate.next_round_number([], ME), 1)
+
+    def test_it_follows_the_highest_claimed_round(self):
+        r2 = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        self.assertEqual(gate.next_round_number([r2], ME), 3)
+
+    def test_it_tolerates_the_history_all_markers_refuses(self):
+        """Otherwise an unreadable history wedges every later round."""
+        broken = comment(
+            "<!-- co-review: sha=xyz -->",
+            created_at="2026-09-11T09:00:00Z",
+            cid=1,
+        )
+        r2 = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=2),
+            created_at="2026-09-11T10:00:00Z",
+            cid=2,
+        )
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([broken, r2], ME)
+        self.assertEqual(gate.next_round_number([broken, r2], ME), 3)
+
+    def test_untrusted_authors_do_not_advance_it(self):
+        theirs = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd=9),
+            author="someone",
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        self.assertEqual(gate.next_round_number([theirs], ME), 1)
+
+
 class SameHeadRereviewTests(unittest.TestCase):
     """A second review of an already-reviewed head cannot flip the verdict.
 

@@ -267,7 +267,46 @@ def all_markers(comments, trusted_authors, marker_re=MARKER_RE,
             )
         found.append((instant, cid, markers[0]))
     found.sort(key=lambda item: (item[0], item[1]))
-    return [marker for _, _, marker in found]
+    markers = [marker for _, _, marker in found]
+    if markers:
+        latest_round = _marker_round(markers[-1])
+        for other in markers[:-1]:
+            if _marker_round(other) > latest_round:
+                raise GateInputError(
+                    "co-review history is not current; an earlier marker "
+                    "claims a later round than the newest one"
+                )
+    return markers
+
+
+def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
+                      prefix: str = MARKER_PREFIX) -> int:
+    """The number the NEXT round comment should carry.
+
+    This is the publication ordinal, deliberately NOT the floor's round index.
+    The floor's index is evidence of progress and falls back to 1 whenever that
+    evidence is unusable; the published number has to stay monotonic anyway.
+    Resetting both together wedges the PR: a round published after an
+    unreadable history would claim a round the PR has already passed, the
+    currency check would reject it, and pushing a commit would not help because
+    the older marker stays on the PR.
+
+    So this tolerates the malformed markers ``all_markers`` refuses -- it reads
+    the highest round anything trusted on the PR claims, and adds one.
+    """
+    if not isinstance(comments, list):
+        raise GateInputError("comments must be a JSON array")
+    highest = 0
+    for entry in comments:
+        if not isinstance(entry, dict) or entry.get("author") not in trusted_authors:
+            continue
+        _, markers = _scan_body(entry.get("body", "") or "", marker_re, prefix)
+        for marker in markers:
+            try:
+                highest = max(highest, int(marker["round"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return highest + 1
 
 
 def _check_round_currency(selected: dict, candidates) -> None:
@@ -300,10 +339,16 @@ def _check_round_currency(selected: dict, candidates) -> None:
     # an ignored marker became authoritative once enough comments accumulated
     # to support its number.
     #
+    # Collapsing identical markers to their first publication was tried too and
+    # reverted: it re-ordered a candidate BEFORE its findings body was
+    # validated, so a marker-only copy of an older round passed as a benign
+    # retry, and it hid genuinely different reviews that happened to share
+    # those fields. There is no collapsing now.
+    #
     # An over-claimed round therefore does wedge the PR, deliberately. Recovery
-    # is editing or deleting the offending comment, which the error names. The
-    # common benign case that used to trip this -- a publish retry -- no longer
-    # reaches here, because identical markers are collapsed before selection.
+    # is editing or deleting the offending comment, which the error names. A
+    # retry of the CURRENT round needs no special handling: it carries the same
+    # round and the same verdict, so neither branch below fires.
     for _, _, shaped, markers, _ in candidates:
         if shaped != 1 or len(markers) != 1:
             continue  # unparsable: see the residual in this docstring

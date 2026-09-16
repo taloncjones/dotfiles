@@ -92,6 +92,10 @@ def floor_for_round(round_index, *, baseline_ok: bool = False) -> int:
         return _FLOOR_BY_ROUND[1]
     if isinstance(round_index, bool):
         return _FLOOR_BY_ROUND[1]
+    if isinstance(round_index, float) and not round_index.is_integer():
+        # int() truncates, which would narrow on a number that was never a
+        # round ordinal at all.
+        return _FLOOR_BY_ROUND[1]
     try:
         index = int(round_index)
     except (TypeError, ValueError, OverflowError):
@@ -223,7 +227,14 @@ def is_blocking(
     through still blocks when it is high or above and the seat says the change
     introduced it -- that is the one thing a late round still cares about.
     """
-    if carried and not discharged:
+    if _is_discharged(discharged):
+        # The seat verified the failure path is repaired. The published table
+        # keeps the row so the thread stays a complete record, but a repaired
+        # finding does not block on its severity either -- checking this before
+        # severity is what makes "RESOLVED" mean resolved rather than "resolved
+        # unless it happens to be critical".
+        return False
+    if is_carried(carried):
         # Checked BEFORE severity classification. Downgrading a carried blocker
         # to an advisory severity would otherwise clear it through the advisory
         # early-return, discharging it by reclassification instead of by the
@@ -252,11 +263,17 @@ def is_carried(value) -> bool:
         return value
     if isinstance(value, str):
         return value.strip().lower() not in _NOT_A_REGRESSION
-    return value is not None and bool(value)
+    # Anything else is a malformed cell, not an explicit "this was not carried".
+    # Reading it as cleared would discharge a blocker by corruption, so it
+    # fails closed exactly as is_fix_regression does. Absence is handled by the
+    # caller, which only passes a value when the column is present.
+    return True
 
 
 def _is_discharged(status) -> bool:
     """True only for the seat's explicit RESOLVED disposition.
+
+    Takes the Status cell verbatim, like the other two normalizers.
 
     The published table keeps discharged rows so the thread stays a complete
     record, so the verdict has to tell a row the seat repaired from one it is
@@ -280,14 +297,19 @@ def verdict_from_findings(
         "CHANGES"
         if any(
             is_blocking(
-                f.get("severity"),
+                row.get("severity"),
                 round_index=round_index,
-                fix_regression=f.get("fix_regression"),
-                carried=is_carried(f.get("carried")) if "carried" in f else False,
-                discharged=_is_discharged(f.get("status")),
+                fix_regression=row.get("fix_regression"),
+                carried=row.get("carried", False),
+                discharged=row.get("status"),
                 baseline_ok=baseline_ok,
             )
-            for f in findings
+            # A malformed row is not a reason to take down the round. An empty
+            # dict has no severity, which is_blocking already fails closed on,
+            # so a junk entry blocks instead of raising -- and the result no
+            # longer depends on where in the list it sits, which any() would
+            # otherwise make order-dependent.
+            for row in (f if isinstance(f, dict) else {} for f in findings)
         )
         else "APPROVE"
     )
