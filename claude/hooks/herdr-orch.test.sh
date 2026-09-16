@@ -7743,5 +7743,136 @@ assert "capability:1" in marker.replace(" ", "").replace(chr(34), ""), marker
 ' "$root" "$LF_SLUG"
 SH
 
+check "lead claim is refused when the gate record is absent" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ga.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-ga \
+   --workspace-root "$LF_WS" --expected-session S1)
+# Seed the capable procedure marker but NOT the gate, so the ONLY reason to
+# refuse is gate absence. HERDR_FIXTURE_NO_SEED stops the fixture recreating it.
+mkdir -p "$root/skills/herdr-orchestration"
+printf '%s\n' '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->' \
+   > "$root/skills/herdr-orchestration/SKILL.md"
+rm -f "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+err=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" 2>&1 >/dev/null) && exit 1
+printf '%s' "$err" | grep -q 'gate record absent'
+# The binding must be untouched and NO coordination lease may exist for this
+# workspace. The lease lives in the coordination root keyed by
+# lead_lease_key(realpath(workspace_root)), not in the payload root.
+python3 -c '
+import hashlib, json, os, sys
+root, bid, slug, ws = sys.argv[1:5]
+rec = json.load(open(os.path.join(root, "herdr-orch", slug, "bindings", bid + ".json")))
+assert rec["status"] == "issued", rec
+key = hashlib.sha256(os.path.realpath(ws).encode()).hexdigest()[:16]
+lease = os.path.join(os.environ["HERDR_COORDINATION_ROOT"], slug, "lead-%s.json" % key)
+assert not os.path.exists(lease), lease
+' "$root" "$bid" "$LF_SLUG" "$LF_WS"
+SH
+
+check "lead claim is refused when the procedure is under-level" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gp.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-gp \
+   --workspace-root "$LF_WS" --expected-session S1)
+# ENABLE the gate, so the only remaining reason to refuse is the procedure
+# level. Write the REAL SKILL.md the reader resolves, at capability 0.
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+slug = sys.argv[1]
+scope = core.account_scope(sys.argv[2], "claude")
+rd = core.repo_dir(slug); rd.mkdir(parents=True, exist_ok=True)
+core.write_json_atomic(rd / "task-lead-gate.json", {
+    "schema_version": 1, "repo_slug": slug, "repo_id": None,
+    "account_id": scope["account_id"], "enabled": True})
+' "$LF_SLUG" "$LF_REPO"
+mkdir -p "$root/skills/herdr-orchestration"
+printf '%s\n' '<!-- herdr-capabilities: {"marker_version":1,"capability":0} -->' \
+   > "$root/skills/herdr-orchestration/SKILL.md"
+err=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" 2>&1 >/dev/null) && exit 1
+printf '%s' "$err" | grep -q 'procedure advertises capability 0'
+SH
+
+check "lead claim is refused when core or guard is under-level" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gc.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-gc \
+   --workspace-root "$LF_WS" --expected-session S1)
+# Everything enabled and capable; drive core and guard under-level in-process,
+# one at a time, and assert each refuses on its own.
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+import herdr_capabilities as hc
+slug, repo, ws, bid = sys.argv[1:5]
+scope = core.account_scope(repo, "claude")
+rd = core.repo_dir(slug); rd.mkdir(parents=True, exist_ok=True)
+core.write_json_atomic(rd / "task-lead-gate.json", {
+    "schema_version": 1, "repo_slug": slug, "repo_id": None,
+    "account_id": scope["account_id"], "enabled": True})
+skill = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "skills", "herdr-orchestration")
+os.makedirs(skill, exist_ok=True)
+open(os.path.join(skill, "SKILL.md"), "w").write(
+    chr(60) + "!-- herdr-capabilities: " + json.dumps({"marker_version":1,"capability":1}) + " --" + chr(62) + chr(10))
+for name in ("CORE_CAPABILITY", "GUARD_CAPABILITY"):
+    saved = getattr(hc, name)
+    setattr(hc, name, 0)
+    admit, reason, _ = core.task_lead_admission(
+        rd, slug, scope["account_id"], os.environ["CLAUDE_CONFIG_DIR"])
+    setattr(hc, name, saved)
+    assert admit is False, (name, admit, reason)
+    assert name.split("_")[0].lower() in reason, (name, reason)
+admit, reason, _ = core.task_lead_admission(
+    rd, slug, scope["account_id"], os.environ["CLAUDE_CONFIG_DIR"])
+assert admit is True, reason
+' "$LF_SLUG" "$LF_REPO" "$LF_WS" "$bid"
+SH
+
+check "lead claim is refused when the gate names another account" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gx.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-gx \
+   --workspace-root "$LF_WS" --expected-session S1)
+mkdir -p "$root/skills/herdr-orchestration" "$root/herdr-orch/$LF_SLUG"
+printf '%s\n' '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->' \
+   > "$root/skills/herdr-orchestration/SKILL.md"
+python3 -c '
+import json, os, sys
+p = os.path.join(sys.argv[1], "herdr-orch", sys.argv[2], "task-lead-gate.json")
+open(p, "w").write(json.dumps({"schema_version":1,"repo_slug":sys.argv[2],"repo_id":None,
+  "account_id":"someone-else","enabled":True}))
+' "$root" "$LF_SLUG"
+err=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" 2>&1 >/dev/null) && exit 1
+printf '%s' "$err" | grep -q 'different account'
+SH
+
+check "a plain launcher claim is unaffected by an absent gate" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gl.git
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1 >/dev/null
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
