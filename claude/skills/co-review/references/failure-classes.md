@@ -1,13 +1,13 @@
 # Co-Review Failure Classes
 
-Round-1 finders probe EVERY class below against the frozen diff, not just
+Finders probe EVERY class below against the frozen diff, not just
 the classes the diff superficially suggests. The pre-freeze self-audit
 walks the same list. One line per entry; keep entries concrete enough to
 probe mechanically and general enough to outlive one incident.
 
-Growth rule: when a complete round after round 1 yields a new-surface
-finding and the reviewed change lives in the repository that owns this
-rubric (dotfiles), the fixer adds or generalizes a class entry in the
+Growth rule: when a review yields a defect no class below would have
+prompted, grow the rubric. If the reviewed change lives in the repository
+that owns this rubric (dotfiles), add or generalize a class entry in the
 same commit as the fix. When reviewing any other repository, record the
 missed class and update this file in dotfiles as a separate authorized
 change.

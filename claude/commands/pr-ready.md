@@ -32,7 +32,7 @@ origin_repo=$(git remote get-url origin)   # normalize to owner/repo:
 [ -n "$base_repo" ] && [ "$origin_repo_normalized" = "$base_repo" ] || STOP
 # --slurp gives one array PER PAGE wrapped in an outer array; pipe to external
 # jq to flatten (gh rejects --slurp together with -q/--jq).
-gh api --paginate --slurp repos/{owner}/{repo}/issues/{number}/comments \
+gh api --paginate --slurp "repos/{owner}/{repo}/issues/<number>/comments" \
   | jq '[.[][] | {author: .user.login, created_at, id, body}]' > comments.json
 uv run --no-project python <co-review>/scripts/review.py resolve-base \
   --repo "$PWD" --base-ref <baseRefName> --head <headRefOid>   # -> {base}
@@ -48,6 +48,9 @@ and `base_ref == baseRefName`. On FAIL (base-repo mismatch/unresolved, stale
 head, retarget, missing/CHANGES marker, or ANY lookup/API error -- the gate
 fails closed), **STOP**: report "re-run co-review" and do not run the steps below
 or post any Jira/PR-body updates.
+
+A PASS licenses merging THAT head. Pass the marker's `sha` to
+`gh pr merge --match-head-commit` so the server enforces it.
 
 **Step 1: Verify PR exists**
 

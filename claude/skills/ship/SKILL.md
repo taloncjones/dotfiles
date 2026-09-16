@@ -48,8 +48,7 @@ only proposes whatever cleanup is actually left.
 1. **Co-review.** Invoke the `co-review` skill on the target PR and run its
    bounded re-review loop to APPROVE: fix all confirmed findings with verified
    repros, re-run affected tests, push, then re-freeze and re-review until a
-   complete round is clean (bounded by co-review's own per-type round caps;
-   escalate if it does not converge).
+   round leaves no blocking finding; escalate if it does not converge.
    Compute the PR target with `gh pr view --json baseRefName` and pass
    `--base-ref <baseRefName>` so the review diffs against the real merge-base;
    warn if a supplied or local base diverges from the resolved target. Every PR
@@ -67,7 +66,11 @@ only proposes whatever cleanup is actually left.
 
 4. **Merge gate (human).** Present a one-screen summary: findings fixed, test
    results, CI state, version change. Ask for explicit confirmation, then
-   **squash-merge** via `gh pr merge --squash`.
+   **squash-merge** via `gh pr merge --squash --match-head-commit <the marker's sha>`.
+
+   `--match-head-commit` makes the server refuse the merge if the head moved after
+   the gate passed. A local re-read before merging is not enough: an ordinary push
+   between the read and the merge call would consume an unreviewed head.
 
    If branch protection requires an external approval that is not yet in, do
    not poll with model turns — start a zero-token background wait
