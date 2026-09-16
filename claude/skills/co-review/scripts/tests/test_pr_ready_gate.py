@@ -114,13 +114,54 @@ class HistoryParityTests(unittest.TestCase):
 
 
 class RoundBoundsTests(unittest.TestCase):
-    def test_an_unreadably_large_round_does_not_parse(self):
-        """Both readers must agree; a round neither can convert is not a round."""
-        huge = marker(verdict="APPROVE", rnd="9" * 5000)
-        self.assertIsNone(gate.MARKER_RE.match(huge))
+    """Bounding the field was tried and reverted: it let the publisher emit a
+    number its own parser refused, and the unparseable marker was then skipped
+    by the currency check, so a replay of the round below it passed."""
 
-    def test_a_four_digit_round_still_parses(self):
-        self.assertIsNotNone(gate.MARKER_RE.match(marker(rnd=9999)))
+    def test_both_readers_fail_closed_on_an_unconvertible_round(self):
+        huge = comment(
+            "| x |\n" + marker(verdict="CHANGES", rnd="9" * 5000),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        current = comment(
+            "| y |\n" + marker(verdict="APPROVE", rnd=2),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        self.assertEqual(gate.decide([huge, current], ME, SHA_A, BASE_A, REF)[0], "FAIL")
+        with self.assertRaises(gate.GateInputError):
+            gate.next_round_number([huge, current], ME)
+        with self.assertRaises(gate.GateInputError):
+            gate.all_markers([huge, current], ME)
+
+    def test_a_round_past_the_old_bound_is_not_a_boundary(self):
+        """9999 -> 10000 used to publish a number the parser rejected."""
+        at_9999 = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=9999),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        self.assertEqual(gate.next_round_number([at_9999], ME), 10000)
+        self.assertIsNotNone(gate.MARKER_RE.match(marker(rnd=10000)))
+
+    def test_the_boundary_replay_fails_closed(self):
+        a = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=9999),
+            created_at="2026-09-11T10:00:00Z",
+            cid=1,
+        )
+        b = comment(
+            "| y |\n" + marker(verdict="CHANGES", rnd=10000),
+            created_at="2026-09-11T11:00:00Z",
+            cid=2,
+        )
+        replay = comment(
+            "| x |\n" + marker(verdict="APPROVE", rnd=9999),
+            created_at="2026-09-11T12:00:00Z",
+            cid=3,
+        )
+        self.assertEqual(gate.decide([a, b, replay], ME, SHA_A, BASE_A, REF)[0], "FAIL")
 
 
 class NextRoundNumberTests(unittest.TestCase):

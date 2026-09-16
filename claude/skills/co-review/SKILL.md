@@ -534,11 +534,19 @@ The published `round` still increments, because it is the publication ordinal.
 So the gate's equal-round check is NOT what guards this case -- it guards two
 publications racing at one ordinal. Do not rely on it to catch a re-review.
 
-A miscounted round therefore wedges the PR, and that is deliberate. Bounding a
-claimed round by the comment count was tried and reverted: it let a miscounted
-higher round be dismissed as noise, so a delayed older APPROVE passed, trading a
-fail-closed wedge for a fail-open. Recovery is to correct or delete the
-offending comment, which the error message names.
+An over-claimed round is cleared by the next round, which publishes a higher
+ordinal. Only a round that cannot be READ at all -- unconvertible to a number --
+stops every reader, and that comment has to be corrected.
+
+Two ways of softening this were tried and both reverted, for the same reason.
+Bounding a claimed round by the comment count let a miscounted higher round be
+dismissed as noise, so a delayed older APPROVE passed. Bounding the field to
+four digits let the publisher emit 10000 while the parser refused it, and the
+unparseable marker was then skipped by the currency check -- the same
+fail-open, one layer down. Each traded a loud, recoverable failure for a silent
+one. A round neither reader can convert now fails closed in BOTH of them, which
+is the property that matters: the publisher and the currency check must never
+disagree about what a round is.
 
 The check compares only markers that parse. A truncated HIGHER-round marker is
 therefore invisible to it, so a delayed lower-round APPROVE can still win in

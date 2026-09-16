@@ -49,11 +49,15 @@ head, retarget, missing/CHANGES marker, a stale or self-contradicting round, or
 ANY lookup/API error -- the gate fails closed), **STOP** and do not run the steps below
 or post any Jira/PR-body updates.
 
-Report "re-run co-review" for the ordinary failures. For a stale or
-self-contradicting round, re-running at the same head reproduces it --
-report that a commit must be pushed first, so the next round runs at a new
-head. Do not suggest deleting the offending comment: it holds the Blocking
-column the next round rebuilds its carried set from.
+Report "re-run co-review" for the ordinary failures, including a stale or
+self-contradicting round: the next round publishes a NEW ordinal from
+`next_round_number`, so re-reviewing clears it without needing a pushed commit,
+provided the round carries its blockers forward. No commit is required.
+
+The exception is a comment whose round cannot be read at all -- unconvertible,
+or claiming a round no later round can exceed. Re-review cannot clear that,
+because every reader refuses the history. Report that the offending comment
+must be corrected, and say which one.
 
 A PASS licenses merging THAT head. Pass the marker's `sha` to
 `gh pr merge --match-head-commit` so the server enforces it.

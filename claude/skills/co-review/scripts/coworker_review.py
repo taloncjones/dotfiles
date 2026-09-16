@@ -99,8 +99,14 @@ def floor_for_round(round_index, *, baseline_ok: bool = False) -> int:
         return _FLOOR_BY_ROUND[1]
     if isinstance(round_index, int):
         index = round_index
-    elif isinstance(round_index, str) and round_index.strip().isdigit():
-        index = int(round_index.strip())
+    elif isinstance(round_index, str):
+        try:
+            # isdigit() alone is not enough: it accepts "\u00b2" and strings
+            # longer than the interpreter's conversion limit, both of which
+            # then raise instead of taking the documented strict floor.
+            index = int(round_index.strip(), 10)
+        except ValueError:
+            return _FLOOR_BY_ROUND[1]
     else:
         return _FLOOR_BY_ROUND[1]
     if index < 1:
@@ -228,7 +234,7 @@ def is_blocking(
     through still blocks when it is high or above and the seat says the change
     introduced it -- that is the one thing a late round still cares about.
     """
-    if _is_discharged(discharged) and is_carried(carried):
+    if _is_discharged(discharged) and _is_explicitly_carried(carried):
         # The seat verified the failure path is repaired. The published table
         # keeps the row so the thread stays a complete record, but a repaired
         # finding does not block on its severity either -- checking this before
@@ -274,6 +280,24 @@ def is_carried(value) -> bool:
     # fails closed exactly as is_fix_regression does. Absence is handled by the
     # caller, which only passes a value when the column is present.
     return True
+
+
+_EXPLICITLY_CARRIED = {"yes", "true", "carried"}
+
+
+def _is_explicitly_carried(value) -> bool:
+    """True only for an affirmative Carried cell.
+
+    ``is_carried`` fails closed to "carried", which is correct when deciding
+    whether a row BLOCKS and exactly backwards when deciding whether a row may
+    be DISCHARGED: a missing or malformed cell would then satisfy the carried
+    half of the discharge condition, and one RESOLVED on a fresh critical would
+    clear the round. Discharge takes the affirmative reading; blocking takes
+    the conservative one.
+    """
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value.strip().lower() in _EXPLICITLY_CARRIED
 
 
 def _is_discharged(status) -> bool:

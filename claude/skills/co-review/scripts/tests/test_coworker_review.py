@@ -303,6 +303,48 @@ class AbsentCarriedCell(unittest.TestCase):
         self.assertEqual(cr.verdict_from_findings([{"severity": "major"}]), "CHANGES")
 
 
+class DischargeNeedsAffirmativeCarried(unittest.TestCase):
+    """is_carried fails closed to "carried"; discharge must not inherit that.
+
+    Blocking and discharge read the same cell in opposite directions, so the
+    conservative reading that keeps a row blocking would, reused here, let a
+    missing cell satisfy the carried half of a discharge.
+    """
+
+    def test_a_missing_carried_cell_cannot_authorize_discharge(self):
+        row = [{"severity": "critical", "status": "RESOLVED"}]
+        self.assertEqual(
+            cr.verdict_from_findings(row, require_carried=True), "CHANGES"
+        )
+
+    def test_a_malformed_carried_cell_cannot_authorize_discharge(self):
+        for value in ("unknown", "", None, []):
+            row = [{"severity": "critical", "carried": value, "status": "RESOLVED"}]
+            self.assertEqual(
+                cr.verdict_from_findings(row, require_carried=True),
+                "CHANGES",
+                repr(value),
+            )
+
+    def test_an_affirmative_carried_cell_still_discharges(self):
+        for value in ("yes", "Yes", True):
+            row = [{"severity": "critical", "carried": value, "status": "RESOLVED"}]
+            self.assertEqual(
+                cr.verdict_from_findings(row, require_carried=True),
+                "APPROVE",
+                repr(value),
+            )
+
+
+class UnusableDigitStrings(unittest.TestCase):
+    def test_a_superscript_digit_takes_the_strict_floor(self):
+        """str.isdigit() accepts it; int() does not."""
+        self.assertEqual(cr.floor_for_round("\u00b2", baseline_ok=True), 1)
+
+    def test_an_overlong_digit_string_takes_the_strict_floor(self):
+        self.assertEqual(cr.floor_for_round("9" * 5000, baseline_ok=True), 1)
+
+
 class DischargeIsForCarriedRows(unittest.TestCase):
     """A round publishes before its fixes land, so a fresh row cannot be RESOLVED."""
 

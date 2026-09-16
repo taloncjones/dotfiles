@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>[1-9]\d{0,3})(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
+    r"round=(?P<round>[1-9]\d*)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))?"
     r"(?: baseline=(?P<baseline>[0-9a-f]{40}))? -->$"
 )
 # target_tip records the target-branch tip the review compared against. It is
@@ -317,12 +317,21 @@ def next_round_number(comments, trusted_authors, marker_re=MARKER_RE,
     for entry in comments:
         if not isinstance(entry, dict) or entry.get("author") not in trusted_authors:
             continue
+        # A shaped-but-unparsable marker carries no round at all, so it is
+        # invisible to the currency check too -- ignoring it here keeps the two
+        # readers symmetric, and is what lets a PR with one old truncated
+        # comment still publish a monotonic round. A marker that PARSES but
+        # whose round will not convert is the asymmetric case, and
+        # _marker_round below fails closed on it in both readers.
         _, markers = _scan_body(entry.get("body", "") or "", marker_re, prefix)
         for marker in markers:
-            try:
-                highest = max(highest, int(marker["round"]))
-            except (KeyError, TypeError, ValueError):
-                continue
+            # Fail closed on a round this cannot convert, rather than skipping
+            # it. Skipping was the asymmetry that mattered: the publisher
+            # ignored an oversized round while the currency check treated it as
+            # authoritative, so a replay of the round below it passed. Bounding
+            # the field instead just moved the asymmetry to the bound, where
+            # the publisher emitted a number its own parser refused.
+            highest = max(highest, _marker_round(marker))
     return highest + 1
 
 
