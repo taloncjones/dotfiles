@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,7 +42,9 @@ def _seed_task_lead_gate(args):
     environment in which leads genuinely are enabled -- an enabled gate record
     in the payload root and a capability-1 marker in the config dir the reader
     resolves. Fixture setup, not a production bypass: the production reader is
-    unchanged and still resolves the account's real config dir.
+    unchanged and still resolves the account's real config dir. Seeding is
+    confined to a temp-root config dir, so a hand-run against a real config
+    dir writes nothing.
     """
     if os.environ.get("HERDR_FIXTURE_NO_SEED"):
         return
@@ -52,7 +55,10 @@ def _seed_task_lead_gate(args):
     slug = value("--repo-slug")
     if not slug or not core.valid_repo_slug(slug):
         return
-    root = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    root = Path(os.environ["CLAUDE_CONFIG_DIR"]).resolve()
+    tmp = Path(os.path.realpath(tempfile.gettempdir())).resolve()
+    if tmp not in root.parents:
+        return
 
     skill = root / "skills" / "herdr-orchestration"
     skill.mkdir(parents=True, exist_ok=True)
@@ -81,11 +87,11 @@ def main():
     if args and args[0] == "claim-owner":
 
         def value(flag):
-            return args[args.index(flag) + 1]
+            return args[args.index(flag) + 1] if flag in args else None
 
         try:
             int(value("--pid"))
-        except ValueError:
+        except (TypeError, ValueError):
             return core.main(args)
         slug = value("--repo-slug")
         if core.valid_repo_slug(slug):
