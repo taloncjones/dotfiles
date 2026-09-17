@@ -43,17 +43,28 @@ jobs:
           python3 -m py_compile claude/skills/lib/*.py claude/skills/co-review/scripts/*.py claude/skills/handoff/scripts/*.py
           echo "[OK] hook scripts compile"
 
-      # py_compile above cannot catch a PEP 604 annotation used without
-      # `from __future__ import annotations`: the annotation is a runtime
-      # expression, so it compiles on every interpreter and only raises
-      # TypeError at IMPORT on Python 3.9. That is the stock macOS python and
-      # what `#!/usr/bin/env python3` resolves to before Homebrew python
-      # exists, and a hook that dies at import exits 1 -- neither the allow (0)
-      # nor the deny (2) a hook may return -- so the guard fails OPEN. This
-      # step imports each module on the floor interpreter, one subprocess
-      # apiece so a single break cannot mask another.
-      - name: install the minimum supported python
-        uses: actions/setup-python@v5
+      - name: Run all test suites
+        run: bash bin/dotfiles-tests
+
+  # A SEPARATE job on purpose. actions/setup-python puts its interpreter on
+  # PATH for every LATER step in the same job, so running this inside `tests`
+  # silently moved the whole suite run onto 3.9 and broke five unrelated
+  # Codex and handoff suites that need a newer python. Isolating it keeps the
+  # floor check honest without dictating the interpreter anything else uses.
+  #
+  # What it catches that the py_compile step cannot: a PEP 604 annotation
+  # (`str | None`) used without `from __future__ import annotations` is a
+  # RUNTIME expression, so it compiles on every interpreter and only raises
+  # TypeError at IMPORT on 3.9 -- the stock macOS python, and what
+  # `#!/usr/bin/env python3` resolves to before Homebrew python exists. A hook
+  # that dies at import exits 1, which is neither the allow (0) nor the deny
+  # (2) a hook may return, so the guard fails OPEN -- before main(), and
+  # before any crash handler is installed.
+  hook-import-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.9"
       - name: import every hook under python 3.9
@@ -77,6 +88,3 @@ jobs:
               raise SystemExit("%d hook module(s) do not import on the floor interpreter" % len(bad))
           print("[OK] every hook imports")
           PY
-
-      - name: Run all test suites
-        run: bash bin/dotfiles-tests

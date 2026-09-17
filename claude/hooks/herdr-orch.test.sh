@@ -2,6 +2,15 @@
 # herdr-orch.test.sh - unit + integration tests for the herdr-orchestration
 # core module and worker-status hook. Stdlib python only; no network, no herdr.
 set -e
+# Self-unset the account selectors, as the runner and the guard suite do.
+# Without this a DIRECT `sh claude/hooks/herdr-orch.test.sh` inherits the
+# shell's selector, account_scope ignores each fixture's CLAUDE_CONFIG_DIR, and
+# the suite reports ~105 phantom failures -- which is exactly what a round-3
+# reviewer hit, spending much of its pass chasing an environmental artifact.
+# Fixing this in bin/dotfiles-tests alone left the trap set for anyone running
+# a single suite, which is how most people run one.
+unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL CLAUDE_PERSONAL_ONLY
+unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
 # Use physical macOS temp paths so strict no-follow state traversal is tested.
 TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))'); export TMPDIR
 PASS=0

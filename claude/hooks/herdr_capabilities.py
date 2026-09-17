@@ -35,7 +35,24 @@ CORE_CAPABILITY = 1
 #: Guard implements gate enforcement at authority.
 GUARD_CAPABILITY = 1
 
-_MARKER_RE = re.compile(r"^<!--\s*herdr-capabilities:\s*(.*?)\s*-->\s*$", re.M)
+#: Longest line that can plausibly hold a marker. The shipped one is 62 bytes.
+#: A candidate longer than this is refused WITHOUT being matched, because an
+#: over-long line is what attacks the pattern below.
+MARKER_LINE_MAX = 512
+
+#: `[ \t]`, never `\s`. With `\s` on both sides of a lazy group the newline
+#: class overlaps between the quantifiers and the matcher backtracks cubically
+#: in the length of a whitespace run: 1000 spaces took 0.43s, 2000 took 3.34s,
+#: 3000 took 11.20s, and the cost multiplies per malformed line. That is not a
+#: slow path but two fail-open paths -- this runs on the PreToolUse path, where
+#: overrunning the hook timeout lets the tool call proceed, and inside
+#: owner_transaction's exclusive flock at claim time, where it wedges every
+#: other verb on the coordination root. A read bound is no defence, it is the
+#: attacker's budget: 4MB of such lines is roughly 70 minutes under the lock.
+#: `[ \t]` cannot overlap the newline `$` anchors on, so the ambiguity is
+#: gone, and the shipped marker still matches.
+_MARKER_RE = re.compile(
+    r"^<!--[ \t]*herdr-capabilities:[ \t]*(.*?)[ \t]*-->[ \t]*$", re.MULTILINE)
 
 
 def _exact_int(value):
@@ -50,6 +67,12 @@ def parse_marker(text):
     non-integer capability all yield None. Never raises on caller input.
     """
     if not isinstance(text, str):
+        return None
+    # Refuse an over-long candidate line BEFORE matching. The pattern is now
+    # linear, but a cheap pre-filter keeps that from being the only thing
+    # standing between a planted file and the hook's timeout.
+    if any(len(line) > MARKER_LINE_MAX for line in text.splitlines()
+           if "herdr-capabilities:" in line):
         return None
     found = _MARKER_RE.findall(text)
     if len(found) != 1:
@@ -81,9 +104,26 @@ def _read_procedure_text(path):
     symlinked parents here would refuse the layout we ship. The leaf is a
     plain regular file in that layout, so O_NOFOLLOW on it costs nothing and
     refuses a planted link that would otherwise advertise a capability from a
-    file the account does not own. That is the second lock, and it is the one
-    carrying the adversarial claim: the gate record lives under the
-    guard-exempt state root, so the marker is what an attacker must forge.
+    file the account does not own.
+
+    What that is NOT is an adversarial control, and an earlier version of this
+    docstring claimed otherwise -- that the marker "carries the adversarial
+    claim" and is "what an attacker must forge". It is not. Because the parent
+    is deliberately followed, one `ln -sfn <tree> <config_dir>/skills` takes
+    this function from 0 to 1 and admission from refuse to admit; `python -c
+    os.symlink` does the same, and both are listed among the edit guard's
+    documented accepted holes, which states outright that it guards against
+    drift and not evasion. Nor is the gate record a control: it lives under
+    the guard-exempt state root and is hand-writable by the very sessions it
+    constrains. There is no second lock. Both records sit inside the session's
+    own uid write scope, and nothing here puts either outside it.
+
+    So read the whole activation gate as what it is: an interlock against
+    accident, drift and premature activation. That is a real and useful
+    property -- it is what keeps a half-installed or downgraded component from
+    silently dispatching leads -- and it is worth the no-follow and S_ISREG
+    checks below, which refuse the accidental and the drifting case. It is not
+    a boundary against a session that has decided to cross it.
 
     O_NONBLOCK for the reason the gate reader states: a FIFO here parks
     admission forever. Admission runs inside the owner transaction's exclusive
@@ -95,7 +135,15 @@ def _read_procedure_text(path):
     with os.fdopen(fd, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError("procedure marker must be a regular file")
-        return stream.read(PROCEDURE_READ_LIMIT).decode("utf-8")
+        # LIMIT + 1, then refuse. A silent truncation at the bound turns an
+        # INVALID file into a VALID advertisement: a capability-1 marker,
+        # padding, and a second marker past the cutoff read as 1, where
+        # parsing the whole file returns None under the fail-closed
+        # duplicate-marker rule. Over-length must be refused, not trimmed.
+        raw = stream.read(PROCEDURE_READ_LIMIT + 1)
+    if len(raw) > PROCEDURE_READ_LIMIT:
+        raise ValueError("procedure marker is too large to read")
+    return raw.decode("utf-8")
 
 
 def procedure_capability(config_dir):
@@ -117,6 +165,36 @@ def procedure_capability(config_dir):
 GATE_SCHEMA_VERSION = 1
 
 GATE_NAME = "task-lead-gate.json"
+
+#: Most of a gate record we will read. A canonical record with a full-length
+#: slug and 32-hex account/repo ids serializes to 181 bytes.
+GATE_READ_LIMIT = 64 * 1024
+
+
+class _IdentityDeferred:
+    """Sentinel: evaluate every gate clause EXCEPT identity corroboration.
+
+    For a caller that must decide whether resolving a live repo_id is worth
+    paying for -- the edit guard, where that resolution is six git
+    subprocesses outside its own budget, on a path whose failure mode is a
+    hook timeout that proceeds.
+
+    It is NOT the same as passing None. None means "I have no identity to
+    offer", which makes a record that NAMES an identity fail closed as
+    uncorroborated -- correct as a final answer, wrong as a pre-check, because
+    it would refuse exactly the leads the full check admits. This sentinel
+    instead skips the corroboration clause while still validating the
+    record's shape, so a caller can cheaply learn whether anything OTHER than
+    identity already disqualifies the gate, then resolve the live repo_id and
+    call again for the real decision. Only ever a pre-check: a decision made
+    under this sentinel has not checked identity at all.
+    """
+
+    def __repr__(self):
+        return "IDENTITY_DEFERRED"
+
+
+IDENTITY_DEFERRED = _IdentityDeferred()
 
 
 def gate_path(rd):
@@ -153,7 +231,17 @@ def _read_gate_text(path):
         with os.fdopen(fd, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise ValueError("gate record must be a regular file")
-            return stream.read().decode("utf-8")
+            # Bounded, for the reason the procedure reader is. The sibling got
+            # this and the gate reader did not: an unbounded read of a
+            # plantable file (the state root is guard-exempt) costs 2x the
+            # file in memory -- 256MB of record peaked 525MB RSS -- on a path
+            # whose failure mode is a hook timeout, which proceeds. A
+            # canonical record with a full-length slug and 32-hex ids is 181
+            # bytes, so 64 KiB is four decimal orders of headroom.
+            raw = stream.read(GATE_READ_LIMIT + 1)
+        if len(raw) > GATE_READ_LIMIT:
+            raise ValueError("gate record is too large to be a record")
+        return raw.decode("utf-8")
 
 
 def gate_enabled(rd, repo_slug, account_id, repo_id=None):
@@ -199,7 +287,12 @@ def gate_enabled(rd, repo_slug, account_id, repo_id=None):
     if rec.get("account_id") != account_id:
         return False, "gate record names a different account"
     stated = rec.get("repo_id")
-    if stated is not None:
+    if repo_id is IDENTITY_DEFERRED:
+        # Validate the record's shape, defer corroboration. See the sentinel's
+        # comment for why this is not the same as passing None.
+        if stated is not None and (not isinstance(stated, str) or not stated):
+            return False, "gate record repo_id is malformed"
+    elif stated is not None:
         if not isinstance(stated, str) or not stated:
             return False, "gate record repo_id is malformed"
         if repo_id is None:

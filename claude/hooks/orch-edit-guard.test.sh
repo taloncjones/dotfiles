@@ -11,15 +11,20 @@ PYTHONDONTWRITEBYTECODE=1
 export PYTHONDONTWRITEBYTECODE
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
-# A personal account selector makes account_scope ignore CLAUDE_CONFIG_DIR and
-# resolve account_root to $HOME/.claude -- whose `skills` is a symlink into
-# this checkout. A fixture that then writes its capability marker under
-# account_root TRUNCATES the tracked SKILL.md. This machine exports
-# WORKFLOW_PERSONAL_ACCOUNT=1 from the shell, so the suite must not inherit
-# it: hermetic means hermetic against the caller's environment too, not only
-# against real state. Unsetting here also removes the standing footgun that a
-# plain run of this suite produced dozens of phantom failures.
-unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL
+# An account selector makes account_scope ignore CLAUDE_CONFIG_DIR and resolve
+# account_root to a real account dir -- whose `skills` is a symlink into this
+# checkout. A fixture that then writes its capability marker under
+# account_root TRUNCATES the tracked SKILL.md. This machine exports selectors
+# from the shell, so the suite must not inherit them: hermetic means hermetic
+# against the caller's environment too, not only against real state.
+#
+# The WHOLE table. A previous pass unset the first two and left
+# CLAUDE_PERSONAL_ONLY, which OUTRANKS CLAUDE_CONFIG_DIR and is the selector
+# this repo's CLAUDE.md tells the user to export -- with it set this suite ran
+# 179/58, and the red cases reported rc=0 where a deny was asserted, so a real
+# fail-open regression would have been invisible in that noise.
+unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL CLAUDE_PERSONAL_ONLY
+unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
 
 REPO_ROOT=$(pwd)
 HOOK=${ORCH_EDIT_GUARD_HOOK:-claude/hooks/orch_edit_guard.py}
@@ -58,48 +63,84 @@ trap 'chmod -R u+w "$FIX" 2>/dev/null; rm -rf "$FIX"' EXIT
 export FIXTURE_ROOT="$FIX"
 cat > "$FIX/fixture_marker.py" <<'HELPER'
 import os
-import tempfile
 
 
-def contained(path):
+def contained(path, extra_root=None):
     """Absolute realpath of `path`, or raise if it is not disposable.
 
-    Disposable means under the suite's fixture root or under the real temp
-    root -- the isolated blocks build their own roots with tempfile.mkdtemp(),
-    which is outside FIXTURE_ROOT but still a throwaway. What this refuses is
-    the case that matters: account_root resolving to the user's real
-    ~/.claude, whose `skills` symlink lands in the tracked checkout.
+    Disposable means under FIXTURE_ROOT, or under `extra_root` when an
+    isolated block passes the tempfile.mkdtemp() root it built for itself.
+
+    It deliberately does NOT trust tempfile.gettempdir(). An earlier version
+    did, and that was the bug: co-review snapshots and Claude Code worktrees
+    live under /private/tmp, so whitelisting the temp root accepted a real
+    tracked SKILL.md inside a real checkout -- and a verification seat then
+    destroyed one through this helper. Containment has to be an argument the
+    caller states, not an ambient property of where temp files happen to go.
+
+    The .git check is the belt: no disposable fixture has a git checkout at or
+    above it, and every path we must never write does.
     """
-    roots = [os.path.realpath(os.environ["FIXTURE_ROOT"]),
-             os.path.realpath(tempfile.gettempdir())]
+    roots = [os.path.realpath(os.environ["FIXTURE_ROOT"])]
+    if extra_root:
+        roots.append(os.path.realpath(extra_root))
     real = os.path.realpath(path)
     if not any(real == r or real.startswith(r + os.sep) for r in roots):
         raise AssertionError(
-            "fixture write escapes every disposable root: %s -> %s (roots %s)"
+            "fixture write escapes every declared root: %s -> %s (roots %s)"
             % (path, real, ", ".join(roots))
         )
-    return real
+    probe = real
+    while True:
+        parent = os.path.dirname(probe)
+        if os.path.exists(os.path.join(probe, ".git")):
+            raise AssertionError(
+                "fixture write lands inside a git checkout: %s (checkout %s)" % (real, probe)
+            )
+        if parent == probe:
+            return real
+        probe = parent
 
 
-def seed_marker(scope, capability):
+def seed_marker(scope, capability, extra_root=None):
     """Publish a capability marker under the scope's account root, or refuse.
 
-    Refusing is the point: if account_root ever resolves outside the fixture
-    the suite must fail loudly here, not quietly overwrite a tracked file.
+    Refusing is the point: if account_root ever resolves outside the declared
+    roots the suite must fail loudly here, not quietly overwrite a tracked
+    file.
+
+    Published by create-and-rename, for the same reason
+    herdr_legacy_fixture._publish_marker is: a plain truncating open writes
+    THROUGH a hardlink, because a hardlink is an inode alias rather than a
+    path component and neither realpath nor O_NOFOLLOW can see one. An earlier
+    version of this helper -- written to guard exactly that class -- used
+    `open(target, "w")` and so carried the bug it existed to prevent.
     """
-    skilld = contained(os.path.join(scope["account_root"], "skills", "herdr-orchestration"))
+    skilld = contained(
+        os.path.join(scope["account_root"], "skills", "herdr-orchestration"), extra_root)
     os.makedirs(skilld, exist_ok=True)
-    target = contained(os.path.join(skilld, "SKILL.md"))
-    with open(target, "w") as stream:
-        stream.write(
-            '<!-- herdr-capabilities: {"marker_version":1,"capability":%d} -->\n' % capability
-        )
+    target = contained(os.path.join(skilld, "SKILL.md"), extra_root)
+    tmp = target + ".tmp.%d" % os.getpid()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(
+                '<!-- herdr-capabilities: {"marker_version":1,"capability":%d} -->\n' % capability
+            )
+        os.rename(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return target
 
 
-def remove_marker(scope):
+def remove_marker(scope, extra_root=None):
     target = contained(
-        os.path.join(scope["account_root"], "skills", "herdr-orchestration", "SKILL.md")
+        os.path.join(scope["account_root"], "skills", "herdr-orchestration", "SKILL.md"),
+        extra_root,
     )
     os.remove(target)
 HELPER
@@ -810,6 +851,12 @@ from fixture_marker import remove_marker, seed_marker
 iso = tempfile.mkdtemp()
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
 os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
+# HOME too. The hook subprocesses elsewhere in this suite run under HOME="$H",
+# but these inline blocks did not, so selected_scope resolved against the
+# caller's REAL home -- the transmission path by which a leaked selector
+# reached ~/.claude and its symlink into the checkout.
+os.environ["HOME"] = os.path.join(iso, "home")
+os.makedirs(os.environ["HOME"], exist_ok=True)
 import herdr_orch_core as core
 import herdr_coordination as coordination
 spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
@@ -839,7 +886,7 @@ gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
             "account_id": scope["account_id"], "enabled": True}
 open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
 # A capable procedure marker, because the guard now runs the full admission.
-seed_marker(scope, 1)
+seed_marker(scope, 1, iso)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("live", is_lead, roots)
 binding["status"] = "revoked"; open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
@@ -1257,6 +1304,10 @@ iso = tempfile.mkdtemp()
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
 os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
 os.environ["HERDR_ENV"] = "1"
+# HOME too -- see the LA block's note; these inline blocks previously resolved
+# selected_scope against the caller's real home.
+os.environ["HOME"] = os.path.join(iso, "home")
+os.makedirs(os.environ["HOME"], exist_ok=True)
 import herdr_orch_core as core
 import herdr_coordination as coordination
 import herdr_capabilities as hc
@@ -1300,7 +1351,7 @@ assert rc == 2, ("case-a-decide-not-plain-worker", rc)
 gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
             "account_id": scope["account_id"], "enabled": True}
 open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
-seed_marker(scope, 1)
+seed_marker(scope, 1, iso)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("case-b-gate-enabled-precondition", is_lead, roots)
 orig_guard_cap = hc.GUARD_CAPABILITY
@@ -1316,8 +1367,8 @@ finally:
 # Case C: gate enabled and guard at level, but the installed PROCEDURE is
 # under-level. The guard must withhold on its own, not only at admission --
 # this is the lock that used to exist at claim time only.
-remove_marker(scope)
-seed_marker(scope, 0)
+remove_marker(scope, iso)
+seed_marker(scope, 0, iso)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("case-c-authority", is_lead, roots)
 rc = g.decide(gate_write_payload, "claude")
@@ -1330,7 +1381,7 @@ assert rc == 2, ("case-c-decide-not-plain-worker", rc)
 # concrete record the two diverge: the live value corroborates and admits, the
 # binding's null cannot corroborate and gate_enabled refuses fail-closed.
 # Reverting orch_edit_guard to rec.get("repo_id") turns case-d-live red.
-seed_marker(scope, 1)
+seed_marker(scope, 1, iso)
 live_repo_id = core.repository_context(ws)["repo_id"]
 assert live_repo_id, "fixture workspace has no canonical repo_id"
 assert binding["repo_id"] is None, binding["repo_id"]
@@ -1348,9 +1399,9 @@ assert rc == 2, ("case-d-decide-not-plain-worker", rc)
 shutil.rmtree(iso, ignore_errors=True)
 PY
 then
-    printf 'PASS  GATE Case A (absent) and Case B (under-level) withhold roots but keep is_lead True and refuse the write\n'; PASS=$((PASS + 1))
+    printf 'PASS  GATE cases A (absent) B (guard under-level) C (procedure under-level) D (concrete repo_id) withhold roots, keep is_lead True, refuse the write\n'; PASS=$((PASS + 1))
 else
-    printf 'FAIL  GATE Case A (absent) and Case B (under-level) withhold roots but keep is_lead True and refuse the write\n' >&2; FAIL=$((FAIL + 1))
+    printf 'FAIL  GATE cases A (absent) B (guard under-level) C (procedure under-level) D (concrete repo_id) withhold roots, keep is_lead True, refuse the write\n' >&2; FAIL=$((FAIL + 1))
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

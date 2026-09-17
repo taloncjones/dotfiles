@@ -240,15 +240,28 @@ PY
 
 check "gate: a FIFO record returns instead of blocking the hook" <<PY
 $LOAD
-import signal
+import subprocess
+# NOT an in-process SIGALRM. An earlier version of this case used one and was
+# vacuous: the handler's AssertionError is raised INSIDE gate_enabled, whose
+# own \`except Exception\` swallows it into exactly the (False, ...) the
+# assertion accepted -- so stripping O_NONBLOCK left the case green after five
+# seconds. Two independent teeth instead: an EXTERNAL wall-clock cap, which
+# nothing in the module can catch, and the specific reason, which only the
+# S_ISREG path produces.
+child = '''
+import os, sys, tempfile, importlib.util
+spec = importlib.util.spec_from_file_location("caps", "claude/hooks/herdr_capabilities.py")
+k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
 d = tempfile.mkdtemp()
 os.mkfifo(os.path.join(d, k.GATE_NAME))
-def bail(*a):
-    raise AssertionError("gate_enabled blocked on a FIFO")
-signal.signal(signal.SIGALRM, bail); signal.alarm(5)
 ok, why = k.gate_enabled(d, "s", "a")
-signal.alarm(0)
-assert ok is False, (ok, why)
+sys.stdout.write("%s\\t%s" % (ok, why))
+'''
+r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, timeout=10)
+assert r.returncode == 0, (r.returncode, r.stderr)
+flag, why = r.stdout.split("\\t", 1)
+assert flag == "False", (flag, why)
+assert "regular file" in why, why
 sys.exit(0)
 PY
 
@@ -266,17 +279,32 @@ PY
 
 check "procedure: a FIFO marker returns instead of blocking the hook" <<PY
 $LOAD
-import signal
+import subprocess
+# External wall-clock cap, for the reason the gate FIFO case states. This one
+# also asserts on _read_procedure_text directly, because procedure_capability
+# flattens every failure to None and so cannot distinguish "refused a FIFO"
+# from "blocked, then got interrupted".
+child = '''
+import os, sys, tempfile, importlib.util
+spec = importlib.util.spec_from_file_location("caps", "claude/hooks/herdr_capabilities.py")
+k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
 cfg = tempfile.mkdtemp()
 d = os.path.join(cfg, "skills", "herdr-orchestration")
 os.makedirs(d)
-os.mkfifo(os.path.join(d, "SKILL.md"))
-def bail(*a):
-    raise AssertionError("procedure_capability blocked on a FIFO")
-signal.signal(signal.SIGALRM, bail); signal.alarm(5)
-cap = k.procedure_capability(cfg)
-signal.alarm(0)
-assert cap is None, cap
+p = os.path.join(d, "SKILL.md")
+os.mkfifo(p)
+try:
+    k._read_procedure_text(p)
+    sys.stdout.write("NO-REFUSAL")
+except ValueError as exc:
+    sys.stdout.write("refused\\t%s\\t%s" % (exc, k.procedure_capability(cfg)))
+'''
+r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, timeout=10)
+assert r.returncode == 0, (r.returncode, r.stderr)
+parts = r.stdout.split("\\t")
+assert parts[0] == "refused", r.stdout
+assert "regular file" in parts[1], parts[1]
+assert parts[2] == "None", parts[2]
 sys.exit(0)
 PY
 
@@ -294,6 +322,98 @@ os.symlink(real, os.path.join(skills, "herdr-orchestration"))
 # no-follow PARENT walk here would refuse the layout we ship. Only the leaf is
 # no-follow. This case fails if that distinction is ever collapsed.
 assert k.procedure_capability(cfg) == 1, k.procedure_capability(cfg)
+sys.exit(0)
+PY
+
+check "marker: a whitespace-padded malformed line cannot stall the parser" <<PY
+$LOAD
+import subprocess
+# Externally timed, because the failure mode is TIME, not a return value. The
+# old pattern used \\s on both sides of a lazy group, which backtracks
+# cubically in the whitespace run: 3000 spaces took 11.2s, and the cost
+# multiplies per line. That is a hook timeout, which proceeds, and it also ran
+# under the admission flock.
+child = '''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("caps", "claude/hooks/herdr_capabilities.py")
+k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
+pad = " " * 4000
+line = "<!--" + pad + "herdr-capabilities:" + pad + "-->x" + chr(10)
+sys.stdout.write(repr(k.parse_marker(line * 8)))
+'''
+r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, timeout=10)
+assert r.returncode == 0, (r.returncode, r.stderr)
+assert r.stdout.strip() == "None", r.stdout
+sys.exit(0)
+PY
+
+check "marker: an over-long candidate line is refused before matching" <<PY
+$LOAD
+long_line = "<!-- herdr-capabilities: " + "x" * (k.MARKER_LINE_MAX + 10) + " -->"
+assert k.parse_marker(long_line + chr(10)) is None
+good = '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->' + chr(10)
+assert k.parse_marker(good) == 1, k.parse_marker(good)
+sys.exit(0)
+PY
+
+check "gate: an over-long record is refused, not truncated" <<PY
+$LOAD
+d = tempfile.mkdtemp()
+rec = {"schema_version": 1, "repo_slug": "s", "repo_id": None,
+       "account_id": "a", "enabled": True}
+body = json.dumps(rec)
+pad = " " * (k.GATE_READ_LIMIT + 1024)
+open(os.path.join(d, k.GATE_NAME), "w").write(body + pad)
+ok, why = k.gate_enabled(d, "s", "a")
+assert ok is False, (ok, why)
+assert "too large" in why, why
+sys.exit(0)
+PY
+
+check "procedure: an over-long file is refused, so truncation cannot validate it" <<PY
+$LOAD
+cfg = tempfile.mkdtemp()
+d = os.path.join(cfg, "skills", "herdr-orchestration")
+os.makedirs(d)
+one = '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->' + chr(10)
+two = '<!-- herdr-capabilities: {"marker_version":1,"capability":0} -->' + chr(10)
+pad = ("padding" + chr(10)) * 4
+body = one + (pad * ((k.PROCEDURE_READ_LIMIT // len(pad)) + 16)) + two
+open(os.path.join(d, "SKILL.md"), "w").write(body)
+# Truncating at the bound would return 1 here while parsing the whole file
+# returns None (two markers, fail closed). Refusing over-length keeps those
+# answers the same.
+assert len(body) > k.PROCEDURE_READ_LIMIT, len(body)
+assert k.parse_marker(body) is None, k.parse_marker(body)
+assert k.procedure_capability(cfg) is None, k.procedure_capability(cfg)
+sys.exit(0)
+PY
+
+check "gate: IDENTITY_DEFERRED defers corroboration without weakening any other clause" <<PY
+$LOAD
+d = tempfile.mkdtemp()
+base = {"schema_version": 1, "repo_slug": "s", "repo_id": "abc",
+        "account_id": "a", "enabled": True}
+p = os.path.join(d, k.GATE_NAME)
+open(p, "w").write(json.dumps(base))
+# The whole point: None REFUSES a record naming an identity, so it is the
+# wrong pre-check. The sentinel accepts, then the caller re-checks for real.
+assert k.gate_enabled(d, "s", "a", None)[0] is False
+assert k.gate_enabled(d, "s", "a", k.IDENTITY_DEFERRED)[0] is True
+assert k.gate_enabled(d, "s", "a", "abc")[0] is True
+assert k.gate_enabled(d, "s", "a", "other")[0] is False
+# Every non-identity clause still bites under the sentinel.
+for bad, field in ((0, "enabled"), (99, "schema_version")):
+    rec = dict(base)
+    rec["enabled" if field == "enabled" else "schema_version"] = False if field == "enabled" else 99
+    open(p, "w").write(json.dumps(rec))
+    assert k.gate_enabled(d, "s", "a", k.IDENTITY_DEFERRED)[0] is False, field
+open(p, "w").write(json.dumps(dict(base, repo_slug="other")))
+assert k.gate_enabled(d, "s", "a", k.IDENTITY_DEFERRED)[0] is False
+open(p, "w").write(json.dumps(dict(base, account_id="other")))
+assert k.gate_enabled(d, "s", "a", k.IDENTITY_DEFERRED)[0] is False
+open(p, "w").write(json.dumps(dict(base, repo_id=17)))
+assert k.gate_enabled(d, "s", "a", k.IDENTITY_DEFERRED)[0] is False
 sys.exit(0)
 PY
 

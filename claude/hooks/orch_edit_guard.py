@@ -215,16 +215,29 @@ def lead_admissible(rd, slug, account_id, caller_scope, workspace_root, seen=Non
 
     A workspace whose repository context will not resolve yields no roots.
 
-    Cost discipline. Resolving the context spends five git subprocesses at up
-    to GIT_CALL_MAX_SECS each, outside the Budget the rest of this hook's git
-    calls share, and a PreToolUse hook that overruns its timeout lets the tool
-    call through -- so an expensive check is a fail-open risk, not merely
-    slow. Two bounds: an absent gate record refuses for free, before any
-    subprocess, which is the ordinary disabled case and needs no repo_id; and
-    `seen` memoizes the resolution per workspace so a session holding several
-    leases pays once per distinct workspace rather than once per lease.
+    Cost discipline. Resolving the context spends SIX git subprocesses on a
+    linked worktree -- five on a plain checkout, but herdr workspaces ARE
+    linked worktrees, so six is the normal case, and the extra call is
+    `worktree list --porcelain -z`, the slowest of the set -- each at up to
+    GIT_CALL_MAX_SECS, and all of them outside the Budget the rest of this
+    hook's git calls share. A PreToolUse hook that overruns its timeout lets
+    the tool call through, so an expensive check is a fail-open risk and not
+    merely slow.
+
+    Two bounds. First the gate is READ before any subprocess, rather than
+    merely tested for existence: `deactivate-task-leads` writes
+    `enabled: false` instead of removing the record, so after step 2 of the
+    documented rollback an existence test is true forever and the expensive
+    path becomes the permanent steady state. The pre-check passes
+    IDENTITY_DEFERRED, not None -- None would refuse a record that names a
+    concrete identity, which is the right final answer but the wrong
+    pre-check, since it rejects leads the full check admits. Second, `seen`
+    memoizes the resolution per workspace, so a session holding several leases
+    pays once per distinct workspace rather than once per lease.
     """
-    if not herdr_caps.gate_path(rd).exists():
+    pre_ok, _pre_why = herdr_caps.gate_enabled(
+        rd, slug, account_id, herdr_caps.IDENTITY_DEFERRED)
+    if not pre_ok:
         return False
     if seen is None:
         seen = {}

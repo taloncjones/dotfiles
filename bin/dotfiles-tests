@@ -13,13 +13,21 @@
 set -u
 
 # The suites are hermetic against real STATE but were not hermetic against the
-# caller's ENVIRONMENT. A personal account selector makes account_scope ignore
-# CLAUDE_CONFIG_DIR and resolve account_root to $HOME/.claude, which is not
-# where any fixture lives -- so a plain local run produced dozens of failures
-# that a run under `env -u WORKFLOW_PERSONAL_ACCOUNT` did not, and the standing
-# workaround was to remember that flag. CI never sets these, so unsetting here
-# is also what makes a local run mean the same thing as the CI run.
-unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL
+# caller's ENVIRONMENT. Any account selector makes account_scope ignore
+# CLAUDE_CONFIG_DIR and resolve account_root to a real account dir, which is
+# not where any fixture lives -- so a plain local run produced dozens of
+# failures that a scrubbed run did not, and the standing workaround was to
+# remember the flag. CI never sets these, so unsetting here is also what makes
+# a local run mean the same thing as the CI run.
+#
+# The WHOLE table, not the two that were noticed first. CLAUDE_PERSONAL_ONLY
+# outranks CLAUDE_CONFIG_DIR and is the one this repo's own CLAUDE.md tells
+# the user to export, so leaving it set took the guard suite from 237/0 to
+# 179/58 -- and the red cases reported rc=0 where a deny was asserted, so a
+# genuine fail-open regression would have been indistinguishable from
+# environment noise. The rest relocate a root or a scope id the same way.
+unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL CLAUDE_PERSONAL_ONLY
+unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
 
 SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"

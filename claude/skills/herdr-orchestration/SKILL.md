@@ -4,6 +4,12 @@ description: Use to run a Claude-led standing per-repo orchestrator over Herdr t
 ---
 
 <!-- herdr-capabilities: {"marker_version":1,"capability":0} -->
+<!-- Exactly ONE capability marker may appear in this file. parse_marker fails
+     closed on a duplicate, so pasting a second copy of the line above -- as an
+     example, or while documenting the format -- makes procedure_capability
+     return None and refuses every lead claim with "procedure advertises no
+     usable capability". Document the format by pointing at this line, never by
+     reproducing it. -->
 
 # herdr-orchestration
 

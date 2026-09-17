@@ -96,9 +96,16 @@ def _seed_task_lead_gate(args):
     resolves. Fixture setup, not a production bypass: the production reader is
     unchanged and still resolves the account's real config dir.
 
-    Confinement is two independent locks, because the marker this writes is
-    the whole adversarial claim behind an admitted lead -- and it writes into
-    a TRACKED file's name:
+    Confinement matters here for a plain reason, not a grand one: this writes
+    into a TRACKED file's name, and getting it wrong destroys source. (An
+    earlier version of this docstring justified it by calling the marker "the
+    whole adversarial claim behind an admitted lead". That was wrong, and
+    herdr_capabilities._read_procedure_text now explains why: the marker is
+    forgeable by anything able to plant a symlink, so the activation gate is
+    an interlock against accident and drift, not an adversarial control. The
+    confinement below is still required -- the reason is data safety.)
+
+    Two independent locks:
 
     1. The resolved config dir must sit under the real temp root. This bounds
        the path we were handed.
@@ -148,11 +155,22 @@ def _seed_task_lead_gate(args):
         # and raised out of a fixture that is supposed to seed or do nothing.
         return
     scope = core.account_scope(os.getcwd(), value("--runtime") or "claude")
+    # Guarded like the two writes above it. A symlink at the gate LEAF makes
+    # atomic_json_at raise, and unguarded that escaped here -- after the
+    # marker was already published, leaving the fixture half-seeded and
+    # crashing, against its seed-or-do-nothing contract.
+    try:
+        _publish_gate(rd, slug, scope["account_id"])
+    except (OSError, ValueError):
+        return
+
+
+def _publish_gate(rd, slug, account_id):
     core.write_json_atomic(core.herdr_caps.gate_path(rd), {
         "schema_version": 1,
         "repo_slug": slug,
         "repo_id": None,
-        "account_id": scope["account_id"],
+        "account_id": account_id,
         "enabled": True,
     })
 
