@@ -11,7 +11,6 @@ execution fact -- see the activation gate design, section 4.1.
 
 import json
 import os
-import re
 import stat
 import sys
 from pathlib import Path
@@ -36,23 +35,59 @@ CORE_CAPABILITY = 1
 GUARD_CAPABILITY = 1
 
 #: Longest line that can plausibly hold a marker. The shipped one is 62 bytes.
-#: A candidate longer than this is refused WITHOUT being matched, because an
-#: over-long line is what attacks the pattern below.
 MARKER_LINE_MAX = 512
 
-#: `[ \t]`, never `\s`. With `\s` on both sides of a lazy group the newline
-#: class overlaps between the quantifiers and the matcher backtracks cubically
-#: in the length of a whitespace run: 1000 spaces took 0.43s, 2000 took 3.34s,
-#: 3000 took 11.20s, and the cost multiplies per malformed line. That is not a
-#: slow path but two fail-open paths -- this runs on the PreToolUse path, where
-#: overrunning the hook timeout lets the tool call proceed, and inside
-#: owner_transaction's exclusive flock at claim time, where it wedges every
-#: other verb on the coordination root. A read bound is no defence, it is the
-#: attacker's budget: 4MB of such lines is roughly 70 minutes under the lock.
-#: `[ \t]` cannot overlap the newline `$` anchors on, so the ambiguity is
-#: gone, and the shipped marker still matches.
-_MARKER_RE = re.compile(
-    r"^<!--[ \t]*herdr-capabilities:[ \t]*(.*?)[ \t]*-->[ \t]*$", re.MULTILINE)
+_MARKER_OPEN = "<!--"
+_MARKER_KEY = "herdr-capabilities:"
+_MARKER_CLOSE = "-->"
+
+
+def _marker_payloads(text):
+    """Every marker payload in `text`, or None if any candidate is unusable.
+
+    Deliberately NOT a regular expression. The pattern this replaces was
+    `^<!--\\s*herdr-capabilities:\\s*(.*?)\\s*-->\\s*$`, and a lazy group
+    between two whitespace quantifiers backtracks catastrophically, because
+    `.` also matches the whitespace the quantifiers are claiming. Measured on
+    a malformed line -- one with no terminator, or a near-miss like a trailing
+    lone `-`:
+
+        pure spaces   n=2000  3.2s   n=5000  47s    n=8000  206s
+        tab+space     n=2000  26s    n=4000  214s   n=8000  1728s
+
+    Both fail-open. It runs on the PreToolUse path, where overrunning the hook
+    timeout lets the tool call proceed (crossed at roughly a 5 KB file), and
+    inside owner_transaction's exclusive flock at claim time, which has no
+    timeout at all and wedges every other verb on the coordination root -- one
+    8 KB line costs about half an hour there.
+
+    Narrowing the classes does NOT fix this. An intermediate version used
+    `[ \\t]` instead of `\\s`, which removes only the newline ambiguity;
+    measured against the tab-and-space variant it was no faster than the
+    original. Nor is a read bound a defence: the pathology reaches its worst
+    case in a few kilobytes, so the 4 MB limit is irrelevant rather than
+    generous. And a length cap alone is a control with no margin.
+
+    So: explicit line parsing, every step linear in the line's length, with no
+    backtracking to exploit. A well-formed marker was always free even under
+    the old pattern -- the cost needed a MALFORMED candidate -- which is why
+    this was never seen in normal use and why nothing about the payload looks
+    suspicious on inspection.
+    """
+    payloads = []
+    for line in text.splitlines():
+        if _MARKER_KEY not in line:
+            continue
+        if len(line) > MARKER_LINE_MAX:
+            return None
+        stripped = line.strip()
+        if not stripped.startswith(_MARKER_OPEN) or not stripped.endswith(_MARKER_CLOSE):
+            continue
+        body = stripped[len(_MARKER_OPEN):-len(_MARKER_CLOSE)].strip()
+        if not body.startswith(_MARKER_KEY):
+            continue
+        payloads.append(body[len(_MARKER_KEY):].strip())
+    return payloads
 
 
 def _exact_int(value):
@@ -68,14 +103,8 @@ def parse_marker(text):
     """
     if not isinstance(text, str):
         return None
-    # Refuse an over-long candidate line BEFORE matching. The pattern is now
-    # linear, but a cheap pre-filter keeps that from being the only thing
-    # standing between a planted file and the hook's timeout.
-    if any(len(line) > MARKER_LINE_MAX for line in text.splitlines()
-           if "herdr-capabilities:" in line):
-        return None
-    found = _MARKER_RE.findall(text)
-    if len(found) != 1:
+    found = _marker_payloads(text)
+    if found is None or len(found) != 1:
         return None
     try:
         rec = json.loads(found[0])

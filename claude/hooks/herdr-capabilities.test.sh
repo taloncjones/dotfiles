@@ -337,9 +337,15 @@ child = '''
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("caps", "claude/hooks/herdr_capabilities.py")
 k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
-pad = " " * 4000
-line = "<!--" + pad + "herdr-capabilities:" + pad + "-->x" + chr(10)
-sys.stdout.write(repr(k.parse_marker(line * 8)))
+# MARKER_LINE_MAX is disabled on purpose, so this times the PARSER and not the
+# length pre-filter. A cap is a control with no margin; if it is the only
+# thing holding, raising it later silently restores the pathology.
+k.MARKER_LINE_MAX = 10 ** 9
+# Tab+space, terminated by a lone "-": the worst measured variant, about 8x
+# the pure-space run and 1728s at this size under the original pattern.
+pad = ("\\t " * 8000)
+line = "<!--" + pad + "herdr-capabilities:" + pad + "-"
+sys.stdout.write(repr(k.parse_marker(line)))
 '''
 r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, timeout=10)
 assert r.returncode == 0, (r.returncode, r.stderr)
