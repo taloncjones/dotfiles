@@ -767,6 +767,9 @@ binding = {"schema_version": 1, "binding_id": bid, "tier": "lead",
            "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
            "status": "claimed", "created_ts": "t", "updated_ts": "t"}
 open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
+            "account_id": scope["account_id"], "enabled": True}
+open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("live", is_lead, roots)
 binding["status"] = "revoked"; open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
@@ -782,6 +785,7 @@ shutil.rmtree(payload_root, ignore_errors=True)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("payload-root-gone", is_lead, roots)
 os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
 binding["status"] = "claimed"; binding["runtime"] = "codex"
 open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
 is_lead, roots = g.lead_authority(sid, "claude", scope)
@@ -843,6 +847,11 @@ open(os.path.join(rd, bid + ".json"), "w").write(json.dumps({
     "account_id": scope["account_id"], "account_kind": scope["kind"],
     "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
     "status": "claimed", "created_ts": "t", "updated_ts": "t"}))
+rdroot = os.path.join(e["LS_CFG"], "herdr-orch", slug)
+os.makedirs(rdroot, exist_ok=True)
+open(os.path.join(rdroot, "task-lead-gate.json"), "w").write(json.dumps({
+    "schema_version": 1, "repo_slug": slug, "repo_id": None,
+    "account_id": scope["account_id"], "enabled": True}))
 PY
 }
 set_binding_status_fixture() {
@@ -1145,6 +1154,88 @@ PY
     else
         printf 'FAIL  docs: state-layout, CLAUDE.md bullet, agent-lessons bullet within caps\n' >&2; FAIL=$((FAIL + 1))
     fi
+fi
+
+# --- Activation gate: authority enforcement (task 7) --------------------
+# Isolated CLAUDE_CONFIG_DIR/HERDR_COORDINATION_ROOT so neither case can
+# touch the suite's shared $CFG fixtures (same isolation as the LA block).
+#
+# Case A -- gate absent: a valid lead lease and a valid binding naming this
+# session, and NO task-lead-gate.json in the payload root. lead_authority
+# must still report is_lead True with roots withheld, and decide() (the
+# :1431 caller) must REFUSE the lead's own in-workspace write rather than
+# allow it -- an allow there would mean the session was silently reclassified
+# as an ordinary worker, which is the exact inversion this task forbids.
+#
+# Case B -- guard under-level: same fixtures plus an ENABLED gate record,
+# with herdr_caps.GUARD_CAPABILITY monkeypatched to 0 in the loaded module.
+# Same expected outcome: is_lead True, roots withheld, write refused.
+if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
+import importlib.util, json, os, sys, hashlib, shutil, tempfile
+sys.dont_write_bytecode = True
+sys.path.insert(0, "claude/hooks")
+iso = tempfile.mkdtemp()
+os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
+os.environ["HERDR_ENV"] = "1"
+import herdr_orch_core as core
+import herdr_coordination as coordination
+spec = importlib.util.spec_from_file_location("g_gate", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"]); sid = os.environ["SID_L"]
+scope = g.selected_scope(os.environ["R"], "claude")
+coord = str(coordination.coordination_root())
+payload_root = os.path.join(str(core.account_payload_root(scope)), "herdr-orch")
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + "3" * 32
+slugd = os.path.join(coord, slug); os.makedirs(slugd, exist_ok=True)
+lease = {"schema_version": 1, "session_id": sid, "host": "h", "pid": 5, "fence": 1,
+         "heartbeat_ts": 9e18, "runtime": "claude", "thread_id": None,
+         "account_id": scope["account_id"], "control_tier": "lead",
+         "workspace_root": ws, "binding_id": bid}
+open(os.path.join(slugd, "lead-%s.json" % key), "w").write(json.dumps(lease))
+rd = os.path.join(payload_root, slug)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding = {"schema_version": 1, "binding_id": bid, "tier": "lead",
+           "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
+           "task_id": "td-x", "repo_id": None, "repo_slug": slug, "workspace_root": ws,
+           "account_id": scope["account_id"], "account_kind": scope["kind"],
+           "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+           "status": "claimed", "created_ts": "t", "updated_ts": "t"}
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+gate_write_payload = {"session_id": sid, "cwd": ws, "hook_event_name": "PreToolUse",
+    "tool_name": "Write", "tool_use_id": "toolu_gatecase",
+    "scratchpad_dir": os.path.join(iso, "scratch"), "permission_mode": "auto",
+    "tool_input": {"file_path": os.path.join(ws, "wsfile.txt"), "content": "x"}}
+
+# Case A: no task-lead-gate.json exists anywhere under rd.
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("case-a-authority", is_lead, roots)
+rc = g.decide(gate_write_payload, "claude")
+assert rc == 2, ("case-a-decide-not-plain-worker", rc)
+
+# Case B: gate present and enabled -- roots granted -- then GUARD_CAPABILITY
+# monkeypatched below REQUIRED_CAPABILITY -- roots withheld again.
+gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
+            "account_id": scope["account_id"], "enabled": True}
+open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [ws], ("case-b-gate-enabled-precondition", is_lead, roots)
+orig_guard_cap = g.herdr_caps.GUARD_CAPABILITY
+g.herdr_caps.GUARD_CAPABILITY = 0
+try:
+    is_lead, roots = g.lead_authority(sid, "claude", scope)
+    assert is_lead is True and roots == [], ("case-b-authority", is_lead, roots)
+    rc = g.decide(gate_write_payload, "claude")
+    assert rc == 2, ("case-b-decide-not-plain-worker", rc)
+finally:
+    g.herdr_caps.GUARD_CAPABILITY = orig_guard_cap
+shutil.rmtree(iso, ignore_errors=True)
+PY
+then
+    printf 'PASS  GATE Case A (absent) and Case B (under-level) withhold roots but keep is_lead True and refuse the write\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  GATE Case A (absent) and Case B (under-level) withhold roots but keep is_lead True and refuse the write\n' >&2; FAIL=$((FAIL + 1))
 fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

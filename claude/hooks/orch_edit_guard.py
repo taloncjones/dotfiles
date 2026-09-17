@@ -67,6 +67,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # never leave __pycache__ under the hooks dir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import herdr_bindings as bindings
+import herdr_capabilities as herdr_caps
 import herdr_orch_core as core
 import rm_guard
 from workflow_context import account_scope, repository_context
@@ -245,6 +246,10 @@ def lead_authority(session_id, runtime, caller_scope):
                 and rec.get("expected_session_id") == session_id
                 and ws not in roots
             ):
+                enabled, _why = herdr_caps.gate_enabled(
+                    payload_root / slug, slug, account_id, rec.get("repo_id"))
+                if not enabled or herdr_caps.GUARD_CAPABILITY < herdr_caps.REQUIRED_CAPABILITY:
+                    continue
                 roots.append(ws)
     return is_lead, roots
 
@@ -1306,8 +1311,9 @@ def refuse_lead(first, roots):
         )
     else:
         print(
-            "This lead's dispatch binding is missing, revoked, or complete, "
-            "so no workspace edit is authorized.",
+            "No workspace edit is authorized for this lead: either its "
+            "dispatch binding is missing, revoked, or complete, or "
+            "task-lead dispatch is not active for this repository.",
             file=sys.stderr,
         )
     print(
