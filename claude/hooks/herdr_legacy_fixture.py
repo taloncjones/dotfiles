@@ -8,6 +8,20 @@ import time
 from pathlib import Path
 
 import herdr_orch_core as core
+from workflow_context import open_state_parent
+
+
+def flag_value(args, flag):
+    """The token after `flag`, or None when it is absent or trailing.
+
+    A trailing flag has no value, so it reads as absent. Indexing past the end
+    would raise IndexError out of a fixture whose whole job is to hand argv to
+    the real CLI, which then never gets to report the usage error itself.
+    """
+    if flag not in args:
+        return None
+    index = args.index(flag) + 1
+    return args[index] if index < len(args) else None
 
 
 def claim_legacy_owner(rd, session_id, host, pid, *args, **kwargs):
@@ -42,15 +56,26 @@ def _seed_task_lead_gate(args):
     environment in which leads genuinely are enabled -- an enabled gate record
     in the payload root and a capability-1 marker in the config dir the reader
     resolves. Fixture setup, not a production bypass: the production reader is
-    unchanged and still resolves the account's real config dir. Seeding is
-    confined to a temp-root config dir, so a hand-run against a real config
-    dir writes nothing.
+    unchanged and still resolves the account's real config dir.
+
+    Confinement is two independent locks, because the marker this writes is
+    the whole adversarial claim behind an admitted lead -- and it writes into
+    a TRACKED file's name:
+
+    1. The resolved config dir must sit under the real temp root. This bounds
+       the path we were handed.
+    2. Every component below it is created and opened NO-FOLLOW, so a symlink
+       planted at `skills` (or anywhere under it) is refused instead of
+       followed. Lock 1 alone is not confinement: it constrains the root and
+       says nothing about what the components below it point at, so a
+       legitimate mktemp config dir containing `skills -> ~/.claude/skills`
+       used to overwrite the tracked SKILL.md with a capability-1 marker.
     """
     if os.environ.get("HERDR_FIXTURE_NO_SEED"):
         return
 
     def value(flag):
-        return args[args.index(flag) + 1] if flag in args else None
+        return flag_value(args, flag)
 
     slug = value("--repo-slug")
     if not slug or not core.valid_repo_slug(slug):
@@ -60,12 +85,27 @@ def _seed_task_lead_gate(args):
     if tmp not in root.parents:
         return
 
-    skill = root / "skills" / "herdr-orchestration"
-    skill.mkdir(parents=True, exist_ok=True)
-    (skill / "SKILL.md").write_text(
-        '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n',
-        encoding="utf-8",
-    )
+    marker = root / "skills" / "herdr-orchestration" / "SKILL.md"
+    try:
+        parent, name = open_state_parent(marker, create=True)
+    except (OSError, ValueError):
+        # A symlinked or non-directory component: seed nothing rather than
+        # write through it. open_state_parent raises ValueError("state path
+        # contains a symlink") for exactly this case.
+        return
+    try:
+        fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent,
+        )
+    except OSError:
+        return
+    finally:
+        os.close(parent)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write('<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
 
     rd = core.repo_dir(slug)
     rd.mkdir(parents=True, exist_ok=True)
@@ -87,7 +127,7 @@ def main():
     if args and args[0] == "claim-owner":
 
         def value(flag):
-            return args[args.index(flag) + 1] if flag in args else None
+            return flag_value(args, flag)
 
         try:
             int(value("--pid"))
@@ -118,9 +158,8 @@ def main():
         root = Path(os.environ["CLAUDE_CONFIG_DIR"])
         root.mkdir(parents=True, exist_ok=True)
         os.chdir(root)
-        if args and args[0] == "claim-owner" and "--control-tier" in args:
-            if args[args.index("--control-tier") + 1] == "lead":
-                _seed_task_lead_gate(args)
+        if flag_value(args, "--control-tier") == "lead":
+            _seed_task_lead_gate(args)
     return core.main(args)
 
 

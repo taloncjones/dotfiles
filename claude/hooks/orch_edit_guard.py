@@ -67,7 +67,6 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # never leave __pycache__ under the hooks dir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import herdr_bindings as bindings
-import herdr_capabilities as herdr_caps
 import herdr_orch_core as core
 import rm_guard
 from workflow_context import account_scope, repository_context
@@ -195,6 +194,38 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
     return owned
 
 
+def lead_admissible(rd, slug, account_id, caller_scope, workspace_root):
+    """Is a lead in this workspace admissible right now? Total; False on doubt.
+
+    Delegates to core.task_lead_admission -- the SAME decision admission makes
+    at claim time -- rather than re-deriving a partial one here. The guard
+    previously checked only the gate record plus `GUARD_CAPABILITY <
+    REQUIRED_CAPABILITY`, which is `1 < 1` and therefore dead as written: the
+    procedure's advertised capability was never consulted on this side at all,
+    so the second lock existed at admission only.
+
+    The repo_id is resolved LIVE from the workspace, not taken from the
+    binding record. The binding's copy is nullable, so passing it made a
+    gate record that names a repository identity unverifiable from here --
+    gate_enabled refuses an uncorroborated claim, fail-closed -- and an
+    admitted lead ended up with zero authorized roots permanently. Admission
+    passes the live value, so the guard must too, or the two locks disagree
+    about the same lead.
+
+    A workspace whose repository context will not resolve yields no roots.
+    """
+    try:
+        repo_id = repository_context(workspace_root)["repo_id"]
+    except (OSError, ValueError, subprocess.SubprocessError, KeyError):
+        return False
+    try:
+        admit, _reason, _levels = core.task_lead_admission(
+            rd, slug, account_id, Path(caller_scope["account_root"]), repo_id)
+    except Exception:  # noqa: BLE001 -- an undecidable admission withholds the root
+        return False
+    return bool(admit)
+
+
 def lead_authority(session_id, runtime, caller_scope):
     """(is_lead, [authorized workspace_root, ...]) for this session.
 
@@ -246,9 +277,8 @@ def lead_authority(session_id, runtime, caller_scope):
                 and rec.get("expected_session_id") == session_id
                 and ws not in roots
             ):
-                enabled, _why = herdr_caps.gate_enabled(
-                    payload_root / slug, slug, account_id, rec.get("repo_id"))
-                if not enabled or herdr_caps.GUARD_CAPABILITY < herdr_caps.REQUIRED_CAPABILITY:
+                if not lead_admissible(payload_root / slug, slug, account_id,
+                                       caller_scope, ws):
                     continue
                 roots.append(ws)
     return is_lead, roots

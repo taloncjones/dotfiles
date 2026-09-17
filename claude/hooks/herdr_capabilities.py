@@ -10,8 +10,18 @@ execution fact -- see the activation gate design, section 4.1.
 """
 
 import json
+import os
 import re
+import stat
+import sys
 from pathlib import Path
+
+# Self-sufficient import, as in herdr_coordination and herdr_orch_core: this
+# module is loaded both as a sibling hook import and by file path (the
+# capability suite uses spec_from_file_location), and the latter puts nothing
+# on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import herdr_coordination as coordination
 
 #: Marker format version. Bump only when the marker's SHAPE changes.
 MARKER_VERSION = 1
@@ -46,7 +56,7 @@ def parse_marker(text):
         return None
     try:
         rec = json.loads(found[0])
-    except ValueError:
+    except Exception:  # noqa: BLE001 -- deep nesting raises RecursionError, not ValueError
         return None
     if not isinstance(rec, dict):
         return None
@@ -82,6 +92,39 @@ def gate_path(rd):
     return Path(rd) / GATE_NAME
 
 
+def _read_gate_text(path):
+    """Gate record text, read without following a link at any component.
+
+    `herdr_orch_core.read_payload_bytes` already reads payload files exactly
+    this way, but core imports THIS module, so calling it would be a circular
+    import. The flags below match it component for component:
+
+    - `payload_parent` walks every parent with O_NOFOLLOW, so a symlinked
+      ancestor is refused rather than followed. It takes no lock and asserts
+      nothing outside a transaction, which is what lets the edit guard call
+      the gate reader on its read-only path.
+    - O_NOFOLLOW on the leaf refuses a symlinked record. Accepting one would
+      let anyone who can create a link in the state dir point the gate at a
+      file saying `enabled`, which reads as FAIL-OPEN against the
+      absence-means-disabled default -- and the real writer could then no
+      longer turn it off, leaving rollback step 0 unsatisfiable.
+    - O_NONBLOCK means a FIFO in the record's place returns instead of
+      parking the hook forever. On a hook timeout the tool call proceeds, so
+      a blocking read removes the guard rather than tightening it.
+    - S_ISREG refuses a device or directory that opened anyway.
+    """
+    with coordination.payload_parent(path) as (parent, name):
+        fd = os.open(
+            name,
+            os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent,
+        )
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("gate record must be a regular file")
+            return stream.read().decode("utf-8")
+
+
 def gate_enabled(rd, repo_slug, account_id, repo_id=None):
     """(enabled, reason). Anything other than a well-formed, identity-matching,
     enabled record is disabled. Never raises: every failure is a disabled
@@ -107,15 +150,14 @@ def gate_enabled(rd, repo_slug, account_id, repo_id=None):
     This follows that convention rather than inventing a second one.
     """
     try:
-        path = gate_path(rd)
-        raw = path.read_text(encoding="utf-8")
+        raw = _read_gate_text(gate_path(rd))
     except FileNotFoundError:
         return False, "gate record absent"
-    except (OSError, TypeError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 -- unreadable is disabled, never a crash
         return False, f"gate record unreadable: {exc}"
     try:
         rec = json.loads(raw)
-    except ValueError:
+    except Exception:  # noqa: BLE001 -- deep nesting raises RecursionError, not ValueError
         return False, "gate record is not valid JSON"
     if not isinstance(rec, dict):
         return False, "gate record is not an object"

@@ -770,6 +770,11 @@ open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding)
 gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
             "account_id": scope["account_id"], "enabled": True}
 open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
+# A capable procedure marker, because the guard now runs the full admission.
+skilld = os.path.join(scope["account_root"], "skills", "herdr-orchestration")
+os.makedirs(skilld, exist_ok=True)
+open(os.path.join(skilld, "SKILL.md"), "w").write(
+    '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("live", is_lead, roots)
 binding["status"] = "revoked"; open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
@@ -852,6 +857,14 @@ os.makedirs(rdroot, exist_ok=True)
 open(os.path.join(rdroot, "task-lead-gate.json"), "w").write(json.dumps({
     "schema_version": 1, "repo_slug": slug, "repo_id": None,
     "account_id": scope["account_id"], "enabled": True}))
+# The guard makes the SAME admission decision core makes at claim time, so an
+# authorized lead needs a capable procedure marker here too, not just an
+# enabled gate record. Without it the guard withholds every root -- which is
+# the correct refusal, and would make these authorized-lead cases vacuous.
+skilld = os.path.join(scope["account_root"], "skills", "herdr-orchestration")
+os.makedirs(skilld, exist_ok=True)
+open(os.path.join(skilld, "SKILL.md"), "w").write(
+    '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
 PY
 }
 set_binding_status_fixture() {
@@ -1180,6 +1193,7 @@ os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
 os.environ["HERDR_ENV"] = "1"
 import herdr_orch_core as core
 import herdr_coordination as coordination
+import herdr_capabilities as hc
 spec = importlib.util.spec_from_file_location("g_gate", os.environ["HOOK"])
 g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
 slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"]); sid = os.environ["SID_L"]
@@ -1214,22 +1228,38 @@ assert is_lead is True and roots == [], ("case-a-authority", is_lead, roots)
 rc = g.decide(gate_write_payload, "claude")
 assert rc == 2, ("case-a-decide-not-plain-worker", rc)
 
-# Case B: gate present and enabled -- roots granted -- then GUARD_CAPABILITY
-# monkeypatched below REQUIRED_CAPABILITY -- roots withheld again.
+# Case B: gate present and enabled, with a capable procedure marker -- roots
+# granted -- then GUARD_CAPABILITY monkeypatched below REQUIRED_CAPABILITY --
+# roots withheld again.
 gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
             "account_id": scope["account_id"], "enabled": True}
 open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
+skilld = os.path.join(scope["account_root"], "skills", "herdr-orchestration")
+os.makedirs(skilld, exist_ok=True)
+open(os.path.join(skilld, "SKILL.md"), "w").write(
+    '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("case-b-gate-enabled-precondition", is_lead, roots)
-orig_guard_cap = g.herdr_caps.GUARD_CAPABILITY
-g.herdr_caps.GUARD_CAPABILITY = 0
+orig_guard_cap = hc.GUARD_CAPABILITY
+hc.GUARD_CAPABILITY = 0
 try:
     is_lead, roots = g.lead_authority(sid, "claude", scope)
     assert is_lead is True and roots == [], ("case-b-authority", is_lead, roots)
     rc = g.decide(gate_write_payload, "claude")
     assert rc == 2, ("case-b-decide-not-plain-worker", rc)
 finally:
-    g.herdr_caps.GUARD_CAPABILITY = orig_guard_cap
+    hc.GUARD_CAPABILITY = orig_guard_cap
+
+# Case C: gate enabled and guard at level, but the installed PROCEDURE is
+# under-level. The guard must withhold on its own, not only at admission --
+# this is the lock that used to exist at claim time only.
+os.remove(os.path.join(skilld, "SKILL.md"))
+open(os.path.join(skilld, "SKILL.md"), "w").write(
+    '<!-- herdr-capabilities: {"marker_version":1,"capability":0} -->\n')
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("case-c-authority", is_lead, roots)
+rc = g.decide(gate_write_payload, "claude")
+assert rc == 2, ("case-c-decide-not-plain-worker", rc)
 shutil.rmtree(iso, ignore_errors=True)
 PY
 then

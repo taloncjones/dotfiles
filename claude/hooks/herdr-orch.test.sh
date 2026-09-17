@@ -7813,8 +7813,11 @@ f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim
 bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-gc \
    --workspace-root "$LF_WS" --expected-session S1)
-# Everything enabled and capable; drive core and guard under-level in-process,
-# one at a time, and assert each refuses on its own.
+# Everything enabled and capable; drive core and guard under-level one at a
+# time and assert each refuses a REAL claim. The claim goes through core.main
+# -- the same argv path the CLI takes -- not through task_lead_admission
+# directly: a claim path that never consulted these constants would satisfy a
+# direct-admission assertion unchanged, which is what this case used to do.
 CLAUDE_CONFIG_DIR="$root" python3 -c '
 import json, os, sys
 sys.path.insert(0, "claude/hooks")
@@ -7830,16 +7833,27 @@ skill = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "skills", "herdr-orchestra
 os.makedirs(skill, exist_ok=True)
 open(os.path.join(skill, "SKILL.md"), "w").write(
     chr(60) + "!-- herdr-capabilities: " + json.dumps({"marker_version":1,"capability":1}) + " --" + chr(62) + chr(10))
+
+def claim():
+    return core.main(["claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                      "--session", "S1", "--host", "h", "--pid", "2",
+                      "--control-tier", "lead", "--workspace-root", ws,
+                      "--binding", bid])
+
 for name in ("CORE_CAPABILITY", "GUARD_CAPABILITY"):
     saved = getattr(hc, name)
     setattr(hc, name, 0)
-    admit, reason, _ = core.task_lead_admission(
-        rd, slug, scope["account_id"], os.environ["CLAUDE_CONFIG_DIR"])
-    setattr(hc, name, saved)
-    assert admit is False, (name, admit, reason)
-    assert name.split("_")[0].lower() in reason, (name, reason)
+    try:
+        rc = claim()
+    except SystemExit as exc:
+        rc = exc.code
+    finally:
+        setattr(hc, name, saved)
+    assert rc != 0, (name, "an under-level claim was admitted")
+
 admit, reason, _ = core.task_lead_admission(
-    rd, slug, scope["account_id"], os.environ["CLAUDE_CONFIG_DIR"])
+    rd, slug, scope["account_id"], os.environ["CLAUDE_CONFIG_DIR"],
+    core.repository_context(repo)["repo_id"])
 assert admit is True, reason
 ' "$LF_SLUG" "$LF_REPO" "$LF_WS" "$bid"
 SH
