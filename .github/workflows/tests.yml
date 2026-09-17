@@ -43,5 +43,40 @@ jobs:
           python3 -m py_compile claude/skills/lib/*.py claude/skills/co-review/scripts/*.py claude/skills/handoff/scripts/*.py
           echo "[OK] hook scripts compile"
 
+      # py_compile above cannot catch a PEP 604 annotation used without
+      # `from __future__ import annotations`: the annotation is a runtime
+      # expression, so it compiles on every interpreter and only raises
+      # TypeError at IMPORT on Python 3.9. That is the stock macOS python and
+      # what `#!/usr/bin/env python3` resolves to before Homebrew python
+      # exists, and a hook that dies at import exits 1 -- neither the allow (0)
+      # nor the deny (2) a hook may return -- so the guard fails OPEN. This
+      # step imports each module on the floor interpreter, one subprocess
+      # apiece so a single break cannot mask another.
+      - name: install the minimum supported python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: import every hook under python 3.9
+        run: |
+          python3 - <<'PY'
+          import glob, os, subprocess, sys
+          mods = sorted(os.path.basename(p)[:-3]
+                        for p in glob.glob("claude/hooks/*.py") + glob.glob("claude/skills/lib/*.py"))
+          mods = [m for m in mods if not (m.endswith("_test") or m.startswith("test_"))]
+          code = ('import sys; sys.path.insert(0, "claude/hooks");'
+                  ' sys.path.insert(0, "claude/skills/lib"); import %s')
+          bad = []
+          for m in mods:
+              r = subprocess.run([sys.executable, "-c", code % m], capture_output=True, text=True)
+              if r.returncode != 0:
+                  bad.append((m, r.stderr.strip().splitlines()[-1]))
+          print("interpreter %s, probed %d modules" % (sys.version.split()[0], len(mods)))
+          for m, err in bad:
+              print("[X] %s: %s" % (m, err))
+          if bad:
+              raise SystemExit("%d hook module(s) do not import on the floor interpreter" % len(bad))
+          print("[OK] every hook imports")
+          PY
+
       - name: Run all test suites
         run: bash bin/dotfiles-tests

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """PostToolUse hook: Cache Jira URL from Atlassian MCP tool responses."""
 
+# Required for PEP 604 annotations under Python 3.9: see rm_guard.py's note.
+from __future__ import annotations
+
 import json
 import os
 import re

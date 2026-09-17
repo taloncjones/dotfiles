@@ -208,5 +208,94 @@ assert k.parse_marker(text) < k.REQUIRED_CAPABILITY
 sys.exit(0)
 PY
 
+# The two readers' hardening was previously pinned by nothing: no case in this
+# suite mentioned symlink, FIFO, O_NOFOLLOW, O_NONBLOCK or S_ISREG, so a change
+# dropping any of those flags would have shipped green. Each case below fails
+# if the corresponding flag is removed.
+
+check "gate: a symlinked record is refused, not followed" <<PY
+$LOAD
+d = tempfile.mkdtemp(); elsewhere = tempfile.mkdtemp()
+real = os.path.join(elsewhere, "planted.json")
+open(real, "w").write(json.dumps({"schema_version": 1, "repo_slug": "s",
+                                  "repo_id": None, "account_id": "a", "enabled": True}))
+os.symlink(real, os.path.join(d, k.GATE_NAME))
+ok, why = k.gate_enabled(d, "s", "a")
+assert ok is False, (ok, why)
+sys.exit(0)
+PY
+
+check "gate: a symlinked PARENT is refused, not followed" <<PY
+$LOAD
+base = tempfile.mkdtemp(); elsewhere = tempfile.mkdtemp()
+open(os.path.join(elsewhere, k.GATE_NAME), "w").write(json.dumps(
+    {"schema_version": 1, "repo_slug": "s", "repo_id": None,
+     "account_id": "a", "enabled": True}))
+link = os.path.join(base, "slug")
+os.symlink(elsewhere, link)
+ok, why = k.gate_enabled(link, "s", "a")
+assert ok is False, (ok, why)
+sys.exit(0)
+PY
+
+check "gate: a FIFO record returns instead of blocking the hook" <<PY
+$LOAD
+import signal
+d = tempfile.mkdtemp()
+os.mkfifo(os.path.join(d, k.GATE_NAME))
+def bail(*a):
+    raise AssertionError("gate_enabled blocked on a FIFO")
+signal.signal(signal.SIGALRM, bail); signal.alarm(5)
+ok, why = k.gate_enabled(d, "s", "a")
+signal.alarm(0)
+assert ok is False, (ok, why)
+sys.exit(0)
+PY
+
+check "procedure: a symlinked marker is refused, not followed" <<PY
+$LOAD
+cfg = tempfile.mkdtemp(); elsewhere = tempfile.mkdtemp()
+planted = os.path.join(elsewhere, "planted.md")
+open(planted, "w").write('<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
+d = os.path.join(cfg, "skills", "herdr-orchestration")
+os.makedirs(d)
+os.symlink(planted, os.path.join(d, "SKILL.md"))
+assert k.procedure_capability(cfg) is None, k.procedure_capability(cfg)
+sys.exit(0)
+PY
+
+check "procedure: a FIFO marker returns instead of blocking the hook" <<PY
+$LOAD
+import signal
+cfg = tempfile.mkdtemp()
+d = os.path.join(cfg, "skills", "herdr-orchestration")
+os.makedirs(d)
+os.mkfifo(os.path.join(d, "SKILL.md"))
+def bail(*a):
+    raise AssertionError("procedure_capability blocked on a FIFO")
+signal.signal(signal.SIGALRM, bail); signal.alarm(5)
+cap = k.procedure_capability(cfg)
+signal.alarm(0)
+assert cap is None, cap
+sys.exit(0)
+PY
+
+check "procedure: a symlinked PARENT is still followed, as the install needs" <<PY
+$LOAD
+cfg = tempfile.mkdtemp(); elsewhere = tempfile.mkdtemp()
+real = os.path.join(elsewhere, "herdr-orchestration")
+os.makedirs(real)
+open(os.path.join(real, "SKILL.md"), "w").write(
+    '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
+skills = os.path.join(cfg, "skills")
+os.makedirs(skills)
+os.symlink(real, os.path.join(skills, "herdr-orchestration"))
+# ~/.claude/skills is a symlink into the checkout in the real install, so a
+# no-follow PARENT walk here would refuse the layout we ship. Only the leaf is
+# no-follow. This case fails if that distinction is ever collapsed.
+assert k.procedure_capability(cfg) == 1, k.procedure_capability(cfg)
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

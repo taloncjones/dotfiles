@@ -67,6 +67,37 @@ def parse_marker(text):
     return rec["capability"]
 
 
+#: Most of a procedure file we will read. The shipped SKILL.md is ~82 KB; an
+#: unbounded read on a hook path is a denial of service by a large file.
+PROCEDURE_READ_LIMIT = 4 * 1024 * 1024
+
+
+def _read_procedure_text(path):
+    """Procedure marker text, read without following a link AT THE LEAF.
+
+    Deliberately NOT the no-follow parent walk `_read_gate_text` uses. The
+    supported install reaches this file THROUGH a symlinked directory --
+    `~/.claude/skills` is a symlink into the dotfiles checkout -- so refusing
+    symlinked parents here would refuse the layout we ship. The leaf is a
+    plain regular file in that layout, so O_NOFOLLOW on it costs nothing and
+    refuses a planted link that would otherwise advertise a capability from a
+    file the account does not own. That is the second lock, and it is the one
+    carrying the adversarial claim: the gate record lives under the
+    guard-exempt state root, so the marker is what an attacker must forge.
+
+    O_NONBLOCK for the reason the gate reader states: a FIFO here parks
+    admission forever. Admission runs inside the owner transaction's exclusive
+    flock, so that wedges every other verb on the coordination root, and a
+    PreToolUse hook that never exits is timed out -- after which the tool call
+    proceeds. A hang is not an exception, so no crash handler can catch it.
+    """
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("procedure marker must be a regular file")
+        return stream.read(PROCEDURE_READ_LIMIT).decode("utf-8")
+
+
 def procedure_capability(config_dir):
     """The installed procedure's capability, or None when unreadable.
 
@@ -76,8 +107,8 @@ def procedure_capability(config_dir):
     """
     try:
         path = Path(config_dir) / "skills" / "herdr-orchestration" / "SKILL.md"
-        text = path.read_text(encoding="utf-8")
-    except (OSError, TypeError, ValueError):
+        text = _read_procedure_text(path)
+    except Exception:  # noqa: BLE001 -- unreadable advertises nothing, never a crash
         return None
     return parse_marker(text)
 

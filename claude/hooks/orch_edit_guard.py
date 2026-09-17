@@ -67,6 +67,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # never leave __pycache__ under the hooks dir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import herdr_bindings as bindings
+import herdr_capabilities as herdr_caps
 import herdr_orch_core as core
 import rm_guard
 from workflow_context import account_scope, repository_context
@@ -194,7 +195,7 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
     return owned
 
 
-def lead_admissible(rd, slug, account_id, caller_scope, workspace_root):
+def lead_admissible(rd, slug, account_id, caller_scope, workspace_root, seen=None):
     """Is a lead in this workspace admissible right now? Total; False on doubt.
 
     Delegates to core.task_lead_admission -- the SAME decision admission makes
@@ -213,10 +214,27 @@ def lead_admissible(rd, slug, account_id, caller_scope, workspace_root):
     about the same lead.
 
     A workspace whose repository context will not resolve yields no roots.
+
+    Cost discipline. Resolving the context spends five git subprocesses at up
+    to GIT_CALL_MAX_SECS each, outside the Budget the rest of this hook's git
+    calls share, and a PreToolUse hook that overruns its timeout lets the tool
+    call through -- so an expensive check is a fail-open risk, not merely
+    slow. Two bounds: an absent gate record refuses for free, before any
+    subprocess, which is the ordinary disabled case and needs no repo_id; and
+    `seen` memoizes the resolution per workspace so a session holding several
+    leases pays once per distinct workspace rather than once per lease.
     """
-    try:
-        repo_id = repository_context(workspace_root)["repo_id"]
-    except (OSError, ValueError, subprocess.SubprocessError, KeyError):
+    if not herdr_caps.gate_path(rd).exists():
+        return False
+    if seen is None:
+        seen = {}
+    if workspace_root not in seen:
+        try:
+            seen[workspace_root] = repository_context(workspace_root)["repo_id"]
+        except (OSError, ValueError, subprocess.SubprocessError, KeyError):
+            seen[workspace_root] = False
+    repo_id = seen[workspace_root]
+    if repo_id is False:
         return False
     try:
         admit, _reason, _levels = core.task_lead_admission(
@@ -244,6 +262,7 @@ def lead_authority(session_id, runtime, caller_scope):
     payload_root = core.account_payload_root(caller_scope) / "herdr-orch"
     is_lead = False
     roots = []
+    seen = {}
     account_id = caller_scope["account_id"]
     for slug in core.coordination.coordination_slugs():
         try:
@@ -278,7 +297,7 @@ def lead_authority(session_id, runtime, caller_scope):
                 and ws not in roots
             ):
                 if not lead_admissible(payload_root / slug, slug, account_id,
-                                       caller_scope, ws):
+                                       caller_scope, ws, seen):
                     continue
                 roots.append(ws)
     return is_lead, roots

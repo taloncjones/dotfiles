@@ -24,6 +24,44 @@ def flag_value(args, flag):
     return args[index] if index < len(args) else None
 
 
+def _publish_marker(parent, name):
+    """Write the capability marker by creating a NEW file and renaming it over
+    `name`, never by opening `name` itself.
+
+    O_NOFOLLOW refuses a symlink at the leaf. It does NOT refuse a hardlink: a
+    hardlink is a second directory entry for one inode, not a path component,
+    so neither the no-follow walk above nor the leaf flag can see it, and an
+    O_TRUNC open through it destroys the aliased file's contents -- including
+    a TRACKED file outside the temp root, with both confinement locks intact.
+
+    Creating a fresh inode with O_EXCL and renaming over the name never opens
+    the attacker-supplied inode at all. The rename replaces the DIRECTORY
+    ENTRY, so a planted hardlink is simply unlinked from that name and its
+    other name keeps its bytes. There is no window to lose: unlinking first
+    and re-opening would reopen the race, and checking st_nlink after an
+    O_TRUNC open is too late, because the kernel truncates during open().
+    This is the discipline `write_json_atomic` already applies to the gate
+    record below; the marker write was the one place that did not.
+    """
+    tmp_name = f".{name}.{os.getpid()}.tmp"
+    fd = os.open(
+        tmp_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write('<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
+        os.rename(tmp_name, name, src_dir_fd=parent, dst_dir_fd=parent)
+    except BaseException:
+        try:
+            os.unlink(tmp_name, dir_fd=parent)
+        except OSError:
+            pass
+        raise
+
+
 def claim_legacy_owner(rd, session_id, host, pid, *args, **kwargs):
     """Seed a legitimate old incumbent, then exercise its real migration."""
     rd = Path(rd)
@@ -94,21 +132,21 @@ def _seed_task_lead_gate(args):
         # contains a symlink") for exactly this case.
         return
     try:
-        fd = os.open(
-            name,
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=parent,
-        )
+        _publish_marker(parent, name)
     except OSError:
         return
     finally:
         os.close(parent)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write('<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
 
     rd = core.repo_dir(slug)
-    rd.mkdir(parents=True, exist_ok=True)
+    try:
+        core.create_payload_dir(rd)
+    except (OSError, ValueError):
+        # Same no-follow discipline as the marker write. A plain mkdir here
+        # would follow a symlinked component and create real directories
+        # inside the link target before write_json_atomic refused the record
+        # and raised out of a fixture that is supposed to seed or do nothing.
+        return
     scope = core.account_scope(os.getcwd(), value("--runtime") or "claude")
     core.write_json_atomic(core.herdr_caps.gate_path(rd), {
         "schema_version": 1,

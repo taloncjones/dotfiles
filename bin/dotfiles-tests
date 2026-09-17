@@ -12,6 +12,15 @@
 
 set -u
 
+# The suites are hermetic against real STATE but were not hermetic against the
+# caller's ENVIRONMENT. A personal account selector makes account_scope ignore
+# CLAUDE_CONFIG_DIR and resolve account_root to $HOME/.claude, which is not
+# where any fixture lives -- so a plain local run produced dozens of failures
+# that a run under `env -u WORKFLOW_PERSONAL_ACCOUNT` did not, and the standing
+# workaround was to remember that flag. CI never sets these, so unsetting here
+# is also what makes a local run mean the same thing as the CI run.
+unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL
+
 SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
 cd "$DOTFILES"

@@ -11,6 +11,16 @@ PYTHONDONTWRITEBYTECODE=1
 export PYTHONDONTWRITEBYTECODE
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
+# A personal account selector makes account_scope ignore CLAUDE_CONFIG_DIR and
+# resolve account_root to $HOME/.claude -- whose `skills` is a symlink into
+# this checkout. A fixture that then writes its capability marker under
+# account_root TRUNCATES the tracked SKILL.md. This machine exports
+# WORKFLOW_PERSONAL_ACCOUNT=1 from the shell, so the suite must not inherit
+# it: hermetic means hermetic against the caller's environment too, not only
+# against real state. Unsetting here also removes the standing footgun that a
+# plain run of this suite produced dozens of phantom failures.
+unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL
+
 REPO_ROOT=$(pwd)
 HOOK=${ORCH_EDIT_GUARD_HOOK:-claude/hooks/orch_edit_guard.py}
 CORE=claude/hooks/herdr_orch_core.py
@@ -37,6 +47,62 @@ FIX=$(safe_mktemp_dir /tmp/orch-edit-guard.XXXXXX) || exit 1
 H="$FIX/home"; CFG="$FIX/cfg"; S="$FIX/scratch"; T="$FIX/tmpdir"; N="$FIX/plain"
 mkdir -p "$H" "$S" "$T" "$N"
 trap 'chmod -R u+w "$FIX" 2>/dev/null; rm -rf "$FIX"' EXIT
+
+# Shared fixture-write helper for the python blocks below. It exists because
+# the marker these blocks seed lives at account_root/skills/..., and
+# account_root is RESOLVED, not fixed: under a personal selector it is
+# $HOME/.claude, whose `skills` is a symlink into this checkout. Writing there
+# truncates the tracked SKILL.md. The suite unsets those selectors above, but
+# a check that only holds while an env var stays unset is not a check, so the
+# write itself refuses anything outside the fixture root.
+export FIXTURE_ROOT="$FIX"
+cat > "$FIX/fixture_marker.py" <<'HELPER'
+import os
+import tempfile
+
+
+def contained(path):
+    """Absolute realpath of `path`, or raise if it is not disposable.
+
+    Disposable means under the suite's fixture root or under the real temp
+    root -- the isolated blocks build their own roots with tempfile.mkdtemp(),
+    which is outside FIXTURE_ROOT but still a throwaway. What this refuses is
+    the case that matters: account_root resolving to the user's real
+    ~/.claude, whose `skills` symlink lands in the tracked checkout.
+    """
+    roots = [os.path.realpath(os.environ["FIXTURE_ROOT"]),
+             os.path.realpath(tempfile.gettempdir())]
+    real = os.path.realpath(path)
+    if not any(real == r or real.startswith(r + os.sep) for r in roots):
+        raise AssertionError(
+            "fixture write escapes every disposable root: %s -> %s (roots %s)"
+            % (path, real, ", ".join(roots))
+        )
+    return real
+
+
+def seed_marker(scope, capability):
+    """Publish a capability marker under the scope's account root, or refuse.
+
+    Refusing is the point: if account_root ever resolves outside the fixture
+    the suite must fail loudly here, not quietly overwrite a tracked file.
+    """
+    skilld = contained(os.path.join(scope["account_root"], "skills", "herdr-orchestration"))
+    os.makedirs(skilld, exist_ok=True)
+    target = contained(os.path.join(skilld, "SKILL.md"))
+    with open(target, "w") as stream:
+        stream.write(
+            '<!-- herdr-capabilities: {"marker_version":1,"capability":%d} -->\n' % capability
+        )
+    return target
+
+
+def remove_marker(scope):
+    target = contained(
+        os.path.join(scope["account_root"], "skills", "herdr-orchestration", "SKILL.md")
+    )
+    os.remove(target)
+HELPER
 
 # B5 regression: recursively run this same suite, with a stubbed `mktemp`
 # that always fails, from inside a disposable canary directory. Buggy code
@@ -739,6 +805,8 @@ if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
 import importlib.util, json, os, sys, hashlib, shutil, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, "claude/hooks")
+sys.path.insert(0, os.environ["FIXTURE_ROOT"])
+from fixture_marker import remove_marker, seed_marker
 iso = tempfile.mkdtemp()
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
 os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
@@ -771,10 +839,7 @@ gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
             "account_id": scope["account_id"], "enabled": True}
 open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
 # A capable procedure marker, because the guard now runs the full admission.
-skilld = os.path.join(scope["account_root"], "skills", "herdr-orchestration")
-os.makedirs(skilld, exist_ok=True)
-open(os.path.join(skilld, "SKILL.md"), "w").write(
-    '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
+seed_marker(scope, 1)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("live", is_lead, roots)
 binding["status"] = "revoked"; open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
@@ -831,6 +896,8 @@ lead_setup() {
     LS_CFG="$CFG" LS_REPO="$R" python3 - <<'PY'
 import hashlib, json, os, sys
 sys.path.insert(0, "claude/hooks")
+sys.path.insert(0, os.environ["FIXTURE_ROOT"])
+from fixture_marker import remove_marker, seed_marker
 os.environ["CLAUDE_CONFIG_DIR"] = os.environ["LS_CFG"]
 import orch_edit_guard as g
 e = os.environ
@@ -861,10 +928,7 @@ open(os.path.join(rdroot, "task-lead-gate.json"), "w").write(json.dumps({
 # authorized lead needs a capable procedure marker here too, not just an
 # enabled gate record. Without it the guard withholds every root -- which is
 # the correct refusal, and would make these authorized-lead cases vacuous.
-skilld = os.path.join(scope["account_root"], "skills", "herdr-orchestration")
-os.makedirs(skilld, exist_ok=True)
-open(os.path.join(skilld, "SKILL.md"), "w").write(
-    '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
+seed_marker(scope, 1)
 PY
 }
 set_binding_status_fixture() {
@@ -1187,6 +1251,8 @@ if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
 import importlib.util, json, os, sys, hashlib, shutil, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, "claude/hooks")
+sys.path.insert(0, os.environ["FIXTURE_ROOT"])
+from fixture_marker import remove_marker, seed_marker
 iso = tempfile.mkdtemp()
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
 os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
@@ -1234,10 +1300,7 @@ assert rc == 2, ("case-a-decide-not-plain-worker", rc)
 gate_rec = {"schema_version": 1, "repo_slug": slug, "repo_id": None,
             "account_id": scope["account_id"], "enabled": True}
 open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(gate_rec))
-skilld = os.path.join(scope["account_root"], "skills", "herdr-orchestration")
-os.makedirs(skilld, exist_ok=True)
-open(os.path.join(skilld, "SKILL.md"), "w").write(
-    '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n')
+seed_marker(scope, 1)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [ws], ("case-b-gate-enabled-precondition", is_lead, roots)
 orig_guard_cap = hc.GUARD_CAPABILITY
@@ -1253,13 +1316,35 @@ finally:
 # Case C: gate enabled and guard at level, but the installed PROCEDURE is
 # under-level. The guard must withhold on its own, not only at admission --
 # this is the lock that used to exist at claim time only.
-os.remove(os.path.join(skilld, "SKILL.md"))
-open(os.path.join(skilld, "SKILL.md"), "w").write(
-    '<!-- herdr-capabilities: {"marker_version":1,"capability":0} -->\n')
+remove_marker(scope)
+seed_marker(scope, 0)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("case-c-authority", is_lead, roots)
 rc = g.decide(gate_write_payload, "claude")
 assert rc == 2, ("case-c-decide-not-plain-worker", rc)
+
+# Case D: a CONCRETE repo_id in the gate record while the binding's copy stays
+# null. Every other case here uses repo_id: None on both, under which a record
+# makes no identity claim -- so passing the live repo_id and passing the
+# binding's null copy are indistinguishable and the fix is unpinned. With a
+# concrete record the two diverge: the live value corroborates and admits, the
+# binding's null cannot corroborate and gate_enabled refuses fail-closed.
+# Reverting orch_edit_guard to rec.get("repo_id") turns case-d-live red.
+seed_marker(scope, 1)
+live_repo_id = core.repository_context(ws)["repo_id"]
+assert live_repo_id, "fixture workspace has no canonical repo_id"
+assert binding["repo_id"] is None, binding["repo_id"]
+open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(
+    dict(gate_rec, repo_id=live_repo_id)))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [ws], ("case-d-live", is_lead, roots)
+
+open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(
+    dict(gate_rec, repo_id=live_repo_id[::-1])))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("case-d-mismatch", is_lead, roots)
+rc = g.decide(gate_write_payload, "claude")
+assert rc == 2, ("case-d-decide-not-plain-worker", rc)
 shutil.rmtree(iso, ignore_errors=True)
 PY
 then

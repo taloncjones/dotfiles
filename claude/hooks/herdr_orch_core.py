@@ -4338,12 +4338,18 @@ def _main(argv=None) -> int:
         )
         enabled, gate_reason = herdr_caps.gate_enabled(
             rd, ns.repo_slug, scope["account_id"], context.get("repo_id"))
+        # Admission stops at a disabled gate without reading the procedure, so
+        # the operator's diagnostic is read here instead: a status verb that
+        # said "procedure: null" whenever the gate was off would hide the one
+        # fact needed to plan re-enabling it.
+        procedure = (levels["procedure"] if levels["procedure"] is not None
+                     else herdr_caps.procedure_capability(config_dir))
         print(json.dumps({
             "gate_enabled": enabled,
             "gate_reason": gate_reason,
             "core": levels["core"],
             "guard": levels["guard"],
-            "procedure": levels["procedure"],
+            "procedure": procedure,
             "required": levels["required"],
             "account_id": scope["account_id"],
             "repo_slug": ns.repo_slug,
@@ -4706,16 +4712,21 @@ def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):
     gate is enabled. See the activation gate design, section 4.1, for why
     core reads guard's constant and what that does and does not prove.
     """
-    procedure = herdr_caps.procedure_capability(config_dir)
     levels = {
         "core": herdr_caps.CORE_CAPABILITY,
         "guard": herdr_caps.GUARD_CAPABILITY,
-        "procedure": procedure,
+        "procedure": None,
         "required": herdr_caps.REQUIRED_CAPABILITY,
     }
+    # The GATE first, then the procedure. The procedure read touches a path an
+    # attacker may control, so the cheap local check that can refuse outright
+    # runs before it -- a disabled gate must not depend on that read behaving.
+    # Callers wanting the procedure level for display (task-lead-status) read
+    # it themselves; admission does not owe a diagnostic it need not compute.
     enabled, reason = herdr_caps.gate_enabled(rd, repo_slug, account_id, repo_id)
     if not enabled:
         return False, reason, levels
+    levels["procedure"] = herdr_caps.procedure_capability(config_dir)
     for name in ("core", "guard", "procedure"):
         level = levels[name]
         if level is None:
