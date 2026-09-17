@@ -32,6 +32,10 @@ CODEX_ROUTES = {
     "controller": ("gpt-6-astra", "high"),
     "planner": ("gpt-6-astra", "high"),
     "reviewer": ("gpt-6-astra", "high"),
+    # A finder reads one frozen diff against three questions and reports what it
+    # sees. It does not rule, so it does not need the reviewer tier: high effort
+    # there spends its surplus widening scope rather than reading more closely.
+    "finder": ("gpt-5.6-sol", "high"),
     "skeptic": ("gpt-6-astra", "high"),
     "implementation": ("gpt-5.6-terra", "high"),
     "read_only": ("gpt-5.6-luna", "medium"),
@@ -43,6 +47,7 @@ CLAUDE_ROUTES = {
     "controller": ("opus", "medium"),
     "planner": ("fable", "high"),
     "reviewer": ("opus", "high"),
+    "finder": ("sonnet", "high"),
     "skeptic": ("opus", "high"),
     "implementation": ("sonnet", "high"),
     "read_only": ("haiku", "medium"),
@@ -83,7 +88,7 @@ CRITICAL_ROLES = ("reviewer", "skeptic", "think")
 # on specialists. The mechanical and read_only tiers are excluded because they are
 # human-designated per task -- a task too hard for them should not have been
 # designated mechanical or read_only.
-DIFFICULTY_ROLES = ("planner", "implementation", "reviewer", "skeptic", "think")
+DIFFICULTY_ROLES = ("planner", "implementation", "finder", "reviewer", "skeptic", "think")
 CONFIG_KEYS = (
     "routes",
     "fallbacks",
