@@ -2607,6 +2607,7 @@ def _main(argv=None) -> int:
     rl.add_argument("--descendants-terminated", action="store_true")
     add("status")
     add("task-lead-status")
+    add("deactivate-task-leads", fenced=True)
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
@@ -4329,6 +4330,24 @@ def _main(argv=None) -> int:
             "admit": admit,
             "admit_reason": admit_reason,
         }, sort_keys=True))
+        return 0
+    if ns.cmd == "deactivate-task-leads":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        context = repository_context(ns.repo_path or os.getcwd())
+        scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
+        with owner_transaction(rd, ns.session, ns.fence, context=context, scope=scope) as tx:
+            _require(
+                tx.current.get("control_tier", "launcher") == "launcher",
+                "only a launcher owner may deactivate task leads",
+            )
+            write_json_atomic(herdr_caps.gate_path(rd), {
+                "schema_version": herdr_caps.GATE_SCHEMA_VERSION,
+                "repo_slug": ns.repo_slug,
+                "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
+                "account_id": tx.account_id,
+                "enabled": False,
+            })
         return 0
     if ns.cmd == "should-dispatch-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")

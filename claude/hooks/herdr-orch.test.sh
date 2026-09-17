@@ -7894,5 +7894,108 @@ except Exception as exc:
 sys.exit(0)
 PY
 
+check "deactivate-task-leads is idempotent and leaves identical bytes" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dt.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+a=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+b=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+test "$a" = "$b"
+python3 -c '
+import json,os,sys
+d=json.load(open(os.path.join(sys.argv[1],"herdr-orch",sys.argv[2],"task-lead-gate.json")))
+assert d["enabled"] is False, d
+' "$root" "$LF_SLUG"
+SH
+
+check "deactivate-task-leads replaces a damaged record with a valid disabled one" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dd.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+mkdir -p "$root/herdr-orch/$LF_SLUG"
+printf '%s' '{not json' > "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+python3 -c '
+import json,os,sys
+d=json.load(open(os.path.join(sys.argv[1],"herdr-orch",sys.argv[2],"task-lead-gate.json")))
+assert d["enabled"] is False and d["schema_version"] == 1, d
+' "$root" "$LF_SLUG"
+SH
+
+check "deactivate-task-leads normalizes a wrong-version or foreign-account record" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dn.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+mkdir -p "$root/herdr-orch/$LF_SLUG"
+for payload in \
+  '{"schema_version":99,"repo_slug":"x","repo_id":null,"account_id":"a","enabled":true}' \
+  '{"schema_version":1,"repo_slug":"x","repo_id":null,"account_id":"someone-else","enabled":true}'
+do
+  printf '%s' "$payload" > "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+  python3 -c '
+import json,os,sys
+d=json.load(open(os.path.join(sys.argv[1],"herdr-orch",sys.argv[2],"task-lead-gate.json")))
+assert d["enabled"] is False, d
+assert d["schema_version"] == 1, d
+assert d["repo_slug"] == sys.argv[2], d
+assert d["account_id"] != "someone-else", d
+' "$root" "$LF_SLUG"
+done
+SH
+
+check "deactivate-task-leads is refused for a wrong session with a correct fence" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dw.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session IMPOSTOR --fence "$f" 2>/dev/null; then exit 1; fi
+test ! -f "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+SH
+
+check "a failed publication leaves the prior gate bytes intact and exits non-zero" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dp.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+before=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+# Fault injection: make the payload dir unwritable so the temp-file create fails
+# BEFORE any replace. The prior record must survive byte-identical.
+chmod 500 "$root/herdr-orch/$LF_SLUG"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" 2>/dev/null; then
+  chmod 700 "$root/herdr-orch/$LF_SLUG"; exit 1
+fi
+chmod 700 "$root/herdr-orch/$LF_SLUG"
+after=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+test "$before" = "$after"
+SH
+
+check "deactivate-task-leads is refused without a valid fence" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-df.git
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1 >/dev/null
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
+SH
+
+check "there is no activation verb: the CLI rejects one and no handler writes an enabled gate" <<'SH'
+if python3 claude/hooks/herdr_orch_core.py activate-task-leads 2>/dev/null; then exit 1; fi
+if grep -qE '"enabled"[[:space:]]*:[[:space:]]*True' claude/hooks/herdr_orch_core.py; then exit 1; fi
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
