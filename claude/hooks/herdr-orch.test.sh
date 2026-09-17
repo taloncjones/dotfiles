@@ -7874,5 +7874,25 @@ CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_leg
    --repo-slug "$LF_SLUG" --session L1 --host h --pid 1 >/dev/null
 SH
 
+check "a context-less lead claim raises ValueError, not a scope crash" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ctxless");rd.mkdir(parents=True)
+with c.coordination.owner_transaction(rd, canonical_id="fixture-ctxless", expected_slug="slug-ctxless"):
+    pass                                                # explicit identity permits an unbound claim
+c.claim_owner(rd, "L1", "h", 1)  # legacy launcher claim so an owner exists
+try:
+    c.claim_owner(rd, "S1", "h", 2, control_tier="lead",
+                  workspace_root="/tmp/slug-ctxless-ws",
+                  binding_id="ldb-" + "0" * 32,
+                  context=None, scope=None)
+    raise AssertionError("claim_owner did not raise")
+except ValueError as exc:
+    assert str(exc) == "a lead claim requires repository context", str(exc)
+except Exception as exc:
+    raise AssertionError(f"expected ValueError, got {type(exc).__name__}: {exc}")
+sys.exit(0)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

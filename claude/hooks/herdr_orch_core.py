@@ -1767,6 +1767,8 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
             raise ValueError("lead claim requires a valid binding id")
     with owner_transaction(rd, context=context, expected_slug=expected_slug, scope=scope) as tx:
         if control_tier == "lead":
+            if context is None or scope is None:
+                raise ValueError("a lead claim requires repository context")
             admit, admit_reason, _levels = task_lead_admission(
                 Path(rd), Path(rd).name, tx.account_id,
                 Path(scope["account_root"]), context["repo_id"] if context else None
@@ -1803,8 +1805,6 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                         "workspace lease is missing, superseded, or a "
                         "legacy/no-generation record; a new binding is required"
                     )
-            if context is None:
-                raise ValueError("a lead claim requires repository context")
             if not workspace_provenance_ok(workspace_root, context):
                 raise ValueError(
                     "workspace_root is not a linked worktree of this repository"
