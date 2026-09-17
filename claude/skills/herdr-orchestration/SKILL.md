@@ -1193,3 +1193,23 @@ accept` on the orchestrator launch line safe. The hook side posts only a
   closed-vocabulary line, only to a canonical `cc-socks` socket owned by this
   uid whose basename pid matches `owner.json`, never with a token, never to
   its own socket, within a 2s budget, failing open.
+
+## Rolling back task leads
+
+Step 0, before everything else -- restore handling: if rollback follows a
+state restore of any kind, publish a disabled gate record and confirm the
+verb exited zero before resuming any service.
+
+1. Stop dispatching new leads. A human decision; nothing durable records it,
+   so re-assert it by running step 2.
+2. Run `deactivate-task-leads`. Idempotent; re-run it if interrupted, and
+   confirm the committed state with `task-lead-status`.
+3. Settle or stop leads and descendants. If interrupted, re-run; outstanding
+   work is re-reported by `outstanding_descendants`.
+4. Run `teardown-binding` and `reconcile-leads`.
+5. Verify a single owner and no lead occupancy. This is a read; re-run it as
+   needed.
+6. Downgrade components -- keep the last build that advertises capability `1`
+   available and downgrade to it, never past it. Do not downgrade below
+   capability `1`: below that level nothing enforces the gate, so quiescence
+   would rest on a verification that has already gone stale.
