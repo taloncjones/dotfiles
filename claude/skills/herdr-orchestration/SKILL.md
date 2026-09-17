@@ -725,7 +725,10 @@ also avoids wasting work and preserves one live reviewer per task.
      for deliberate development repair. Run a scoped `review-change` only when
      the repair needs fresh evidence; structural repairs return to design. An
      exhausted final `co-review --fix` budget never resets or re-enters its gate
-     here until diagnosis and development evidence address its stopping cause.
+     here. Record the stop in the task/handoff and return control to the user.
+     Diagnosis, a new head, a resumed session or this development branch of the
+     workflow cannot renew the allowance; require new explicit user direction
+     after the stop before another cycle.
    - only `approved` with no blocking findings and complete evidence ->
      `status: reviewed`, event `reviewed`. Advisories remain visible and do not
      create an automatic fix queue.

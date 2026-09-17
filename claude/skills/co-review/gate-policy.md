@@ -54,25 +54,61 @@ where relevant. Self-review is evidence only and never grants approval.
 Obtain exactly one independent `review-change` review of that packet, repairs,
 and affected contracts. It classifies each new blocker as repair-introduced,
 previously missed, or changed requirements, with its concrete consequence.
-Failed tests, incomplete or blocking development feedback, or a broad redesign
-need returns the work to development. Repeated fix-induced blockers in one
-subsystem require diagnosis of the common design contract, never a local patch
-loop. The outer development orchestrator cannot reset an exhausted `--fix`
-budget or re-enter the gate until that diagnosis and development evidence address
-the stopping cause.
+Failed tests, incomplete or blocking repair feedback, or a broad redesign need
+stops the entire calling workflow and returns control to the user. Diagnosis
+may explain the failure; it does not authorize another repair/review cycle.
+The allowance belongs to the original task, across development, shipping,
+review, resumed sessions, and handoffs. Record an exhausted allowance in the
+existing task/handoff record. A new head, run ID, session, or a return to
+"development" never resets it. Only a new explicit user instruction after the
+stop may authorize another cycle; standing implementation/merge authorization
+is not that instruction.
 
-Only a complete, clean repair review permits one new full plain gate on the new
-head, with a new run and expected identity and every known blocker supplied for
-disposition. It retains full coverage and the fixed material threshold while
-focusing investigation on repairs and affected contracts. Settled unchanged
-advisories do not reopen as blockers without new material evidence. Its new
-blockers classify as repair-introduced, previously missed, or changed
-requirements, with a concrete consequence; fewer findings never reclassify one.
-The new gate's `APPROVE`, `CHANGES`, or `INCOMPLETE` result stops the coordinator.
-Repair feedback, stale artifacts, or the development review never substitutes
-for that full gate or approves the PR. The mode therefore allows at most one
-repair batch and at most two full gates, including a reused current `CHANGES`
-gate; it never recursively invokes `--fix`.
+Only a complete, clean repair review permits one follow-up verification on the
+new head, with a fresh expected identity and every known blocker supplied for
+disposition. The same four fresh seats inspect the repair delta and affected
+contracts; they do not repeat the initial unrestricted search. Follow-up
+coverage is assembled as described below. New material evidence may invalidate
+carried coverage, but fewer findings never change severity. Classify a new
+blocker as repair-introduced, previously missed, or changed requirements.
+Every follow-up outcome stops the coordinator and its outer caller. A material
+scope change or invalidated baseline requiring a full new review also stops;
+do not launch that review automatically. The mode permits one repair batch
+and one follow-up after the initial gate, including a reused current CHANGES
+result. It never recursively invokes --fix.
+
+### Follow-up evidence
+
+Retain the successfully finalized initial report and its actual seat artifacts
+as hashed, report-relative evidence in the active workflow. They supply prior
+coverage, never authority to approve the new head. Freeze and verify the new
+head normally; obtain fresh CI, four current seat reports, and a current
+expected identity. An interrupted workflow cannot reconstruct its authority
+from an old report.
+
+The follow-up packet includes the initial report/artifact digests, exact prior
+head/base/tree, the repair delta, changed-symbol callers and repair evidence.
+Assign each coverage entry one of two evidenced treatments in its existing
+coverage string:
+
+- Rechecked: name the repair or affected contract, fresh probe/inspection, and
+  current seat evidence.
+- Carried: cite the prior report path/digest and entry, the unchanged contract,
+  and the current comparison showing the repair and its callers do not affect
+  it. Match repository, base, requirements and threat model as well as code.
+
+Never carry an unresolved gap or blocker as completed coverage. An unchanged
+filename alone proves nothing about dependencies or behavior. Where the delta
+invalidates prior evidence, recheck the affected contract. Opaque diff output
+is not evidence that a file is unchanged: inspect the frozen file/tree and
+record missing inspection as a coverage gap. No token scanner decides this.
+
+The first three seats receive the same prior baseline independently and report
+fresh evidence for their affected scope, plus any invalidated carried entry.
+The verifier checks material claims, prior blocker dispositions, and the
+combined coverage ledger. It reconciles those claims instead of starting an
+unrestricted fourth search. Retain every architecture/checklist entry in the
+final report, but do not require every seat to repeat all unchanged probes.
 
 Run each plain gate's finalization block as a separate subprocess. Capture its
 structured evaluation and cleanup result before deciding what the coordinator
@@ -88,26 +124,22 @@ cleanup. Freeze a dirty source when requested, record its state, and make the
 result incomplete unless the committed expected tree equals the frozen reviewed
 tree. `manifest.source.source_tree` binds `expected.tree`; the verified
 `manifest.snapshot.codex_tree` binds `report.reviewed_tree`. Capture the exact
-frozen Git diff bytes without universal-newline normalization, then decode them
-strictly and scan structural records only at LF. Capture the CI payload for the
-expected head as a regular report artifact. Hash every artifact after it is
-complete. Paths in the report are relative to the report file; artifacts must
+frozen Git diff bytes without universal-newline normalization. Capture the CI
+payload for the expected head as a regular report artifact. Hash every artifact
+after it is complete. Paths in the report are relative to the report file; artifacts must
 not be symlinks.
 
 Build the report only from actual seat output and the schema printed by
 `gate_report.py schema`. Use its required `preconditions` object with the exact
 head/tree, report-relative diff and CI artifacts/digests, and its optional
-explicit no-CI evidence and exact marker exceptions. Omit optional fields unless
-they apply. A skipped or neutral CI result is visible evidence, not proof that a
-test ran. Missing or malformed evidence is incomplete.
+explicit no-CI evidence. Omit optional fields unless they apply. A skipped or
+neutral CI result is visible evidence, not proof that a test ran. Missing or malformed evidence is incomplete.
 
-Each marker exception is an exact `{file, line, text, kind, evidence, reason}`
-record. `kind` is only `fixture_literal`, `documentation_example`, or
-`detector_literal`; the latter applies only to the detector's own token
-definition in its complete canonical form, never unfinished production code.
-`evidence` and `reason` identify why that exact added line is allowed. No
-path-wide, category-wide, or
-undocumented marker exception is valid.
+Comments or strings containing TODO, TEMP, FIXME or similar tokens do not
+block approval by themselves. Reviewers inspect unfinished behavior and report
+its concrete impact. There is no mandatory token scan or marker exception
+ledger. The frozen diff remains a hashed review artifact; opaque source changes
+must still be accounted for in review coverage.
 
 Normalize the live provider payload before hashing it as the CI artifact. It is
 the strict envelope `{head, check_runs, status_contexts}`: `head` is the actual
@@ -157,7 +189,17 @@ descriptions.
 ### Findings, blockers, and coverage
 
 Each finding has a stable ID, severity, disposition, concrete scenario, and
-evidence. Allowed severities are `critical`, `high`, `major`, `minor`, `low`,
+evidence. A confirmed or unresolved critical/high/major allegation also needs
+an explicit `impact`: the concrete effect on correctness, security, data,
+ownership, lifecycle, or necessary integration, with a supported scenario.
+A rule violation, missing preferred pattern, or token by itself does not
+establish material impact, including rules written for this review tooling.
+The verifier checks the consequence and may record a justified severity
+correction; code validates that material allegations include impact, not its
+truth. Do not label an impact-free allegation major to force a stop; classify
+nonmaterial feedback as advisory. Unknown material impact remains a gap only
+when evidence supports a concrete material-risk scenario.
+Allowed severities are `critical`, `high`, `major`, `minor`, `low`,
 `nit`, and `advisory`. Confirmed `critical`, `high`, and `major` findings yield
 `CHANGES`. Confirmed `minor`, `low`, `nit`, and `advisory` findings remain
 visible but permit approval. Unknown severity, a disputed classification, or an
@@ -165,13 +207,15 @@ unresolved material allegation yields `INCOMPLETE`.
 
 A refutation identifies frozen enforcement that disproves a necessary premise;
 absence of a production occurrence, enumeration, naming, or lack of evidence
-is not refutation. Each known blocker from the expected identity has an
+is not refutation. An explicitly approved requirement change may also make a
+prior finding inapplicable: record it as refuted with the decision, current
+contract and evidence that no material consequence remains. Do not describe
+the removed requirement as repaired or silently drop its prior finding. Each known blocker from the expected identity has an
 evidenced `repaired`, `refuted`, or `still-open` disposition. A missing or
 still-open material blocker prevents approval. There are no round counts,
-severity floors, or automatic fix-and-repeat loops. A bounded repair check may
-cover a repaired defect and its affected contracts; structural or scope change
-requires a new full gate outside the bounded coordinator. Two successive
-fix-induced blockers in one subsystem return work to development/design.
+severity floors, or automatic fix-and-repeat loops. Follow-up verification
+covers repairs and affected contracts using the prior coverage rules above.
+Structural or scope changes requiring a new full review stop for a user decision; they do not escape the original workflow allowance.
 
 Coverage is separate from findings. Supply evidence or an explicit gap for each
 architecture axis:
@@ -204,10 +248,13 @@ Supply evidence or an explicit gap for each checklist item:
 
 A material gap yields `INCOMPLETE`. A nonmaterial gap needs the schema's exact
 `accepted_by` field naming a human who accepted it; no reviewer can accept its
-own gap. It remains visible and does not become an unqualified assertion. A
-mechanical defect in these
-repository review tools needs an executable regression, or the report records
-visible unfixed coverage; prose alone cannot discharge it.
+own gap. It remains visible and does not become an unqualified assertion.
+A mechanical defect in these repository review tools needs an executable
+regression, or the report records it unfixed; prose alone cannot discharge it.
+Removing an unnecessary requirement is a design change: remove its executable
+policy and obsolete tests together, and test the retained behavior. Do not
+claim a deleted requirement was repaired or that caller instructions enforce
+a runtime state machine.
 
 | Axis | Required review question | Blocking example |
 | --- | --- | --- |
@@ -216,7 +263,7 @@ visible unfixed coverage; prose alone cannot discharge it.
 | `contract_coherence` | Do producer, schema, evaluator, and consumer agree on identity, fields, and failure meanings? | A producer emits a schema version or enum that an existing consumer rejects, breaking deployed clients. |
 | `state_effects` | Are partial state, interruption, retry, and changed inputs represented and revalidated? | A timeout after a successful write retries without idempotency and duplicates the external effect. |
 | `lifecycle_operations` | Are rollout, upgrade, rollback, cleanup, capacity, and failure exits ordered and bounded? | A mixed-version rollout writes data the rollback version cannot read, or an unbounded queue exhausts worker resources. |
-| `demonstrability_constraints` | Can the stated behavior be exercised under the repository's real limits and tests? | A review-tool guard changes behavior without an executable regression, leaving the defect unproven. |
+| `demonstrability_constraints` | Can the stated behavior be exercised under the repository's real limits and tests? | A changed protocol cannot interoperate with deployed peers and drops required messages under supported conditions. |
 
 An architecture finding blocks only when it cites the applicable required
 contract and a material consequence like these. A loud failure may block.

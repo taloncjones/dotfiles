@@ -137,6 +137,13 @@ def _findings(report: dict, expected: dict, reasons: list[str]) -> bool:
             reasons.append(f"finding {finding['id']} is invalid")
             continue
         ids.add(finding["id"])
+        if (
+            finding["severity"] in _MATERIAL
+            and finding["disposition"] in {"confirmed", "unresolved"}
+            and not _nonempty(finding.get("impact"))
+        ):
+            reasons.append(f"material finding {finding['id']} impact is invalid")
+            continue
         if finding["disposition"] == "unresolved" and finding["severity"] in _MATERIAL:
             reasons.append(f"material finding {finding['id']} is unresolved")
         elif finding["disposition"] == "confirmed" and finding["severity"] in _MATERIAL:
@@ -245,20 +252,18 @@ def schema() -> dict:
         "diff": {"artifact": "report-relative path", "sha256": "SHA-256"},
         "ci": {"artifact": "report-relative path", "sha256": "SHA-256"},
         "no_ci": {"evidence": "explicit evidence"},
-        "marker_exceptions": [
-            {
-                "file": "exact file",
-                "line": 1,
-                "text": "exact added line",
-                "kind": "fixture_literal, documentation_example, or detector_literal",
-                "evidence": "source proving the literal is safe",
-                "reason": "fixture, documentation example, or complete detector token definition",
-            }
-        ],
     }
     return {
         "schema_version": 1,
         "required_seats": list(_SEATS),
+        "finding_fields": {
+            "id": "nonempty unique identifier",
+            "severity": "critical, high, major, minor, low, nit, or advisory",
+            "disposition": "confirmed, refuted, or unresolved",
+            "scenario": "nonempty reproduction or review scenario",
+            "evidence": "nonempty supporting evidence",
+            "impact": "nonempty for confirmed or unresolved critical, high, and major findings",
+        },
         "coverage": {"architecture": list(_AXES), "checklist": list(_CHECKLIST)},
         "report_example": {
             "schema_version": 1,

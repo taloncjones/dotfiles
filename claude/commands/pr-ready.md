@@ -16,8 +16,10 @@ Validate PR is complete, run tests, and post summary comments only if everything
 This command accepts only an active co-review report and independently retained
 expected identity from the coordinating workflow. They are not PR comments,
 markers, or files reconstructed from historical data. If either is absent,
-unreadable, or belongs to an interrupted session, **STOP**: report "re-run
-co-review" and do not run later steps, launch a review, or post updates.
+unreadable, or belongs to an interrupted session, **STOP**: report the missing
+evidence and return control to the user. Do not run later steps, launch a
+review, or post updates. This command cannot renew an exhausted repair
+allowance; a new head or diagnosis does not authorize another cycle.
 Co-review removes its coordinator-owned expected identity when snapshot cleanup
 fails, so a cleanup-failed report is never active evidence for this command.
 
@@ -56,7 +58,8 @@ uv run --no-project python "$GATE_REPORT" evaluate \
 
 Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
 missing active evidence, evaluator `CHANGES`/`INCOMPLETE`, or CI failure stops
-with re-run co-review guidance. Evaluator approval does not authorize a merge:
+and returns control to the user. Preserve the calling workflow's stop; do not
+turn it into an automatic review request. Evaluator approval does not authorize a merge:
 explicit user merge permission, required human approvals, current CI, and
 server-side `--match-head-commit` remain separate gates.
 

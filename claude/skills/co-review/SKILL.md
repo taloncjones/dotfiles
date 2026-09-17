@@ -17,8 +17,10 @@ coordinator invocation; it is not an option for `review.py` or
 `gate_report.py`. The coordinator may begin with this fresh gate or validate a
 current finalized `CHANGES` report as the policy requires. It hands only
 confirmed blockers to one separate implementer batch, requires regression tests
-and one independent `review-change` review, then runs one new plain full gate
-on the repaired head. All outcomes stop. Do not use it for advisory edits,
+and one independent `review-change` review, then runs one follow-up verification
+on the repaired head using the canonical carried-coverage rules. All outcomes
+stop the entire calling workflow; only new explicit user direction after a
+stop can authorize another cycle. Do not use it for advisory edits,
 recursive repairs, redesign, a stale report, or an incomplete result.
 
 Resolve this installed skill first. The helper path is never relative to the
@@ -93,14 +95,23 @@ CI JSON response for that exact expected head. Both live inside `RUN_DIR`, are
 hashed after capture, and are referenced by the report's
 `preconditions` fields defined by `schema`.
 
+For a follow-up, also supply each seat the retained initial report and actual
+artifact paths/digests, prior head/base/tree, repair delta and affected callers.
+Follow the canonical Follow-up evidence section: inspect affected contracts,
+identify invalidated prior coverage, and cite evidence for carried entries.
+The full frozen change remains available as context; it is not an instruction
+to restart an unrestricted search. The current report binds the current tree
+and CI; prior evidence cannot supply current approval authority. A full review
+required by scope/coverage changes stops for a new user decision.
+
 ## Dispatch and collect four seats
 
 Save the exact `POLICY`, frozen diff, and the complete `## Classes` section of
 `$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md`, manifest
 identity, expected identity, and declared threat model in each prompt. The
 first three prompts are independent. Each requests structured findings with a
-stable ID, severity, disposition, scenario, evidence, coverage evidence or
-gap, and a verdict. A runtime result is an artifact only when the runner
+stable ID, severity, disposition, scenario, evidence, concrete material impact,
+coverage evidence or gap, and a verdict. A runtime result is an artifact only when the runner
 returns a genuine successful completion; preserve requested and observed route
 metadata from that result.
 
@@ -137,8 +148,10 @@ partner, posts feedback, fixes code, or acts outside disposable fixtures.
 After the first three artifact files exist and their digests are recorded, run
 the verifier with role `skeptic` and the same frozen snapshot. Its prompt also
 contains the three artifact paths/digests and all known blockers; it tests their
-claims independently and accounts for each blocker. Do not give finder reports
-to the first three seats.
+material claims independently, accounts for each blocker and reconciles
+the combined coverage ledger. It does not start another unrestricted search.
+Do not give current finder reports to the first three seats; the retained
+initial baseline is shared only for follow-up verification.
 
 ```bash
 uv run --no-project python "$RUNNER" run \
@@ -161,8 +174,8 @@ SHA-256 digests, the frozen diff/CI artifact digests, and only actual findings
 and coverage. Keep every path report-relative. Populate the named `seats`
 entries `claude`, `codex`, `breaker`, and `verifier`; put their raw runtime JSON
 paths and observed metadata in the fields named by the schema. Never replace a
-failed runtime result with coordinator prose. Include exact marker exceptions
-only where the preconditions schema permits them.
+failed runtime result with coordinator prose. Token presence is advisory context;
+unfinished behavior blocks only with a concrete material consequence.
 
 Verify once more before evaluating. The expected file remains the independent
 current-workflow authority; it is never copied from the report.

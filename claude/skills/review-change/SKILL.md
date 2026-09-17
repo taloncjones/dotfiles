@@ -81,8 +81,9 @@ uv run --no-project python "$RUNNER" run \
 
 Treat a confirmed major, high, or critical defect as blocking only when it has
 a concrete material consequence for intended behavior, caller contracts, data,
-security, lifecycle, or required integration. Minor, low, nit, taste, and
-speculative findings are advisory. A timeout, empty report, unknown completion,
+security, lifecycle, or required integration. Require the finding to state
+that impact; a written rule or TODO-like token alone is insufficient. Minor,
+low, nit, taste, and speculative findings are advisory. A timeout, empty report, unknown completion,
 unknown evidence, or material coverage gap is incomplete feedback, never a
 clean review.
 
@@ -92,7 +93,9 @@ invoke co-review, partners, markers, external posts, or fixes.
 
 A repair packet's self-review is evidence only and never grants approval. A
 complete clean review supports only task-local readiness and cannot renew a
-bounded `--fix` budget or replace its follow-up full gate.
+bounded `--fix` allowance or replace its follow-up verification. An exhausted
+allowance stops the outer development/shipping workflow too; diagnosis, a new
+head, or a resumed session cannot reset it. Return control to the user.
 
 Only a complete report with no blockers can support existing Herd task-local
 readiness. Task-local readiness is never PR approval, merge authority, or a PR

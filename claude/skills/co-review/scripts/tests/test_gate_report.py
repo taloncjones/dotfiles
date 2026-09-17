@@ -144,68 +144,6 @@ class GateReportTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "APPROVE")
         self.assertTrue(result["approve_allowed"])
 
-    def test_git_diff_bytes_with_embedded_cr_marker_are_incomplete(self):
-        repo = self.root / "source"
-        repo.mkdir()
-        source = repo / "main.py"
-        source.write_bytes(b"enabled = False\n")
-        for command in (
-            ["git", "init", "-q"],
-            ["git", "config", "user.email", "test@example.invalid"],
-            ["git", "config", "user.name", "Test"],
-            ["git", "add", "main.py"],
-            ["git", "commit", "-qm", "initial"],
-        ):
-            subprocess.run(command, cwd=repo, check=True)
-
-        source.write_bytes(b"enabled = True # TODO remove temporary bypass\n")
-        ordinary_diff = subprocess.run(
-            ["git", "diff", "--", "main.py"],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-        ).stdout
-        self.report["preconditions"]["diff"] = self._write_bytes(
-            "review.diff", ordinary_diff
-        )
-        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
-
-        sources = (
-            ("form_feed", b"\f", b"enabled = True #\fTODO remove temporary bypass\n"),
-            ("vertical_tab", b"\v", b"enabled = True #\vTODO remove temporary bypass\n"),
-            ("nel", b"\xc2\x85", b"enabled = True #\xc2\x85TODO remove temporary bypass\n"),
-            ("line_separator", b"\xe2\x80\xa8", b"enabled = True #\xe2\x80\xa8TODO remove temporary bypass\n"),
-            ("paragraph_separator", b"\xe2\x80\xa9", b"enabled = True #\xe2\x80\xa9TODO remove temporary bypass\n"),
-            ("carriage_return", b"\r", b"enabled = True\r# TODO remove temporary bypass\n"),
-        )
-        for label, separator, source_bytes in sources:
-            with self.subTest(separator=label):
-                compile(source_bytes.decode("utf-8"), "main.py", "exec")
-                source.write_bytes(source_bytes)
-                diff = subprocess.run(
-                    ["git", "diff", "--", "main.py"],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                ).stdout
-                self.assertIn(separator, diff)
-                self.report = self._report()
-                self.report["preconditions"]["diff"] = self._write_bytes(
-                    "review.diff", diff
-                )
-                self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
-                self.report["preconditions"]["marker_exceptions"] = [
-                    {
-                        "file": "main.py",
-                        "line": 1,
-                        "text": source_bytes.decode("utf-8").rstrip("\n"),
-                        "kind": "fixture_literal",
-                        "evidence": "disposable Git-byte fixture",
-                        "reason": "exact literal fixture line",
-                    }
-                ]
-                self.assertEqual(self.verdict()["verdict"], "APPROVE")
-
     def test_missing_failed_or_empty_seat_is_incomplete(self):
         for mutation in (
             lambda: self.report["seats"].pop("codex"),
@@ -265,7 +203,7 @@ class GateReportTests(unittest.TestCase):
         ]
         self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
 
-    def test_confirmed_changes_refuted_and_advisory_allow_approval(self):
+    def test_material_findings_require_impact_evidence_shape(self):
         finding = {
             "id": "f",
             "severity": "major",
@@ -274,9 +212,16 @@ class GateReportTests(unittest.TestCase):
             "evidence": "y",
         }
         self.report["findings"] = [finding]
+        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+        finding["impact"] = "Users can bypass the required check."
         self.assertEqual(self.verdict()["verdict"], "CHANGES")
-        finding.update(disposition="refuted")
-        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+        finding.update(disposition="unresolved")
+        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+        for impact in ("", "  "):
+            with self.subTest(impact=repr(impact)):
+                finding["impact"] = impact
+                self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+        finding.pop("impact")
         finding.update(severity="advisory", disposition="confirmed")
         self.assertEqual(self.verdict()["verdict"], "APPROVE")
 

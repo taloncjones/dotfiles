@@ -18,7 +18,9 @@ coordinator invocation; it is not an option for `review.py` or
 `gate_report.py`. Follow the canonical policy to validate a reusable current
 `CHANGES` report, repair only confirmed blockers in one separate implementer
 batch, run regression tests and one independent `review-change`, and then run
-one new plain full gate on the repaired head. All outcomes stop. It never
+one follow-up verification on the repaired head using the canonical
+carried-coverage rules. All outcomes stop the entire calling workflow; only
+new explicit user direction after a stop can authorize another cycle. It never
 auto-edits advisory findings, recurses, or converts incomplete or stale
 evidence into a repair budget.
 
@@ -71,6 +73,15 @@ prompts, native completion artifacts, frozen diff, normalized CI envelope, and
 `report.json` in `RUN_DIR`. This lets `review.py cleanup --manifest` remove only
 the verified snapshots while retaining the active gate evidence.
 
+For a follow-up, also supply each seat the retained initial report and actual
+artifact paths/digests, prior head/base/tree, repair delta and affected callers.
+Follow the canonical Follow-up evidence section: inspect affected contracts,
+identify invalidated prior coverage, and cite evidence for carried entries.
+The full frozen change remains available as context; it is not an instruction
+to restart an unrestricted search. The current report binds the current tree
+and CI; prior evidence cannot supply current approval authority. A full review
+required by scope/coverage changes stops for a new user decision.
+
 Load the canonical material into the active report directory, then resolve each
 seat before launch. A route that is unavailable or unsupported stops the gate.
 
@@ -121,7 +132,8 @@ frozen values, never placeholders: repository identity; `snapshot.codex_root`;
 base, head, expected tree, and reviewed tree; frozen diff path and digest;
 target repository/PR/base-branch identity; the extracted policy; full rubric;
 declared threat model; and changed-symbol callers. State the requested finding
-format, disposable-fixture/read-only limits, and prohibition on skills,
+format (including concrete impact for any material allegation),
+disposable-fixture/read-only limits, and prohibition on skills,
 partners, network actions, comments, fixes, and merge actions.
 
 Dispatch the `codex` reviewer and `breaker` through the native `spawn_agent`
@@ -144,8 +156,9 @@ artifact paths and digests, and the expected known blockers. It includes no
 other controller history. Dispatch the verifier with native `spawn_agent`,
 `fork_turns: "none"`, and its parsed skeptic-route `model` and
 `reasoning_effort`; then wait, collect, validate, and hash its completion using
-the same deadline rules. The verifier independently tests each claim and
-accounts for every blocker.
+the same deadline rules. The verifier independently tests material claims,
+accounts for every blocker and reconciles the combined coverage ledger. It
+does not start another unrestricted search.
 
 Create `report.json` from the exact `gate_report.py schema` example. Fill all
 fields from the verified manifest, independent expected identity, actual four

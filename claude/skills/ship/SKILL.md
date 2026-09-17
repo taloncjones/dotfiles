@@ -39,8 +39,12 @@ target base. Stop if either identity is unavailable or mismatched.
    auto-fix and relaunch a full gate. An explicitly user-invoked
    `co-review --fix` supplies its scoped repair authorization; existing
    development authorization also covers that handoff. It uses its own bounded
-   coordinator policy; otherwise a later, deliberate new gate is required after
-   any changed head, tree, target, or interrupted session.
+   coordinator policy, including one follow-up verification of repairs and
+   affected contracts with evidenced carried coverage. Exhaustion stops ship
+   and the outer development workflow. A changed head, diagnosis or resumed
+   session cannot renew the allowance; only new explicit user direction after
+   the stop can. Changed identity or interruption invalidates approval and is
+   a stop, not permission to automatically launch another gate.
 
 4. **Recheck gate evidence.** Immediately before presenting a merge-ready
    result, fetch live PR head, base branch, target base, and CI. The active
@@ -54,7 +58,9 @@ target base. Stop if either identity is unavailable or mismatched.
    co-review snapshot has already been verified and cleaned; this step checks
    live source/PR identity and retained report artifacts, not a deleted manifest.
    A changed identity, failed evaluation, absent active files, or session interruption
-   requires a fresh co-review; historical PR comments never resume this step.
+   invalidates approval and stops this workflow. A fresh review needs the
+   caller authorization described above; historical PR comments never resume
+   this step.
 
 5. **Merge gate (human).** Present the findings disposition, test results, CI
    state, version change, and active evaluator result. Ask for explicit merge
