@@ -204,7 +204,12 @@ PY
 check "shipped procedure is below the required level, so leads cannot be admitted" <<PY
 $LOAD
 text = open("claude/skills/herdr-orchestration/SKILL.md", encoding="utf-8").read()
-assert k.parse_marker(text) < k.REQUIRED_CAPABILITY
+cap = k.parse_marker(text)
+# Compared in two steps on purpose: comparing None with an int raises
+# TypeError on py3, so a one-line comparison fails with an error pointing at
+# the test rather than at the file whose marker became unusable.
+assert cap is not None, "shipped SKILL.md has no usable marker"
+assert cap < k.REQUIRED_CAPABILITY, cap
 sys.exit(0)
 PY
 
@@ -420,6 +425,99 @@ open(p, "w").write(json.dumps(dict(base, account_id="other")))
 assert k.gate_enabled(d, "s", "a", k.IDENTITY_DEFERRED)[0] is False
 open(p, "w").write(json.dumps(dict(base, repo_id=17)))
 assert k.gate_enabled(d, "s", "a", k.IDENTITY_DEFERRED)[0] is False
+sys.exit(0)
+PY
+
+# --- marker grammar corpus -------------------------------------------------
+#
+# This exists because hand-reasoning the marker grammar failed four times in
+# four rounds. The grammar was once a regex,
+#     ^<!--\s*herdr-capabilities:\s*(.*?)\s*-->\s*$      (MULTILINE)
+# which had to be replaced because it backtracked catastrophically. The
+# replacement was written by reading the regex and thinking about it, and a
+# differential corpus then found 17 disagreements across 38 cases -- 14 of
+# them fail-open.
+#
+# So the corpus is the specification now. Each case below is an ADJUDICATED
+# verdict, not a transcription of what the regex did: some of the regex's
+# behaviours were accidents and are deliberately changed. Assertions are on
+# parse_marker's verdict, not on the private helper, so a future rewrite that
+# preserves behaviour stays free to reshape the internals.
+#
+# KNOWN SHARED HAZARD, out of scope here: a marker at column 0 inside a fenced
+# code block is a live declaration under BOTH the regex and the parser. The
+# shipped-file assertion above is what currently catches that; do not read
+# this corpus as proof it is handled.
+
+check "marker grammar: preserved behaviours" <<PY
+$LOAD
+NL = chr(10)
+P1 = '{"marker_version":1,"capability":1}'
+P0 = '{"marker_version":1,"capability":0}'
+M1 = "<!-- herdr-capabilities: " + P1 + " -->"
+M0 = "<!-- herdr-capabilities: " + P0 + " -->"
+
+# A marker on its own line at column 0.
+assert k.parse_marker(M1 + NL) == 1
+assert k.parse_marker(M1) == 1, "no trailing newline"
+assert k.parse_marker(M0 + NL) == 0
+
+# Trailing WHITESPACE tolerated; trailing TEXT rejected.
+assert k.parse_marker(M1 + "   " + NL) == 1
+assert k.parse_marker(M1 + chr(9) + NL) == 1
+assert k.parse_marker(M1 + " trailing" + NL) is None
+
+# Arbitrary whitespace inside the comment is accepted.
+assert k.parse_marker("<!--   herdr-capabilities:   " + P1 + "   -->" + NL) == 1
+
+# Duplicates fail closed.
+assert k.parse_marker(M1 + NL + M1 + NL) is None
+assert k.parse_marker(M0 + NL + M1 + NL) is None
+
+# Line breaks are newline ONLY. splitlines() also breaks on these nine, which
+# would let a marker be smuggled into a prose line that every renderer, and
+# grep, shows as one line.
+for ch in ("\v", "\f", chr(28), chr(29), chr(30), chr(133), chr(8232), chr(8233), "\r"):
+    smuggled = "prose" + ch + M1 + ch + "prose" + NL
+    assert k.parse_marker(smuggled) is None, repr(ch)
+
+# A prose line merely containing the key contributes nothing, AT ANY LENGTH.
+# Checking length before shape let one long line refuse a whole valid file.
+assert k.parse_marker("we set herdr-capabilities: somewhere" + NL + M1 + NL) == 1
+long_prose = "x" * 600 + " herdr-capabilities: " + "y" * 20
+assert k.parse_marker(long_prose + NL + M0 + NL) == 0
+sys.exit(0)
+PY
+
+check "marker grammar: deliberately changed behaviours" <<PY
+$LOAD
+NL = chr(10)
+P1 = '{"marker_version":1,"capability":1}'
+P0 = '{"marker_version":1,"capability":0}'
+M1 = "<!-- herdr-capabilities: " + P1 + " -->"
+M0 = "<!-- herdr-capabilities: " + P0 + " -->"
+
+# INDENTED markers are ignored. The regex anchored at column 0, so a
+# four-space Markdown example declared nothing -- which is what makes showing
+# the format safe. A parser that stripped first turned every such example into
+# a live declaration, either duplicating the real marker (refusing every lead
+# claim) or, with no real marker, declaring capability 1 outright.
+assert k.parse_marker(M0 + NL + "    " + M1 + NL) == 0, "indented example must not count"
+assert k.parse_marker(M0 + NL + chr(9) + M1 + NL) == 0
+assert k.parse_marker("prose" + NL + "    " + M1 + NL) is None
+assert k.parse_marker(" " + M1 + NL) is None
+
+# A marker SPANNING LINES refuses the whole file. The regex matched one
+# (its \s crossed newlines) and counted it toward the duplicate rule; the
+# first line parser could not see one at all, so a file that used to be
+# refused as duplicated started advertising a capability. Neither is right.
+multi = "<!--" + NL + "herdr-capabilities: " + P1 + NL + "-->" + NL
+assert k.parse_marker(multi) is None, "a marker across lines is refused"
+assert k.parse_marker(M0 + NL + multi) is None, "and still counts as ambiguity"
+
+# An over-long line is refused only once it is shape-confirmed as a candidate.
+over = "<!-- herdr-capabilities: " + "x" * (k.MARKER_LINE_MAX + 10) + " -->"
+assert k.parse_marker(over + NL) is None
 sys.exit(0)
 PY
 

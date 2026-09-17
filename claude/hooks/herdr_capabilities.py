@@ -74,20 +74,63 @@ def _marker_payloads(text):
     this was never seen in normal use and why nothing about the payload looks
     suspicious on inspection.
     """
+    if _spans_lines(text):
+        return None
     payloads = []
-    for line in text.splitlines():
-        if _MARKER_KEY not in line:
+    # split("\n"), never splitlines(). splitlines() also breaks on VT, FF, FS,
+    # GS, RS, NEL, U+2028, U+2029 and a bare CR, while the regex's ^ and $
+    # under MULTILINE anchor only at \n. Accepting those let a marker be
+    # smuggled mid-prose: every renderer and grep sees one line, the parser
+    # saw a declaration.
+    for line in text.split("\n"):
+        # Column 0, with no lstrip. The regex anchored `<!--` at ^, so an
+        # INDENTED marker declared nothing -- which is what makes a four-space
+        # Markdown example safe to write. Stripping first turned every such
+        # example into a live declaration.
+        if not line.startswith(_MARKER_OPEN) or _MARKER_KEY not in line:
             continue
+        # Length is checked only AFTER the shape test. Checking it first let
+        # one long prose line that merely mentioned the key refuse the whole
+        # file. Every step below is linear, so this cap is defence in depth,
+        # not the bound that holds.
         if len(line) > MARKER_LINE_MAX:
             return None
-        stripped = line.strip()
-        if not stripped.startswith(_MARKER_OPEN) or not stripped.endswith(_MARKER_CLOSE):
+        rest = line.rstrip()
+        if not rest.endswith(_MARKER_CLOSE):
             continue
-        body = stripped[len(_MARKER_OPEN):-len(_MARKER_CLOSE)].strip()
+        body = rest[len(_MARKER_OPEN):-len(_MARKER_CLOSE)].strip()
         if not body.startswith(_MARKER_KEY):
             continue
         payloads.append(body[len(_MARKER_KEY):].strip())
     return payloads
+
+
+def _spans_lines(text):
+    """True if a marker-looking comment spans more than one line.
+
+    The regex this replaced matched such a comment, because its `\\s` crossed
+    newlines, and counted it toward the duplicate rule. The line parser cannot
+    see it at all -- so a file the interlock used to refuse as duplicated
+    started advertising a capability instead.
+
+    Neither behaviour is right. A marker spanning lines is not a line marker,
+    so accepting it is wrong; ignoring it reopens the duplicate hole. Refusing
+    the whole file is the only fail-closed answer, and it is what a reader who
+    wrote one across lines should be told.
+    """
+    pos = 0
+    while True:
+        start = text.find(_MARKER_OPEN, pos)
+        if start < 0:
+            return False
+        if start == 0 or text[start - 1] == "\n":
+            end = text.find(_MARKER_CLOSE, start + len(_MARKER_OPEN))
+            if end < 0:
+                return False
+            span = text[start:end]
+            if "\n" in span and _MARKER_KEY in span:
+                return True
+        pos = start + len(_MARKER_OPEN)
 
 
 def _exact_int(value):

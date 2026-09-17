@@ -239,6 +239,17 @@ def lead_admissible(rd, slug, account_id, caller_scope, workspace_root, seen=Non
         rd, slug, account_id, herdr_caps.IDENTITY_DEFERRED)
     if not pre_ok:
         return False
+    # Then the capability levels, still before any subprocess. Admission
+    # requires ALL of gate, core, guard and procedure, so testing the cheap
+    # terms first cannot change a verdict -- it only avoids paying six git
+    # subprocesses to reach a refusal already determined. Two constants and
+    # one bounded read, against up to 30 seconds of resolution outside this
+    # hook's budget. The gate stays first, because the procedure read touches
+    # a path an attacker may control and the gate check does not.
+    for level in (herdr_caps.CORE_CAPABILITY, herdr_caps.GUARD_CAPABILITY,
+                  herdr_caps.procedure_capability(Path(caller_scope["account_root"]))):
+        if level is None or level < herdr_caps.REQUIRED_CAPABILITY:
+            return False
     if seen is None:
         seen = {}
     if workspace_root not in seen:

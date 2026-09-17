@@ -24,6 +24,40 @@ def flag_value(args, flag):
     return args[index] if index < len(args) else None
 
 
+def _disposable(root):
+    """True if `root` is somewhere this fixture may write, else False + a WHY.
+
+    Two independent rules, because the temp-root rule alone is not enough and
+    that is exactly how a tracked SKILL.md was destroyed:
+
+    1. Under the real temp root. Bounds the path we were handed.
+    2. NOT inside a git checkout, at any depth. A checkout under /private/tmp
+       satisfies rule 1 while being the last place on the machine we may
+       write -- and co-review snapshots, Claude Code worktrees and the review
+       fixtures themselves all have exactly that shape. Every component being
+       a real directory means the no-follow walk is satisfied too, so nothing
+       else in this file catches it.
+
+    The refusal is LOUD. A silent skip here is indistinguishable downstream
+    from "the gate is disabled", and that ambiguity has already cost two
+    reviewers most of a pass chasing 90 red tests with no diagnostic.
+    """
+    tmp = Path(os.path.realpath(tempfile.gettempdir())).resolve()
+    if tmp not in root.parents:
+        sys.stderr.write(
+            f"[fixture] not seeding: {root} is not under the temp root {tmp}\n")
+        return False
+    probe = root
+    while True:
+        if (probe / ".git").exists():
+            sys.stderr.write(
+                f"[fixture] not seeding: {root} is inside the git checkout {probe}\n")
+            return False
+        if probe.parent == probe:
+            return True
+        probe = probe.parent
+
+
 def _publish_marker(parent, name):
     """Write the capability marker by creating a NEW file and renaming it over
     `name`, never by opening `name` itself.
@@ -126,8 +160,7 @@ def _seed_task_lead_gate(args):
     if not slug or not core.valid_repo_slug(slug):
         return
     root = Path(os.environ["CLAUDE_CONFIG_DIR"]).resolve()
-    tmp = Path(os.path.realpath(tempfile.gettempdir())).resolve()
-    if tmp not in root.parents:
+    if not _disposable(root):
         return
 
     marker = root / "skills" / "herdr-orchestration" / "SKILL.md"
@@ -153,6 +186,7 @@ def _seed_task_lead_gate(args):
         # would follow a symlinked component and create real directories
         # inside the link target before write_json_atomic refused the record
         # and raised out of a fixture that is supposed to seed or do nothing.
+        _unpublish_marker(marker)
         return
     scope = core.account_scope(os.getcwd(), value("--runtime") or "claude")
     # Guarded like the two writes above it. A symlink at the gate LEAF makes
@@ -162,7 +196,23 @@ def _seed_task_lead_gate(args):
     try:
         _publish_gate(rd, slug, scope["account_id"])
     except (OSError, ValueError):
+        _unpublish_marker(marker)
         return
+
+
+def _unpublish_marker(marker):
+    """Undo the marker write, so a failed seed leaves nothing behind.
+
+    The contract is seed-or-do-nothing. Publishing the capability-1 marker and
+    then failing to publish the gate left a lead-capable procedure advertised
+    with no gate -- harmless for admission, since absence means disabled, but
+    it is not what the function says it does, and the marker is the one write
+    here that lands in a TRACKED file's name.
+    """
+    try:
+        os.unlink(str(marker))
+    except OSError:
+        pass
 
 
 def _publish_gate(rd, slug, account_id):

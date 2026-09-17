@@ -119,30 +119,45 @@ def seed_marker(scope, capability, extra_root=None):
     skilld = contained(
         os.path.join(scope["account_root"], "skills", "herdr-orchestration"), extra_root)
     os.makedirs(skilld, exist_ok=True)
-    target = contained(os.path.join(skilld, "SKILL.md"), extra_root)
-    tmp = target + ".tmp.%d" % os.getpid()
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    contained(os.path.join(skilld, "SKILL.md"), extra_root)
+    # Every operation below goes through a RETAINED directory descriptor, not
+    # by path. contained() returns a realpath, but create and rename would
+    # each re-traverse it, so a parent swapped in between redirects the write
+    # -- O_NOFOLLOW covers only the temp leaf. Pinning the directory closes
+    # that window, and it is what the production sibling already does via
+    # open_state_parent's dir_fd.
+    dirfd = os.open(skilld, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        with os.fdopen(fd, "w") as stream:
-            stream.write(
-                '<!-- herdr-capabilities: {"marker_version":1,"capability":%d} -->\n' % capability
-            )
-        os.rename(tmp, target)
-    except BaseException:
+        tmp = "SKILL.md.tmp.%d" % os.getpid()
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                     0o600, dir_fd=dirfd)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    return target
+            with os.fdopen(fd, "w") as stream:
+                stream.write(
+                    '<!-- herdr-capabilities: {"marker_version":1,"capability":%d} -->\n'
+                    % capability
+                )
+            os.rename(tmp, "SKILL.md", src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=dirfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dirfd)
+    return os.path.join(skilld, "SKILL.md")
 
 
 def remove_marker(scope, extra_root=None):
-    target = contained(
-        os.path.join(scope["account_root"], "skills", "herdr-orchestration", "SKILL.md"),
-        extra_root,
-    )
-    os.remove(target)
+    skilld = contained(
+        os.path.join(scope["account_root"], "skills", "herdr-orchestration"), extra_root)
+    contained(os.path.join(skilld, "SKILL.md"), extra_root)
+    dirfd = os.open(skilld, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.unlink("SKILL.md", dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
 HELPER
 
 # B5 regression: recursively run this same suite, with a stubbed `mktemp`
