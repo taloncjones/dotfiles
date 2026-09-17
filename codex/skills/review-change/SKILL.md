@@ -81,8 +81,13 @@ the `REVIEW_REPAIR_PACKET` path and rendered content, asking the child to verify
 self-review, behavioral-regression, and affected failure-path evidence; it
 classifies each new blocker as repair-introduced, previously missed, or changed
 requirements with a concrete consequence. Require blocking findings, useful
-advisory findings, safe reproduction evidence, and coverage gaps. Do not invoke
-co-review, partners, markers, external posts, or fixes.
+advisory findings, safe reproduction evidence, and coverage gaps. Its prompt
+permits relevant reference skills for language, security, framework and
+architecture guidance, including installed ECC references. This review scope,
+material-impact threshold and read-only authority take precedence over that
+guidance. Require the reviewer to perform the review itself; do not launch
+another review workflow, delegate reviewers, modify code or publish findings.
+Do not invoke co-review, partners, markers, external posts, or fixes.
 
 Treat a confirmed major, high, or critical defect as blocking only when it has
 a concrete material consequence for intended behavior, caller contracts, data,

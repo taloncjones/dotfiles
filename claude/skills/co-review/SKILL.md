@@ -142,8 +142,11 @@ uv run --no-project python "$RUNNER" run \
 The Claude invocation preserves the original repository's selected account;
 the runtime runner resolves it rather than an inherited snapshot account. A
 Codex-led controller creates a native fresh Codex seat through this runner and
-does not use a nested generic CLI review. No prompt invokes a generic external review plugin, a
-partner, posts feedback, fixes code, or acts outside disposable fixtures.
+does not use a nested generic CLI review. Every prompt permits relevant
+reference skills under the canonical policy and requires the reviewer to do
+the review itself. It must not launch another review workflow, delegate
+reviewers, invoke a partner, post feedback, fix code, or act outside disposable
+fixtures.
 
 After the first three artifact files exist and their digests are recorded, run
 the verifier with role `skeptic` and the same frozen snapshot. Its prompt also

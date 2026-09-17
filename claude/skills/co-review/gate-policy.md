@@ -171,9 +171,13 @@ Use the shared resolver for every seat. Preserve the original repository's
 account route; a personal Claude route unsets `CLAUDE_CONFIG_DIR`. The first
 three seats receive the frozen diff, relevant callers, repository conventions,
 the declared threat model (default `exposed`), and this policy. The verifier additionally receives
-the first-three artifacts and prior blockers. No seat invokes a generic
-external review plugin, another partner, external actions, comments, fixes, or
-merge actions.
+the first-three artifacts and prior blockers. Every prompt permits relevant
+reference skills for language, security, framework and architecture guidance,
+including installed ECC references. That guidance does not override the review
+scope, material-impact threshold or read-only authority. Reviewers perform the
+review themselves; they do not launch another review workflow, delegate
+reviewers, modify code, publish findings or merge. A skill that would perform
+those actions may be read as reference, but its workflow must not be executed.
 
 Every seat uses the same adversarial method: trace affected call sites and
 state transitions; try ordinary mistakes, interrupted operations, and retries;

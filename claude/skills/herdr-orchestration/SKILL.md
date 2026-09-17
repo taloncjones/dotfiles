@@ -684,7 +684,8 @@ also avoids wasting work and preserves one live reviewer per task.
    transition the ticket to In Review -- see section 10.
 5. Prompt the review agent to run **`review-change`** over the pinned base,
    current diff, intended behavior, and affected callers. It reports blockers,
-   advisories, and coverage gaps after safe reproductions where useful; it
+   advisories, and coverage gaps after safe reproductions where useful. It may
+   consult relevant reference skills as permitted by `review-change`; it
    never applies fixes, launches another reviewer, posts externally, or runs
    final co-review. `review-change` is herdr-agnostic; the herdr-specific
    `emit-review` call lives in this brief. Then

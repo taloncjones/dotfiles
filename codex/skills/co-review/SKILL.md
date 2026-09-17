@@ -133,8 +133,10 @@ base, head, expected tree, and reviewed tree; frozen diff path and digest;
 target repository/PR/base-branch identity; the extracted policy; full rubric;
 declared threat model; and changed-symbol callers. State the requested finding
 format (including concrete impact for any material allegation),
-disposable-fixture/read-only limits, and prohibition on skills,
-partners, network actions, comments, fixes, and merge actions.
+disposable-fixture/read-only limits, and permission to consult relevant
+reference skills under the canonical policy. Require the reviewer to do the
+review itself, without another review workflow, delegated reviewers, partners,
+network actions, comments, fixes or merge actions.
 
 Dispatch the `codex` reviewer and `breaker` through the native `spawn_agent`
 API with `fork_turns: "none"`, `model` and `reasoning_effort` taken from their
