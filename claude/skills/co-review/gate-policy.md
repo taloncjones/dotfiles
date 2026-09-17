@@ -88,9 +88,11 @@ cleanup. Freeze a dirty source when requested, record its state, and make the
 result incomplete unless the committed expected tree equals the frozen reviewed
 tree. `manifest.source.source_tree` binds `expected.tree`; the verified
 `manifest.snapshot.codex_tree` binds `report.reviewed_tree`. Capture the exact
-frozen added-line diff and the CI payload for the expected head as regular
-report artifacts. Hash every artifact after it is complete. Paths in the report
-are relative to the report file; artifacts must not be symlinks.
+frozen Git diff bytes without universal-newline normalization, then decode them
+strictly and scan structural records only at LF. Capture the CI payload for the
+expected head as a regular report artifact. Hash every artifact after it is
+complete. Paths in the report are relative to the report file; artifacts must
+not be symlinks.
 
 Build the report only from actual seat output and the schema printed by
 `gate_report.py schema`. Use its required `preconditions` object with the exact

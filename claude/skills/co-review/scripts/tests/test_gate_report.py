@@ -77,6 +77,11 @@ class GateReportTests(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         return {"artifact": relative, "sha256": digest(path)}
 
+    def _write_bytes(self, relative: str, body: bytes) -> dict:
+        path = self.root / relative
+        path.write_bytes(body)
+        return {"artifact": relative, "sha256": digest(path)}
+
     def _report(self):
         seats = {}
         for name in ("claude", "codex", "breaker", "verifier"):
@@ -138,6 +143,68 @@ class GateReportTests(unittest.TestCase):
         result = self.verdict()
         self.assertEqual(result["verdict"], "APPROVE")
         self.assertTrue(result["approve_allowed"])
+
+    def test_git_diff_bytes_with_embedded_cr_marker_are_incomplete(self):
+        repo = self.root / "source"
+        repo.mkdir()
+        source = repo / "main.py"
+        source.write_bytes(b"enabled = False\n")
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "test@example.invalid"],
+            ["git", "config", "user.name", "Test"],
+            ["git", "add", "main.py"],
+            ["git", "commit", "-qm", "initial"],
+        ):
+            subprocess.run(command, cwd=repo, check=True)
+
+        source.write_bytes(b"enabled = True # TODO remove temporary bypass\n")
+        ordinary_diff = subprocess.run(
+            ["git", "diff", "--", "main.py"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        ).stdout
+        self.report["preconditions"]["diff"] = self._write_bytes(
+            "review.diff", ordinary_diff
+        )
+        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+
+        sources = (
+            ("form_feed", b"\f", b"enabled = True #\fTODO remove temporary bypass\n"),
+            ("vertical_tab", b"\v", b"enabled = True #\vTODO remove temporary bypass\n"),
+            ("nel", b"\xc2\x85", b"enabled = True #\xc2\x85TODO remove temporary bypass\n"),
+            ("line_separator", b"\xe2\x80\xa8", b"enabled = True #\xe2\x80\xa8TODO remove temporary bypass\n"),
+            ("paragraph_separator", b"\xe2\x80\xa9", b"enabled = True #\xe2\x80\xa9TODO remove temporary bypass\n"),
+            ("carriage_return", b"\r", b"enabled = True\r# TODO remove temporary bypass\n"),
+        )
+        for label, separator, source_bytes in sources:
+            with self.subTest(separator=label):
+                compile(source_bytes.decode("utf-8"), "main.py", "exec")
+                source.write_bytes(source_bytes)
+                diff = subprocess.run(
+                    ["git", "diff", "--", "main.py"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                ).stdout
+                self.assertIn(separator, diff)
+                self.report = self._report()
+                self.report["preconditions"]["diff"] = self._write_bytes(
+                    "review.diff", diff
+                )
+                self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+                self.report["preconditions"]["marker_exceptions"] = [
+                    {
+                        "file": "main.py",
+                        "line": 1,
+                        "text": source_bytes.decode("utf-8").rstrip("\n"),
+                        "kind": "fixture_literal",
+                        "evidence": "disposable Git-byte fixture",
+                        "reason": "exact literal fixture line",
+                    }
+                ]
+                self.assertEqual(self.verdict()["verdict"], "APPROVE")
 
     def test_missing_failed_or_empty_seat_is_incomplete(self):
         for mutation in (

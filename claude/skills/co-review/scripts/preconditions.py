@@ -125,7 +125,7 @@ def _marker_reasons(diff: str, exceptions: object, artifact_root: Path) -> list[
     file_name: str | None = None
     new_line: int | None = None
     reasons: list[str] = []
-    for raw in diff.splitlines():
+    for raw in diff.split("\n"):
         if raw.startswith("diff --git "):
             file_name = None
             new_line = None
@@ -174,7 +174,7 @@ def evaluate(preconditions: object, artifact_root: Path) -> dict:
         try:
             reasons.extend(
                 _marker_reasons(
-                    diff_path.read_text(encoding="utf-8"),
+                    diff_path.read_bytes().decode("utf-8"),
                     preconditions.get("marker_exceptions"),
                     artifact_root,
                 )
