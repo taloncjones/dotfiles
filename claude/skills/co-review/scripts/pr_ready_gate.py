@@ -209,7 +209,7 @@ def select_marker(
 
 
 def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):
-    """('PASS'|'FAIL', reason). Current APPROVE for this head, base, and target."""
+    """Compatibility tuple: comment history no longer grants readiness."""
     try:
         marker = select_marker(comments, set(trusted_authors))
     except GateInputError as error:
@@ -224,7 +224,7 @@ def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):
         return ("FAIL", "co-review base != current target base; re-run co-review")
     if marker["base_ref"] != base_ref:
         return ("FAIL", "co-review target branch changed (retarget); re-run co-review")
-    return ("PASS", "co-review APPROVE is current for this head and target")
+    return ("FAIL", "comment history cannot grant readiness; run current co-review")
 
 
 def main(argv: list[str] | None = None) -> int:

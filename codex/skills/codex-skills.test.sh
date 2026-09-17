@@ -22,6 +22,10 @@ assert "claude-spec-review skill exists" \
     test -f codex/skills/claude-spec-review/SKILL.md
 assert "co-review skill exists" \
     test -f codex/skills/co-review/SKILL.md
+assert "Claude review-change skill exists" \
+    test -f claude/skills/review-change/SKILL.md
+assert "Codex review-change skill exists" \
+    test -f codex/skills/review-change/SKILL.md
 # Snapshot/base/tree, privacy, cleanup, and route behavior are exercised by
 # the registered review-helper and agent-runtime suites. Keep this suite
 # focused on installed discovery and links to those shared implementations.
@@ -29,27 +33,26 @@ assert "claude-plan-review uses the shared native runtime" \
     rg -q 'agent_runtime' codex/skills/claude-plan-review/SKILL.md
 assert "claude-spec-review selects the Claude runtime" \
     rg -q -- '--runtime claude' codex/skills/claude-spec-review/SKILL.md
-assert "co-review mentions both reviewers" \
-    rg -q 'Claude.*Codex|Codex.*Claude' codex/skills/co-review/SKILL.md
-assert "co-review uses the native Codex session" \
-    rg -q 'Codex reviews.*in this session' codex/skills/co-review/SKILL.md
-assert "co-review prevents nested Codex CLI reviews" \
-    rg -q 'Do not run `codex exec`' codex/skills/co-review/SKILL.md
-assert "co-review uses the Claude native review flow" \
-    rg -q '/code-review' codex/skills/co-review/SKILL.md
-# Tripwire for finder-side discharge. The phrase lives INSIDE the carried-blocker
-# prompt instruction, so a prompt that lets the finder rule a carried finding
-# ADDRESSED cannot be reinstated while this still matches.
-assert "co-review denies the finder any discharge authority" \
-    rg -q 'you discharge nothing' codex/skills/co-review/SKILL.md
-assert "Claude co-review routes model and effort through the shared runtime" \
-    rg -q 'agent_runtime' claude/skills/co-review/SKILL.md
-assert "Claude co-review freezes and verifies its input" \
-    sh -c 'rg -q "prepare --repo" claude/skills/co-review/SKILL.md && rg -q "verify --manifest" claude/skills/co-review/SKILL.md'
-assert "Claude co-review uses ownership-checked cleanup" \
-    rg -q 'cleanup --manifest' claude/skills/co-review/SKILL.md
+assert "co-review extracts the canonical policy and schema" \
+    sh -c 'rg -q "policy --section POLICY" claude/skills/co-review/SKILL.md && rg -q "policy --section POLICY" codex/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" claude/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" codex/skills/co-review/SKILL.md'
+assert "co-review requires four named independent seats" \
+    sh -c 'rg -q "Run four" codex/skills/co-review/SKILL.md && rg -q "fresh, independent read-only 600-second seats" codex/skills/co-review/SKILL.md && rg -q "claude.*,.*codex.*,.*breaker.*,.*verifier" codex/skills/co-review/SKILL.md'
+assert "co-review freezes evaluates and cleans up through shared helpers" \
+    sh -c 'rg -q "REVIEW_HELPER.*prepare" claude/skills/co-review/SKILL.md && rg -q "REVIEW_HELPER.*verify" claude/skills/co-review/SKILL.md && rg -q "REVIEW_HELPER.*cleanup" claude/skills/co-review/SKILL.md && rg -q "report.json.*EXPECTED_IDENTITY" codex/skills/co-review/SKILL.md'
+assert "co-review prevents generic partner dispatch and automatic repeat loops" \
+    sh -c 'rg -q "generic ./code-review" codex/skills/co-review/SKILL.md && ! rg -qi "auto.*repeat\|repeat.*auto\|review round" claude/skills/co-review/SKILL.md codex/skills/co-review/SKILL.md'
 assert "document review binds a frozen plan" \
     rg -q 'FROZEN_PLAN_SHA256' codex/skills/claude-plan-review/SKILL.md
+assert "review-change resolves the development reviewer route" \
+    rg -q -- '--role development_reviewer' codex/skills/review-change/SKILL.md
+assert "review-change resolves installed helpers and original account scope" \
+    sh -c 'rg -q "REVIEW_SKILL_FILE" claude/skills/review-change/SKILL.md && rg -q "REVIEW_SKILL_FILE" codex/skills/review-change/SKILL.md && rg -q "source and .not Path.source..is_absolute" claude/skills/review-change/SKILL.md && rg -q "source and .not Path.source..is_absolute" codex/skills/review-change/SKILL.md && rg -q "account-scope" claude/skills/review-change/SKILL.md && rg -q "account-scope" codex/skills/review-change/SKILL.md'
+assert "review-change has one bounded fresh native Codex reviewer" \
+    sh -c 'rg -q "fresh native Codex child" codex/skills/review-change/SKILL.md && rg -q "fork_turns.*none" codex/skills/review-change/SKILL.md && rg -q "reasoning_effort" codex/skills/review-change/SKILL.md && rg -q "target worktree, pinned base, intended behavior" codex/skills/review-change/SKILL.md && rg -q "affected callers" codex/skills/review-change/SKILL.md && rg -q "interrupt_agent" codex/skills/review-change/SKILL.md && ! rg -q -- "--timeout-secs 600" codex/skills/review-change/SKILL.md'
+assert "review-change cannot approve a PR or recurse into partners" \
+    sh -c 'rg -q "task-local readiness" codex/skills/review-change/SKILL.md && rg -q "unknown evidence" claude/skills/review-change/SKILL.md && rg -q "unknown evidence" codex/skills/review-change/SKILL.md && rg -q "co-review, partners" codex/skills/review-change/SKILL.md'
+assert "review-change blocks concrete major-or-higher defects" \
+    sh -c 'rg -q "major, high, or critical" claude/skills/review-change/SKILL.md && rg -q "major, high, or critical" codex/skills/review-change/SKILL.md'
 
 assert "installer links repo-managed codex skills" \
     rg -q 'codex/skills' install/common/codex-links.sh
@@ -274,6 +277,8 @@ links_shared_workflow_surfaces() (
     done
     [ "$(readlink "$tmp_home/.codex/skills/herdr-orchestration")" = "$PWD/codex/skills/herdr-orchestration" ] || return 1
     [ -f "$tmp_home/.codex/skills/herdr-orchestration/SKILL.md" ] || return 1
+    [ "$(readlink "$tmp_home/.codex/skills/review-change")" = "$PWD/codex/skills/review-change" ] || return 1
+    [ -f "$tmp_home/.codex/skills/review-change/SKILL.md" ] || return 1
     printf 'A concrete fixture sentence.\n' >"$tmp_home/voice.txt"
     voice_resolver=$(sed -n '/^V=/,/^fi$/p' "$PWD/claude/skills/voice/SKILL.md")
     [ -n "$voice_resolver" ] || return 1

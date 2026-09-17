@@ -105,7 +105,8 @@ Use these skills by default when the task matches:
   schema, query, or migration work.
 - `ecc:deployment-patterns` for Docker, Compose, systemd, cloud deploy, CI, and
   environment hardening.
-- `co-review` for top-level review orchestration after implementation, and
+- `review-change` for a bounded development review; `co-review` for top-level
+  finished-PR review orchestration after implementation, and
   `superpowers:verification-before-completion` before claiming work is done.
 - `repo-recall` for prior repo decisions, findings, plans, handoffs, and todos;
   open the cited source before treating a search result as evidence.
@@ -127,13 +128,15 @@ For substantial Codex-led work:
 3. `superpowers:writing-plans`
 4. `claude-plan-review` for the completed implementation plan
 5. `superpowers:executing-plans`
-6. `co-review` for Claude + Codex code/PR review
+6. `co-review` for Claude + Codex finished-PR review
 7. `superpowers:verification-before-completion`
 
 Merge requires completed Claude and Codex code reviews and any required
 adversarial verification. Approval to merge preserves these gates.
 
-The `co-review` step is for top-level sessions where you orchestrate the review.
+Use `review-change` for a single fresh development reviewer. A clean
+task-local review never grants PR approval. The `co-review` step is for
+top-level sessions where you orchestrate the final review.
 When you were launched _as Claude's reviewer_ (a plain "review this" request
 arriving via `codex exec`), just review the change yourself and return findings.
 Do NOT load or run the `co-review` skill in that case — it would shell back out

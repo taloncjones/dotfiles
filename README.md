@@ -382,7 +382,8 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
     `~/.local/state/dotfiles/dashboard/<account_id>/<repo_slug>.html` by
     default; task and TODO state remain read-only. Use `--runtime codex`
     for Codex and retain `--personal` for a personal account in a work repo
-- `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) review gates
+- `review-change` - bounded single-seat development review
+- `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) final/spec/plan review gates
 - `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection
 - `voice` - shared prose lint and independent rewrite with protected facts
 - `herdr-orchestration` - Claude-led shared lifecycle; Codex supplies bounded UI/prose/review work
@@ -392,7 +393,7 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `lib/work-state.sh` - shared PR/worktree state gathering (tested by `lib/test_work_state.sh`)
 
 Codex discovers maintained handoff/kickoff and voice skills directly, alongside its own
-`co-review`, `claude-plan-review`, `claude-spec-review`, and the installed
+`review-change`, `co-review`, `claude-plan-review`, `claude-spec-review`, and the installed
 `herdr-orchestration` compatibility entrypoint. The canonical Claude-led
 workflow is `claude/skills/herdr-orchestration/SKILL.md`. ECC and Superpowers
 remain independent native plugins. TDD, systematic debugging, and verification
@@ -404,8 +405,8 @@ ordinary removals continue through each runtime's approval policy.
 Herd resolves model and effort together through `claude/hooks/agent_runtime.py`.
 Claude controls, plans, and implements by default. Codex UI implementation uses
 the shared skill's explicit Astra/high override; Terra/high remains the general
-Codex implementation default. Luna/medium serves bounded reads; Sol/high is a
-configured skeptic or routine alternative. Critical review uses xhigh explicitly.
+Codex implementation default. Luna/medium serves bounded reads; Sol/high is the
+Codex development-review route. Critical review uses xhigh explicitly.
 A running controller keeps its actual launch model/effort until restarted.
 Requested settings and observed runtime evidence are reported separately.
 

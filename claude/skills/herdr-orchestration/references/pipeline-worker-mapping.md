@@ -28,7 +28,7 @@ is tracked separately.
 | codex-plan-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve               |
 | implement                 | implementation       | sonnet/high      | Claude  | auto + per-task review            |
 | implement, UX/UI override | codex implementation | gpt-6-astra/high | Codex   | fresh Claude review before commit |
-| implementation review     | reviewer             | opus/high        | Claude  | auto, blocks on findings          |
+| implementation review     | development_reviewer | sonnet/high      | Claude  | task-local advisory review; blockers return to development |
 | voice pass (outward text) | codex voice          | gpt-6-astra/high | Codex   | auto, before the write            |
 | co-review, Claude half    | reviewer             | opus/high        | Claude  | verify each finding               |
 | co-review, skeptic        | skeptic              | opus/high        | Claude  | verify each finding               |
@@ -39,13 +39,20 @@ The planner's `fable/high` carries a configured `opus/xhigh` fallback for when
 fable is unavailable. One planning worker spans brainstorm, spec and plan --
 not three dispatches.
 
+Native Codex `implementation-review` resolves the same
+`development_reviewer` role to `gpt-5.6-sol/high`. Dispatch this step through
+`route --step implementation-review`; the Herd lifecycle continues to store
+the task worker as `review`.
+
 ## Deviating from the defaults
 
 Two axes raise effort within the role's chosen model. Neither lowers it.
 
-- `risk=critical` -- blast radius. Restricted to `reviewer`, `skeptic`, `think`.
+- `risk=critical` -- blast radius. Restricted to `development_reviewer`,
+  `reviewer`, `skeptic`, `think`.
 - `difficulty=hard` -- how much thinking the task needs. Available to `planner`,
-  `implementation`, `reviewer`, `skeptic`, `think`. Supplied explicitly through
+  `implementation`, `development_reviewer`, `reviewer`, `skeptic`, `think`.
+  Supplied explicitly through
   `--config-json`; the orchestrator may propose a level but a human confirms it,
   and the proposal is recorded alongside the outcome so the agreement rate is
   measurable before the confirmation step is retired.

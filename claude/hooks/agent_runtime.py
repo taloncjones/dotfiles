@@ -32,6 +32,7 @@ CODEX_ROUTES = {
     "controller": ("gpt-6-astra", "high"),
     "planner": ("gpt-6-astra", "high"),
     "reviewer": ("gpt-6-astra", "high"),
+    "development_reviewer": ("gpt-5.6-sol", "high"),
     "skeptic": ("gpt-6-astra", "high"),
     "implementation": ("gpt-5.6-terra", "high"),
     "read_only": ("gpt-5.6-luna", "medium"),
@@ -43,6 +44,7 @@ CLAUDE_ROUTES = {
     "controller": ("opus", "medium"),
     "planner": ("fable", "high"),
     "reviewer": ("opus", "high"),
+    "development_reviewer": ("sonnet", "high"),
     "skeptic": ("opus", "high"),
     "implementation": ("sonnet", "high"),
     "read_only": ("haiku", "medium"),
@@ -77,13 +79,20 @@ if _UNKNOWN_FALLBACK_ROLES:
         f"unknown fallback role in defaults: {min(_UNKNOWN_FALLBACK_ROLES)}"
     )
 
-CRITICAL_ROLES = ("reviewer", "skeptic", "think")
+CRITICAL_ROLES = ("reviewer", "development_reviewer", "skeptic", "think")
 # Difficulty escalates effort within the role's model. The gateway is excluded on
 # purpose: it runs at medium so routing judgment stays cheap and the budget lands
 # on specialists. The mechanical and read_only tiers are excluded because they are
 # human-designated per task -- a task too hard for them should not have been
 # designated mechanical or read_only.
-DIFFICULTY_ROLES = ("planner", "implementation", "reviewer", "skeptic", "think")
+DIFFICULTY_ROLES = (
+    "planner",
+    "implementation",
+    "reviewer",
+    "development_reviewer",
+    "skeptic",
+    "think",
+)
 CONFIG_KEYS = (
     "routes",
     "fallbacks",
@@ -104,7 +113,8 @@ PIPELINE_ROUTES: dict[str, str] = {
     "spec-review": "reviewer",
     "plan-review": "reviewer",
     "implement": "implementation",
-    "implementation-review": "reviewer",
+    "implementation-review": "development_reviewer",
+    "review-change": "development_reviewer",
     "co-review": "reviewer",
     "gateway": "controller",
     "read-only": "read_only",

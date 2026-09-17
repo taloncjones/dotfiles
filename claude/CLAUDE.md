@@ -174,9 +174,10 @@ orders below are deliberate policy, not hints.
 - For Herd work, Claude is the default controller, planner, and general
   implementer. Codex supplies bounded UI implementation, prose, and independent
   review through the canonical `claude/skills/herdr-orchestration/SKILL.md`
-  recipe; a fresh independent Claude reviewer must approve Codex UI edits.
-  Explicit user standalone runtime choices and existing review gates remain in
-  force.
+  recipe; a fresh independent Claude `review-change` reviewer must approve
+  Codex UI edits for task-local readiness. Final co-review remains required for
+  a finished PR. Explicit user standalone runtime choices and existing review
+  gates remain in force.
 - Run verification-before-completion before claiming work is done.
 
 ## Code Design

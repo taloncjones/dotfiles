@@ -71,7 +71,7 @@ approval.
 | `claude/commands/jira.md`, `comment`                                      | jira-comment                 | the comment text               |
 | `claude/skills/ship/SKILL.md`, step 4 summary and any PR comment it posts | pr-comment                   | the comment body               |
 | `claude/skills/post-merge/SKILL.md`, step 4 resolution comment            | jira-comment                 | the resolution comment         |
-| Herdr reviewer brief findings summary (the `co-review` report comment)    | pr-comment                   | the findings summary           |
+| Herdr review-change findings summary (when posted as a PR comment)        | pr-comment                   | the findings summary           |
 | Jira ticket creation (`/start`, `reconcile` backfill)                     | jira-title, jira-description | summary and description        |
 
 ## Notes

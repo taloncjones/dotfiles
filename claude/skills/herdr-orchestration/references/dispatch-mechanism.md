@@ -52,7 +52,10 @@ Default for dispatched Herd work (not just `/goal`):
 
 - Brainstorm design-direction: HUMAN gate.
 - spec -> codex-spec-review -> writing-plans -> codex-plan-review -> implement ->
-  per-task/co-review: Codex is the review gate, findings auto-resolved.
+  per-task/review-change: one fresh development reviewer reports blockers,
+  advisories, and coverage. Only blockers require deliberate repair; task-local
+  approval is not PR approval.
+- Final co-review: the finished-PR gate before an authorized merge.
 - Merge: HUMAN gate (fresh go).
 - Interaction: gateway relay, a single channel. The worker surfaces
   questions/status to the gateway; the human talks only to the gateway, which

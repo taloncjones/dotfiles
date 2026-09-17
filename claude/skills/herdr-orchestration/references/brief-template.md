@@ -91,7 +91,7 @@ When you finish, pause, or fail this phase:
    `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
    NOT open a PR or merge. Your `emit-done` record is the ONLY completion
    signal; the orchestrator detects it on its next check-in and drives what
-   comes next (review dispatch, phase advance, surface-for-merge).
+   comes next (review dispatch, phase advance, task-local readiness).
 
 Do not report completion any other way -- the orchestrator only recognizes
 this record.
@@ -214,27 +214,30 @@ with the task section and close replaced:
 
 ```
 You are `<agent-name>` reviewing task `<task_id>` in repo `<repo_slug>` at
-HEAD `<review_head_sha>`.
+HEAD `<review_head_sha>` against base `<base_sha>`.
 
 ## Task
-Run the native `co-review` skill in REPORT-ONLY mode over frozen inputs for
-this revision: both Claude and Codex finders, then bounded adversarial verification,
-but do NOT apply fixes -- report only, so you never edit the branch you review
-(fixing here would advance HEAD and loop review). You are a fresh agent in the
-task's own worktree; that plus co-review's Codex model is the independence.
-Classify every finding as blocking or advisory.
+Run the native `review-change` skill over this revision's relevant diff,
+intended behavior, and affected callers. You are a fresh agent in the task's
+own worktree. Report blocking findings, useful advisories, coverage gaps, and
+safe reproduction evidence. Do not edit the branch, invoke co-review or another
+reviewer, post externally, push, merge, or open a PR.
 
 ## Close
 When review is complete:
 1. Run (`--blocking-count` is the number of findings you classified as
    blocking; set `--outcome changes-requested` whenever it is non-zero):
-   `<core-command> emit-review <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path to full co-review output> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
+   `<core-command> emit-review <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path to review-change findings> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
+   Emit `changes-requested` with the actual blocking count (zero when there
+   are no concrete blockers) for incomplete, timed-out, or missing evidence.
+   Do not emit `approved` in those cases.
 2. Then STOP and go idle -- hand back to the orchestrator. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
    NOT apply fixes, push, merge, or open a PR. Your `emit-review` record is
    the ONLY signal; the orchestrator reads it on its next check-in and drives
-   what comes next (re-dispatch on changes-requested, surface-for-merge on
-   approved).
+   what comes next (deliberate repair on changes-requested, task-local
+   readiness on approved). `approved` is not PR approval and never authorizes
+   merge.
 
 Never push, merge, or open a PR.
 ```

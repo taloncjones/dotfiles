@@ -183,6 +183,37 @@ class StopGateTests(unittest.TestCase):
         self.assertIn("--launch-id review-1", result["command"])
         self.assertIn("--outcome '<approved|changes-requested>'", result["command"])
 
+    def test_native_development_reviewer_accepts_exact_review_record(self):
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+        }
+        self._write_index("review")
+        self._write_task([self.entry, review])
+        record = {
+            "task_id": self.task_id,
+            "workspace_id": self.workspace,
+            "agent": review["agent"],
+            "phase": review["phase"],
+            "outcome": "approved",
+            "reviewed_head_sha": self.head_sha,
+            "launch_id": review["launch_id"],
+            "runtime": review["runtime"],
+            "pane_id": review["pane_id"],
+            "source_head_sha": review["source_head_sha"],
+            "ts": "2026-09-07T12:00:01Z",
+        }
+        (self.rd / "tasks" / f"{self.task_id}.review.json").write_text(
+            json.dumps(record)
+        )
+
+        result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result["action"], "allow")
+
     def test_native_account_mismatch_refuses_without_exposing_identity(self):
         self._write_task([{**self.entry, "account_id": "foreign-account"}])
         self._write_done()

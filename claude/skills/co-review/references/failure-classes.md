@@ -37,9 +37,11 @@ change.
   untracked files the user owns.
 - Fetch/ref races: a base ref moving between resolution and use; stale
   local refs standing in for remote state.
-- Replayable-file authority: authority decisions that trust replayable or
-  reconstructible files over durable registries; high-water counters or
-  generation fences that can move backward.
+- Replayable-file authority: stale or reconstructible evidence that can stand
+  in for a fresh independently retained identity, including generation fences
+  or high-water counters that can move backward. Judge the control against the
+  declared threat model and single-coordinator scope; do not assume a durable
+  registry is required.
 - Resume/retry revalidation: resume or retry paths that skip live
   revalidation the first-run path performs (SHA, approval, occupancy,
   lease ownership).

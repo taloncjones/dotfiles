@@ -58,7 +58,7 @@ in this skill.
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-plan-review.XXXXXX")
-printf '%s\n' "/code-review frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Return severity, location, problem, concrete fix, and one verdict. Do not invoke co-review, another partner, or external actions." >"$PROMPT_FILE"
+printf '%s\n' "Independently review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Return severity, location, problem, concrete fix, and one verdict. Do not invoke co-review, another partner, skills, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime claude --role reviewer --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \

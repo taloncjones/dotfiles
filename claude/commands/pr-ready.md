@@ -11,46 +11,54 @@ Validate PR is complete, run tests, and post summary comments only if everything
 
 ## Instructions
 
-**Step 0: Co-review currency gate (blocking)**
+**Step 0: Active final-gate report (blocking)**
 
-The branch is not ready unless its latest co-review is APPROVE and current. Run
-the gate before anything else:
+This command accepts only an active co-review report and independently retained
+expected identity from the coordinating workflow. They are not PR comments,
+markers, or files reconstructed from historical data. If either is absent,
+unreadable, or belongs to an interrupted session, **STOP**: report "re-run
+co-review" and do not run later steps, launch a review, or post updates.
+Co-review removes its coordinator-owned expected identity when snapshot cleanup
+fails, so a cleanup-failed report is never active evidence for this command.
+
+Resolve the installed co-review helper root, then use its evaluator. Before
+evaluation, recheck the live PR's repository, number, full head, target branch,
+resolved base, and CI. Compare each to the independently retained expected
+identity. Refresh the active report's exact-head CI payload and digest, then
+evaluate the report against that expected file:
 
 ```bash
-set -o pipefail
-gh pr view --json number,headRefOid,baseRefName,author
-gh api user -q .login                          # authenticated reviewer identity
-# Bind the review to the PR's REAL target repo. `baseRepository` is not a
-# pr-view field; read it from the pulls REST response, and compare it to
-# origin's actual fetch URL (not `gh repo view`, which honours GH_REPO / the
-# default repo and can lie). On a fork PR origin is the contributor's fork, so
-# resolving --base-ref there is wrong -> fail closed on mismatch or if either
-# side is unresolved.
-base_repo=$(gh api "repos/{owner}/{repo}/pulls/<number>" -q .base.repo.full_name)
-origin_repo=$(git remote get-url origin)   # normalize to owner/repo:
-#   strip any ssh host alias/user@host prefix and trailing .git, lowercase-compare
-[ -n "$base_repo" ] && [ "$origin_repo_normalized" = "$base_repo" ] || STOP
-# --slurp gives one array PER PAGE wrapped in an outer array; pipe to external
-# jq to flatten (gh rejects --slurp together with -q/--jq).
-gh api --paginate --slurp "repos/{owner}/{repo}/issues/<number>/comments" \
-  | jq '[.[][] | {author: .user.login, created_at, id, body}]' > comments.json
-uv run --no-project python <co-review>/scripts/review.py resolve-base \
-  --repo "$PWD" --base-ref <baseRefName> --head <headRefOid>   # -> {base}
-uv run --no-project python <co-review>/scripts/pr_ready_gate.py \
-  --comments comments.json --head <headRefOid> --base <resolved-base> \
-  --base-ref <baseRefName> \
-  --trusted-author <pr-author-login> --trusted-author <gh-login>
+test -f "$ACTIVE_CO_REVIEW_REPORT" && test -f "$EXPECTED_IDENTITY" || exit 2
+GATE_REPORT="$REVIEW_ROOT/claude/skills/co-review/scripts/gate_report.py"
+REVIEW_HELPER="$REVIEW_ROOT/claude/skills/co-review/scripts/review.py"
+gh pr view --json number,headRefOid,baseRefName,statusCheckRollup > live-pr.json
+# Resolve BASE_REPO from pulls REST .base.repo.full_name, normalize and compare
+# it with origin's real fetch URL. Extract PR_NUMBER, HEAD, and BASE_REF from
+# live-pr.json, then resolve BASE with review.py resolve-base for HEAD/BASE_REF.
+TREE=$(git rev-parse "$HEAD^{tree}")
+uv run --no-project python - "$EXPECTED_IDENTITY" "$BASE_REPO" "$PR_NUMBER" "$HEAD" "$BASE" "$BASE_REF" "$TREE" <<'PY'
+import json
+import sys
+
+expected = json.load(open(sys.argv[1]))
+actual = dict(zip(("repository", "pr_number", "head", "base", "base_ref", "tree"), sys.argv[2:]))
+for key, value in actual.items():
+    if expected.get(key) != (int(value) if key == "pr_number" else value):
+        raise SystemExit(f"active identity changed: {key}")
+PY
+# Normalize statusCheckRollup into the strict CI envelope with the actual
+# headRefOid, required check_runs/status_contexts arrays, and each returned
+# check identity/status/conclusion or context identity/state. Refresh the
+# report's exact-head CI artifact and recorded digest before evaluate.
+uv run --no-project python "$GATE_REPORT" evaluate \
+  --report "$ACTIVE_CO_REVIEW_REPORT" --expected "$EXPECTED_IDENTITY"
 ```
 
-PASS requires origin's real fetch URL == the PR base repository, and the latest
-trusted marker `verdict=APPROVE`, `sha == headRefOid`, `base == resolved base`,
-and `base_ref == baseRefName`. On FAIL (base-repo mismatch/unresolved, stale
-head, retarget, missing/CHANGES marker, or ANY lookup/API error -- the gate
-fails closed), **STOP**: report "re-run co-review" and do not run the steps below
-or post any Jira/PR-body updates.
-
-A PASS licenses merging THAT head. Pass the marker's `sha` to
-`gh pr merge --match-head-commit` so the server enforces it.
+Only evaluator `APPROVE` permits the remaining readiness checks. Any mismatch,
+missing active evidence, evaluator `CHANGES`/`INCOMPLETE`, or CI failure stops
+with re-run co-review guidance. Evaluator approval does not authorize a merge:
+explicit user merge permission, required human approvals, current CI, and
+server-side `--match-head-commit` remain separate gates.
 
 **Step 1: Verify PR exists**
 

@@ -133,7 +133,8 @@ def test_pipeline_steps_bind_to_policy_routes():
         "spec": ("claude", "planner", "fable", "high"),
         "plan": ("claude", "planner", "fable", "high"),
         "implement": ("claude", "implementation", "sonnet", "high"),
-        "implementation-review": ("claude", "reviewer", "opus", "high"),
+        "implementation-review": ("claude", "development_reviewer", "sonnet", "high"),
+        "review-change": ("codex", "development_reviewer", "gpt-5.6-sol", "high"),
         "gateway": ("claude", "controller", "opus", "medium"),
         "read-only": ("claude", "read_only", "haiku", "medium"),
         "spec-review": ("codex", "reviewer", "gpt-6-astra", "high"),
@@ -222,6 +223,36 @@ def test_critical_routes_are_explicit_xhigh():
         assert route["effort"] == "xhigh", route
         assert route["quality_floor"] == "xhigh", route
         assert route["risk"] == "critical", route
+
+
+def test_development_reviewer_routes_normal_and_critical():
+    assert runtime.CODEX_ROUTES["development_reviewer"] == ("gpt-5.6-sol", "high")
+    assert runtime.CLAUDE_ROUTES["development_reviewer"] == ("sonnet", "high")
+    for selected_runtime, expected_model, capabilities in (
+        ("claude", "sonnet", None),
+        ("codex", "gpt-5.6-sol", codex_capabilities()),
+    ):
+        ordinary = runtime.resolve_route(
+            selected_runtime,
+            "development_reviewer",
+            capabilities=capabilities,
+        )
+        assert (ordinary["model"], ordinary["effort"], ordinary["risk"]) == (
+            expected_model,
+            "high",
+            "normal",
+        ), ordinary
+        critical = runtime.resolve_route(
+            selected_runtime,
+            "development_reviewer",
+            risk="critical",
+            capabilities=capabilities,
+        )
+        assert (critical["model"], critical["effort"], critical["quality_floor"]) == (
+            expected_model,
+            "xhigh",
+            "xhigh",
+        ), critical
 
 
 def test_parent_xhigh_is_not_inherited():
@@ -1494,6 +1525,7 @@ for name, test in (
     ("model catalog separates effort support from availability", test_model_catalog_discovers_effort_without_claiming_availability),
     ("Codex role table uses Astra, Terra and Luna", test_codex_role_table),
     ("critical review and think explicitly use xhigh", test_critical_routes_are_explicit_xhigh),
+    ("development reviewer routes normally and escalates only for critical risk", test_development_reviewer_routes_normal_and_critical),
     ("parent xhigh is not inherited", test_parent_xhigh_is_not_inherited),
     ("mechanical writing requires designation and review", test_mechanical_writing_needs_designation_and_review_gate),
     ("aliases, unsupported effort and diff-size risk reject", test_aliases_efforts_and_diff_size_risk_are_rejected),
