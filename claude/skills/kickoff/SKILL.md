@@ -34,11 +34,17 @@ invitation to fall back to another latest record.
 
 ## Reconcile and continue
 
-Read the returned brief in full. Report material Git drift and whether
-ownership is unchanged, changed or unverified. `--owner-id TOKEN` on verify
-must come from a fresh authoritative observation; the helper never queries or
-claims ownership. Do not treat an idle pane as a completed task or assume a
-saved controller lease remains valid.
+Read the returned brief in full.
+Adopt the record's `role` when it is set; it outranks the default lead role
+but not an explicit role in this session's own launch brief. Before acting
+on a `working:` brief, confirm no other pane or session still holds the
+task.
+
+Report material Git drift and whether ownership is unchanged, changed or
+unverified. `--owner-id TOKEN` on verify must come from a fresh authoritative
+observation; the helper never queries or claims ownership. Do not treat an
+idle pane as a completed task or assume a saved controller lease remains
+valid.
 
 Check referenced plans, review evidence, active workers and pending user
 instructions against the current task. The helper checks local HEAD/branch,

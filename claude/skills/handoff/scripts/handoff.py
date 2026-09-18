@@ -30,6 +30,9 @@ from workflow_context import (
 TASK_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 RECORD_PATTERN = re.compile(r"[0-9]{16,20}-[0-9a-f]{32}\Z")
 SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+ROLES = ("director", "lead", "worker", "reviewer")
+OPTIONAL_KEYS = {"role", "parent"}
+SUMMARY_CHARS = 80
 MAX_BRIEF_BYTES = 1 << 20
 MAX_RECORD_BYTES = 8 << 20
 RECORD_KEYS = {
@@ -230,8 +233,10 @@ def brief_content(path: Path, context: dict, scope: dict) -> str:
 def validate_record(
     record: dict, context: dict, scope: dict, task: str, record_id: str
 ) -> None:
+    keys = set(record)
     if (
-        set(record) != RECORD_KEYS
+        not RECORD_KEYS <= keys
+        or not keys <= RECORD_KEYS | OPTIONAL_KEYS
         or type(record.get("schema_version")) is not int
         or record["schema_version"] != 1
     ):
@@ -265,6 +270,15 @@ def validate_record(
         brief.encode()
     ).hexdigest() != record.get("brief_sha256"):
         raise ValueError("Handoff brief failed integrity verification")
+    if "role" in record and record["role"] not in ROLES:
+        raise ValueError("Handoff record has an unknown role")
+    if "parent" in record:
+        parent = record["parent"]
+        if not isinstance(parent, str):
+            raise TypeError("Handoff record has invalid parent task ID")
+        identifier(parent, TASK_PATTERN, "parent task ID")
+        if parent == task:
+            raise ValueError("Handoff record cannot be its own parent")
 
 
 def load_at(
@@ -368,7 +382,11 @@ def make_record(args, context: dict, scope: dict) -> dict:
     working_tree = working_state(args.repo)
     if repository_context(args.repo) != context:
         raise ValueError("Repository changed while preparing handoff")
-    return {
+    if args.parent is not None:
+        identifier(args.parent, TASK_PATTERN, "parent task ID")
+        if args.parent == args.task:
+            raise ValueError("Handoff record cannot be its own parent")
+    record = {
         "schema_version": 1,
         "record_id": f"{time.time_ns()}-{uuid.uuid4().hex}",
         "task_id": args.task,
@@ -384,6 +402,11 @@ def make_record(args, context: dict, scope: dict) -> dict:
         "brief_sha256": hashlib.sha256(brief.encode()).hexdigest(),
         "imported_from": str(args.brief_file.expanduser().absolute()),
     }
+    if args.role is not None:
+        record["role"] = args.role
+    if args.parent is not None:
+        record["parent"] = args.parent
+    return record
 
 
 def save(args, context: dict, scope: dict, directory: Path) -> dict:
@@ -396,7 +419,10 @@ def save(args, context: dict, scope: dict, directory: Path) -> dict:
             except FileNotFoundError:
                 pass
             else:
-                load_at(parent, context, scope, args.task)
+                previous, _ = load_at(parent, context, scope, args.task)
+                for key in OPTIONAL_KEYS:
+                    if key not in record and key in previous:
+                        record[key] = previous[key]
             record_id = record["record_id"]
             atomic_json_at(parent, f"{record_id}.json", record, exclusive=True)
             atomic_json_at(
@@ -457,6 +483,13 @@ def verify(args, context: dict, scope: dict, directory: Path) -> dict:
     }
 
 
+def summary_of(brief: str) -> str:
+    for line in brief.splitlines():
+        if line.strip():
+            return line.strip()[:SUMMARY_CHARS]
+    return ""
+
+
 def list_tasks(context: dict, scope: dict, directory: Path) -> dict:
     try:
         parent, _ = open_state_parent(directory / "unused", create=False)
@@ -479,6 +512,9 @@ def list_tasks(context: dict, scope: dict, directory: Path) -> dict:
                         "record_id": record_id,
                         "created_at": record["created_at"],
                         "status": "ready",
+                        "role": record.get("role"),
+                        "parent": record.get("parent"),
+                        "summary": summary_of(record["brief"]),
                     }
                 )
             except (OSError, TypeError, ValueError) as exc:
@@ -508,6 +544,8 @@ def arguments():
         if name == "save":
             command.add_argument("--brief-file", type=Path, required=True)
             command.add_argument("--base")
+            command.add_argument("--role", choices=ROLES)
+            command.add_argument("--parent")
     return parser.parse_args()
 
 

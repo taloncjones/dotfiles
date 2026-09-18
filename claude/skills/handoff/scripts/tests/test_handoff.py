@@ -677,6 +677,91 @@ class HandoffTests(unittest.TestCase):
         self.save("../escape", expect=1)
         self.assertFalse(self.state.exists())
 
+    def save_with(self, task, *flags, brief=None):
+        return self.run_cli(
+            "save", "--task", task, "--brief-file", str(brief or self.brief), *flags
+        )
+
+    def test_save_with_role_and_parent_round_trips_and_lists(self):
+        saved = self.save_with("worker-one", "--role", "worker", "--parent", "lead-task")
+        self.assertEqual(saved["record"]["role"], "worker")
+        self.assertEqual(saved["record"]["parent"], "lead-task")
+        loaded = self.load(task="worker-one")
+        self.assertEqual(loaded["record"]["role"], "worker")
+        self.assertEqual(loaded["record"]["parent"], "lead-task")
+        listed = self.run_cli("list")["tasks"]
+        self.assertEqual(
+            listed,
+            [
+                {
+                    "task_id": "worker-one",
+                    "record_id": saved["record"]["record_id"],
+                    "created_at": saved["record"]["created_at"],
+                    "status": "ready",
+                    "role": "worker",
+                    "parent": "lead-task",
+                    "summary": "Scope: finish the regression fix.",
+                }
+            ],
+        )
+
+    def test_save_without_role_omits_the_keys(self):
+        saved = self.save()
+        self.assertNotIn("role", saved["record"])
+        self.assertNotIn("parent", saved["record"])
+        listed = self.run_cli("list")["tasks"][0]
+        self.assertIsNone(listed["role"])
+        self.assertIsNone(listed["parent"])
+
+    def test_resave_inherits_role_and_parent_when_flags_omitted(self):
+        self.save_with("worker-one", "--role", "worker", "--parent", "lead-task")
+        second = self.save_with("worker-one")
+        self.assertEqual(second["record"]["role"], "worker")
+        self.assertEqual(second["record"]["parent"], "lead-task")
+
+    def test_resave_with_new_role_reassigns(self):
+        self.save_with("worker-one", "--role", "worker", "--parent", "lead-task")
+        second = self.save_with("worker-one", "--role", "reviewer", "--parent", "other-lead")
+        self.assertEqual(second["record"]["role"], "reviewer")
+        self.assertEqual(second["record"]["parent"], "other-lead")
+
+    def test_cli_rejects_unknown_role(self):
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT), "save", "--repo", str(self.repo),
+                "--runtime", "codex", "--task", "task-one",
+                "--brief-file", str(self.brief), "--role", "boss",
+            ],
+            env=self.env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid choice", result.stderr)
+
+    def test_save_rejects_self_parent_and_bad_parent_before_writing(self):
+        for parent in ("task-one", "../x"):
+            result = self.run_cli(
+                "save", "--task", "task-one", "--brief-file", str(self.brief),
+                "--parent", parent, expect=1,
+            )
+            self.assertIn("parent", result["error"].lower())
+        self.assertEqual(self.run_cli("list")["tasks"], [])
+
+    def test_validate_record_rejects_bad_role_parent_and_self_parent(self):
+        saved = self.save()
+        record = saved["record"]
+        context = record["repository"]
+        scope = saved["scope"]
+        record_id = record["record_id"]
+        for extra in ({"role": "boss"}, {"parent": "../x"}, {"parent": "task-one"}):
+            with self.assertRaises(ValueError):
+                handoff.validate_record({**record, **extra}, context, scope, "task-one", record_id)
+
+    def test_summary_is_first_non_blank_line_truncated(self):
+        self.brief.write_text("\n\n" + ("x" * 100) + "\nsecond line\n")
+        self.save()
+        listed = self.run_cli("list")["tasks"][0]
+        self.assertEqual(listed["summary"], "x" * 80)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
