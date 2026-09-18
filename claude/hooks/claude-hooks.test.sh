@@ -1268,6 +1268,7 @@ fi
 # Personal rules are always-on: none may carry a `paths:` front-matter key,
 # which would turn it into a path-scoped rule that silently stops loading.
 for rule in claude/rules/personal/*.md; do
+    [ -e "$rule" ] || continue
     if sed -n '1,/^---$/p' "$rule" | grep -q '^paths:'; then
         printf 'FAIL  rules: %s has paths: front matter\n' "$rule" >&2
         FAIL=$((FAIL + 1))
