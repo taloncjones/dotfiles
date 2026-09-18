@@ -13,6 +13,11 @@ helper timeout, malformed payload) exits 0 silently. Uses the account scope
 the helper derives from the repository; a deliberate --personal override in a
 work repository is not visible here, so those records are listed by running
 the helper by hand.
+
+This hook runs the helper with the session's own python3 (via sys.executable),
+so the notice depends on that interpreter being 3.11 or newer and otherwise
+silently does not appear, the same dependency the other SessionStart hooks
+that import workflow_context already have.
 """
 
 import json

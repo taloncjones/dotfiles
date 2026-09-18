@@ -752,8 +752,13 @@ class HandoffTests(unittest.TestCase):
         context = record["repository"]
         scope = saved["scope"]
         record_id = record["record_id"]
-        for extra in ({"role": "boss"}, {"parent": "../x"}, {"parent": "task-one"}):
-            with self.assertRaises(ValueError):
+        cases = (
+            ({"role": "boss"}, "unknown role"),
+            ({"parent": "../x"}, "parent task ID"),
+            ({"parent": "task-one"}, "own parent"),
+        )
+        for extra, pattern in cases:
+            with self.assertRaisesRegex(ValueError, pattern):
                 handoff.validate_record({**record, **extra}, context, scope, "task-one", record_id)
 
     def test_summary_is_first_non_blank_line_truncated(self):
