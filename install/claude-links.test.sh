@@ -200,6 +200,11 @@ if jget "$CFG/settings.json" "'permissions' in d and 'statusLine' in d"; then
 else
     fail "link path delivers template permissions/statusLine"
 fi
+if jget "$CFG/settings.json" "'Skill(review-change)' in d['permissions']['allow']"; then
+    pass "link path grants review-change skill permission"
+else
+    fail "link path grants review-change skill permission"
+fi
 if jget "$CFG/settings.json" "d['permissions']['deny'] == [] and 'Bash(rm:*)' not in d['permissions']['ask']"; then
     pass "link path drops the rm ask rule and deny floor"
 else

@@ -1,100 +1,81 @@
 ---
 name: ship
-description: Use when a branch or PR is implementation-complete and the user wants it taken all the way to merged-and-cleaned-up. Trigger on "ship this", "ship PR <n>", "take this to merge", "finish this PR off". Not for starting reviews alone (use co-review) or cleanup alone (use post-merge).
+description: Use when a branch or PR is implementation-complete and the user wants it taken through the explicit merge gate and cleanup.
 ---
 
-# Ship (review -> fix -> merge -> cleanup)
+# Ship
 
-One command for the standard delivery arc. Chains existing skills; the only
-human gate is the merge itself.
+Ship completes implementation, tests, release-version work, one final
+co-review, then asks for explicit merge permission. It never treats a comment
+or a historical review as present-session authority.
 
 ## Target resolution
 
-- PR number/URL given: ship **that PR**.
-- Otherwise: the current branch's open PR (`gh pr view`). No PR yet? Offer to
-  create one first (per global PR rules), then continue.
-- State the target, base branch, and linked Jira ticket (from branch name or PR
-  body) in one line before starting.
+- A PR number or URL selects that PR.
+- Otherwise use the current branch's open PR (`gh pr view`). If none exists,
+  offer to create one under the existing PR rules.
+- State the selected PR, target branch, and linked Jira ticket before work.
+- If the PR is already merged, go directly to `post-merge` cleanup.
 
-## Resume (cheap re-runs)
-
-Before step 1, run the PR-ready currency gate. First verify `origin` is the PR's
-base repository: read the base repo from the pulls REST response
-(`gh api repos/{owner}/{repo}/pulls/<n> -q .base.repo.full_name` -- `baseRepository`
-is not a `pr view` field) and compare it to origin's real fetch URL
-(`git remote get-url origin`, normalized to owner/repo -- not `gh repo view`,
-which honours `GH_REPO`). On a fork PR origin is the contributor's fork and
-resolving the base there is wrong -- FAIL closed on mismatch or if either side is
-unresolved. Fetch the PR's comments (`gh api --paginate --slurp
-repos/{owner}/{repo}/issues/{number}/comments | jq '[.[][] | {author:
-.user.login, created_at, id, body}]'` -- pipe to external `jq`, since `gh`
-rejects `--slurp` with `-q`; `--slurp` wraps the per-page arrays so `.[][]`
-flattens), resolve the target base (`review.py resolve-base --base-ref
-<baseRefName> --head <headRefOid>`), and run `scripts/pr_ready_gate.py --comments
-<file> --head <headRefOid> --base <resolved> --base-ref <baseRefName>
---trusted-author <pr-author> --trusted-author <gh-login>`. If it PASSes -- origin
-is the base repo and the latest trusted marker has `verdict=APPROVE`, `sha ==
-headRefOid`, `base == resolved base`, `base_ref == baseRefName` -- the review
-stands; skip step 1 and resume at step 2. Any FAIL (base-repo mismatch, newer
-commit, retarget, missing/CHANGES marker, or any lookup error -- the gate fails
-closed) means re-review.
-
-PR already `MERGED` (run died between merge and cleanup)? Jump straight to
-steps 5-6 — `post-merge` is propose-confirm-apply over observed state, so it
-only proposes whatever cleanup is actually left.
+For a PR, verify that `origin` is its real base repository using the pulls REST
+response and `git remote get-url origin`. A fork's `origin` cannot resolve the
+target base. Stop if either identity is unavailable or mismatched.
 
 ## Steps
 
-1. **Co-review.** Invoke the `co-review` skill on the target PR and run its
-   bounded re-review loop to APPROVE: fix all confirmed findings with verified
-   repros, re-run affected tests, push, then re-freeze and re-review until a
-   round leaves no blocking finding; escalate if it does not converge.
-   Compute the PR target with `gh pr view --json baseRefName` and pass
-   `--base-ref <baseRefName>` so the review diffs against the real merge-base;
-   warn if a supplied or local base diverges from the resolved target. Every PR
-   review entrypoint resolves and verifies the target branch before trusting a
-   marker -- never assume `origin` is the target without checking.
+1. **Complete the change.** Make only authorized implementation changes. Use
+   `review-change` for development feedback when useful; advisory feedback is
+   not an automatic fix queue. Resolve concrete blockers and run the relevant
+   tests before the final gate.
 
-2. **Verify.** Run the project's test suite locally, then wait for CI checks on
-   the PR head to be green. Do not proceed on red or pending-forever checks —
-   surface them instead.
+2. **Version work.** If the repository versions releases, make the authorized
+   version change now and rerun affected tests. Do not change a version after
+   final co-review. Skip when the repository has no release version.
 
-3. **Version bump (if the project versions releases).** Default to a PATCH
-   bump and fold the proposed version into the step-4 summary — the merge-gate
-   confirmation covers both. Ask separately only if MINOR/MAJOR seems
-   warranted. Skip silently if the repo has no version to bump.
+3. **Final gate.** Invoke `co-review` once against the live PR target, with its
+   real `baseRefName`. The active workflow retains the resulting report and its
+   independently created expected-identity file. `CHANGES` returns concrete
+   blockers to development. `INCOMPLETE` states the missing evidence. Do not
+   auto-fix and relaunch a full gate. An explicitly user-invoked
+   `co-review --fix` supplies its scoped repair authorization; existing
+   development authorization also covers that handoff. It uses its own bounded
+   coordinator policy, including one follow-up verification of repairs and
+   affected contracts with evidenced carried coverage. Exhaustion stops ship
+   and the outer development workflow. A changed head, diagnosis or resumed
+   session cannot renew the allowance; only new explicit user direction after
+   the stop can. Changed identity or interruption invalidates approval and is
+   a stop, not permission to automatically launch another gate.
 
-4. **Merge gate (human).** Present a one-screen summary: findings fixed, test
-   results, CI state, version change. Ask for explicit confirmation, then
-   **squash-merge** via `gh pr merge --squash --match-head-commit <the marker's sha>`.
+4. **Recheck gate evidence.** Immediately before presenting a merge-ready
+   result, fetch live PR head, base branch, target base, and CI. The active
+   report path and successfully finalized expected-identity path must both be
+   present from this same uninterrupted workflow. Cleanup failure invalidates
+   and removes the active expected identity, so it always requires a new gate.
+   Read the expected file and stop unless its
+   repository, PR number, head, base, base branch, and tree exactly equal the
+   live values. Refresh its exact-head CI artifact and digest, then
+   invoke `gate_report.py evaluate --report REPORT --expected EXPECTED`. The
+   co-review snapshot has already been verified and cleaned; this step checks
+   live source/PR identity and retained report artifacts, not a deleted manifest.
+   A changed identity, failed evaluation, absent active files, or session interruption
+   invalidates approval and stops this workflow. A fresh review needs the
+   caller authorization described above; historical PR comments never resume
+   this step.
 
-   `--match-head-commit` makes the server refuse the merge if the head moved after
-   the gate passed. A local re-read before merging is not enough: an ordinary push
-   between the read and the merge call would consume an unreviewed head.
+5. **Merge gate (human).** Present the findings disposition, test results, CI
+   state, version change, and active evaluator result. Ask for explicit merge
+   confirmation. Required human approvals remain separate from evaluator
+   approval. On confirmation, squash merge with
+   `gh pr merge --squash --match-head-commit <expected-head>` so the server
+   refuses a moved head.
 
-   If branch protection requires an external approval that is not yet in, do
-   not poll with model turns — start a zero-token background wait
-   (`run_in_background`) and present the gate when it fires:
-
-   ```bash
-   until [ "$(gh pr view <n> --json reviewDecision -q .reviewDecision)" = "APPROVED" ]; do
-     sleep 300
-   done
-   ```
-
-   If the session ends before approval lands, a later `/ship <n>` picks up at
-   step 2 via the resume rule above.
-
-5. **Cleanup.** Invoke the `post-merge` skill: worktree teardown, local +
-   remote branch deletion, Jira transition to Done, sprint/epic hygiene.
-
-6. **Exit state.** Confirm clean: no leftover worktree, no stale branch, Jira
-   reconciled. Report in 3 lines max.
+6. **Cleanup.** Invoke `post-merge`, then report remaining cleanup state.
 
 ## Notes
 
-- Stop and report at the first hard failure (red tests, blocked CI, merge
-  conflict). Do not auto-retry around a failing gate.
-- Never merge without the step-4 confirmation, even if the user said "ship it"
-  up front — "ship" authorizes the pipeline, the gate authorizes the merge.
-- Follow-ups discovered but not fixed here: file Jira tickets, not todo files.
+- Stop on a failed test, red or pending required CI, merge conflict, missing
+  active report, missing human approval, or evaluator failure.
+- `ship` authorizes the delivery workflow. The explicit step-5 confirmation
+  authorizes the merge.
+- Command-mode redesign, PR metadata automation, and `/ready` removal remain
+  deferred to the separate shipping-workflow change.

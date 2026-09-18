@@ -124,7 +124,7 @@ for the provider's `launch_env` mapping.
    message; triage/status still work read-only where possible.
 5. **Selected-runtime readiness (owner only, after config validation).**
    New native Claude and Codex dispatches use the selected runtime's resolver:
-   `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|read_only|mechanical|think> --risk <normal|critical>`.
+   `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|development_reviewer|read_only|mechanical|think> --risk <normal|critical>`.
    Step-to-worker defaults and the two effort-raising axes are in
    `references/pipeline-worker-mapping.md`.
    Inspect the returned readiness and capability evidence before dispatch;
@@ -450,9 +450,10 @@ resumes. A nonzero process exit, malformed JSON, `error` or `timeout` status,
 missing or nonzero `exit_code`, true `timed_out`, empty/non-string `result`, or
 any diff/status scope drift blocks the pass. Claude then validates the complete
 diff, status including untracked files, and applicable tests. A fresh
-independent Claude reviewer -- never the supervising worker -- must approve the
-Codex UI change before the Claude worker commits and emits its own lifecycle
-record. Frozen Claude + Codex co-review remains the final gate.
+independent Claude reviewer -- never the supervising worker -- must run
+`review-change` before the Claude worker accepts a Codex UI change and emits
+its own lifecycle record. The task-local result is not PR approval. Frozen
+Claude + Codex co-review remains the final finished-PR gate.
 
 ## 3. Triage (advisory only -- read-only)
 
@@ -610,8 +611,9 @@ An unmatched, stale, or missing `done.json`, a HEAD that disagrees, or a
 while its recorded `review_head_sha` equals current HEAD. If HEAD has advanced
 past it -- the branch moved during or after review, at any moment including
 just before a merge -- the verdict is stale. Recover it in three steps:
-(a) if a review agent for this task is still running, **stop it** (exit/kill the
-`rev-<...>` agent -- `herdr pane release-agent`, or `/exit` to its pane; do
+(a) if a review agent for this task is still running, **stop it** using its
+recorded agent and pane identity (send `esc` to the named `rev-<...>` agent,
+then send `/exit`; close that exact review pane if it remains live; do
 **not** `herdr workspace close`, which would tear down the shared task worktree),
 since the review is now moot -- do this on every stale reset, whether it lands on
 `completed` or `in-progress`, because a reset to `in-progress` will not
@@ -636,12 +638,10 @@ Report per-task status, workspace, latest note, and recommended next action.
 
 The review runs **in the task's own worktree**, not a separate workspace. git
 allows only one worktree per branch, so a second workspace on the branch is
-impossible (`herdr worktree open` just re-attaches to the impl workspace); and
-`co-review` already spins up independent Claude (`/code-review`) and Codex
-(`codex exec review`) contexts, so a separate reviewer workspace would duplicate
-what co-review provides. Independence comes from a **fresh review agent** (clean
-context, distinct from the impl session) plus co-review's Codex model, run
-**report-only** so the gate never edits its own subject.
+impossible (`herdr worktree open` just re-attaches to the impl workspace).
+Independence comes from a **fresh review agent** with clean context, distinct
+from the implementation session. It runs the bounded single-seat
+`review-change` skill and never edits its subject.
 
 Guard: `python3 "$CORE" status` reports `completed` and
 `python3 "$CORE" should-dispatch-review --repo-slug <slug> --task-id <task_id> --head-sha <sha>`
@@ -651,57 +651,92 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 
 **Reviewer-dispatch preflight (one review agent at a time).** Reconcile live
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
-already running in it (exit/kill the agent -- do **not** `herdr workspace close`,
-which would tear down the shared task worktree). There must be zero live review
-agents before you start one. Strict attempt validation rejects late writes; stopping the old reviewer
+already running in it by its recorded agent and pane identity (do **not** `herdr
+workspace close`, which would tear down the shared task worktree). There must be
+zero live review agents before you start one. Strict attempt validation rejects late writes; stopping the old reviewer
 also avoids wasting work and preserves one live reviewer per task.
 
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture the
    HEAD SHA as the intended `review_head_sha`.
-2. **Reuse the task's own worktree/workspace** (`<ws_id>`, the impl phase's).
-   The impl agent has handed off; free its root pane (send it `/exit`, or launch
-   in a fresh self-owned `pane split`) and start the review agent there -- no
-   `worktree open`, no new workspace. Do not resume the implementer while review
+2. **Reuse the task's own worktree/workspace** (`<ws_id>`, the impl phase's),
+   but launch the reviewer in a fresh self-owned `pane split` there. Its recorded
+   pane is the exact timeout target; never reuse the implementation root pane.
+   There is no `worktree open` and no new workspace. Do not resume the implementer while review
    is pending. (Should a `worktree open` ever be needed here despite the above,
    it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
    repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
    applies to every `worktree create`/`open`, no exceptions.)
-3. Reserve and launch a fresh review attempt through the adapter. Set the
+3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional`, then reserve and launch a
+   fresh review attempt through the adapter. This derives
+   `development_reviewer` (Claude Sonnet/high or Codex Sol/high) from the
+   selected runtime. `--provisional` is permitted only when availability or
+   effort capability is indeterminate; retain that observation as unknown and
+   block any result whose `ready` field remains false. Set the
    workspace index to `role: review`; preserve implementation completion and
    record `review_head_sha`. Set `review-dispatched` only when dispatch is
-   accepted. A failed attempt is visible and retryable. Refresh both agent
-   and workspace display metadata, including when reusing the implement pane.
+   accepted. A failed attempt is visible and retryable. The active coordinator
+   establishes the exact review deadline as this persisted native row's
+   `started_ns + 600_000_000_000` (600 seconds), keyed by `launch_id`; it
+   recomputes that value after a coordinator restart rather than adding a second
+   state field. This is the `600-second deadline`. Refresh both agent and
+   workspace display metadata.
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
-5. Prompt the review agent to run **`co-review` in report-only mode** against the
-   branch -- both finders (Claude and Codex native finders over the same frozen inputs)
-   plus the adversarial-verify stage, but **no fix application**: report only, so
-   the gate never edits the branch it reviews and cannot trigger a fix ->
-   re-review loop. (`co-review` stays herdr-agnostic -- the herdr-specific
-   `emit-review` call lives in this brief, not in the skill; if invoked outside a
-   Herdr session the review agent just runs co-review and reports.) Then
+5. Prompt the review agent to run **`review-change`** over the pinned base,
+   current diff, intended behavior, and affected callers. It reports blockers,
+   advisories, and coverage gaps after safe reproductions where useful. It may
+   consult relevant reference skills as permitted by `review-change`; it
+   never applies fixes, launches another reviewer, posts externally, or runs
+   final co-review. `review-change` is herdr-agnostic; the herdr-specific
+   `emit-review` call lives in this brief. Then
    `python3 "$CORE" emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path> --launch-id <launch_id> --runtime <runtime> --pane-id <pane_id> --source-head-sha <launch_source_head>`
-   (`<n>` = count of blocking findings; the merge gate rejects any non-zero
-   count even under `approved`), then the review agent goes idle and hands
-   back -- it does NOT run `/handoff`; `emit-review` is its only signal. Review
-   agent and orchestrator never push or open PRs. The verdict lands in
+   (`<n>` = count of actual blocking findings; incomplete or missing review
+   evidence emits `changes-requested` with `<n>` possibly zero and never emits
+   `approved`), then the review agent goes idle and hands back --
+   it does NOT run `/handoff`; `emit-review` is its only signal. Review agent
+   and orchestrator never push or open PRs. The verdict lands in
    `tasks/<task_id>.review.json`, separate from the impl `.done.json`.
-6. At the next check-in, read the reviewer's completion record. First confirm
-   it covers the dispatched revision: the reviewer's `reviewed_head_sha` must
+6. At every coordinator check-in while `review-dispatched`, enforce the bound
+   before reading a verdict. Resolve the latest `phase: review` native row and
+   require its task, workspace, launch, agent, pane, source HEAD, and
+   `review_head_sha` to match the dispatched attempt. If no exact accepted
+   review record exists at `started_ns + 600_000_000_000`, interrupt only that
+   agent: `herdr agent send-keys <recorded-agent> esc`, then
+   `herdr agent prompt <recorded-agent> /exit --wait --timeout 10000`. Wait at
+   most 10 seconds for that named agent; if it remains live, re-check the tuple
+   and run `herdr pane close <recorded-pane>`. Never use `release-agent` as an
+   interrupt and never close the workspace. Use `$CORE write-task` to carry the
+   full task record forward with `status: changes-requested`, report `review incomplete: 600-second
+   deadline, <launch_id>`, and never fabricate a review record, blocker count,
+   or approval. A late sidecar cannot change that non-approved status. Herd's
+   interactive start timeout bounds startup, not a running agent turn; exact-pane
+   close is the controller's available interruption. If it cannot confirm the
+   agent settled after close, report the detached-process risk and do not
+   relaunch or surface readiness until reconciliation.
+
+   Otherwise read the reviewer's completion record. First confirm it covers the
+   dispatched revision: the reviewer's `reviewed_head_sha` must
    equal both the dispatched `review_head_sha` and current HEAD. If any
    disagree (the branch advanced, or the reviewer logged the wrong SHA), the
    verdict is stale -- do **not** record it; apply the section-4 stale-verdict
    rule (reset to `completed`/`in-progress` and clear `review_head_sha`) so a
    fresh review dispatches. Only when all three SHAs agree:
-   - blocking findings -> `status: changes-requested`, event
-     `changes-requested`, surface the findings; a subsequent implementer
-     push to a new HEAD clears the dispatch guard so a fresh review runs
-     against the new `review_head_sha`.
-   - none blocking -> `status: reviewed`, event `reviewed`.
+   - `changes-requested` or blocking findings -> `status: changes-requested`,
+     event `changes-requested`, and surface the findings or incomplete evidence
+     for deliberate development repair. Run a scoped `review-change` only when
+     the repair needs fresh evidence; structural repairs return to design. An
+     exhausted final `co-review --fix` budget never resets or re-enters its gate
+     here. Record the stop in the task/handoff and return control to the user.
+     Diagnosis, a new head, a resumed session or this development branch of the
+     workflow cannot renew the allowance; require new explicit user direction
+     after the stop before another cycle.
+   - only `approved` with no blocking findings and complete evidence ->
+     `status: reviewed`, event `reviewed`. Advisories remain visible and do not
+     create an automatic fix queue.
 
-## 6. Surface for merge (human gate) -- only on `reviewed`
+## 6. Surface task-local readiness -- only on `reviewed`
 
-A task is surfaced as merge-ready only when `status: reviewed` AND
+A task has a completed task-local review only when `status: reviewed` AND
 `python3 "$CORE" confirm-review --repo-slug <slug> --task-id <task_id> --workspace <review_ws> --head-sha <sha>`
 exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb reads
 `tasks/<task_id>.review.json` and passes only when ALL hold: `outcome ==
@@ -710,54 +745,18 @@ dispatched review workspace (provenance); and the task record's dispatched
 `review_head_sha`, the review record's `reviewed_head_sha`, and live HEAD all
 equal `<sha>`. So an approved-with-blocking verdict, a foreign worker's record,
 or a branch advance after dispatch (even one where the reviewer logged the new
-live SHA) never clears the gate. Rely on the verb, never re-derive the check by
-hand.
+live SHA) never clears the task-local gate. Rely on the verb, never re-derive
+the check by hand.
 
-**Vibe-audit gate for grown resolutions.** co-review (section 5) gates the diff
-for BUGS; it does not check whether the change stayed honest to its plan. When a
-task reached `reviewed` only after a review-resolution cycle whose fixes grew
-beyond trivial -- new scope, new files/functions, chat-directed changes, not a
-one-line fix -- run `vibe-audit` on the resolution before surfacing merge-ready:
-those commits skipped brainstorm/spec/plan, which is exactly vibe-audit's domain
-(verified beliefs + test coverage, not bug-finding, so it complements rather than
-repeats co-review). A failing vibe-audit blocks the surface (the task stays
-`reviewed` but not merge-ready) and its findings feed a fix pass (a new HEAD ->
-fresh co-review); a clean vibe-audit, or a resolution trivial enough never to
-trigger it, clears the gate. Planned work that never grew past its plan needs no
-vibe-audit -- its front-pipeline gates already ran. `vibe-audit` is
-herdr-agnostic; the orchestrator just invokes it here as the last gate.
+This outcome is task readiness only. It is not PR approval, does not authorize
+publication or merge, and does not replace the final co-review for a finished
+PR. Product verification remains scoped to the task's requirements; it does not
+create an automatic advisory-fix or full-review loop.
 
-**Post-rebase contract check (speculative merge check).** After
-`confirm-review` and the vibe-audit gate clear, and before surfacing:
-`git fetch`, capture `MAIN_SHA` (`origin/<default>`) and live HEAD. A
-recorded `merge_check` with `result: "pass"` matching both exactly means
-skip and surface. Otherwise, in a scratch location OUTSIDE the task
-worktree: `git worktree add --detach <tmp> <head>`; `git -C <tmp> rebase
-<MAIN_SHA>`. On conflict: `git -C <tmp> rebase --abort`, record
-`result: "conflict"`. On a clean rebase:
-`python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
---worktree <tmp>` and record `result: "pass"` (exit 0) or `"fail"` (exit 1).
-Always `git worktree remove --force <tmp>` then `git worktree prune` (a
-failed removal is surfaced for manual cleanup but does not invalidate the
-result). Before recording or surfacing, recapture live HEAD and
-`origin/<default>`: if either moved during the check, discard the result
-(record nothing) and re-run next check-in. Write the `merge_check` object
-(`base_main_sha`, `branch_head_sha`, `result`, `ts`) via `write-task`,
-carrying all other record fields forward. Fetch/worktree/rebase
-infrastructure errors and verify exits 2/3 record NOTHING -- surface and
-retry next check-in; exit 4 (or an exit 5 despite a pinned record) is the
-integrity halt of section 4. Surface merge-ready ONLY on a matching
-`result: "pass"`; on `fail`/`conflict` the task stays `reviewed` unsurfaced,
-with the cause and the recommended fix path reported (rebase/fix -> new HEAD
--> stale-review reset -> fresh cycle). This is an advisory compatibility
-check, not a serializing queue: the human merge remains the serialization
-point. A grandfathered pinless task skips this check with the section-4
-`[WARNING]`. The branch itself never moves here, so this check can never
-trip the stale-review rule.
-
-Surface: "`<task_id>` reviewed clean @ `<sha>`. Ready for your review and
-merge." `changes-requested` is never surfaced as merge-ready. Merge, `/ship`,
-`/post-merge` remain human actions; `/post-merge` sets `merged`.
+Surface: "`<task_id>` review-change clean @ `<sha>`. Task-local review is
+complete; final co-review is still required before PR merge." `changes-requested`
+is not task-local readiness. Merge, `/ship`, `/post-merge` remain human actions;
+`/post-merge` sets `merged`.
 
 ## 7. Worker-created panes (self-managed)
 
@@ -814,13 +813,13 @@ role).
 | Planning worker (`plan`)   | fable -> opus                     | high                 | raw items only: brainstorm/spec/plan on the strong model so design judgment is never delegated to the cheap impl worker; skipped for plan-ready items |
 | Implementation worker      | sonnet -> opus                    | inherit              | cheap execution of an existing plan; no `--effort` flag passed, worker takes the CLI's own default                                                    |
 | Mechanical worker (`mech`) | haiku -> sonnet                   | inherit              | human-designated mechanical work, headless `claude -p`, turn+budget+wall-clock capped; spend in `tasks/<task_id>.spend.jsonl`                         |
-| Reviewer (co-review)       | opus -> sonnet                    | high                 | co-review report-only (Claude `/code-review` + Codex) in the task worktree, fresh agent; Opus Claude-half adds model diversity vs a Sonnet impl       |
+| Legacy reviewer (`review`) | opus -> sonnet                    | high                 | legacy wrapper only; new task reviews resolve `implementation-review` through the native runtime adapter |
 | Deep-think (`think`)       | fable -> opus                     | high (xhigh/max opt) | orchestrator-only bounded escalation (Deep-think escalation, below); `fable`/`opus` and `high`/`xhigh`/`max` only, never `inherit`                    |
 
 Fallback scaffolding: when Fable is unavailable (enterprise account, usage
 exhausted, or the current session is already Opus), fall back to Opus and
 set `thinking: adaptive`, relying on the design's explicit worker fan-out
-plus the codex spec/plan/co-review gates as the compensation for Opus
+plus the codex spec/plan and final co-review gates as the compensation for Opus
 standing in for Fable. This is a fully supported operating mode, not a
 degraded one.
 
@@ -913,7 +912,7 @@ milestone`) and needs splitting into tasks before anything can be kicked
 - Anything else the human explicitly asks to "escalate" or "deep-think".
   Kind `other`.
 - **Not eligible**: any decision with a documented path (kickoff, phase
-  advance, review dispatch, merge surface, mech relaunch); routine status;
+  advance, review dispatch, task-local readiness, mech relaunch); routine status;
   design work a `plan` worker is about to do at high effort anyway;
   anything a worker wants (workers hand back; `run-think` is
   orchestrator-only and a worker brief never carries it).
@@ -990,7 +989,7 @@ multi-agent fan-outs. Substrate decision table:
 A Workflow run is **in-turn helper work** (section 7's rule of thumb, at
 scale). It has no workspace, no index entry, no record; it never
 substitutes for a herdr phase or role -- the review gate always stays a
-fresh `rev-<t>` agent running co-review, and the orchestrator never
+fresh `rev-<t>` agent running review-change, and the orchestrator never
 dispatches a Workflow _instead of_ a worker. A Workflow launched by the
 orchestrator is read-only (analysis, triage support, decomposition
 drafting): the orchestrator authors no code and its Workflow agents write
@@ -1109,8 +1108,8 @@ the new `status`; that write is the authoritative record.
 | in-progress/blocked                          | Stop hint + `outcome: failed` or errored, no usable branch                     | `failed`                                       | failed                  | yes       |
 | in-progress/blocked/completed                | workspace+worktree gone, no completion                                         | `abandoned`                                    | abandoned               | yes       |
 | completed                                    | human/orch dispatch (guard: not already dispatched for this `review_head_sha`) | `review-dispatched`                            | review-dispatched       | no        |
-| review-dispatched                            | reviewer done (reviewed HEAD == dispatched == live), findings = blocking       | `changes-requested`                            | changes-requested       | no        |
-| review-dispatched                            | reviewer done (reviewed HEAD == dispatched == live), findings = none blocking  | `reviewed`                                     | reviewed                | no        |
+| review-dispatched                            | exact review evidence at dispatched/live HEAD: `outcome: changes-requested`, blockers, or incomplete evidence (including deadline) | `changes-requested`                            | changes-requested       | no        |
+| review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)             | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                   | (re-kickoff impl or resume)                    | in-progress             | no        |
 | reviewed                                     | human merges; `/post-merge`                                                    | `merged`                                       | merged                  | yes       |
