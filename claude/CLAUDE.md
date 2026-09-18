@@ -174,7 +174,13 @@ orders below are deliberate policy, not hints.
   lives in the plan/spec Markdown and renders natively in GitHub; reach for an
   HTML/SVG tool only when presentation or interaction matters. In autonomous
   mode, still produce both diagrams and surface them at the status gates, but do
-  not block.
+  not block. When a diagram records an architectural decision future work depends
+  on -- not a throwaway review question -- persist it in the repo (a Markdown file
+  under `docs/` or beside the code it describes) and reference it from the repo's
+  `CLAUDE.md`/`AGENTS.md`; then read it before planning and update it in the same
+  change when the structure shifts, so it stays living context rather than a stale
+  artifact. The same persist-and-reference habit applies to any other
+  documentation worth keeping current.
 - Autonomous mode (under `/goal`, or when told "be autonomous" / "don't rely on
   me"): run the WHOLE pipeline end-to-end without pausing at the spec/plan gates.
   Codex becomes the review gate -- run `codex-spec-review` / `codex-plan-review`,
