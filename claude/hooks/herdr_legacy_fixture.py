@@ -7,6 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import herdr_capabilities as herdr_caps
 import herdr_orch_core as core
 from workflow_context import open_state_parent
 
@@ -42,6 +43,15 @@ def _disposable(root):
     from "the gate is disabled", and that ambiguity has already cost two
     reviewers most of a pass chasing 90 red tests with no diagnostic.
     """
+    home = Path(os.path.realpath(os.path.expanduser("~"))).resolve()
+    if root == home or home in root.parents:
+        # Whatever the roots say -- the rule git_remote_guard.under_root and
+        # scratch_policy both already apply. TMPDIR can point under HOME, and
+        # an attacker seat used exactly that (TMPDIR=$HOME) as a bypass in an
+        # earlier round, so the temp-root test alone admits the one tree we
+        # least want to write into.
+        sys.stderr.write(f"[fixture] not seeding: {root} is under HOME\n")
+        return False
     tmp = Path(os.path.realpath(tempfile.gettempdir())).resolve()
     if tmp not in root.parents:
         sys.stderr.write(
@@ -216,7 +226,7 @@ def _unpublish_marker(marker):
 
 
 def _publish_gate(rd, slug, account_id):
-    core.write_json_atomic(core.herdr_caps.gate_path(rd), {
+    core.write_json_atomic(herdr_caps.gate_path(rd), {
         "schema_version": 1,
         "repo_slug": slug,
         "repo_id": None,

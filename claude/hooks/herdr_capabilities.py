@@ -205,14 +205,19 @@ def _read_procedure_text(path):
     """
     fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "rb") as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
             raise ValueError("procedure marker must be a regular file")
         # LIMIT + 1, then refuse. A silent truncation at the bound turns an
         # INVALID file into a VALID advertisement: a capability-1 marker,
         # padding, and a second marker past the cutoff read as 1, where
         # parsing the whole file returns None under the fail-closed
         # duplicate-marker rule. Over-length must be refused, not trimmed.
-        raw = stream.read(PROCEDURE_READ_LIMIT + 1)
+        # min(size, LIMIT) + 1, not LIMIT + 1: CPython allocates whatever is
+        # asked for, so the flat form reserved 4MB to read an 83KB file. The
+        # over-length test below is unaffected -- a file that grew between the
+        # fstat and the read returns more than st_size and still trips it.
+        raw = stream.read(min(info.st_size, PROCEDURE_READ_LIMIT) + 1)
     if len(raw) > PROCEDURE_READ_LIMIT:
         raise ValueError("procedure marker is too large to read")
     return raw.decode("utf-8")
@@ -301,7 +306,8 @@ def _read_gate_text(path):
             dir_fd=parent,
         )
         with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
                 raise ValueError("gate record must be a regular file")
             # Bounded, for the reason the procedure reader is. The sibling got
             # this and the gate reader did not: an unbounded read of a
@@ -310,7 +316,7 @@ def _read_gate_text(path):
             # whose failure mode is a hook timeout, which proceeds. A
             # canonical record with a full-length slug and 32-hex ids is 181
             # bytes, so 64 KiB is four decimal orders of headroom.
-            raw = stream.read(GATE_READ_LIMIT + 1)
+            raw = stream.read(min(info.st_size, GATE_READ_LIMIT) + 1)
         if len(raw) > GATE_READ_LIMIT:
             raise ValueError("gate record is too large to be a record")
         return raw.decode("utf-8")

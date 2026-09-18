@@ -149,15 +149,6 @@ def seed_marker(scope, capability, extra_root=None):
     return os.path.join(skilld, "SKILL.md")
 
 
-def remove_marker(scope, extra_root=None):
-    skilld = contained(
-        os.path.join(scope["account_root"], "skills", "herdr-orchestration"), extra_root)
-    contained(os.path.join(skilld, "SKILL.md"), extra_root)
-    dirfd = os.open(skilld, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        os.unlink("SKILL.md", dir_fd=dirfd)
-    finally:
-        os.close(dirfd)
 HELPER
 
 # B5 regression: recursively run this same suite, with a stubbed `mktemp`
@@ -862,7 +853,7 @@ import importlib.util, json, os, sys, hashlib, shutil, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, "claude/hooks")
 sys.path.insert(0, os.environ["FIXTURE_ROOT"])
-from fixture_marker import remove_marker, seed_marker
+from fixture_marker import seed_marker
 iso = tempfile.mkdtemp()
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
 os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
@@ -959,7 +950,7 @@ lead_setup() {
 import hashlib, json, os, sys
 sys.path.insert(0, "claude/hooks")
 sys.path.insert(0, os.environ["FIXTURE_ROOT"])
-from fixture_marker import remove_marker, seed_marker
+from fixture_marker import seed_marker
 os.environ["CLAUDE_CONFIG_DIR"] = os.environ["LS_CFG"]
 import orch_edit_guard as g
 e = os.environ
@@ -1314,7 +1305,7 @@ import importlib.util, json, os, sys, hashlib, shutil, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, "claude/hooks")
 sys.path.insert(0, os.environ["FIXTURE_ROOT"])
-from fixture_marker import remove_marker, seed_marker
+from fixture_marker import seed_marker
 iso = tempfile.mkdtemp()
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
 os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
@@ -1382,7 +1373,6 @@ finally:
 # Case C: gate enabled and guard at level, but the installed PROCEDURE is
 # under-level. The guard must withhold on its own, not only at admission --
 # this is the lock that used to exist at claim time only.
-remove_marker(scope, iso)
 seed_marker(scope, 0, iso)
 is_lead, roots = g.lead_authority(sid, "claude", scope)
 assert is_lead is True and roots == [], ("case-c-authority", is_lead, roots)

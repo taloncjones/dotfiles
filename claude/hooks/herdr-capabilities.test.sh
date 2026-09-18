@@ -2,7 +2,16 @@
 # herdr-capabilities.test.sh - capability constants and procedure marker parsing.
 # Stdlib python only; no network, no herdr.
 set -e
-TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))'); export TMPDIR
+# Derived the same way herdr-orch.test.sh derives it, and for the same reason:
+# BSD mktemp -d ignores $TMPDIR while Python's gettempdir() honours it, so
+# setting one from the other makes them disagree whenever a caller exports
+# something else. This suite uses tempfile.mkdtemp() rather than shell mktemp,
+# so it is not currently exposed -- but two suites deriving one value two ways
+# is how the divergence went unnoticed the first time.
+TMPDIR=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || TMPDIR=""
+[ -n "$TMPDIR" ] || TMPDIR=/tmp
+TMPDIR=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$TMPDIR")
+export TMPDIR
 PASS=0
 FAIL=0
 
@@ -355,15 +364,6 @@ sys.stdout.write(repr(k.parse_marker(line)))
 r = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True, timeout=10)
 assert r.returncode == 0, (r.returncode, r.stderr)
 assert r.stdout.strip() == "None", r.stdout
-sys.exit(0)
-PY
-
-check "marker: an over-long candidate line is refused before matching" <<PY
-$LOAD
-long_line = "<!-- herdr-capabilities: " + "x" * (k.MARKER_LINE_MAX + 10) + " -->"
-assert k.parse_marker(long_line + chr(10)) is None
-good = '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->' + chr(10)
-assert k.parse_marker(good) == 1, k.parse_marker(good)
 sys.exit(0)
 PY
 

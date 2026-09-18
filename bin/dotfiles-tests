@@ -33,6 +33,10 @@ SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )
 DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
 cd "$DOTFILES"
 
+# Snapshot for the litter check at the end. Captured before any suite runs so
+# uncommitted work in progress is the baseline rather than a false positive.
+before_status=$(git status --porcelain 2>/dev/null || true)
+
 # interpreter<space>path, relative to repo root. Keep in sync when adding a
 # *.test.sh or a skill test; grep -rl 'passed, .* failed' is a quick audit.
 SUITES="
@@ -110,6 +114,24 @@ while read -r interp path; do
 done <<EOF
 $SUITES
 EOF
+
+# Did a suite litter the checkout? Compared against the snapshot taken before
+# the loop, not against "clean", because running this with uncommitted work is
+# normal. A suite that redirects to a bare relative path writes into whatever
+# cwd the runner has, which is the repo root -- and one such file reached a
+# commit via `git add -A`. Its content was a test's stderr, which a different
+# failure could make carry a temp path or an account id. Diffing the status
+# catches that for every suite rather than for one filename.
+after_status=$(git status --porcelain 2>/dev/null || true)
+if [ "$after_status" != "$before_status" ]; then
+    echo "[X] a suite changed the working tree:"
+    printf '%s\n' "$after_status" | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf '%s\n' "$before_status" | grep -qxF "$line" || printf '    %s\n' "$line"
+    done
+    fail=$((fail + 1))
+    failed_suites="$failed_suites working-tree-litter"
+fi
 
 echo "=== dotfiles-tests: $pass suites passed, $fail failed"
 if [ "$fail" -ne 0 ]; then

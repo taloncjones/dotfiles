@@ -235,21 +235,21 @@ def lead_admissible(rd, slug, account_id, caller_scope, workspace_root, seen=Non
     memoizes the resolution per workspace, so a session holding several leases
     pays once per distinct workspace rather than once per lease.
     """
-    pre_ok, _pre_why = herdr_caps.gate_enabled(
-        rd, slug, account_id, herdr_caps.IDENTITY_DEFERRED)
-    if not pre_ok:
+    config_dir = Path(caller_scope["account_root"])
+    try:
+        # The SAME admission, minus the one clause the sentinel defers -- not a
+        # hand-copy of its cheap terms. An earlier version of this function
+        # carried a partial copy that drifted into a dead `1 < 1` test and
+        # never consulted the procedure at all, which is why the docstring
+        # above says to delegate. A second copy drifts the same way: add a
+        # fourth component to the required set and the copy admits what the
+        # real check refuses.
+        pre_admit, _pre_why, _pre_levels = core.task_lead_admission(
+            rd, slug, account_id, config_dir, herdr_caps.IDENTITY_DEFERRED)
+    except Exception:  # noqa: BLE001 -- an undecidable admission withholds the root
         return False
-    # Then the capability levels, still before any subprocess. Admission
-    # requires ALL of gate, core, guard and procedure, so testing the cheap
-    # terms first cannot change a verdict -- it only avoids paying six git
-    # subprocesses to reach a refusal already determined. Two constants and
-    # one bounded read, against up to 30 seconds of resolution outside this
-    # hook's budget. The gate stays first, because the procedure read touches
-    # a path an attacker may control and the gate check does not.
-    for level in (herdr_caps.CORE_CAPABILITY, herdr_caps.GUARD_CAPABILITY,
-                  herdr_caps.procedure_capability(Path(caller_scope["account_root"]))):
-        if level is None or level < herdr_caps.REQUIRED_CAPABILITY:
-            return False
+    if not pre_admit:
+        return False
     if seen is None:
         seen = {}
     if workspace_root not in seen:
@@ -262,7 +262,7 @@ def lead_admissible(rd, slug, account_id, caller_scope, workspace_root, seen=Non
         return False
     try:
         admit, _reason, _levels = core.task_lead_admission(
-            rd, slug, account_id, Path(caller_scope["account_root"]), repo_id)
+            rd, slug, account_id, config_dir, repo_id)
     except Exception:  # noqa: BLE001 -- an undecidable admission withholds the root
         return False
     return bool(admit)

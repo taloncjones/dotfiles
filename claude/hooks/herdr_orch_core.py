@@ -1771,7 +1771,7 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                 raise ValueError("a lead claim requires repository context")
             admit, admit_reason, _levels = task_lead_admission(
                 Path(rd), Path(rd).name, tx.account_id,
-                Path(scope["account_root"]), context["repo_id"] if context else None
+                Path(scope["account_root"]), context["repo_id"]
             )
             if not admit:
                 raise ValueError(f"task-lead dispatch is not active: {admit_reason}")
@@ -2626,29 +2626,8 @@ def _main(argv=None) -> int:
     vc.add_argument("--validate-only", action="store_true")
     ns = ap.parse_args(argv)
 
-    def select_payload():
-        """Resolve context and scope, verify the slug, and pin the selection.
-
-        Must run BEFORE repo_dir(): state_root() reads the pinned selection,
-        so a verb that resolves rd first reads whatever CLAUDE_CONFIG_DIR
-        happens to say instead of the account the repository actually selects.
-
-        It is also what supplies owner_transaction's expected_slug, because
-        that default is only filled when a selection is pinned.
-        """
-        if _PAYLOAD_SELECTION.get() is not None:
-            return
-        context = repository_context(ns.repo_path or os.getcwd())
-        scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
-        try:
-            remote = context_git(context["root"], "remote", "get-url", "origin")
-        except subprocess.SubprocessError:
-            remote = ""
-        _require(ns.repo_slug == repo_slug(remote, context["common_dir"]), "repo-slug does not match repository identity")
-        _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
-
     if ns.repo_path is not None or ns.runtime is not None or ns.personal:
-        select_payload()
+        select_payload(ns)
 
     if ns.cmd == "claim-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -4327,7 +4306,7 @@ def _main(argv=None) -> int:
         # the committed state, so it has to resolve the same payload root
         # admission does; resolving rd first let it report disabled while
         # admission read enabled.
-        select_payload()
+        select_payload(ns)
         selection = _PAYLOAD_SELECTION.get()
         context, scope = selection["context"], selection["scope"]
         rd = repo_dir(ns.repo_slug)
@@ -4363,7 +4342,7 @@ def _main(argv=None) -> int:
         # because owner_transaction only fills expected_slug from a pinned
         # selection. Without it this verb -- the documented off switch, and
         # step 2 of the rollback runbook -- exited 2 on its default args.
-        select_payload()
+        select_payload(ns)
         selection = _PAYLOAD_SELECTION.get()
         context, scope = selection["context"], selection["scope"]
         rd = repo_dir(ns.repo_slug)
@@ -4701,6 +4680,32 @@ def _main(argv=None) -> int:
                 return 2
         return run_think(rd, ns, question, launch, add_dirs)
     return 2
+
+
+def select_payload(ns):
+    """Resolve context and scope, verify the slug, and pin the selection.
+
+    Must run BEFORE repo_dir(): state_root() reads the pinned selection, so a
+    verb that resolves rd first reads whatever CLAUDE_CONFIG_DIR happens to
+    say instead of the account the repository actually selects.
+
+    It is also what supplies owner_transaction's expected_slug, because that
+    default is only filled when a selection is pinned.
+
+    Idempotent, so a verb may call it without knowing whether the top-level
+    flag handling already did.
+    """
+    if _PAYLOAD_SELECTION.get() is not None:
+        return
+    context = repository_context(ns.repo_path or os.getcwd())
+    scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
+    try:
+        remote = context_git(context["root"], "remote", "get-url", "origin")
+    except subprocess.SubprocessError:
+        remote = ""
+    _require(ns.repo_slug == repo_slug(remote, context["common_dir"]),
+             "repo-slug does not match repository identity")
+    _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
 
 
 def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):

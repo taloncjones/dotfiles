@@ -166,9 +166,3 @@ settings.local.json
 .netrc
 *credentials*
 *.tfstate
-
-# Belt only. herdr-orch.test.sh now captures stderr per check under its own
-# throwaway root, so this should never reappear -- but one such file was once
-# committed by a blanket `git add -A`, and its content is a test's stderr,
-# which a different failure could make carry a temp path or an account id.
-/err
