@@ -160,6 +160,21 @@ orders below are deliberate policy, not hints.
   `superpowers:subagent-driven-development` (or `superpowers:executing-plans`);
   finish with `co-review` (Claude + Codex) at the branch gate -- the single
   second-model pass.
+- Diagram gate for reviewing changes (the interactive pipeline's plan->implement
+  and branch gates): before implementation, have the plan step emit a Mermaid
+  diagram matched to the open question -- an as-is/to-be comparison for a change
+  to an existing system, an architecture plus data-flow view for new work, a
+  sequence or state diagram for a component with a hard lifecycle. Draw it at
+  implementation altitude -- the concrete components, calls, and data involved,
+  enough to judge the approach -- so the human reviews the change through the
+  diagram instead of reading every file; a box or arrow is cheaper to correct
+  here than after the misunderstanding spreads. Render it as an Artifact for that
+  review. At the `co-review`/branch gate, emit a diagram of what was actually
+  built and diff it against the approved one for final design sign-off. Mermaid
+  lives in the plan/spec Markdown and renders natively in GitHub; reach for an
+  HTML/SVG tool only when presentation or interaction matters. In autonomous
+  mode, still produce both diagrams and surface them at the status gates, but do
+  not block.
 - Autonomous mode (under `/goal`, or when told "be autonomous" / "don't rely on
   me"): run the WHOLE pipeline end-to-end without pausing at the spec/plan gates.
   Codex becomes the review gate -- run `codex-spec-review` / `codex-plan-review`,
