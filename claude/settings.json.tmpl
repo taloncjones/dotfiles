@@ -275,6 +275,15 @@
             "command": "~/.claude/hooks/settings_drift_check.py"
           }
         ]
+      },
+      {
+        "matcher": "startup|clear|compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/handoff_notice.py"
+          }
+        ]
       }
     ],
     "Stop": [
