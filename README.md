@@ -422,6 +422,7 @@ inheriting an unverified work account.
 **Hooks** (pre/post tool execution):
 
 - `account_guard.py` - Warn at session start when Claude account does not match directory convention
+- `handoff_notice.py` - List saved handoffs for the current repository at session start with a kickoff hint
 - `block_secrets.py` - Block reads/writes of files containing secrets
 - `cache_jira_url.py` - Cache the linked Jira instance URL after MCP calls
 - `commit_guard.py` - Enforce commit message standards (no attribution, no emojis)
