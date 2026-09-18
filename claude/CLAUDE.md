@@ -211,6 +211,31 @@ orders below are deliberate policy, not hints.
   visible in sequence -- even at 90% duplication between tests. Share only
   spec/constant objects (one source of truth for expected values) and
   assert/validation helpers; inline test-side orchestration wrappers.
+- Comments earn their place: keep only what the code cannot say -- a
+  non-obvious why, a constraint, a gotcha, a reference -- and keep each one
+  short, usually one to three lines. Docstrings get a one-line summary unless
+  the contract needs more. Skip restating the code, narrating steps, section
+  banners, and change logs. If a comment is needed to explain what the code
+  does, simplify the code instead; longer rationale belongs in the commit
+  message or PR. Comment lines in a PR stay well below its code lines.
+- Reuse before you write: before adding a helper, search the repo, its
+  shared/common modules, and its submodules for an existing implementation,
+  and check the methods an object already exposes before recreating them
+  outside it. When the same logic is needed in a second file, extract it to
+  the shared location instead of copying it. When two structures encode the
+  same data (an enum mirroring a schema's values, a constant copied from a
+  config), retire one rather than keeping them in sync by hand.
+- Abstract on the second real caller, not the first: no single-caller wrapper
+  layers, no parameters nothing overrides, no hooks added to a shared base
+  class for one consumer's need. A few local lines beat a speculative shared
+  layer.
+- Take constraints from the source of truth -- the implementation, schema,
+  upstream API, or real call sites -- never from a comment's wording, a
+  variable name, or a ticket's framing. Grep the consumers before trusting
+  a description of them.
+- Test edits get the same scrutiny as source. Deleting, skipping, or
+  loosening a test needs a stated reason in the PR; compare test counts
+  before and after a mechanical change so nothing vanishes silently.
 
 ## Code Cleanup
 
