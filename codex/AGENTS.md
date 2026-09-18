@@ -113,6 +113,10 @@ Use these skills by default when the task matches:
 - `post-merge` for merged-branch cleanup and shared lessons distillation.
 - `todos` for inspecting and maintaining the repo's current and pending work.
 - `handoff` and `kickoff` for explicit task-scoped restart/resume.
+- Team roles: a plain top-level Codex session is a lead unless its launch
+  brief or a resumed handoff record says otherwise; the contract lives in
+  `~/.claude/rules/personal/team-roles.md` (director, lead, worker, reviewer;
+  selection order explicit role, then handoff role, then lead).
 - `voice` for an independent prose pass before authorized outward writes.
 - `herdr-orchestration` for bounded UI/UX implementation, prose, and independent
   review in Claude-led Herd work. Its installed Codex compatibility entrypoint
