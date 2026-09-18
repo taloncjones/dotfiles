@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_runtime
 import herdr_bindings as bindings
+import herdr_capabilities as herdr_caps
 import herdr_coordination as coordination
 import herdr_envelope as envelope
 
@@ -1766,6 +1767,14 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
             raise ValueError("lead claim requires a valid binding id")
     with owner_transaction(rd, context=context, expected_slug=expected_slug, scope=scope) as tx:
         if control_tier == "lead":
+            if context is None or scope is None:
+                raise ValueError("a lead claim requires repository context")
+            admit, admit_reason, _levels = task_lead_admission(
+                Path(rd), Path(rd).name, tx.account_id,
+                Path(scope["account_root"]), context["repo_id"]
+            )
+            if not admit:
+                raise ValueError(f"task-lead dispatch is not active: {admit_reason}")
             rec = bindings.read_binding(Path(rd), binding_id)
             if rec is None:
                 raise ValueError("unknown dispatch binding")
@@ -1796,8 +1805,6 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                         "workspace lease is missing, superseded, or a "
                         "legacy/no-generation record; a new binding is required"
                     )
-            if context is None:
-                raise ValueError("a lead claim requires repository context")
             if not workspace_provenance_ok(workspace_root, context):
                 raise ValueError(
                     "workspace_root is not a linked worktree of this repository"
@@ -2599,6 +2606,8 @@ def _main(argv=None) -> int:
     rl.add_argument("--stale-secs", type=int, default=900)
     rl.add_argument("--descendants-terminated", action="store_true")
     add("status")
+    add("task-lead-status")
+    add("deactivate-task-leads", fenced=True)
     add("should-dispatch-review", "--task-id", "--head-sha")
     add("confirm-completion", "--task-id", "--workspace", "--head-sha")
     add("confirm-review", "--task-id", "--workspace", "--head-sha")
@@ -2616,15 +2625,9 @@ def _main(argv=None) -> int:
     vc.add_argument("--allow-unpinned", action="store_true")
     vc.add_argument("--validate-only", action="store_true")
     ns = ap.parse_args(argv)
+
     if ns.repo_path is not None or ns.runtime is not None or ns.personal:
-        context = repository_context(ns.repo_path or os.getcwd())
-        scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
-        try:
-            remote = context_git(context["root"], "remote", "get-url", "origin")
-        except subprocess.SubprocessError:
-            remote = ""
-        _require(ns.repo_slug == repo_slug(remote, context["common_dir"]), "repo-slug does not match repository identity")
-        _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
+        select_payload(ns)
 
     if ns.cmd == "claim-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -4297,6 +4300,65 @@ def _main(argv=None) -> int:
         }
         print(json.dumps(result))
         return 0
+    if ns.cmd == "task-lead-status":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        # Selection BEFORE rd. The rollback runbook reads this verb to confirm
+        # the committed state, so it has to resolve the same payload root
+        # admission does; resolving rd first let it report disabled while
+        # admission read enabled.
+        select_payload(ns)
+        selection = _PAYLOAD_SELECTION.get()
+        context, scope = selection["context"], selection["scope"]
+        rd = repo_dir(ns.repo_slug)
+        config_dir = Path(scope["account_root"])
+        admit, admit_reason, levels = task_lead_admission(
+            rd, ns.repo_slug, scope["account_id"], config_dir,
+            context.get("repo_id")
+        )
+        enabled, gate_reason = herdr_caps.gate_enabled(
+            rd, ns.repo_slug, scope["account_id"], context.get("repo_id"))
+        # Admission stops at a disabled gate without reading the procedure, so
+        # the operator's diagnostic is read here instead: a status verb that
+        # said "procedure: null" whenever the gate was off would hide the one
+        # fact needed to plan re-enabling it.
+        procedure = (levels["procedure"] if levels["procedure"] is not None
+                     else herdr_caps.procedure_capability(config_dir))
+        print(json.dumps({
+            "gate_enabled": enabled,
+            "gate_reason": gate_reason,
+            "core": levels["core"],
+            "guard": levels["guard"],
+            "procedure": procedure,
+            "required": levels["required"],
+            "account_id": scope["account_id"],
+            "repo_slug": ns.repo_slug,
+            "admit": admit,
+            "admit_reason": admit_reason,
+        }, sort_keys=True))
+        return 0
+    if ns.cmd == "deactivate-task-leads":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        # Selection BEFORE rd, for the same reason as task-lead-status, and
+        # because owner_transaction only fills expected_slug from a pinned
+        # selection. Without it this verb -- the documented off switch, and
+        # step 2 of the rollback runbook -- exited 2 on its default args.
+        select_payload(ns)
+        selection = _PAYLOAD_SELECTION.get()
+        context, scope = selection["context"], selection["scope"]
+        rd = repo_dir(ns.repo_slug)
+        with owner_transaction(rd, ns.session, ns.fence, context=context, scope=scope) as tx:
+            _require(
+                tx.current.get("control_tier", "launcher") == "launcher",
+                "only a launcher owner may deactivate task leads",
+            )
+            write_json_atomic(herdr_caps.gate_path(rd), {
+                "schema_version": herdr_caps.GATE_SCHEMA_VERSION,
+                "repo_slug": ns.repo_slug,
+                "repo_id": tx.bindings.get(tx.slug, {}).get("repo_id"),
+                "account_id": tx.account_id,
+                "enabled": False,
+            })
+        return 0
     if ns.cmd == "should-dispatch-review":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -4618,6 +4680,68 @@ def _main(argv=None) -> int:
                 return 2
         return run_think(rd, ns, question, launch, add_dirs)
     return 2
+
+
+def select_payload(ns):
+    """Resolve context and scope, verify the slug, and pin the selection.
+
+    Must run BEFORE repo_dir(): state_root() reads the pinned selection, so a
+    verb that resolves rd first reads whatever CLAUDE_CONFIG_DIR happens to
+    say instead of the account the repository actually selects.
+
+    It is also what supplies owner_transaction's expected_slug, because that
+    default is only filled when a selection is pinned.
+
+    Idempotent, so a verb may call it without knowing whether the top-level
+    flag handling already did.
+    """
+    if _PAYLOAD_SELECTION.get() is not None:
+        return
+    context = repository_context(ns.repo_path or os.getcwd())
+    scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
+    try:
+        remote = context_git(context["root"], "remote", "get-url", "origin")
+    except subprocess.SubprocessError:
+        remote = ""
+    _require(ns.repo_slug == repo_slug(remote, context["common_dir"]),
+             "repo-slug does not match repository identity")
+    _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
+
+
+def task_lead_admission(rd, repo_slug, account_id, config_dir, repo_id=None):
+    """(admit, reason, levels) for a lead claim in this repository.
+
+    Reads three advertised levels -- core's own constant, guard's constant
+    from the shared module, and the installed procedure's marker -- plus the
+    gate record. Refuses unless all three meet REQUIRED_CAPABILITY and the
+    gate is enabled. See the activation gate design, section 4.1, for why
+    core reads guard's constant and what that does and does not prove.
+    """
+    levels = {
+        "core": herdr_caps.CORE_CAPABILITY,
+        "guard": herdr_caps.GUARD_CAPABILITY,
+        "procedure": None,
+        "required": herdr_caps.REQUIRED_CAPABILITY,
+    }
+    # The GATE first, then the procedure. The procedure read touches a path an
+    # attacker may control, so the cheap local check that can refuse outright
+    # runs before it -- a disabled gate must not depend on that read behaving.
+    # Callers wanting the procedure level for display (task-lead-status) read
+    # it themselves; admission does not owe a diagnostic it need not compute.
+    enabled, reason = herdr_caps.gate_enabled(rd, repo_slug, account_id, repo_id)
+    if not enabled:
+        return False, reason, levels
+    levels["procedure"] = herdr_caps.procedure_capability(config_dir)
+    for name in ("core", "guard", "procedure"):
+        level = levels[name]
+        if level is None:
+            return False, f"{name} advertises no usable capability", levels
+        if level < herdr_caps.REQUIRED_CAPABILITY:
+            return False, (
+                f"{name} advertises capability {level} "
+                f"below the required {herdr_caps.REQUIRED_CAPABILITY}"
+            ), levels
+    return True, "task-lead dispatch is admissible", levels
 
 
 def main(argv=None) -> int:

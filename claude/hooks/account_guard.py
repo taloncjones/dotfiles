@@ -11,6 +11,9 @@ is still detected. When identities are unavailable, config paths provide the
 fallback check. This also covers launchers that bypass the shell wrapper.
 """
 
+# Required for PEP 604 annotations under Python 3.9: see rm_guard.py's note.
+from __future__ import annotations
+
 import json
 import os
 import sys
