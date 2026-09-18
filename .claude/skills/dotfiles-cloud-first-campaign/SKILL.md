@@ -249,9 +249,8 @@ three excluded plugins reported `disabled` in `claude plugin list` despite
 but they load nothing; disabled-but-installed is the expected shape, so do
 not read their presence in the install record as a failed exclusion). This
 repo excludes `telegram` (unused) and the official `code-review` and
-`code-simplifier` plugins (name-collide with the built-in `/code-review` that
-the tracked `co-review` skill invokes, and with the built-in `/simplify` +
-ECC's simplifier). Verify sync state per container: grep `"scope": "user"` in
+`code-simplifier` plugins because their names collide with maintained local
+review and simplification workflows. Verify sync state per container: grep `"scope": "user"` in
 `~/.claude/plugins/installed_plugins.json` and compare against
 `enabledPlugins` in `~/.claude/settings.json`.
 

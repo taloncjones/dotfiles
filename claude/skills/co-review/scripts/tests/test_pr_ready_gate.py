@@ -1,4 +1,5 @@
 """Tests for co-review marker parsing and PR-ready currency decision."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -102,11 +103,13 @@ class SelectMarkerTests(unittest.TestCase):
     def test_latest_by_instant_not_round(self):
         older = comment(
             "| x |\n" + marker(sha=SHA_A, verdict="APPROVE", rnd=5),
-            created_at="2026-09-11T09:00:00Z", cid=1,
+            created_at="2026-09-11T09:00:00Z",
+            cid=1,
         )
         newer = comment(
             "| y |\n" + marker(sha=SHA_B, verdict="CHANGES", rnd=1),
-            created_at="2026-09-11T10:00:00Z", cid=2,
+            created_at="2026-09-11T10:00:00Z",
+            cid=2,
         )
         self.assertEqual(gate.select_marker([older, newer], ME)["verdict"], "CHANGES")
 
@@ -122,8 +125,12 @@ class SelectMarkerTests(unittest.TestCase):
 
     def test_coworker_marker_is_not_a_currency_marker(self):
         cw = (
-            "<!-- co-review-coworker: sha=" + SHA_A + " base=" + BASE_A
-            + " base_ref=main base_ref_tip=" + SHA_B
+            "<!-- co-review-coworker: sha="
+            + SHA_A
+            + " base="
+            + BASE_A
+            + " base_ref=main base_ref_tip="
+            + SHA_B
             + " verdict=APPROVE round=1 -->"
         )
         # The anchored currency regex must not select a coworker marker...
@@ -141,8 +148,12 @@ class SelectMarkerTests(unittest.TestCase):
             gate.select_marker([bad], ME)
 
     def test_tie_break_by_id(self):
-        a = comment("| x |\n" + marker(sha=SHA_A), created_at="2026-09-11T10:00:00Z", cid=1)
-        b = comment("| y |\n" + marker(sha=SHA_B), created_at="2026-09-11T10:00:00Z", cid=2)
+        a = comment(
+            "| x |\n" + marker(sha=SHA_A), created_at="2026-09-11T10:00:00Z", cid=1
+        )
+        b = comment(
+            "| y |\n" + marker(sha=SHA_B), created_at="2026-09-11T10:00:00Z", cid=2
+        )
         self.assertEqual(gate.select_marker([a, b], ME)["sha"], SHA_B)
 
     def test_non_list_raises(self):
@@ -151,9 +162,11 @@ class SelectMarkerTests(unittest.TestCase):
 
 
 class DecideTests(unittest.TestCase):
-    def test_pass(self):
-        verdict, _ = gate.decide([comment("| x |\n" + marker())], ME, SHA_A, BASE_A, REF)
-        self.assertEqual(verdict, "PASS")
+    def test_comment_history_never_grants_ready(self):
+        verdict, _ = gate.decide(
+            [comment("| x |\n" + marker())], ME, SHA_A, BASE_A, REF
+        )
+        self.assertEqual(verdict, "FAIL")
 
     def test_fail_sha_mismatch(self):
         verdict, why = gate.decide(
@@ -197,7 +210,8 @@ class DecideTests(unittest.TestCase):
         # the approval: the whole decision fails closed.
         older = comment(
             marker(sha=SHA_A, verdict="APPROVE"),
-            created_at="2026-09-11T09:00:00Z", cid=1,
+            created_at="2026-09-11T09:00:00Z",
+            cid=1,
         )
         newer = comment(marker(sha=SHA_A, verdict="CHANGES"), cid=2)
         del newer["created_at"]
@@ -210,11 +224,21 @@ class CliTests(unittest.TestCase):
     def test_unreadable_comments_file_fails_closed(self):
         result = subprocess.run(
             [
-                sys.executable, str(SPEC), "--comments", "/nonexistent.json",
-                "--head", SHA_A, "--base", BASE_A, "--base-ref", REF,
-                "--trusted-author", "me",
+                sys.executable,
+                str(SPEC),
+                "--comments",
+                "/nonexistent.json",
+                "--head",
+                SHA_A,
+                "--base",
+                BASE_A,
+                "--base-ref",
+                REF,
+                "--trusted-author",
+                "me",
             ],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("fail closed", result.stdout)
@@ -228,7 +252,9 @@ class FailClosedSelectionTests(unittest.TestCase):
         # (which has a trailing space before "sha="), or this one character
         # of truncation slips through as ordinary text.
         comments = [
-            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment(
+                marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1
+            ),
             comment("<!-- co-review:", created_at="2026-09-11T11:00:00Z", cid=2),
         ]
         with self.assertRaises(gate.GateInputError):
@@ -243,7 +269,9 @@ class FailClosedSelectionTests(unittest.TestCase):
         # derived from the marker regex loses the prefix match here and lets
         # selection fall through to the older APPROVE.
         comments = [
-            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment(
+                marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1
+            ),
             comment("<!-- co-review: sh", created_at="2026-09-11T11:00:00Z", cid=2),
         ]
         with self.assertRaises(gate.GateInputError):
@@ -255,7 +283,9 @@ class FailClosedSelectionTests(unittest.TestCase):
     def test_truncated_at_bare_prefix_does_not_expose_older_approve(self):
         # Truncated to exactly the literal prefix, nothing after it.
         comments = [
-            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment(
+                marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1
+            ),
             comment("<!-- co-review: ", created_at="2026-09-11T11:00:00Z", cid=2),
         ]
         with self.assertRaises(gate.GateInputError):
@@ -266,7 +296,9 @@ class FailClosedSelectionTests(unittest.TestCase):
 
     def test_truncated_latest_changes_does_not_expose_older_approve(self):
         comments = [
-            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment(
+                marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1
+            ),
             comment(
                 marker(verdict="CHANGES"),  # marker only, no findings table
                 created_at="2026-09-11T11:00:00Z",
@@ -280,7 +312,9 @@ class FailClosedSelectionTests(unittest.TestCase):
     def test_two_markers_in_latest_comment_fails_closed(self):
         body = marker(verdict="CHANGES") + "\n" + marker(verdict="APPROVE")
         comments = [
-            comment(marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
+            comment(
+                marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1
+            ),
             comment("| a |\n" + body, created_at="2026-09-11T11:00:00Z", cid=2),
         ]
         decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
@@ -288,29 +322,47 @@ class FailClosedSelectionTests(unittest.TestCase):
 
     def test_wellformed_latest_changes_supersedes_approve(self):
         comments = [
-            comment("| x |\n" + marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
-            comment("| y |\n" + marker(verdict="CHANGES"), created_at="2026-09-11T11:00:00Z", cid=2),
+            comment(
+                "| x |\n" + marker(verdict="APPROVE"),
+                created_at="2026-09-11T10:00:00Z",
+                cid=1,
+            ),
+            comment(
+                "| y |\n" + marker(verdict="CHANGES"),
+                created_at="2026-09-11T11:00:00Z",
+                cid=2,
+            ),
         ]
         decision, _ = gate.decide(comments, ME, SHA_A, BASE_A, REF)
         self.assertEqual(decision, "FAIL")
 
-    def test_approve_with_table_passes(self):
-        comments = [comment("| x |\n" + marker(), created_at="2026-09-11T10:00:00Z", cid=1)]
+    def test_approve_with_table_still_fails(self):
+        comments = [
+            comment("| x |\n" + marker(), created_at="2026-09-11T10:00:00Z", cid=1)
+        ]
         decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
-        self.assertEqual(decision, "PASS", reason)
+        self.assertEqual(decision, "FAIL", reason)
 
-    def test_no_actionable_findings_counts_as_a_table(self):
+    def test_no_actionable_findings_still_fails(self):
         body = "No actionable findings.\n\n" + marker()
         comments = [comment(body, created_at="2026-09-11T10:00:00Z", cid=1)]
         decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
-        self.assertEqual(decision, "PASS", reason)
+        self.assertEqual(decision, "FAIL", reason)
 
     def test_unparsable_latest_marker_does_not_fall_back_to_older_approve(self):
         # The exact fallback this task exists to prevent: the newest comment's
         # marker line does not parse at all, and an older APPROVE is present.
         comments = [
-            comment("| x |\n" + marker(verdict="APPROVE"), created_at="2026-09-11T10:00:00Z", cid=1),
-            comment("| y |\n<!-- co-review: sha=zzz -->", created_at="2026-09-11T11:00:00Z", cid=2),
+            comment(
+                "| x |\n" + marker(verdict="APPROVE"),
+                created_at="2026-09-11T10:00:00Z",
+                cid=1,
+            ),
+            comment(
+                "| y |\n<!-- co-review: sha=zzz -->",
+                created_at="2026-09-11T11:00:00Z",
+                cid=2,
+            ),
         ]
         decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
         self.assertEqual(decision, "FAIL")
@@ -338,13 +390,13 @@ class FailClosedSelectionTests(unittest.TestCase):
         decision, _ = gate.decide([comment(body)], ME, SHA_A, BASE_A, REF)
         self.assertEqual(decision, "FAIL")
 
-    def test_non_round_comment_is_not_a_candidate(self):
+    def test_non_round_comment_cannot_revive_history(self):
         comments = [
             comment("| x |\n" + marker(), created_at="2026-09-11T10:00:00Z", cid=1),
             comment("looks good to me", created_at="2026-09-11T12:00:00Z", cid=2),
         ]
         decision, reason = gate.decide(comments, ME, SHA_A, BASE_A, REF)
-        self.assertEqual(decision, "PASS", reason)
+        self.assertEqual(decision, "FAIL", reason)
 
 
 class TargetTipTests(unittest.TestCase):
@@ -366,10 +418,10 @@ class TargetTipTests(unittest.TestCase):
         got = gate.select_marker([comment(body)], ME)
         self.assertEqual(got["target_tip"], self.TIP)
 
-    def test_gate_ignores_target_tip_entirely(self):
+    def test_gate_ignores_target_tip_but_history_still_fails(self):
         body = "| x |\n" + self._marker_with_tip(self.TIP)
         decision, reason = gate.decide([comment(body)], ME, SHA_A, BASE_A, REF)
-        self.assertEqual(decision, "PASS", reason)
+        self.assertEqual(decision, "FAIL", reason)
 
     def test_malformed_target_tip_does_not_parse_as_a_marker(self):
         body = "| x |\n" + self._marker_with_tip("nothex")

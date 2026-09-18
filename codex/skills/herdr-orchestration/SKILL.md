@@ -24,8 +24,10 @@ SHARED_SKILL="$ORCH_SOURCE_ROOT/claude/skills/herdr-orchestration/SKILL.md"
 
 For bounded implementation, accept only the assigned UI files and tests; return
 a result to the Claude worker. Do not claim Herd ownership, commit, or emit a
-lifecycle record. A fresh independent Claude review is required for Codex UI
-edits before the Claude worker accepts them.
+lifecycle record. A fresh independent Claude `review-change` review
+(development_reviewer: Sonnet/high) is required for Codex UI edits before the
+Claude worker accepts them. This is task-local readiness; final co-review is
+still required for a finished PR.
 
 Normal standalone Codex CLI use remains the user's choice. Shared compatibility
 APIs remain installed. A Codex-driven Herd controller is not supported and is not

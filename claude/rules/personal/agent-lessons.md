@@ -25,14 +25,14 @@ is the staging tier, not an archive.
   a small change the human approved this turn. Larger: todo + kickoff.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
   MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
-- (2026-09) Never expand a short sha by hand: any full sha you emit (markers,
-  comments, ledgers) comes from rev-parse, not pattern completion.
+- (2026-09) Never expand or abbreviate a sha by hand: emit what rev-parse or
+  ls-remote returns -- flags like --match-head-commit reject a short sha.
 - (2026-09) A worker never commits with failing tests: fix or report
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
   clean: retry once with defensive review framing before counting the seat.
-- (2026-09) Editing a shared module means running its CONSUMERS' suites too:
-  a subsystem-green change still broke a consumer the full repo gate caught.
+- (2026-09) Changing a shared thing: find every consumer first -- callers,
+  cited concepts, parallel installed copies -- then run their suites too.
 - (2026-09) A protected main makes a local merge unshippable: open the PR
   first, so co-review round comments and markers land on it, then merge there.
 - (2026-09) A completion-enforcing hook is not user consent: hold the gated
