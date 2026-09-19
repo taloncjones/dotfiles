@@ -25,6 +25,16 @@ Runs before Claude and Codex shell tool calls. Fails open on any exception,
 and on any segment that contains no `rm`/`rmdir` token.
 """
 
+# PEP 604 annotations (`str | None`) are evaluated at def time, so without this
+# every function below raises TypeError at IMPORT on Python 3.9 -- the stock
+# macOS interpreter, and what `#!/usr/bin/env python3` resolves to before
+# Homebrew python is installed. An import-time failure exits 1, which is
+# neither the allow (0) nor the deny (2) a hook may return, so every guard that
+# imports this module fails OPEN. It happens before main(), so no crash handler
+# can catch it, and `py_compile` cannot see it because the annotation is a
+# runtime expression.
+from __future__ import annotations
+
 import json
 import os
 import re
