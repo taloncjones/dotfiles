@@ -1232,10 +1232,17 @@ refused afterwards cannot erase the row, so `outstanding_descendants` still
 sees the pane and `teardown-binding --abandon` refuses instead of releasing the
 lease over a live worker. Skipping step 2 reintroduces that fail-open.
 
-Re-dispatch appends a new reservation. Reusing a `launch_id` is allowed -- they
-are not unique -- but the full attempt identity must differ from every row
-already in the record; an exact repeat of the current row is treated as a
-crashed-lead retry and writes nothing.
+Re-dispatch appends a new reservation. **Mint a fresh `launch_id` for every new
+dispatch**, as the mech relaunch rule above already requires. Nothing enforces
+uniqueness, so reuse is accepted where the rest of the identity differs -- a
+review detour returning to a prior head, for instance -- but reusing one for a
+genuinely new pane makes the record harder to read for no benefit.
+
+Two repeats are handled differently. An exact repeat of the current row, while
+that attempt is unsettled, is the crashed-lead retry: it succeeds and writes
+nothing, so one pane is never counted twice. A repeat of any identity that a
+settlement record already matches is refused, because it would arrive already
+settled and hide the pane it names from teardown.
 
 ## Rolling back task leads
 

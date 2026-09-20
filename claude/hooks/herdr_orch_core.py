@@ -2748,6 +2748,14 @@ def _main(argv=None) -> int:
                  "source-head-sha must be 40 hex characters")
         with _fenced_scoped(ns) as (rd, base):
             require_not_consumed(rd, ns.binding)
+            # Pin the task to the binding, as emit-envelope and emit-artifacts
+            # do. outstanding_descendants scans every task file in the lead
+            # subtree, so a row seeded under a stray task id would block
+            # teardown for a task this binding does not own.
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(ns.task_id == rec_b["task_id"],
+                     "reservation task does not match the binding")
             dest = base / "tasks" / f"{ns.task_id}.json"
             prior = read_prior_task(dest)
             _require(prior is not PRIOR_ABSENT,
@@ -2775,16 +2783,18 @@ def _main(argv=None) -> int:
                      "reservation is not a native dispatch row")
             workers = prior["workers"]
             identity = _attempt_tuple(row)
-            # An exact replay is the crashed-lead retry: succeed, write nothing,
-            # so one pane is never counted twice.
-            if workers and _attempt_tuple(workers[-1]) == identity:
-                return 0
             if any(_attempt_tuple(worker) == identity for worker in workers):
                 # Re-dispatching to an earlier head is legitimate -- a review
                 # detour returns to a prior SHA. Only a SETTLED identity is
                 # unsafe: outstanding_descendants empties only when the final
                 # row is settled, so reserving one again would hide the live
                 # pane it names.
+                #
+                # This covers the CURRENT row too, not just earlier ones. A
+                # settled workers[-1] means the identity is being reused for a
+                # new dispatch, not replayed -- treating that as an idempotent
+                # retry would record nothing and blind teardown to the pane
+                # the caller is about to start.
                 try:
                     settle = json.loads(read_payload_text(
                         base / "tasks" / f"{ns.task_id}{_SETTLE_SUFFIX[ns.phase]}"
@@ -2801,6 +2811,11 @@ def _main(argv=None) -> int:
                 _require(not _attempt_settled(row, settle),
                          "attempt identity is already settled; reserving it "
                          "again would hide a live pane from teardown")
+                # Unsettled and already the current row: the crashed-lead
+                # retry. Succeed writing nothing, so one pane is never
+                # counted twice.
+                if _attempt_tuple(workers[-1]) == identity:
+                    return 0
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, {**prior, "workers": [*workers, row]})
             return 0
@@ -2823,8 +2838,25 @@ def _main(argv=None) -> int:
         # record, never here.
         _require(not set(updates) & set(ATTEMPT_FIELDS),
                  "an enrichment may not name an attempt identity field")
+        # Record-level keys belong to the task, not to one attempt. A row
+        # carrying its own task_id/repo_slug/worktree makes scratch_policy's
+        # _audit_target return None, which drops the audit entry silently
+        # while leaving the permission decision unchanged.
+        _require(not set(updates) & {"task_id", "repo_slug", "worktree"},
+                 "an enrichment may not name a task record field")
+        # Scalars only: a list or object here reaches readers that expect a
+        # string (a non-ROLE_NAMES role already blinds the stop gate).
+        _require(
+            all(value is None or isinstance(value, (str, int, float, bool))
+                for value in updates.values()),
+            "enrichment values must be scalars",
+        )
         with _fenced_scoped(ns) as (rd, base):
             require_not_consumed(rd, ns.binding)
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(ns.task_id == rec_b["task_id"],
+                     "enrichment task does not match the binding")
             dest = base / "tasks" / f"{ns.task_id}.json"
             prior = read_prior_task(dest)
             _require(prior is not PRIOR_ABSENT, "no task record to enrich")

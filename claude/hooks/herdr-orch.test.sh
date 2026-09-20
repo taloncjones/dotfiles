@@ -8422,5 +8422,71 @@ assert rows[sys.argv[1]]["action"] == "released", rows
 SH
 
 
+check "reserve-dispatch: a settled CURRENT row is not an idempotent replay" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-f1.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-f1 \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --json '{"task_id":"td-f1","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+# The attempt settles. Its identity is now the CURRENT row and settled.
+CLAUDE_CONFIG_DIR="$root" $CLI emit-done \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-f1 --workspace w1 \
+   --agent impl-td-f1 --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --runtime claude --launch-id I1 --pane-id pane1 --source-head-sha "$SHA40"
+# Reusing that exact identity for a NEW dispatch must NOT be swallowed as a
+# retry: writing nothing would leave the pane the caller is about to start
+# invisible to teardown.
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "already settled" "$ERRFILE"
+# An UNSETTLED current row still replays idempotently.
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert [w["launch_id"] for w in rec["workers"]] == ["I1", "I2"], rec
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-f1.json"
+# A reservation whose task does not match the binding is refused.
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-other \
+   --launch-id I3 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane3 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match the binding" "$ERRFILE"
+# Enrichment payload constraints: record-level keys and non-scalars refused.
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '{"task_id":"OTHER"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "task record field" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '{"role":["not","a","string"]}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "must be scalars" "$ERRFILE"
+SH
+
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
