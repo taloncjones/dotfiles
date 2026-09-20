@@ -1,6 +1,6 @@
 # Pipeline worker mapping
 
-Policy an orchestrator follows when dispatching a superpowers pipeline. The
+Policy a director follows when dispatching a superpowers pipeline. The
 model and effort columns are not read from this file: `claude/hooks/agent_runtime.py`
 is authoritative for every model and effort named here, and the `policy document
 matches the route table` case in `agent-runtime.test.sh` parses this file and
@@ -18,22 +18,22 @@ is tracked separately.
 
 ## Step to worker
 
-| Step                      | Role                 | Model / effort   | Runtime | Gate                              |
-| ------------------------- | -------------------- | ---------------- | ------- | --------------------------------- |
-| isolated worktree         | dispatch harness     | --               | --      | auto                              |
-| brainstorming             | planner              | fable/high       | Claude  | HUMAN                             |
-| write spec                | planner              | fable/high       | Claude  | auto                              |
-| codex-spec-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve               |
-| writing-plans             | planner              | fable/high       | Claude  | auto                              |
-| codex-plan-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve               |
-| implement                 | implementation       | sonnet/high      | Claude  | auto + per-task review            |
-| implement, UX/UI override | codex implementation | gpt-6-astra/high | Codex   | fresh Claude review before commit |
+| Step                      | Role                 | Model / effort   | Runtime | Gate                                                       |
+| ------------------------- | -------------------- | ---------------- | ------- | ---------------------------------------------------------- |
+| isolated worktree         | dispatch harness     | --               | --      | auto                                                       |
+| brainstorming             | planner              | fable/high       | Claude  | HUMAN                                                      |
+| write spec                | planner              | fable/high       | Claude  | auto                                                       |
+| codex-spec-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
+| writing-plans             | planner              | fable/high       | Claude  | auto                                                       |
+| codex-plan-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
+| implement                 | implementation       | sonnet/high      | Claude  | auto + per-task review                                     |
+| implement, UX/UI override | codex implementation | gpt-6-astra/high | Codex   | fresh Claude review before commit                          |
 | implementation review     | development_reviewer | sonnet/high      | Claude  | task-local advisory review; blockers return to development |
-| voice pass (outward text) | codex voice          | gpt-6-astra/high | Codex   | auto, before the write            |
-| co-review, Claude half    | reviewer             | opus/high        | Claude  | verify each finding               |
-| co-review, skeptic        | skeptic              | opus/high        | Claude  | verify each finding               |
-| co-review, Codex half     | codex reviewer       | gpt-6-astra/high | Codex   | verify each finding               |
-| merge                     | gateway              | --               | --      | HUMAN                             |
+| voice pass (outward text) | codex voice          | gpt-6-astra/high | Codex   | auto, before the write                                     |
+| co-review, Claude half    | reviewer             | opus/high        | Claude  | verify each finding                                        |
+| co-review, skeptic        | skeptic              | opus/high        | Claude  | verify each finding                                        |
+| co-review, Codex half     | codex reviewer       | gpt-6-astra/high | Codex   | verify each finding                                        |
+| merge                     | gateway              | --               | --      | HUMAN                                                      |
 
 The planner's `fable/high` carries a configured `opus/xhigh` fallback for when
 fable is unavailable. One planning worker spans brainstorm, spec and plan --
@@ -53,7 +53,7 @@ Two axes raise effort within the role's chosen model. Neither lowers it.
 - `difficulty=hard` -- how much thinking the task needs. Available to `planner`,
   `implementation`, `development_reviewer`, `reviewer`, `skeptic`, `think`.
   Supplied explicitly through
-  `--config-json`; the orchestrator may propose a level but a human confirms it,
+  `--config-json`; the director may propose a level but a human confirms it,
   and the proposal is recorded alongside the outcome so the agreement rate is
   measurable before the confirmation step is retired.
 

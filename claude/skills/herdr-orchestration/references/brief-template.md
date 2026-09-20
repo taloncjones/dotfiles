@@ -66,8 +66,8 @@ native child agents under the user's delegation policy, not Claude Workflow.
   side-processes (test-watcher, dev server, log tail) via `pane split`/
   `pane run`. You own their lifecycle: close everything you opened before
   you finish or hand off. Do not use `agent start` -- spawning another
-  agent panel is orchestrator territory, not yours. If the task genuinely
-  needs an independent long-lived actor, hand back to the orchestrator to
+  agent panel is director territory, not yours. If the task genuinely
+  needs an independent long-lived actor, hand back to the director to
   decompose it into a sibling task.
 - Workflow/subagent helpers never call `herdr_orch_core.py`; only you emit
   the completion record.
@@ -82,18 +82,18 @@ When you finish, pause, or fail this phase:
    `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`.
    You may use `--outcome completed` in the next step ONLY if it exits 0, or
    if it exits 5 (no contract pinned -- note "exit 5, no pin" in your close;
-   the orchestrator decides whether its grandfather rule applies). On ANY
+   the director decides whether its grandfather rule applies). On ANY
    other nonzero exit, emit `failed` or `paused` instead -- never
    `completed`.
 3. Run:
    `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
-4. Then STOP and go idle -- hand back to the orchestrator. Do NOT run
+4. Then STOP and go idle -- hand back to the director. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
    NOT open a PR or merge. Your `emit-done` record is the ONLY completion
-   signal; the orchestrator detects it on its next check-in and drives what
+   signal; the director detects it on its next check-in and drives what
    comes next (review dispatch, phase advance, task-local readiness).
 
-Do not report completion any other way -- the orchestrator only recognizes
+Do not report completion any other way -- the director only recognizes
 this record.
 ```
 
@@ -137,13 +137,13 @@ When the private spec + plan are frozen and reviewed:
 1. Commit intended public code/contracts only. Keep private plans and state untracked.
 2. Run (note `--phase plan`):
    `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase plan --plan-artifacts <artifact-list-json> --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
-3. Then STOP and go idle -- hand back to the orchestrator. Do NOT run
+3. Then STOP and go idle -- hand back to the director. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan or start the
    implement slice, do NOT open a PR or merge. Your `emit-done` record is the
-   ONLY completion signal; the orchestrator detects it on its next check-in
+   ONLY completion signal; the director detects it on its next check-in
    and launches the implement worker.
 
-Do not report completion any other way. The orchestrator advances to the
+Do not report completion any other way. The director advances to the
 implement phase only on this `phase: plan` record.
 ```
 
@@ -179,7 +179,7 @@ emit `paused --reason needs_design`. Commit as you go.
 - Phase: implement
 
 ## Routing
-Models and efforts were resolved by the orchestrator from one `routing-table`
+Models and efforts were resolved by the director from one `routing-table`
 snapshot at launch; use these aliases verbatim in any Workflow `agent()` call
 (`effort` omitted where it says inherit); a role listed as unavailable may not
 appear in a script you author:
@@ -231,10 +231,10 @@ When review is complete:
    Emit `changes-requested` with the actual blocking count (zero when there
    are no concrete blockers) for incomplete, timed-out, or missing evidence.
    Do not emit `approved` in those cases.
-2. Then STOP and go idle -- hand back to the orchestrator. Do NOT run
+2. Then STOP and go idle -- hand back to the director. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
    NOT apply fixes, push, merge, or open a PR. Your `emit-review` record is
-   the ONLY signal; the orchestrator reads it on its next check-in and drives
+   the ONLY signal; the director reads it on its next check-in and drives
    what comes next (deliberate repair on changes-requested, task-local
    readiness on approved). `approved` is not PR approval and never authorizes
    merge.
@@ -244,14 +244,14 @@ Never push, merge, or open a PR.
 
 ## Deep-think brief variant (`<think_id>`)
 
-Written by the orchestrator, not sent via `agent prompt` -- the thinker runs
+Written by the director, not sent via `agent prompt` -- the thinker runs
 headless (`run-think`, SKILL.md section 8, Deep-think escalation), so this
 is the input contract, not a chat brief. Fill every `<...>` placeholder and
 write it to `STATE_ROOT/<slug>/think/<think_id>.question.md` before
 launching. Five sections, in order:
 
 ```
-You are `<think_id>`, a read-only advisor for the orchestrator of repo
+You are `<think_id>`, a read-only advisor for the director of repo
 `<repo_slug>`. You have Read/Glob/Grep only, at most `<max_turns>` turns
 and $`<max_budget_usd>`. You cannot and must not change anything. Your only
 output is the structured answer.
