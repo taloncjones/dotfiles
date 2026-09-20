@@ -42,6 +42,11 @@ cp "$REPO/bin/zed-claude-agent" "$WORK/checkout/bin/zed-claude-agent"
 cat > "$WORK/checkout/claude/skills/lib/workflow_context.py" <<'EOF'
 import json, os, sys
 
+argv_out = os.environ.get("STUB_ARGV_OUT")
+if argv_out:
+    with open(argv_out, "w") as handle:
+        handle.write(" ".join(sys.argv[1:]))
+
 kind = os.environ.get("STUB_KIND", "personal")
 home = os.environ["HOME"]
 if kind == "work":
@@ -64,6 +69,15 @@ run_wrapper() {
 run_bare() {
     HOME="$FAKEHOME" PATH="$WORK/bin:/usr/bin:/bin" \
         bash "$WORK/bare/bin/zed-claude-agent" "$@"
+}
+
+# ~/bin/zed-claude-agent is a symlink into the checkout, so exercise that path.
+mkdir -p "$WORK/link"
+ln -s "$WORK/checkout/bin/zed-claude-agent" "$WORK/link/zed-claude-agent"
+
+run_linked() {
+    HOME="$FAKEHOME" PATH="$WORK/bin:/usr/bin:/bin" \
+        bash "$WORK/link/zed-claude-agent" "$@"
 }
 
 # 1. personal launches with CLAUDE_CONFIG_DIR unset, not pinned to the
@@ -124,6 +138,19 @@ assert "fallback personal leaves CLAUDE_CONFIG_DIR unset" \
 out="$(run_bare work 2>/dev/null)"
 assert "fallback work pins the work config dir" \
     sh -c "printf '%s\n' \"$out\" | grep -q '^CLAUDE_CONFIG_DIR=/tmp/fakehome/.claude-work\$'"
+
+# 11. invoked through a symlink, the wrapper still finds the checkout's
+#     resolver and hands it this process's cwd plus the personal override
+ARGV_FILE="$WORK/argv.txt"
+HERE="$(pwd)"
+STUB_KIND=personal STUB_ARGV_OUT="$ARGV_FILE" run_linked personal >/dev/null
+assert "symlinked wrapper passes cwd to the resolver" \
+    grep -q -- "--cwd $HERE" "$ARGV_FILE"
+
+# 12. the personal entry asks the resolver for the personal override, which is
+#     what lets a personal thread open inside a work repository
+assert "personal entry passes --personal to the resolver" \
+    grep -q -- "--personal" "$ARGV_FILE"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

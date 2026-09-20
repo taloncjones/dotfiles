@@ -78,6 +78,7 @@ else
         export WORKFLOW_PERSONAL_ACCOUNT=1
     else
         export CLAUDE_CONFIG_DIR="$HOME/.claude-work"
+        unset WORKFLOW_PERSONAL_ACCOUNT
     fi
 fi
 
