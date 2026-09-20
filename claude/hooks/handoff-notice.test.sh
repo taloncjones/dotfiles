@@ -51,6 +51,21 @@ contains() {
     fi
 }
 
+# SessionStart output must be a JSON envelope; only additionalContext reaches
+# the model's context. Bare stdout is never folded in.
+envelope_ok() {
+    label=$1; out=$2
+    if printf '%s' "$out" | $PY -c 'import json,sys; h=json.load(sys.stdin)["hookSpecificOutput"]; sys.exit(0 if h["hookEventName"]=="SessionStart" and isinstance(h["additionalContext"],str) else 1)' 2>/dev/null; then
+        printf 'PASS  %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s\n%s\n' "$label" "$out" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+
+context() {
+    printf '%s' "$1" | $PY -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'
+}
+
 # 1. No records: silent, exit 0.
 out=$(run_hook "$REPO"); rc=$?
 silent "no records prints nothing" "$out" "$rc"
@@ -63,7 +78,9 @@ $PY "$HELPER" save --repo "$REPO" --runtime claude --task fix-login \
 $PY "$HELPER" save --repo "$REPO" --runtime claude --task release-notes \
     --brief-file "$TMP/brief-b.txt" --role worker --parent fix-login >/dev/null
 out=$(run_hook "$REPO"); rc=$?
-contains "two records list task, role, summary, hint" "$out" "$rc" \
+envelope_ok "two records emit a SessionStart envelope" "$out"
+ctx=$(context "$out")
+contains "two records list task, role, summary, hint" "$ctx" "$rc" \
     "fix-login [lead]" "working: fix the flaky login test." \
     "release-notes [worker of fix-login]" "assigned: write the release notes." \
     "Run /kickoff <task> to resume one."
@@ -93,11 +110,12 @@ while [ "$i" -le 10 ]; do
     i=$((i + 1))
 done
 out=$(run_hook "$REPO"); rc=$?
-shown=$(printf '%s\n' "$out" | grep -c '^  [a-z0-9-]* \[')
+ctx=$(context "$out")
+shown=$(printf '%s\n' "$ctx" | grep -c '^  [a-z0-9-]* \[')
 if [ "$rc" = 0 ] && [ "$shown" = 10 ] \
-    && printf '%s' "$out" | grep -qF 'and 2 more' \
-    && printf '%s' "$out" | grep -qF 'filler-10 [no role]' \
-    && ! printf '%s' "$out" | grep -qF 'fix-login ['; then
+    && printf '%s' "$ctx" | grep -qF 'and 2 more' \
+    && printf '%s' "$ctx" | grep -qF 'filler-10 [no role]' \
+    && ! printf '%s' "$ctx" | grep -qF 'fix-login ['; then
     printf 'PASS  overflow shows ten newest and omitted count\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  overflow shows ten newest and omitted count (rc=%s shown=%s)\n%s\n' "$rc" "$shown" "$out" >&2

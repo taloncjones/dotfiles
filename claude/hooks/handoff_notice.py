@@ -85,9 +85,19 @@ def main() -> int:
         return 0
     if len(ready) > MAX_RECORDS:
         lines.append(f"  and {len(ready) - MAX_RECORDS} more; run the handoff list command to see all")
-    print("Saved handoffs for this repository:")
-    print("\n".join(lines))
-    print("Run /kickoff <task> to resume one.")
+    message = "\n".join(
+        ["Saved handoffs for this repository:", *lines, "Run /kickoff <task> to resume one."]
+    )
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": message,
+                }
+            }
+        )
+    )
     return 0
 
 
