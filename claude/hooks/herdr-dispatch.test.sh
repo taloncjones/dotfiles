@@ -103,6 +103,15 @@ log = Path(os.environ["FAKE_HERDR_LOG"])
 with log.open("a") as stream:
     stream.write(json.dumps(args) + "\n")
 mode = os.environ.get("FAKE_HERDR_MODE", "ok")
+# Modes where `agent prompt --wait` reports a timeout; the following
+# `agent get` is then the adapter's reconciliation poll.
+timeout_modes = (
+    "prompt-timeout",
+    "prompt-timeout-idle",
+    "prompt-timeout-poll-fails",
+    "prompt-timeout-blocked",
+    "prompt-timeout-done",
+)
 pane = os.environ["FAKE_PANE"]
 workspace = os.environ["FAKE_WORKSPACE"]
 cwd = os.environ["FAKE_CWD"]
@@ -208,14 +217,17 @@ elif args[:2] == ["agent", "get"]:
     # is the pre-prompt readiness probe, which must keep answering idle. The
     # prompt branch drops a marker, so this branch can tell them apart.
     reconciling = (
-        mode in ("prompt-timeout", "prompt-timeout-idle", "prompt-timeout-poll-fails")
-        and Path(os.environ["FAKE_PROMPT_SEEN"]).exists()
+        mode in timeout_modes and Path(os.environ["FAKE_PROMPT_SEEN"]).exists()
     )
     if reconciling and mode == "prompt-timeout-poll-fails":
         print(json.dumps({"error": "server_not_running"}), file=sys.stderr)
         raise SystemExit(1)
     if reconciling:
-        status = "idle" if mode == "prompt-timeout-idle" else "working"
+        status = {
+            "prompt-timeout-idle": "idle",
+            "prompt-timeout-blocked": "blocked",
+            "prompt-timeout-done": "done",
+        }.get(mode, "working")
         print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
             "name": os.environ["FAKE_AGENT"], "pane_id": pane,
             "agent": os.environ.get("FAKE_RUNTIME", "codex"),
@@ -232,7 +244,7 @@ elif args[:2] == ["agent", "get"]:
         "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
         "focused": False, "revision": 2}}}))
 elif args[:2] == ["agent", "prompt"]:
-    if mode in ("prompt-timeout", "prompt-timeout-idle", "prompt-timeout-poll-fails"):
+    if mode in timeout_modes:
         # herdr reports a --wait timeout as an error envelope at exit 0.
         Path(os.environ["FAKE_PROMPT_SEEN"]).write_text("yes")
         print(json.dumps({"id": "fake", "error": {"code": "timeout",
@@ -884,6 +896,63 @@ def test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed():
         # case passing because no reconciliation happened at all.
         gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
         assert len(gets) == 2, gets
+    finally:
+        fixture.close()
+
+
+def test_blocked_agent_after_a_prompt_failure_is_never_called_launched():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-timeout-blocked"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == "Herdr agent prompt did not report success", exc
+        else:
+            raise AssertionError("a blocked agent must not rescue the attempt")
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        # herdr refuses a submission to an already-blocked agent with
+        # agent_blocked BEFORE writing any input, and `agent get` cannot tell
+        # that refusal from a brief that landed and then hit a permission
+        # prompt. Calling it launched would strand a phantom worker.
+        assert attempt["status"] == "launch_failed", attempt
+        assert "prompt_wait" not in attempt, attempt
+        # Proves the re-poll ran and REJECTED blocked, rather than the case
+        # passing because no reconciliation was attempted at all.
+        gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
+        assert len(gets) == 2, gets
+    finally:
+        fixture.close()
+
+
+def test_done_agent_after_a_prompt_failure_reconciles_to_launched():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-timeout-done"
+        result = fixture.launch()
+        # Readiness proved the agent idle, so a completed turn can only be the
+        # one this prompt started: the brief landed and finished inside the
+        # wait window.
+        assert result["status"] == "launched", result
+        assert result["prompt_state"] == "done", result
+        assert result["prompt_wait"] == "late-ready", result
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["status"] == "launched", attempt
+        assert attempt["prompt_state"] == "done", attempt
+    finally:
+        fixture.close()
+
+
+def test_late_ready_records_why_the_wait_failed():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-timeout"
+        result = fixture.launch()
+        assert result["prompt_wait"] == "late-ready", result
+        cause = result["prompt_wait_cause"]
+        assert cause == "Herdr agent prompt did not report success", cause
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["prompt_wait_cause"] == cause, attempt
     finally:
         fixture.close()
 
@@ -1803,6 +1872,9 @@ for name, test in (
     ("malformed Herdr JSON rejects before mutation", test_malformed_herdr_json_fails_before_attempt),
     ("prompt-wait timeout reconciles to launched when the agent is live", test_prompt_wait_timeout_reconciles_to_launched_when_agent_is_live),
     ("prompt-wait timeout on a dead agent still records launch_failed", test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed),
+    ("a blocked agent after a prompt failure is never called launched", test_blocked_agent_after_a_prompt_failure_is_never_called_launched),
+    ("a done agent after a prompt failure reconciles to launched", test_done_agent_after_a_prompt_failure_reconciles_to_launched),
+    ("late-ready records why the wait failed", test_late_ready_records_why_the_wait_failed),
     ("a failed re-poll surfaces the prompt error, not the poll's", test_failed_repoll_surfaces_the_prompt_error_not_the_polls),
     ("a clean prompt wait records prompt_wait accepted", test_clean_prompt_wait_records_accepted),
     ("presentation failure is reported after launch", test_presentation_failure_is_reported_after_successful_launch),

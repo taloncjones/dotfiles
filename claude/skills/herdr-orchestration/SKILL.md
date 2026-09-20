@@ -722,7 +722,7 @@ also avoids wasting work and preserves one live reviewer per task.
    and run `herdr pane close <recorded-pane>`. Never use `release-agent` as an
    interrupt and never close the workspace. Use `$CORE write-task` to carry the
    full task record forward with `status: changes-requested`, report `review incomplete: 600-second
-deadline, <launch_id>`, and never fabricate a review record, blocker count,
+   deadline, <launch_id>`, and never fabricate a review record, blocker count,
    or approval. A late sidecar cannot change that non-approved status. Herd's
    interactive start timeout bounds startup, not a running agent turn; exact-pane
    close is the controller's available interruption. If it cannot confirm the
@@ -889,12 +889,26 @@ or chooses a different account for the caller.
   the DEFAULT predicate -- it is waiting for the agent to leave -- so never add
   `--until working` to it.
 - A prompt-wait timeout is not itself a launch failure. The adapter re-polls
-  `agent get` once before classifying: a `working` or `blocked` agent records
-  `launched` with `prompt_wait: late-ready`, so the timeout stays visible in
-  the attempt rather than being swallowed; anything else keeps `launch_failed`
-  and surfaces the prompt's error, not the re-poll's. A clean wait records
-  `prompt_wait: accepted`. Never delete a task or worktree because a prompt
-  wait timed out.
+  `agent get` once before classifying: a `working` or `done` agent records
+  `launched` with `prompt_wait: late-ready` and `prompt_wait_cause` holding the
+  wait's error, so the timeout stays visible rather than being swallowed.
+  Anything else keeps `launch_failed` and surfaces the prompt's error, not the
+  re-poll's. A clean wait records `prompt_wait: accepted`. Never delete a task
+  or worktree because a prompt wait timed out.
+- The re-poll never accepts `blocked`, even though the wait itself may match
+  it. herdr rejects a submission to an already-blocked agent with
+  `agent_blocked` BEFORE writing any input, and `agent get` cannot tell that
+  refusal apart from a brief that landed and then hit a permission prompt.
+  Recording the refusal as `launched` would strand a phantom worker the
+  controller waits on forever. On the accepted path the `agent_prompted`
+  envelope proves delivery, so `--until blocked` is correct there.
+- Two residual windows this does NOT close, both pre-existing. herdr applies a
+  fixed 5000ms acceptance bound independent of `--timeout` and returns
+  `agent_prompt_stalled` for an accepted submission showing no activity in it,
+  so a delivered brief whose worker is slow to register can still record
+  `launch_failed`. And `--until working` is weak against an agent that is
+  already working; `AgentInfo.state_change_seq` is the signal that would close
+  that, and the adapter reads neither it nor `revision` across the prompt.
 - Banner evidence must follow a unique current-launch boundary. The legacy
   `classify-banner --model <alias> --effort <level|inherit> --text-file <path>`
   requires `--after <marker>` or an independently fresh `--fresh-capture`.

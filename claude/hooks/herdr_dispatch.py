@@ -698,7 +698,8 @@ def launch(
             assert isinstance(prompt_result, dict)
             prompt_state = _prompt_state(prompt_result)
             prompt_wait = "accepted"
-        except DispatchError:
+            prompt_wait_cause = None
+        except DispatchError as exc:
             # A --wait failure is not proof the prompt was refused: it covers a
             # timeout, a transport fault, and an unexpected reply alike. Ask the
             # agent once. Only a live agent rescues the attempt; the re-poll's
@@ -714,10 +715,24 @@ def launch(
                 observed = _live_agent_status(polled, agent, runtime, pane_id)
             except DispatchError:
                 observed = None
-            if observed not in ("working", "blocked"):
+            # Readiness proved the agent idle, so only a turn that began after
+            # it can show working or done -- either way the brief landed.
+            #
+            # `blocked` is NOT accepted here, even though the wait itself may
+            # match it. herdr refuses a submission to an already-blocked agent
+            # with agent_blocked BEFORE writing any input, and `agent get`
+            # cannot tell that refusal apart from a brief that was delivered
+            # and then hit a permission prompt. Recording the refusal as
+            # launched would strand a phantom worker the controller waits on
+            # forever. On the accepted path the agent_prompted envelope proves
+            # delivery, so `--until blocked` stays correct there.
+            if observed not in ("working", "done"):
                 raise
             prompt_state = observed
             prompt_wait = "late-ready"
+            # Keep WHY the wait failed: late-ready alone cannot distinguish a
+            # benign timeout from a transport fault or an unexpected reply.
+            prompt_wait_cause = str(exc)
         final_attempt = _update_attempt(
             rd,
             task_id,
@@ -730,6 +745,7 @@ def launch(
             status="launched",
             prompt_state=prompt_state,
             prompt_wait=prompt_wait,
+            prompt_wait_cause=prompt_wait_cause,
         )
         metadata = metadata_argv(final_attempt, "working", started_ns)
         try:
@@ -774,6 +790,7 @@ def launch(
         "launch_id": launch_id,
         "prompt_state": prompt_state,
         "prompt_wait": prompt_wait,
+        "prompt_wait_cause": prompt_wait_cause,
         "completion_candidate": candidate,
         "completion_authoritative": False,
         "observed_model": None,
