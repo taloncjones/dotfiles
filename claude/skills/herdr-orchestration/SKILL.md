@@ -722,7 +722,7 @@ also avoids wasting work and preserves one live reviewer per task.
    and run `herdr pane close <recorded-pane>`. Never use `release-agent` as an
    interrupt and never close the workspace. Use `$CORE write-task` to carry the
    full task record forward with `status: changes-requested`, report `review incomplete: 600-second
-deadline, <launch_id>`, and never fabricate a review record, blocker count,
+   deadline, <launch_id>`, and never fabricate a review record, blocker count,
    or approval. A late sidecar cannot change that non-approved status. Herd's
    interactive start timeout bounds startup, not a running agent turn; exact-pane
    close is the controller's available interruption. If it cannot confirm the
@@ -1172,7 +1172,7 @@ Rules (these are outward-facing writes, so treat them carefully):
 
 ## Safety
 
-- **A director session dispatches; it does not edit.** It changes
+- **An orchestrator session dispatches; it does not edit.** It changes
   repo files only for a small change (a few lines, one or two files, no
   new behaviour) that the human approved in the current turn; anything
   larger becomes a todo and a kickoff. Writes outside every git work tree
