@@ -18,6 +18,14 @@ Selection order, first match wins:
 2. The `role` of a handoff record this session resumed with kickoff.
 3. Lead, for any other top-level session.
 
+The same role names apply under herdr indexed orchestration, where the
+director is the per-repo lease holder (`tier: "launcher"` in `owner.json`)
+and a lead is a session dispatched by that director with a dispatch binding
+(`claim-owner --control-tier lead --binding <id>`). A plain session never
+claims a herdr lead lease; a herdr-dispatched session keeps its brief. The
+herdr lead is dispatch-only; the plain-session lead is the default plain
+role.
+
 - A lead does not need a director. Lead means owning the task, not opening
   panes or spawning agents; create a worktree when implementation needs one
   and delegate only independent slices with explicit file ownership.
