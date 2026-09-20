@@ -342,8 +342,7 @@ def lead_authority(session_id, runtime, caller_scope):
     non-terminal binding cannot keep a session classified. Unlike the lease
     path above, that corroboration reads the account payload root, so --
     unlike the lease path -- it does NOT survive removal or alteration of
-    the binding record or of the payload root. See section 8 of
-    docs/superpowers/specs/2026-09-20-lead-recognition-collapse-design.md.
+    the binding record or of the payload root (spec S8).
     """
     payload_root = core.account_payload_root(caller_scope) / "herdr-orch"
     is_lead = False
@@ -393,6 +392,43 @@ def lead_authority(session_id, runtime, caller_scope):
     return is_lead, roots
 
 
+def env_payload_roots():
+    """Account payload roots derivable from the environment alone.
+
+    privileged_anywhere runs where the account scope could not be derived,
+    or must not be: deriving it spends a git subprocess, and one of its two
+    call sites is reached precisely when subprocesses are failing or timing
+    out. A PreToolUse hook that overruns its timeout fails OPEN, so the
+    scope-free derivation is a correctness requirement, not a shortcut.
+
+    These are every root account_payload_root can return, built the way
+    core.state_root builds its own env-only root -- through payload_path,
+    which rewrites a leading /tmp or /var to /private on macOS. Skipping
+    that normalization would make open_state_parent's O_NOFOLLOW walk fail
+    with ELOOP and silently under-match.
+
+    A "custom" account kind needs no entry: it arises only on the branch
+    where CLAUDE_CONFIG_DIR is explicitly set, which is already covered.
+    Over-matching across candidates is this function's documented and safe
+    direction -- a match still requires a binding to name the session.
+    """
+    home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+    candidates = [home / ".claude", home / ".claude-work"]
+    for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_WORK_CONFIG_DIR"):
+        value = os.environ.get(name)
+        if value:
+            candidates.append(Path(value))
+    roots = []
+    for candidate in candidates:
+        try:
+            root = core.coordination.payload_path(candidate) / "herdr-orch"
+        except Exception:  # noqa: BLE001, S112 -- an unusable candidate is skipped
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
 def privileged_anywhere(session_id, runtime):
     """Scope-independent: does ANY coordination record name this session as
     a launcher (a slug's owner.json) or a lead (a lead-*.json lease)?
@@ -402,7 +438,21 @@ def privileged_anywhere(session_id, runtime):
     raise on a legal non-UTF-8 branch name, yet the session's coordination
     records stay readable. Ignoring account_id here can only over-match (a
     false deny for a session privileged under another account), never
-    under-match. Total: an unreadable coordination root is False."""
+    under-match. Total: an unreadable coordination root is False.
+
+    A deleted lease is also covered: a live registry occupancy whose
+    binding record names this session reports privileged, resolved against
+    environment-derived payload roots so no subprocess is added to a path
+    reached when subprocesses are already failing. account_id is
+    deliberately not matched here -- there is no scope from which to derive
+    one, and over-matching is this function's safe direction.
+
+    One limit, by construction: the corroboration runs only if the scan
+    above did not itself raise, because that except returns first. So an
+    unreadable coordination root still answers False without consulting the
+    registry. Reordering to fix that would let a raise in the newer code
+    skip the lease scan entirely, which is the worse trade.
+    """
     try:
         for slug in core.coordination.coordination_slugs():
             rec = read_state_json(
@@ -430,6 +480,16 @@ def privileged_anywhere(session_id, runtime):
                     return True
     except Exception:  # noqa: BLE001 -- unreadable namespace: cannot identify
         return False
+    # After the existing scan, never before it: this whole function's body
+    # is inside one broad except that returns False, so a raise in new code
+    # placed first would skip the lease scan entirely and read an intact
+    # lease as unprivileged -- a regression on today's behaviour.
+    try:
+        for payload_root in env_payload_roots():
+            if corroborated_lead(payload_root, session_id, runtime):
+                return True
+    except Exception:  # noqa: BLE001, S110 -- best effort; the lease scan already answered
+        pass
     return False
 
 

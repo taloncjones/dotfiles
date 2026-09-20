@@ -1062,6 +1062,89 @@ else
     printf 'FAIL  LD lease deletion keeps a lead classified; release, mismatch, and terminal bindings do not\n' >&2; FAIL=$((FAIL + 1))
 fi
 
+# --- Crash and scope-failure paths fail closed on a deleted lease -------
+if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
+import importlib.util, json, os, sys, hashlib, shutil, tempfile
+sys.dont_write_bytecode = True
+sys.path.insert(0, "claude/hooks")
+# No FIXTURE_ROOT/seed_marker here: corroborated_lead never calls
+# lead_admissible, so this block needs neither a gate record nor a marker.
+iso = tempfile.mkdtemp()
+home = os.path.join(iso, "home"); os.makedirs(home, exist_ok=True)
+os.environ["HOME"] = home
+os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude")
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
+import herdr_orch_core as core
+import herdr_coordination as coordination
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"]); sid = os.environ["SID_L"]
+scope = g.selected_scope(os.environ["R"], "claude")
+coord = str(coordination.coordination_root())
+payload_root = os.path.join(str(core.account_payload_root(scope)), "herdr-orch")
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + "1" * 32
+os.makedirs(os.path.join(coord, slug), exist_ok=True)
+rd = os.path.join(payload_root, slug)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding = {"schema_version": 1, "binding_id": bid, "tier": "lead",
+           "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
+           "task_id": "td-x", "repo_id": None, "repo_slug": slug, "workspace_root": ws,
+           "account_id": scope["account_id"], "account_kind": scope["kind"],
+           "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+           "status": "claimed", "created_ts": "t", "updated_ts": "t"}
+open(os.path.join(rd, "bindings", bid + ".json"), "w").write(json.dumps(binding))
+
+# No occupancy anywhere: an unprivileged session stays unprivileged.
+assert g.privileged_anywhere(sid, "claude") is False, "clean-negative"
+
+# Occupancy present, NO lease file at all -- the deleted-lease shape. The
+# crash and scope-failure paths must now report privileged.
+open(os.path.join(coord, "bindings.json"), "w").write(json.dumps(
+    {slug: {"lead_ws": {key: {"generation": 1, "binding_id": bid,
+                              "last_fence": 1}}}}))
+assert g.privileged_anywhere(sid, "claude") is True, "corroborated"
+
+# A different session is not implicated by that occupancy.
+assert g.privileged_anywhere("sess-unrelated-0000", "claude") is False, "other-session"
+
+# env_payload_roots covers the work default even with no config vars set.
+# Compare through payload_path: on macOS tempfile.mkdtemp() returns
+# /var/folders/..., and payload_path rewrites a leading /var to /private/var,
+# so a raw os.path.join would never match and the failure would look like a
+# bug in env_payload_roots rather than in this assertion.
+os.environ.pop("CLAUDE_CONFIG_DIR", None)
+os.environ.pop("CLAUDE_WORK_CONFIG_DIR", None)
+roots = [str(p) for p in g.env_payload_roots()]
+want = str(coordination.payload_path(os.path.join(home, ".claude")) / "herdr-orch")
+want_work = str(
+    coordination.payload_path(os.path.join(home, ".claude-work")) / "herdr-orch")
+assert want in roots, (want, roots)
+assert want_work in roots, (want_work, roots)
+assert len(roots) == len(set(roots)), ("deduplicated", roots)
+
+# crash_verdict routes through it: an unidentifiable payload stays allow,
+# and the corroborated session is refused. HERDR_ENV must be set FIRST --
+# crash_verdict short-circuits to 0 when it is unset, so the bad-sid case
+# would otherwise pass without ever reaching the SESSION_ID_RE branch it
+# is meant to exercise.
+os.environ["HERDR_ENV"] = "1"
+# refuse_crash writes three lines to stderr; keep them out of suite output.
+import contextlib, io
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    bad = g.crash_verdict({"session_id": "not a valid id"}, "claude")
+    fenced = g.crash_verdict({"session_id": sid}, "claude")
+assert bad == 0, ("bad-sid", bad)
+assert fenced == 2, ("crash-fails-closed", fenced)
+shutil.rmtree(iso, ignore_errors=True)
+PY
+then
+    printf 'PASS  PA privileged_anywhere corroborates a deleted lease from the registry\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  PA privileged_anywhere corroborates a deleted lease from the registry\n' >&2; FAIL=$((FAIL + 1))
+fi
+
 # --- Lead containment: guard acceptance (spec 7) ------------------------
 # lead_setup SID WS: write a live lead lease (coordination) + a matching
 # claimed binding (payload root) for SID at realpath(WS), under SLUG_A. The
