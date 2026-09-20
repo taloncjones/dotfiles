@@ -49,6 +49,7 @@ sh zsh/codex-account.test.sh
 sh claude/hooks/claude-hooks.test.sh
 sh claude/hooks/plan-canvas-isolation.test.sh
 sh claude/hooks/ecc-hook-isolation.test.sh
+sh claude/hooks/gateguard-tuning.test.sh
 sh claude/hooks/herdr-capabilities.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
