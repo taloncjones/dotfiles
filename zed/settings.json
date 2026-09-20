@@ -1,0 +1,121 @@
+// Zed settings
+//
+// For information on how to configure Zed, see the Zed
+// documentation: https://zed.dev/docs/configuring-zed
+//
+// To see all of Zed's default settings without changing your
+// custom settings, run `zed: open default settings` from the
+// command palette (cmd-shift-p / ctrl-shift-p)
+{
+  "proxy": "",
+  "icon_theme": {
+    "mode": "system",
+    "light": "Zed (Default)",
+    "dark": "Zed (Default)"
+  },
+  "telemetry": {
+    "diagnostics": false,
+    "metrics": false,
+    "anthropic_retention": false
+  },
+  "session": {
+    "trust_all_worktrees": true
+  },
+  "terminal": {
+    "env": {
+      "FIG_NEW_SESSION": "\"1\""
+    },
+    "font_family": "FiraCode Nerd Font"
+  },
+  "git": {
+    "inline_blame": {
+      "enabled": true
+    }
+  },
+  "preview_tabs": {
+    "enable_preview_from_file_finder": true,
+    "enable_keep_preview_on_code_navigation": true
+  },
+  "tabs": {
+    "show_close_button": "hidden"
+  },
+  "sticky_scroll": {
+    "enabled": true
+  },
+  "gutter": {
+    "line_numbers": true
+  },
+  "minimap": {
+    "show": "always"
+  },
+  "scrollbar": {
+    "axes": {
+      "horizontal": false
+    }
+  },
+  "hover_popover_sticky": false,
+  "window_title_format": "${separator}${branch} ",
+  "buffer_font_family": "Jetbrains Mono",
+  "file_types": {
+    "tailwindcss": ["*.css"]
+  },
+  "colorize_brackets": true,
+  "show_edit_predictions": true,
+  "ensure_final_newline_on_save": true,
+  "format_on_save": "on",
+  "hard_tabs": false,
+  "tab_size": 4,
+  // Account routing: every Claude entry launches through
+  // `~/bin/zed-claude-agent <account>`, which pins CLAUDE_CONFIG_DIR from
+  // $HOME and unsets ANTHROPIC_API_KEY. Zed's env values are passed
+  // literally (no ~ expansion), so a config-dir pin cannot live in this
+  // file without hardcoding a machine path into a public repo; the command
+  // field IS tilde-expanded, so the pin moved into the wrapper instead.
+  // claude-acp is a compat alias for the personal account: saved Zed
+  // spaces resolve agents by name, and removing it broke every saved space
+  // on 2026-09-19. Remove only after those spaces migrate to
+  // claude-personal. Never add an unpinned Claude entry.
+  "agent_servers": {
+    "codex-acp": {
+      "type": "registry"
+    },
+    "claude-personal": {
+      "type": "custom",
+      "command": "~/bin/zed-claude-agent",
+      "args": ["personal"],
+      "default_config_options": {
+        "effort": "high",
+        "model": "sonnet"
+      }
+    },
+    // Compat alias: pre-migration spaces were created against the
+    // "claude-acp" name; Zed resolves saved threads by server name, so the
+    // alias must stay until those spaces are gone.
+    "claude-acp": {
+      "type": "custom",
+      "command": "~/bin/zed-claude-agent",
+      "args": ["personal"],
+      "default_config_options": {
+        "effort": "medium",
+        "model": "claude-fable-5-1[1m]"
+      }
+    },
+    "claude-work": {
+      "type": "custom",
+      "command": "~/bin/zed-claude-agent",
+      "args": ["work"],
+      "default_config_options": {
+        "effort": "high",
+        "model": "sonnet"
+      }
+    }
+  },
+  "base_keymap": "VSCode",
+  "ui_font_size": 16,
+  "buffer_font_size": 12.5,
+  "theme": {
+    "mode": "system",
+    "light": "One Light",
+    "dark": "One Dark"
+  }
+}
