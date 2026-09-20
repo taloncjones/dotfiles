@@ -1,0 +1,9 @@
+# ECC and other plugin installers write vendored agent files into this dir
+# through the ~/.claude*/agents symlink. They are machine-local and
+# reproducible; only the whitelisted personas below are version-controlled.
+# This committed whitelist outranks the machine-local .git/info/exclude
+# pattern (claude/agents/*.md), so tracked personas stay addable.
+/*
+!/.gitignore
+!/.gitkeep
+!/director.md
