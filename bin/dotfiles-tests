@@ -21,6 +21,7 @@ cd "$DOTFILES"
 SUITES="
 sh install/install.test.sh
 sh bin/remote-access-doctor.test.sh
+sh bin/zed-claude-agent.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
 sh zsh/claude-account.test.sh

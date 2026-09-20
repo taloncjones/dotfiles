@@ -65,38 +65,24 @@
   "format_on_save": "on",
   "hard_tabs": false,
   "tab_size": 4,
-  // Account routing: every Claude entry MUST pin CLAUDE_CONFIG_DIR (values
-  // are passed literally -- absolute paths, no ~). An unpinned entry
-  // launches with an empty CLAUDE_CONFIG_DIR, which resolves to the
-  // personal account even in a work repo (live-confirmed 2026-09-19).
-  // claude-acp is a compat alias pinned to the personal account: saved Zed
+  // Account routing: every Claude entry launches through
+  // `~/bin/zed-claude-agent <account>`, which pins CLAUDE_CONFIG_DIR from
+  // $HOME and unsets ANTHROPIC_API_KEY. Zed's env values are passed
+  // literally (no ~ expansion), so a config-dir pin cannot live in this
+  // file without hardcoding a machine path into a public repo; the command
+  // field IS tilde-expanded, so the pin moved into the wrapper instead.
+  // claude-acp is a compat alias for the personal account: saved Zed
   // spaces resolve agents by name, and removing it broke every saved space
   // on 2026-09-19. Remove only after those spaces migrate to
-  // claude-personal. Every entry launches through
-  // `/usr/bin/env -u ANTHROPIC_API_KEY` because the ACP adapter's Agent SDK
-  // treats a present-but-empty ANTHROPIC_API_KEY as a commitment to
-  // API-key auth and fails; Zed can inject an empty key regardless of what
-  // this file sets, so the strip happens at the wrapper, not just by
-  // omitting the key from env. Adapter version is pinned to the
-  // spike-tested release; bump deliberately and re-verify per the spec's
-  // spike procedure.
+  // claude-personal. Never add an unpinned Claude entry.
   "agent_servers": {
     "codex-acp": {
       "type": "registry"
     },
     "claude-personal": {
       "type": "custom",
-      "command": "/usr/bin/env",
-      "args": [
-        "-u",
-        "ANTHROPIC_API_KEY",
-        "npx",
-        "-y",
-        "@agentclientprotocol/claude-agent-acp@0.79.0"
-      ],
-      "env": {
-        "CLAUDE_CONFIG_DIR": "/Users/talon/.claude"
-      },
+      "command": "~/bin/zed-claude-agent",
+      "args": ["personal"],
       "default_config_options": {
         "effort": "high",
         "model": "sonnet"
@@ -104,21 +90,11 @@
     },
     // Compat alias: pre-migration spaces were created against the
     // "claude-acp" name; Zed resolves saved threads by server name, so the
-    // alias must stay until those spaces are gone. Pinned like
-    // claude-personal per the account-routing rule above.
+    // alias must stay until those spaces are gone.
     "claude-acp": {
       "type": "custom",
-      "command": "/usr/bin/env",
-      "args": [
-        "-u",
-        "ANTHROPIC_API_KEY",
-        "npx",
-        "-y",
-        "@agentclientprotocol/claude-agent-acp@0.79.0"
-      ],
-      "env": {
-        "CLAUDE_CONFIG_DIR": "/Users/talon/.claude"
-      },
+      "command": "~/bin/zed-claude-agent",
+      "args": ["personal"],
       "default_config_options": {
         "effort": "medium",
         "model": "claude-fable-5-1[1m]"
@@ -126,17 +102,8 @@
     },
     "claude-work": {
       "type": "custom",
-      "command": "/usr/bin/env",
-      "args": [
-        "-u",
-        "ANTHROPIC_API_KEY",
-        "npx",
-        "-y",
-        "@agentclientprotocol/claude-agent-acp@0.79.0"
-      ],
-      "env": {
-        "CLAUDE_CONFIG_DIR": "/Users/talon/.claude-work"
-      },
+      "command": "~/bin/zed-claude-agent",
+      "args": ["work"],
       "default_config_options": {
         "effort": "high",
         "model": "sonnet"
