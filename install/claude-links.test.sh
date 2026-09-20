@@ -384,5 +384,48 @@ else
     fail "stamp write skipped through a symlinked stamp path"
 fi
 
+# --- director agent asset -------------------------------------------------
+# The persona must be tracked despite the machine-local info/exclude pattern
+# claude/agents/*.md; the committed whitelist .gitignore outranks it. A
+# tracked file always reports not-ignored (check-ignore consults the index),
+# so precedence is proven in an untracked fixture repo instead.
+if [ -n "$(git ls-files claude/agents/director.md)" ]; then
+    pass "claude/agents/director.md is tracked"
+else
+    fail "claude/agents/director.md is tracked"
+fi
+
+AGFIX="$(mktemp -d "${TMPDIR:-/tmp}/agents-ignore-test.XXXXXX")"
+git -C "$AGFIX" init -q
+mkdir -p "$AGFIX/claude/agents"
+cp claude/agents/.gitignore "$AGFIX/claude/agents/.gitignore"
+: > "$AGFIX/claude/agents/director.md"
+: > "$AGFIX/claude/agents/architect.md"
+# Whitelist alone (a machine WITHOUT the local exclude line): the committed
+# /* must keep vendored files ignored, the negation must free director.md.
+if git -C "$AGFIX" check-ignore -q claude/agents/director.md; then
+    fail "whitelist alone leaves director.md addable"
+else
+    pass "whitelist alone leaves director.md addable"
+fi
+if git -C "$AGFIX" check-ignore -q claude/agents/architect.md; then
+    pass "whitelist alone keeps vendored agents ignored"
+else
+    fail "whitelist alone keeps vendored agents ignored"
+fi
+# Now plant the machine-local exclude: the committed negation must outrank it.
+printf 'claude/agents/*.md\n' >> "$AGFIX/.git/info/exclude"
+if git -C "$AGFIX" check-ignore -q claude/agents/director.md; then
+    fail "whitelist negation beats info/exclude for director.md"
+else
+    pass "whitelist negation beats info/exclude for director.md"
+fi
+if git -C "$AGFIX" check-ignore -q claude/agents/architect.md; then
+    pass "vendored agents stay ignored with info/exclude present"
+else
+    fail "vendored agents stay ignored with info/exclude present"
+fi
+rm -rf "$AGFIX"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

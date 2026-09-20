@@ -1,8 +1,8 @@
 # Event schema
 
 The task record's `status` field (written via `$CORE write-task`) is the
-sole authoritative state -- the value the orchestrator reports and acts on.
-`events.jsonl` is a hook-hints-only log: a secondary signal the orchestrator
+sole authoritative state -- the value the director reports and acts on.
+`events.jsonl` is a hook-hints-only log: a secondary signal the director
 reads during status/triage, never a status override and never itself the
 authoritative record of a transition.
 
@@ -20,31 +20,31 @@ No code appends `kickoff`, `phase-advanced`, `review-dispatched`,
 `completed`, `paused`, `failed`, `changes-requested`, `reviewed`,
 `abandoned`, or `merged` as log records. Those names appear only as the
 "Event" column of the SKILL.md state transition table (section 9), where
-each names the conceptual transition the orchestrator makes to `status` via
+each names the conceptual transition the director makes to `status` via
 `$CORE write-task` -- not an emitted `events.jsonl` line. Adding a verb to
 append them as real log records is a documented future option, out of scope
 here.
 
-The `$CORE watch` subcommand (orchestrator wake, SKILL.md section 1 step 6)
+The `$CORE watch` subcommand (director wake, SKILL.md section 1 step 6)
 is a READER of `events.jsonl` and the `tasks/` sidecars: it emits only the
 closed stdout vocabulary `signal` / `heartbeat` and never appends events.
 
 `tasks/<task_id>.spend.jsonl` (the mech spend ledger, written by `$CORE
 run-mech`) is watched like the completion sidecars so an append wakes the
-orchestrator; its lines are ledger records, not events, and are folded only
+director; its lines are ledger records, not events, and are folded only
 by `status`.
 
 `think/<think_id>.launch.json` and `think/<think_id>.answer.json` (written
 by `$CORE run-think`, `references/state-layout.md`) are watched the same
-way: a write to either wakes the orchestrator, but they are records, not
+way: a write to either wakes the director, but they are records, not
 events, and are folded only by `status` (into the `_think` summary), never
 appended to `events.jsonl`.
 
 After appending, the hook also pushes one wake line to the owning
-orchestrator's inbox socket (`$CORE post_wake`, path from
+director's inbox socket (`$CORE post_wake`, path from
 `owner.json.messaging_socket`). The wake is not an event: it is written to no
-herdr file, carries no authority, and the orchestrator treats it as a wake
-trigger only. Claude Code persists the delivered line in the orchestrator's
+herdr file, carries no authority, and the director treats it as a wake
+trigger only. Claude Code persists the delivered line in the director's
 own session transcript like any message; it holds only non-secret
 operational metadata (`repo_slug`, workspace id, event name, timestamp,
 nonce). The two steps fail independently: an `append_event` failure never
