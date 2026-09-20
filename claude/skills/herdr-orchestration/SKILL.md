@@ -1219,10 +1219,13 @@ reads as absent rather than empty.
 --pane-id <p> --source-head-sha <40hex>`, after the pane exists and BEFORE
    starting an agent in it. Optionally `--role --agent --model --effort`.
 3. Start the agent in that pane.
-4. `enrich-dispatch --binding <bid> --task-id <t> --launch-id <id> --json
-'{"peer_name":"..."}'` for facts discovered after launch. An enrichment may
-   not name an attempt identity field (`launch_id`, `phase`, `runtime`,
-   `workspace_id`, `pane_id`, `source_head_sha`).
+4. `enrich-dispatch --binding <bid> --task-id <t>` plus the SAME full identity
+   you reserved (`--launch-id --phase --runtime --workspace-id --pane-id
+--source-head-sha`) and `--json '{"peer_name":"..."}'`, for facts
+   discovered after launch. The update may not name an identity field; the
+   identity is how the verb finds the row, and it must equal the current
+   attempt. Passing the full tuple is what stops a replayed enrichment from
+   landing on a later attempt that happens to share a `launch_id`.
 
 Reserving before the agent starts is what makes teardown safe: a `write-task`
 refused afterwards cannot erase the row, so `outstanding_descendants` still

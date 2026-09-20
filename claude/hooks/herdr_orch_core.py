@@ -2090,9 +2090,10 @@ def _native_worker_row(row) -> bool:
 def _attempt_tuple(row):
     """The native identity of a worker row, or None when it is legacy.
 
-    outstanding_descendants gates on the FINAL row alone, so a settled or
-    superseded identity re-appended as that row reports a live successor's
-    pane as already settled."""
+    outstanding_descendants gates on the FINAL row alone, so a SETTLED
+    identity re-appended as that row reports a live successor's pane as
+    already settled. reserve-dispatch refuses only that case; an unsettled
+    repeat is a legitimate re-dispatch to a prior head."""
     if not isinstance(row, dict):
         return None
     values = tuple(row.get(key) for key in ATTEMPT_FIELDS)
@@ -2538,7 +2539,12 @@ def _main(argv=None) -> int:
     rsv.add_argument("--binding", required=True)
     for optional in ("--role", "--agent", "--model", "--effort"):
         rsv.add_argument(optional, default=None)
-    enr = add("enrich-dispatch", "--task-id", "--launch-id", "--json", fenced=True)
+    # The FULL identity, not just --launch-id: launch_ids are not unique, so a
+    # replayed enrichment keyed on one alone lands on whichever attempt is
+    # current and mislabels it.
+    enr = add("enrich-dispatch", "--task-id", "--launch-id", "--phase",
+              "--workspace-id", "--pane-id", "--source-head-sha", "--json",
+              fenced=True)
     enr.add_argument("--binding", required=True)
     wi = add("write-index", "--workspace", "--json", fenced=True)
     wi.add_argument("--binding", default=None)
@@ -2784,8 +2790,13 @@ def _main(argv=None) -> int:
                         base / "tasks" / f"{ns.task_id}{_SETTLE_SUFFIX[ns.phase]}"
                     ))
                 except FileNotFoundError:
+                    # A vanished payload dir must not read as "unsettled",
+                    # which would let the reservation through.
+                    coordination.assert_transaction_current()
                     settle = None
-                except (OSError, ValueError):
+                except (OSError, ValueError, RecursionError):
+                    # RecursionError for the same reason read_prior_task
+                    # catches it: deeply nested JSON must exit 2, not traceback.
                     _require(False, "settlement record is unreadable")
                 _require(not _attempt_settled(row, settle),
                          "attempt identity is already settled; reserving it "
@@ -2804,6 +2815,12 @@ def _main(argv=None) -> int:
         # Identity preservation is structural: the identity keys are never in
         # the update, so every gate reading ATTEMPT_FIELDS observes an
         # unchanged value without any comparison having to be right.
+        #
+        # The cost: every OTHER field of a bound workers[-1] is mutable, so no
+        # gate may key on one. Nothing does today -- the readers that use
+        # `status` or `reprompts` read launcher-scope rd/tasks/ -- and a new
+        # bound-path fact belongs in the identity tuple or a settlement
+        # record, never here.
         _require(not set(updates) & set(ATTEMPT_FIELDS),
                  "an enrichment may not name an attempt identity field")
         with _fenced_scoped(ns) as (rd, base):
@@ -2818,8 +2835,13 @@ def _main(argv=None) -> int:
                      "task record task_id does not match --task-id")
             workers = prior["workers"]
             _require(bool(workers), "task record has no dispatch row to enrich")
-            _require(workers[-1].get("launch_id") == ns.launch_id,
-                     "launch-id is not the current attempt")
+            _require(
+                _attempt_tuple(workers[-1]) == (
+                    ns.launch_id, ns.phase, ns.runtime, ns.workspace_id,
+                    ns.pane_id, ns.source_head_sha,
+                ),
+                "attempt identity is not the current attempt",
+            )
             # Built from the record on disk, never from a caller's copy.
             updated = {**workers[-1], **updates}
             _require(_native_worker_row(updated),

@@ -435,18 +435,24 @@ list is accepted. On the binding-scoped path neither route works and
 the record must be repaired on disk first.
 
 A refused dispatch row cannot hide a live pane. `reserve-dispatch` introduces
-bound worker rows and `enrich-dispatch` mutates the current one; bound
-`write-task` still carries rows forward, but may not repeat an attempt identity
-already in the record. A lead reserves its attempt under the owner transaction
-after the pane exists and before it starts an agent, so a later `write-task`
-that exits 2 cannot erase the evidence: dispatch history is append-only, the
-reserved row survives the refusal, and `outstanding_descendants` still reports
-its pane.
+bound worker rows and `enrich-dispatch` mutates the current one. A lead reserves
+its attempt under the owner transaction after the pane exists and before it
+starts an agent, so a later `write-task` that exits 2 cannot erase the evidence:
+dispatch history is append-only, the reserved row survives the refusal, and
+`outstanding_descendants` still reports its pane.
 
-The identity rule exists because `outstanding_descendants` gates on the FINAL
-row alone. Re-appending a settled or superseded tuple as that row would report
-a live successor's pane as already settled, and teardown would release the lease
-over it.
+`reserve-dispatch` refuses an attempt identity that a settlement record already
+matches, because `outstanding_descendants` gates on the FINAL row alone: a
+settled identity re-appended as that row reports a live successor's pane as
+already settled, and teardown would release the lease over it. An UNSETTLED
+repeat is allowed -- that is a legitimate re-dispatch back to a prior head.
+
+**Bound `write-task` is not settlement-aware and does not enforce this.** It
+still carries rows forward under the append-only prefix and the native row
+rule, so re-appending a settled identity through `write-task` directly does
+empty the outstanding set and does release the lease over a live pane. Closing
+that needs a settlement-aware writer contract; it is tracked separately and is
+not fixed by the reservation work.
 
 A reservation whose lead died before it could settle blocks both
 `teardown-binding` and `reconcile-leads` until an operator passes

@@ -8210,15 +8210,18 @@ CLAUDE_CONFIG_DIR="$root" $CLI write-task \
 if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
    --launch-id L1 --phase nonsense --runtime claude --workspace-id w1 \
-   --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "phase must be one of" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
    --launch-id L1 --phase implement --runtime claude --workspace-id 'w-1' \
-   --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "invalid workspace-id" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
    --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
-   --pane-id pane1 --source-head-sha notasha 2>/dev/null; then exit 1; fi
+   --pane-id pane1 --source-head-sha notasha 2>"$ERRFILE"; then exit 1; fi
+grep -q "source-head-sha must be 40 hex" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
    --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
@@ -8270,7 +8273,8 @@ print(core.outstanding_descendants(core.repo_dir(sys.argv[1]), sys.argv[2]))
 ' "$LF_SLUG" "$bid")
 CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
-   --launch-id L1 --json '{"peer_name":"impl-td-e"}'
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"peer_name":"impl-td-e"}'
 AFTER=$(CLAUDE_CONFIG_DIR="$root" python3 -c '
 import sys; sys.path.insert(0, "claude/hooks")
 import herdr_orch_core as core
@@ -8288,15 +8292,35 @@ assert w["launch_id"] == "L1" and w["pane_id"] == "pane1", w
 ' "$TASK"
 if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
-   --launch-id L1 --json '{"pane_id":"pane9"}' 2>"$ERRFILE"; then exit 1; fi
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"pane_id":"pane9"}' 2>"$ERRFILE"; then exit 1; fi
 grep -q "identity field" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
-   --launch-id NOPE --json '{"peer_name":"x"}' 2>"$ERRFILE"; then exit 1; fi
-grep -q "current attempt" "$ERRFILE"
+   --launch-id NOPE --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"peer_name":"x"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "not the current attempt" "$ERRFILE"
+# A replayed enrichment must NOT land on a later attempt that reuses the
+# launch_id: the full identity is what finds the row.
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
 if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
-   --launch-id L1 --json '[]' 2>/dev/null; then exit 1; fi
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"peer_name":"stale"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "not the current attempt" "$ERRFILE"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["workers"][-1]["pane_id"] == "pane2", rec
+assert "peer_name" not in rec["workers"][-1], rec
+' "$TASK"
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '[]' 2>/dev/null; then exit 1; fi
 SH
 
 
