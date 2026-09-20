@@ -8222,6 +8222,19 @@ if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
    --pane-id pane1 --source-head-sha notasha 2>"$ERRFILE"; then exit 1; fi
 grep -q "source-head-sha must be 40 hex" "$ERRFILE"
+# An unparseable pane id would produce the <unreadable> sentinel, which
+# --descendants-terminated deliberately does not override and append-only
+# cannot remove: the binding would be tearable only by on-disk repair.
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id '<unreadable>' --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "pane-id must be shell-safe" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id 'bad id' --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "launch-id must be shell-safe" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
    --launch-id L1 --phase implement --runtime claude --workspace-id w1 \

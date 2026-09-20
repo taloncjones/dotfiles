@@ -2746,12 +2746,23 @@ def _main(argv=None) -> int:
         _require(ns.runtime is not None, "a reservation requires --runtime")
         _require(bool(SHA40_RE.fullmatch(ns.source_head_sha or "")),
                  "source-head-sha must be 40 hex characters")
+        # Append-only means a bad pane id can never be removed, and the
+        # <unreadable> sentinel it can produce is deliberately NOT overridden
+        # by --descendants-terminated: one typo would leave the binding
+        # tearable only by on-disk repair.
+        _require(bool(SHELL_SAFE_RE.fullmatch(ns.pane_id or "")),
+                 "pane-id must be shell-safe")
+        _require(bool(SHELL_SAFE_RE.fullmatch(ns.launch_id or "")),
+                 "launch-id must be shell-safe")
         with _fenced_scoped(ns) as (rd, base):
             require_not_consumed(rd, ns.binding)
             # Pin the task to the binding, as emit-envelope and emit-artifacts
-            # do. outstanding_descendants scans every task file in the lead
-            # subtree, so a row seeded under a stray task id would block
-            # teardown for a task this binding does not own.
+            # do: outstanding_descendants scans every task file in the lead
+            # subtree, so a row under a stray task id blocks teardown for a
+            # task this binding does not own. This closes the path through
+            # THIS verb only -- bound write-task is still unpinned, so the
+            # shape stays reachable there (tracked with the other writer
+            # residuals).
             rec_b = bindings.read_binding(rd, ns.binding)
             _require(rec_b is not None, "unknown dispatch binding")
             _require(ns.task_id == rec_b["task_id"],
