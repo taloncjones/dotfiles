@@ -127,6 +127,20 @@ sessions"). User-layer and project-layer plugin declarations are merged
 (**inferred-from-docs** for exact merge rules; live container shows both
 layers' plugins active).
 
+Skill-level controls (checked against upstream docs and the 2.1.278 binary,
+2026-09-19): `skillOverrides` (`on` / `name-only` / `user-invocable-only` /
+`off`) hides or trims personal, project, and bundled skills, and
+`Skill(...)` permission rules restrict invocation -- but upstream states
+plainly that plugin skills are NOT affected by `skillOverrides`; the only
+control for a plugin's skills is the whole plugin (`enabledPlugins`,
+`/plugin`). `claude plugin details <name@marketplace>` prints a plugin's
+component inventory and projected always-on token cost (ECC 2.2.1: 380
+skills, ~40.6k tokens per session); `/skill-doctor` (interactive) shows
+per-skill cost and usage. A same-named plugin loaded via `--plugin-dir` or
+as a `~/.claude/skills/<name>` skills-dir plugin shadows the installed
+marketplace copy for that session, which is the only route to a curated
+subset of a third-party plugin (see the ECC-future todo).
+
 ## Plugin system mechanics
 
 On-disk layout under `<config-dir>/plugins/`, live-verified 2026-07-02:
@@ -190,15 +204,15 @@ is warn-only: it only ever exits 0 with a warning payload.
 1. USER layer -- `claude/settings.json.tmpl` `hooks` key (lands in each
    config dir's settings.json):
 
-| Event        | Matcher                   | Hooks                                                                      |
-| ------------ | ------------------------- | -------------------------------------------------------------------------- |
-| PreToolUse   | `Bash`                    | commit_guard.py, no_ai_attribution_bash.py                                 |
-| PreToolUse   | `Read\|Edit\|Write`       | block_secrets.py (segment-based matching since commit 52f807d, 2026-07-02) |
-| PreToolUse   | `Edit\|Write`             | protect_claude_md.py (warn-only)                                           |
-| PostToolUse  | `Edit\|Write`             | emoji_guard.py, no_ai_comments.py, format_files.py (prettier)              |
-| PostToolUse  | `mcp__plugin_atlassian`   | cache_jira_url.py                                                          |
-| SessionStart | `startup\|clear\|compact` | account_guard.py                                                           |
-| PermissionRequest | `Bash` | scratch_policy.py (scratch-only allow or no decision; Claude only) |
+| Event             | Matcher                   | Hooks                                                                      |
+| ----------------- | ------------------------- | -------------------------------------------------------------------------- |
+| PreToolUse        | `Bash`                    | commit_guard.py, no_ai_attribution_bash.py                                 |
+| PreToolUse        | `Read\|Edit\|Write`       | block_secrets.py (segment-based matching since commit 52f807d, 2026-07-02) |
+| PreToolUse        | `Edit\|Write`             | protect_claude_md.py (warn-only)                                           |
+| PostToolUse       | `Edit\|Write`             | emoji_guard.py, no_ai_comments.py, format_files.py (prettier)              |
+| PostToolUse       | `mcp__plugin_atlassian`   | cache_jira_url.py                                                          |
+| SessionStart      | `startup\|clear\|compact` | account_guard.py                                                           |
+| PermissionRequest | `Bash`                    | scratch_policy.py (scratch-only allow or no decision; Claude only)         |
 
 2. PROJECT layer -- `.claude/settings.json`:
 
