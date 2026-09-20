@@ -6,6 +6,11 @@
 # same payloads with the knobs cleared and must show the gate; a control
 # that passes without the knobs is a suite bug.
 #
+# The exemption glob in the template is absolute (/**) because ECC 2.2.2
+# scopes a relative glob to the project root: an unqualified ** only matches
+# targets under it. The Edit/Write cases pin CLAUDE_PROJECT_DIR to /repo and
+# check both a target contained under it and one outside it.
+#
 # Bash cases run ECC's real pre-Bash dispatcher chain (pre-bash-dispatcher.js
 # -> bash-hook-dispatcher.js's runPreBash, which runs block-no-verify then
 # auto-tmux-dev then gateguard-fact-force under standard/strict, with
@@ -116,7 +121,7 @@ run_case() {
         set -f  # $knobs is word-split on purpose; ** must not glob
         cd "$TMP" && env -i PATH="$PATH" HOME="$TMP/home" \
             CLAUDE_PLUGIN_ROOT="$ECC_ROOT" ECC_HOOKS_ENABLED=true ECC_HOOK_PROFILE=standard \
-            GATEGUARD_STATE_DIR="$cd_/state" CLAUDE_SESSION_ID="$sid" \
+            GATEGUARD_STATE_DIR="$cd_/state" CLAUDE_SESSION_ID="$sid" CLAUDE_PROJECT_DIR=/repo \
             $knobs \
             node "$ECC_ROOT/scripts/hooks/run-with-flags.js" "$1" scripts/hooks/gateguard-fact-force.js standard,strict
     ) >"$cd_/out" 2>"$cd_/err"
@@ -157,8 +162,9 @@ EDIT_ID=pre:edit-write:gateguard-fact-force
 ROUTINE='{"tool_name":"Bash","tool_input":{"command":"cat README.md"}}'
 RMRF='{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/scratch/build"}}'
 RESET='{"tool_name":"Bash","tool_input":{"command":"git reset --hard HEAD~1"}}'
-EDIT='{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/module.py","old_string":"a","new_string":"b"}}'
-WRITE='{"tool_name":"Write","tool_input":{"file_path":"/repo/docs/new.md","content":"x"}}'
+EDIT='{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/module.py","old_string":"a","new_string":"b"},"cwd":"/repo"}'
+WRITE='{"tool_name":"Write","tool_input":{"file_path":"/repo/docs/new.md","content":"x"},"cwd":"/repo"}'
+EDIT_OUTSIDE='{"tool_name":"Edit","tool_input":{"file_path":"/elsewhere/notes.md","old_string":"a","new_string":"b"},"cwd":"/repo"}'
 
 expect "template env: routine Bash is not gated"            allow "$(run_case_bash template "$ROUTINE")"
 expect "control: without the knobs routine Bash is gated"    deny  "$(run_case_bash none "$ROUTINE")"
@@ -167,6 +173,7 @@ expect "template env: git reset --hard still denied"         deny  "$(run_case_b
 expect "template env: first-touch Edit is not gated"         allow "$(run_case "$EDIT_ID" template "$EDIT")"
 expect "template env: first-touch Write is not gated"        allow "$(run_case "$EDIT_ID" template "$WRITE")"
 expect "control: without the knobs first-touch Edit is gated" deny  "$(run_case "$EDIT_ID" none "$EDIT")"
+expect "template env: first-touch Edit outside the project dir is not gated" allow "$(run_case "$EDIT_ID" template "$EDIT_OUTSIDE")"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

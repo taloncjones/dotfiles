@@ -447,20 +447,22 @@ fi
 # for both accounts; the destructive-Bash gate stays on because neither knob
 # touches it. Values are pinned (not just present) because the reconciler
 # merges env with existing keys surviving, so rollback is a value flip, not
-# a line deletion. See claude/hooks/gateguard-tuning.test.sh for the proof.
+# a line deletion. The exempt glob is absolute: since ECC 2.2.2 a relative
+# glob is scoped to the project root, an absolute glob matches every path,
+# which is the intent. See claude/hooks/gateguard-tuning.test.sh for the proof.
 if python3 - <<'PY'
 import json
 import sys
 
 env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
-ok = env.get("GATEGUARD_BASH_ROUTINE_DISABLED") == "1" and env.get("GATEGUARD_EXEMPT_GLOBS") == "**"
+ok = env.get("GATEGUARD_BASH_ROUTINE_DISABLED") == "1" and env.get("GATEGUARD_EXEMPT_GLOBS") == "/**"
 sys.exit(0 if ok else 1)
 PY
 then
-    printf 'PASS  gateguard: template pins GATEGUARD_BASH_ROUTINE_DISABLED=1 and GATEGUARD_EXEMPT_GLOBS=**\n'
+    printf 'PASS  gateguard: template pins GATEGUARD_BASH_ROUTINE_DISABLED=1 and GATEGUARD_EXEMPT_GLOBS=/**\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  gateguard: template pins GATEGUARD_BASH_ROUTINE_DISABLED=1 and GATEGUARD_EXEMPT_GLOBS=**\n' >&2
+    printf 'FAIL  gateguard: template pins GATEGUARD_BASH_ROUTINE_DISABLED=1 and GATEGUARD_EXEMPT_GLOBS=/**\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
