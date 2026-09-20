@@ -1037,6 +1037,95 @@ PY
     fi
 done
 
+# GateGuard knob support: 2026-09-19 incident -- a stale PROJECT-scope
+# ecc@ecc 2.0.0-rc.1 record (predating both knobs) sat alongside a current
+# USER-scope 2.2.1 record; a linked-worktree session resolved the stale
+# project record and silently ignored GATEGUARD_BASH_ROUTINE_DISABLED and
+# GATEGUARD_EXEMPT_GLOBS while the env and the hermetic suite both looked
+# fine. Check every record this checkout could actually load.
+if python3 - <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+
+def real(path):
+    return os.path.realpath(path)
+
+
+try:
+    current_root = real(
+        subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], text=True
+        ).strip()
+    )
+    common_dir = subprocess.check_output(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        text=True,
+    ).strip()
+    main_root = real(os.path.dirname(common_dir))
+except Exception as exc:
+    print("  could not resolve git worktree roots: " + str(exc))
+    sys.exit(2)
+
+found_file = False
+selected = []
+for config_dir in (os.path.expanduser("~/.claude"), os.path.expanduser("~/.claude-work")):
+    path = os.path.join(config_dir, "plugins", "installed_plugins.json")
+    if not os.path.isfile(path):
+        continue
+    found_file = True
+    data = json.load(open(path))
+    plugins = data.get("plugins", data)
+    records = plugins.get("ecc@ecc") or []
+    for rec in records:
+        scope = rec.get("scope")
+        if scope == "user":
+            selected.append(rec)
+        elif scope == "project":
+            proj = rec.get("projectPath")
+            if proj and real(proj) in (current_root, main_root):
+                selected.append(rec)
+
+if not found_file or not selected:
+    sys.exit(2)
+
+fails = []
+for rec in selected:
+    install_path = rec.get("installPath", "")
+    hook_path = os.path.join(install_path, "scripts", "hooks", "gateguard-fact-force.js")
+    ok = False
+    if os.path.isfile(hook_path):
+        content = open(hook_path, encoding="utf-8", errors="replace").read()
+        ok = "GATEGUARD_BASH_ROUTINE_DISABLED" in content and "GATEGUARD_EXEMPT_GLOBS" in content
+    if not ok:
+        fails.append(rec)
+
+for rec in fails:
+    print(
+        "  scope=" + str(rec.get("scope"))
+        + " version=" + str(rec.get("version"))
+        + " projectPath=" + str(rec.get("projectPath"))
+        + " installPath=" + str(rec.get("installPath"))
+        + " -- run: claude plugin update ecc@ecc --scope " + str(rec.get("scope"))
+        + " (from that project path)"
+    )
+sys.exit(1 if fails else 0)
+PY
+then
+    printf 'PASS  gateguard: loaded ecc@ecc records support the GateGuard knobs\n'
+    PASS=$((PASS + 1))
+else
+    status=$?
+    if [ "$status" -eq 2 ]; then
+        printf 'SKIP  gateguard: no loadable ecc@ecc plugin record found\n'
+    else
+        printf 'FAIL  gateguard: loaded ecc@ecc records support the GateGuard knobs\n' >&2
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
 # herdr_stop_gate.py: exit 2 (refuse) when an orchestrated worker stops
 # without its completion record, 0 otherwise. Every fixture is a throwaway
 # config dir under mktemp with the documented herdr-orch layout; the hook
