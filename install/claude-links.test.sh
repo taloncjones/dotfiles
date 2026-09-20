@@ -177,6 +177,45 @@ else
     fail "reconcile leaves no token in env"
 fi
 
+# 6b. Retired model-alias pins are swept. env is otherwise a union, so a
+# machine that once carried ANTHROPIC_DEFAULT_OPUS_MODEL would keep the stale
+# model ID forever after the template dropped it. A pin the template still
+# defines stays, and unrelated machine-local env additions survive.
+PINTMPL="$TMP/pin-tmpl.json"
+cat >"$PINTMPL" <<'EOF'
+{
+  "model": "fable[1m]",
+  "env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "deliberate-pin"}
+}
+EOF
+PINDEST="$TMP/pin-dest.json"
+cat >"$PINDEST" <<'EOF'
+{
+  "env": {
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "stale-value",
+    "ANTHROPIC_BASE_URL": "https://gateway.example",
+    "MACHINE_LOCAL": "keep"
+  }
+}
+EOF
+reconcile_claude_settings_file "$PINTMPL" "$PINDEST" "[test]" >/dev/null 2>&1
+if jget "$PINDEST" "'ANTHROPIC_DEFAULT_OPUS_MODEL' not in d['env']"; then
+    pass "reconcile sweeps a model pin the template dropped"
+else
+    fail "reconcile sweeps a model pin the template dropped"
+fi
+if jget "$PINDEST" "d['env']['ANTHROPIC_DEFAULT_SONNET_MODEL'] == 'deliberate-pin'"; then
+    pass "reconcile keeps a model pin the template still defines"
+else
+    fail "reconcile keeps a model pin the template still defines"
+fi
+if jget "$PINDEST" "d['env']['ANTHROPIC_BASE_URL'] == 'https://gateway.example' and d['env']['MACHINE_LOCAL'] == 'keep'"; then
+    pass "the sweep leaves unrelated env keys alone"
+else
+    fail "the sweep leaves unrelated env keys alone"
+fi
+
 # --- link_claude_config_dir integration (real repo template) ---
 # The campaign 3.2 gate: run the machine link path against a scratch config
 # dir whose settings.json holds only installer-written keys, and prove the
@@ -215,15 +254,19 @@ if jget "$CFG/settings.json" "'~/.claude/hooks/rm_guard.py' in [h['command'] for
 else
     fail "link path registers rm_guard.py as a PreToolUse Bash hook"
 fi
-if jget "$CFG/settings.json" "d['model'] == 'claude-fable-5[1m]'"; then
-    pass "link path pins the shared Claude default to Fable 5 1M"
+if jget "$CFG/settings.json" "d['model'] == 'fable[1m]'"; then
+    pass "link path defaults to the Fable alias at 1M"
 else
-    fail "link path pins the shared Claude default to Fable 5 1M"
+    fail "link path defaults to the Fable alias at 1M"
 fi
-if jget "$CFG/settings.json" "d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] == 'claude-opus-4-8[1m]'"; then
-    pass "link path maps the Opus alias to Opus 4.8 1M"
+# A version-pinned default (claude-fable-5[1m], claude-opus-4-8[1m]) strands
+# the machine on a retired model; the alias always resolves to the newest
+# release of that family. ANTHROPIC_DEFAULT_*_MODEL takes a concrete model ID,
+# so the only way to leave the opus alias un-pinned is to not set it.
+if jget "$CFG/settings.json" "not any(k.startswith('ANTHROPIC_DEFAULT_') for k in d['env'])"; then
+    pass "link path leaves every model alias un-pinned"
 else
-    fail "link path maps the Opus alias to Opus 4.8 1M"
+    fail "link path leaves every model alias un-pinned"
 fi
 if jget "$CFG/settings.json" "{x.strip().lower() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending', 'post:bash:command-log-audit', 'post:bash:command-log-cost', 'post:skill:track', 'pre:mcp-health-check', 'post:mcp-health-check'}"; then
     pass "link path delivers the seven-id ECC hook exclusion"
