@@ -85,7 +85,7 @@ STATE_ROOT/
                                       # transitions the binding claimed ->
                                       # completed after an expected-base check)
     think/
-      <think_id>.question.md          # orchestrator-written brief (input contract)
+      <think_id>.question.md          # director-written brief (input contract)
       <think_id>.launch.json          # wrapper-written, create-exclusive, before launch (liveness)
       <think_id>.answer.json          # wrapper-written result (output contract)
     workspaces/
@@ -132,7 +132,7 @@ STATE_ROOT/
   Verify uniqueness via `agent list`; each launch also gets a collision-resistant
   launch ID. Names are transport handles, not task identity.
 - Display label: short task title, current role/runtime/model/status in separate
-  metadata fields; orchestrator `orch:<repo>`. Retain stable task and launch IDs
+  metadata fields; director `director:<repo>`. Retain stable task and launch IDs
   behind the label. Refresh pane and workspace metadata on every phase/retry so
   a reused plan pane no longer displays a plan role during review.
 - **One workspace/worktree per task.** git allows only one worktree per branch,
@@ -181,7 +181,7 @@ STATE_ROOT/
   and treated as `null`.
 - Preflight claims if the file is absent or `heartbeat_ts` is stale (e.g.
   > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
-  > orchestrator whose claim fails **yields** to read-only reporting and
+  > director whose claim fails **yields** to read-only reporting and
   > offers an explicit takeover.
 
 ### `config.json`
@@ -226,7 +226,7 @@ Validation: required `user`, `default_base`; `epics` a (possibly empty)
 list; `soft_cap` a positive int (default 3); `models` optional (falls back
 to the built-in preferences). `models`, when present, must be an object keyed
 by the canonical resolver roles `plan`/`impl`/`review`/`mech`/`think` (no
-`orchestrator` -- its model is fixed at session launch), each value a list of
+`director` -- its model is fixed at session launch), each value a list of
 the aliases `fable`/`opus`/`sonnet`/`haiku`; `haiku` is legal only in
 `models.mech`, and `models.think` may name only `fable`/`opus` (`sonnet` or
 `haiku` under `think` is a config error, exit 5 -- deep think is the strong
@@ -319,14 +319,14 @@ verify-after-launch). Never committed.
 ```json
 {
   "v": 1,
-  "session_id": "<orchestrator session id>",
+  "session_id": "<director session id>",
   "available": { "fable": false, "opus": true, "sonnet": true, "haiku": true }
 }
 ```
 
 `v` must be the integer 1 (not `true`); `available` must carry exactly the four
 aliases, each a boolean; `haiku` is legal only in `models.mech`. `resolve-model`
-treats the map as stale (exit 3) when `session_id` != the live orchestrator
+treats the map as stale (exit 3) when `session_id` != the live director
 session, so a restart / `/clear` triggers a fresh probe. `resolve-model` filters
 each role's preference list by this map and prints the first available alias,
 or exits 3 (stale/absent), 4 (no survivor), or 5 (invalid role / malformed
@@ -334,7 +334,7 @@ or exits 3 (stale/absent), 4 (no survivor), or 5 (invalid role / malformed
 
 ### `tasks/<task_id>.json` -- durable task record
 
-Written only by the owning orchestrator, via `$CORE write-task`.
+Written only by the owning director, via `$CORE write-task`.
 
 ```json
 {
@@ -463,7 +463,7 @@ legacy carry-forward. Every new dispatch includes explicit requested effort;
 observed model/effort are separate fields or unknown when not exposed.
 
 `contract_path` (worktree-relative) and `contract_sha256` are the
-verification-contract pin, written by the orchestrator at implement dispatch
+verification-contract pin, written by the director at implement dispatch
 (the sha256 of the committed contract blob; see the contract section below).
 Records predating the feature lack both fields -- `verify-contract` then
 exits 5 and the skill's grandfather rule applies. `merge_check` records the
@@ -548,7 +548,7 @@ check for the impl `.done.json`.
 
 Append-only, per-task, written only by `$CORE run-mech` (single writer, one
 `start` line before the headless launch and one `end` line after it returns
-or times out -- never by `emit-done` or the orchestrator). Read and folded
+or times out -- never by `emit-done` or the director). Read and folded
 only by `$CORE status`.
 
 ```json
@@ -686,7 +686,7 @@ skipped and counted in `skipped_files`, never fatal. No per-task field.
 
 ### `workspaces/<HERDR_WORKSPACE_ID>.json` -- reverse index
 
-Read by the monitoring hook; written by the orchestrator via
+Read by the monitoring hook; written by the director via
 `$CORE write-index`.
 
 ```json
@@ -706,7 +706,7 @@ distinction lives in the task record's `workers[].phase`, not the index role.
 
 Append-only, **per-workspace**, written only by that workspace's hook
 (single writer per file, so no cross-writer interleaving). The
-orchestrator merges across files on read (`$CORE status`). See
+director merges across files on read (`$CORE status`). See
 `event-schema.md` for the event vocabulary and fold rule.
 
 ### `claude/contracts/<task_id>-contract.json` -- verification contract (branch-committed)
