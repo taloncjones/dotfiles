@@ -939,6 +939,129 @@ else
     printf 'FAIL  LA lead_authority resolves a live binding and fails closed on revoke/missing/mismatch/malformed-sibling/recursion\n' >&2; FAIL=$((FAIL + 1))
 fi
 
+# --- Lease deletion must not widen a lead to an ordinary worker ---------
+if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
+import importlib.util, json, os, sys, hashlib, shutil, tempfile
+sys.dont_write_bytecode = True
+sys.path.insert(0, "claude/hooks")
+sys.path.insert(0, os.environ["FIXTURE_ROOT"])
+from fixture_marker import seed_marker
+iso = tempfile.mkdtemp()
+os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
+os.environ["HOME"] = os.path.join(iso, "home")
+os.makedirs(os.environ["HOME"], exist_ok=True)
+import herdr_orch_core as core
+import herdr_coordination as coordination
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+slug = os.environ["SLUG_A"]; ws = os.path.realpath(os.environ["R"]); sid = os.environ["SID_L"]
+scope = g.selected_scope(os.environ["R"], "claude")
+coord = str(coordination.coordination_root())
+payload_root = os.path.join(str(core.account_payload_root(scope)), "herdr-orch")
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + "1" * 32
+slugd = os.path.join(coord, slug); os.makedirs(slugd, exist_ok=True)
+lease = {"schema_version": 1, "session_id": sid, "host": "h", "pid": 5, "fence": 1,
+         "heartbeat_ts": 9e18, "runtime": "claude", "thread_id": None,
+         "account_id": scope["account_id"], "control_tier": "lead",
+         "workspace_root": ws, "binding_id": bid}
+lease_path = os.path.join(slugd, "lead-%s.json" % key)
+open(lease_path, "w").write(json.dumps(lease))
+rd = os.path.join(payload_root, slug)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+binding = {"schema_version": 1, "binding_id": bid, "tier": "lead",
+           "parent": {"tier": "launcher", "task_id": "PROJ-1", "session_id": "L1"},
+           "task_id": "td-x", "repo_id": None, "repo_slug": slug, "workspace_root": ws,
+           "account_id": scope["account_id"], "account_kind": scope["kind"],
+           "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+           "status": "claimed", "created_ts": "t", "updated_ts": "t"}
+bpath = os.path.join(rd, "bindings", bid + ".json")
+open(bpath, "w").write(json.dumps(binding))
+open(os.path.join(rd, "task-lead-gate.json"), "w").write(json.dumps(
+    {"schema_version": 1, "repo_slug": slug, "repo_id": None,
+     "account_id": scope["account_id"], "enabled": True}))
+seed_marker(scope, 1, iso)
+occupied = {"generation": 1, "binding_id": bid, "last_fence": 1}
+# Minimal shape for the READER under test. A real writer also stores
+# repo_id/payload_scopes, which OwnerTransaction.__init__ requires; do not
+# copy this fixture into a write-path test.
+registry = {slug: {"lead_ws": {key: occupied}}}
+reg_path = os.path.join(coord, "bindings.json")
+open(reg_path, "w").write(json.dumps(registry))
+
+# Live lease: the roots path answers, unchanged.
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [ws], ("live", is_lead, roots)
+
+# Lease DELETED. Before this change is_lead went False -- allow everything.
+os.remove(lease_path)
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is True and roots == [], ("lease-deleted", is_lead, roots)
+
+# A completed release clears the occupancy. A stale claimed binding must
+# NOT keep the session classified (R2).
+released = {"generation": 1, "binding_id": None, "last_fence": 1,
+            "releases": {"1": bid}}
+open(reg_path, "w").write(json.dumps({slug: {"lead_ws": {key: released}}}))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is False and roots == [], ("released", is_lead, roots)
+
+# Occupancy naming a DIFFERENT session must not deny this one (R3).
+open(reg_path, "w").write(json.dumps(registry))
+open(bpath, "w").write(json.dumps(dict(binding, expected_session_id="someone-else")))
+is_lead, roots = g.lead_authority(sid, "claude", scope)
+assert is_lead is False, ("other-session", is_lead)
+
+# Same for an account or runtime mismatch.
+open(bpath, "w").write(json.dumps(dict(binding, account_id="other-account")))
+is_lead, _r = g.lead_authority(sid, "claude", scope)
+assert is_lead is False, ("account-mismatch", is_lead)
+open(bpath, "w").write(json.dumps(dict(binding, runtime="codex")))
+is_lead, _r = g.lead_authority(sid, "claude", scope)
+assert is_lead is False, ("runtime-mismatch", is_lead)
+
+# A terminal binding does not corroborate (a named residual).
+open(bpath, "w").write(json.dumps(dict(binding, status="completed")))
+is_lead, _r = g.lead_authority(sid, "claude", scope)
+assert is_lead is False, ("terminal", is_lead)
+
+# A binding that cannot be read must not crash the guard open.
+open(bpath, "w").write("{not json")
+is_lead, _r = g.lead_authority(sid, "claude", scope)
+assert is_lead is False, ("corrupt-binding", is_lead)
+
+# Deleting the binding too is the documented residual: allowed.
+os.remove(bpath)
+is_lead, _r = g.lead_authority(sid, "claude", scope)
+assert is_lead is False, ("binding-gone", is_lead)
+
+# Occupancy for a slug whose payload directory is gone entirely: no
+# corroboration and no raise (spec test 18).
+shutil.rmtree(rd, ignore_errors=True)
+is_lead, _r = g.lead_authority(sid, "claude", scope)
+assert is_lead is False, ("payload-dir-gone", is_lead)
+os.makedirs(os.path.join(rd, "bindings"), exist_ok=True)
+
+# Cost: with no occupancy at all, read_binding is never called.
+open(reg_path, "w").write(json.dumps({slug: {"lead_ws": {}}}))
+import herdr_bindings
+calls = []
+real = herdr_bindings.read_binding
+herdr_bindings.read_binding = lambda *a, **k: calls.append(a) or real(*a, **k)
+try:
+    g.lead_authority(sid, "claude", scope)
+finally:
+    herdr_bindings.read_binding = real
+assert calls == [], ("zero-binding-reads", calls)
+shutil.rmtree(iso, ignore_errors=True)
+PY
+then
+    printf 'PASS  LD lease deletion keeps a lead classified; release, mismatch, and terminal bindings do not\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  LD lease deletion keeps a lead classified; release, mismatch, and terminal bindings do not\n' >&2; FAIL=$((FAIL + 1))
+fi
+
 # --- Lead containment: guard acceptance (spec 7) ------------------------
 # lead_setup SID WS: write a live lead lease (coordination) + a matching
 # claimed binding (payload root) for SID at realpath(WS), under SLUG_A. The
