@@ -901,7 +901,11 @@ or chooses a different account for the caller.
   refusal apart from a brief that landed and then hit a permission prompt.
   Recording the refusal as `launched` would strand a phantom worker the
   controller waits on forever. On the accepted path the `agent_prompted`
-  envelope proves delivery, so `--until blocked` is correct there.
+  envelope proves delivery, so `--until blocked` is correct there. When herdr
+  names the refusal outright with `agent_blocked`, the adapter skips the
+  re-poll entirely: delivery is provably absent, so no later observation --
+  including an agent that unblocks and starts an unrelated turn -- can rescue
+  the attempt.
 - Two residual windows this does NOT close, both pre-existing. herdr applies a
   fixed 5000ms acceptance bound independent of `--timeout` and returns
   `agent_prompt_stalled` for an accepted submission showing no activity in it,

@@ -704,6 +704,13 @@ def launch(
             # timeout, a transport fault, and an unexpected reply alike. Ask the
             # agent once. Only a live agent rescues the attempt; the re-poll's
             # own failure is swallowed so the recorded error stays the prompt's.
+            # agent_blocked is herdr stating it refused the submission before
+            # writing any input: delivery is PROVABLY absent, so no observation
+            # can rescue it. Checked before polling, because an agent that
+            # unblocks and starts an unrelated turn would otherwise read as
+            # live. Matches the code result_object appends.
+            if str(exc).endswith(": agent_blocked"):
+                raise
             observed = None
             try:
                 polled = _run_herdr(
@@ -732,7 +739,9 @@ def launch(
             prompt_wait = "late-ready"
             # Keep WHY the wait failed: late-ready alone cannot distinguish a
             # benign timeout from a transport fault or an unexpected reply.
-            prompt_wait_cause = str(exc)
+            # Bounded because a nonzero exit carries herdr's whole stderr and
+            # this string is persisted into the shared task record.
+            prompt_wait_cause = str(exc)[:200]
         final_attempt = _update_attempt(
             rd,
             task_id,

@@ -34,6 +34,13 @@ def result_object(output: str, operation: str) -> dict[str, Any]:
         or not isinstance(record.get("id"), str)
         or "error" in record
     ):
+        # Carry herdr's error code when it sent one. Without it every envelope
+        # failure -- timeout, agent_prompt_stalled, agent_blocked -- flattens to
+        # one message, and a caller that records the reason records nothing.
+        error = record.get("error") if isinstance(record, dict) else None
+        code = error.get("code") if isinstance(error, dict) else None
+        if isinstance(code, str) and code:
+            raise _dispatch_error(f"{operation} did not report success: {code}")
         raise _dispatch_error(f"{operation} did not report success")
     result = record.get("result")
     if not isinstance(result, dict):
@@ -58,7 +65,12 @@ def run_herdr(
             text=True,
             timeout=timeout_secs,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError: text=True decodes in subprocess.run, so a partial
+        # reply from a crashing herdr raises a ValueError that is NOT a
+        # DispatchError -- it would escape every caller's handler and strand the
+        # attempt mid-transaction. _deliver_reprompt already guards this by
+        # decoding explicitly; this closes it for every other call site.
         raise _dispatch_error(f"Herdr command failed: {argv[0]} {argv[1]}") from exc
     if process.returncode != 0:
         detail = process.stderr.strip() or process.stdout.strip() or "no detail"

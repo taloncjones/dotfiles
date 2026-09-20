@@ -111,6 +111,7 @@ timeout_modes = (
     "prompt-timeout-poll-fails",
     "prompt-timeout-blocked",
     "prompt-timeout-done",
+    "prompt-refused-blocked",
 )
 pane = os.environ["FAKE_PANE"]
 workspace = os.environ["FAKE_WORKSPACE"]
@@ -227,6 +228,9 @@ elif args[:2] == ["agent", "get"]:
             "prompt-timeout-idle": "idle",
             "prompt-timeout-blocked": "blocked",
             "prompt-timeout-done": "done",
+            # A refused submission whose agent then starts an unrelated turn:
+            # only the error code proves nothing was delivered.
+            "prompt-refused-blocked": "working",
         }.get(mode, "working")
         print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
             "name": os.environ["FAKE_AGENT"], "pane_id": pane,
@@ -247,7 +251,8 @@ elif args[:2] == ["agent", "prompt"]:
     if mode in timeout_modes:
         # herdr reports a --wait timeout as an error envelope at exit 0.
         Path(os.environ["FAKE_PROMPT_SEEN"]).write_text("yes")
-        print(json.dumps({"id": "fake", "error": {"code": "timeout",
+        code = ("agent_blocked" if mode == "prompt-refused-blocked" else "timeout")
+        print(json.dumps({"id": "fake", "error": {"code": code,
             "message": "timed out waiting for agent state"}}))
         raise SystemExit(0)
     if mode == "prompt-reject":
@@ -885,7 +890,7 @@ def test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed():
             # The PROMPT's error surfaces, never the re-poll's. result_object
             # flattens every error envelope to this one message, so the herdr
             # error code itself is not recoverable here.
-            assert str(exc) == "Herdr agent prompt did not report success", exc
+            assert str(exc) == "Herdr agent prompt did not report success: timeout", exc
         else:
             raise AssertionError("an idle agent after a prompt timeout was accepted")
         attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
@@ -907,7 +912,7 @@ def test_blocked_agent_after_a_prompt_failure_is_never_called_launched():
         try:
             fixture.launch()
         except herdr_dispatch.DispatchError as exc:
-            assert str(exc) == "Herdr agent prompt did not report success", exc
+            assert str(exc) == "Herdr agent prompt did not report success: timeout", exc
         else:
             raise AssertionError("a blocked agent must not rescue the attempt")
         attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
@@ -921,6 +926,27 @@ def test_blocked_agent_after_a_prompt_failure_is_never_called_launched():
         # passing because no reconciliation was attempted at all.
         gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
         assert len(gets) == 2, gets
+    finally:
+        fixture.close()
+
+
+def test_agent_blocked_refusal_is_never_reconciled_even_if_agent_goes_working():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-refused-blocked"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).endswith(": agent_blocked"), exc
+        else:
+            raise AssertionError("a refused submission was reconciled")
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["status"] == "launch_failed", attempt
+        # The agent reports `working` here. Only herdr's error code proves the
+        # submission was refused before any input was written, so the re-poll
+        # must be skipped entirely rather than trusting the observed state.
+        gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
+        assert len(gets) == 1, gets
     finally:
         fixture.close()
 
@@ -950,7 +976,10 @@ def test_late_ready_records_why_the_wait_failed():
         result = fixture.launch()
         assert result["prompt_wait"] == "late-ready", result
         cause = result["prompt_wait_cause"]
-        assert cause == "Herdr agent prompt did not report success", cause
+        # herdr's own error code is carried through; without it every envelope
+        # failure flattens to one message and the field records nothing useful.
+        assert cause == "Herdr agent prompt did not report success: timeout", cause
+        assert cause.endswith("timeout"), cause
         attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
         assert attempt["prompt_wait_cause"] == cause, attempt
     finally:
@@ -967,7 +996,7 @@ def test_failed_repoll_surfaces_the_prompt_error_not_the_polls():
             # The re-poll is diagnostic. Its own failure is swallowed so the
             # record explains why the PROMPT failed, not why the probe did:
             # a server_not_running here would misdirect whoever reads it.
-            assert str(exc) == "Herdr agent prompt did not report success", exc
+            assert str(exc) == "Herdr agent prompt did not report success: timeout", exc
             assert "server_not_running" not in str(exc), exc
         else:
             raise AssertionError("a failed re-poll must not rescue the attempt")
@@ -1873,6 +1902,7 @@ for name, test in (
     ("prompt-wait timeout reconciles to launched when the agent is live", test_prompt_wait_timeout_reconciles_to_launched_when_agent_is_live),
     ("prompt-wait timeout on a dead agent still records launch_failed", test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed),
     ("a blocked agent after a prompt failure is never called launched", test_blocked_agent_after_a_prompt_failure_is_never_called_launched),
+    ("an agent_blocked refusal is never reconciled", test_agent_blocked_refusal_is_never_reconciled_even_if_agent_goes_working),
     ("a done agent after a prompt failure reconciles to launched", test_done_agent_after_a_prompt_failure_reconciles_to_launched),
     ("late-ready records why the wait failed", test_late_ready_records_why_the_wait_failed),
     ("a failed re-poll surfaces the prompt error, not the poll's", test_failed_repoll_surfaces_the_prompt_error_not_the_polls),
