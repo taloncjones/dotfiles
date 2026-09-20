@@ -16,6 +16,7 @@ brew "lazygit"
 brew "pipx"
 brew "blueutil"
 brew "uv"           # Modern Python package and project manager (replaces pyenv, pip, pip-tools)
+brew "node"         # npx runs the pinned claude-agent-acp adapter (zed/settings.json)
 cask "font-fira-code"
 cask "font-jetbrains-mono"
 # AI tools
@@ -46,6 +47,7 @@ cask "ghostty" unless system("test -e /Applications/Ghostty.app")
 cask "sourcetree" unless system("test -e /Applications/Sourcetree.app")
 cask "sublime-text" unless system("test -e \"/Applications/Sublime Text.app\"")
 cask "visual-studio-code" unless system("test -e \"/Applications/Visual Studio Code.app\"")
+cask "zed" unless system("test -e /Applications/Zed.app")
 
 # utilities
 cask "appcleaner" unless system("test -e /Applications/AppCleaner.app")

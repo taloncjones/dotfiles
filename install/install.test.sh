@@ -56,5 +56,10 @@ for(const[k,e]of Object.entries(a)){
 assert "link.sh links zed settings" \
     rg -q -F 'ln -sf "$DOTFILEDIR"/zed/settings.json "$HOME/.config/zed/settings.json"' install/macos/link.sh
 
+assert "macOS Brewfile installs zed cask" \
+    rg -q 'cask "zed"' install/macos/Brewfile.rb
+assert "macOS Brewfile installs node for agent adapters" \
+    rg -q 'brew "node"' install/macos/Brewfile.rb
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
