@@ -204,6 +204,26 @@ elif args[:2] == ["agent", "start"]:
 elif args[:2] == ["agent", "get"]:
     observed_pane = "w9:p9" if mode == "stale-agent" else pane
     busy = mode == "agent-busy"
+    # The reconciliation re-poll is the SECOND agent get in a launch: the first
+    # is the pre-prompt readiness probe, which must keep answering idle. The
+    # prompt branch drops a marker, so this branch can tell them apart.
+    reconciling = (
+        mode in ("prompt-timeout", "prompt-timeout-idle", "prompt-timeout-poll-fails")
+        and Path(os.environ["FAKE_PROMPT_SEEN"]).exists()
+    )
+    if reconciling and mode == "prompt-timeout-poll-fails":
+        print(json.dumps({"error": "server_not_running"}), file=sys.stderr)
+        raise SystemExit(1)
+    if reconciling:
+        status = "idle" if mode == "prompt-timeout-idle" else "working"
+        print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
+            "name": os.environ["FAKE_AGENT"], "pane_id": pane,
+            "agent": os.environ.get("FAKE_RUNTIME", "codex"),
+            "agent_status": status, "interactive_ready": status == "idle",
+            "launch_pending": False,
+            "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
+            "focused": False, "revision": 4}}}))
+        raise SystemExit(0)
     print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
         "name": os.environ["FAKE_AGENT"], "pane_id": observed_pane,
         "agent": os.environ.get("FAKE_RUNTIME", "codex"),
@@ -212,6 +232,12 @@ elif args[:2] == ["agent", "get"]:
         "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
         "focused": False, "revision": 2}}}))
 elif args[:2] == ["agent", "prompt"]:
+    if mode in ("prompt-timeout", "prompt-timeout-idle", "prompt-timeout-poll-fails"):
+        # herdr reports a --wait timeout as an error envelope at exit 0.
+        Path(os.environ["FAKE_PROMPT_SEEN"]).write_text("yes")
+        print(json.dumps({"id": "fake", "error": {"code": "timeout",
+            "message": "timed out waiting for agent state"}}))
+        raise SystemExit(0)
     if mode == "prompt-reject":
         print(json.dumps({"error": "not_idle"}), file=sys.stderr)
         raise SystemExit(1)
@@ -221,7 +247,7 @@ elif args[:2] == ["agent", "prompt"]:
     print(json.dumps({"id": "fake", "result": {"type": "agent_prompted", "agent": {
         "name": os.environ["FAKE_AGENT"], "pane_id": pane,
         "agent": os.environ.get("FAKE_RUNTIME", "codex"),
-        "agent_status": "done", "interactive_ready": True, "launch_pending": False,
+        "agent_status": "working", "interactive_ready": True, "launch_pending": False,
         "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
         "focused": False, "revision": 3}}}))
 elif args[:2] == ["pane", "report-metadata"]:
@@ -302,6 +328,7 @@ class Fixture:
             "FAKE_WRONG_CWD": str(self.root / "other"),
             "FAKE_READ_COUNT": str(self.root / "read-count"),
             "FAKE_ATTEMPT_SEEN": str(self.root / "attempt-seen"),
+            "FAKE_PROMPT_SEEN": str(self.root / "prompt-seen"),
             "FAKE_TASK_FILE": str(self.task_file),
             "FAKE_AGENT": "impl-td-a",
             "FAKE_ENV_OUTPUT": str(self.root / "env-output"),
@@ -540,8 +567,15 @@ def test_prompt_is_literal_argv_and_wait_is_only_a_hint():
         assert "--runtime codex" in prompt[3], prompt
         assert "Keep the source tree read-only" not in prompt[3], prompt
         assert "approval is rejected" not in prompt[3], prompt
-        assert prompt[4:] == ["--wait", "--timeout", "1000"], prompt
-        assert result["prompt_state"] == "done", result
+        # --until bounds the wait to ACCEPTANCE. Without it herdr's default
+        # predicate is idle|done|blocked -- the first turn FINISHING -- so a
+        # normally-long first turn times out and the attempt is misrecorded
+        # launch_failed while the worker is live.
+        assert prompt[4:] == [
+            "--wait", "--until", "working", "--until", "blocked",
+            "--timeout", "1000",
+        ], prompt
+        assert result["prompt_state"] == "working", result
         assert result["completion_authoritative"] is False, result
         assert not (fixture.rd / "tasks" / "td-a.done.json").exists()
     finally:
@@ -806,6 +840,83 @@ def test_malformed_herdr_json_fails_before_attempt():
         else:
             raise AssertionError("malformed pane JSON was accepted")
         assert json.loads(fixture.task_file.read_text())["workers"] == []
+    finally:
+        fixture.close()
+
+
+def test_prompt_wait_timeout_reconciles_to_launched_when_agent_is_live():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-timeout"
+        result = fixture.launch()
+        assert result["status"] == "launched", result
+        assert result["prompt_state"] == "working", result
+        assert result["prompt_wait"] == "late-ready", result
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["status"] == "launched", attempt
+        assert attempt["prompt_state"] == "working", attempt
+        assert attempt["prompt_wait"] == "late-ready", attempt
+        # The timeout is recorded, not swallowed: a re-poll ran after the prompt.
+        gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
+        assert len(gets) == 2, gets
+    finally:
+        fixture.close()
+
+
+def test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-timeout-idle"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            # The PROMPT's error surfaces, never the re-poll's. result_object
+            # flattens every error envelope to this one message, so the herdr
+            # error code itself is not recoverable here.
+            assert str(exc) == "Herdr agent prompt did not report success", exc
+        else:
+            raise AssertionError("an idle agent after a prompt timeout was accepted")
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["status"] == "launch_failed", attempt
+        assert "prompt_wait" not in attempt, attempt
+        assert not (fixture.rd / "tasks" / "td-a.done.json").exists()
+        # Proves the re-poll actually ran and returned idle, rather than the
+        # case passing because no reconciliation happened at all.
+        gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
+        assert len(gets) == 2, gets
+    finally:
+        fixture.close()
+
+
+def test_failed_repoll_surfaces_the_prompt_error_not_the_polls():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-timeout-poll-fails"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            # The re-poll is diagnostic. Its own failure is swallowed so the
+            # record explains why the PROMPT failed, not why the probe did:
+            # a server_not_running here would misdirect whoever reads it.
+            assert str(exc) == "Herdr agent prompt did not report success", exc
+            assert "server_not_running" not in str(exc), exc
+        else:
+            raise AssertionError("a failed re-poll must not rescue the attempt")
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["status"] == "launch_failed", attempt
+    finally:
+        fixture.close()
+
+
+def test_clean_prompt_wait_records_accepted():
+    fixture = Fixture()
+    try:
+        result = fixture.launch()
+        assert result["prompt_wait"] == "accepted", result
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["prompt_wait"] == "accepted", attempt
+        gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
+        assert len(gets) == 1, gets
     finally:
         fixture.close()
 
@@ -1207,6 +1318,13 @@ def test_reprompt_targets_named_launch_and_records_in_place():
         before = len(fx.worker_records())
         result = fx.reprompt(lid)
         assert result["status"] == "reprompted", result
+        # Same acceptance bound as the launch path; dispatch-mechanism.md
+        # already claims this fence covers "delivering acceptance".
+        delivery = [c for c in fx.calls() if c[:2] == ["agent", "prompt"]][-1]
+        assert delivery[4:] == [
+            "--wait", "--until", "working", "--until", "blocked",
+            "--timeout", "1000",
+        ], delivery
         assert result["reprompt_seq"] == 0, result
         assert result["observation"] == "session-identity-not-exposed-by-herdr", result
         workers = fx.worker_records()
@@ -1683,6 +1801,10 @@ for name, test in (
     ("current Codex hook review variants are narrowly recognized", test_current_codex_hook_review_variants_are_narrowly_recognized),
     ("failed native start never emits completion", test_start_failure_never_emits_completion),
     ("malformed Herdr JSON rejects before mutation", test_malformed_herdr_json_fails_before_attempt),
+    ("prompt-wait timeout reconciles to launched when the agent is live", test_prompt_wait_timeout_reconciles_to_launched_when_agent_is_live),
+    ("prompt-wait timeout on a dead agent still records launch_failed", test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed),
+    ("a failed re-poll surfaces the prompt error, not the poll's", test_failed_repoll_surfaces_the_prompt_error_not_the_polls),
+    ("a clean prompt wait records prompt_wait accepted", test_clean_prompt_wait_records_accepted),
     ("presentation failure is reported after launch", test_presentation_failure_is_reported_after_successful_launch),
     ("launch requires a managed Herdr environment", test_launch_requires_managed_herdr_environment),
     ("native start timeout range fails before mutation", test_native_start_timeout_range_fails_before_mutation),

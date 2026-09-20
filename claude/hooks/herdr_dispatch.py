@@ -312,6 +312,30 @@ def _write_attempt(
         return updated
 
 
+def _live_agent_status(result: Any, agent: str, runtime: str, pane_id: str) -> str | None:
+    """Read agent_status from an `agent get` reply, or None if it is not ours.
+
+    Deliberately not `_validate_agent`: that helper requires idle and
+    interactive-ready, which is the pre-launch contract and the exact inverse of
+    what a post-prompt reconciliation has to accept.
+    """
+    if not isinstance(result, dict) or result.get("type") not in (
+        "agent_info",
+        "agent_started",
+    ):
+        return None
+    embedded = result.get("agent")
+    record = embedded if isinstance(embedded, dict) else result
+    if (
+        record.get("name") != agent
+        or record.get("agent") != runtime
+        or record.get("pane_id") != pane_id
+    ):
+        return None
+    status = record.get("agent_status")
+    return status if isinstance(status, str) else None
+
+
 def _update_attempt(
     rd: Path,
     task_id: str,
@@ -641,23 +665,59 @@ def launch(
             personal,
             approval_mediated=runtime == "codex" and sandbox == "read-only",
         )
-        prompt_result = _run_herdr(
-            herdr_cli,
-            [
-                "agent",
-                "prompt",
-                agent,
-                launch_prompt,
-                "--wait",
-                "--timeout",
-                str(prompt_timeout_ms),
-            ],
-            env=child_env,
-            timeout_secs=prompt_timeout_ms / 1000 + 5,
-            json_result=True,
-        )
-        assert isinstance(prompt_result, dict)
-        prompt_state = _prompt_state(prompt_result)
+        # The reconciled region spans the prompt AND its reply parsing. A
+        # --wait failure does not mean the prompt was not accepted, so the
+        # agent is observed once before the attempt is called a failure.
+        # _prompt_state must be inside: it binds prompt_state for both
+        # branches, and it keeps an unexpected reply shape reconcilable
+        # instead of fatal.
+        try:
+            prompt_result = _run_herdr(
+                herdr_cli,
+                [
+                    "agent",
+                    "prompt",
+                    agent,
+                    launch_prompt,
+                    "--wait",
+                    # Bound the wait to acceptance. herdr's default predicate
+                    # is idle|done|blocked -- the first turn FINISHING -- so
+                    # without --until a normally-long first turn times out and
+                    # a live, briefed worker is recorded launch_failed.
+                    "--until",
+                    "working",
+                    "--until",
+                    "blocked",
+                    "--timeout",
+                    str(prompt_timeout_ms),
+                ],
+                env=child_env,
+                timeout_secs=prompt_timeout_ms / 1000 + 5,
+                json_result=True,
+            )
+            assert isinstance(prompt_result, dict)
+            prompt_state = _prompt_state(prompt_result)
+            prompt_wait = "accepted"
+        except DispatchError:
+            # A --wait failure is not proof the prompt was refused: it covers a
+            # timeout, a transport fault, and an unexpected reply alike. Ask the
+            # agent once. Only a live agent rescues the attempt; the re-poll's
+            # own failure is swallowed so the recorded error stays the prompt's.
+            observed = None
+            try:
+                polled = _run_herdr(
+                    herdr_cli,
+                    ["agent", "get", agent],
+                    env=child_env,
+                    json_result=True,
+                )
+                observed = _live_agent_status(polled, agent, runtime, pane_id)
+            except DispatchError:
+                observed = None
+            if observed not in ("working", "blocked"):
+                raise
+            prompt_state = observed
+            prompt_wait = "late-ready"
         final_attempt = _update_attempt(
             rd,
             task_id,
@@ -669,6 +729,7 @@ def launch(
             launch_id,
             status="launched",
             prompt_state=prompt_state,
+            prompt_wait=prompt_wait,
         )
         metadata = metadata_argv(final_attempt, "working", started_ns)
         try:
@@ -712,6 +773,7 @@ def launch(
         "status": "launched",
         "launch_id": launch_id,
         "prompt_state": prompt_state,
+        "prompt_wait": prompt_wait,
         "completion_candidate": candidate,
         "completion_authoritative": False,
         "observed_model": None,
@@ -917,8 +979,9 @@ def _deliver_reprompt(herdr_cli, agent, prompt, prompt_timeout_ms, env):
     Output is captured as bytes and decoded explicitly so invalid UTF-8 cannot
     escape as a ValueError that a caller might mistake for a pre-delivery fault.
     """
-    argv = ["agent", "prompt", agent, prompt, "--wait", "--timeout",
-            str(prompt_timeout_ms)]
+    argv = ["agent", "prompt", agent, prompt, "--wait",
+            "--until", "working", "--until", "blocked",
+            "--timeout", str(prompt_timeout_ms)]
     # The invariant: the ONLY provably-retry-safe outcome is a process-CREATION
     # failure (the delivery binary never ran). Once the process has started,
     # every failure -- timeout, communication error, nonzero exit, undecodable

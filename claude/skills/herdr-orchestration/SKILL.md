@@ -722,7 +722,7 @@ also avoids wasting work and preserves one live reviewer per task.
    and run `herdr pane close <recorded-pane>`. Never use `release-agent` as an
    interrupt and never close the workspace. Use `$CORE write-task` to carry the
    full task record forward with `status: changes-requested`, report `review incomplete: 600-second
-   deadline, <launch_id>`, and never fabricate a review record, blocker count,
+deadline, <launch_id>`, and never fabricate a review record, blocker count,
    or approval. A late sidecar cannot change that non-approved status. Herd's
    interactive start timeout bounds startup, not a running agent turn; exact-pane
    close is the controller's available interruption. If it cannot confirm the
@@ -879,6 +879,22 @@ or chooses a different account for the caller.
   actual current effort; the policy does not change an already running model.
 - Herdr startup/readiness and `agent prompt --wait` are transport evidence,
   never completion. Only the core's milestone/contract/review gates advance.
+- The adapter's own `agent prompt --wait` is bounded to ACCEPTANCE with
+  `--until working --until blocked`. Without `--until`, herdr matches
+  `idle|done|blocked` -- the first turn finishing -- so a normally-long first
+  turn times out and a live worker is misrecorded. Verified against herdr
+  0.9.1; the release that introduced `--until` is not established, so an older
+  herdr would reject the flag and fail the launch loudly. This applies to the
+  adapter's launch and reprompt calls only. The `/exit` interrupt above wants
+  the DEFAULT predicate -- it is waiting for the agent to leave -- so never add
+  `--until working` to it.
+- A prompt-wait timeout is not itself a launch failure. The adapter re-polls
+  `agent get` once before classifying: a `working` or `blocked` agent records
+  `launched` with `prompt_wait: late-ready`, so the timeout stays visible in
+  the attempt rather than being swallowed; anything else keeps `launch_failed`
+  and surfaces the prompt's error, not the re-poll's. A clean wait records
+  `prompt_wait: accepted`. Never delete a task or worktree because a prompt
+  wait timed out.
 - Banner evidence must follow a unique current-launch boundary. The legacy
   `classify-banner --model <alias> --effort <level|inherit> --text-file <path>`
   requires `--after <marker>` or an independently fresh `--fresh-capture`.
