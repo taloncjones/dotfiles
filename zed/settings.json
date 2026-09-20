@@ -85,7 +85,7 @@
       "args": ["personal"],
       "default_config_options": {
         "effort": "high",
-        "model": "sonnet"
+        "model": "fable[1m]"
       }
     },
     // Compat alias: pre-migration spaces were created against the
@@ -96,8 +96,8 @@
       "command": "~/bin/zed-claude-agent",
       "args": ["personal"],
       "default_config_options": {
-        "effort": "medium",
-        "model": "claude-fable-5-1[1m]"
+        "effort": "high",
+        "model": "fable[1m]"
       }
     },
     "claude-work": {
@@ -106,7 +106,7 @@
       "args": ["work"],
       "default_config_options": {
         "effort": "high",
-        "model": "sonnet"
+        "model": "opus"
       }
     }
   },

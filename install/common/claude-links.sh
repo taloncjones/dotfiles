@@ -135,6 +135,14 @@ for hook_id in required_hooks:
         hook_tokens.append(hook_id)
 env["ECC_DISABLED_HOOKS"] = ",".join(hook_tokens)
 env["ECC_PLAN_CANVAS_STATE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plan-canvas")
+
+# env is a union, so dropping a key from the template would otherwise leave it
+# set on every machine that already has it. Model aliases must stay un-pinned:
+# ANTHROPIC_DEFAULT_<FAMILY>_MODEL takes a concrete model ID, so a stale one
+# strands the machine on a retired model instead of tracking the newest release.
+for key in [k for k in env if k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL")]:
+    if key not in tmpl.get("env", {}):
+        del env[key]
 result["env"] = env
 
 # Preserve any platform/installer keys the template does not define.

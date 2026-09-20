@@ -104,7 +104,8 @@ Each is resolved here, with the reason, so none is silently re-litigated.
 10. **The voice pass is `gpt-6-astra/high`**, matching every other Astra row.
     Nothing argued for a different value; the source simply omitted it.
 11. **Tier doctrine describes defaults, not exclusivity.** `opus` is the reviewer
-    tier and also the gateway model at a lower effort. The `opus` alias resolves
-    to Opus 4.8 in both.
+    tier and also the gateway model at a lower effort. No role names a model
+    version: every tier is a family alias, which resolves to that family's
+    newest release.
 12. **Skeptic is `opus/high`**, rising to `xhigh` under `risk=critical` or
     `difficulty=hard` -- the same as reviewer, which the source left unstated.
