@@ -1200,6 +1200,43 @@ p = os.path.join(e["SB_CFG"], "herdr-orch", e["SB_SLUG"], "bindings", bid + ".js
 rec = json.load(open(p)); rec["status"] = e["SB_STATUS"]; json.dump(rec, open(p, "w"))
 PY
 }
+# occupancy_setup WS: record a live lead occupancy in the coordination
+# registry for realpath(WS) under SLUG_A, using the same binding id
+# lead_setup derives. Merges into any existing registry.
+occupancy_setup() {
+    OS_WS="$1" OS_SLUG="$SLUG_A" OS_COORD="$HERDR_COORDINATION_ROOT" python3 - <<'PY'
+import hashlib, json, os
+e = os.environ
+ws = os.path.realpath(e["OS_WS"])
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+bid = "ldb-" + key + "0" * (32 - len(key))
+os.makedirs(e["OS_COORD"], exist_ok=True)
+path = os.path.join(e["OS_COORD"], "bindings.json")
+try:
+    reg = json.load(open(path))
+except Exception:
+    reg = {}
+reg.setdefault(e["OS_SLUG"], {}).setdefault("lead_ws", {})[key] = {
+    "generation": 1, "binding_id": bid, "last_fence": 1}
+json.dump(reg, open(path, "w"))
+PY
+}
+# lease_remove WS: delete the lead lease for realpath(WS) under SLUG_A,
+# leaving the registry occupancy and the binding record intact.
+lease_remove() {
+    LR_WS="$1" LR_SLUG="$SLUG_A" LR_COORD="$HERDR_COORDINATION_ROOT" python3 - <<'PY'
+import hashlib, os
+e = os.environ
+ws = os.path.realpath(e["LR_WS"])
+key = hashlib.sha256(ws.encode()).hexdigest()[:16]
+path = os.path.join(e["LR_COORD"], e["LR_SLUG"], "lead-%s.json" % key)
+# Assert it was there. The suite runs under `set -u` but not `set -e`, so a
+# silently-failing helper would leave the lease LIVE and let the test below
+# pass while proving nothing.
+assert os.path.exists(path), path
+os.remove(path)
+PY
+}
 # Real worktrees so workspace_root is a real dir and nested cases use real git.
 LWS="$FIX/leadws"; LWS2="$FIX/leadws2"
 git -C "$R" worktree add -q -b leadbr "$LWS" >/dev/null 2>&1
@@ -1439,6 +1476,120 @@ hook_case "AC-G ':(glob)' filename is guarded literally (lead outside denied)" d
 CRR="$FIX/cr$(printf '\r')repo"
 mkrepo "$CRR" "git@example.com:org/cr.git"
 hook_case "AC-G carriage return in repo root: a launcher's write is denied, not un-guarded" deny Edit "$CRR/tracked.txt" "$CRR" "$SID_A"
+
+# A lead whose LEASE was deleted, with occupancy and binding intact, must
+# still be refused. Before this change is_lead went False and the write was
+# allowed outright.
+SID_LD=77777777-7777-7777-7777-777777777777
+lead_setup "$SID_LD" "$LWS"
+occupancy_setup "$LWS"
+lease_remove "$LWS"
+hook_case "LD-E deleted lease still refuses a guarded write" deny Edit "$R/tracked.txt" "$R" "$SID_LD"
+
+# Spec test 20: the selected_scope failure handler. Scope derivation raises,
+# an occupancy names the session, and decide() must return 2 rather than
+# falling through to the plain-worker allow.
+if HOOK="$HOOK" R="$R" SID_LD="$SID_LD" SID_W="$SID_W" CFG="$CFG" H="$H" \
+   HERDR_COORDINATION_ROOT="$HERDR_COORDINATION_ROOT" python3 - <<'PY'
+import contextlib, importlib.util, io, os, sys
+sys.dont_write_bytecode = True
+# HOME like every sibling block: without it env_payload_roots() probes the
+# developer's real ~/.claude and the suite stops being hermetic.
+os.environ["HOME"] = os.environ["H"]
+os.environ["CLAUDE_CONFIG_DIR"] = os.environ["CFG"]
+os.environ["HERDR_ENV"] = "1"
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+def boom(*_a, **_k):
+    raise OSError("scope derivation failed")
+g.selected_scope = boom
+payload = {"hook_event_name": "PreToolUse", "tool_name": "Edit",
+           "session_id": os.environ["SID_LD"], "cwd": os.environ["R"],
+           "tool_input": {"file_path": os.path.join(os.environ["R"], "tracked.txt")}}
+# refuse_crash prints its three-line refusal; keep it out of the suite output.
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    denied = g.decide(payload)
+    # SID_W is the suite's genuine never-leased session. Do NOT use SID_C:
+    # every lead_setup call in this file makes SID_C a lead, so this
+    # assertion would depend on block ordering rather than on the code.
+    payload["session_id"] = os.environ["SID_W"]
+    allowed = g.decide(payload)
+assert denied == 2, ("scope-failure must fail closed for a lead", denied)
+assert allowed == 0, ("scope-failure still allows a plain worker", allowed)
+PY
+then
+    printf 'PASS  LD-S scope-derivation failure fails closed for a lease-deleted lead\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  LD-S scope-derivation failure fails closed for a lease-deleted lead\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+# A sibling occupancy whose binding read raises a non-ValueError OSError
+# (EACCES, not corrupt JSON) must not abort corroboration before a LATER,
+# valid occupancy is reached: corroborated_lead's read_binding catch is
+# `except Exception`, not `except ValueError`, precisely because
+# open_state_parent lets a non-FileNotFoundError OSError (ELOOP/ENOTDIR/
+# EACCES) through uncaught. A narrower catch here would let that OSError
+# escape lead_authority (uncaught at its own corroborated_lead call site)
+# into decide()'s crash path, which answers "not privileged" for exactly
+# the lead this whole change exists to keep classified.
+SID_LB=88888888-8888-8888-8888-888888888888
+if HOOK="$HOOK" R="$R" SID_LB="$SID_LB" python3 - <<'PY'
+import importlib.util, json, os, sys, tempfile
+sys.dont_write_bytecode = True
+sys.path.insert(0, "claude/hooks")
+iso = tempfile.mkdtemp()
+os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
+os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
+os.environ["HOME"] = os.path.join(iso, "home")
+os.makedirs(os.environ["HOME"], exist_ok=True)
+os.makedirs(os.environ["HERDR_COORDINATION_ROOT"], exist_ok=True)
+import herdr_orch_core as core
+import herdr_coordination as coordination
+spec = importlib.util.spec_from_file_location("g", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+sid = os.environ["SID_LB"]
+scope = g.selected_scope(os.environ["R"], "claude")
+coord = str(coordination.coordination_root())
+payload_root = os.path.join(str(core.account_payload_root(scope)), "herdr-orch")
+# Registry insertion order drives occupancies.items() order: the poisoned
+# slug sorts and inserts first, so a broad except is required to reach the
+# good slug inserted after it.
+slug_bad, slug_good = "aaa-poison", "zzz-good"
+bid_bad, bid_good = "ldb-" + "3" * 32, "ldb-" + "4" * 32
+registry = {
+    slug_bad: {"lead_ws": {"a" * 16: {
+        "generation": 1, "binding_id": bid_bad, "last_fence": 1}}},
+    slug_good: {"lead_ws": {"b" * 16: {
+        "generation": 1, "binding_id": bid_good, "last_fence": 1}}},
+}
+open(os.path.join(coord, "bindings.json"), "w").write(json.dumps(registry))
+# Poisoned slug: a bindings dir that exists but cannot be opened at all.
+rd_bad = os.path.join(payload_root, slug_bad, "bindings")
+os.makedirs(rd_bad, exist_ok=True)
+# Good slug: a normal, valid, live binding naming this session.
+rd_good = os.path.join(payload_root, slug_good, "bindings")
+os.makedirs(rd_good, exist_ok=True)
+binding = {"schema_version": 1, "binding_id": bid_good, "tier": "lead",
+           "parent": {"tier": "launcher", "task_id": "td-x", "session_id": "L1"},
+           "task_id": "td-x", "repo_id": None, "repo_slug": slug_good,
+           "workspace_root": os.path.realpath(os.environ["R"]),
+           "account_id": scope["account_id"], "account_kind": scope["kind"],
+           "runtime": "claude", "expected_session_id": sid, "created_fence": 1,
+           "status": "claimed", "created_ts": "t", "updated_ts": "t"}
+open(os.path.join(rd_good, bid_good + ".json"), "w").write(json.dumps(binding))
+os.chmod(rd_bad, 0o000)
+try:
+    is_lead, roots = g.lead_authority(sid, "claude", scope)
+finally:
+    os.chmod(rd_bad, 0o700)
+assert is_lead is True and roots == [], ("poisoned-sibling", is_lead, roots)
+PY
+then
+    printf 'PASS  LB a sibling binding read raising OSError does not stop corroboration by a later valid one\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  LB a sibling binding read raising OSError does not stop corroboration by a later valid one\n' >&2; FAIL=$((FAIL + 1))
+fi
 
 # --- static: shebang, executable, compiles, registration -----------------
 if [ -x "$HOOK" ] && head -n 1 "$HOOK" | grep -qx '#!/usr/bin/env python3' \
