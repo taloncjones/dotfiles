@@ -22,6 +22,11 @@ ln -sf "$DOTFILEDIR"/vscode/settings.json "$HOME/Library/Application Support/Cod
 ln -sf "$DOTFILEDIR"/vscode/keybindings.json "$HOME/Library/Application Support/Code/User/keybindings.json"
 ln -sf "$DOTFILEDIR"/vscode/welcomePage.js "$HOME/Library/Application Support/Code/User/welcomePage.js"
 
+# Zed settings (agent entries pin CLAUDE_CONFIG_DIR per account; see zed/settings.json)
+echo "Setting up symbolic links for Zed..."
+mkdir -p "$HOME/.config/zed"
+ln -sf "$DOTFILEDIR"/zed/settings.json "$HOME/.config/zed/settings.json"
+
 # 1Password SSH agent config is seeded machine-local by common/link.sh
 # (seed_machine_local_file). Do NOT symlink it here: edits to the live file
 # would write real vault/item names through the link into the tracked repo.

@@ -53,5 +53,8 @@ for(const[k,e]of Object.entries(a)){
   if(k.startsWith("claude")&&(!e.env||!e.env.CLAUDE_CONFIG_DIR))process.exit(1);}
 '
 
+assert "link.sh links zed settings" \
+    rg -q -F 'ln -sf "$DOTFILEDIR"/zed/settings.json "$HOME/.config/zed/settings.json"' install/macos/link.sh
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
