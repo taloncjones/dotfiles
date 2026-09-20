@@ -38,5 +38,40 @@ assert "link.sh seeds config_cloudflared machine-local, never symlinks it" \
 assert "link.sh links remote-access-doctor into ~/bin" \
     rg -q -F 'ln -sf "$DOTFILEDIR"/bin/remote-access-doctor "$HOME"/bin/remote-access-doctor' install/common/link.sh
 
+assert "zed settings enforce account-pinned claude agent entries" \
+    node -e '
+const fs=require("fs");
+const raw=fs.readFileSync("zed/settings.json","utf8");
+const o=JSON.parse(raw.replace(/^\s*\/\/.*$/gm,"").replace(/,\s*([}\]])/g,"$1"));
+const a=o.agent_servers||{};
+const want={"claude-personal":"personal","claude-acp":"personal","claude-work":"work"};
+for(const k of Object.keys(want)){
+  if(!(k in a))process.exit(1);
+}
+for(const[k,e]of Object.entries(a)){
+  if(!k.startsWith("claude"))continue;
+  if(!(k in want))process.exit(1);
+  if(!e||e.type!=="custom")process.exit(1);
+  if(e.command!=="~/bin/zed-claude-agent")process.exit(1);
+  const args=e.args||[];
+  if(args[0]!==want[k])process.exit(1);
+  if(e.env&&(("CLAUDE_CONFIG_DIR" in e.env)||("ANTHROPIC_API_KEY" in e.env)))process.exit(1);
+}
+'
+
+assert "zed agent wrapper pins the adapter version" \
+    rg -q -F '@agentclientprotocol/claude-agent-acp@0.79.0' bin/zed-claude-agent
+
+assert "link.sh links zed-claude-agent into ~/bin" \
+    rg -q -F 'ln -sf "$DOTFILEDIR"/bin/zed-claude-agent "$HOME"/bin/zed-claude-agent' install/common/link.sh
+
+assert "link.sh links zed settings" \
+    rg -q -F 'ln -sf "$DOTFILEDIR"/zed/settings.json "$HOME/.config/zed/settings.json"' install/macos/link.sh
+
+assert "macOS Brewfile installs zed cask" \
+    rg -q 'cask "zed"' install/macos/Brewfile.rb
+assert "macOS Brewfile installs node for agent adapters" \
+    rg -q 'brew "node"' install/macos/Brewfile.rb
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
