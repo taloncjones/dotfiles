@@ -722,7 +722,7 @@ also avoids wasting work and preserves one live reviewer per task.
    and run `herdr pane close <recorded-pane>`. Never use `release-agent` as an
    interrupt and never close the workspace. Use `$CORE write-task` to carry the
    full task record forward with `status: changes-requested`, report `review incomplete: 600-second
-   deadline, <launch_id>`, and never fabricate a review record, blocker count,
+deadline, <launch_id>`, and never fabricate a review record, blocker count,
    or approval. A late sidecar cannot change that non-approved status. Herd's
    interactive start timeout bounds startup, not a running agent turn; exact-pane
    close is the controller's available interruption. If it cannot confirm the
@@ -1205,6 +1205,34 @@ accept` on the director launch line safe. The hook side posts only a
   closed-vocabulary line, only to a canonical `cc-socks` socket owned by this
   uid whose basename pid matches `owner.json`, never with a token, never to
   its own socket, within a 2s budget, failing open.
+
+## Lead worker dispatch (binding-scoped)
+
+Four steps, in this order. The bootstrap step is not optional:
+`reserve-dispatch` requires the task record to exist, and a missing record
+reads as absent rather than empty.
+
+1. `write-task --binding <bid> --task-id <t> --json '{"task_id":"<t>", ...}'`
+   with `workers` omitted or `[]`, creating the record.
+2. `reserve-dispatch --binding <bid> --task-id <t> --launch-id <id> --phase
+<plan|implement|review> --runtime <claude|codex> --workspace-id <w>
+--pane-id <p> --source-head-sha <40hex>`, after the pane exists and BEFORE
+   starting an agent in it. Optionally `--role --agent --model --effort`.
+3. Start the agent in that pane.
+4. `enrich-dispatch --binding <bid> --task-id <t> --launch-id <id> --json
+'{"peer_name":"..."}'` for facts discovered after launch. An enrichment may
+   not name an attempt identity field (`launch_id`, `phase`, `runtime`,
+   `workspace_id`, `pane_id`, `source_head_sha`).
+
+Reserving before the agent starts is what makes teardown safe: a `write-task`
+refused afterwards cannot erase the row, so `outstanding_descendants` still
+sees the pane and `teardown-binding --abandon` refuses instead of releasing the
+lease over a live worker. Skipping step 2 reintroduces that fail-open.
+
+Re-dispatch appends a new reservation. Reusing a `launch_id` is allowed -- they
+are not unique -- but the full attempt identity must differ from every row
+already in the record; an exact repeat of the current row is treated as a
+crashed-lead retry and writes nothing.
 
 ## Rolling back task leads
 
