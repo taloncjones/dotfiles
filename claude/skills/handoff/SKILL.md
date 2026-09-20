@@ -48,6 +48,18 @@ on save records an already observed ownership token. On verify, supply the
 freshly observed token; without it ownership is explicitly unverified. The
 helper never queries or claims Herd ownership.
 
+Add `--role director|lead|worker|reviewer` to record the session's role and
+`--parent TASK` to name the task that assigned this one. A save on a task
+that already has a record inherits both when the flags are omitted; passing
+different values reassigns. A lead assigns work by writing a brief and saving
+it with `--role worker --parent <own task>`; the worker resumes it with
+kickoff and reports back by saving a new record on the same task ID. Start
+the brief's first line with `assigned:`, `working:`, `blocked:`, or `done:`;
+a `done:` line names the commit inspected and the test command run. `list`
+shows each task's role, parent, and that first line. A record says nothing
+about whether a session is already running the task; check for a live pane
+before kicking one off.
+
 Require exit 0 and inspect the JSON. Verify compares local HEAD, branch,
 worktree, tracked/index diffs, and untracked path status. It does not hash
 untracked contents, fetch remote refs, run tests, or execute brief instructions.
