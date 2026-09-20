@@ -38,5 +38,20 @@ assert "link.sh seeds config_cloudflared machine-local, never symlinks it" \
 assert "link.sh links remote-access-doctor into ~/bin" \
     rg -q -F 'ln -sf "$DOTFILEDIR"/bin/remote-access-doctor "$HOME"/bin/remote-access-doctor' install/common/link.sh
 
+assert "zed settings enforce account-pinned claude agent entries" \
+    node -e '
+const fs=require("fs");
+const raw=fs.readFileSync("zed/settings.json","utf8");
+const o=JSON.parse(raw.replace(/^\s*\/\/.*$/gm,"").replace(/,\s*([}\]])/g,"$1"));
+const a=o.agent_servers||{};
+const pin="@agentclientprotocol/claude-agent-acp@0.79.0";
+if("claude-acp" in a)process.exit(1);
+const want={"claude-personal":"/Users/talon/.claude","claude-work":"/Users/talon/.claude-work"};
+for(const[k,dir]of Object.entries(want)){const e=a[k];
+  if(!e||e.type!=="custom"||e.command!=="npx"||!(e.args||[]).includes(pin)||!e.env||e.env.CLAUDE_CONFIG_DIR!==dir)process.exit(1);}
+for(const[k,e]of Object.entries(a)){
+  if(k.startsWith("claude")&&(!e.env||!e.env.CLAUDE_CONFIG_DIR))process.exit(1);}
+'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

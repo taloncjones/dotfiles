@@ -1,0 +1,113 @@
+// Zed settings
+//
+// For information on how to configure Zed, see the Zed
+// documentation: https://zed.dev/docs/configuring-zed
+//
+// To see all of Zed's default settings without changing your
+// custom settings, run `zed: open default settings` from the
+// command palette (cmd-shift-p / ctrl-shift-p)
+{
+  "proxy": "",
+  "icon_theme": {
+    "mode": "system",
+    "light": "Zed (Default)",
+    "dark": "Zed (Default)"
+  },
+  "telemetry": {
+    "diagnostics": false,
+    "metrics": false,
+    "anthropic_retention": false
+  },
+  "session": {
+    "trust_all_worktrees": true
+  },
+  "terminal": {
+    "env": {
+      "FIG_NEW_SESSION": "\"1\""
+    },
+    "font_family": "FiraCode Nerd Font"
+  },
+  "git": {
+    "inline_blame": {
+      "enabled": true
+    }
+  },
+  "preview_tabs": {
+    "enable_preview_from_file_finder": true,
+    "enable_keep_preview_on_code_navigation": true
+  },
+  "tabs": {
+    "show_close_button": "hidden"
+  },
+  "sticky_scroll": {
+    "enabled": true
+  },
+  "gutter": {
+    "line_numbers": true
+  },
+  "minimap": {
+    "show": "always"
+  },
+  "scrollbar": {
+    "axes": {
+      "horizontal": false
+    }
+  },
+  "hover_popover_sticky": false,
+  "window_title_format": "${separator}${branch} ",
+  "buffer_font_family": "Jetbrains Mono",
+  "file_types": {
+    "tailwindcss": ["*.css"]
+  },
+  "colorize_brackets": true,
+  "show_edit_predictions": true,
+  "ensure_final_newline_on_save": true,
+  "format_on_save": "on",
+  "hard_tabs": false,
+  "tab_size": 4,
+  // Account routing: every Claude entry MUST pin CLAUDE_CONFIG_DIR (values
+  // are passed literally -- absolute paths, no ~). An unpinned entry
+  // launches with an empty CLAUDE_CONFIG_DIR, which resolves to the
+  // personal account even in a work repo (live-confirmed 2026-09-19).
+  // Adapter version is pinned to the spike-tested release; bump
+  // deliberately and re-verify per the spec's spike procedure.
+  "agent_servers": {
+    "codex-acp": {
+      "type": "registry"
+    },
+    "claude-personal": {
+      "type": "custom",
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.79.0"],
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/Users/talon/.claude",
+        "ANTHROPIC_API_KEY": ""
+      },
+      "default_config_options": {
+        "effort": "high",
+        "model": "sonnet"
+      }
+    },
+    "claude-work": {
+      "type": "custom",
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/claude-agent-acp@0.79.0"],
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/Users/talon/.claude-work",
+        "ANTHROPIC_API_KEY": ""
+      },
+      "default_config_options": {
+        "effort": "high",
+        "model": "sonnet"
+      }
+    }
+  },
+  "base_keymap": "VSCode",
+  "ui_font_size": 16,
+  "buffer_font_size": 12.5,
+  "theme": {
+    "mode": "system",
+    "light": "One Light",
+    "dark": "One Dark"
+  }
+}
