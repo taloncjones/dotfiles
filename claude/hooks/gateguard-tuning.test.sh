@@ -6,13 +6,19 @@
 # same payloads with the knobs cleared and must show the gate; a control
 # that passes without the knobs is a suite bug.
 #
-# Every case runs ECC's gateguard-fact-force.js through run-with-flags.js
-# exactly as hooks.json does, against a fake HOME and a fresh mktemp state
-# dir with its own session id. GateGuard's only evidence is a per-session
-# marker file under GATEGUARD_STATE_DIR; isolating it per case means no
-# case can see another's "already checked" marker. The hook's stdout is
-# captured to a file before assertion so an interrupted run leaves an
-# attributable artifact, not a guess. The real ~/.gateguard is never touched.
+# Bash cases run ECC's real pre-Bash dispatcher chain (pre-bash-dispatcher.js
+# -> bash-hook-dispatcher.js's runPreBash, which runs block-no-verify then
+# auto-tmux-dev then gateguard-fact-force under standard/strict, with
+# early-exit on a non-zero exit) exactly as hooks.json wires the Bash
+# PreToolUse matcher. Edit/Write cases run gateguard-fact-force.js through
+# run-with-flags.js with the pre:edit-write id, exactly as hooks.json wires
+# the Write/Edit/MultiEdit matcher. Both run against a fake HOME and a fresh
+# mktemp state dir with its own session id. GateGuard's only evidence is a
+# per-session marker file under GATEGUARD_STATE_DIR; isolating it per case
+# means no case can see another's "already checked" marker. The hook's
+# stdout is captured to a file before assertion so an interrupted run leaves
+# an attributable artifact, not a guess. The real ~/.gateguard is never
+# touched.
 #
 # Knobs: ECC_PLUGIN_ROOT overrides ECC root resolution.
 #        ECC_HOOK_TEST_REQUIRE_ECC=1 turns the no-ECC SKIP into a FAIL.
@@ -53,7 +59,8 @@ if [ -z "$ECC_ROOT" ]; then
         fi
     done
 fi
-if [ ! -f "$ECC_ROOT/scripts/hooks/gateguard-fact-force.js" ] || [ ! -f "$ECC_ROOT/scripts/hooks/run-with-flags.js" ]; then
+if [ ! -f "$ECC_ROOT/scripts/hooks/gateguard-fact-force.js" ] || [ ! -f "$ECC_ROOT/scripts/hooks/run-with-flags.js" ] \
+        || [ ! -f "$ECC_ROOT/scripts/hooks/pre-bash-dispatcher.js" ]; then
     missing "ECC GateGuard hook not installed (looked under the Claude config dirs)"
 fi
 
@@ -116,12 +123,36 @@ run_case() {
     decision "$cd_" "$?"
 }
 
+# run_case_bash <envmode> <payload-json>: same isolation as run_case, but
+# drives ECC's real pre-Bash dispatcher (block-no-verify, auto-tmux-dev, then
+# gateguard-fact-force under standard/strict) instead of calling
+# gateguard-fact-force.js directly, so a dispatcher-wiring regression in any
+# of those hooks would also be caught.
+run_case_bash() {
+    cd_="$(mktemp -d "$TMP/case.XXXXXX")"
+    mkdir -p "$cd_/state"
+    sid="gateguard-tuning-$(basename "$cd_")"
+    if [ "$1" = template ]; then
+        knobs="GATEGUARD_BASH_ROUTINE_DISABLED=$ROUTINE_OFF GATEGUARD_EXEMPT_GLOBS=$EXEMPT_GLOBS"
+    else
+        knobs="GATEGUARD_BASH_ROUTINE_DISABLED= GATEGUARD_EXEMPT_GLOBS="
+    fi
+    printf '%s' "$2" | (
+        set -f  # $knobs is word-split on purpose; ** must not glob
+        cd "$TMP" && env -i PATH="$PATH" HOME="$TMP/home" \
+            CLAUDE_PLUGIN_ROOT="$ECC_ROOT" ECC_HOOKS_ENABLED=true ECC_HOOK_PROFILE=standard \
+            GATEGUARD_STATE_DIR="$cd_/state" CLAUDE_SESSION_ID="$sid" \
+            $knobs \
+            node "$ECC_ROOT/scripts/hooks/pre-bash-dispatcher.js"
+    ) >"$cd_/out" 2>"$cd_/err"
+    decision "$cd_" "$?"
+}
+
 expect() {
     # expect <label> <want> <got>
     if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (want $2, got $3)"; fi
 }
 
-BASH_ID=pre:bash:gateguard-fact-force
 EDIT_ID=pre:edit-write:gateguard-fact-force
 ROUTINE='{"tool_name":"Bash","tool_input":{"command":"cat README.md"}}'
 RMRF='{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/scratch/build"}}'
@@ -129,10 +160,10 @@ RESET='{"tool_name":"Bash","tool_input":{"command":"git reset --hard HEAD~1"}}'
 EDIT='{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/module.py","old_string":"a","new_string":"b"}}'
 WRITE='{"tool_name":"Write","tool_input":{"file_path":"/repo/docs/new.md","content":"x"}}'
 
-expect "template env: routine Bash is not gated"            allow "$(run_case "$BASH_ID" template "$ROUTINE")"
-expect "control: without the knobs routine Bash is gated"    deny  "$(run_case "$BASH_ID" none "$ROUTINE")"
-expect "template env: rm -rf still denied (destructive gate)" deny  "$(run_case "$BASH_ID" template "$RMRF")"
-expect "template env: git reset --hard still denied"         deny  "$(run_case "$BASH_ID" template "$RESET")"
+expect "template env: routine Bash is not gated"            allow "$(run_case_bash template "$ROUTINE")"
+expect "control: without the knobs routine Bash is gated"    deny  "$(run_case_bash none "$ROUTINE")"
+expect "template env: rm -rf still denied (destructive gate)" deny  "$(run_case_bash template "$RMRF")"
+expect "template env: git reset --hard still denied"         deny  "$(run_case_bash template "$RESET")"
 expect "template env: first-touch Edit is not gated"         allow "$(run_case "$EDIT_ID" template "$EDIT")"
 expect "template env: first-touch Write is not gated"        allow "$(run_case "$EDIT_ID" template "$WRITE")"
 expect "control: without the knobs first-touch Edit is gated" deny  "$(run_case "$EDIT_ID" none "$EDIT")"
