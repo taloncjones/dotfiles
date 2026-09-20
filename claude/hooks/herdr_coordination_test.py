@@ -1116,6 +1116,80 @@ with c.owner_transaction(rd) as tx:
             self.assertEqual(entry["releases"], {"1": b1})
         self.assertFalse(p.exists())
 
+    def _write_registry(self, payload):
+        root = Path(os.environ["HERDR_COORDINATION_ROOT"])
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "bindings.json"
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        return path
+
+    def test_occupied_lead_bindings_reports_only_live_occupancies(self):
+        occupied = {"generation": 1, "binding_id": "ldb-" + "1" * 32, "last_fence": 1}
+        released = {"generation": 2, "binding_id": None, "last_fence": 2,
+                    "releases": {"2": "ldb-" + "2" * 32}}
+        self._write_registry({"repo": {"lead_ws": {"a" * 16: occupied,
+                                                   "b" * 16: released}}})
+        self.assertEqual(
+            coordination.occupied_lead_bindings(),
+            {"repo": {"a" * 16: "ldb-" + "1" * 32}},
+        )
+
+    def test_occupied_lead_bindings_drops_only_the_unit_that_failed(self):
+        good = {"generation": 1, "binding_id": "ldb-" + "1" * 32, "last_fence": 1}
+        # last_fence 0 fails _valid_lead_ws_entry.
+        bad = {"generation": 1, "binding_id": "ldb-" + "3" * 32, "last_fence": 0}
+        other = {"generation": 1, "binding_id": "ldb-" + "4" * 32, "last_fence": 1}
+        self._write_registry({
+            "repo": {"lead_ws": {"a" * 16: good, "c" * 16: bad}},
+            "other": {"lead_ws": {"d" * 16: other}},
+            "third": {"lead_ws": "not-a-dict"},
+            "fourth": "not-a-dict",
+        })
+        self.assertEqual(coordination.occupied_lead_bindings(), {
+            "repo": {"a" * 16: "ldb-" + "1" * 32},
+            "other": {"d" * 16: "ldb-" + "4" * 32},
+        })
+
+    def test_occupied_lead_bindings_is_empty_on_whole_file_failures(self):
+        self.assertEqual(coordination.occupied_lead_bindings(), {})
+        for payload in ("null", "{not json", json.dumps([1, 2]), json.dumps("s")):
+            self._write_registry(payload)
+            self.assertEqual(coordination.occupied_lead_bindings(), {})
+
+    def test_occupied_lead_bindings_refuses_a_symlinked_registry(self):
+        root = Path(os.environ["HERDR_COORDINATION_ROOT"])
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / "real.json"
+        target.write_text(json.dumps({"repo": {"lead_ws": {
+            "a" * 16: {"generation": 1, "binding_id": "ldb-" + "1" * 32,
+                       "last_fence": 1}}}}))
+        (root / "bindings.json").symlink_to(target)
+        self.assertEqual(coordination.occupied_lead_bindings(), {})
+
+    def test_occupied_lead_bindings_drops_junk_slug_keys(self):
+        entry = {"generation": 1, "binding_id": "ldb-" + "1" * 32, "last_fence": 1}
+        self._write_registry({"../escape": {"lead_ws": {"a" * 16: entry}},
+                              "UPPER": {"lead_ws": {"a" * 16: entry}},
+                              "": {"lead_ws": {"a" * 16: entry}}})
+        self.assertEqual(coordination.occupied_lead_bindings(), {})
+
+    def test_occupied_lead_bindings_survives_an_entry_that_raises(self):
+        good = {"generation": 1, "binding_id": "ldb-" + "1" * 32, "last_fence": 1}
+        # A 5000-digit release-ledger key passes _GENERATION_KEY but makes
+        # int(gen_key) raise ValueError on CPython's int-from-string digit
+        # limit. This is the reachable raise inside _valid_lead_ws_entry;
+        # `generation` itself is NOT bounded there, so a huge generation
+        # validates cleanly and would be reported, not dropped.
+        raising = {"generation": 1, "binding_id": "ldb-" + "5" * 32,
+                   "last_fence": 1,
+                   "releases": {"9" * 5000: "ldb-" + "6" * 32}}
+        self._write_registry({"repo": {"lead_ws": {"a" * 16: good,
+                                                   "e" * 16: raising}}})
+        self.assertEqual(
+            coordination.occupied_lead_bindings(),
+            {"repo": {"a" * 16: "ldb-" + "1" * 32}},
+        )
+
 
 class AttemptTests(unittest.TestCase):
     def test_latest_attempt_rejects_old_completion_and_review(self):

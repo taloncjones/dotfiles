@@ -81,6 +81,75 @@ def iter_lead_leases(slug):
     return leases
 
 
+def occupied_lead_bindings():
+    """{slug: {workspace_key: binding_id}} for live lead occupancies.
+
+    ONE lockless read of the whole registry: bindings.json is a single file
+    keyed by slug, so a per-slug reader would re-parse all of it once per
+    slug.
+
+    Total. Every unit it cannot trust is dropped at the tightest scope the
+    damage allows -- a whole-file failure yields {}, an unusable slug drops
+    that slug, an invalid entry drops that entry and keeps its valid
+    siblings. The guard consults an occupancy only to WITHHOLD authority, so
+    reporting one narrows access and dropping one widens it; scoping each
+    failure tightly is therefore the fail-closed direction here.
+
+    This deliberately does NOT mirror OwnerTransaction.__init__, which
+    raises on any invalid entry anywhere. Refusing to operate is
+    conservative for a writer; for a total reader the nearest equivalent --
+    reporting nothing -- is the permissive answer.
+
+    An absent registry and a corrupt one are indistinguishable here, and
+    that is correct: both mean "no occupancy to corroborate". The
+    disambiguating stat OwnerTransaction performs would be dead code,
+    because nothing downstream branches on the difference.
+    """
+    try:
+        parent = os.open(
+            str(coordination_root()),
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except Exception:  # noqa: BLE001 -- broader than OSError on purpose
+        # coordination_root() itself can raise: Path.home() raises
+        # RuntimeError with HOME unset, and a NUL byte in
+        # HERDR_COORDINATION_ROOT makes os.open raise ValueError. Neither is
+        # an OSError, and either would break the "never raises" contract.
+        return {}
+    try:
+        registry = _read_at(parent, "bindings.json")
+    except Exception:  # noqa: BLE001 -- an unreadable registry reports no occupancy
+        return {}
+    finally:
+        os.close(parent)
+    if not isinstance(registry, dict):
+        return {}
+    occupied = {}
+    for slug, item in registry.items():
+        if not isinstance(slug, str) or not _SLUG.fullmatch(slug):
+            continue
+        if not isinstance(item, dict):
+            continue
+        ws_map = item.get("lead_ws", {})
+        if not isinstance(ws_map, dict):
+            continue
+        keyed = {}
+        for key, entry in ws_map.items():
+            # Per-entry guard: a record whose validation raises -- an
+            # oversized release-ledger key hits CPython's int-from-string
+            # digit limit -- drops alone rather than taking its valid
+            # siblings with it.
+            try:
+                valid = isinstance(key, str) and _valid_lead_ws_entry(entry)
+            except Exception:  # noqa: BLE001, S112 -- read-only view; skip a bad entry
+                continue
+            if valid and entry["binding_id"] is not None:
+                keyed[key] = entry["binding_id"]
+        if keyed:
+            occupied[slug] = keyed
+    return occupied
+
+
 def coordination_slugs():
     """Valid slug directory names under the coordination root, sorted.
 
