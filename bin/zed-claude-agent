@@ -1,29 +1,86 @@
 #!/usr/bin/env bash
 # zed-claude-agent - launch the Claude Code ACP adapter for one account.
 #
-# Zed's agent_servers env values are passed literally (no ~ expansion), so a
-# config dir pin there would hardcode a machine path into this public repo.
-# The command field IS tilde-expanded, so the pin lives here instead,
-# derived from $HOME at launch. ANTHROPIC_API_KEY is unset because the
-# adapter's Agent SDK treats a present-but-empty key as a commitment to
-# API-key auth and fails, and Zed may inject the empty key regardless of
-# settings.
+# Zed passes agent_servers env values literally (no ~ expansion), so account
+# routing cannot live in the tracked zed/settings.json. It lives here and
+# defers to claude/skills/lib/workflow_context.py, the same resolver the
+# claude() shell wrapper uses, so Zed and the terminal agree on which account
+# a directory belongs to. Zed launches this with the project root as cwd.
+#
+# Setting CLAUDE_CONFIG_DIR selects a separate authentication namespace even
+# when it names the default directory, so the personal account must launch
+# with it unset. Pinning it to "$HOME/.claude" left Zed in a namespace that
+# had never been logged in (2026-09-20).
+#
+# ANTHROPIC_API_KEY is unset because the adapter's Agent SDK treats a
+# present-but-empty key as a commitment to API-key auth and fails, and Zed may
+# inject the empty key regardless of settings.
 set -euo pipefail
+
+ADAPTER="@agentclientprotocol/claude-agent-acp@0.79.0"
 
 account="${1:-}"
 case "$account" in
-personal)
-    dir="$HOME/.claude"
-    ;;
-work)
-    dir="$HOME/.claude-work"
-    ;;
+personal | work) ;;
 *)
     echo "usage: zed-claude-agent personal|work" >&2
     exit 2
     ;;
 esac
 
+# This script is linked into ~/bin, so resolve symlinks to reach the checkout.
+script_path="${BASH_SOURCE[0]}"
+while [[ -L "$script_path" ]]; do script_path="$(readlink "$script_path")"; done
+resolver="$(cd "$(dirname "$script_path")/.." && pwd)/claude/skills/lib/workflow_context.py"
+
+scope_args=(account-scope --cwd "$PWD" --runtime claude)
+[[ "$account" == personal ]] && scope_args+=(--personal)
+
+plan=""
+if [[ -r "$resolver" ]] && command -v python3 >/dev/null 2>&1; then
+    plan="$(python3 "$resolver" "${scope_args[@]}" 2>/dev/null | python3 -c '
+import json, shlex, sys
+
+scope = json.load(sys.stdin)
+kind = scope.get("kind")
+launch = scope.get("launch_env")
+if kind not in ("personal", "work") or not isinstance(launch, dict):
+    raise SystemExit(2)
+print("kind=%s" % shlex.quote(kind))
+for key, value in launch.items():
+    if not key.isidentifier():
+        raise SystemExit(2)
+    if value is None:
+        print("unset %s" % key)
+    elif isinstance(value, str) and "\n" not in value and "\0" not in value:
+        print("export %s=%s" % (key, shlex.quote(value)))
+    else:
+        raise SystemExit(2)
+' 2>/dev/null)" || plan=""
+fi
+
+if [[ -n "$plan" ]]; then
+    kind=""
+    eval "$plan"
+    # The resolver owns the decision; a mismatch means this entry was opened
+    # against a directory belonging to the other account.
+    if [[ "$kind" != "$account" ]]; then
+        echo "zed-claude-agent: $PWD routes to the $kind account, not $account." >&2
+        echo "  Use the claude-$kind agent in Zed, or run identity-setup if the" >&2
+        echo "  $account account is not configured on this machine." >&2
+        exit 3
+    fi
+else
+    # Resolver unavailable: keep Zed usable with the account argument alone.
+    echo "zed-claude-agent: account resolver unavailable, routing by argument." >&2
+    if [[ "$account" == personal ]]; then
+        unset CLAUDE_CONFIG_DIR
+        export WORKFLOW_PERSONAL_ACCOUNT=1
+    else
+        export CLAUDE_CONFIG_DIR="$HOME/.claude-work"
+        unset WORKFLOW_PERSONAL_ACCOUNT
+    fi
+fi
+
 unset ANTHROPIC_API_KEY
-export CLAUDE_CONFIG_DIR="$dir"
-exec npx -y @agentclientprotocol/claude-agent-acp@0.79.0 "${@:2}"
+exec npx -y "$ADAPTER" "${@:2}"
