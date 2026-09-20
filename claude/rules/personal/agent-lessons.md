@@ -23,8 +23,8 @@ is the staging tier, not an archive.
   uses `pipestatus`; rm/git-meta guards reject them -- pass literal paths.
 - (2026-09) An orchestrator session dispatches; it edits repo files only for
   a small change the human approved this turn. Larger: todo + kickoff.
-- (2026-09) Merge on the PR, never locally: protected main blocks a local
-  merge, and a draft reports MERGEABLE yet refuses it -- check `isDraft`.
+- (2026-09) Open the PR before co-review so its rounds land there, and merge
+  on it, never locally -- protected main refuses, as does a draft (`isDraft`).
 - (2026-09) Never expand or abbreviate a sha by hand: emit what rev-parse or
   ls-remote returns -- flags like --match-head-commit reject a short sha.
 - (2026-09) A worker never commits with failing tests: fix or report
@@ -40,6 +40,6 @@ is the staging tier, not an archive.
 - (2026-09) Never write an unverified reference: grep-verify code anchors, and
   check external CLI flags against their help, before a plan or skill cites it.
 - (2026-09) Read every static-scan hit in full before calling it a false
-  positive: one truncated line dismissed so shipped a rule breaking a test.
+  positive: judging one by a truncated line shipped a rule that broke a test.
 - (2026-09) Run suites to a file, then grep it: pipes hide failures and stderr.
 - (2026-09) Settle a factual review dispute by executing the case, not by rank.

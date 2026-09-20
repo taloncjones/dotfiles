@@ -8474,6 +8474,12 @@ if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
    --launch-id I3 --phase implement --runtime claude --workspace-id w1 \
    --pane-id pane3 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
 grep -q "does not match the binding" "$ERRFILE"
+# The same pin on enrich-dispatch.
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-other \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '{"peer_name":"x"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match the binding" "$ERRFILE"
 # Enrichment payload constraints: record-level keys and non-scalars refused.
 if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
