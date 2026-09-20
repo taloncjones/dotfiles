@@ -10,6 +10,9 @@ Blocks commits containing:
 Runs before Bash tool calls that involve git commit.
 """
 
+# Required for PEP 604 annotations under Python 3.9: see rm_guard.py's note.
+from __future__ import annotations
+
 import json
 import re
 import sys

@@ -94,7 +94,7 @@ flowchart TD
     K --> L[Set Homebrew ZSH as default]
 
     subgraph "Symlinks"
-        H --> H1[zsh, git, ssh, vscode, claude]
+        H --> H1[zsh, git, ssh, vscode, zed, claude]
         I --> I1[zsh, git, ssh, claude]
     end
 ```
@@ -160,6 +160,7 @@ dotfiles/
 │   └── work/         # Work git identity template (machine-local; never tracked)
 │       └── .gitconfig-work.tmpl
 ├── vscode/           # VS Code settings and extensions
+├── zed/              # Zed settings (account-pinned Claude agent entries)
 ├── ssh/              # SSH configuration
 │   ├── configs/      # SSH config files (main config + personal/work includes)
 │   │   └── agent.toml  # 1Password agent template (seeded machine-local on install)

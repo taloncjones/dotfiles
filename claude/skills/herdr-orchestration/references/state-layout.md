@@ -55,6 +55,8 @@ STATE_ROOT/
   <repo_slug>/
     owner.json                        # compatibility mirror of shared owner
     config.json                       # machine-local config
+    task-lead-gate.json               # task-lead activation gate record; absence,
+                                      # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append from the section-1 probe step; safe to delete
     tasks/
       <task_id>.json                  # durable task record
@@ -269,6 +271,44 @@ an unknown key or an out-of-bounds value makes `think-caps` exit 5. Missing/
 invalid config -> mutating actions refuse with a concrete message. This file
 holds the only employer/user identifiers; the shipped skill and fixtures
 never contain them.
+
+### `task-lead-gate.json`
+
+The task-lead activation gate record. The intended writer is
+`deactivate-task-leads`, under a launcher fence.
+
+```json
+{
+  "schema_version": 1,
+  "repo_slug": "<slug>",
+  "repo_id": "<id or null>",
+  "account_id": "<account>",
+  "enabled": false
+}
+```
+
+**Absence means disabled.** So does every damaged, malformed, wrong-version,
+or identity-mismatched state: an unreadable file, non-JSON content, a
+non-object body, an unsupported `schema_version`, a `repo_slug` or
+`account_id` that does not match the caller, or an `enabled` value that is
+not a boolean. There is no `updated_ts` field.
+
+`repo_id` is nullable. When it is `null` the record makes no identity claim
+to corroborate. When it is set, the caller's own resolved `repo_id` must
+equal it; a record that names a repository identity the caller cannot
+corroborate (the caller has none to compare) is **refused**, not accepted --
+this is the same fail-closed rule `claim-owner` already applies to a
+binding's `repo_id`.
+
+Reading the record is not the whole admission decision. A lead is admitted
+only when the record additionally reads `enabled: true` and core, guard, and
+the installed procedure each advertise a capability at or above the required
+level (the procedure's advertised level is carried by the capability marker
+in the skill's `SKILL.md`).
+
+There is no verb that turns the gate on. `deactivate-task-leads` is the only
+verb this record has; enabling it means writing the record by hand or
+restoring an older one.
 
 ### `capabilities.json` -- legacy Claude strong-model availability
 

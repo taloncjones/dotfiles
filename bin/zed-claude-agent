@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# zed-claude-agent - launch the Claude Code ACP adapter for one account.
+#
+# Zed's agent_servers env values are passed literally (no ~ expansion), so a
+# config dir pin there would hardcode a machine path into this public repo.
+# The command field IS tilde-expanded, so the pin lives here instead,
+# derived from $HOME at launch. ANTHROPIC_API_KEY is unset because the
+# adapter's Agent SDK treats a present-but-empty key as a commitment to
+# API-key auth and fails, and Zed may inject the empty key regardless of
+# settings.
+set -euo pipefail
+
+account="${1:-}"
+case "$account" in
+personal)
+    dir="$HOME/.claude"
+    ;;
+work)
+    dir="$HOME/.claude-work"
+    ;;
+*)
+    echo "usage: zed-claude-agent personal|work" >&2
+    exit 2
+    ;;
+esac
+
+unset ANTHROPIC_API_KEY
+export CLAUDE_CONFIG_DIR="$dir"
+exec npx -y @agentclientprotocol/claude-agent-acp@0.79.0 "${@:2}"

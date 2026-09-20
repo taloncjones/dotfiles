@@ -31,8 +31,8 @@ is the staging tier, not an archive.
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
   clean: retry once with defensive review framing before counting the seat.
-- (2026-09) Changing a shared thing: find every consumer first -- callers,
-  cited concepts, parallel installed copies -- then run their suites too.
+- (2026-09) Never change or fix one instance in isolation: name the failure
+  class or consumer set, grep every sibling site, and run their suites too.
 - (2026-09) A protected main makes a local merge unshippable: open the PR
   first, so co-review round comments and markers land on it, then merge there.
 - (2026-09) A completion-enforcing hook is not user consent: hold the gated

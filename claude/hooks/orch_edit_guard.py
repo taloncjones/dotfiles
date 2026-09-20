@@ -67,6 +67,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # never leave __pycache__ under the hooks dir
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import herdr_bindings as bindings
+import herdr_capabilities as herdr_caps
 import herdr_orch_core as core
 import rm_guard
 from workflow_context import account_scope, repository_context
@@ -194,6 +195,79 @@ def owned_slugs(session_id, runtime, caller_scope, candidates):
     return owned
 
 
+def lead_admissible(rd, slug, account_id, caller_scope, workspace_root, seen=None):
+    """Is a lead in this workspace admissible right now? Total; False on doubt.
+
+    Delegates to core.task_lead_admission -- the SAME decision admission makes
+    at claim time -- rather than re-deriving a partial one here. The guard
+    previously checked only the gate record plus `GUARD_CAPABILITY <
+    REQUIRED_CAPABILITY`, which is `1 < 1` and therefore dead as written: the
+    procedure's advertised capability was never consulted on this side at all,
+    so the second lock existed at admission only.
+
+    The repo_id is resolved LIVE from the workspace, not taken from the
+    binding record. The binding's copy is nullable, so passing it made a
+    gate record that names a repository identity unverifiable from here --
+    gate_enabled refuses an uncorroborated claim, fail-closed -- and an
+    admitted lead ended up with zero authorized roots permanently. Admission
+    passes the live value, so the guard must too, or the two locks disagree
+    about the same lead.
+
+    A workspace whose repository context will not resolve yields no roots.
+
+    Cost discipline. Resolving the context spends SIX git subprocesses on a
+    linked worktree -- five on a plain checkout, but herdr workspaces ARE
+    linked worktrees, so six is the normal case, and the extra call is
+    `worktree list --porcelain -z`, the slowest of the set -- each at up to
+    GIT_CALL_MAX_SECS, and all of them outside the Budget the rest of this
+    hook's git calls share. A PreToolUse hook that overruns its timeout lets
+    the tool call through, so an expensive check is a fail-open risk and not
+    merely slow.
+
+    Two bounds. First the gate is READ before any subprocess, rather than
+    merely tested for existence: `deactivate-task-leads` writes
+    `enabled: false` instead of removing the record, so after step 2 of the
+    documented rollback an existence test is true forever and the expensive
+    path becomes the permanent steady state. The pre-check passes
+    IDENTITY_DEFERRED, not None -- None would refuse a record that names a
+    concrete identity, which is the right final answer but the wrong
+    pre-check, since it rejects leads the full check admits. Second, `seen`
+    memoizes the resolution per workspace, so a session holding several leases
+    pays once per distinct workspace rather than once per lease.
+    """
+    config_dir = Path(caller_scope["account_root"])
+    try:
+        # The SAME admission, minus the one clause the sentinel defers -- not a
+        # hand-copy of its cheap terms. An earlier version of this function
+        # carried a partial copy that drifted into a dead `1 < 1` test and
+        # never consulted the procedure at all, which is why the docstring
+        # above says to delegate. A second copy drifts the same way: add a
+        # fourth component to the required set and the copy admits what the
+        # real check refuses.
+        pre_admit, _pre_why, _pre_levels = core.task_lead_admission(
+            rd, slug, account_id, config_dir, herdr_caps.IDENTITY_DEFERRED)
+    except Exception:  # noqa: BLE001 -- an undecidable admission withholds the root
+        return False
+    if not pre_admit:
+        return False
+    if seen is None:
+        seen = {}
+    if workspace_root not in seen:
+        try:
+            seen[workspace_root] = repository_context(workspace_root)["repo_id"]
+        except (OSError, ValueError, subprocess.SubprocessError, KeyError):
+            seen[workspace_root] = False
+    repo_id = seen[workspace_root]
+    if repo_id is False:
+        return False
+    try:
+        admit, _reason, _levels = core.task_lead_admission(
+            rd, slug, account_id, config_dir, repo_id)
+    except Exception:  # noqa: BLE001 -- an undecidable admission withholds the root
+        return False
+    return bool(admit)
+
+
 def lead_authority(session_id, runtime, caller_scope):
     """(is_lead, [authorized workspace_root, ...]) for this session.
 
@@ -212,6 +286,7 @@ def lead_authority(session_id, runtime, caller_scope):
     payload_root = core.account_payload_root(caller_scope) / "herdr-orch"
     is_lead = False
     roots = []
+    seen = {}
     account_id = caller_scope["account_id"]
     for slug in core.coordination.coordination_slugs():
         try:
@@ -245,6 +320,9 @@ def lead_authority(session_id, runtime, caller_scope):
                 and rec.get("expected_session_id") == session_id
                 and ws not in roots
             ):
+                if not lead_admissible(payload_root / slug, slug, account_id,
+                                       caller_scope, ws, seen):
+                    continue
                 roots.append(ws)
     return is_lead, roots
 
@@ -1306,8 +1384,9 @@ def refuse_lead(first, roots):
         )
     else:
         print(
-            "This lead's dispatch binding is missing, revoked, or complete, "
-            "so no workspace edit is authorized.",
+            "No workspace edit is authorized for this lead: either its "
+            "dispatch binding is missing, revoked, or complete, or "
+            "task-lead dispatch is not active for this repository.",
             file=sys.stderr,
         )
     print(

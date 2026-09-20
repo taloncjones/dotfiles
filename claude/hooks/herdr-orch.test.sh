@@ -2,8 +2,33 @@
 # herdr-orch.test.sh - unit + integration tests for the herdr-orchestration
 # core module and worker-status hook. Stdlib python only; no network, no herdr.
 set -e
+# Self-unset the account selectors, as the runner and the guard suite do.
+# Without this a DIRECT `sh claude/hooks/herdr-orch.test.sh` inherits the
+# shell's selector, account_scope ignores each fixture's CLAUDE_CONFIG_DIR, and
+# the suite reports ~105 phantom failures -- which is exactly what a round-3
+# reviewer hit, spending much of its pass chasing an environmental artifact.
+# Fixing this in bin/dotfiles-tests alone left the trap set for anyone running
+# a single suite, which is how most people run one.
+unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL CLAUDE_PERSONAL_ONLY
+unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
 # Use physical macOS temp paths so strict no-follow state traversal is tested.
-TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))'); export TMPDIR
+#
+# Derived from the SAME source `mktemp -d` uses, which is not $TMPDIR. BSD
+# mktemp with no template ignores $TMPDIR entirely and always uses the
+# per-user dir, while Python's gettempdir() honours it. Setting TMPDIR from
+# Python therefore made the two disagree whenever the caller exported anything
+# else: the fixture's containment check then found no match, SILENTLY seeded
+# nothing, and this suite went from 242/0 to 152/90 with every failure reading
+# "gate record absent" -- indistinguishable from a real regression in lead
+# admission. getconf is what mktemp consults, so they cannot diverge.
+# Realpath'd, because the physical path is what makes the no-follow traversal
+# above meaningful: /var is a symlink to /private/var. Both sides resolve, so
+# the physical form still agrees with what mktemp returns.
+TMPDIR=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || TMPDIR=""
+[ -n "$TMPDIR" ] || TMPDIR=$(mktemp -d -u 2>/dev/null | sed 's:/[^/]*$::')
+[ -n "$TMPDIR" ] || TMPDIR=/tmp
+TMPDIR=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$TMPDIR")
+export TMPDIR
 PASS=0
 FAIL=0
 
@@ -13,6 +38,12 @@ FAIL=0
 check() {
     label="$1"
     HERDR_COORDINATION_ROOT=$(mktemp -d); export HERDR_COORDINATION_ROOT
+    # Per-check stderr capture, inside the throwaway root. The bodies used to
+    # redirect to a bare `err`, which resolves against the cwd -- the repo
+    # root -- so every local run littered the checkout, and one such file was
+    # committed by a blanket `git add -A`. Its content is a test's stderr,
+    # which another failure could make carry a temp path or an account id.
+    ERRFILE="$HERDR_COORDINATION_ROOT/err"; export ERRFILE
     body=$(cat)
     first_line=$(printf '%s\n' "$body" | head -n 1)
     case "$first_line" in
@@ -3487,8 +3518,8 @@ json.dump(rec, open(path, "w"))
 ' "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.consumed.json"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --base-sha "$BASE40" --head-sha "$SHA40" 2>err; then exit 1; fi
-grep -q "not claimed" err
+   --base-sha "$BASE40" --head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not claimed" "$ERRFILE"
 SH
 
 check "integrate-envelope: serial integration of parallel PR-ready branches" <<'SH'
@@ -3727,12 +3758,12 @@ json.dump(rec, open(p, "w"), separators=(",", ":"))
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-envelope \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
    --json '{"task_id":"td-x","attempt":{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},"sequence":3,"summary":{"outcome":"blocked","pr":null,"expected_base_sha":null,"reason":"still waiting","follow_ups":[]}}' \
-   2>err; then exit 1; fi
-grep -q "already integrated" err
+   2>"$ERRFILE"; then exit 1; fi
+grep -q "already integrated" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   2>err; then exit 1; fi
-grep -q "consumed record does not match" err
+   2>"$ERRFILE"; then exit 1; fi
+grep -q "consumed record does not match" "$ERRFILE"
 SH
 
 check "consumption freezes binding-scoped writers; null record is corrupt" <<'SH'
@@ -3770,31 +3801,31 @@ json.dump(rec, open(p, "w"))
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
    --json '{"task_id":"td-x","workers":[{"role":"mech","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}],"status":"blocked"}' \
-   2>err; then exit 1; fi
-grep -q "writes are frozen" err
+   2>"$ERRFILE"; then exit 1; fi
+grep -q "writes are frozen" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-index \
    --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --workspace w1 \
-   --json '{"workspace_id":"w1"}' 2>err; then exit 1; fi
-grep -q "writes are frozen" err
+   --json '{"workspace_id":"w1"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "writes are frozen" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w1 \
    --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
    --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" \
-   2>err; then exit 1; fi
-grep -q "writes are frozen" err
+   2>"$ERRFILE"; then exit 1; fi
+grep -q "writes are frozen" "$ERRFILE"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w1 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 0 \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
    --reviewer-session R1 \
-   2>err; then exit 1; fi
-grep -q "writes are frozen" err
+   2>"$ERRFILE"; then exit 1; fi
+grep -q "writes are frozen" "$ERRFILE"
 # a consumed file holding JSON null is corrupt, not absent:
 printf 'null' > "$CONSUMED"
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   2>err; then exit 1; fi
-grep -q "consumption record is unreadable" err
+   2>"$ERRFILE"; then exit 1; fi
+grep -q "consumption record is unreadable" "$ERRFILE"
 SH
 
 check "integrate-envelope: superseded binding cannot integrate" <<'SH'
@@ -3869,8 +3900,8 @@ import os, sys
 os.unlink(sys.argv[1])
 PY
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py integrate-envelope \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidA" 2>err; then exit 1; fi
-grep -q "workspace occupancy superseded" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bidA" 2>"$ERRFILE"; then exit 1; fi
+grep -q "workspace occupancy superseded" "$ERRFILE"
 SH
 
 check "set-binding-status: completed is refused outright; revoked still works" <<'SH'
@@ -4701,31 +4732,31 @@ assert stored == expected, stored
 # launcher identity is not the lease holder:
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session L1 --fence "$f" \
-    --binding "$bid" --task-id td-x --file "$SRC/handoff.md" 2>err; then exit 1; fi
-grep -q "not the live lease holder" err
+    --binding "$bid" --task-id td-x --file "$SRC/handoff.md" 2>"$ERRFILE"; then exit 1; fi
+grep -q "not the live lease holder" "$ERRFILE"
 # duplicate basenames refuse:
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-    --file "$SRC/handoff.md" --file "$SRC/handoff.md" 2>err; then exit 1; fi
-grep -q "duplicate artifact name" err
+    --file "$SRC/handoff.md" --file "$SRC/handoff.md" 2>"$ERRFILE"; then exit 1; fi
+grep -q "duplicate artifact name" "$ERRFILE"
 # a symlink source refuses (no-follow):
 ln -s /etc/passwd "$SRC/link.md"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-    --file "$SRC/link.md" 2>err; then exit 1; fi
+    --file "$SRC/link.md" 2>"$ERRFILE"; then exit 1; fi
 # a FIFO source refuses without hanging (O_NONBLOCK + regular-file check):
 mkfifo "$SRC/pipe.md"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-    --file "$SRC/pipe.md" 2>err; then exit 1; fi
-grep -q "regular file" err
+    --file "$SRC/pipe.md" 2>"$ERRFILE"; then exit 1; fi
+grep -q "regular file" "$ERRFILE"
 # a failed batch leaves prior preserved bytes intact: re-emit with a CHANGED
 # handoff.md plus an unreadable second source; after the refusal the stored
 # handoff.md still hashes to the ORIGINAL manifest digest.
 printf 'changed body' > "$SRC/handoff.md"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-    --file "$SRC/handoff.md" --file "$SRC/absent.md" 2>err; then exit 1; fi
+    --file "$SRC/handoff.md" --file "$SRC/absent.md" 2>"$ERRFILE"; then exit 1; fi
 python3 -c '
 import hashlib, sys
 data = open(sys.argv[1], "rb").read()
@@ -4738,8 +4769,8 @@ printf 'evil parent body' > "$EVILSRC/real.md"
 ln -s "$EVILSRC" "$SRC/dirlink"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-    --file "$SRC/dirlink/real.md" 2>err; then exit 1; fi
-grep -q "artifact source is unreadable" err
+    --file "$SRC/dirlink/real.md" 2>"$ERRFILE"; then exit 1; fi
+grep -q "artifact source is unreadable" "$ERRFILE"
 # the store swapped for a symlink refuses before any byte lands outside it:
 STORE="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts"
 EVIL=$(mktemp -d)
@@ -4748,15 +4779,15 @@ ln -s "$EVIL" "$STORE"
 printf 'handoff body' > "$SRC/handoff.md"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
-    --file "$SRC/handoff.md" 2>err; then exit 1; fi
+    --file "$SRC/handoff.md" 2>"$ERRFILE"; then exit 1; fi
 [ -z "$(ls -A "$EVIL")" ] || exit 1
 rm "$STORE"
 mv "$STORE.real" "$STORE"
 # task mismatch:
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id other-task \
-    --file "$SRC/handoff.md" 2>err; then exit 1; fi
-grep -q "does not match the binding" err
+    --file "$SRC/handoff.md" 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match the binding" "$ERRFILE"
 SH
 
 check "emit-review journal: an entry with the wrong shape (null, empty object) fails closed" <<'SH'
@@ -5256,8 +5287,8 @@ CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
 CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
    --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --binding "$bid2"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
-   --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --binding "$bid2" 2>err; then exit 1; fi
-grep -q "no artifacts manifest" err
+   --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --binding "$bid2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "no artifacts manifest" "$ERRFILE"
 LF_SLUG="$MAIN_SLUG"
 LF_WS="$MAIN_WS"
 
@@ -5313,8 +5344,8 @@ ART="$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts/$HP"
 cp "$ART" "$ART.orig"
 printf 'TAMPERED' > "$ART"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>err; then exit 1; fi
-grep -q "does not match its digest" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match its digest" "$ERRFILE"
 cp "$ART.orig" "$ART"
 
 # --prune: envelope.json and the review-log journal are gone; the
@@ -5374,8 +5405,8 @@ rec = {
 json.dump(rec, open(path, "w"))
 ' "$LEAD_DIR/envelope.json" "$bid"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>err; then exit 1; fi
-grep -q "does not match the consumption record" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match the consumption record" "$ERRFILE"
 rm -f "$LEAD_DIR/envelope.json"
 
 # Same refusal for a journal-key conflict: the review-log was also pruned;
@@ -5383,8 +5414,8 @@ rm -f "$LEAD_DIR/envelope.json"
 # replace the retained journal digest for td-x.
 printf 'tampered review-log line\n' > "$LEAD_DIR/tasks/td-x.review-log.jsonl"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>err; then exit 1; fi
-grep -q "surviving content conflicts" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" 2>"$ERRFILE"; then exit 1; fi
+grep -q "surviving content conflicts" "$ERRFILE"
 rm -f "$LEAD_DIR/tasks/td-x.review-log.jsonl"
 SH
 
@@ -5406,9 +5437,9 @@ CLAUDE_CONFIG_DIR="$root" $CLI write-task \
 
 # No .done.json for the latest (implement) row: outstanding, named by pane.
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>err; then exit 1; fi
-grep -q "outstanding descendants" err
-grep -q "pane1" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>"$ERRFILE"; then exit 1; fi
+grep -q "outstanding descendants" "$ERRFILE"
+grep -q "pane1" "$ERRFILE"
 
 # Tamper the task record (direct file write) to hold a worker row with only
 # {"phase": "implement"}: missing the native identity tuple -> "<unreadable>".
@@ -5422,8 +5453,8 @@ task["workers"].append({"phase": "implement"})
 json.dump(task, open(path, "w"))
 ' "$TASK"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>err; then exit 1; fi
-grep -q "descendant records are unreadable" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>"$ERRFILE"; then exit 1; fi
+grep -q "descendant records are unreadable" "$ERRFILE"
 cp "$TASK.orig" "$TASK"
 
 # Restored record plus --descendants-terminated: teardown succeeds.
@@ -5452,8 +5483,8 @@ lf2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S2 --host h --pid 3 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bid2")
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid2" 2>err; then exit 1; fi
-grep -q "only with --abandon" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid2" 2>"$ERRFILE"; then exit 1; fi
+grep -q "only with --abandon" "$ERRFILE"
 SH
 
 check "teardown leaves a successor's lease untouched" <<'SH'
@@ -5770,8 +5801,8 @@ import json, sys
 rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
 assert rows[sys.argv[1]]["lease"] == "corrupt", rows
 ' "$GARBAGE_ID"
-if CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply 2>err; then exit 1; fi
-grep -q "$GARBAGE_ID" err
+if CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply 2>"$ERRFILE"; then exit 1; fi
+grep -q "$GARBAGE_ID" "$ERRFILE"
 AFTER=$(cat "$root/herdr-orch/$LF_SLUG/bindings/$bid3.json")
 [ "$BEFORE" = "$AFTER" ] || exit 1
 SH
@@ -5954,8 +5985,8 @@ SRC=$(mktemp -d)
 printf 'body' > "$SRC/a.md"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-artifacts \
     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" \
-    --task-id "$TID" --file "$SRC/a.md" 2>err; then exit 1; fi
-grep -q "manifest exceeds the size bound" err
+    --task-id "$TID" --file "$SRC/a.md" 2>"$ERRFILE"; then exit 1; fi
+grep -q "manifest exceeds the size bound" "$ERRFILE"
 # nothing was published: no manifest, empty store
 [ ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts.json" ] || exit 1
 [ -z "$(ls -A "$root/herdr-orch/$LF_SLUG/leads/$bid/artifacts")" ] || exit 1
@@ -6382,8 +6413,8 @@ CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
 cp "$LEASE.saved" "$LEASE"
 if CLAUDE_CONFIG_DIR="$root" $CLI write-index \
    --repo-slug "$LF_SLUG" --session SA --fence "$lfA" --binding "$bidA" --workspace w1 \
-   --json '{"workspace_id":"w1"}' 2>err; then exit 1; fi
-grep -q "missing lead fence" err
+   --json '{"workspace_id":"w1"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "missing lead fence" "$ERRFILE"
 [ ! -e "$root/herdr-orch/$LF_SLUG/leads/$bidA/workspaces/w1.json" ] || exit 1
 SH
 
@@ -6435,8 +6466,8 @@ json.dump(rec, open(path, "w"))
 # the resumed path exactly as to the first run
 if CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --head-sha "$SHA40" 2>err; then exit 1; fi
-grep -q "requires --base-sha" err
+   --head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "requires --base-sha" "$ERRFILE"
 # resume with a MOVED head: exit 3, binding stays claimed
 rc=0
 CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
@@ -6556,8 +6587,8 @@ for i in range(70):
 EOF
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --abandon --descendants-terminated --prune 2>err; then exit 1; fi
-grep -q "teardown manifest exceeds the size bound" err
+   --abandon --descendants-terminated --prune 2>"$ERRFILE"; then exit 1; fi
+grep -q "teardown manifest exceeds the size bound" "$ERRFILE"
 # refused BEFORE release or prune: the lease survives and the journals do too
 KEY=$(python3 -c '
 import os, sys; sys.path.insert(0, "claude/hooks")
@@ -6598,8 +6629,8 @@ json.dump(rec, open(path, "w"))
 ' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --abandon --descendants-terminated 2>err; then exit 1; fi
-grep -q "resume integrate-envelope" err
+   --abandon --descendants-terminated 2>"$ERRFILE"; then exit 1; fi
+grep -q "resume integrate-envelope" "$ERRFILE"
 python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "claimed"
@@ -6634,10 +6665,10 @@ reg.write_text(json.dumps(data))
 rc=0
 CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --abandon --descendants-terminated 2>err || rc=$?
+   --abandon --descendants-terminated 2>"$ERRFILE" || rc=$?
 test "$rc" = 2
-grep -q '^\[X\]' err
-if grep -q "Traceback" err; then exit 1; fi
+grep -q '^\[X\]' "$ERRFILE"
+if grep -q "Traceback" "$ERRFILE"; then exit 1; fi
 SH
 
 check "reconcile leaves freshly issued bindings alone, revokes aged ones" <<'SH'
@@ -6775,8 +6806,8 @@ CLAUDE_CONFIG_DIR="$root" $CLI emit-envelope \
 # integrated_by carries the 4200-char launcher session: the record would
 # exceed the bounded reader's cap, so the writer must refuse it up front.
 if CLAUDE_CONFIG_DIR="$root" $CLI integrate-envelope \
-   --repo-slug "$LF_SLUG" --session "$LONG" --fence "$f" --binding "$bid" 2>err; then exit 1; fi
-grep -q "consumption record exceeds the size bound" err
+   --repo-slug "$LF_SLUG" --session "$LONG" --fence "$f" --binding "$bid" 2>"$ERRFILE"; then exit 1; fi
+grep -q "consumption record exceeds the size bound" "$ERRFILE"
 [ ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/envelope.consumed.json" ] || exit 1
 python3 -c '
 import json, sys
@@ -6796,8 +6827,8 @@ CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
    --workspace-root "$LF_WS" --binding "$bid" >/dev/null
 if CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads \
-   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply --stale-secs -1 2>err; then exit 1; fi
-grep -q "must be non-negative" err
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --apply --stale-secs -1 2>"$ERRFILE"; then exit 1; fi
+grep -q "must be non-negative" "$ERRFILE"
 python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "claimed"
@@ -6895,8 +6926,8 @@ bid2=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
    --workspace-root "$LF_WS" --expected-session S2)
 if CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S2 --host h --pid 3 --control-tier lead \
-   --workspace-root "$LF_WS" --binding "$bid2" --stale-secs 0 2>err; then exit 1; fi
-grep -q "occupant has a consumption record" err
+   --workspace-root "$LF_WS" --binding "$bid2" --stale-secs 0 2>"$ERRFILE"; then exit 1; fi
+grep -q "occupant has a consumption record" "$ERRFILE"
 python3 -c '
 import json, sys
 sys.path.insert(0, "claude/hooks")
@@ -6924,8 +6955,8 @@ printf 'not json' > "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-bad.json"
 # flag asserts terminated panes, not ignorable records)
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --abandon --descendants-terminated 2>err; then exit 1; fi
-grep -q "descendant records are unreadable" err
+   --abandon --descendants-terminated 2>"$ERRFILE"; then exit 1; fi
+grep -q "descendant records are unreadable" "$ERRFILE"
 KEY=$(python3 -c '
 import os, sys; sys.path.insert(0, "claude/hooks")
 import herdr_coordination as coordination
@@ -7068,8 +7099,8 @@ bidB=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
    --workspace-root "$LF_WS" --expected-session SB)
 if CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SB --host h --pid 3 --control-tier lead \
-   --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0 2>err; then exit 1; fi
-grep -q "another account scope" err
+   --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0 2>"$ERRFILE"; then exit 1; fi
+grep -q "another account scope" "$ERRFILE"
 # same account, but the registry entry is gone: a surviving stale lease
 # with no corroborating registry entry is unattested evidence -- refuse
 cp "$LEASE.saved" "$LEASE"
@@ -7091,8 +7122,8 @@ reg.write_text(json.dumps(data))
 ' "$LF_SLUG" "$KEY"
 if CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session SB --host h --pid 3 --control-tier lead \
-   --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0 2>err; then exit 1; fi
-grep -q "no corroborating registry" err
+   --workspace-root "$LF_WS" --binding "$bidB" --stale-secs 0 2>"$ERRFILE"; then exit 1; fi
+grep -q "no corroborating registry" "$ERRFILE"
 [ -e "$LEASE" ] || exit 1
 SH
 
@@ -7128,8 +7159,8 @@ json.dump(rec, open(path, "w"))
 # verb half: no transition OUT of claimed while a consumption record exists
 if CLAUDE_CONFIG_DIR="$root" $CLI set-binding-status \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --status revoked 2>err; then exit 1; fi
-grep -q "resume integrate-envelope" err
+   --status revoked 2>"$ERRFILE"; then exit 1; fi
+grep -q "resume integrate-envelope" "$ERRFILE"
 python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "claimed"
@@ -7152,8 +7183,8 @@ json.dump(rec, open(path, "w"))
 ' "$BREC"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --descendants-terminated 2>err; then exit 1; fi
-grep -q "revoked binding holds a consumption record" err
+   --descendants-terminated 2>"$ERRFILE"; then exit 1; fi
+grep -q "revoked binding holds a consumption record" "$ERRFILE"
 [ -e "$CON" ] || exit 1
 # reconcile half: the revoked+consumed row is repair-only, never released
 KEY=$(python3 -c '
@@ -7225,8 +7256,8 @@ json.dump(rec, open(path, "w"))
 # verb half: issued -> revoked is refused while the record exists
 if CLAUDE_CONFIG_DIR="$root" $CLI set-binding-status \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --status revoked 2>err; then exit 1; fi
-grep -q "resume integrate-envelope" err
+   --status revoked 2>"$ERRFILE"; then exit 1; fi
+grep -q "resume integrate-envelope" "$ERRFILE"
 python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["status"] == "issued"
@@ -7298,8 +7329,8 @@ json.dump(rec, open(path, "w"))
 ' "$LEAD_DIR/envelope.json" "$bid"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --no-artifacts --descendants-terminated 2>err; then exit 1; fi
-grep -q "does not match the consumption record" err
+   --no-artifacts --descendants-terminated 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match the consumption record" "$ERRFILE"
 [ ! -e "$LEAD_DIR/teardown.json" ] || exit 1
 # absent envelope: the consumed digest is authoritative for the manifest
 rm "$LEAD_DIR/envelope.json"
@@ -7326,8 +7357,8 @@ json.dump(rec, open(path, "w"))
 ' "$LEAD_DIR/teardown.json"
 if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
    --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" \
-   --no-artifacts --descendants-terminated 2>err; then exit 1; fi
-grep -q "surviving content conflicts" err
+   --no-artifacts --descendants-terminated 2>"$ERRFILE"; then exit 1; fi
+grep -q "surviving content conflicts" "$ERRFILE"
 SH
 
 check "emit-artifacts durability: store fsync before publish, sweep, fsync again" <<PY
@@ -7434,15 +7465,15 @@ reg.write_text(json.dumps(data))
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-done \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-2 --workspace w1 \
    --agent mech-td-x --phase implement --outcome completed --head-sha h1 --base-sha b0 \
-   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>err; then exit 1; fi
-grep -q "does not corroborate the lease" err
+   --runtime claude --launch-id L1 --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not corroborate the lease" "$ERRFILE"
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-2.done.json"
 if CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id PROJ-3 --workspace w2 \
    --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$BASE40" --blocking-count 0 \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
-   --reviewer-session R1 2>err; then exit 1; fi
-grep -q "does not corroborate the lease" err
+   --reviewer-session R1 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not corroborate the lease" "$ERRFILE"
 test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/PROJ-3.review.json"
 SH
 
@@ -7478,8 +7509,8 @@ EOF
 cp "$LEASE.saved" "$LEASE"
 if CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
-   --workspace-root "$LF_WS" --binding "$bid" 2>err; then exit 1; fi
-grep -q "already released on this workspace" err
+   --workspace-root "$LF_WS" --binding "$bid" 2>"$ERRFILE"; then exit 1; fi
+grep -q "already released on this workspace" "$ERRFILE"
 python3 -c '
 import json, sys
 sys.path.insert(0, "claude/hooks")
@@ -7652,6 +7683,375 @@ c=importlib.util.module_from_spec(s); s.loader.exec_module(c)
 d=c.outstanding_descendants(pathlib.Path('$root/herdr-orch/$LF_SLUG'), '$bid')
 assert d==['p1'], d
 "
+SH
+
+check "task-lead-status reports disabled and refuses admission on a fresh root" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-tls.git
+root=$(mktemp -d)
+out=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO")
+printf '%s' "$out" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["gate_enabled"] is False, d
+assert d["admit"] is False, d
+assert d["required"] == 1, d
+assert d["core"] == 1 and d["guard"] == 1, d
+assert isinstance(d["gate_reason"], str) and d["gate_reason"], d
+assert isinstance(d["admit_reason"], str) and d["admit_reason"], d
+'
+SH
+
+check "task-lead-status agrees with what a real claim would do" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-tlsa.git
+root=$(mktemp -d)
+# An enabled, fully-capable, identity-bearing gate. status must report
+# admit:true here, and a real claim must succeed. The two must never disagree:
+# status omitting repo_id while the claim path supplies it would produce
+# admit:false from status and a successful claim, which is worse than useless.
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+slug, repo = sys.argv[1:3]
+ctx = core.repository_context(repo)
+scope = core.account_scope(ctx["root"], "claude")
+rd = core.repo_dir(slug); rd.mkdir(parents=True, exist_ok=True)
+core.write_json_atomic(rd / "task-lead-gate.json", {
+    "schema_version": 1, "repo_slug": slug, "repo_id": ctx["repo_id"],
+    "account_id": scope["account_id"], "enabled": True})
+skill = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "skills", "herdr-orchestration")
+os.makedirs(skill, exist_ok=True)
+open(os.path.join(skill, "SKILL.md"), "w").write(
+    chr(60) + "!-- herdr-capabilities: " + json.dumps({"marker_version":1,"capability":1}) + " --" + chr(62) + chr(10))
+' "$LF_SLUG" "$LF_REPO"
+out=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO")
+printf '%s' "$out" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["gate_enabled"] is True, d
+assert d["admit"] is True, d
+'
+# Status said admit:true. Now prove a REAL claim agrees. Without this the test
+# only exercises the status handler, and the two could still diverge -- which
+# is the exact defect this case exists to catch. NO_SEED keeps the fixture from
+# overwriting the identity-bearing gate with a repo_id:None one.
+f=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-agree \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+test -n "$lf"
+python3 -c '
+import json, os, sys
+root, bid, slug = sys.argv[1:4]
+rec = json.load(open(os.path.join(root, "herdr-orch", slug, "bindings", bid + ".json")))
+assert rec["status"] == "claimed", rec
+gate = json.load(open(os.path.join(root, "herdr-orch", slug, "task-lead-gate.json")))
+assert gate["repo_id"] is not None, gate
+' "$root" "$bid" "$LF_SLUG"
+SH
+
+check "task-lead-status exits 0 even when leads are not admissible" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-tls0.git
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py task-lead-status \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" >/dev/null
+SH
+
+check "fixture publishes an enabled gate and a capable procedure for a lead claim" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-fx.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-fx \
+   --workspace-root "$LF_WS" --expected-session S1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" >/dev/null
+python3 -c '
+import json, os, sys
+root, slug = sys.argv[1:3]
+gate = json.load(open(os.path.join(root, "herdr-orch", slug, "task-lead-gate.json")))
+assert gate["enabled"] is True, gate
+assert gate["repo_slug"] == slug, gate
+assert gate["schema_version"] == 1, gate
+marker = open(os.path.join(root, "skills", "herdr-orchestration", "SKILL.md"), encoding="utf-8").read()
+assert "capability:1" in marker.replace(" ", "").replace(chr(34), ""), marker
+' "$root" "$LF_SLUG"
+SH
+
+check "lead claim is refused when the gate record is absent" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ga.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-ga \
+   --workspace-root "$LF_WS" --expected-session S1)
+# Seed the capable procedure marker but NOT the gate, so the ONLY reason to
+# refuse is gate absence. HERDR_FIXTURE_NO_SEED stops the fixture recreating it.
+mkdir -p "$root/skills/herdr-orchestration"
+printf '%s\n' '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->' \
+   > "$root/skills/herdr-orchestration/SKILL.md"
+rm -f "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+err=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" 2>&1 >/dev/null) && exit 1
+printf '%s' "$err" | grep -q 'gate record absent'
+# The binding must be untouched and NO coordination lease may exist for this
+# workspace. The lease lives in the coordination root keyed by
+# lead_lease_key(realpath(workspace_root)), not in the payload root.
+python3 -c '
+import hashlib, json, os, sys
+root, bid, slug, ws = sys.argv[1:5]
+rec = json.load(open(os.path.join(root, "herdr-orch", slug, "bindings", bid + ".json")))
+assert rec["status"] == "issued", rec
+key = hashlib.sha256(os.path.realpath(ws).encode()).hexdigest()[:16]
+lease = os.path.join(os.environ["HERDR_COORDINATION_ROOT"], slug, "lead-%s.json" % key)
+assert not os.path.exists(lease), lease
+' "$root" "$bid" "$LF_SLUG" "$LF_WS"
+SH
+
+check "lead claim is refused when the procedure is under-level" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gp.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-gp \
+   --workspace-root "$LF_WS" --expected-session S1)
+# ENABLE the gate, so the only remaining reason to refuse is the procedure
+# level. Write the REAL SKILL.md the reader resolves, at capability 0.
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+slug = sys.argv[1]
+scope = core.account_scope(sys.argv[2], "claude")
+rd = core.repo_dir(slug); rd.mkdir(parents=True, exist_ok=True)
+core.write_json_atomic(rd / "task-lead-gate.json", {
+    "schema_version": 1, "repo_slug": slug, "repo_id": None,
+    "account_id": scope["account_id"], "enabled": True})
+' "$LF_SLUG" "$LF_REPO"
+mkdir -p "$root/skills/herdr-orchestration"
+printf '%s\n' '<!-- herdr-capabilities: {"marker_version":1,"capability":0} -->' \
+   > "$root/skills/herdr-orchestration/SKILL.md"
+err=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" 2>&1 >/dev/null) && exit 1
+printf '%s' "$err" | grep -q 'procedure advertises capability 0'
+SH
+
+check "lead claim is refused when core or guard is under-level" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gc.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-gc \
+   --workspace-root "$LF_WS" --expected-session S1)
+# Everything enabled and capable; drive core and guard under-level one at a
+# time and assert each refuses a REAL claim. The claim goes through core.main
+# -- the same argv path the CLI takes -- not through task_lead_admission
+# directly: a claim path that never consulted these constants would satisfy a
+# direct-admission assertion unchanged, which is what this case used to do.
+CLAUDE_CONFIG_DIR="$root" python3 -c '
+import json, os, sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+import herdr_capabilities as hc
+slug, repo, ws, bid = sys.argv[1:5]
+scope = core.account_scope(repo, "claude")
+rd = core.repo_dir(slug); rd.mkdir(parents=True, exist_ok=True)
+core.write_json_atomic(rd / "task-lead-gate.json", {
+    "schema_version": 1, "repo_slug": slug, "repo_id": None,
+    "account_id": scope["account_id"], "enabled": True})
+skill = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "skills", "herdr-orchestration")
+os.makedirs(skill, exist_ok=True)
+open(os.path.join(skill, "SKILL.md"), "w").write(
+    chr(60) + "!-- herdr-capabilities: " + json.dumps({"marker_version":1,"capability":1}) + " --" + chr(62) + chr(10))
+
+def claim():
+    return core.main(["claim-owner", "--repo-slug", slug, "--repo-path", repo,
+                      "--session", "S1", "--host", "h", "--pid", "2",
+                      "--control-tier", "lead", "--workspace-root", ws,
+                      "--binding", bid])
+
+for name in ("CORE_CAPABILITY", "GUARD_CAPABILITY"):
+    saved = getattr(hc, name)
+    setattr(hc, name, 0)
+    try:
+        rc = claim()
+    except SystemExit as exc:
+        rc = exc.code
+    finally:
+        setattr(hc, name, saved)
+    assert rc != 0, (name, "an under-level claim was admitted")
+
+admit, reason, _ = core.task_lead_admission(
+    rd, slug, scope["account_id"], os.environ["CLAUDE_CONFIG_DIR"],
+    core.repository_context(repo)["repo_id"])
+assert admit is True, reason
+' "$LF_SLUG" "$LF_REPO" "$LF_WS" "$bid"
+SH
+
+check "lead claim is refused when the gate names another account" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gx.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-gx \
+   --workspace-root "$LF_WS" --expected-session S1)
+mkdir -p "$root/skills/herdr-orchestration" "$root/herdr-orch/$LF_SLUG"
+printf '%s\n' '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->' \
+   > "$root/skills/herdr-orchestration/SKILL.md"
+python3 -c '
+import json, os, sys
+p = os.path.join(sys.argv[1], "herdr-orch", sys.argv[2], "task-lead-gate.json")
+open(p, "w").write(json.dumps({"schema_version":1,"repo_slug":sys.argv[2],"repo_id":None,
+  "account_id":"someone-else","enabled":True}))
+' "$root" "$LF_SLUG"
+err=$(CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid" 2>&1 >/dev/null) && exit 1
+printf '%s' "$err" | grep -q 'different account'
+SH
+
+check "a plain launcher claim is unaffected by an absent gate" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-gl.git
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" HERDR_FIXTURE_NO_SEED=1 python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1 >/dev/null
+SH
+
+check "a context-less lead claim raises ValueError, not a scope crash" <<PY
+$LOAD
+root=tempfile.mkdtemp();os.environ["CLAUDE_CONFIG_DIR"]=root
+rd=c.repo_dir("slug-ctxless");rd.mkdir(parents=True)
+with c.coordination.owner_transaction(rd, canonical_id="fixture-ctxless", expected_slug="slug-ctxless"):
+    pass                                                # explicit identity permits an unbound claim
+c.claim_owner(rd, "L1", "h", 1)  # legacy launcher claim so an owner exists
+try:
+    c.claim_owner(rd, "S1", "h", 2, control_tier="lead",
+                  workspace_root="/tmp/slug-ctxless-ws",
+                  binding_id="ldb-" + "0" * 32,
+                  context=None, scope=None)
+    raise AssertionError("claim_owner did not raise")
+except ValueError as exc:
+    assert str(exc) == "a lead claim requires repository context", str(exc)
+except Exception as exc:
+    raise AssertionError(f"expected ValueError, got {type(exc).__name__}: {exc}")
+sys.exit(0)
+PY
+
+check "deactivate-task-leads is idempotent and leaves identical bytes" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dt.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+a=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+b=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+test "$a" = "$b"
+python3 -c '
+import json,os,sys
+d=json.load(open(os.path.join(sys.argv[1],"herdr-orch",sys.argv[2],"task-lead-gate.json")))
+assert d["enabled"] is False, d
+' "$root" "$LF_SLUG"
+SH
+
+check "deactivate-task-leads replaces a damaged record with a valid disabled one" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dd.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+mkdir -p "$root/herdr-orch/$LF_SLUG"
+printf '%s' '{not json' > "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+python3 -c '
+import json,os,sys
+d=json.load(open(os.path.join(sys.argv[1],"herdr-orch",sys.argv[2],"task-lead-gate.json")))
+assert d["enabled"] is False and d["schema_version"] == 1, d
+' "$root" "$LF_SLUG"
+SH
+
+check "deactivate-task-leads normalizes a wrong-version or foreign-account record" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dn.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+mkdir -p "$root/herdr-orch/$LF_SLUG"
+for payload in \
+  '{"schema_version":99,"repo_slug":"x","repo_id":null,"account_id":"a","enabled":true}' \
+  '{"schema_version":1,"repo_slug":"x","repo_id":null,"account_id":"someone-else","enabled":true}'
+do
+  printf '%s' "$payload" > "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+     --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+  python3 -c '
+import json,os,sys
+d=json.load(open(os.path.join(sys.argv[1],"herdr-orch",sys.argv[2],"task-lead-gate.json")))
+assert d["enabled"] is False, d
+assert d["schema_version"] == 1, d
+assert d["repo_slug"] == sys.argv[2], d
+assert d["account_id"] != "someone-else", d
+' "$root" "$LF_SLUG"
+done
+SH
+
+check "deactivate-task-leads is refused for a wrong session with a correct fence" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dw.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session IMPOSTOR --fence "$f" 2>/dev/null; then exit 1; fi
+test ! -f "$root/herdr-orch/$LF_SLUG/task-lead-gate.json"
+SH
+
+check "a failed publication leaves the prior gate bytes intact and exits non-zero" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dp.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f"
+before=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+# Fault injection: make the payload dir unwritable so the temp-file create fails
+# BEFORE any replace. The prior record must survive byte-identical.
+chmod 500 "$root/herdr-orch/$LF_SLUG"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" 2>/dev/null; then
+  chmod 700 "$root/herdr-orch/$LF_SLUG"; exit 1
+fi
+chmod 700 "$root/herdr-orch/$LF_SLUG"
+after=$(shasum "$root/herdr-orch/$LF_SLUG/task-lead-gate.json" | cut -d' ' -f1)
+test "$before" = "$after"
+SH
+
+check "deactivate-task-leads is refused without a valid fence" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-df.git
+root=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1 >/dev/null
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py deactivate-task-leads \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence 9999 2>/dev/null; then exit 1; fi
+SH
+
+check "there is no activation verb: the CLI rejects one and no handler writes an enabled gate" <<'SH'
+if python3 claude/hooks/herdr_orch_core.py activate-task-leads 2>/dev/null; then exit 1; fi
+if grep -qE '"enabled"[[:space:]]*:[[:space:]]*True' claude/hooks/herdr_orch_core.py; then exit 1; fi
 SH
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
