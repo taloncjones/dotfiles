@@ -443,6 +443,27 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# GateGuard tuning: the routine-Bash and first-touch Edit/Write gates are off
+# for both accounts; the destructive-Bash gate stays on because neither knob
+# touches it. Values are pinned (not just present) because the reconciler
+# merges env with existing keys surviving, so rollback is a value flip, not
+# a line deletion. See claude/hooks/gateguard-tuning.test.sh for the proof.
+if python3 - <<'PY'
+import json
+import sys
+
+env = json.load(open("claude/settings.json.tmpl")).get("env") or {}
+ok = env.get("GATEGUARD_BASH_ROUTINE_DISABLED") == "1" and env.get("GATEGUARD_EXEMPT_GLOBS") == "**"
+sys.exit(0 if ok else 1)
+PY
+then
+    printf 'PASS  gateguard: template pins GATEGUARD_BASH_ROUTINE_DISABLED=1 and GATEGUARD_EXEMPT_GLOBS=**\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  gateguard: template pins GATEGUARD_BASH_ROUTINE_DISABLED=1 and GATEGUARD_EXEMPT_GLOBS=**\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # Permissions floor: the template must not ask (or allow) for rm, so auto
 # mode's classifier decides scratch cleanup; must keep the force-push and
 # Jira-create ask rules; and must deny the literal root / home / .git
