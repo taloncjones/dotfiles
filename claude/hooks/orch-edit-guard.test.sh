@@ -1063,7 +1063,12 @@ else
 fi
 
 # --- Crash and scope-failure paths fail closed on a deleted lease -------
-if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_C" python3 - <<'PY'
+# SID_W is the suite's genuine never-leased session (see PA below and its use
+# at LD-S). It is defined here, ahead of its shared definition further down,
+# because this block runs before that point in the script; the later
+# definition assigns the identical literal and is a no-op reassignment.
+SID_W=55555555-5555-5555-5555-555555555555
+if HOOK="$HOOK" SLUG_A="$SLUG_A" R="$R" SID_L="$SID_W" python3 - <<'PY'
 import importlib.util, json, os, sys, hashlib, shutil, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, "claude/hooks")
@@ -1310,10 +1315,16 @@ rm -f "$RD_A/orch-edit-allow.json"
 # LT: a completed binding ends lead edit authority even inside the workspace.
 lead_setup "$SID_C" "$LWS"; set_binding_status_fixture "$SID_C" "$LWS" completed
 hook_case "LT completed binding ends lead edit authority inside the workspace" deny Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
-# LX: with the lease removed, the session is a plain worker again (allow).
+# LX: with the lease removed AND no registry occupancy recorded for this
+# workspace, the session reverts to a plain worker (allow). This is not a
+# standing "no lease means plain worker" invariant -- that is exactly the
+# hole this branch closed (see LD-E below). It holds here only because
+# occupancy_setup has not been called yet at this point in the suite; once a
+# registry occupancy exists, a deleted lease still keeps the session
+# classified as a lead and denies the write.
 lead_setup "$SID_C" "$LWS"
 rm -f "$HERDR_COORDINATION_ROOT/$SLUG_A"/lead-*.json
-hook_case "LX no lead lease reverts to plain-worker allow" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
+hook_case "LX no lead lease AND no registry occupancy reverts to plain-worker allow" allow Write "$LWS/wsfile.txt" "$LWS" "$SID_C"
 
 # Legacy no-tier owner record still blanket-fences (real guard path, not a
 # dict-default assertion): drop control_tier from SID_A's live coordination
@@ -1486,6 +1497,10 @@ occupancy_setup "$LWS"
 lease_remove "$LWS"
 hook_case "LD-E deleted lease still refuses a guarded write" deny Edit "$R/tracked.txt" "$R" "$SID_LD"
 
+# LD-S depends on the registry occupancy the occupancy_setup call above (in
+# LD-E) wrote for SLUG_A/LWS; it creates none of its own. Confirmed by
+# mutation: no-op'ing that call fails both LD-E and LD-S. Do not reorder this
+# block ahead of LD-E without carrying an equivalent occupancy_setup.
 # Spec test 20: the selected_scope failure handler. Scope derivation raises,
 # an occupancy names the session, and decide() must return 2 rather than
 # falling through to the plain-worker allow.
@@ -1535,9 +1550,15 @@ fi
 # the lead this whole change exists to keep classified.
 SID_LB=88888888-8888-8888-8888-888888888888
 if HOOK="$HOOK" R="$R" SID_LB="$SID_LB" python3 - <<'PY'
-import importlib.util, json, os, sys, tempfile
+import importlib.util, json, os, sys, tempfile, shutil
 sys.dont_write_bytecode = True
 sys.path.insert(0, "claude/hooks")
+# chmod 0o000 is not a barrier for root (or CAP_DAC_OVERRIDE): under root this
+# fault injection would pass vacuously, never exercising the except-clause
+# breadth it exists to pin. Make that explicit instead of silently vacuous.
+if hasattr(os, "geteuid") and os.geteuid() == 0:
+    print("SKIP  LB fault injection: chmod 0o000 does not block root reads")
+    sys.exit(0)
 iso = tempfile.mkdtemp()
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(iso, "cfg")
 os.environ["HERDR_COORDINATION_ROOT"] = os.path.join(iso, "coord")
@@ -1584,6 +1605,7 @@ try:
 finally:
     os.chmod(rd_bad, 0o700)
 assert is_lead is True and roots == [], ("poisoned-sibling", is_lead, roots)
+shutil.rmtree(iso, ignore_errors=True)
 PY
 then
     printf 'PASS  LB a sibling binding read raising OSError does not stop corroboration by a later valid one\n'; PASS=$((PASS + 1))
