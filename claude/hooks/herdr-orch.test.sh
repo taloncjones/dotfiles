@@ -106,6 +106,12 @@ print(c.repo_slug(sys.argv[1]))
     LF_WS="$LF_WSBASE/wt"
     git -C "$LF_REPO" worktree add -q "$LF_WS"
 }
+findings_ok() {
+    FINDINGS_OK="$1/herdr-orch/$LF_SLUG/artifacts/td-x/review-L2/findings.md"
+    mkdir -p "$(dirname "$FINDINGS_OK")"
+    printf 'No blocking findings. Inspected: fixture diff.\n' > "$FINDINGS_OK"
+    export FINDINGS_OK
+}
 HELPER
 
 check "repo_slug deterministic + hashed + valid" <<PY
@@ -4333,6 +4339,135 @@ import json, sys
 rec = json.load(open(sys.argv[1]))
 assert rec["outcome"] == "approved" and rec["blocking_count"] == 1 and rec["findings_ref"] == "F1", rec
 ' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
+SH
+
+# Shared native review fixture: lead binding, implement attempt pane1/w1,
+# dispatched review attempt pane2/w2, findings file under the fixture root.
+PROV_FIXTURE_HELPER=$(mktemp); export PROV_FIXTURE_HELPER
+cat > "$PROV_FIXTURE_HELPER" <<'HELPER'
+prov_fixture() {
+    . "$LEAD_FIXTURE_HELPER"; lead_fixture "$1"
+    root=$(mktemp -d)
+    f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+       --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+    bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+       --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+       --workspace-root "$LF_WS" --expected-session S1)
+    lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+       --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+       --workspace-root "$LF_WS" --binding "$bid")
+    SHA40=$(printf 'a%.0s' $(seq 1 40))
+    CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+       --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+       --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"impl","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}]}'
+    findings_ok "$root"
+    LEAD_TASKS="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks"
+    REVIEW_JSON="$LEAD_TASKS/td-x.review.json"
+    DONE_JSON="$LEAD_TASKS/td-x.done.json"
+}
+prov_emit_review() {
+    CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+       --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+       --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 0 \
+       --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
+       --reviewer-session R1 "$@"
+}
+prov_emit_done() {
+    # Grounded on the L3 implement row prov_impl_row appends (the task's LAST
+    # row must be the implement attempt for attempt_matches to accept it).
+    CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-done \
+       --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w1 \
+       --agent impl-td-x --phase implement --outcome completed --head-sha "$SHA40" --base-sha "$SHA40" \
+       --runtime claude --launch-id L3 --pane-id pane1 --source-head-sha "$SHA40" "$@"
+}
+prov_impl_row() {
+    # Binding-scoped dispatch history is append-only: repeat the two prior
+    # rows in order and append a current implement attempt.
+    CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+       --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+       --json '{"task_id":"td-x","base_sha":"'"$SHA40"'","review_head_sha":"'"$SHA40"'","workers":[{"role":"impl","launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"},{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$SHA40"'"},{"role":"impl","launch_id":"L3","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}]}'
+}
+HELPER
+
+check "emit provenance: other pane exits 3" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-prov1.git
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w2 HERDR_PANE_ID=pane9 prov_emit_review --findings-ref "$FINDINGS_OK" 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+grep -q 'not the designated agent' "$ERRFILE"
+test ! -e "$REVIEW_JSON"
+SH
+
+check "emit provenance: refused before any directory is created" <<'SH'
+# No write-task here: the bound write-task itself creates leads/<bid>/tasks,
+# so only a fixture without one can prove the guard runs before
+# create_payload_dir.
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-prov0.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+findings_ok "$root"
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w2 HERDR_PANE_ID=pane9 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
+   --reviewer-session R1 --findings-ref "$FINDINGS_OK" 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+test ! -e "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks"
+SH
+
+check "emit provenance: other workspace exits 3" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-prov2.git
+rc=0; HERDR_ENV=1 HERDR_PANE_ID=pane2 HERDR_WORKSPACE_ID=w9 prov_emit_review --findings-ref "$FINDINGS_OK" 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+test ! -e "$REVIEW_JSON"
+SH
+
+check "emit provenance: missing pane variable exits 3" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-prov3.git
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w2 prov_emit_review --findings-ref "$FINDINGS_OK" 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w2 HERDR_PANE_ID= prov_emit_review --findings-ref "$FINDINGS_OK" 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+test ! -e "$REVIEW_JSON"
+SH
+
+check "emit provenance: designated pane records emitter fields" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-prov4.git
+HERDR_ENV=1 HERDR_PANE_ID=pane2 HERDR_WORKSPACE_ID=w2 CLAUDE_CODE_SESSION_ID=sess-1 prov_emit_review --findings-ref "$FINDINGS_OK"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["emitter_pane_id"] == "pane2" and rec["emitter_session_id"] == "sess-1", rec
+' "$REVIEW_JSON"
+# outside herdr an identical re-emit lands with null emitter fields. A
+# variable assignment prefixing a shell FUNCTION call (unlike an external
+# command) leaks into the calling shell once the call returns, so the prior
+# line's HERDR_ENV/HERDR_PANE_ID/HERDR_WORKSPACE_ID/CLAUDE_CODE_SESSION_ID
+# must be unset explicitly to actually simulate being outside herdr.
+unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID CLAUDE_CODE_SESSION_ID
+prov_emit_review --findings-ref "$FINDINGS_OK"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["emitter_pane_id"] is None and rec["emitter_session_id"] is None, rec
+' "$REVIEW_JSON"
+SH
+
+check "emit-done provenance: other pane exits 3" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-prov5.git
+prov_impl_row
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=pane9 prov_emit_done 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+test ! -e "$DONE_JSON"
+HERDR_ENV=1 HERDR_PANE_ID=pane1 HERDR_WORKSPACE_ID=w1 prov_emit_done
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["emitter_pane_id"] == "pane1"
+' "$DONE_JSON"
 SH
 
 check "emit-review --binding: intermediate-head dance refused until review_head_sha advances" <<'SH'

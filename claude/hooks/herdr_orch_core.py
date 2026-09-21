@@ -3629,6 +3629,15 @@ def _main(argv=None) -> int:
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
+        if ns.runtime is not None and ns.pane_id and os.environ.get("HERDR_ENV") == "1":
+            # Inside herdr the emitting pane must be the dispatched pane. The
+            # caller-supplied --pane-id is matched against the task record
+            # later; this ties it to the process that is running. Runs before
+            # any directory is created. Exit 3 is distinct from _require (2).
+            if (os.environ.get("HERDR_PANE_ID") != ns.pane_id
+                    or os.environ.get("HERDR_WORKSPACE_ID") != ns.workspace):
+                sys.stderr.write("[X] not the designated agent\n")
+                return 3
         rd = repo_dir(ns.repo_slug)
         base = rd
         if getattr(ns, "binding", None) is not None:
@@ -3694,6 +3703,10 @@ def _main(argv=None) -> int:
                      "runtime attempt requires launch-id, pane-id, and source-head-sha")
             _require(SHA40_RE.fullmatch(ns.source_head_sha), "source-head-sha must be 40 hex")
             done.update(runtime=ns.runtime, pane_id=ns.pane_id, source_head_sha=ns.source_head_sha)
+            done.update(
+                emitter_pane_id=os.environ.get("HERDR_PANE_ID") or None,
+                emitter_session_id=os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
+            )
         _require(contained(out, state_root()), "escapes state root")
         if ns.runtime is not None:
             with owner_transaction(rd) as tx:
