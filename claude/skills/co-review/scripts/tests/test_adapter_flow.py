@@ -29,8 +29,13 @@ def finalization_block(adapter: Path) -> str:
 
 class AdapterFinalizationTests(unittest.TestCase):
     def run_block(
-        self, adapter: Path, *, evaluator_exit: int, cleanup_exit: int
-    ) -> tuple[subprocess.CompletedProcess[str], bool, list[str]]:
+        self,
+        adapter: Path,
+        *,
+        evaluator_exit: int,
+        cleanup_exit: int,
+        ref_repo: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], bool, list[str], str]:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             run_dir = root / "run"
@@ -38,6 +43,20 @@ class AdapterFinalizationTests(unittest.TestCase):
             expected = root / "expected.json"
             expected.write_text("{}")
             trace = root / "trace"
+            # A real repository for the run ref the block deletes after cleanup.
+            repo = root / "repo"
+            repo.mkdir()
+            git_env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(root)}
+            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, env=git_env)
+            subprocess.run(
+                ["git", "-C", str(repo), "-c", "user.name=t", "-c",
+                 "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "x"],
+                check=True, env=git_env, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "update-ref", "refs/co-review-run/test-run", "HEAD"],
+                check=True, env=git_env,
+            )
             fake_bin = root / "bin"
             fake_bin.mkdir()
             fake_uv = fake_bin / "uv"
@@ -69,15 +88,21 @@ class AdapterFinalizationTests(unittest.TestCase):
                     "REVIEW_HELPER": "review.py",
                     "GATE_REPORT": "gate_report.py",
                     "MANIFEST": "manifest.json",
+                    "REPO": ref_repo if ref_repo is not None else str(repo),
+                    "RUN_ID": "test-run",
                 },
                 check=False,
             )
-            return result, expected.exists(), trace.read_text().splitlines()
+            refs = subprocess.run(
+                ["git", "-C", str(repo), "for-each-ref", "refs/co-review-run/"],
+                capture_output=True, text=True, check=True, env=git_env,
+            ).stdout.strip()
+            return result, expected.exists(), trace.read_text().splitlines(), refs
 
     def test_approve_requires_successful_cleanup_and_invalidates_on_failure(self):
         for adapter in ADAPTERS:
             with self.subTest(adapter=adapter):
-                result, expected_exists, trace = self.run_block(
+                result, expected_exists, trace, _refs = self.run_block(
                     adapter, evaluator_exit=0, cleanup_exit=7
                 )
                 self.assertEqual(result.returncode, 2)
@@ -91,7 +116,7 @@ class AdapterFinalizationTests(unittest.TestCase):
     def test_evaluator_failure_still_runs_cleanup_before_returning_result(self):
         for adapter in ADAPTERS:
             with self.subTest(adapter=adapter):
-                result, expected_exists, trace = self.run_block(
+                result, expected_exists, trace, _refs = self.run_block(
                     adapter, evaluator_exit=1, cleanup_exit=0
                 )
                 self.assertEqual(result.returncode, 1)
@@ -99,6 +124,32 @@ class AdapterFinalizationTests(unittest.TestCase):
                 self.assertIn('"verdict":"CHANGES"', result.stdout)
                 self.assertTrue(any(" evaluate " in f" {line} " for line in trace))
                 self.assertTrue(any(" cleanup " in f" {line} " for line in trace))
+
+    def test_approve_path_deletes_the_run_ref(self):
+        for adapter in ADAPTERS:
+            with self.subTest(adapter=adapter):
+                result, expected_exists, trace, refs = self.run_block(
+                    adapter, evaluator_exit=0, cleanup_exit=0
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertTrue(expected_exists)
+                self.assertEqual(refs, "")
+                self.assertTrue(any(" cleanup " in f" {line} " for line in trace))
+
+    def test_run_ref_removal_failure_invalidates_after_cleanup(self):
+        for adapter in ADAPTERS:
+            with self.subTest(adapter=adapter):
+                result, expected_exists, trace, refs = self.run_block(
+                    adapter, evaluator_exit=0, cleanup_exit=0,
+                    ref_repo="/nonexistent/not-a-repo",
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(expected_exists)
+                self.assertIn(
+                    "run ref removal failed; evidence preserved", result.stderr
+                )
+                self.assertTrue(any(" cleanup " in f" {line} " for line in trace))
+                self.assertNotEqual(refs, "")
 
 
 if __name__ == "__main__":
