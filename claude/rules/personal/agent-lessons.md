@@ -25,8 +25,8 @@ is the staging tier, not an archive.
   a small change the human approved this turn. Larger: todo + kickoff.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
   MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
-- (2026-09) Never expand or abbreviate a sha by hand: emit what rev-parse or
-  ls-remote returns -- flags like --match-head-commit reject a short sha.
+- (2026-09) Never emit an identifier from memory -- shas, test cases, symbols,
+  CLI flags: read it back from rev-parse, ls-remote, grep, or the tool's help.
 - (2026-09) A worker never commits with failing tests: fix or report
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
@@ -37,9 +37,9 @@ is the staging tier, not an archive.
   first, so co-review round comments and markers land on it, then merge there.
 - (2026-09) A completion-enforcing hook is not user consent: hold the gated
   action, say you are blocked once, and wait instead of restating.
-- (2026-09) Never cite code anchors from memory in a plan: grep-verify that
-  every referenced test case or symbol exists before a worker is sent to it.
 - (2026-09) Verify external CLI syntax against its help/docs before writing it
   into a skill: unverified gh fields and flag combinations shipped broken.
+- (2026-09) Probe runtime behavior in a clean env: a session's inherited
+  settings outlive the config change, so its own probes read the old value.
 - (2026-09) Run suites to a file, then grep it: pipes hide failures and stderr.
 - (2026-09) Settle a factual review dispute by executing the case, not by rank.
