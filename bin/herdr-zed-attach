@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# herdr-zed-attach - attach a Zed Terminal Thread to the herdr agent whose
+# pane runs under the current project root.
+#
+# A herdr pane attached from a Terminal Thread is a second viewport onto the
+# real claude CLI process, so it shows up in Zed's Agent Panel sidebar and
+# Remote Control started in that pane is live here too. The project root is
+# the git toplevel of the thread's cwd: every herdr worktree is its own
+# toplevel, so a worktree finds its worker and the main checkout finds the
+# director. Attaching joins a pane whose account was bound at dispatch, so
+# no account routing happens here.
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+usage: herdr-zed-attach [TARGET]
+
+  (no argument)   attach to the one herdr agent under this project root
+  TARGET          attach to an explicit pane ID (w1:p1) or agent name
+  -h, --help      print this help
+
+exit status: 0 attached, 1 no agent under the root, 2 several agents
+(listed on stderr; pass one as TARGET), 3 herdr unavailable, 4 usage
+EOF
+}
+
+# -h/--help anywhere wins over every other argument error.
+for arg in "$@"; do
+    case "$arg" in
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    esac
+done
+
+target=""
+for arg in "$@"; do
+    case "$arg" in
+    -*)
+        usage >&2
+        exit 4
+        ;;
+    *)
+        if [[ -n "$target" ]]; then
+            usage >&2
+            exit 4
+        fi
+        target="$arg"
+        ;;
+    esac
+done
+
+if ! command -v herdr >/dev/null 2>&1; then
+    echo "herdr-zed-attach: herdr is not on PATH" >&2
+    exit 3
+fi
+
+if [[ -n "$target" ]]; then
+    exec herdr agent attach "$target"
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "herdr-zed-attach: python3 is required" >&2
+    exit 3
+fi
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || root="$PWD"
+
+listing="$(herdr agent list)" || {
+    echo "herdr-zed-attach: herdr agent list failed" >&2
+    exit 3
+}
+
+# stdin: the agent list JSON; argv[1]: the project root. Prints the chosen
+# pane ID on stdout (exit 0), or a message plus a candidate listing on
+# stderr (exit 1 none, 2 several, 3 unreadable listing).
+resolver='
+import json
+import os
+import sys
+
+root = os.path.realpath(sys.argv[1])
+prefix = root.rstrip("/") + "/"
+try:
+    agents = json.load(sys.stdin)["result"]["agents"]
+    if not isinstance(agents, list):
+        raise ValueError("agents is not a list")
+except (ValueError, KeyError, TypeError):
+    print("herdr-zed-attach: herdr agent list failed", file=sys.stderr)
+    sys.exit(3)
+agents = [a for a in agents if isinstance(a, dict)]
+
+
+def under(path):
+    if not isinstance(path, str) or not path:
+        return False
+    real = os.path.realpath(path)
+    return real == root or real.startswith(prefix)
+
+
+def line(agent):
+    label = agent.get("name") or agent.get("terminal_title_stripped") or agent.get("agent") or "-"
+    fields = (agent.get("pane_id") or "-", label, agent.get("agent_status") or "-", agent.get("cwd") or "-")
+    return "\t".join(str(f) for f in fields)
+
+
+matches = []
+seen = set()
+for agent in agents:
+    pane = agent.get("pane_id")
+    if not isinstance(pane, str) or not pane or pane in seen:
+        continue
+    if under(agent.get("cwd")) or under(agent.get("foreground_cwd")):
+        seen.add(pane)
+        matches.append(agent)
+
+if len(matches) == 1:
+    print(matches[0]["pane_id"])
+    sys.exit(0)
+if not matches:
+    print("herdr-zed-attach: no herdr agent runs under %s" % root, file=sys.stderr)
+    rows = [line(a) for a in agents]
+    print("\n".join(rows) if rows else "(no live herdr agents)", file=sys.stderr)
+    sys.exit(1)
+print("herdr-zed-attach: %d herdr agents run under %s; pass one as the target:" % (len(matches), root), file=sys.stderr)
+print("\n".join(line(a) for a in matches), file=sys.stderr)
+sys.exit(2)
+'
+
+rc=0
+pane="$(printf '%s' "$listing" | python3 -c "$resolver" "$root")" || rc=$?
+if [[ $rc -ne 0 ]]; then
+    exit "$rc"
+fi
+exec herdr agent attach "$pane"

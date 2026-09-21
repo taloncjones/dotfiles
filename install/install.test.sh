@@ -65,6 +65,9 @@ assert "zed agent wrapper pins the adapter version" \
 assert "link.sh links zed-claude-agent into ~/bin" \
     rg -q -F 'ln -sf "$DOTFILEDIR"/bin/zed-claude-agent "$HOME"/bin/zed-claude-agent' install/common/link.sh
 
+assert "link.sh links herdr-zed-attach into ~/bin" \
+    rg -q -F 'ln -sf "$DOTFILEDIR"/bin/herdr-zed-attach "$HOME"/bin/herdr-zed-attach' install/common/link.sh
+
 assert "link.sh links zed settings" \
     rg -q -F 'ln -sf "$DOTFILEDIR"/zed/settings.json "$HOME/.config/zed/settings.json"' install/macos/link.sh
 

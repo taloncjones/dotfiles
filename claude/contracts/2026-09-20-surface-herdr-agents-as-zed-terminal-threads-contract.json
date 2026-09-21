@@ -1,0 +1,51 @@
+{
+  "v": 1,
+  "task_id": "2026-09-20-surface-herdr-agents-as-zed-terminal-threads",
+  "commands": [
+    {
+      "name": "script-shebang-executable-syntax",
+      "run": "test -x bin/herdr-zed-attach && head -n 1 bin/herdr-zed-attach | grep -qxF '#!/usr/bin/env bash' && bash -n bin/herdr-zed-attach",
+      "timeout_secs": 30
+    },
+    {
+      "name": "herdr-zed-attach-suite",
+      "run": "sh -n bin/herdr-zed-attach.test.sh && sh bin/herdr-zed-attach.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "suite-registered-in-dotfiles-tests",
+      "run": "grep -qxF 'sh bin/herdr-zed-attach.test.sh' bin/dotfiles-tests && bash bin/dotfiles-tests --list | grep -qF 'bin/herdr-zed-attach.test.sh'",
+      "timeout_secs": 30
+    },
+    {
+      "name": "link-sh-links-into-home-bin",
+      "run": "grep -qF 'ln -sf \"$DOTFILEDIR\"/bin/herdr-zed-attach \"$HOME\"/bin/herdr-zed-attach' install/common/link.sh && grep -qF 'link.sh links herdr-zed-attach into ~/bin' install/install.test.sh && sh install/install.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "readme-zed-terminal-threads-section",
+      "run": "f=\"${TMPDIR:-/tmp}/zt-section.$$\"; awk '/^### Zed Terminal Threads$/{s=1;next} /^### /{if(s)exit} s{print}' README.md > \"$f\"; if ! test -s \"$f\"; then rm -f \"$f\"; exit 1; fi; for k in 'agent: new terminal thread' 'agent::NewTerminalThread' 'herdr-zed-attach' 'terminal_init_command' '--remote-control' 'show-toplevel'; do grep -q -F -- \"$k\" \"$f\" || { rm -f \"$f\"; exit 1; }; done; rm -f \"$f\"; awk '/^### Remote Access$/{a=NR} /^### Zed Terminal Threads$/{b=NR} /^### Worktree Hydration$/{c=NR} END{exit !(a && b && c && a<b && b<c)}' README.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "claude-md-names-script-and-suite",
+      "run": "grep -qF 'bin/herdr-zed-attach' CLAUDE.md && grep -qF 'bin/herdr-zed-attach.test.sh' CLAUDE.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "readme-remote-control-flag",
+      "run": "! grep -qF 'claude remote-control' README.md && test \"$(grep -cF 'claude --remote-control' README.md)\" -ge 2 && grep -qF \"'claude --remote-control'\" claude/contracts/td-2026-09-05-explore-cloudflared-tunnel-access-remote-access-to-contract.json && ! grep -qF \"'claude remote-control'\" claude/contracts/td-2026-09-05-explore-cloudflared-tunnel-access-remote-access-to-contract.json",
+      "timeout_secs": 30
+    },
+    {
+      "name": "public-safety-scan",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "neighbor-suites",
+      "run": "sh bin/zed-claude-agent.test.sh && sh bin/remote-access-doctor.test.sh",
+      "timeout_secs": 120
+    }
+  ]
+}

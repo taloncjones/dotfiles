@@ -284,7 +284,7 @@ to the internet and fails behind CGNAT. Cloudflare Tunnel + Access needs
 no inbound port, adds an identity login in front of sshd, and uses the
 `cloudflared` binary already in the common Brewfile.
 
-**Claude sessions need no tunnel.** `claude remote-control` on the host
+**Claude sessions need no tunnel.** `claude --remote-control` on the host
 dials out to Anthropic; connect from claude.ai/code or the mobile app.
 Run it inside a herdr pane so it survives terminal close and sleep.
 The tunnel is for `herdr --remote` (a full terminal workspace) and
@@ -339,8 +339,39 @@ key from `authorized_keys`.
 the Status line above: P1 tunnel connector up across sleep; P2 ssh
 through Access; P3 client on Proton; P4 host on Proton (http2 fallback
 if QUIC flaps); P5 herdr --remote attach, repeated after the Access
-token expires; P6 claude remote-control from the mobile app; P7 ssh
+token expires; P6 claude --remote-control from the mobile app; P7 ssh
 refused after removing the pubkey (second gate).
+
+### Zed Terminal Threads
+
+Zed's Agent Panel lists Terminal Threads beside its ACP threads. Attaching
+to a herdr pane from one puts the herdr-hosted agent in that sidebar: the
+thread is a second viewport onto the same `claude` CLI process herdr is
+already running, so nothing is duplicated and nothing new is launched.
+
+**Flow:** open the project in Zed, run `agent: new terminal thread` from
+the Command Palette (the action is `agent::NewTerminalThread`, bindable in
+your machine-local Zed keymap; the per-project "+" menu on Zed 1.20 does
+not offer it), then run `herdr-zed-attach` in the new thread.
+
+**Matching:** the project root is `git rev-parse --show-toplevel` of the
+thread's cwd (the cwd itself outside a repository). An agent matches when
+its cwd or foreground cwd is at or under that root. Every herdr worktree is
+its own toplevel, so a worktree opened in Zed finds its own worker and the
+main checkout finds the director. With no match the script lists every
+live agent and exits 1; with several it lists the candidates and exits 2.
+Pass a pane ID or agent name to pick one: `herdr-zed-attach w1:p1`.
+
+**Caveats:** the sidebar label stays `herdr-zed-attach` and does not follow
+the agent's title (title forwarding is not built). Zed's
+`agent.terminal_init_command` is deliberately not used because it runs in
+every Terminal Thread, not only the ones you want attached. Zed tasks
+cannot target a Terminal Thread, so there is no one-click task.
+
+**Remote Control:** a pane started with `claude --remote-control` answers
+from the mobile app and from this Zed thread at once, because both are
+views onto one CLI process. ACP threads in Zed cannot get Remote Control,
+so this is the route for anything that needs it or runs unattended.
 
 ### Worktree Hydration
 
