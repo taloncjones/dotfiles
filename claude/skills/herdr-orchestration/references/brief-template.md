@@ -218,10 +218,14 @@ HEAD `<review_head_sha>` against base `<base_sha>`.
 
 ## Task
 Run the native `review-change` skill over this revision's relevant diff,
-intended behavior, and affected callers. You are a fresh agent in the task's
-own worktree. Report blocking findings, useful advisories, coverage gaps, and
-safe reproduction evidence. Do not edit the branch, invoke co-review or another
-reviewer, post externally, push, merge, or open a PR.
+intended behavior, and affected callers. Set `REVIEW_BASE_REF` to this task's
+base branch, write your findings file into the `REVIEW_OUT` directory that
+`review-change` prints, and pass that file as `--findings-ref`, so its
+`changed-files.txt` and `base-context.json` sit beside your findings. You are
+a fresh agent in the task's own worktree. Report blocking findings, useful
+advisories, coverage gaps, and safe reproduction evidence. Do not edit the
+branch, invoke co-review or another reviewer, post externally, push, merge,
+or open a PR.
 
 ## Close
 When review is complete:

@@ -738,7 +738,16 @@ deadline, <launch_id>`, and never fabricate a review record, blocker count,
    fresh review dispatches. Only when all three SHAs agree:
    - `changes-requested` or blocking findings -> `status: changes-requested`,
      event `changes-requested`, and surface the findings or incomplete evidence
-     for deliberate development repair. Run a scoped `review-change` only when
+     for deliberate development repair.
+     Before surfacing, read the reviewer's `changed-files.txt` and
+     `base-context.json` beside `--findings-ref`; check each finding's claim
+     against that set and read the cited content from the task worktree at
+     `review_head_sha` (changed path) or `git show <base_ref_tip>:<path>`
+     (unchanged path). A finding that says the change touched a path outside
+     the set is a stale-base artifact: surface it as refuted, never as a file
+     the change missed. Missing sidecars are incomplete evidence, handled like
+     a missing findings file.
+     Run a scoped `review-change` only when
      the repair needs fresh evidence; structural repairs return to design. An
      exhausted final `co-review --fix` budget never resets or re-enters its gate
      here. Record the stop in the task/handoff and return control to the user.
