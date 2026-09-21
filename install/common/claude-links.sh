@@ -52,7 +52,7 @@ seed_machine_local_file() {
 # ABSENT, so template changes never reach an existing settings.json on their
 # own (seed-once design). This merge closes that gap and is safe to run on
 # every install/update:
-#   - template-owned keys (hooks, statusLine, permissions, env, ...) come from
+#   - template-owned keys (hooks, statusLine, permissions, env, model, promptSuggestionEnabled, ...) come from
 #     the template -- template drift is reconciled away;
 #   - env string values have {{CLAUDE_CONFIG_DIR}} replaced by the absolute
 #     config dir the file lands in (per-account ECC state paths);
