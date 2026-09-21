@@ -69,7 +69,7 @@
     },
     {
       "name": "suites-unset-herdr-pane-env",
-      "run": "for f in bin/dotfiles-tests claude/hooks/herdr-orch.test.sh claude/hooks/herdr-stop-gate.test.sh claude/hooks/herdr-orch-contract.test.sh claude/hooks/herdr-dispatch.test.sh claude/hooks/claude-hooks.test.sh; do grep -q 'HERDR_PANE_ID' \"$f\" && grep -q 'HERDR_ACCOUNT_ID' \"$f\" || { echo \"missing unset: $f\"; exit 1; }; done; grep -q '\"HERDR_PANE_ID\": \"pane-1\"\\|HERDR_PANE_ID=\"pane-1\"' claude/hooks/herdr_stop_gate_test.py",
+      "run": "for f in bin/dotfiles-tests claude/hooks/herdr-orch.test.sh claude/hooks/herdr-stop-gate.test.sh claude/hooks/herdr-coordination.test.sh claude/hooks/herdr-orch-contract.test.sh claude/hooks/herdr-dispatch.test.sh claude/hooks/claude-hooks.test.sh; do grep -q 'HERDR_PANE_ID' \"$f\" && grep -q 'HERDR_ACCOUNT_ID' \"$f\" || { echo \"missing unset: $f\"; exit 1; }; done; grep -q '\"HERDR_PANE_ID\": \"pane-1\"\\|HERDR_PANE_ID=\"pane-1\"' claude/hooks/herdr_stop_gate_test.py",
       "timeout_secs": 30
     },
     {
