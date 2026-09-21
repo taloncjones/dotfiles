@@ -336,9 +336,11 @@ or exits 3 (stale/absent), 4 (no survivor), or 5 (invalid role / malformed
 
 Written by the owning director via `$CORE write-task`, and -- for binding-scoped
 records -- by `$CORE reserve-dispatch` and `$CORE enrich-dispatch`, which own
-introducing and mutating worker rows respectively. (`herdr_dispatch.py` also
-writes launcher-scope records directly; reconciling that claim is the separate
-sole-writer todo.)
+introducing and mutating worker rows respectively.
+`herdr_dispatch.py` still writes launcher-scope records directly. Binding-scoped
+rows are introduced only by `reserve-dispatch` and mutated only by
+`enrich-dispatch`; `launch --binding` calls those verbs and never writes a
+`leads/` record itself.
 
 ```json
 {
