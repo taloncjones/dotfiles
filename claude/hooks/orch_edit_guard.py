@@ -268,6 +268,58 @@ def lead_admissible(rd, slug, account_id, caller_scope, workspace_root, seen=Non
     return bool(admit)
 
 
+def corroborated_lead(payload_root, session_id, runtime, account_id=None):
+    """Is this session named by a binding at a LIVE registry occupancy?
+
+    Recognition that survives deletion of the lead lease. The lease is one
+    file, and deleting it used to reclassify a live lead as an ordinary
+    worker -- a WIDER classification, so destroying the evidence granted
+    more access. Two records in independently-failing trees must now agree:
+    the coordination registry says a workspace is occupied by a binding id,
+    and that binding record names this session.
+
+    This never grants a root, only sets is_lead, so it can only NARROW
+    access. That is precisely why a record from the payload root is safe to
+    consult here even though the guard exempts that tree from
+    classification and a fenced session can therefore write it: a forged
+    record denies its author and nobody else.
+
+    A cleared occupancy ends the classification, which is what keeps a
+    stale non-terminal binding -- reachable by a crash mid-teardown, or by
+    reconcile-leads' replayed-lease cleanup, which releases with no status
+    write -- from bricking a resumed session permanently.
+
+    account_id None skips the account match, for privileged_anywhere, which
+    has no scope from which to derive one; its over-match is documented and
+    safe. Total: no failure here may escape into the guard's fail-open
+    handler.
+    """
+    try:
+        occupancies = core.coordination.occupied_lead_bindings()
+    except Exception:  # noqa: BLE001 -- an unreadable registry corroborates nothing
+        return False
+    for slug, keyed in occupancies.items():
+        for binding_id in keyed.values():
+            # Broad by necessity: read_binding raises ValueError on a corrupt
+            # record, but open_state_parent lets any non-FileNotFoundError
+            # OSError through, and a leaked OSError would reach crash_verdict
+            # and answer "not privileged" for the very lead this exists to
+            # catch.
+            try:
+                rec = bindings.read_binding(Path(payload_root) / slug, binding_id)
+            except Exception:  # noqa: BLE001, S112 -- an unreadable binding corroborates nothing
+                continue
+            if (
+                rec is not None
+                and rec.get("status") in ("issued", "claimed")
+                and rec.get("expected_session_id") == session_id
+                and rec.get("runtime") == runtime
+                and (account_id is None or rec.get("account_id") == account_id)
+            ):
+                return True
+    return False
+
+
 def lead_authority(session_id, runtime, caller_scope):
     """(is_lead, [authorized workspace_root, ...]) for this session.
 
@@ -282,7 +334,16 @@ def lead_authority(session_id, runtime, caller_scope):
     parent, of tier lead, and agrees with the lease/context on runtime,
     repo_slug, workspace_root, account, and expected session. A missing,
     corrupt, revoked, completed, or mismatched binding leaves the session a
-    lead (is_lead True) with that workspace_root withheld -- fail closed."""
+    lead (is_lead True) with that workspace_root withheld -- fail closed.
+
+    Classification also survives deletion of the LEASE, via
+    corroborated_lead: a live registry occupancy whose binding record names
+    this session. It ends when the registry records the release, so a stale
+    non-terminal binding cannot keep a session classified. Unlike the lease
+    path above, that corroboration reads the account payload root, so --
+    unlike the lease path -- it does NOT survive removal or alteration of
+    the binding record or of the payload root (spec S8).
+    """
     payload_root = core.account_payload_root(caller_scope) / "herdr-orch"
     is_lead = False
     roots = []
@@ -324,7 +385,61 @@ def lead_authority(session_id, runtime, caller_scope):
                                        caller_scope, ws, seen):
                     continue
                 roots.append(ws)
+    if not is_lead:
+        # The lease is gone or never named this session. A live registry
+        # occupancy whose binding names it still does -- fail closed.
+        is_lead = corroborated_lead(payload_root, session_id, runtime, account_id)
     return is_lead, roots
+
+
+def env_payload_roots():
+    """Account payload roots derivable from the environment alone.
+
+    privileged_anywhere runs where the account scope could not be derived,
+    or must not be: deriving it spends a git subprocess, and one of its two
+    call sites is reached precisely when subprocesses are failing or timing
+    out. A PreToolUse hook that overruns its timeout fails OPEN, so the
+    scope-free derivation is a correctness requirement, not a shortcut.
+
+    These are every root account_payload_root can return, including both
+    the resolved and unresolved spellings of HOME: account_payload_root
+    builds its personal-scope root from Path.home().resolve(), but
+    coordination.payload_path does not resolve symlinks (it only rewrites
+    a leading /tmp or /var to /private on macOS), so a symlinked HOME
+    needs both spellings covered here or the resolved one is missed.
+    Skipping the macOS normalization would also make open_state_parent's
+    O_NOFOLLOW walk fail with ELOOP and silently under-match.
+
+    A "custom" account kind needs no entry: it arises only on the branch
+    where CLAUDE_CONFIG_DIR is explicitly set, which is already covered.
+    Over-matching across candidates is this function's documented and safe
+    direction -- a match still requires a binding to name the session.
+    """
+    home = Path(os.environ.get("HOME", os.path.expanduser("~")))
+    homes = [home]
+    try:
+        resolved_home = home.resolve()
+    except Exception:  # noqa: BLE001, S112 -- an unresolvable HOME is skipped
+        resolved_home = None
+    if resolved_home is not None and resolved_home != home:
+        homes.append(resolved_home)
+    candidates = []
+    for one_home in homes:
+        candidates.append(one_home / ".claude")
+        candidates.append(one_home / ".claude-work")
+    for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_WORK_CONFIG_DIR"):
+        value = os.environ.get(name)
+        if value:
+            candidates.append(Path(value))
+    roots = []
+    for candidate in candidates:
+        try:
+            root = core.coordination.payload_path(candidate) / "herdr-orch"
+        except Exception:  # noqa: BLE001, S112 -- an unusable candidate is skipped
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 def privileged_anywhere(session_id, runtime):
@@ -336,7 +451,21 @@ def privileged_anywhere(session_id, runtime):
     raise on a legal non-UTF-8 branch name, yet the session's coordination
     records stay readable. Ignoring account_id here can only over-match (a
     false deny for a session privileged under another account), never
-    under-match. Total: an unreadable coordination root is False."""
+    under-match. Total: an unreadable coordination root is False.
+
+    A deleted lease is also covered: a live registry occupancy whose
+    binding record names this session reports privileged, resolved against
+    environment-derived payload roots so no subprocess is added to a path
+    reached when subprocesses are already failing. account_id is
+    deliberately not matched here -- there is no scope from which to derive
+    one, and over-matching is this function's safe direction.
+
+    One limit, by construction: the corroboration runs only if the scan
+    above did not itself raise, because that except returns first. So an
+    unreadable coordination root still answers False without consulting the
+    registry. Reordering to fix that would let a raise in the newer code
+    skip the lease scan entirely, which is the worse trade.
+    """
     try:
         for slug in core.coordination.coordination_slugs():
             rec = read_state_json(
@@ -364,6 +493,16 @@ def privileged_anywhere(session_id, runtime):
                     return True
     except Exception:  # noqa: BLE001 -- unreadable namespace: cannot identify
         return False
+    # After the existing scan, never before it: this whole function's body
+    # is inside one broad except that returns False, so a raise in new code
+    # placed first would skip the lease scan entirely and read an intact
+    # lease as unprivileged -- a regression on today's behaviour.
+    try:
+        for payload_root in env_payload_roots():
+            if corroborated_lead(payload_root, session_id, runtime):
+                return True
+    except Exception:  # noqa: BLE001, S110 -- best effort; the lease scan already answered
+        pass
     return False
 
 
