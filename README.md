@@ -342,6 +342,37 @@ if QUIC flaps); P5 herdr --remote attach, repeated after the Access
 token expires; P6 claude --remote-control from the mobile app; P7 ssh
 refused after removing the pubkey (second gate).
 
+### Zed Terminal Threads
+
+Zed's Agent Panel lists Terminal Threads beside its ACP threads. Attaching
+to a herdr pane from one puts the herdr-hosted agent in that sidebar: the
+thread is a second viewport onto the same `claude` CLI process herdr is
+already running, so nothing is duplicated and nothing new is launched.
+
+**Flow:** open the project in Zed, run `agent: new terminal thread` from
+the Command Palette (the action is `agent::NewTerminalThread`, bindable in
+your machine-local Zed keymap; the per-project "+" menu on Zed 1.20 does
+not offer it), then run `herdr-zed-attach` in the new thread.
+
+**Matching:** the project root is `git rev-parse --show-toplevel` of the
+thread's cwd (the cwd itself outside a repository). An agent matches when
+its cwd or foreground cwd is at or under that root. Every herdr worktree is
+its own toplevel, so a worktree opened in Zed finds its own worker and the
+main checkout finds the director. With no match the script lists every
+live agent and exits 1; with several it lists the candidates and exits 2.
+Pass a pane ID or agent name to pick one: `herdr-zed-attach w1:p1`.
+
+**Caveats:** the sidebar label stays `herdr-zed-attach` and does not follow
+the agent's title (title forwarding is not built). Zed's
+`agent.terminal_init_command` is deliberately not used because it runs in
+every Terminal Thread, not only the ones you want attached. Zed tasks
+cannot target a Terminal Thread, so there is no one-click task.
+
+**Remote Control:** a pane started with `claude --remote-control` answers
+from the mobile app and from this Zed thread at once, because both are
+views onto one CLI process. ACP threads in Zed cannot get Remote Control,
+so this is the route for anything that needs it or runs unattended.
+
 ### Worktree Hydration
 
 `git`'s `core.hooksPath` (set in `.gitconfig`) points at `~/.config/git/hooks`, which is symlinked to `git/hooks/` in this repo. The `post-checkout` hook fires on `git worktree add` and hydrates untracked directories into the new worktree:
