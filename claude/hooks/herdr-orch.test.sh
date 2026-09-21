@@ -4279,6 +4279,8 @@ SH
 check "emit-review verdict-flip: outcome/blocking-count/findings swap at one head refused, identical re-emit allowed" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-vf.git
 root=$(mktemp -d)
+findings_ok "$root"
+FINDINGS_ALT="$root/herdr-orch/$LF_SLUG/artifacts/td-x/review-L2/findings-alt.md"; printf 'One advisory finding.\n' > "$FINDINGS_ALT"
 f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
    --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
 bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
@@ -4294,13 +4296,13 @@ CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-tas
 # approved, blocking-count 1, findings F1 at head SHA40 (baseline record)
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
-   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 1 --findings-ref F1 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 1 --findings-ref "$FINDINGS_OK" \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
    --reviewer-session R1
 # blocking-count flip (approved bc 0) at the SAME head/reviewer -> refused
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
-   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 0 --findings-ref F1 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 0 --findings-ref "$FINDINGS_OK" \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 python3 -c '
@@ -4311,17 +4313,17 @@ assert rec["outcome"] == "approved" and rec["blocking_count"] == 1, rec
 # findings_ref swap at the SAME head/reviewer -> refused
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
-   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 1 --findings-ref F2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 1 --findings-ref "$FINDINGS_ALT" \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 python3 -c '
 import json, sys
-assert json.load(open(sys.argv[1]))["findings_ref"] == "F1"
-' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
+assert json.load(open(sys.argv[1]))["findings_ref"] == sys.argv[2]
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json" "$FINDINGS_OK"
 # outcome flip (changes-requested) at the SAME head -> refused
 if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
-   --agent rev-td-x --outcome changes-requested --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 2 --findings-ref F1 \
+   --agent rev-td-x --outcome changes-requested --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 2 --findings-ref "$FINDINGS_OK" \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 python3 -c '
@@ -4331,14 +4333,14 @@ assert json.load(open(sys.argv[1]))["outcome"] == "approved"
 # an identical re-emit (same outcome/reviewer/blocking-count/findings) is allowed
 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
    --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
-   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 1 --findings-ref F1 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 1 --findings-ref "$FINDINGS_OK" \
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$SHA40" \
    --reviewer-session R1
 python3 -c '
 import json, sys
 rec = json.load(open(sys.argv[1]))
-assert rec["outcome"] == "approved" and rec["blocking_count"] == 1 and rec["findings_ref"] == "F1", rec
-' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json"
+assert rec["outcome"] == "approved" and rec["blocking_count"] == 1 and rec["findings_ref"] == sys.argv[2], rec
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review.json" "$FINDINGS_OK"
 SH
 
 # Shared native review fixture: lead binding, implement attempt pane1/w1,
@@ -4468,6 +4470,70 @@ python3 -c '
 import json, sys
 assert json.load(open(sys.argv[1]))["emitter_pane_id"] == "pane1"
 ' "$DONE_JSON"
+SH
+
+check "findings-ref: invalid files are refused" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-fr1.git
+d="$(dirname "$FINDINGS_OK")"
+: > "$d/empty.md"
+printf ' \n\t' > "$d/blank.md"
+ln -s "$FINDINGS_OK" "$d/link.md"
+ln -s "$d/nope.md" "$d/dangling.md"
+mkfifo "$d/fifo.md"
+printf 'x' > "$d/noperm.md"; chmod 000 "$d/noperm.md"
+python3 -c 'import importlib.util,sys; s=importlib.util.spec_from_file_location("c","claude/hooks/herdr_orch_core.py"); c=importlib.util.module_from_spec(s); s.loader.exec_module(c); open(sys.argv[1],"wb").write(b"x"*(c.FINDINGS_MAX_BYTES+1))' "$d/big.md"
+outside=$(mktemp); printf 'x' > "$outside"
+refuse_findings() {
+    rc=0; prov_emit_review --findings-ref "$1" 2>"$ERRFILE" || rc=$?
+    test "$rc" = 2 || { echo "expected 2 for $1, got $rc"; exit 1; }
+    grep -q 'findings-ref' "$ERRFILE" || { echo "no findings-ref reason for $1"; exit 1; }
+    test ! -e "$REVIEW_JSON"
+}
+for bad in "$d/missing.md" "$d/empty.md" "$d/blank.md" "$d/link.md" "$d/dangling.md" "$d/fifo.md" "$d/big.md" "$outside" "relative/f.md" "$d/../review-L2/findings.md" "$d"; do
+    refuse_findings "$bad"
+done
+if [ "$(id -u)" != 0 ]; then
+    refuse_findings "$d/noperm.md"
+fi
+prov_emit_review --findings-ref "$FINDINGS_OK"
+python3 -c '
+import hashlib, json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["findings_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), rec
+' "$REVIEW_JSON" "$FINDINGS_OK"
+SH
+
+check "findings-ref: wrong pane wins over bad findings" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-fr2.git
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w2 HERDR_PANE_ID=pane9 prov_emit_review --findings-ref "$(dirname "$FINDINGS_OK")/missing.md" 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+grep -q 'not the designated agent' "$ERRFILE"
+test ! -e "$REVIEW_JSON"
+SH
+
+check "findings-ref: required under HERDR_ENV" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-fr3.git
+rc=0; HERDR_ENV=1 HERDR_PANE_ID=pane2 HERDR_WORKSPACE_ID=w2 prov_emit_review 2>"$ERRFILE" || rc=$?
+test "$rc" = 2
+grep -q -- '--findings-ref' "$ERRFILE"
+test ! -e "$REVIEW_JSON"
+# A shell function's env-var prefix leaks into the calling shell after it
+# returns (unlike an external command), so the first call's HERDR_ENV must
+# be cleared before this one, or it would still look like it's inside herdr.
+unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
+# outside herdr the option stays optional (compatibility; confirm-review still requires the file)
+prov_emit_review
+test -f "$REVIEW_JSON"
+SH
+
+check "findings-ref: same-head content rewrite is refused" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-fr4.git
+prov_emit_review --findings-ref "$FINDINGS_OK"
+# identical content -> allowed
+prov_emit_review --findings-ref "$FINDINGS_OK"
+printf 'Rewritten after the verdict.\n' > "$FINDINGS_OK"
+if prov_emit_review --findings-ref "$FINDINGS_OK" 2>"$ERRFILE"; then exit 1; fi
+grep -q 'same-revision review verdict' "$ERRFILE"
 SH
 
 check "emit-review --binding: intermediate-head dance refused until review_head_sha advances" <<'SH'

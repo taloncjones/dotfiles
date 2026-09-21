@@ -3684,6 +3684,22 @@ def _main(argv=None) -> int:
                 "blocking_count": int(ns.blocking_count),
                 "ts": now_iso(),
             }
+            if ns.runtime is not None:
+                # Review evidence must exist under the state root before a
+                # native verdict lands. Inside herdr the file is mandatory;
+                # outside (tests, operator repair) it stays optional, and
+                # is_reviewed still refuses a native record without it.
+                _require(
+                    ns.findings_ref is not None or os.environ.get("HERDR_ENV") != "1",
+                    "emit-review requires --findings-ref (absolute path under the "
+                    "orchestration state root to a readable non-empty findings file)",
+                )
+                if ns.findings_ref is not None:
+                    try:
+                        evidence = findings_bytes(ns.findings_ref, state_root())
+                    except ValueError as exc:
+                        _require(False, f"findings-ref {exc}")
+                    done["findings_sha256"] = hashlib.sha256(evidence).hexdigest()
             if ns.findings_ref:
                 done["findings_ref"] = ns.findings_ref
             if getattr(ns, "binding", None) is not None:
@@ -3793,6 +3809,7 @@ def _main(argv=None) -> int:
                         or prior.get("reviewer_session_id") != done.get("reviewer_session_id")
                         or prior.get("blocking_count") != done.get("blocking_count")
                         or prior.get("findings_ref") != done.get("findings_ref")
+                        or prior.get("findings_sha256") != done.get("findings_sha256")
                     ):
                         _require(False,
                                  "a same-revision review verdict cannot be replaced; "
