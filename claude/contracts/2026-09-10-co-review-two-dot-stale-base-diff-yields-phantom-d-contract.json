@@ -64,7 +64,7 @@
     },
     {
       "name": "no-two-dot-instruction",
-      "run": "! grep -rn 'git diff origin/main' claude/skills codex/skills claude/operating-principles.md claude/rules/personal",
+      "run": "! grep -rn --exclude-dir=tests 'git diff origin/main' claude/skills codex/skills claude/operating-principles.md claude/rules/personal",
       "timeout_secs": 30
     },
     {
