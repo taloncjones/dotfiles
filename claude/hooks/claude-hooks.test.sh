@@ -1,5 +1,9 @@
 #!/bin/sh
 set -e
+# herdr pane identity must not leak in from a herdr-hosted run. HERDR_PERSONAL
+# also flips herdr_stop_gate.py into strict account-verification mode, so it
+# is unset here too (the sibling suites already carry it).
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID HERDR_PERSONAL
 
 PASS=0
 FAIL=0

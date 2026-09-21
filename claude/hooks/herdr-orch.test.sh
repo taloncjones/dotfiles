@@ -11,6 +11,7 @@ set -e
 # a single suite, which is how most people run one.
 unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL CLAUDE_PERSONAL_ONLY
 unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
 # Use physical macOS temp paths so strict no-follow state traversal is tested.
 #
 # Derived from the SAME source `mktemp -d` uses, which is not $TMPDIR. BSD

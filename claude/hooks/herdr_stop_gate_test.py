@@ -32,12 +32,17 @@ class StopGateTests(unittest.TestCase):
             "CLAUDE_WORK_CONFIG_DIR",
             "HERDR_PERSONAL",
             "HERDR_ACCOUNT_ID",
+            "HERDR_ENV",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_PANE_ID",
+            "HERDR_TAB_ID",
         ):
             environment.pop(key, None)
         environment.update(
             HOME=str(self.root),
             HERDR_ENV="1",
             HERDR_WORKSPACE_ID="w1",
+            HERDR_PANE_ID="pane-1",
             GIT_CONFIG_GLOBAL="/dev/null",
             GIT_CONFIG_NOSYSTEM="1",
             PYTHONDONTWRITEBYTECODE="1",

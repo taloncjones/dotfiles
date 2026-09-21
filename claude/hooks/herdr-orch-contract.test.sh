@@ -4,6 +4,8 @@
 # herdr, no network. Fake herdr/jira just emit canned JSON to prove command
 # shape and state transitions.
 set -e
+# herdr pane identity must not leak in from a herdr-hosted run
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
 # Use physical macOS temp paths so strict no-follow state traversal is tested.
 TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))'); export TMPDIR
 PASS=0; FAIL=0
