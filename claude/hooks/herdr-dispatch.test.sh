@@ -2088,6 +2088,46 @@ def test_reprompt_cli_rejects_non_utf8_prompt_file():
         fx.close()
 
 
+def test_bound_prechecks_refuse_before_any_herdr_call():
+    def refused(fixture, message, **kwargs):
+        try:
+            fixture.launch(**kwargs)
+        except herdr_dispatch.DispatchError as exc:
+            assert message in str(exc), (message, exc)
+        else:
+            raise AssertionError(f"accepted: {message}")
+        assert fixture.calls() == [], fixture.calls()
+        assert fixture.bound_workers() == []
+
+    fixture = LeadFixture()
+    try:
+        refused(fixture, "invalid binding id", binding="ldb-not-hex")
+        refused(fixture, "unknown or corrupt dispatch binding",
+                binding="ldb-" + "0" * 32)
+        refused(fixture, "binding does not name this task",
+                binding=fixture.binding, task_id="td-b")
+        refused(fixture, "a binding-scoped launch supports only", phase="think")
+        refused(fixture, "review_head_sha equal to HEAD", phase="review",
+                agent="rev-td-a")
+        fixture.write_bound_task(bound_task_record(
+            fixture, fixture.lead_context, review_head_sha="f" * 40))
+        refused(fixture, "review_head_sha equal to HEAD", phase="review",
+                agent="rev-td-a")
+        # workspace_root mismatch: the binding names the lead worktree, the
+        # launch targets the primary checkout. Refused before any record read.
+        refused(fixture, "binding workspace does not match", cwd=fixture.repo)
+    finally:
+        fixture.close()
+    fixture = LeadFixture()
+    try:
+        fixture.core("set-binding-status", "--session", "S", "--fence", "1",
+                     "--binding", fixture.binding, "--status", "revoked",
+                     repo_path=fixture.repo)
+        refused(fixture, "binding is not claimed")
+    finally:
+        fixture.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -2153,6 +2193,7 @@ for name, test in (
     ("bound launch reserves before native start and writes no launcher row", test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row),
     ("bound cross-scope fences refuse before start", test_bound_cross_scope_fences_refuse_before_start),
     ("bound start failure keeps the pane outstanding until re-dispatch", test_bound_start_failure_keeps_pane_outstanding_until_redispatch),
+    ("bound prechecks refuse before any herdr call", test_bound_prechecks_refuse_before_any_herdr_call),
 ):
     check(name, test)
 
