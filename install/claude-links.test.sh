@@ -58,6 +58,7 @@ cat >"$TMPL" <<'EOF'
     ]
   },
   "statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"},
+  "promptSuggestionEnabled": false,
   "enabledPlugins": {"ecc@ecc": true, "conflict@market": true}
 }
 EOF
