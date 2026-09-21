@@ -443,6 +443,18 @@ list is accepted. On the binding-scoped path neither route works and
 `teardown-binding` refuses before `--descendants-terminated` is consulted, so
 the record must be repaired on disk first.
 
+`reset-task --task-id <old> --new-task-id <new> --json <record>` is the
+launcher-scope fresh start. It writes `tasks/<new>.json` from the supplied
+record with `workers` forced to `[]` and `reset_from: <old>` added, and it
+never reads back, rewrites, or deletes the old record, its `.done.json` or
+`.review.json`, or any workspace index entry. It refuses when the ids are
+equal, the payload names a non-empty `workers` or a `reset_from`, the old
+record is absent, the new record already exists, or a settlement file already
+exists under the new id (an empty `workers` list would match it vacuously
+through the legacy rule in `attempt_matches`). There is no bound form: a lead
+that needs a fresh start hands back to the director for a new binding.
+`reset_from` is an additive key every reader ignores.
+
 A refused dispatch row cannot hide a live pane. `reserve-dispatch` introduces
 bound worker rows and `enrich-dispatch` mutates the current one. A lead reserves
 its attempt under the owner transaction after the pane exists and before it

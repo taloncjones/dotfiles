@@ -8817,5 +8817,60 @@ assert c._readable_row_count({'workers': [{'x': 1}, {'phase': 'review'}]}) == 2
 "
 SH
 
+check "reset-task opens a fresh task id and retains the old record" <<'SH'
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-rs --session S --host h --pid 1)
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+TASKS="$root/herdr-orch/slug-rs/tasks"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task --repo-slug slug-rs --session S --fence "$f" --task-id td-a \
+   --json '{"task_id":"td-a","base_sha":"b0","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1"}]}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-done --repo-slug slug-rs --task-id td-a --workspace w1 --agent impl-td-a \
+   --phase implement --outcome failed --head-sha h1 --base-sha b0
+OLD_REC=$(shasum -a 256 "$TASKS/td-a.json"); OLD_DONE=$(shasum -a 256 "$TASKS/td-a.done.json")
+# Happy path: fresh id, empty history, provenance, old files byte-identical.
+CLAUDE_CONFIG_DIR="$root" $CLI reset-task --repo-slug slug-rs --session S --fence "$f" \
+   --task-id td-a --new-task-id td-a2 --json '{"task_id":"td-a2","base_sha":"b0","status":"kickoff"}'
+python3 -c "
+import json
+d=json.load(open('$TASKS/td-a2.json'))
+assert d['workers']==[] and d['reset_from']=='td-a' and d['status']=='kickoff' and d['base_sha']=='b0', d
+"
+[ "$(shasum -a 256 "$TASKS/td-a.json")" = "$OLD_REC" ]
+[ "$(shasum -a 256 "$TASKS/td-a.done.json")" = "$OLD_DONE" ]
+# The verb has no --binding: it is launcher-scope only.
+if python3 claude/hooks/herdr_orch_core.py reset-task --help | grep -q -- '--binding'; then exit 1; fi
+refuse() {  # refuse MESSAGE ARGS... : the verb must exit non-zero naming MESSAGE
+  msg="$1"; shift
+  if CLAUDE_CONFIG_DIR="$root" $CLI reset-task --repo-slug slug-rs --session S --fence "$f" "$@" 2>"$ERRFILE"; then
+    echo "accepted: $*" >&2; exit 1
+  fi
+  grep -q "$msg" "$ERRFILE" || { echo "wrong refusal for $*:"; cat "$ERRFILE"; exit 1; } >&2
+}
+refuse 'invalid new-task-id' --task-id td-a --new-task-id '../x' --json '{"task_id":"../x"}'
+refuse 'reset must open a fresh task id' --task-id td-a --new-task-id td-a --json '{"task_id":"td-a"}'
+refuse 'reset json must be a JSON object whose task_id equals --new-task-id' --task-id td-a --new-task-id td-a3 --json '{"task_id":"td-a"}'
+refuse 'reset json must be a JSON object whose task_id equals --new-task-id' --task-id td-a --new-task-id td-a3 --json '[]'
+refuse 'a reset opens with no dispatch history; append rows with write-task' --task-id td-a --new-task-id td-a3 --json '{"task_id":"td-a3","workers":[{"phase":"implement"}]}'
+refuse 'reset_from is set by the verb' --task-id td-a --new-task-id td-a3 --json '{"task_id":"td-a3","reset_from":"td-a"}'
+refuse 'no task record to reset' --task-id td-zz --new-task-id td-a3 --json '{"task_id":"td-a3"}'
+refuse 'reset target already exists' --task-id td-a --new-task-id td-a2 --json '{"task_id":"td-a2"}'
+printf '{}' > "$TASKS/td-b.done.json"
+refuse 'reset target has settlement records' --task-id td-a --new-task-id td-b --json '{"task_id":"td-b"}'
+test ! -e "$TASKS/td-b.json"
+test ! -e "$TASKS/td-a3.json"
+# An explicit empty workers key is the one accepted spelling besides omission.
+CLAUDE_CONFIG_DIR="$root" $CLI reset-task --repo-slug slug-rs --session S --fence "$f" \
+   --task-id td-a2 --new-task-id td-a3 --json '{"task_id":"td-a3","workers":[]}'
+python3 -c "
+import json
+d=json.load(open('$TASKS/td-a3.json')); assert d['reset_from']=='td-a2' and d['workers']==[], d
+"
+# A stale fence is still refused by the shared scoping, not by this verb.
+if CLAUDE_CONFIG_DIR="$root" $CLI reset-task --repo-slug slug-rs --session S --fence 999 \
+   --task-id td-a --new-task-id td-a4 --json '{"task_id":"td-a4"}' 2>/dev/null; then exit 1; fi
+test ! -e "$TASKS/td-a4.json"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

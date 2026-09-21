@@ -2589,6 +2589,9 @@ def _main(argv=None) -> int:
     add("check-fence", "--session", "--fence")
     wt = add("write-task", "--task-id", "--json", fenced=True)
     wt.add_argument("--binding", default=None)
+    # Launcher-scope only: no --binding, so _fenced_scoped never resolves a
+    # lead subtree. A lead that needs a fresh start hands back to the director.
+    add("reset-task", "--task-id", "--new-task-id", "--json", fenced=True)
     rsv = add("reserve-dispatch", "--task-id", "--launch-id", "--phase",
               "--workspace-id", "--pane-id", "--source-head-sha", fenced=True)
     # Required, unlike write-task's optional --binding: _fenced_scoped falls
@@ -2793,6 +2796,40 @@ def _main(argv=None) -> int:
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
+            return 0
+    if ns.cmd == "reset-task":
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(valid_task_id(ns.new_task_id), "invalid new-task-id")
+        _require(ns.new_task_id != ns.task_id, "reset must open a fresh task id")
+        rec = _parse_payload(ns.json)
+        _require(
+            isinstance(rec, dict) and rec.get("task_id") == ns.new_task_id,
+            "reset json must be a JSON object whose task_id equals --new-task-id",
+        )
+        _require(rec.get("workers", []) == [],
+                 "a reset opens with no dispatch history; append rows with write-task")
+        _require("reset_from" not in rec, "reset_from is set by the verb")
+        with _fenced_scoped(ns) as (rd, base):
+            tasks = base / "tasks"
+            _require(read_prior_task(tasks / f"{ns.task_id}.json") is not PRIOR_ABSENT,
+                     "no task record to reset")
+            _require(read_prior_task(tasks / f"{ns.new_task_id}.json") is PRIOR_ABSENT,
+                     "reset target already exists")
+            # A settlement file under the fresh id would match an empty
+            # workers list vacuously through attempt_matches' legacy rule.
+            for suffix in (".done.json", ".review.json"):
+                try:
+                    read_payload_text(tasks / f"{ns.new_task_id}{suffix}")
+                except FileNotFoundError:
+                    coordination.assert_transaction_current()
+                    continue
+                except (OSError, ValueError):
+                    pass  # present but unreadable still counts as present
+                _require(False, "reset target has settlement records")
+            opened = {**rec, "workers": [], "reset_from": ns.task_id}
+            _require_record_within_reader_limit(opened)
+            create_payload_dir(tasks)
+            write_json_atomic(tasks / f"{ns.new_task_id}.json", opened)
             return 0
     if ns.cmd == "reserve-dispatch":
         _require(valid_task_id(ns.task_id), "invalid task-id")
