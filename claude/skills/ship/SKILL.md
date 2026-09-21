@@ -63,9 +63,13 @@ target base. Stop if either identity is unavailable or mismatched.
    this step.
 
 5. **Merge gate (human).** Present the findings disposition, test results, CI
-   state, version change, and active evaluator result. Ask for explicit merge
-   confirmation. Required human approvals remain separate from evaluator
-   approval. On confirmation, squash merge with
+   state, version change, and active evaluator result.
+   Name any stale-base artifact the gate refuted and quote the base tip SHA
+   from its `evidence`; present recorded dispositions only, with no fresh
+   reads, since the run ref is gone after finalize and `RUN_DIR` has no
+   defined lifetime. Any outward post of a finding needs that recorded check
+   first. Ask for explicit merge confirmation. Required human approvals
+   remain separate from evaluator approval. On confirmation, squash merge with
    `gh pr merge --squash --match-head-commit <expected-head>` so the server
    refuses a moved head.
 

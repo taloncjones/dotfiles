@@ -18,6 +18,14 @@ Standing engineering discipline for all sessions, all repos.
   not a completion report.
 - Treat empty or near-empty findings on a large diff as a tool-failure signal, not
   as cleanliness.
+- Review the three-dot change plus working-tree and untracked edits, never a
+  two-dot diff against a branch tip. That changed-file set is authoritative: a
+  finding claiming the change touched a file outside it is a stale-base artifact
+  -- discard it; absence never means the change "missed" the file.
+  Read an unchanged file with `git show <fresh base tip>:<path>` after fetching
+  that tip into a private ref (or via `review.py resolve-base`), never from the
+  review worktree, the snapshot, a local base checkout, or a shared
+  remote-tracking ref you rewrote.
 
 ## Scope and safety
 
