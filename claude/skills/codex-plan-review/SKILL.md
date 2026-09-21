@@ -64,14 +64,17 @@ the shared runtime runner:
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-plan-review.XXXXXX")
 printf '%s\n' "Review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Flag an oversized scope as a finding: a plan that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; plans with no durable-write behavior are exempt. Return severity, location, failure scenario, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
-  --runtime codex --role reviewer --risk normal --provisional \
+  --runtime codex --step plan-review --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
 
-Use `--risk critical` only for explicit critical risk. A Codex-led skill uses
-its current session or a native child and never invokes another Codex CLI review
-recursively. Record requested route separately from unknown observed metadata.
+The plan-review seat refuses `--risk critical` and `difficulty`; escalate a
+plan that needs a heavier review with a recorded `--config-json` `routes`
+override on `plan_reviewer` (for example `{"model": "opus", "effort":
+"xhigh"}`). A Codex-led skill uses its current session or a native child and
+never invokes another Codex CLI review recursively. Record requested route
+separately from unknown observed metadata.
 
 Verify findings against the frozen plan, merge duplicates, and retain uncertain
 findings as unresolved. Apply fixes within existing user authorization;
