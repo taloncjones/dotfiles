@@ -8,8 +8,8 @@
       "timeout_secs": 60
     },
     {
-      "name": "plan-review-step-routes-to-fable-high",
-      "run": "python3 claude/hooks/agent_runtime.py route --runtime claude --step plan-review | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('plan_reviewer','fable','high'), r\"",
+      "name": "plan-review-step-routes-to-fable-medium",
+      "run": "python3 claude/hooks/agent_runtime.py route --runtime claude --step plan-review | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('plan_reviewer','fable','medium'), r\"",
       "timeout_secs": 60
     },
     {
@@ -34,7 +34,7 @@
     },
     {
       "name": "planner-falls-back-to-fable-at-either-floor",
-      "run": "python3 -c \"import importlib.util,sys; spec=importlib.util.spec_from_file_location('ar','claude/hooks/agent_runtime.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); caps={'models':{'opus':{'status':'unavailable','efforts':['high','xhigh']},'fable':{'status':'available','efforts':['high','xhigh']}}}; n=m.resolve_route('claude','planner',capabilities=caps); assert (n['model'],n['effort'],n['ready'])==('fable','high',True), n; h=m.resolve_route('claude','planner',capabilities=caps,config={'difficulty':{'level':'hard','proposed':'hard','confirmed':True}}); assert (h['model'],h['effort'],h['ready'])==('fable','xhigh',True), h; r=m.resolve_route('claude','plan_reviewer',capabilities={'models':{'fable':{'status':'unavailable','efforts':['high']},'opus':{'status':'available','efforts':['high','xhigh']}}}); assert (r['model'],r['effort'],r['ready'])==('opus','high',True), r; assert 'plan_reviewer' not in m.CRITICAL_ROLES and 'plan_reviewer' not in m.DIFFICULTY_ROLES\"",
+      "run": "python3 -c \"import importlib.util,sys; spec=importlib.util.spec_from_file_location('ar','claude/hooks/agent_runtime.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); caps={'models':{'opus':{'status':'unavailable','efforts':['high','xhigh']},'fable':{'status':'available','efforts':['medium','high']}}}; n=m.resolve_route('claude','planner',capabilities=caps); assert (n['model'],n['effort'],n['ready'])==('fable','medium',True), n; h=m.resolve_route('claude','planner',capabilities=caps,config={'difficulty':{'level':'hard','proposed':'hard','confirmed':True}}); assert (h['model'],h['effort'],h['ready'])==('fable','high',True), h; r=m.resolve_route('claude','plan_reviewer',capabilities={'models':{'fable':{'status':'unavailable','efforts':['high']},'opus':{'status':'available','efforts':['high','xhigh']}}}); assert (r['model'],r['effort'],r['ready'])==('opus','high',True), r; assert 'plan_reviewer' not in m.CRITICAL_ROLES and 'plan_reviewer' not in m.DIFFICULTY_ROLES\"",
       "timeout_secs": 60
     },
     {
@@ -44,7 +44,7 @@
     },
     {
       "name": "policy-document-names-both-review-seats",
-      "run": "grep -qE '\\| *planner *\\| *opus/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qE '\\| *plan_reviewer *\\| *fable/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qE '\\| *codex plan_reviewer *\\| *gpt-6-astra/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && ! grep -qE '\\| *planner *\\| *fable/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qF 'read-only sandbox, single pass' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && ! grep -qF 'carries a configured `opus/xhigh` fallback' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md",
+      "run": "grep -qE '\\| *planner *\\| *opus/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qE '\\| *plan_reviewer *\\| *fable/medium *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qE '\\| *codex plan_reviewer *\\| *gpt-6-astra/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && ! grep -qE '\\| *planner *\\| *fable/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qF 'read-only sandbox, single pass' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && ! grep -qF 'carries a configured `opus/xhigh` fallback' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md",
       "timeout_secs": 60
     },
     {
