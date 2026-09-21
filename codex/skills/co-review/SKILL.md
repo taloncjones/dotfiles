@@ -94,6 +94,99 @@ uv run --no-project python "$RUNNER" route --runtime codex --role skeptic --risk
 uv run --no-project python "$RUNNER" route --runtime codex --role skeptic --risk normal --provisional >"$RUN_DIR/verifier.route.json"
 ```
 
+Export `RUN_ID` from that file so later steps name the run without re-reading
+the report:
+
+```bash
+RUN_ID=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_id"])' "$EXPECTED_IDENTITY") || exit 2
+```
+
+Compute the changed-file set and pin the base tip before any seat starts:
+
+Compute the changed-file set from the verified manifest, never from the
+caller: it is the three-dot change, and `--no-renames` lists both sides of a
+rename. For a PR, cross-check GitHub's list one-directionally (every PR path
+must be in the frozen set; the frozen set may be larger because `prepare`
+folds local work into the snapshot) and check head identity directly. Then
+resolve the base tip exactly once and pin it for the run.
+
+```bash
+: "${REPO:?}" "${RUN_DIR:?}" "${MANIFEST:?}" "${RUN_ID:?}" "${REVIEW_HELPER:?}"
+read -r BASE SNAPSHOT_HEAD HEAD <<EOF2
+$(uv run --no-project python -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["source"]["base"], m["snapshot"]["snapshot_head"], m["source"]["head"])' "$MANIFEST")
+EOF2
+[ -n "$BASE" ] && [ -n "$SNAPSHOT_HEAD" ] && [ -n "$HEAD" ] || exit 2
+git -C "$REPO" -c core.quotePath=false diff --name-only --no-renames "$BASE" "$SNAPSHOT_HEAD" >"$RUN_DIR/changed-files.raw" || exit 2
+LC_ALL=C sort "$RUN_DIR/changed-files.raw" >"$RUN_DIR/changed-files.txt" || exit 2
+[ -s "$RUN_DIR/changed-files.txt" ] || exit 2
+rm -f -- "$RUN_DIR/changed-files.raw" "$RUN_DIR/base-context.json.tmp"
+# Exactly one resolve-base per run: a second fetch could return a newer tip
+# and the seats would judge one finding against two different bases.
+[ ! -e "$RUN_DIR/base-context.json" ] || exit 2
+# A PR gate is keyed on BASE_REF (prepare ran with --base-ref) and must name
+# its PR; a local review has neither. Any other pairing is a caller error.
+if [ -n "${BASE_REF:-}" ]; then
+  : "${PR_NUMBER:?}"
+  gh pr view "$PR_NUMBER" --json headRefOid,changedFiles,files >"$RUN_DIR/pr-files.json" || exit 2
+  uv run --no-project python - "$RUN_DIR/pr-files.json" "$RUN_DIR/changed-files.txt" "$HEAD" <<'PY' || exit 2
+import json, sys
+pr = json.load(open(sys.argv[1]))
+frozen = set(open(sys.argv[2]).read().splitlines())
+if pr["headRefOid"] != sys.argv[3]:
+    raise SystemExit("PR head is not the frozen source head")
+listed = {f["path"] for f in pr["files"]}
+if pr["changedFiles"] > len(listed):
+    print(f"warning: provider listed {len(listed)} of {pr['changedFiles']} files; containment checked on the listed subset", file=sys.stderr)
+missing = sorted(listed - frozen)
+if missing:
+    raise SystemExit("PR paths absent from the frozen change:\n" + "\n".join(missing))
+extra = sorted(frozen - listed)
+if extra and pr["changedFiles"] <= len(listed):
+    print("frozen paths beyond the PR (local work in the snapshot):\n" + "\n".join(extra), file=sys.stderr)
+PY
+  uv run --no-project python "$REVIEW_HELPER" resolve-base \
+    --repo "$REPO" --base-ref "$BASE_REF" --head "$HEAD" >"$RUN_DIR/resolve-base.json" || exit 2
+  uv run --no-project python - "$RUN_DIR/resolve-base.json" "$BASE" "$RUN_ID" "$RUN_DIR/base-context.json" <<'PY' || exit 2
+import datetime, json, os, sys
+resolved = json.load(open(sys.argv[1]))
+if resolved["base"] != sys.argv[2]:
+    raise SystemExit("merge-base moved since prepare; the frozen inputs are stale")
+resolved["run_ref"] = f"refs/co-review-run/{sys.argv[3]}"
+resolved["resolved_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+tmp = sys.argv[4] + ".tmp"
+with open(tmp, "x") as out:
+    json.dump(resolved, out, sort_keys=True)
+    out.flush()
+    os.fsync(out.fileno())
+os.replace(tmp, sys.argv[4])
+PY
+  BASE_TIP=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_ref_tip"])' "$RUN_DIR/base-context.json") || exit 2
+  git -C "$REPO" update-ref "refs/co-review-run/${RUN_ID}" "${BASE_TIP}" || exit 2
+else
+  [ -z "${PR_NUMBER:-}" ] || exit 2
+  # Local --base review: no remote tip. Unchanged-path claims are merge-base content.
+  printf '{"base": "%s", "base_ref": null, "base_ref_tip": null, "run_ref": null, "resolved_at": "%s"}\n' \
+    "$BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$RUN_DIR/base-context.json.tmp" || exit 2
+  mv "$RUN_DIR/base-context.json.tmp" "$RUN_DIR/base-context.json" || exit 2
+fi
+```
+
+Each nonzero exit here is `INCOMPLETE`. A failed manifest read leaves `read`
+returning 0 with empty variables, and a pipeline's status is its last
+command's, so the block checks the three values, writes the diff before
+sorting, and refuses an empty set: an empty changed-file set would refute
+every finding. The PR path is keyed on `BASE_REF` and requires `PR_NUMBER`;
+the `else` branch is the local no-PR review and refuses a stray `PR_NUMBER`.
+
+| Stop                                                                    | Durable evidence that survives                                                                                                                       | Who can destroy it                | Recovery                                                                                                                                                                   |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Merge-base moved since prepare                                          | `RUN_DIR`, manifest, snapshot worktrees                                                                                                              | `review.py cleanup`, the operator | Run cleanup, then a fresh gate: new `run_id`, new prepare. Policy already voids a run whose base changed.                                                                  |
+| PR head is not the frozen head, or PR paths missing from the frozen set | same                                                                                                                                                 | same                              | The snapshot froze the wrong head or the PR moved. Fresh gate against the live PR head.                                                                                    |
+| `resolve-base` fails (offline, fork origin, no merge-base)              | same                                                                                                                                                 | same                              | Retry once. Still failing: `INCOMPLETE`; a PR gate never falls back to snapshot content for unchanged paths. Only `--base` local reviews use the labelled merge-base mode. |
+| Crash between `resolve-base` and prompt writing                         | `base-context.json` is written to `.tmp` and moved into place with `os.replace`, so it is either absent or complete; a stale `.tmp` is removed first | same                              | Absent: run the block again (the guard permits it). Present: reuse it; do not resolve again.                                                                               |
+| Crash between seats or before the provenance check                      | `base-context.json`, `changed-files.txt`, the run ref                                                                                                | same                              | Reuse the files. The run ref keeps the tip readable until finalize.                                                                                                        |
+| Interruption after finalize deleted the run ref                         | finding `evidence` and `snapshot_integrity` name the tip; objects may be pruned                                                                      | `git gc`, the operator            | Ship step 5 presents the recorded dispositions and evidence; no fresh reads. A later reader that cannot `git show` the tip records an evidence gap.                        |
+
 Run `gate_report.py schema` before report assembly. Resolve each fresh seat
 with the shared runner and `--provisional`; this records unknown availability
 honestly and stops if the route is actually unavailable or unsupported. Run four
@@ -131,7 +224,11 @@ For each native seat, build a complete rendered review packet from actual
 frozen values, never placeholders: repository identity; `snapshot.codex_root`;
 base, head, expected tree, and reviewed tree; frozen diff path and digest;
 target repository/PR/base-branch identity; the extracted policy; full rubric;
-declared threat model; and changed-symbol callers. State the requested finding
+declared threat model; and changed-symbol callers; the contents of
+`RUN_DIR/changed-files.txt` and `RUN_DIR/base-context.json`; and the read form
+`git -C <seat root> show <base_ref_tip>:<path>` for any path outside the
+changed-file set. A finding that says this change touched a path outside that
+set is a stale-base artifact the seat discards. State the requested finding
 format (including concrete impact for any material allegation),
 disposable-fixture/read-only limits, and permission to consult relevant
 reference skills under the canonical policy. Require the reviewer to do the
@@ -162,6 +259,21 @@ the same deadline rules. The verifier independently tests material claims,
 accounts for every blocker and reconciles the combined coverage ledger. It
 does not start another unrestricted search.
 
+Before writing `findings`, check every seat finding's provenance against
+`RUN_DIR/changed-files.txt` and `RUN_DIR/base-context.json` (never a fresh
+`resolve-base`). A finding that asserts this change added, modified, deleted,
+or reverted a path outside the changed-file set is a stale-base artifact:
+keep its ID and severity, set `disposition: refuted`, and put the
+changed-file set check in `evidence`. For every other finding read the cited
+content from the snapshot head tree (changed path) or
+`git -C "$REPO" show <base_ref_tip>:<path>` (unchanged path) and record what
+was read together with the tip SHA; a failed read is an evidence gap on that
+finding. Set `snapshot_integrity` to name how many stale-base artifacts were
+refuted and the tip SHA they were checked against (the report schema has no
+tip field, so evidence strings are where the tip survives). A
+deletion or reversion claim is the riskiest shape; new added lines verified
+in the head tree are the safe shape.
+
 Create `report.json` from the exact `gate_report.py schema` example. Fill all
 fields from the verified manifest, independent expected identity, actual four
 runtime artifacts and SHA-256 digests, frozen diff/CI artifact digests,
@@ -188,6 +300,12 @@ fi
 if [ "$cleanup_status" -ne 0 ]; then
   rm -f -- "$EXPECTED_IDENTITY"
   printf '%s\n' '{"verdict":"INCOMPLETE","approve_allowed":false,"reasons":["snapshot cleanup failed; evidence preserved"]}' >&2
+  exit 2
+fi
+if [ -z "${REPO:-}" ] || [ -z "${RUN_ID:-}" ] \
+  || ! git -C "$REPO" update-ref -d "refs/co-review-run/${RUN_ID}"; then
+  rm -f -- "$EXPECTED_IDENTITY"
+  printf '%s\n' '{"verdict":"INCOMPLETE","approve_allowed":false,"reasons":["run ref removal failed; evidence preserved"]}' >&2
   exit 2
 fi
 cat "$RUN_DIR/evaluation.json"

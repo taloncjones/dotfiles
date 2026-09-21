@@ -410,5 +410,8 @@ isolates_fixture_codex_home() (
 assert "installer fixtures preserve an inherited caller Codex home" \
     isolates_fixture_codex_home
 
+assert "co-review adapters pass the changed-file set and pinned base tip" \
+    sh -c 'for f in claude/skills/co-review/SKILL.md codex/skills/co-review/SKILL.md; do rg -qF -- "diff --name-only --no-renames" "$f" && rg -qF -- "headRefOid,changedFiles,files" "$f" && rg -qF -- "resolve-base" "$f" && rg -qF -- "base-context.json" "$f" && rg -qF -- "refs/co-review-run/" "$f" && rg -qF -- "stale-base artifact" "$f" && ! rg -qF -- "jq " "$f" || exit 1; done'
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
