@@ -48,6 +48,38 @@ lifecycle when relevant. Classify each new blocker as repair-introduced,
 previously missed, or changed requirements, with a concrete consequence.
 Set `REVIEW_REPAIR_PACKET` to the readable packet path for a repair batch.
 
+Compute the changed-file set over the live target (it routinely holds
+uncommitted work): the three-dot committed change (`"${REVIEW_BASE}...HEAD"`,
+never two-dot, which would add the base's own advancement to the set), staged
+and unstaged edits, and untracked files, all with `--no-renames` so both sides
+of a rename are listed. Set `REVIEW_BASE_REF` to the plain origin branch name when the caller
+has one (the herdr reviewer brief passes the task's base branch); one
+`resolve-base` call then supplies the base tip. Leave it unset for a pinned
+SHA base with no remote; unchanged-path claims are then labelled base content.
+Both files go into `REVIEW_OUT`, which defaults to a fresh `mktemp -d`
+directory so existing callers keep working; the skill prints it. A caller
+that emits a findings file writes it into `REVIEW_OUT` and passes that path
+as `--findings-ref`, which binds the sidecars to the findings.
+
+```bash
+: "${REVIEW_REPO:?}" "${REVIEW_BASE:?}" "${REVIEW_ROOT:?}"
+REVIEW_OUT="${REVIEW_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/review-change-out.XXXXXX")}" || exit 2
+{
+  git -C "$REVIEW_REPO" -c core.quotePath=false diff --name-only --no-renames "${REVIEW_BASE}...HEAD" || exit 2
+  git -C "$REVIEW_REPO" -c core.quotePath=false diff --name-only --no-renames HEAD || exit 2
+  git -C "$REVIEW_REPO" -c core.quotePath=false ls-files --others --exclude-standard || exit 2
+} >"$REVIEW_OUT/changed-files.raw" || exit 2
+LC_ALL=C sort -u "$REVIEW_OUT/changed-files.raw" >"$REVIEW_OUT/changed-files.txt" || exit 2
+rm -f -- "$REVIEW_OUT/changed-files.raw"
+if [ -n "${REVIEW_BASE_REF:-}" ]; then
+  uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/review.py" resolve-base \
+    --repo "$REVIEW_REPO" --base-ref "$REVIEW_BASE_REF" --head HEAD >"$REVIEW_OUT/base-context.json" || exit 2
+else
+  printf '%s\n' '{"base": null, "base_ref": null, "base_ref_tip": null}' >"$REVIEW_OUT/base-context.json" || exit 2
+fi
+printf 'review-change sidecars: %s\n' "$REVIEW_OUT"
+```
+
 Resolve account scope from the original target before dispatch. Preserve that
 scope, including an intentionally unset personal `CLAUDE_CONFIG_DIR`.
 
@@ -76,7 +108,13 @@ already-dispatched reviewer executes the review directly and does not dispatch
 another reviewer.
 
 Its prompt supplies the exact target worktree, pinned base, intended behavior,
-affected callers, and full relevant diff. For a repair batch it also supplies
+affected callers, and full relevant diff. It also supplies the changed-file
+set and base context from `REVIEW_OUT` and this rule: a finding that says this
+change added, modified, deleted, or reverted a path outside the changed-file
+set is a stale-base artifact to discard; absence from the set never means the
+change missed that file; an unchanged path is read only with
+`git show <base_ref_tip>:<path>`, or labelled base content when
+`base_ref_tip` is null. For a repair batch it also supplies
 the `REVIEW_REPAIR_PACKET` path and rendered content, asking the child to verify
 self-review, behavioral-regression, and affected failure-path evidence; it
 classifies each new blocker as repair-introduced, previously missed, or changed
