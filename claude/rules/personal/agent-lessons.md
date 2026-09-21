@@ -25,8 +25,8 @@ is the staging tier, not an archive.
   a small change the human approved this turn. Larger: todo + kickoff.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
   MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
-- (2026-09) Never emit an identifier from memory -- shas, test cases, symbols,
-  CLI flags: read it back from rev-parse, ls-remote, grep, or the tool's help.
+- (2026-09) Never emit an identifier from memory, or one an earlier edit moved:
+  shas, symbols, line numbers -- re-read it, or anchor on surrounding text.
 - (2026-09) A worker never commits with failing tests: fix or report
   BLOCKED/DONE_WITH_CONCERNS uncommitted; green-before-commit is the contract.
 - (2026-09) A content-flagged adversarial run with no output is incomplete, not
