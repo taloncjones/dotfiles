@@ -2406,7 +2406,8 @@ def outstanding_descendants(rd, binding_id):
             continue
         try:
             task = json.loads(read_payload_text(tf))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
+            # RecursionError as in read_prior_task: nested JSON must yield the sentinel.
             return [UNREADABLE_SENTINEL]
         if not _valid_task_shape(task):
             return [UNREADABLE_SENTINEL]
@@ -2429,7 +2430,7 @@ def outstanding_descendants(rd, binding_id):
             ))
         except FileNotFoundError:
             settle = None
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return [UNREADABLE_SENTINEL]
         if not _attempt_settled(att, settle):
             panes.add(att["pane_id"])
@@ -2464,6 +2465,16 @@ def _binding_is_fresh(rec_b, stale_secs):
     except (TypeError, ValueError):
         return False
     return time.time() - parsed.timestamp() <= stale_secs
+
+
+def _parse_payload(text):
+    """json.loads for a caller-supplied --json, or None when it does not
+    parse. RecursionError is a RuntimeError, so a deeply nested payload must
+    be caught here or it escapes as a traceback (see read_prior_task)."""
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return None
 
 
 def _require(cond, msg) -> None:
@@ -2730,10 +2741,7 @@ def _main(argv=None) -> int:
             if ns.binding is not None:
                 require_not_consumed(rd, ns.binding)
             _require(valid_task_id(ns.task_id), "invalid task-id")
-            try:
-                rec = json.loads(ns.json)
-            except ValueError:
-                rec = None
+            rec = _parse_payload(ns.json)
             # Persisting a non-dict (e.g. a bare `[]`) would later crash `status`
             # on `.get`; a task_id mismatch would mislabel the record under its file.
             _require(

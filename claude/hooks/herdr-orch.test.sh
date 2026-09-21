@@ -8565,6 +8565,51 @@ assert c.UNREADABLE_SENTINEL=='<unreadable>'
 "
 SH
 
+check "write-task and outstanding_descendants catch decoder recursion" <<PY
+$LOAD
+import contextlib, io, pathlib
+# This Python's C decoder never raises RecursionError from a real document, so
+# each site is pinned with a stub; narrowing a tuple back would otherwise pass.
+def _deep(*a, **k):
+    raise RecursionError("maximum recursion depth exceeded")
+
+# 1. The payload parse helper write-task uses.
+_real_loads = c.json.loads
+c.json.loads = _deep
+try:
+    assert c._parse_payload('{"task_id":"T"}') is None
+finally:
+    c.json.loads = _real_loads
+assert c._parse_payload('{"task_id":"T"}') == {"task_id": "T"}
+assert c._parse_payload('not json') is None
+
+# 2. outstanding_descendants: a task record whose read recurses, then a
+# settlement record whose read recurses. Each yields the sentinel list.
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = c.repo_dir("slug-rec"); base = rd / "leads" / "ldb-rec" / "tasks"
+base.mkdir(parents=True)
+row = {"launch_id": "L1", "phase": "implement", "runtime": "claude",
+       "workspace_id": "w1", "pane_id": "p1", "source_head_sha": "a" * 40}
+(base / "td-r.json").write_text(json.dumps({"task_id": "td-r", "workers": [row]}))
+assert c.outstanding_descendants(rd, "ldb-rec") == ["p1"]
+_real_read = c.read_payload_text
+c.read_payload_text = _deep
+try:
+    assert c.outstanding_descendants(rd, "ldb-rec") == [c.UNREADABLE_SENTINEL]
+finally:
+    c.read_payload_text = _real_read
+def _deep_settle(path):
+    if str(path).endswith(".done.json"):
+        raise RecursionError("maximum recursion depth exceeded")
+    return _real_read(path)
+(base / "td-r.done.json").write_text("{}")
+c.read_payload_text = _deep_settle
+try:
+    assert c.outstanding_descendants(rd, "ldb-rec") == [c.UNREADABLE_SENTINEL]
+finally:
+    c.read_payload_text = _real_read
+sys.exit(0)
+PY
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
