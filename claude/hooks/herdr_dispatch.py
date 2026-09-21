@@ -400,16 +400,24 @@ class _LauncherRecords:
         self.todo_binding = todo_binding
 
     def reserve(self, attempt: dict[str, Any]) -> dict[str, Any]:
-        return _write_attempt(
-            self.rd, self.task_id, self.session, self.fence, self.repository,
-            self.scope, self.repo_slug, attempt, self.todo_binding,
-        )
+        try:
+            return _write_attempt(
+                self.rd, self.task_id, self.session, self.fence, self.repository,
+                self.scope, self.repo_slug, attempt, self.todo_binding,
+            )
+        except ValueError as exc:
+            # owner_transaction refuses a stale or foreign fence with a bare
+            # ValueError; the adapter's callers only handle DispatchError.
+            raise DispatchError(f"launcher record write refused: {exc}") from exc
 
     def update(self, launch_id: str, **fields: Any) -> dict[str, Any]:
-        return _update_attempt(
-            self.rd, self.task_id, self.session, self.fence, self.repository,
-            self.scope, self.repo_slug, launch_id, **fields,
-        )
+        try:
+            return _update_attempt(
+                self.rd, self.task_id, self.session, self.fence, self.repository,
+                self.scope, self.repo_slug, launch_id, **fields,
+            )
+        except ValueError as exc:
+            raise DispatchError(f"launcher record write refused: {exc}") from exc
 
 
 class _BoundRecords:

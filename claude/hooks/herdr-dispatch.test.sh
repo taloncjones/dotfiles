@@ -544,6 +544,65 @@ def test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row():
         fixture.close()
 
 
+def test_bound_cross_scope_fences_refuse_before_start():
+    fixture = LeadFixture()
+    try:
+        # A launcher fence carrying --binding: the core's lead_check refuses.
+        try:
+            fixture.launch(session="S", fence=1)
+        except herdr_dispatch.DispatchError as exc:
+            assert "bound record write refused: reserve-dispatch" in str(exc), exc
+            assert "lead fence" in str(exc), exc
+        else:
+            raise AssertionError("launcher fence with --binding was accepted")
+        assert fixture.bound_workers() == []
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
+        # A lead fence without --binding: owner_transaction validates against
+        # the launcher's owner.json and refuses in-process.
+        fixture.task_file.write_text(json.dumps(bound_task_record(fixture, fixture.lead_context)))
+        try:
+            fixture.launch(binding=None, cwd=fixture.lead_ws)
+        except herdr_dispatch.DispatchError as exc:
+            assert "missing owner fence" in str(exc), exc
+        else:
+            raise AssertionError("lead fence without --binding was accepted")
+        assert fixture.bound_workers() == []
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
+    finally:
+        fixture.close()
+
+
+def test_bound_start_failure_keeps_pane_outstanding_until_redispatch():
+    fixture = LeadFixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "start-fail"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert "agent_not_ready" in str(exc), exc
+        else:
+            raise AssertionError("failed native start was accepted")
+        rows = fixture.bound_workers()
+        assert len(rows) == 1 and rows[-1]["status"] == "launch_failed", rows
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == ["w1:p1"]
+        assert not (fixture.rd / "leads" / fixture.binding / "tasks" / "td-a.done.json").exists()
+        # A re-dispatch appends a successor row; the failed pane stops gating.
+        fixture.env["FAKE_HERDR_MODE"] = "ok"
+        fixture.env["FAKE_PANE"] = "w1:p2"
+        for name in ("read-count", "attempt-seen"):
+            (fixture.root / name).unlink(missing_ok=True)
+        result = fixture.launch(pane_id="w1:p2")
+        assert result["status"] == "launched", result
+        rows = fixture.bound_workers()
+        assert [row["pane_id"] for row in rows] == ["w1:p1", "w1:p2"], rows
+        assert rows[0]["status"] == "launch_failed" and rows[1]["status"] == "launched", rows
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == ["w1:p2"]
+    finally:
+        fixture.close()
+
+
 def test_launch_records_attempt_before_native_start():
     fixture = Fixture()
     try:
@@ -2057,6 +2116,8 @@ for name, test in (
     ("attempt record carries absent difficulty shape", test_attempt_record_carries_absent_difficulty_shape),
     ("tampered unconfirmed difficulty route rejects launch", test_tampered_unconfirmed_difficulty_route_rejects_launch),
     ("bound launch reserves before native start and writes no launcher row", test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row),
+    ("bound cross-scope fences refuse before start", test_bound_cross_scope_fences_refuse_before_start),
+    ("bound start failure keeps the pane outstanding until re-dispatch", test_bound_start_failure_keeps_pane_outstanding_until_redispatch),
 ):
     check(name, test)
 
