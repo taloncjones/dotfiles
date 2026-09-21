@@ -138,7 +138,7 @@ def test_pipeline_steps_bind_to_policy_routes():
         "gateway": ("claude", "controller", "opus", "medium"),
         "read-only": ("claude", "read_only", "haiku", "medium"),
         "spec-review": ("codex", "reviewer", "gpt-6-astra", "high"),
-        "plan-review": ("claude", "plan_reviewer", "fable", "high"),
+        "plan-review": ("claude", "plan_reviewer", "fable", "medium"),
         "co-review": ("codex", "reviewer", "gpt-6-astra", "high"),
     }
     for step, (rt, role, wanted_model, wanted_effort) in expected.items():
@@ -155,7 +155,7 @@ def test_plan_review_seat_is_separate_from_spec_review():
     assert runtime.role_for_step("spec-review") == "reviewer"
     assert runtime.role_for_step("co-review") == "reviewer"
     plan_review = runtime.resolve_route("claude", "plan_reviewer")
-    assert (plan_review["model"], plan_review["effort"]) == ("fable", "high"), plan_review
+    assert (plan_review["model"], plan_review["effort"]) == ("fable", "medium"), plan_review
     spec_review = runtime.resolve_route("claude", "reviewer")
     assert (spec_review["model"], spec_review["effort"]) == ("opus", "high"), spec_review
     # On Codex the new role is deliberately identical to reviewer, so the Codex
@@ -1141,12 +1141,12 @@ def test_claude_controller_is_opus_medium():
         lambda: runtime.resolve_route(
             "claude", "controller", config={"routes": {"controller": {"effort": "low"}}}
         ),
-        "below the medium role floor",
+        "below the opus/medium role floor",
     )
     # Every other Claude role tuple is unchanged.
     expected = {
         "planner": ("opus", "high"),
-        "plan_reviewer": ("fable", "high"),
+        "plan_reviewer": ("fable", "medium"),
         "reviewer": ("opus", "high"),
         "skeptic": ("opus", "high"),
         "implementation": ("sonnet", "high"),
@@ -1158,19 +1158,31 @@ def test_claude_controller_is_opus_medium():
 
 
 def test_claude_controller_fallback_respects_medium_floor():
-    # A medium-effort fallback IS accepted under the new medium floor. This is the
-    # floor-distinguishing case: before the change the requested model is fable
-    # (absent from caps -> indeterminate -> not ready), so this fails; after the
-    # change the requested opus is unavailable and the medium fallback is taken.
-    ok_caps = {"models": {"opus": model(status="unavailable"), "sonnet": model()}}
+    # A fallback AT the floor tier is accepted from a different model: fable/low
+    # is a peer of opus/medium by tier (fable carries a +1 tier offset over
+    # opus at any given effort label), matching the controller's floor exactly.
+    ok_caps = {"models": {"opus": model(status="unavailable"), "fable": model()}}
     ok = runtime.resolve_route(
         "claude",
         "controller",
-        config={"fallbacks": {"controller": [{"model": "sonnet", "effort": "medium"}]}},
+        config={"fallbacks": {"controller": [{"model": "fable", "effort": "low"}]}},
         capabilities=ok_caps,
     )
     assert ok["ready"] is True, ok
-    assert (ok["model"], ok["effort"]) == ("sonnet", "medium"), ok
+    assert (ok["model"], ok["effort"]) == ("fable", "low"), ok
+
+    # sonnet sits a tier below opus at any given effort label, so a same-label
+    # sonnet/medium fallback no longer meets the controller's opus/medium floor
+    # under the tier-aware check (it did under the old effort-only one).
+    sonnet_caps = {"models": {"opus": model(status="unavailable"), "sonnet": model()}}
+    sonnet_blocked = runtime.resolve_route(
+        "claude",
+        "controller",
+        config={"fallbacks": {"controller": [{"model": "sonnet", "effort": "medium"}]}},
+        capabilities=sonnet_caps,
+    )
+    assert sonnet_blocked["ready"] is False, sonnet_blocked
+    assert sonnet_blocked["blocked_reason"] == "no-fallback-meets-quality-floor", sonnet_blocked
 
     # A sub-floor (low) fallback is still skipped and blocks.
     block_caps = {"models": {"opus": model(status="unavailable"), "haiku": model()}}
@@ -1185,9 +1197,11 @@ def test_claude_controller_fallback_respects_medium_floor():
 
 
 def test_claude_planner_falls_back_to_fable():
-    # Opus is the requested planner tier. Fable is a peer design tier, not a
-    # drop, so the built-in fallback swaps at the same effort instead of buying
-    # extra thinking to compensate.
+    # Opus is the requested planner tier. fable/medium is the tier peer of
+    # opus/high and is tried first; this fixture's fable capability omits
+    # "medium" from its supported efforts, so that candidate is skipped on
+    # capability grounds and the loop lands on the next tier-eligible entry,
+    # fable/high.
     caps = {
         "models": {
             "opus": model(status="unavailable"),
@@ -1228,34 +1242,95 @@ def test_claude_planner_falls_back_to_fable():
     assert disabled["ready"] is False, disabled
     assert disabled["blocked_reason"] == "no-fallback-meets-quality-floor", disabled
 
-    # A caller who routes planning to a cheaper model owns that choice. The
-    # default is keyed on the route-table model, so an explicit downgrade blocks
-    # for re-decision instead of silently escalating back to fable.
-    override_caps = {"models": {"haiku": model(status="unavailable"), "opus": model()}}
-    override = runtime.resolve_route(
+    # A caller who routes planning to a strictly weaker model at the same
+    # effort label owns that choice, but the tier-aware floor check now
+    # refuses it immediately rather than deferring to availability-based
+    # blocking -- haiku/high never reaches opus/high's tier regardless of
+    # whether haiku itself is reachable.
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "planner",
+            config={"routes": {"planner": {"model": "haiku", "effort": "high"}}},
+            capabilities={
+                "models": {"haiku": model(status="unavailable"), "opus": model()}
+            },
+        ),
+        "configured haiku/high is below the opus/high role floor",
+    )
+
+
+def test_planner_fallback_prefers_fable_medium_at_the_base_floor():
+    # fable/medium is the tier peer of opus/high and the first fallback
+    # entry, so it is selected outright when its effort is actually
+    # supported (unlike test_claude_planner_falls_back_to_fable's fixture,
+    # which omits "medium" to exercise the capability-skip path instead).
+    caps = {"models": {"opus": model(status="unavailable"), "fable": model()}}
+    route = runtime.resolve_route("claude", "planner", capabilities=caps)
+    assert route["ready"] is True, route
+    assert (route["model"], route["effort"]) == ("fable", "medium"), route
+    assert route["fallback"] == {
+        "from": "opus",
+        "reason": "requested-model-unavailable",
+    }, route
+
+
+def test_planner_sonnet_fallback_refused_below_opus_high_tier():
+    # sonnet sits a tier below opus at any given effort label, so an explicit
+    # sonnet/high fallback can never satisfy planner's opus/high floor even
+    # though the effort label matches literally.
+    caps = {"models": {"opus": model(status="unavailable"), "sonnet": model()}}
+    route = runtime.resolve_route(
         "claude",
         "planner",
-        config={"routes": {"planner": {"model": "haiku", "effort": "high"}}},
-        capabilities=override_caps,
+        config={"fallbacks": {"planner": [{"model": "sonnet", "effort": "high"}]}},
+        capabilities=caps,
     )
-    assert override["ready"] is False, override
-    assert override["blocked_reason"] == "no-fallback-meets-quality-floor", override
-    assert override["model"] == "haiku", override
+    assert route["ready"] is False, route
+    assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
+
+
+def test_route_override_is_tier_aware_not_effort_only():
+    # opus/medium sits below planner's opus/high floor by rank alone, so it is
+    # refused; fable/medium is a tier peer of opus/high, so it is accepted
+    # even though "medium" is a lower effort label than "high".
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude", "planner", config={"routes": {"planner": {"effort": "medium"}}}
+        ),
+        "configured opus/medium is below the opus/high role floor",
+    )
+    accepted = runtime.resolve_route(
+        "claude",
+        "planner",
+        config={"routes": {"planner": {"model": "fable", "effort": "medium"}}},
+        capabilities={"models": {"fable": model()}},
+    )
+    assert accepted["ready"] is True, accepted
+    assert (accepted["model"], accepted["effort"]) == ("fable", "medium"), accepted
 
 
 def test_claude_fallback_defaults_are_scoped():
-    # think is the only role that still roots on fable, so it is the only one
-    # that loses a tier when fable goes and keeps the opus/xhigh default.
+    # think is the only role that still roots on fable. Its opus/xhigh
+    # fallback matches fable/high's tier exactly, so it still clears think's
+    # base floor when fable goes.
     caps = {"models": {"fable": model(status="unavailable"), "opus": model()}}
     normal = runtime.resolve_route("claude", "think", capabilities=caps)
     assert normal["ready"] is True, normal
     assert (normal["model"], normal["effort"]) == ("opus", "xhigh"), normal
 
+    # risk=critical raises think's floor to fable/xhigh's own tier -- one tier
+    # above anything opus can reach, since opus/xhigh tops out at fable/high's
+    # tier. A critical-risk think dispatch with fable down now correctly
+    # blocks for re-decision instead of silently under-serving on opus, which
+    # the old effort-only comparison could not distinguish from a real match.
     critical = runtime.resolve_route(
         "claude", "think", risk="critical", capabilities=caps
     )
-    assert critical["ready"] is True, critical
-    assert (critical["model"], critical["effort"]) == ("opus", "xhigh"), critical
+    assert critical["ready"] is False, critical
+    assert critical["blocked_reason"] == "no-fallback-meets-quality-floor", critical
     assert critical["quality_floor"] == "xhigh", critical
 
     # A Claude role with no default still blocks rather than inventing one.
@@ -1451,7 +1526,7 @@ def test_route_override_below_raised_floor_is_refused():
                 "routes": {"implementation": {"effort": "high"}},
             },
         ),
-        "configured effort high is below the xhigh role floor",
+        "configured sonnet/high is below the sonnet/xhigh role floor",
     )
 
 
@@ -1472,7 +1547,12 @@ def test_hard_implementation_without_fallback_blocks():
     assert route["quality_floor"] == "xhigh", route
 
 
-def test_hard_planner_still_reaches_its_xhigh_fallback():
+def test_hard_planner_selects_fable_high_at_the_opus_xhigh_tier():
+    # Under difficulty=hard the floor rises to opus/xhigh's tier. fable/medium
+    # (the first fallback entry) is tier-eligible at the base floor but not
+    # here, so it is skipped by the tier check itself (not by a capability
+    # gap -- "medium" is deliberately included below); fable/high is the
+    # first entry whose tier reaches opus/xhigh.
     route = runtime.resolve_route(
         "claude",
         "planner",
@@ -1480,13 +1560,13 @@ def test_hard_planner_still_reaches_its_xhigh_fallback():
         capabilities={
             "models": {
                 "opus": model("unavailable", ["high", "xhigh"]),
-                "fable": model("available", ["high", "xhigh"]),
+                "fable": model("available", ["medium", "high", "xhigh"]),
             }
         },
     )
     assert route["quality_floor"] == "xhigh", route
     assert route["model"] == "fable", route
-    assert route["effort"] == "xhigh", route
+    assert route["effort"] == "high", route
     assert route["ready"] is True, route
 
 
@@ -1496,7 +1576,7 @@ def test_configured_fallback_below_raised_floor_is_skipped_not_promoted():
         "implementation",
         config={
             "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
-            "fallbacks": {"implementation": [{"model": "opus", "effort": "high"}]},
+            "fallbacks": {"implementation": [{"model": "opus", "effort": "medium"}]},
         },
         capabilities={
             "models": {
@@ -1542,8 +1622,8 @@ def test_policy_document_matches_the_route_table():
     assert rows >= 7, rows
     assert len(checked_roles) >= 4, checked_roles
     assert runtime.CLAUDE_FALLBACKS["planner"] == [
+        {"model": "fable", "effort": "medium"},
         {"model": "fable", "effort": "high"},
-        {"model": "fable", "effort": "xhigh"},
     ], runtime.CLAUDE_FALLBACKS
     assert runtime.CLAUDE_FALLBACKS["plan_reviewer"] == [
         {"model": "opus", "effort": "high"}
@@ -1556,6 +1636,9 @@ def test_policy_document_matches_the_route_table():
 for name, test in (
     ("Claude controller routes to opus/medium", test_claude_controller_is_opus_medium),
     ("Claude planner falls back to fable", test_claude_planner_falls_back_to_fable),
+    ("planner fallback prefers fable/medium at the base floor", test_planner_fallback_prefers_fable_medium_at_the_base_floor),
+    ("planner sonnet fallback refused below opus/high tier", test_planner_sonnet_fallback_refused_below_opus_high_tier),
+    ("route override is tier-aware, not effort-only", test_route_override_is_tier_aware_not_effort_only),
     ("Claude fallback defaults are scoped to the fable-rooted role", test_claude_fallback_defaults_are_scoped),
     ("Claude controller fallback respects the medium floor", test_claude_controller_fallback_respects_medium_floor),
     ("model catalog separates effort support from availability", test_model_catalog_discovers_effort_without_claiming_availability),
@@ -1597,7 +1680,7 @@ for name, test in (
     ("critical risk still refused for planner with difficulty", test_critical_risk_still_refused_for_planner_with_difficulty),
     ("route override below raised floor is refused", test_route_override_below_raised_floor_is_refused),
     ("hard implementation without fallback blocks", test_hard_implementation_without_fallback_blocks),
-    ("hard planner still reaches its xhigh fallback", test_hard_planner_still_reaches_its_xhigh_fallback),
+    ("hard planner selects fable/high at the opus/xhigh tier", test_hard_planner_selects_fable_high_at_the_opus_xhigh_tier),
     ("configured fallback below raised floor is skipped not promoted", test_configured_fallback_below_raised_floor_is_skipped_not_promoted),
     ("policy document matches the route table", test_policy_document_matches_the_route_table),
     ("pipeline steps bind to policy routes", test_pipeline_steps_bind_to_policy_routes),
