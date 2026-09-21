@@ -2162,6 +2162,17 @@ def read_prior_task(dest):
         return PRIOR_CORRUPT
 
 
+def _readable_row_count(prior):
+    """Row count of a prior record's workers list, or None when the prior
+    is absent, corrupt, not a dict, or has a non-list workers -- the shapes
+    with no measurable dispatch history, which the unbound repair route
+    (state-layout.md) must still be able to overwrite."""
+    if prior is PRIOR_ABSENT or prior is PRIOR_CORRUPT or not isinstance(prior, dict):
+        return None
+    workers = prior.get("workers")
+    return len(workers) if isinstance(workers, list) else None
+
+
 def resolve_task_workers(rec, prior, bound):
     """Resolve the workers list write-task should persist for `rec`.
 
@@ -2184,7 +2195,9 @@ def resolve_task_workers(rec, prior, bound):
     the readers differ: an unbound record is read by _valid_task_shape, a
     bound one additionally by outstanding_descendants, which is native-only.
 
-    Repairing a record through an explicit list is an UNBOUND-path property.
+    Repairing a record through an explicit list is an UNBOUND-path property,
+    bounded by _readable_row_count: the list may not have fewer rows than a
+    readable prior list.
     A malformed BOUND record is refused outright by the malformed-prior check
     below, so it has no repair payload; recovering one needs a fenced
     operation this verb does not provide.
@@ -2234,6 +2247,14 @@ def resolve_task_workers(rec, prior, bound):
         # them: `==` holds between True and 1, so an accepted prefix can
         # still differ from the record in JSON value types.
         workers = prior_workers + workers[inherited:]
+    elif not bound:
+        # An explicit list may rewrite launcher-scope rows (peer_name, status
+        # are discovered after launch) but never drop one: an explicit [] over
+        # a dispatched record would read as "nothing was ever dispatched".
+        floor = _readable_row_count(prior)
+        _require(floor is None or len(workers) >= floor,
+                 "unbound dispatch history may not shrink; "
+                 "open a fresh task id with reset-task")
     _require(
         all((_native_worker_row if bound else _phased_worker_row)(row)
             for row in workers[inherited:]),

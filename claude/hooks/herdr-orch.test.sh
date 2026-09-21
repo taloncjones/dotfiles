@@ -451,7 +451,7 @@ for label, payload in (
 # the shell would run backticked text as a command substitution.
 typed = {"task_id": "T", "workers": [{"phase": "implement", "flag": 1}]}
 supplied = {"task_id": "T", "workers": [{"phase": "implement", "flag": True}]}
-# Unbound never consults prior, so it returns the caller's bool unchanged.
+# Unbound keeps the caller's rows (same count, so no shrink), bool unchanged.
 kept = c.resolve_task_workers(supplied, typed, False)
 assert isinstance(kept[0]["flag"], bool), kept
 # Bound inherits the record's own row, so the stored int survives.
@@ -8730,6 +8730,90 @@ grep -q 'exceed the 2000000-byte dispatch reader limit' "$ERRFILE"
 python3 -c "
 import json
 d=json.load(open('$BOUNDFILE')); assert len(d['workers'])==1 and 'note' not in d['workers'][0], d
+"
+SH
+
+check "unbound explicit workers list may not shrink dispatch history" <<'SH'
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug slug-ns --session S --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1","peer_name":null}]}'
+TASKFILE="$root/herdr-orch/slug-ns/tasks/td-s.json"
+BEFORE=$(cat "$TASKFILE")
+# The laundering shape: an explicit [] over a dispatched record. Refused, the
+# row survives, and the null-attempt reader still sees an attempt.
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"in-progress","workers":[]}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'unbound dispatch history may not shrink; open a fresh task id with reset-task' "$ERRFILE"
+[ "$(cat "$TASKFILE")" = "$BEFORE" ]
+python3 -c "
+import importlib.util, json
+s=importlib.util.spec_from_file_location('core','claude/hooks/herdr_orch_core.py')
+c=importlib.util.module_from_spec(s); s.loader.exec_module(c)
+assert c.has_attempt_rows(json.load(open('$TASKFILE')), 'implement')
+"
+# Same-count rewrite with changed non-identity fields: the director's normal
+# full-record rewrite (peer_name discovered after launch) stays accepted.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1","peer_name":"impl-td-s"}]}'
+grep -q '"peer_name":"impl-td-s"' "$TASKFILE"
+# Longer list accepted; omitted key inherits; shrinking from two to one refused.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"review-dispatched","workers":[{"phase":"implement","launch_id":"I1","peer_name":"impl-td-s"},{"phase":"review","launch_id":"R1"}]}'
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"reviewed"}'
+python3 -c "
+import json
+d=json.load(open('$TASKFILE')); assert d['status']=='reviewed' and len(d['workers'])==2, d
+"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"reviewed","workers":[{"phase":"implement","launch_id":"I1"}]}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'may not shrink' "$ERRFILE"
+# Repair routes stay open: a phase-less prior row is replaced by a
+# same-length repaired list; a prior whose workers is not a list has no
+# measurable history, so any explicit list is accepted.
+python3 -c "
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path)); rec['workers'] = [{'launch_id': 'I1'}, {'launch_id': 'R1'}]
+json.dump(rec, open(path, 'w'))
+" "$TASKFILE"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"repaired","workers":[{"phase":"implement","launch_id":"I1"}]}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'may not shrink' "$ERRFILE"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"repaired","workers":[{"phase":"implement","launch_id":"I1"},{"phase":"review","launch_id":"R1"}]}'
+grep -q '"status":"repaired"' "$TASKFILE"
+python3 -c "
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path)); rec['workers'] = 'nope'
+json.dump(rec, open(path, 'w'))
+" "$TASKFILE"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug slug-ns --session S --fence "$f" --task-id td-s \
+   --json '{"task_id":"td-s","status":"rebuilt","workers":[]}'
+grep -q '"status":"rebuilt"' "$TASKFILE"
+# Unit: the count helper's None cases.
+python3 -c "
+import importlib.util
+s=importlib.util.spec_from_file_location('core','claude/hooks/herdr_orch_core.py')
+c=importlib.util.module_from_spec(s); s.loader.exec_module(c)
+assert c._readable_row_count(c.PRIOR_ABSENT) is None
+assert c._readable_row_count(c.PRIOR_CORRUPT) is None
+assert c._readable_row_count(None) is None
+assert c._readable_row_count({'workers': 'nope'}) is None
+assert c._readable_row_count({'task_id': 'T'}) is None
+assert c._readable_row_count({'workers': [{'x': 1}, {'phase': 'review'}]}) == 2
 "
 SH
 

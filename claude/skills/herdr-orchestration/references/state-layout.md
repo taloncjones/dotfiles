@@ -413,6 +413,14 @@ rather than clearing it, so only an explicit list can change dispatch
 history. New rows must carry a `phase` on the unbound path and the full
 native tuple, with valid values, on the binding-scoped path.
 
+On the unbound path an explicit `workers` list may rewrite rows but may not
+have fewer rows than the prior record's list when that list is readable
+(`_readable_row_count`): an explicit `[]` over a dispatched record would
+otherwise read as "nothing was ever dispatched". A prior that is corrupt, not
+an object, or whose `workers` is not a list has no measurable history, so the
+repair route below still accepts any explicit list there. A legitimate fresh
+start is `reset-task`, described after the repair routes.
+
 The pass-through of a row its reader would refuse is binding-scoped only. On
 that path the append-only prefix is inherited unchanged and is not re-checked,
 which keeps a record holding a pre-contract legacy row writable rather than
