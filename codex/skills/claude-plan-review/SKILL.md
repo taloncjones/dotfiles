@@ -60,7 +60,7 @@ skill.
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-plan-review.XXXXXX")
 printf '%s\n' "Independently review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Return severity, location, problem, concrete fix, and one verdict. Do not invoke co-review, another partner, skills, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
-  --runtime claude --step plan-review --provisional \
+  --runtime claude --step plan-review --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
