@@ -364,14 +364,15 @@ want = [
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
+    "~/.claude/hooks/planning_artifact_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
 then
-    printf 'PASS  hwg: template lists the Bash guards in order, orch_edit_guard last\n'
+    printf 'PASS  hwg: template lists the Bash guards in order, planning_artifact_guard last\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  hwg: template lists the Bash guards in order, orch_edit_guard last\n' >&2
+    printf 'FAIL  hwg: template lists the Bash guards in order, planning_artifact_guard last\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
@@ -1142,8 +1143,9 @@ fi
 
 # git_remote_guard.py registration: the template carries exactly one
 # PreToolUse entry with matcher Bash|Edit|Write, listing only the git
-# metadata guard, appended last, and the Bash guard group retains the
-# orchestrator edit guard registered by its dedicated suite.
+# metadata guard, appended last, and the Bash guard group ends with the
+# orchestrator edit guard followed by the planning-artifact guard,
+# both registered by their dedicated suites.
 # Independent of live machine state; the live drift check above is
 # derived from the template and covers reconciled machines.
 if python3 - <<'PY'
@@ -1160,6 +1162,7 @@ want_bash = [
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
+    "~/.claude/hooks/planning_artifact_guard.py",
 ]
 ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
       and ours[0]["hooks"] == [{"type": "command",
