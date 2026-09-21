@@ -15,6 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "review.py"
 DOTFILES_ROOT = SCRIPT.parents[4]
+GATE_REPORT = SCRIPT.parent / "gate_report.py"
 
 
 class ReviewHelperTests(unittest.TestCase):
@@ -917,6 +918,95 @@ class ReviewHelperTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["base"], self.base)
         self.assertEqual(payload["base_ref_tip"], origin_tip)
+
+    def prepare_feature_against_origin(self, origin_extra: str) -> tuple[str, dict]:
+        """origin target = base + <origin_extra>.txt; feature = base + feature.txt.
+        Returns (origin tip, manifest) from prepare --base-ref target."""
+        origin_tip = self.make_origin_target(origin_extra)
+        self.run_git("checkout", "-q", "-b", "feature", self.base)
+        (self.repo / "feature.txt").write_text("feature\n")
+        self.run_git("add", "feature.txt")
+        self.run_git("commit", "-qm", "feature: work")
+        output = self.root / "review output"
+        result = self.command(
+            "prepare", "--repo", str(self.repo),
+            "--base-ref", "target", "--output-dir", str(output),
+        )
+        manifest = json.loads(Path(json.loads(result.stdout)["manifest"]).read_text())
+        return origin_tip, manifest
+
+    def test_frozen_diff_excludes_base_advancement(self) -> None:
+        # Incident shape: the base branch gained added_on_main.txt after the
+        # feature's base. A two-dot diff against the origin tip reports it as
+        # a deletion the feature never made; the frozen three-dot set does not.
+        origin_tip, manifest = self.prepare_feature_against_origin("added_on_main")
+        snapshot_head = manifest["snapshot"]["snapshot_head"]
+        two_dot = self.git("diff", "--name-status", origin_tip, snapshot_head)
+        self.assertIn("D\tadded_on_main.txt", two_dot)
+        changed = self.git(
+            "diff", "--name-only", "--no-renames",
+            manifest["source"]["base"], snapshot_head,
+        )
+        self.assertEqual(changed, "feature.txt")
+        self.assertEqual(manifest["source"]["base_ref_tip"], origin_tip)
+
+    def test_changed_file_set_lists_both_sides_of_a_rename(self) -> None:
+        self.run_git("checkout", "-q", "-b", "feature", self.base)
+        self.run_git("mv", "tracked.txt", "moved.txt")
+        self.run_git("commit", "-qm", "feature: rename")
+        head = self.git("rev-parse", "HEAD")
+        # Pin rename detection on so the control does not depend on the
+        # developer machine's diff.renames setting.
+        with_renames = self.git(
+            "-c", "diff.renames=true", "diff", "--name-only", self.base, head
+        )
+        self.assertEqual(with_renames, "moved.txt")  # why --no-renames exists
+        both_sides = self.git(
+            "diff", "--name-only", "--no-renames", self.base, head
+        ).split("\n")
+        self.assertEqual(sorted(both_sides), ["moved.txt", "tracked.txt"])
+
+    def test_base_tip_readable_from_snapshot_after_owned_ref_is_gone(self) -> None:
+        origin_tip, manifest = self.prepare_feature_against_origin("origin_only")
+        self.assertEqual(self.git("for-each-ref", "refs/co-review/"), "")
+        claude_root = Path(manifest["snapshot"]["claude_root"])
+        self.assertFalse((claude_root / "origin_only.txt").exists())
+        content = self.git("show", f"{origin_tip}:origin_only.txt", cwd=claude_root)
+        self.assertEqual(content, "origin_only")
+
+    def test_pinned_run_ref_survives_prune(self) -> None:
+        # gc --prune=now drops unreachable objects whether loose or packed. If
+        # this ever flakes, the fixture's object layout changed, not the design.
+        origin_tip, manifest = self.prepare_feature_against_origin("origin_only")
+        claude_root = Path(manifest["snapshot"]["claude_root"])
+        self.run_git("update-ref", "refs/co-review-run/test-run", origin_tip)
+        self.run_git("gc", "-q", "--prune=now")
+        self.assertEqual(
+            self.git("show", f"{origin_tip}:origin_only.txt", cwd=claude_root),
+            "origin_only",
+        )
+        self.run_git("update-ref", "-d", "refs/co-review-run/test-run")
+        self.run_git("gc", "-q", "--prune=now")
+        gone = subprocess.run(
+            ["git", "-C", str(claude_root), "show", f"{origin_tip}:origin_only.txt"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(gone.returncode, 0)
+
+    def test_out_of_diff_read_form_is_tree_scoped(self) -> None:
+        # A tracked file whose name begins with '-' is readable through the
+        # <sha>:<path> form (the argument starts with the SHA, so no option
+        # parsing), and a path with '..' cannot escape the commit's tree.
+        (self.repo / "-flag.txt").write_text("flag\n")
+        self.run_git("add", "--", "-flag.txt")
+        self.run_git("commit", "-qm", "fixture: dash file")
+        tip = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.git("show", f"{tip}:-flag.txt"), "flag")
+        escaped = subprocess.run(
+            ["git", "-C", str(self.repo), "show", f"{tip}:../tracked.txt"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(escaped.returncode, 0)
 
 
 if __name__ == "__main__":
