@@ -32,6 +32,7 @@ CODEX_ROUTES = {
     "controller": ("gpt-6-astra", "high"),
     "planner": ("gpt-6-astra", "high"),
     "reviewer": ("gpt-6-astra", "high"),
+    "plan_reviewer": ("gpt-6-astra", "high"),
     "development_reviewer": ("gpt-5.6-sol", "high"),
     "skeptic": ("gpt-6-astra", "high"),
     "implementation": ("gpt-5.6-terra", "high"),
@@ -42,8 +43,9 @@ CODEX_ROUTES = {
 
 CLAUDE_ROUTES = {
     "controller": ("opus", "medium"),
-    "planner": ("fable", "high"),
+    "planner": ("opus", "high"),
     "reviewer": ("opus", "high"),
+    "plan_reviewer": ("fable", "high"),
     "development_reviewer": ("sonnet", "high"),
     "skeptic": ("opus", "high"),
     "implementation": ("sonnet", "high"),
@@ -54,16 +56,24 @@ CLAUDE_ROUTES = {
 
 # Same-account fallbacks applied when a role's DEFAULT model -- the one in the
 # route table above -- is unavailable and the caller supplied no fallbacks for
-# that role. Fable is the top tier for both fable-rooted roles, so losing it
-# drops a tier; xhigh on opus compensates rather than silently working at a
-# lower standard. Two deliberate limits:
+# that role. Opus and fable are peer design tiers, so planner and plan_reviewer
+# swap to the other one at the same effort rather than buying extra thinking to
+# compensate; think still roots on fable, loses a tier when fable goes, and
+# keeps opus/xhigh. The planner carries two entries so the swap lands on
+# whichever quality floor applies -- high normally, xhigh under
+# difficulty=hard, where a single high entry would be skipped by the floor rule
+# and block the dispatch. Two deliberate limits:
 #   - A caller who overrides the route to a different model owns that choice, so
 #     the default does not fire. An explicit cheaper pick is never silently
 #     escalated back to opus/xhigh.
 #   - A config "fallbacks" entry for a role replaces the default outright,
 #     including an empty list to disable fallback for that role.
 CLAUDE_FALLBACKS: dict[str, list[dict[str, str]]] = {
-    "planner": [{"model": "opus", "effort": "xhigh"}],
+    "planner": [
+        {"model": "fable", "effort": "high"},
+        {"model": "fable", "effort": "xhigh"},
+    ],
+    "plan_reviewer": [{"model": "opus", "effort": "high"}],
     "think": [{"model": "opus", "effort": "xhigh"}],
 }
 
@@ -109,9 +119,9 @@ CONFIG_KEYS = (
 PIPELINE_ROUTES: dict[str, str] = {
     "brainstorming": "planner",
     "spec": "planner",
-    "plan": "planner",
+    "writing-plans": "planner",
     "spec-review": "reviewer",
-    "plan-review": "reviewer",
+    "plan-review": "plan_reviewer",
     "implement": "implementation",
     "implementation-review": "development_reviewer",
     "review-change": "development_reviewer",

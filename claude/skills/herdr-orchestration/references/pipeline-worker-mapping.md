@@ -13,7 +13,7 @@ This describes the **native** path -- `agent_runtime.resolve_route` plus
 `herdr_dispatch.launch`. It does **not** describe the legacy
 `herdr_orch_core.py` path that `run-mech` and `run-think` use today, which runs
 its own `ROLE_DEFAULTS` off `capabilities.json`, never calls `resolve_route`, and
-serves `opus/high` where the native path serves `opus/xhigh`. Reconciling the two
+serves `opus/high` where the native path now falls back to fable. Reconciling the two
 is tracked separately.
 
 ## Step to worker
@@ -21,11 +21,12 @@ is tracked separately.
 | Step                      | Role                 | Model / effort   | Runtime | Gate                                                       |
 | ------------------------- | -------------------- | ---------------- | ------- | ---------------------------------------------------------- |
 | isolated worktree         | dispatch harness     | --               | --      | auto                                                       |
-| brainstorming             | planner              | fable/high       | Claude  | HUMAN                                                      |
-| write spec                | planner              | fable/high       | Claude  | auto                                                       |
+| brainstorming             | planner              | opus/high        | Claude  | HUMAN                                                      |
+| write spec                | planner              | opus/high        | Claude  | auto                                                       |
 | codex-spec-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
-| writing-plans             | planner              | fable/high       | Claude  | auto                                                       |
-| codex-plan-review         | codex reviewer       | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
+| writing-plans             | planner              | opus/high        | Claude  | auto                                                       |
+| plan-review               | plan_reviewer        | fable/high       | Claude  | read-only sandbox, single pass                             |
+| codex-plan-review         | codex plan_reviewer  | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
 | implement                 | implementation       | sonnet/high      | Claude  | auto + per-task review                                     |
 | implement, UX/UI override | codex implementation | gpt-6-astra/high | Codex   | fresh Claude review before commit                          |
 | implementation review     | development_reviewer | sonnet/high      | Claude  | task-local advisory review; blockers return to development |
@@ -35,9 +36,18 @@ is tracked separately.
 | co-review, Codex half     | codex reviewer       | gpt-6-astra/high | Codex   | verify each finding                                        |
 | merge                     | gateway              | --               | --      | HUMAN                                                      |
 
-The planner's `fable/high` carries a configured `opus/xhigh` fallback for when
-fable is unavailable. One planning worker spans brainstorm, spec and plan --
-not three dispatches.
+The planner runs `opus/high` and falls back to fable at whichever quality floor
+applies -- `fable/high` normally, `fable/xhigh` under `difficulty=hard`. One
+planning worker spans brainstorm, spec and plan -- not three dispatches.
+
+Plan review is the one review step that does not share the `reviewer` role.
+`plan_reviewer` is `fable/high` with an `opus/high` fallback: fable's judgment
+is bought as a single bounded read-only pass over a finished plan instead of as
+the seat that authors it. Spec review and co-review stay `opus/high`.
+`plan_reviewer` is in neither `CRITICAL_ROLES` nor `DIFFICULTY_ROLES`, so
+`--risk critical` is refused on it; a plan that needs a heavier review is
+escalated with a recorded `--config-json` `routes` override on `plan_reviewer`,
+never by hand-picking `--role reviewer`.
 
 Native Codex `implementation-review` resolves the same
 `development_reviewer` role to `gpt-5.6-sol/high`. Dispatch this step through
@@ -81,8 +91,11 @@ documented to increase misjudgment.
 The design note this table came from disagreed with itself in twelve places.
 Each is resolved here, with the reason, so none is silently re-litigated.
 
-1. **Planner fallback is `opus/xhigh`, not `opus/high`.** Shipped in PR #108 and
-   live in `CLAUDE_FALLBACKS`. Losing the top tier is compensated, not absorbed.
+1. **The planner is `opus/high`, and its fallback is fable at the floor.**
+   Fable authoring loops are what exhausted a five-hour usage window on
+   2026-09-21; opus authors the artifact and fable reviews it once. Fable is a
+   peer tier, so the fallback swaps at the same effort rather than compensating
+   with `xhigh`.
 2. **The fallback attaches to the planner role**, so it covers brainstorm, spec
    and plan alike. One worker spans all three and cannot hold two policies.
 3. **Gateway effort is `medium`.** Shipped in PR #107. The open dial is closed by
@@ -91,9 +104,10 @@ Each is resolved here, with the reason, so none is silently re-litigated.
    it as an open question. A merged commit outranks an open dial.
 5. **Terra and Luna are never default-routed** in Claude-led work. They are
    reachable only as Astra's delegated implementers inside the Codex lane.
-6. **`CODEX_ROUTES` is unchanged; the UX/UI override is a config-level `routes`
-   override at dispatch.** That keeps one role table rather than two, and it is
-   already how the SKILL does it.
+6. **`CODEX_ROUTES` gains only `plan_reviewer`, at Astra's existing value, and
+   the UX/UI override is a config-level `routes` override at dispatch.** That
+   keeps one role table rather than two, and it is already how the SKILL does
+   it.
 7. **Reviewer is `opus/high` by default**, rising to `xhigh` under
    `risk=critical` or `difficulty=hard`. Defaults and escalations are different
    statements about the same role.

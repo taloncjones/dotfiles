@@ -55,7 +55,7 @@ import herdr_orch_core as core  # after the path insert; read-only helpers only
 GATED_ROLES = ("impl", "review")
 ROLE_NAMES = {
     "impl": {"impl", "implementation", "planner", "mechanical"},
-    "review": {"review", "reviewer", "skeptic", "development_reviewer"},
+    "review": {"review", "reviewer", "skeptic", "development_reviewer", "plan_reviewer"},
 }
 RECORD_SUFFIX = {"impl": ".done.json", "review": ".review.json"}
 CORE_CMD = 'python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.py"'
