@@ -4,7 +4,7 @@
   "commands": [
     {
       "name": "py-compile-co-review-scripts",
-      "run": "python3 -m py_compile claude/skills/co-review/scripts/review.py claude/skills/co-review/scripts/gate_report.py claude/skills/co-review/scripts/tests/test_review.py",
+      "run": "python3 -m py_compile claude/skills/co-review/scripts/review.py claude/skills/co-review/scripts/gate_report.py claude/skills/co-review/scripts/tests/test_review.py claude/skills/co-review/scripts/tests/test_adapter_flow.py",
       "timeout_secs": 60
     },
     {
@@ -15,6 +15,11 @@
     {
       "name": "new-tests-present",
       "run": "for t in test_frozen_diff_excludes_base_advancement test_changed_file_set_lists_both_sides_of_a_rename test_base_tip_readable_from_snapshot_after_owned_ref_is_gone test_pinned_run_ref_survives_prune test_out_of_diff_read_form_is_tree_scoped test_final_gate_documents_carry_stale_base_guards test_development_review_documents_carry_stale_base_guards; do grep -q \"def $t(\" claude/skills/co-review/scripts/tests/test_review.py || exit 1; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "adapter-flow-tests-present",
+      "run": "for t in test_approve_path_deletes_the_run_ref test_run_ref_removal_failure_invalidates_after_cleanup; do grep -q \"def $t(\" claude/skills/co-review/scripts/tests/test_adapter_flow.py || exit 1; done",
       "timeout_secs": 30
     },
     {
