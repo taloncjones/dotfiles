@@ -9,7 +9,7 @@
     },
     {
       "name": "review-suite",
-      "run": "sh claude/skills/co-review/scripts/tests/review_test.sh",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT sh claude/skills/co-review/scripts/tests/review_test.sh",
       "timeout_secs": 900
     },
     {
