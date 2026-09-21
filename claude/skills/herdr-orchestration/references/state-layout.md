@@ -334,7 +334,11 @@ or exits 3 (stale/absent), 4 (no survivor), or 5 (invalid role / malformed
 
 ### `tasks/<task_id>.json` -- durable task record
 
-Written only by the owning director, via `$CORE write-task`.
+Written by the owning director via `$CORE write-task`, and -- for binding-scoped
+records -- by `$CORE reserve-dispatch` and `$CORE enrich-dispatch`, which own
+introducing and mutating worker rows respectively. (`herdr_dispatch.py` also
+writes launcher-scope records directly; reconciling that claim is the separate
+sole-writer todo.)
 
 ```json
 {
@@ -430,12 +434,31 @@ list is accepted. On the binding-scoped path neither route works and
 `teardown-binding` refuses before `--descendants-terminated` is consulted, so
 the record must be repaired on disk first.
 
-A refused dispatch row records nothing. Panes are dispatched before their row
-is written, so a `write-task` that exits 2 on a worker row leaves a live pane
-with no entry in the task record -- and `outstanding_descendants` is teardown's
-only evidence of descendants. Terminate the pane or correct and re-write the
-row before tearing the binding down; teardown cannot see an attempt that was
-never recorded.
+A refused dispatch row cannot hide a live pane. `reserve-dispatch` introduces
+bound worker rows and `enrich-dispatch` mutates the current one. A lead reserves
+its attempt under the owner transaction after the pane exists and before it
+starts an agent, so a later `write-task` that exits 2 cannot erase the evidence:
+dispatch history is append-only, the reserved row survives the refusal, and
+`outstanding_descendants` still reports its pane.
+
+`reserve-dispatch` refuses an attempt identity that a settlement record already
+matches, because `outstanding_descendants` gates on the FINAL row alone: a
+settled identity re-appended as that row reports a live successor's pane as
+already settled, and teardown would release the lease over it. An UNSETTLED
+repeat is allowed -- that is a legitimate re-dispatch back to a prior head.
+
+**Bound `write-task` is not settlement-aware and does not enforce this.** It
+still carries rows forward under the append-only prefix and the native row
+rule, so re-appending a settled identity through `write-task` directly does
+empty the outstanding set and does release the lease over a live pane. Closing
+that needs a settlement-aware writer contract; it is tracked separately and is
+not fixed by the reservation work.
+
+A reservation whose lead died before it could settle blocks both
+`teardown-binding` and `reconcile-leads` until an operator passes
+`--descendants-terminated`. That is deliberate: `emit-done --binding` requires a
+live, registry-corroborated lead lease, so no other actor can settle on a dead
+lead's behalf.
 
 Planning has a separate `plan_artifacts` list in both task and completion:
 exactly one `spec` and one `plan`, each with absolute `path` and `sha256`.

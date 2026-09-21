@@ -2087,6 +2087,19 @@ def _native_worker_row(row) -> bool:
     return all(_nonempty_str(row.get(key)) for key in ATTEMPT_FIELDS)
 
 
+def _attempt_tuple(row):
+    """The native identity of a worker row, or None when it is legacy.
+
+    outstanding_descendants gates on the FINAL row alone, so a SETTLED
+    identity re-appended as that row reports a live successor's pane as
+    already settled. reserve-dispatch refuses only that case; an unsettled
+    repeat is a legitimate re-dispatch to a prior head."""
+    if not isinstance(row, dict):
+        return None
+    values = tuple(row.get(key) for key in ATTEMPT_FIELDS)
+    return values if all(_nonempty_str(value) for value in values) else None
+
+
 PRIOR_ABSENT = object()
 PRIOR_CORRUPT = object()
 
@@ -2518,6 +2531,21 @@ def _main(argv=None) -> int:
     add("check-fence", "--session", "--fence")
     wt = add("write-task", "--task-id", "--json", fenced=True)
     wt.add_argument("--binding", default=None)
+    rsv = add("reserve-dispatch", "--task-id", "--launch-id", "--phase",
+              "--workspace-id", "--pane-id", "--source-head-sha", fenced=True)
+    # Required, unlike write-task's optional --binding: _fenced_scoped falls
+    # through to LAUNCHER scope when it is absent, and a launcher-scope row
+    # written here would bypass every herdr_dispatch validation.
+    rsv.add_argument("--binding", required=True)
+    for optional in ("--role", "--agent", "--model", "--effort"):
+        rsv.add_argument(optional, default=None)
+    # The FULL identity, not just --launch-id: launch_ids are not unique, so a
+    # replayed enrichment keyed on one alone lands on whichever attempt is
+    # current and mislabels it.
+    enr = add("enrich-dispatch", "--task-id", "--launch-id", "--phase",
+              "--workspace-id", "--pane-id", "--source-head-sha", "--json",
+              fenced=True)
+    enr.add_argument("--binding", required=True)
     wi = add("write-index", "--workspace", "--json", fenced=True)
     wi.add_argument("--binding", default=None)
     add("write-capabilities", "--json", fenced=True)
@@ -2709,6 +2737,159 @@ def _main(argv=None) -> int:
             rec["workers"] = resolve_task_workers(rec, prior, bound)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
+            return 0
+    if ns.cmd == "reserve-dispatch":
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(valid_workspace_id(ns.workspace_id), "invalid workspace-id")
+        _require(ns.phase in DESCENDANT_PHASES,
+                 f"phase must be one of {'|'.join(DESCENDANT_PHASES)}")
+        _require(ns.runtime is not None, "a reservation requires --runtime")
+        _require(bool(SHA40_RE.fullmatch(ns.source_head_sha or "")),
+                 "source-head-sha must be 40 hex characters")
+        # Append-only means a bad pane id can never be removed, and the
+        # <unreadable> sentinel it can produce is deliberately NOT overridden
+        # by --descendants-terminated: one typo would leave the binding
+        # tearable only by on-disk repair.
+        _require(bool(SHELL_SAFE_RE.fullmatch(ns.pane_id or "")),
+                 "pane-id must be shell-safe")
+        _require(bool(SHELL_SAFE_RE.fullmatch(ns.launch_id or "")),
+                 "launch-id must be shell-safe")
+        with _fenced_scoped(ns) as (rd, base):
+            require_not_consumed(rd, ns.binding)
+            # Pin the task to the binding, as emit-envelope and emit-artifacts
+            # do: outstanding_descendants scans every task file in the lead
+            # subtree, so a row under a stray task id blocks teardown for a
+            # task this binding does not own. This closes the path through
+            # THIS verb only -- bound write-task is still unpinned, so the
+            # shape stays reachable there (tracked with the other writer
+            # residuals).
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(ns.task_id == rec_b["task_id"],
+                     "reservation task does not match the binding")
+            dest = base / "tasks" / f"{ns.task_id}.json"
+            prior = read_prior_task(dest)
+            _require(prior is not PRIOR_ABSENT,
+                     "no task record; write the task record before reserving")
+            _require(prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
+                     "bound task record is malformed; reserve-dispatch "
+                     "cannot repair it")
+            # write-task validates this on the submitted payload; this verb
+            # reads the record from disk, so it must check the record itself.
+            _require(prior.get("task_id") == ns.task_id,
+                     "task record task_id does not match --task-id")
+            row = {
+                "launch_id": ns.launch_id,
+                "phase": ns.phase,
+                "runtime": ns.runtime,
+                "workspace_id": ns.workspace_id,
+                "pane_id": ns.pane_id,
+                "source_head_sha": ns.source_head_sha,
+            }
+            for name in ("role", "agent", "model", "effort"):
+                value = getattr(ns, name)
+                if value is not None:
+                    row[name] = value
+            _require(_native_worker_row(row),
+                     "reservation is not a native dispatch row")
+            workers = prior["workers"]
+            identity = _attempt_tuple(row)
+            if any(_attempt_tuple(worker) == identity for worker in workers):
+                # Re-dispatching to an earlier head is legitimate -- a review
+                # detour returns to a prior SHA. Only a SETTLED identity is
+                # unsafe: outstanding_descendants empties only when the final
+                # row is settled, so reserving one again would hide the live
+                # pane it names.
+                #
+                # This covers the CURRENT row too, not just earlier ones. A
+                # settled workers[-1] means the identity is being reused for a
+                # new dispatch, not replayed -- treating that as an idempotent
+                # retry would record nothing and blind teardown to the pane
+                # the caller is about to start.
+                try:
+                    settle = json.loads(read_payload_text(
+                        base / "tasks" / f"{ns.task_id}{_SETTLE_SUFFIX[ns.phase]}"
+                    ))
+                except FileNotFoundError:
+                    # A vanished payload dir must not read as "unsettled",
+                    # which would let the reservation through.
+                    coordination.assert_transaction_current()
+                    settle = None
+                except (OSError, ValueError, RecursionError):
+                    # RecursionError for the same reason read_prior_task
+                    # catches it: deeply nested JSON must exit 2, not traceback.
+                    _require(False, "settlement record is unreadable")
+                _require(not _attempt_settled(row, settle),
+                         "attempt identity is already settled; reserving it "
+                         "again would hide a live pane from teardown")
+                # Unsettled and already the current row: the crashed-lead
+                # retry. Succeed writing nothing, so one pane is never
+                # counted twice.
+                if _attempt_tuple(workers[-1]) == identity:
+                    return 0
+            create_payload_dir(base / "tasks")
+            write_json_atomic(dest, {**prior, "workers": [*workers, row]})
+            return 0
+    if ns.cmd == "enrich-dispatch":
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        try:
+            updates = json.loads(ns.json)
+        except ValueError:
+            updates = None
+        _require(isinstance(updates, dict) and bool(updates),
+                 "enrichment json must be a non-empty JSON object")
+        # Identity preservation is structural: the identity keys are never in
+        # the update, so every gate reading ATTEMPT_FIELDS observes an
+        # unchanged value without any comparison having to be right.
+        #
+        # The cost: every OTHER field of a bound workers[-1] is mutable, so no
+        # gate may key on one. Nothing does today -- the readers that use
+        # `status` or `reprompts` read launcher-scope rd/tasks/ -- and a new
+        # bound-path fact belongs in the identity tuple or a settlement
+        # record, never here.
+        _require(not set(updates) & set(ATTEMPT_FIELDS),
+                 "an enrichment may not name an attempt identity field")
+        # Record-level keys belong to the task, not to one attempt. A row
+        # carrying its own task_id/repo_slug/worktree makes scratch_policy's
+        # _audit_target return None, which drops the audit entry silently
+        # while leaving the permission decision unchanged.
+        _require(not set(updates) & {"task_id", "repo_slug", "worktree"},
+                 "an enrichment may not name a task record field")
+        # Scalars only: a list or object here reaches readers that expect a
+        # string (a non-ROLE_NAMES role already blinds the stop gate).
+        _require(
+            all(value is None or isinstance(value, (str, int, float, bool))
+                for value in updates.values()),
+            "enrichment values must be scalars",
+        )
+        with _fenced_scoped(ns) as (rd, base):
+            require_not_consumed(rd, ns.binding)
+            rec_b = bindings.read_binding(rd, ns.binding)
+            _require(rec_b is not None, "unknown dispatch binding")
+            _require(ns.task_id == rec_b["task_id"],
+                     "enrichment task does not match the binding")
+            dest = base / "tasks" / f"{ns.task_id}.json"
+            prior = read_prior_task(dest)
+            _require(prior is not PRIOR_ABSENT, "no task record to enrich")
+            _require(prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
+                     "bound task record is malformed; enrich-dispatch "
+                     "cannot repair it")
+            _require(prior.get("task_id") == ns.task_id,
+                     "task record task_id does not match --task-id")
+            workers = prior["workers"]
+            _require(bool(workers), "task record has no dispatch row to enrich")
+            _require(
+                _attempt_tuple(workers[-1]) == (
+                    ns.launch_id, ns.phase, ns.runtime, ns.workspace_id,
+                    ns.pane_id, ns.source_head_sha,
+                ),
+                "attempt identity is not the current attempt",
+            )
+            # Built from the record on disk, never from a caller's copy.
+            updated = {**workers[-1], **updates}
+            _require(_native_worker_row(updated),
+                     "enrichment would produce a row its readers reject")
+            write_json_atomic(dest, {**prior, "workers": [*workers[:-1], updated]})
             return 0
     if ns.cmd == "write-index":
         with _fenced_scoped(ns) as (rd, base):

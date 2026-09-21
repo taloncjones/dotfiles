@@ -722,7 +722,7 @@ also avoids wasting work and preserves one live reviewer per task.
    and run `herdr pane close <recorded-pane>`. Never use `release-agent` as an
    interrupt and never close the workspace. Use `$CORE write-task` to carry the
    full task record forward with `status: changes-requested`, report `review incomplete: 600-second
-   deadline, <launch_id>`, and never fabricate a review record, blocker count,
+deadline, <launch_id>`, and never fabricate a review record, blocker count,
    or approval. A late sidecar cannot change that non-approved status. Herd's
    interactive start timeout bounds startup, not a running agent turn; exact-pane
    close is the controller's available interruption. If it cannot confirm the
@@ -1205,6 +1205,44 @@ accept` on the director launch line safe. The hook side posts only a
   closed-vocabulary line, only to a canonical `cc-socks` socket owned by this
   uid whose basename pid matches `owner.json`, never with a token, never to
   its own socket, within a 2s budget, failing open.
+
+## Lead worker dispatch (binding-scoped)
+
+Four steps, in this order. The bootstrap step is not optional:
+`reserve-dispatch` requires the task record to exist, and a missing record
+reads as absent rather than empty.
+
+1. `write-task --binding <bid> --task-id <t> --json '{"task_id":"<t>", ...}'`
+   with `workers` omitted or `[]`, creating the record.
+2. `reserve-dispatch --binding <bid> --task-id <t> --launch-id <id> --phase
+<plan|implement|review> --runtime <claude|codex> --workspace-id <w>
+--pane-id <p> --source-head-sha <40hex>`, after the pane exists and BEFORE
+   starting an agent in it. Optionally `--role --agent --model --effort`.
+3. Start the agent in that pane.
+4. `enrich-dispatch --binding <bid> --task-id <t>` plus the SAME full identity
+   you reserved (`--launch-id --phase --runtime --workspace-id --pane-id
+--source-head-sha`) and `--json '{"peer_name":"..."}'`, for facts
+   discovered after launch. The update may not name an identity field; the
+   identity is how the verb finds the row, and it must equal the current
+   attempt. Passing the full tuple is what stops a replayed enrichment from
+   landing on a later attempt that happens to share a `launch_id`.
+
+Reserving before the agent starts is what makes teardown safe: a `write-task`
+refused afterwards cannot erase the row, so `outstanding_descendants` still
+sees the pane and `teardown-binding --abandon` refuses instead of releasing the
+lease over a live worker. Skipping step 2 reintroduces that fail-open.
+
+Re-dispatch appends a new reservation. **Mint a fresh `launch_id` for every new
+dispatch**, as the mech relaunch rule above already requires. Nothing enforces
+uniqueness, so reuse is accepted where the rest of the identity differs -- a
+review detour returning to a prior head, for instance -- but reusing one for a
+genuinely new pane makes the record harder to read for no benefit.
+
+Two repeats are handled differently. An exact repeat of the current row, while
+that attempt is unsettled, is the crashed-lead retry: it succeeds and writes
+nothing, so one pane is never counted twice. A repeat of any identity that a
+settlement record already matches is refused, because it would arrive already
+settled and hide the pane it names from teardown.
 
 ## Rolling back task leads
 

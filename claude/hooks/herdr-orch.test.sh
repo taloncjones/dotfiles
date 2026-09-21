@@ -8054,5 +8054,458 @@ if python3 claude/hooks/herdr_orch_core.py activate-task-leads 2>/dev/null; then
 if grep -qE '"enabled"[[:space:]]*:[[:space:]]*True' claude/hooks/herdr_orch_core.py; then exit 1; fi
 SH
 
+check "reserve-dispatch: a settled identity cannot be reserved again; an unsettled one can" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-dup-tuple.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-dup \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+H2=$(printf 'b%.0s' $(seq 1 40))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-dup.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
+   --json '{"task_id":"td-dup","workers":[]}'
+# A review detour: dispatch at H, advance to H2, then return to H. The
+# returning row repeats H's identity but nothing has settled it, so it is a
+# legitimate re-dispatch and must be appended (the :4405 shape).
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H"
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H2"
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+shas = [w["source_head_sha"] for w in rec["workers"]]
+assert len(shas) == 3 and shas[0] == shas[2] and shas[0] != shas[1], rec
+' "$TASK"
+# Now settle the current (H) review attempt. Re-reserving that exact identity
+# is then refused: it would arrive already settled and empty the outstanding
+# set while pane2 is live.
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
+   --json '{"task_id":"td-dup","review_head_sha":"'"$H"'","base_sha":"'"$H"'","workers":['"$(python3 -c '
+import json, sys
+print(json.dumps(json.load(open(sys.argv[1]))["workers"])[1:-1])
+' "$TASK")"']}'
+CLAUDE_CONFIG_DIR="$root" $CLI emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-dup --workspace w2 \
+   --agent rev-td-dup --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$H" \
+   --blocking-count 0 --runtime claude --launch-id L2 --pane-id pane2 \
+   --source-head-sha "$H" --reviewer-session R1
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H2" 2>/dev/null; then :; else exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-dup \
+   --launch-id L2 --phase review --runtime claude --workspace-id w2 \
+   --pane-id pane2 --source-head-sha "$H" 2>"$ERRFILE"; then exit 1; fi
+grep -q "already settled" "$ERRFILE"
+SH
+
+
+check "reserve-dispatch: appends a native row, idempotent on exact replay" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-reserve.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-r \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+SHA40B=$(printf 'b%.0s' $(seq 1 40))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-r.json"
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-r \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "no task record" "$ERRFILE"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-r \
+   --json '{"task_id":"td-r","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-r \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --role mech --agent mech-td-r
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert len(rec["workers"]) == 1, rec
+w = rec["workers"][0]
+assert w["launch_id"] == "L1" and w["pane_id"] == "pane1", w
+assert w["role"] == "mech" and w["agent"] == "mech-td-r", w
+' "$TASK"
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>"$ERRFILE"; then exit 1; fi
+grep -q "outstanding descendants" "$ERRFILE"
+grep -q "pane1" "$ERRFILE"
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-r \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+python3 -c '
+import json, sys
+assert len(json.load(open(sys.argv[1]))["workers"]) == 1
+' "$TASK"
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-r \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert [w["pane_id"] for w in rec["workers"]] == ["pane1", "pane2"], rec
+' "$TASK"
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-r \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40B"
+# Repeating pane1's earlier identity is allowed while nothing has settled it:
+# that is a legitimate re-dispatch back to a prior head. (The settled case is
+# refused -- see the settled-identity check.)
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-r \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+panes = [w["pane_id"] for w in rec["workers"]]
+assert panes == ["pane1", "pane2", "pane2", "pane1"], rec
+' "$TASK"
+SH
+
+check "reserve-dispatch: input and scope guards" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-reserve-guard.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-g \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --json '{"task_id":"td-g","workers":[]}'
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase nonsense --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "phase must be one of" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id 'w-1' \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "invalid workspace-id" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha notasha 2>"$ERRFILE"; then exit 1; fi
+grep -q "source-head-sha must be 40 hex" "$ERRFILE"
+# An unparseable pane id would produce the <unreadable> sentinel, which
+# --descendants-terminated deliberately does not override and append-only
+# cannot remove: the binding would be tearable only by on-disk repair.
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id '<unreadable>' --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "pane-id must be shell-safe" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id 'bad id' --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "launch-id must be shell-safe" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id '' --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence 99 --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>/dev/null; then exit 1; fi
+python3 -c '
+import json, sys
+p = sys.argv[1]
+rec = json.load(open(p)); rec["task_id"] = "other"; json.dump(rec, open(p, "w"))
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-g.json"
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-g \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "task_id" "$ERRFILE"
+SH
+
+check "enrich-dispatch: identity-preserving update of the current attempt" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-enrich.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-e \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+TASK="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-e.json"
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --json '{"task_id":"td-e","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+BEFORE=$(CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys; sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+print(core.outstanding_descendants(core.repo_dir(sys.argv[1]), sys.argv[2]))
+' "$LF_SLUG" "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"peer_name":"impl-td-e"}'
+AFTER=$(CLAUDE_CONFIG_DIR="$root" python3 -c '
+import sys; sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as core
+print(core.outstanding_descendants(core.repo_dir(sys.argv[1]), sys.argv[2]))
+' "$LF_SLUG" "$bid")
+[ "$BEFORE" = "$AFTER" ]
+[ "$BEFORE" = "['pane1']" ]
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert len(rec["workers"]) == 1, rec
+w = rec["workers"][0]
+assert w["peer_name"] == "impl-td-e", w
+assert w["launch_id"] == "L1" and w["pane_id"] == "pane1", w
+' "$TASK"
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"pane_id":"pane9"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "identity field" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id NOPE --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"peer_name":"x"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "not the current attempt" "$ERRFILE"
+# A replayed enrichment must NOT land on a later attempt that reuses the
+# launch_id: the full identity is what finds the row.
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" --json '{"peer_name":"stale"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "not the current attempt" "$ERRFILE"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert rec["workers"][-1]["pane_id"] == "pane2", rec
+assert "peer_name" not in rec["workers"][-1], rec
+' "$TASK"
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-e \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '[]' 2>/dev/null; then exit 1; fi
+SH
+
+
+check "teardown fail-open: settled I1, running I2, refused publication" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-failopen.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-fo \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-fo \
+   --json '{"task_id":"td-fo","workers":[]}'
+# I1 is reserved, dispatched, and settles.
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-fo \
+   --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+CLAUDE_CONFIG_DIR="$root" $CLI emit-done \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-fo --workspace w1 \
+   --agent impl-td-fo --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --runtime claude --launch-id I1 --pane-id pane1 --source-head-sha "$SHA40"
+# I2 is reserved and its pane goes live.
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-fo \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
+# The lead publishes a further row that the ROW RULE refuses: it omits
+# pane_id. The payload carries the full reserved prefix, so the append-only
+# check passes and the row rule is what fires -- the exact refusal the source
+# todo names as the cause of the fail-open.
+I1ROW='{"launch_id":"I1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane1","source_head_sha":"'"$SHA40"'"}'
+I2ROW='{"launch_id":"I2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"pane2","source_head_sha":"'"$SHA40"'"}'
+if CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-fo \
+   --json '{"task_id":"td-fo","workers":['"$I1ROW"','"$I2ROW"',{"phase":"implement","launch_id":"I3","runtime":"claude","workspace_id":"w1","source_head_sha":"'"$SHA40"'"}]}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "must be native dispatch rows" "$ERRFILE"
+# The reservation survives the refusal, so teardown must REFUSE, naming pane2.
+if CLAUDE_CONFIG_DIR="$root" $CLI teardown-binding \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --binding "$bid" --abandon 2>"$ERRFILE"; then exit 1; fi
+grep -q "outstanding descendants" "$ERRFILE"
+grep -q "pane2" "$ERRFILE"
+python3 -c '
+import json, sys
+assert json.load(open(sys.argv[1]))["status"] == "claimed", "lease must NOT be released"
+' "$root/herdr-orch/$LF_SLUG/bindings/$bid.json"
+SH
+
+check "reconcile-leads defers release while a RESERVED descendant is outstanding" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rl-reserved.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","workers":[]}'
+# The row arrives by reservation, not by write-task.
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --launch-id L1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+KEY=$(python3 -c '
+import os, sys; sys.path.insert(0, "claude/hooks")
+import herdr_coordination as coordination
+print(coordination.lead_lease_key(os.path.realpath(sys.argv[1])))' "$LF_WS")
+python3 -c '
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec["heartbeat_ts"] = 0
+json.dump(rec, open(path, "w"))
+' "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json"
+f2=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L2 --host h --pid 3 --stale-secs 0)
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "needs-descendant-termination", rows
+' "$bid"
+[ -e "$HERDR_COORDINATION_ROOT/$LF_SLUG/lead-$KEY.json" ] || exit 1
+out=$(CLAUDE_CONFIG_DIR="$root" $CLI reconcile-leads --repo-slug "$LF_SLUG" --session L2 --fence "$f2" --apply --descendants-terminated)
+printf '%s' "$out" | python3 -c '
+import json, sys
+rows = {r["binding_id"]: r for r in json.loads(sys.stdin.read())["bindings"]}
+assert rows[sys.argv[1]]["action"] == "released", rows
+' "$bid"
+SH
+
+
+check "reserve-dispatch: a settled CURRENT row is not an idempotent replay" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-f1.git
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" $CLI issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-f1 \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" $CLI claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" $CLI write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --json '{"task_id":"td-f1","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40"
+# The attempt settles. Its identity is now the CURRENT row and settled.
+CLAUDE_CONFIG_DIR="$root" $CLI emit-done \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-f1 --workspace w1 \
+   --agent impl-td-f1 --phase implement --outcome completed --head-sha h1 --base-sha b0 \
+   --runtime claude --launch-id I1 --pane-id pane1 --source-head-sha "$SHA40"
+# Reusing that exact identity for a NEW dispatch must NOT be swallowed as a
+# retry: writing nothing would leave the pane the caller is about to start
+# invisible to teardown.
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "already settled" "$ERRFILE"
+# An UNSETTLED current row still replays idempotently.
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
+CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40"
+python3 -c '
+import json, sys
+rec = json.load(open(sys.argv[1]))
+assert [w["launch_id"] for w in rec["workers"]] == ["I1", "I2"], rec
+' "$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-f1.json"
+# A reservation whose task does not match the binding is refused.
+if CLAUDE_CONFIG_DIR="$root" $CLI reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-other \
+   --launch-id I3 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane3 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match the binding" "$ERRFILE"
+# The same pin on enrich-dispatch.
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-other \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '{"peer_name":"x"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "does not match the binding" "$ERRFILE"
+# Enrichment payload constraints: record-level keys and non-scalars refused.
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '{"task_id":"OTHER"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "task record field" "$ERRFILE"
+if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" --task-id td-f1 \
+   --launch-id I2 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id pane2 --source-head-sha "$SHA40" --json '{"role":["not","a","string"]}' 2>"$ERRFILE"; then exit 1; fi
+grep -q "must be scalars" "$ERRFILE"
+SH
+
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
