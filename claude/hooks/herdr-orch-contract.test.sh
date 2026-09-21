@@ -6,6 +6,9 @@
 set -e
 # herdr pane identity must not leak in from a herdr-hosted run
 unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
+# The account-routing wrapper replay reads WORKFLOW_PERSONAL_ACCOUNT directly;
+# a herdr pane's operator-quota flag must not steer the replayed CFG choice.
+unset WORKFLOW_PERSONAL_ACCOUNT
 # Use physical macOS temp paths so strict no-follow state traversal is tested.
 TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))'); export TMPDIR
 PASS=0; FAIL=0
