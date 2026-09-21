@@ -1008,6 +1008,44 @@ class ReviewHelperTests(unittest.TestCase):
         )
         self.assertNotEqual(escaped.returncode, 0)
 
+    def test_final_gate_documents_carry_stale_base_guards(self) -> None:
+        adapter_phrases = (
+            "diff --name-only --no-renames",
+            "headRefOid,changedFiles,files",
+            "resolve-base",
+            "base-context.json",
+            "refs/co-review-run/",
+            "update-ref -d",
+            "stale-base artifact",
+        )
+        required = {
+            "claude/skills/co-review/SKILL.md": adapter_phrases,
+            "codex/skills/co-review/SKILL.md": adapter_phrases,
+            "claude/skills/ship/SKILL.md": ("stale-base artifact",),
+            "claude/operating-principles.md": (
+                "three-dot", "changed-file set", "stale-base artifact",
+                "discard", "git show",
+            ),
+        }
+        for relative, phrases in required.items():
+            content = (DOTFILES_ROOT / relative).read_text()
+            for phrase in phrases:
+                with self.subTest(document=relative, phrase=phrase):
+                    self.assertIn(phrase, content)
+            if relative.endswith("co-review/SKILL.md"):
+                self.assertNotIn("jq ", content)
+        policy = subprocess.run(
+            [sys.executable, str(GATE_REPORT), "policy", "--section", "POLICY"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for phrase in (
+            "three-dot", "changed-file set", "--no-renames",
+            "stale-base artifact", "git show <base_tip>:<path>", "affected caller",
+        ):
+            with self.subTest(policy_phrase=phrase):
+                self.assertIn(phrase, policy)
+        self.assertNotIn("git diff origin/main", policy)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
