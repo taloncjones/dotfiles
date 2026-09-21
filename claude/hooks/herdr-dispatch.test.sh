@@ -1548,6 +1548,25 @@ def test_dispatch_entrypoint_preserves_machine_readable_cli_contract():
         "reason": "native-queue-not-smoke-validated",
         "status": "unsupported",
     }, process.stdout
+    for command in ("launch", "inspect"):
+        help_text = subprocess.run(
+            [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), command, "--help"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert "--binding" in help_text, (command, help_text)
+    # No --help here: argparse's help action exits 0 before it reports an
+    # unrecognized flag, so the rejection is only observable without it.
+    # argparse also checks required arguments before unrecognized ones, so
+    # every other required reprompt flag must be present or the "unrecognized
+    # arguments" error never fires.
+    rejected = subprocess.run(
+        [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), "reprompt",
+         "--repo-slug", "r", "--task-id", "t", "--session", "s",
+         "--workspace-id", "w1", "--launch-id", "l", "--phase", "implement",
+         "--cwd", ".", "--prompt-file", "p", "--fence", "1", "--binding", "x"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rejected.returncode == 2 and "unrecognized arguments" in rejected.stderr, rejected
 
 
 def test_reprompt_cli_subcommand_reaches_the_function():
@@ -2128,6 +2147,54 @@ def test_bound_prechecks_refuse_before_any_herdr_call():
         fixture.close()
 
 
+def test_inspect_binding_reads_lead_subtree():
+    fixture = LeadFixture()
+    try:
+        result = fixture.launch()
+        row = fixture.bound_workers()[-1]
+        bound = herdr_dispatch.inspect(
+            fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws,
+            runtime="codex", binding=fixture.binding,
+        )
+        assert bound["current_attempt"]["launch_id"] == result["launch_id"], bound
+        assert bound["completion_candidate"] is False, bound
+        # The launcher-scope inspect must pass _validate_task_context against
+        # the lead worktree, so point the launcher record there first; its
+        # workers list stays empty because the bound launch never wrote to it.
+        fixture.task_file.write_text(
+            json.dumps(bound_task_record(fixture, fixture.lead_context))
+        )
+        launcher = herdr_dispatch.inspect(
+            fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws, runtime="codex",
+        )
+        assert launcher["current_attempt"] is None, launcher
+        fixture.core(
+            "emit-done", "--binding", fixture.binding, "--task-id", "td-a",
+            "--workspace", "w1", "--agent", "impl-td-a", "--phase", "implement",
+            "--outcome", "completed", "--head-sha", fixture.lead_context["head"],
+            "--base-sha", fixture.lead_context["head"], "--runtime", "codex",
+            "--launch-id", row["launch_id"], "--pane-id", "w1:p1",
+            "--source-head-sha", row["source_head_sha"], repo_path=fixture.lead_ws,
+        )
+        bound = herdr_dispatch.inspect(
+            fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws,
+            runtime="codex", binding=fixture.binding,
+        )
+        assert bound["result_matches_attempt"] is True, bound
+        assert bound["completion_candidate"] is True, bound
+        try:
+            herdr_dispatch.inspect(
+                fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws,
+                runtime="codex", binding="ldb-" + "0" * 32,
+            )
+        except herdr_dispatch.DispatchError as exc:
+            assert "unknown or corrupt dispatch binding" in str(exc), exc
+        else:
+            raise AssertionError("inspect accepted an unknown binding")
+    finally:
+        fixture.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -2194,6 +2261,7 @@ for name, test in (
     ("bound cross-scope fences refuse before start", test_bound_cross_scope_fences_refuse_before_start),
     ("bound start failure keeps the pane outstanding until re-dispatch", test_bound_start_failure_keeps_pane_outstanding_until_redispatch),
     ("bound prechecks refuse before any herdr call", test_bound_prechecks_refuse_before_any_herdr_call),
+    ("inspect --binding reads the lead subtree", test_inspect_binding_reads_lead_subtree),
 ):
     check(name, test)
 
