@@ -31,7 +31,7 @@ import herdr_coordination as coordination
 import herdr_envelope as envelope
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
-from workflow_context import account_scope, atomic_json_at, repository_context
+from workflow_context import account_scope, atomic_json_at, open_state_parent, repository_context
 from workflow_context import git as context_git
 
 _PAYLOAD_SELECTION = contextvars.ContextVar("herdr_payload_selection", default=None)
@@ -106,6 +106,55 @@ TASK_RECORD_MAX_BYTES = 2_000_000
 
 def _nonempty_str(v) -> bool:
     return isinstance(v, str) and bool(v.strip())
+
+
+FINDINGS_MAX_BYTES = 4 * 1024 * 1024
+_FINDINGS_UNREADABLE = "is not a readable regular file"
+
+
+def findings_bytes(value, root):
+    """Content of a findings file usable as review evidence.
+
+    Absolute, no '..', contained under root (the orchestration state root),
+    opened no-follow as a regular file, bounded, not blank. Raises
+    ValueError with the reason otherwise. Reads through open_state_parent
+    directly rather than read_payload_bytes: the latter asserts the owner
+    transaction, and a coordination fence failure must surface as itself,
+    never as missing evidence."""
+    if not _nonempty_str(value):
+        raise ValueError("must be a non-empty string")
+    if not os.path.isabs(value) or ".." in Path(value).parts:
+        raise ValueError("must be an absolute path without '..'")
+    if not contained(value, root):
+        raise ValueError("must be under the orchestration state root")
+    try:
+        parent, name = open_state_parent(coordination.payload_path(value))
+    except (OSError, ValueError):
+        raise ValueError(_FINDINGS_UNREADABLE) from None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError(_FINDINGS_UNREADABLE)
+            content = stream.read(FINDINGS_MAX_BYTES + 1)
+    except OSError:
+        raise ValueError(_FINDINGS_UNREADABLE) from None
+    finally:
+        os.close(parent)
+    if len(content) > FINDINGS_MAX_BYTES:
+        raise ValueError("is too large")
+    if not content.strip():
+        raise ValueError("is empty")
+    return content
+
+
+def findings_ref_error(value, root):
+    """Reason a findings reference is unusable, else None."""
+    try:
+        findings_bytes(value, root)
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 
 def validate_contract(rec, task_id):

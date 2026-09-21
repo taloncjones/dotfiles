@@ -127,6 +127,34 @@ assert not c.valid_task_id("../evil") and not c.valid_task_id("a/b") and not c.v
 sys.exit(0)
 PY
 
+check "findings_ref_error table" <<PY
+$LOAD
+d=os.path.realpath(tempfile.mkdtemp())
+ok=os.path.join(d,"f.md"); open(ok,"w").write("No blocking findings. Inspected: fixture.\n")
+empty=os.path.join(d,"e.md"); open(empty,"w").close()
+ws=os.path.join(d,"w.md"); open(ws,"w").write(" \n\t")
+ln=os.path.join(d,"l.md"); os.symlink(ok,ln)
+dangling=os.path.join(d,"gone.md"); os.symlink(os.path.join(d,"nope.md"),dangling)
+fifo=os.path.join(d,"p.md"); os.mkfifo(fifo)
+big=os.path.join(d,"big.md"); open(big,"wb").write(b"x"*(c.FINDINGS_MAX_BYTES+1))
+noperm=os.path.join(d,"np.md"); open(noperm,"w").write("x"); os.chmod(noperm,0)
+outside=os.path.realpath(tempfile.mkdtemp()); out=os.path.join(outside,"o.md"); open(out,"w").write("x")
+assert c.findings_ref_error(ok,d) is None and c.findings_bytes(ok,d).startswith(b"No blocking")
+assert c.findings_ref_error(None,d)=="must be a non-empty string"
+assert c.findings_ref_error("  ",d)=="must be a non-empty string"
+assert c.findings_ref_error("relative/f.md",d)=="must be an absolute path without '..'"
+assert c.findings_ref_error(os.path.join(d,"..","f.md"),d)=="must be an absolute path without '..'"
+assert c.findings_ref_error(out,d)=="must be under the orchestration state root"
+for bad in (ln,dangling,fifo,d,os.path.join(d,"missing.md")):
+    assert c.findings_ref_error(bad,d)=="is not a readable regular file", bad
+if os.geteuid()!=0:
+    assert c.findings_ref_error(noperm,d)=="is not a readable regular file"
+assert c.findings_ref_error(big,d)=="is too large"
+assert c.findings_ref_error(empty,d)=="is empty"
+assert c.findings_ref_error(ws,d)=="is empty"
+sys.exit(0)
+PY
+
 check "agent_name herdr-compliant, bounded, unique" <<PY
 $LOAD
 n=c.agent_name("impl","PROJ-123")
