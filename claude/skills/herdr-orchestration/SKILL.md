@@ -139,7 +139,7 @@ for the provider's `launch_env` mapping.
    message; triage/status still work read-only where possible.
 5. **Selected-runtime readiness (owner only, after config validation).**
    New native Claude and Codex dispatches use the selected runtime's resolver:
-   `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|development_reviewer|read_only|mechanical|think> --risk <normal|critical>`.
+   `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|plan_reviewer|development_reviewer|read_only|mechanical|think> --risk <normal|critical>`.
    Step-to-worker defaults and the two effort-raising axes are in
    `references/pipeline-worker-mapping.md`.
    Inspect the returned readiness and capability evidence before dispatch;
@@ -824,7 +824,7 @@ role).
 
 | Role / phase               | Preference (first available wins) | Effort               | Notes                                                                                                                                                 |
 | -------------------------- | --------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Director                   | fable -> opus                     | low/med              | routine coordination; model set at session launch (advisory, not enforceable via `agent start`)                                                       |
+| Director                   | opus                              | low/med              | routine coordination at low or medium effort; model set at session launch (advisory, not enforceable via `agent start`)                               |
 | Planning worker (`plan`)   | fable -> opus                     | high                 | raw items only: brainstorm/spec/plan on the strong model so design judgment is never delegated to the cheap impl worker; skipped for plan-ready items |
 | Implementation worker      | sonnet -> opus                    | inherit              | cheap execution of an existing plan; no `--effort` flag passed, worker takes the CLI's own default                                                    |
 | Mechanical worker (`mech`) | haiku -> sonnet                   | inherit              | human-designated mechanical work, headless `claude -p`, turn+budget+wall-clock capped; spend in `tasks/<task_id>.spend.jsonl`                         |
@@ -849,7 +849,7 @@ resolve model and effort together through `agent_runtime.py`. The older Claude
 do not pass its Claude-only aliases to Codex.
 
 One snapshot per dispatch: use `route --runtime <claude|codex> --role
-<planner|implementation|reviewer|read_only|mechanical|think> --risk
+<planner|implementation|reviewer|plan_reviewer|read_only|mechanical|think> --risk
 <normal|critical>` and optional explicit policy/capability files. Inspect the
 returned readiness, availability reason, model, and effort before launch.
 Catalog presence is not proof that the selected account can run a model.
