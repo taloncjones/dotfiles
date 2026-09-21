@@ -399,20 +399,29 @@ current-phase attempt's complete tuple. Partial native tuples are invalid;
 legacy fallback applies only to records that predate native attempts.
 
 `write-task` enforces that contract at the writer for every row NEW in a write,
-so no write can add a row whose SHAPE its readers reject. Identity field values
-are still only checked at settlement: `_native_worker_row` requires each
-attempt field to be a non-empty string, while `attempt_matches` additionally
-requires `runtime` to be `claude` or `codex` and `source_head_sha` to match
-`SHA40_RE`. A row with `runtime: "other"` is therefore accepted by the writer
-and later refused at settlement -- by `emit-done` or `emit-review` depending on
-its phase, which share the `attempt_matches` gate -- so it never settles. The
-one value the writer does check is `phase`, which must be in
-`DESCENDANT_PHASES`. A first write that omits
-`workers` persists `[]` rather than a record carrying no `workers` key. A later
-write that omits `workers` inherits the prior list rather than clearing it, so
-only an explicit list can change dispatch history. New rows must carry a
-`phase` on the unbound path and the full native tuple on the binding-scoped
-path.
+so no write can add a row its readers reject, by shape or by value.
+`_native_worker_row` requires a `phase` in `DESCENDANT_PHASES`, a `runtime`
+key, a non-empty string for every attempt field, and the identity values
+settlement requires: `runtime` in `claude`/`codex`, `source_head_sha`
+matching `SHA40_RE`, `workspace_id` passing `valid_workspace_id`, and a
+`pane_id` other than the reserved `<unreadable>` sentinel that
+`outstanding_descendants` returns for a record it cannot read. A row the
+writer accepts can therefore always be settled by `emit-done` or
+`emit-review`; before this rule a row with `runtime: "other"` was accepted
+and then refused at settlement forever, keeping teardown blocked. A first
+write that omits `workers` persists `[]` rather than a record carrying no
+`workers` key. A later write that omits `workers` inherits the prior list
+rather than clearing it, so only an explicit list can change dispatch
+history. New rows must carry a `phase` on the unbound path and the full
+native tuple, with valid values, on the binding-scoped path.
+
+On the unbound path an explicit `workers` list may rewrite rows but may not
+have fewer rows than the prior record's list when that list is readable
+(`_readable_row_count`): an explicit `[]` over a dispatched record would
+otherwise read as "nothing was ever dispatched". A prior that is corrupt, not
+an object, or whose `workers` is not a list has no measurable history, so the
+repair route below still accepts any explicit list there. A legitimate fresh
+start is `reset-task`, described after the repair routes.
 
 The pass-through of a row its reader would refuse is binding-scoped only. On
 that path the append-only prefix is inherited unchanged and is not re-checked,
@@ -435,6 +444,18 @@ explicitly. The unbound path has no append-only prefix, so a corrected explicit
 list is accepted. On the binding-scoped path neither route works and
 `teardown-binding` refuses before `--descendants-terminated` is consulted, so
 the record must be repaired on disk first.
+
+`reset-task --task-id <old> --new-task-id <new> --json <record>` is the
+launcher-scope fresh start. It writes `tasks/<new>.json` from the supplied
+record with `workers` forced to `[]` and `reset_from: <old>` added, and it
+never reads back, rewrites, or deletes the old record, its `.done.json` or
+`.review.json`, or any workspace index entry. It refuses when the ids are
+equal, the payload names a non-empty `workers` or a `reset_from`, the old
+record is absent, the new record already exists, or a settlement file already
+exists under the new id (an empty `workers` list would match it vacuously
+through the legacy rule in `attempt_matches`). There is no bound form: a lead
+that needs a fresh start hands back to the director for a new binding.
+`reset_from` is an additive key every reader ignores.
 
 A refused dispatch row cannot hide a live pane. `reserve-dispatch` introduces
 bound worker rows and `enrich-dispatch` mutates the current one. A lead reserves

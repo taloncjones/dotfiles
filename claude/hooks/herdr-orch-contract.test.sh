@@ -509,5 +509,24 @@ ok "teardown-binding with --abandon tears down the claimed binding" \
 ok "teardown-binding revoked the binding record" \
   "python3 -c \"import json;d=json.load(open('$TDRD/bindings/$BID.json'));import sys;sys.exit(0 if d['status']=='revoked' else 1)\""
 
+# reset-task: a fresh task id carries no history and links back to the old one;
+# the old record and its settlement file are retained byte for byte.
+RSSLUG="github-com-org-reset-deadbeef"
+RSF=$($CLI claim-owner --repo-slug "$RSSLUG" --session RS --host h --pid 7)
+RSRD="$ROOT/herdr-orch/$RSSLUG"
+$CLI write-task --repo-slug "$RSSLUG" --task-id PROJ-R1 --session RS --fence "$RSF" \
+  --json '{"task_id":"PROJ-R1","base_sha":"b0","status":"in-progress","workers":[{"phase":"implement","launch_id":"I1"}]}'
+$CLI emit-done --repo-slug "$RSSLUG" --task-id PROJ-R1 --workspace w1 --agent impl-proj-r1 \
+  --phase implement --outcome failed --head-sha h1 --base-sha b0
+RS_OLD=$(shasum -a 256 "$RSRD/tasks/PROJ-R1.json" "$RSRD/tasks/PROJ-R1.done.json")
+ok "unbound write-task refuses an explicit [] over dispatched history" \
+  "! $CLI write-task --repo-slug '$RSSLUG' --task-id PROJ-R1 --session RS --fence '$RSF' --json '{\"task_id\":\"PROJ-R1\",\"base_sha\":\"b0\",\"status\":\"in-progress\",\"workers\":[]}' 2>/dev/null"
+ok "reset-task opens PROJ-R2 with empty history and reset_from" \
+  "$CLI reset-task --repo-slug '$RSSLUG' --task-id PROJ-R1 --new-task-id PROJ-R2 --session RS --fence '$RSF' --json '{\"task_id\":\"PROJ-R2\",\"base_sha\":\"b0\",\"status\":\"kickoff\"}' && python3 -c \"import json;d=json.load(open('$RSRD/tasks/PROJ-R2.json'));assert d['workers']==[] and d['reset_from']=='PROJ-R1',d\""
+ok "reset-task retained the old record and its settlement file" \
+  "[ \"\$(shasum -a 256 '$RSRD/tasks/PROJ-R1.json' '$RSRD/tasks/PROJ-R1.done.json')\" = \"$RS_OLD\" ]"
+ok "status lists both the old and the reset task" \
+  "$CLI status --repo-slug '$RSSLUG' | grep -q PROJ-R1 && $CLI status --repo-slug '$RSSLUG' | grep -q PROJ-R2"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
