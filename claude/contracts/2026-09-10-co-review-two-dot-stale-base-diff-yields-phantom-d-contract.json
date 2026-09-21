@@ -19,7 +19,7 @@
     },
     {
       "name": "policy-emits-changed-file-rules",
-      "run": "f=$(mktemp) && uv run --no-project python claude/skills/co-review/scripts/gate_report.py policy --section POLICY >\"$f\" && for p in three-dot 'changed-file set' '--no-renames' 'stale-base artifact' 'git show <base_tip>:<path>' 'affected caller'; do grep -qF -- \"$p\" \"$f\" || { rm -f \"$f\"; exit 1; }; done && ! grep -qF 'git diff origin/main' \"$f\"; rc=$?; rm -f \"$f\"; exit $rc",
+      "run": "f=$(mktemp) && uv run --no-project --offline --no-cache python claude/skills/co-review/scripts/gate_report.py policy --section POLICY >\"$f\" && for p in three-dot 'changed-file set' '--no-renames' 'stale-base artifact' 'git show <base_tip>:<path>' 'affected caller'; do grep -qF -- \"$p\" \"$f\" || { rm -f \"$f\"; exit 1; }; done && ! grep -qF 'git diff origin/main' \"$f\"; rc=$?; rm -f \"$f\"; exit $rc",
       "timeout_secs": 120
     },
     {
