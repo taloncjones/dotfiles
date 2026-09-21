@@ -401,11 +401,14 @@ def env_payload_roots():
     out. A PreToolUse hook that overruns its timeout fails OPEN, so the
     scope-free derivation is a correctness requirement, not a shortcut.
 
-    These are every root account_payload_root can return, built the way
-    core.state_root builds its own env-only root -- through payload_path,
-    which rewrites a leading /tmp or /var to /private on macOS. Skipping
-    that normalization would make open_state_parent's O_NOFOLLOW walk fail
-    with ELOOP and silently under-match.
+    These are every root account_payload_root can return, including both
+    the resolved and unresolved spellings of HOME: account_payload_root
+    builds its personal-scope root from Path.home().resolve(), but
+    coordination.payload_path does not resolve symlinks (it only rewrites
+    a leading /tmp or /var to /private on macOS), so a symlinked HOME
+    needs both spellings covered here or the resolved one is missed.
+    Skipping the macOS normalization would also make open_state_parent's
+    O_NOFOLLOW walk fail with ELOOP and silently under-match.
 
     A "custom" account kind needs no entry: it arises only on the branch
     where CLAUDE_CONFIG_DIR is explicitly set, which is already covered.
@@ -413,7 +416,17 @@ def env_payload_roots():
     direction -- a match still requires a binding to name the session.
     """
     home = Path(os.environ.get("HOME", os.path.expanduser("~")))
-    candidates = [home / ".claude", home / ".claude-work"]
+    homes = [home]
+    try:
+        resolved_home = home.resolve()
+    except Exception:  # noqa: BLE001, S112 -- an unresolvable HOME is skipped
+        resolved_home = None
+    if resolved_home is not None and resolved_home != home:
+        homes.append(resolved_home)
+    candidates = []
+    for one_home in homes:
+        candidates.append(one_home / ".claude")
+        candidates.append(one_home / ".claude-work")
     for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_WORK_CONFIG_DIR"):
         value = os.environ.get(name)
         if value:

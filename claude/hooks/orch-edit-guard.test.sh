@@ -1128,6 +1128,22 @@ assert want in roots, (want, roots)
 assert want_work in roots, (want_work, roots)
 assert len(roots) == len(set(roots)), ("deduplicated", roots)
 
+# A symlinked HOME must yield BOTH spellings. account_payload_root builds
+# its real root from Path.home().resolve() (herdr_orch_core.py), but
+# coordination.payload_path does not resolve symlinks -- so on a machine
+# whose HOME is reached through a symlink, env_payload_roots must cover
+# the resolved spelling too or it under-matches the root the rest of the
+# system actually uses.
+real_home = os.path.join(iso, "real-home"); os.makedirs(real_home, exist_ok=True)
+link_home = os.path.join(iso, "link-home")
+os.symlink(real_home, link_home)
+os.environ["HOME"] = link_home
+resolved_want = str(
+    coordination.payload_path(os.path.join(real_home, ".claude")) / "herdr-orch")
+symlinked_roots = [str(p) for p in g.env_payload_roots()]
+assert resolved_want in symlinked_roots, ("resolved-home", resolved_want, symlinked_roots)
+os.environ["HOME"] = home
+
 # crash_verdict routes through it: an unidentifiable payload stays allow,
 # and the corroborated session is refused. HERDR_ENV must be set FIRST --
 # crash_verdict short-circuits to 0 when it is unset, so the bad-sid case
