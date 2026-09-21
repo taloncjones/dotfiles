@@ -1046,6 +1046,27 @@ class ReviewHelperTests(unittest.TestCase):
                 self.assertIn(phrase, policy)
         self.assertNotIn("git diff origin/main", policy)
 
+    def test_development_review_documents_carry_stale_base_guards(self) -> None:
+        review_change_phrases = (
+            "--no-renames", "ls-files --others", "REVIEW_BASE_REF",
+            "base-context.json", "changed-file set", "stale-base artifact",
+        )
+        required = {
+            "claude/skills/review-change/SKILL.md": review_change_phrases,
+            "codex/skills/review-change/SKILL.md": review_change_phrases,
+            "claude/skills/herdr-orchestration/SKILL.md": (
+                "base-context.json", "stale-base artifact",
+            ),
+            "claude/skills/herdr-orchestration/references/brief-template.md": (
+                "REVIEW_BASE_REF",
+            ),
+        }
+        for relative, phrases in required.items():
+            content = (DOTFILES_ROOT / relative).read_text()
+            for phrase in phrases:
+                with self.subTest(document=relative, phrase=phrase):
+                    self.assertIn(phrase, content)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
