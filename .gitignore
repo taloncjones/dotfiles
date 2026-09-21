@@ -145,6 +145,7 @@ Brewfile.rb.lock.json
 /docs/superpowers/
 /docs/plans/
 /docs/specs/
+/claude/contracts/
 
 # ruff lint cache
 .ruff_cache/

@@ -63,8 +63,32 @@ assert "scanner self-test catches tracked and staged-only plants" \
     git_grep_clean_detects_plants
 assert "no tracked local backlog file" \
     sh -c "! git ls-files --error-unmatch todo.md"
-assert "no tracked planning artifacts" \
-    sh -c "! git ls-files 'docs/superpowers/**' 'docs/plans/**' 'docs/specs/**' | grep -q ."
+# One pathspec list for the scan and its self-test: a planted tracked
+# contract and spec must be found before the clean run is trusted.
+tracked_artifacts() {
+    git -C "$1" ls-files -- 'docs/superpowers/**' 'docs/plans/**' 'docs/specs/**' 'claude/contracts/**'
+}
+tracked_artifacts_clean() { ! tracked_artifacts . | grep -q .; }
+tracked_artifacts_detect_plants() {
+    tmp_repo="$(mktemp -d)" || return 1
+    (
+        export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+        git -C "$tmp_repo" init -q || exit 1
+        mkdir -p "$tmp_repo/claude/contracts" "$tmp_repo/docs/specs" || exit 1
+        echo "plant" > "$tmp_repo/claude/contracts/plant.json"
+        echo "plant" > "$tmp_repo/docs/specs/plant.md"
+        git -C "$tmp_repo" add -f claude/contracts/plant.json docs/specs/plant.md || exit 1
+        tracked_artifacts "$tmp_repo" | grep -q 'claude/contracts/plant.json' || exit 1
+        tracked_artifacts "$tmp_repo" | grep -q 'docs/specs/plant.md' || exit 1
+    )
+    result=$?
+    rm -rf "$tmp_repo"
+    return "$result"
+}
+assert "tracked-artifact scan catches a planted contract and spec" \
+    tracked_artifacts_detect_plants
+assert "no tracked planning artifacts or verification contracts" \
+    tracked_artifacts_clean
 assert "no hardcoded local user paths" \
     git_grep_clean '/Users/talon' . ':(exclude)git/hooks/public-safety.test.sh'
 assert "no high-confidence secrets in tracked content" \
