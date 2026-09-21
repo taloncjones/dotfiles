@@ -8611,5 +8611,127 @@ finally:
 sys.exit(0)
 PY
 
+check "task record writers refuse a record over the dispatch reader limit" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-big.git
+root=$(mktemp -d)
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+CORE_PY='import importlib.util
+s=importlib.util.spec_from_file_location("core","claude/hooks/herdr_orch_core.py")
+c=importlib.util.module_from_spec(s); s.loader.exec_module(c)'
+# Unit: the helper measures the bytes atomic_json_at publishes (sorted keys,
+# compact separators, one trailing newline) and refuses only above the cap:
+# the largest accepted JSON body is cap - 1 bytes.
+python3 -c "
+$CORE_PY
+import contextlib, io, json
+cap = c.TASK_RECORD_MAX_BYTES
+assert cap == 2_000_000
+base = {'task_id': 'td-b', 'workers': [], 'pad': ''}
+overhead = len(json.dumps(base, sort_keys=True, separators=(',', ':')).encode())
+largest = {**base, 'pad': 'x' * (cap - 1 - overhead)}
+assert len(json.dumps(largest, sort_keys=True, separators=(',', ':')).encode()) + 1 == cap
+c._require_record_within_reader_limit(largest)
+err = io.StringIO()
+try:
+    with contextlib.redirect_stderr(err):
+        c._require_record_within_reader_limit({**base, 'pad': 'x' * (cap - overhead)})
+    raise AssertionError('oversized record must be refused')
+except SystemExit as exc:
+    assert exc.code == 2, exc.code
+assert 'exceed the 2000000-byte dispatch reader limit' in err.getvalue(), err.getvalue()
+# Parity with the reader: the literal in herdr_dispatch._read_json.
+src = open('claude/hooks/herdr_dispatch.py').read()
+body = src.split('def _read_json')[1].split('def _read_task')[0]
+assert '2_000_000' in body, 'reader cap moved; update TASK_RECORD_MAX_BYTES parity'
+"
+# Launcher scope: a prior record padded to the cap through its one worker row.
+# write-task omitting workers inherits that row, so the small payload resolves
+# to an oversized record and must be refused; ARG_MAX forbids passing 2 MB.
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --task-id td-b \
+   --json '{"task_id":"td-b","status":"kickoff","workers":[{"phase":"implement","note":"small"}]}'
+TASKFILE="$root/herdr-orch/$LF_SLUG/tasks/td-b.json"
+python3 -c "
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path))
+rec['workers'][0]['note'] = 'x' * 1_999_900
+json.dump(rec, open(path, 'w'), sort_keys=True, separators=(',', ':'))
+" "$TASKFILE"
+BEFORE=$(shasum -a 256 "$TASKFILE")
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --task-id td-b \
+   --json '{"task_id":"td-b","status":"a-status-long-enough-to-cross-the-cap-by-itself-when-added-to-the-padded-row"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'exceed the 2000000-byte dispatch reader limit' "$ERRFILE"
+[ "$(shasum -a 256 "$TASKFILE")" = "$BEFORE" ]
+# A same-count explicit list that drops the padding is the recovery route.
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --task-id td-b \
+   --json '{"task_id":"td-b","status":"recovered","workers":[{"phase":"implement","note":"small"}]}'
+grep -q '"status":"recovered"' "$TASKFILE"
+# The omit branch still refuses a malformed prior with its own message, and
+# the vacuous inherited-row refusal text is gone from the module.
+python3 -c "
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path)); rec['workers'] = [{'no_phase': True}]
+json.dump(rec, open(path, 'w'))
+" "$TASKFILE"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session L1 --fence "$f" --task-id td-b \
+   --json '{"task_id":"td-b","status":"x"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'task record is unreadable or malformed; pass an explicit' "$ERRFILE"
+if grep -q 'inherited task workers' claude/hooks/herdr_orch_core.py; then exit 1; fi
+# Bound scope: reserve-dispatch appending a row that crosses the cap, and
+# enrich-dispatch merging a scalar that crosses it, are both refused.
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 \
+   --control-tier lead --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","workers":[]}'
+BOUNDFILE="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.json"
+python3 -c "
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path)); rec['pad'] = 'x' * 1_999_900
+json.dump(rec, open(path, 'w'), sort_keys=True, separators=(',', ':'))
+" "$BOUNDFILE"
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" \
+   --task-id td-x --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id p1 --source-head-sha "$SHA40" 2>"$ERRFILE"; then exit 1; fi
+grep -q 'exceed the 2000000-byte dispatch reader limit' "$ERRFILE"
+python3 -c "
+import json
+d=json.load(open('$BOUNDFILE')); assert d['workers']==[], d
+"
+python3 -c "
+import json, sys
+path = sys.argv[1]
+rec = json.load(open(path)); rec['pad'] = 'x' * 1_999_000
+json.dump(rec, open(path, 'w'), sort_keys=True, separators=(',', ':'))
+" "$BOUNDFILE"
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py reserve-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" \
+   --task-id td-x --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id p1 --source-head-sha "$SHA40"
+NOTE=$(python3 -c 'print("y"*2000)')
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py enrich-dispatch \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --fence "$lf" --binding "$bid" \
+   --task-id td-x --launch-id I1 --phase implement --runtime claude --workspace-id w1 \
+   --pane-id p1 --source-head-sha "$SHA40" --json '{"note":"'"$NOTE"'"}' 2>"$ERRFILE"; then exit 1; fi
+grep -q 'exceed the 2000000-byte dispatch reader limit' "$ERRFILE"
+python3 -c "
+import json
+d=json.load(open('$BOUNDFILE')); assert len(d['workers'])==1 and 'note' not in d['workers'][0], d
+"
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

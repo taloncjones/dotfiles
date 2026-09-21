@@ -99,6 +99,10 @@ CONTRACT_MAX_COMMANDS = 32
 CONTRACT_MAX_TIMEOUT = 3600
 CONTRACT_DEFAULT_TIMEOUT = 600
 
+# The dispatch adapter's task reader (herdr_dispatch._read_json) refuses a
+# larger record; every writer here measures against the same cap.
+TASK_RECORD_MAX_BYTES = 2_000_000
+
 
 def _nonempty_str(v) -> bool:
     return isinstance(v, str) and bool(v.strip())
@@ -2176,9 +2180,9 @@ def resolve_task_workers(rec, prior, bound):
     by any verb. Forward-only enforcement still holds -- a record can never
     gain a row the rule would refuse.
 
-    The rule is per path because the readers differ: an unbound record is read
-    by _valid_task_shape, a bound one additionally by outstanding_descendants,
-    which is native-only.
+    Only rows NEW in this write face the row rule, which is per path because
+    the readers differ: an unbound record is read by _valid_task_shape, a
+    bound one additionally by outstanding_descendants, which is native-only.
 
     Repairing a record through an explicit list is an UNBOUND-path property.
     A malformed BOUND record is refused outright by the malformed-prior check
@@ -2189,36 +2193,7 @@ def resolve_task_workers(rec, prior, bound):
     rather than in the caller: it is what establishes which rows are inherited,
     so splitting the two would let a payload substitute a row at an inherited
     index and face no rule at all."""
-    if "workers" in rec:
-        workers = rec["workers"]
-        _require(isinstance(workers, list), "task workers must be a list")
-        inherited = 0
-        if bound and prior is not PRIOR_ABSENT:
-            _require(
-                prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
-                "bound task record is malformed; write-task cannot repair it",
-            )
-            # Dispatch history is append-only so a superseded attempt can never
-            # be erased to revive an older envelope (the P1 revival scenario):
-            # every prior worker row must survive, in order, as a prefix of the
-            # new list. Other fields (status, base_sha, review_head_sha, ...)
-            # stay freely updatable -- base_sha mutation is a legitimate
-            # rebase-redispatch, its abuse closed separately by the
-            # approval-base binding check at emit/integrate.
-            prior_workers = prior["workers"]
-            _require(
-                len(workers) >= len(prior_workers)
-                and all(workers[i] == prior_workers[i]
-                        for i in range(len(prior_workers))),
-                "binding-scoped dispatch history is append-only",
-            )
-            inherited = len(prior_workers)
-            # Persist the prior rows themselves, not the caller's copies of
-            # them: `==` holds between True and 1, so an accepted prefix can
-            # still differ from the record in JSON value types.
-            workers = prior_workers + workers[inherited:]
-        source = "task workers"
-    else:
+    if "workers" not in rec:
         if prior is PRIOR_ABSENT:
             return []
         _require(
@@ -2231,14 +2206,39 @@ def resolve_task_workers(rec, prior, bound):
             "task record is unreadable or malformed; pass an explicit "
             "workers list, with a phase on every row",
         )
-        workers = prior["workers"]
-        inherited = len(workers)
-        source = "inherited task workers"
+        return prior["workers"]
+    workers = rec["workers"]
+    _require(isinstance(workers, list), "task workers must be a list")
+    inherited = 0
+    if bound and prior is not PRIOR_ABSENT:
+        _require(
+            prior is not PRIOR_CORRUPT and _valid_task_shape(prior),
+            "bound task record is malformed; write-task cannot repair it",
+        )
+        # Dispatch history is append-only so a superseded attempt can never
+        # be erased to revive an older envelope (the P1 revival scenario):
+        # every prior worker row must survive, in order, as a prefix of the
+        # new list. Other fields (status, base_sha, review_head_sha, ...)
+        # stay freely updatable -- base_sha mutation is a legitimate
+        # rebase-redispatch, its abuse closed separately by the
+        # approval-base binding check at emit/integrate.
+        prior_workers = prior["workers"]
+        _require(
+            len(workers) >= len(prior_workers)
+            and all(workers[i] == prior_workers[i]
+                    for i in range(len(prior_workers))),
+            "binding-scoped dispatch history is append-only",
+        )
+        inherited = len(prior_workers)
+        # Persist the prior rows themselves, not the caller's copies of
+        # them: `==` holds between True and 1, so an accepted prefix can
+        # still differ from the record in JSON value types.
+        workers = prior_workers + workers[inherited:]
     _require(
         all((_native_worker_row if bound else _phased_worker_row)(row)
             for row in workers[inherited:]),
-        f"new {source} must be native dispatch rows" if bound
-        else f"new {source} rows must be objects carrying a phase",
+        "new task workers must be native dispatch rows" if bound
+        else "new task workers rows must be objects carrying a phase",
     )
     return workers
 
@@ -2465,6 +2465,17 @@ def _binding_is_fresh(rec_b, stale_secs):
     except (TypeError, ValueError):
         return False
     return time.time() - parsed.timestamp() <= stale_secs
+
+
+def _require_record_within_reader_limit(rec) -> None:
+    """Refuse a task record herdr_dispatch would reject for size, measured on
+    the bytes atomic_json_at publishes: sorted keys, compact separators, and
+    the one trailing newline it appends after the JSON."""
+    body = json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n"
+    size = len(body.encode("utf-8"))
+    _require(size <= TASK_RECORD_MAX_BYTES,
+             f"task record would exceed the {TASK_RECORD_MAX_BYTES}-byte "
+             "dispatch reader limit")
 
 
 def _parse_payload(text):
@@ -2758,6 +2769,7 @@ def _main(argv=None) -> int:
             # validate the workers list before publishing, so an omitted key
             # inherits prior dispatch history rather than asserting none.
             rec["workers"] = resolve_task_workers(rec, prior, bound)
+            _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
             return 0
@@ -2850,8 +2862,10 @@ def _main(argv=None) -> int:
                 # counted twice.
                 if _attempt_tuple(workers[-1]) == identity:
                     return 0
+            reserved = {**prior, "workers": [*workers, row]}
+            _require_record_within_reader_limit(reserved)
             create_payload_dir(base / "tasks")
-            write_json_atomic(dest, {**prior, "workers": [*workers, row]})
+            write_json_atomic(dest, reserved)
             return 0
     if ns.cmd == "enrich-dispatch":
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -2912,7 +2926,9 @@ def _main(argv=None) -> int:
             updated = {**workers[-1], **updates}
             _require(_native_worker_row(updated),
                      "enrichment would produce a row its readers reject")
-            write_json_atomic(dest, {**prior, "workers": [*workers[:-1], updated]})
+            enriched = {**prior, "workers": [*workers[:-1], updated]}
+            _require_record_within_reader_limit(enriched)
+            write_json_atomic(dest, enriched)
             return 0
     if ns.cmd == "write-index":
         with _fenced_scoped(ns) as (rd, base):
