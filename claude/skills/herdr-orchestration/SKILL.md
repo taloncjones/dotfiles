@@ -309,7 +309,7 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
 - **Plan-ready item** -- a refined Jira ticket, or a task that already has a
   reviewed, frozen private spec and plan with recorded hashes: dispatch an `implement`
   worker directly (only after the contract pinning steps at the end of this
-  section; a plan-ready item without a committed contract is treated as raw),
+  section; a plan-ready item without a validated on-disk contract is treated as raw),
   using `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
   with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
   (section 8). An unready route blocks this dispatch.
@@ -341,19 +341,21 @@ mech [max-turns <int>] [budget <number>]`, or todo frontmatter `tier: mech`
   the legacy `routing-table` mech entry and caps from
   `python3 "$CORE" mech-caps --repo-slug <slug> [--max-turns N]
 [--max-budget-usd X]` (exit 5 refuses the kickoff with its message; never
-  clamp by hand). Contract source, in order: (1) committed at HEAD -> use it;
-  (2) `config.mech.contract_commands` present, worktree clean, and the branch
-  either created by this kickoff or adopted with HEAD == `base_sha` ->
+  clamp by hand). Contract source, in order: (1) present on disk at
+  `claude/contracts/<task_id>-contract.json` (untracked and ignored; a copy
+  tracked at HEAD from before this rule is accepted with the legacy warning
+  below) -> use it; (2) `config.mech.contract_commands` present, worktree
+  clean, and the branch either created by this kickoff or adopted with HEAD
+  == `base_sha` ->
   `python3 "$CORE" mech-contract --repo-slug <slug> --task-id <task_id>
---worktree <path> --base-sha <base_sha>` writes it, then `git add` + commit it as
-  `<task_id>: Add mech contract` (the only commit the director ever
-  authors; inside the step 3-6 window so step 9 cleanup covers it);
-  (3) else refuse: "mech kickoff needs a committed contract or
-  `mech.contract_commands` in config; kick off as raw instead". **`Launch base`:**
-  after a generated-contract commit, record `base_sha` as the post-commit HEAD
-  (the launch base) so every ahead-of-base check demands real worker commits;
-  `base_ref` still names the ref. Then run the "Contract pinning" steps below
-  unchanged.
+--worktree <path> --base-sha <base_sha>` writes it; never `git add` or
+  commit it -- it stays untracked and ignored, so **`Launch base`** stays the
+  launch HEAD (no post-contract commit moves it), and `base_ref` still names
+  the ref; (3) else refuse: "mech kickoff needs a contract on disk or
+  `mech.contract_commands` in config; kick off as raw instead". A mech
+  contract has no frozen copy: if the worktree copy is lost the contract
+  gate halts and regeneration needs the user's task authorization and a
+  fresh pin. Then run the "Contract pinning" steps below unchanged.
 
 The steps below call the dispatched worker "the worker"; they apply to whichever
 phase is launched (`plan` for a raw item, else `implement`), with the
@@ -435,8 +437,18 @@ phase-appropriate brief (references/brief-template.md) and model.
 **Contract pinning (implement dispatch, both paths).** Before launching any
 `implement` worker (plan-ready kickoff here, or phase advancement in section
 2a), compute the pin: require the task worktree clean (`git status
---porcelain` empty) and the contract tracked at HEAD (`git cat-file -e
-HEAD:claude/contracts/<task_id>-contract.json`); then run
+--porcelain` empty) and the contract on disk, checked in this order:
+(1) `git ls-files --error-unmatch -- claude/contracts/<task_id>-contract.json`
+succeeds -> a legacy tracked contract; accept it with `[WARNING] legacy
+tracked contract; untrack it with git rm --cached before the branch ships
+(the planning-artifact guard refuses new adds; DOTFILES_ALLOW_PLAN_ARTIFACTS=1
+is the deliberate override)` and skip (2) -- `check-ignore` reports a
+tracked path as not ignored; (2) otherwise the file must exist and
+`git check-ignore -q -- claude/contracts/<task_id>-contract.json` must
+succeed, so every later clean-tree gate holds; a present but unignored
+contract blocks with `contract is not ignored: run update to link
+~/.gitignore_global, or add claude/contracts/ to the repository's ignore
+rules`. Then run
 `python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
 --worktree <path> --contract claude/contracts/<task_id>-contract.json
 --allow-unpinned --validate-only` -- it prints the sha256. A missing or
@@ -458,10 +470,10 @@ phase; it never marks the task `completed` and never dispatches review.
    Use the `co-review` artifact helper to freeze reviewed documents under
    `<account_payload>/artifacts/<task>/<launch>`. Record the same artifact
    references in the task and plan completion. Never commit private plans.
-2. A plan-only milestone may have HEAD equal to base. If a public verification
-   contract was authored, commit only that contract and validate/pin it before
-   implementation. Final HEAD may differ from the launch's source HEAD; both
-   are recorded for different checks.
+2. A plan-only milestone may have HEAD equal to base. The contract the plan
+   worker authored stays untracked and ignored; validate and pin it before
+   implementation (Contract pinning, section 2). Final HEAD may differ from
+   the launch's source HEAD; both are recorded for different checks.
 3. Reuse the task's branch/workspace after the plan worker is idle or exited.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
    again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
@@ -721,9 +733,16 @@ Correlate these independent facts, all keyed to the same `task_id`/
    result; re-correlate next check-in). On exit 1 the task stays
    `in-progress`: surface the failing command output and recommend
    resuming/re-briefing the implement worker -- never dispatch review. Exit 2
-   (invalid schema/path or corrupt task record), 3 (contract file missing),
-   or 4 (hash mismatch) is an integrity halt: surface it and stop advancing
-   this task; never dispatch review, never re-pin to clear it. Exit 5 fires
+   (invalid schema/path or corrupt task record) or 4 (hash mismatch) is an
+   integrity halt: surface it and stop advancing this task; never dispatch
+   review, never re-pin to clear it. Exit 3 (contract file missing) tries
+   one recovery first: in the parent directory of the task's frozen spec
+   (`plan_artifacts` entry with `kind: spec`), find the `contract-*.json`
+   whose sha256 equals `contract_sha256`; exactly one match -> copy it
+   byte-for-byte to `<worktree>/<contract_path>` (an ignored path outside
+   the orchestrator edit guard's guarded set), re-read the sha, and re-run
+   this gate once; no `plan_artifacts` (mech task) or no match -> the same
+   integrity halt. Exit 5 fires
    only on a valid record lacking pin fields -- the grandfather path (task
    predates contracts): warn `[WARNING] no contract pinned (pre-contract
 task)` and treat this gate as passed. This gate augments facts 1-5; it

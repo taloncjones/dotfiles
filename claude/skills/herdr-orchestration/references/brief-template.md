@@ -90,7 +90,7 @@ native child agents under the user's delegation policy, not Claude Workflow.
 
 ## Close
 When you finish, pause, or fail this phase:
-1. Commit intended public code/contracts only. Keep private plans and state untracked.
+1. Commit intended public code only. Keep private plans, the verification contract, and state untracked.
 2. Run
    `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`.
    You may use `--outcome completed` in the next step ONLY if it exits 0, or
@@ -130,7 +130,9 @@ its own pipeline: brainstorming -> writing-specs (spec to private `docs/superpow
 independent spec review -> writing-plans (plan to private `docs/superpowers/plans/`) ->
 independent plan review. In Claude use codex-spec-review/codex-plan-review;
 in Codex use claude-spec-review/claude-plan-review. Author the task's verification contract at
-`claude/contracts/<task_id>-contract.json` alongside the plan: 1-32 commands, each
+`claude/contracts/<task_id>-contract.json` alongside the plan. It is a private
+orchestration artifact: it stays untracked and git-ignored on disk, and the
+planning-artifact guard refuses `git add` of it. 1-32 commands, each
 `{"name", "run"[, "timeout_secs" 1-3600]}`, that are falsifiable (a broken
 implementation must fail at least one), repo-local, deterministic, and
 worktree-safe (no STATE_ROOT writes, no machine-state mutation, no network,
@@ -138,16 +140,18 @@ no secret echo). Include in the plan a mapping table pairing each acceptance
 criterion with its contract command (or an explicit "human-verify" entry).
 Validate it --
 `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path> --contract claude/contracts/<task_id>-contract.json --allow-unpinned --validate-only`
-must exit 0. Commit only the public contract. Fold review findings back into
-the private spec/plan. Freeze each with the co-review artifact helper under
-`<account_payload>/artifacts/<task_id>/<launch_id>`, returning one spec and one
-plan reference with path and SHA-256. Supply these as `plan_artifacts` in the
-plan record; the controller records the same references in the task before
+must exit 0. Never commit the contract. Fold review findings back into the
+private spec/plan. Freeze the spec, the plan, and the contract with the
+co-review artifact helper (`--kind spec|plan|contract`) under
+`<account_payload>/artifacts/<task_id>/<launch_id>`; supply only the spec and
+plan references (path and SHA-256) as `plan_artifacts` in the plan record --
+the frozen contract copy is the director's recovery source and is not listed.
+The controller records the same two references in the task before
 `confirm-plan`. Do NOT write implementation code.
 
 ## Close
 When the private spec + plan are frozen and reviewed:
-1. Commit intended public code/contracts only. Keep private plans and state untracked.
+1. Commit intended public code only. Keep private plans, the verification contract, and state untracked.
 2. Run (note `--phase plan`):
    `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase plan --plan-artifacts <artifact-list-json> --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
 3. Then STOP and go idle -- hand back to the director. Do NOT run
@@ -204,7 +208,7 @@ appear in a script you author:
 <workflow-opt-in-line>
 
 ## Close
-1. Commit intended public code/contracts only. Keep private plans and state untracked.
+1. Commit intended public code only. Keep private plans, the verification contract, and state untracked.
 2. Run `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`;
    `--outcome completed` only on exit 0 (or exit 5, noting "exit 5, no pin").
 3. Run `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head> [--reason needs_design|blocked_on_human|other]`
