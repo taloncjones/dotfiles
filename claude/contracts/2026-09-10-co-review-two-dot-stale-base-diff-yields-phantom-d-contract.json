@@ -1,0 +1,86 @@
+{
+  "v": 1,
+  "task_id": "2026-09-10-co-review-two-dot-stale-base-diff-yields-phantom-d",
+  "commands": [
+    {
+      "name": "py-compile-co-review-scripts",
+      "run": "python3 -m py_compile claude/skills/co-review/scripts/review.py claude/skills/co-review/scripts/gate_report.py claude/skills/co-review/scripts/tests/test_review.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "review-suite",
+      "run": "sh claude/skills/co-review/scripts/tests/review_test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "new-tests-present",
+      "run": "for t in test_frozen_diff_excludes_base_advancement test_changed_file_set_lists_both_sides_of_a_rename test_base_tip_readable_from_snapshot_after_owned_ref_is_gone test_pinned_run_ref_survives_prune test_out_of_diff_read_form_is_tree_scoped test_final_gate_documents_carry_stale_base_guards test_development_review_documents_carry_stale_base_guards; do grep -q \"def $t(\" claude/skills/co-review/scripts/tests/test_review.py || exit 1; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "policy-emits-changed-file-rules",
+      "run": "f=$(mktemp) && uv run --no-project python claude/skills/co-review/scripts/gate_report.py policy --section POLICY >\"$f\" && for p in three-dot 'changed-file set' '--no-renames' 'stale-base artifact' 'git show <base_tip>:<path>' 'affected caller'; do grep -qF -- \"$p\" \"$f\" || { rm -f \"$f\"; exit 1; }; done && ! grep -qF 'git diff origin/main' \"$f\"; rc=$?; rm -f \"$f\"; exit $rc",
+      "timeout_secs": 120
+    },
+    {
+      "name": "claude-co-review-adapter-steps",
+      "run": "f=claude/skills/co-review/SKILL.md; for p in 'diff --name-only --no-renames' 'headRefOid,changedFiles,files' resolve-base base-context.json refs/co-review-run/ 'update-ref -d' 'stale-base artifact'; do grep -qF -- \"$p\" \"$f\" || exit 1; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "codex-co-review-adapter-steps",
+      "run": "f=codex/skills/co-review/SKILL.md; for p in 'diff --name-only --no-renames' 'headRefOid,changedFiles,files' resolve-base base-context.json refs/co-review-run/ 'update-ref -d' 'stale-base artifact'; do grep -qF -- \"$p\" \"$f\" || exit 1; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "adapters-do-not-introduce-jq",
+      "run": "! grep -q 'jq ' claude/skills/co-review/SKILL.md && ! grep -q 'jq ' codex/skills/co-review/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "review-change-skills-carry-guards",
+      "run": "for f in claude/skills/review-change/SKILL.md codex/skills/review-change/SKILL.md; do for p in '--no-renames' 'ls-files --others' REVIEW_BASE_REF base-context.json 'changed-file set' 'stale-base artifact'; do grep -qF -- \"$p\" \"$f\" || exit 1; done; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "herdr-relay-and-brief-carry-guards",
+      "run": "grep -qF 'base-context.json' claude/skills/herdr-orchestration/SKILL.md && grep -qF 'stale-base artifact' claude/skills/herdr-orchestration/SKILL.md && grep -qF 'REVIEW_BASE_REF' claude/skills/herdr-orchestration/references/brief-template.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "ship-merge-gate-names-artifacts",
+      "run": "grep -qF 'stale-base artifact' claude/skills/ship/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "operating-principles-standing-rule",
+      "run": "for p in three-dot 'changed-file set' 'stale-base artifact' discard 'git show'; do grep -qF -- \"$p\" claude/operating-principles.md || exit 1; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "no-two-dot-instruction",
+      "run": "! grep -rn 'git diff origin/main' claude/skills codex/skills claude/operating-principles.md claude/rules/personal",
+      "timeout_secs": 30
+    },
+    {
+      "name": "codex-skills-suite",
+      "run": "sh codex/skills/codex-skills.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "herdr-core-untouched",
+      "run": "git diff --quiet \"$(git merge-base HEAD origin/main)\" -- claude/hooks/herdr_orch_core.py",
+      "timeout_secs": 30
+    },
+    {
+      "name": "private-planning-docs-untracked",
+      "run": "test -z \"$(git ls-files docs/superpowers docs/plans docs/specs)\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "public-safety-scan",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 120
+    }
+  ]
+}
