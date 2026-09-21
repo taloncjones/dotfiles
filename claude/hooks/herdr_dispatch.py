@@ -537,13 +537,14 @@ def _lifecycle_prompt(
     prompt: str,
     attempt: dict[str, Any],
     task: dict[str, Any],
-    rd: Path,
+    base: Path,
     personal: bool,
     *,
     approval_mediated: bool,
+    binding: str | None = None,
 ) -> str:
     suffix = "review" if attempt["phase"] == "review" else "done"
-    result = (rd / "tasks" / f"{attempt['task_id']}.{suffix}.json").resolve()
+    result = (base / "tasks" / f"{attempt['task_id']}.{suffix}.json").resolve()
     emitter = Path(core.__file__).resolve()
     coordination = core.coordination.coordination_root().resolve()
     command = [
@@ -562,6 +563,10 @@ def _lifecycle_prompt(
         attempt["repo_slug"],
         "--task-id",
         attempt["task_id"],
+    ]
+    if binding is not None:
+        command += ["--binding", binding]
+    command += [
         "--workspace",
         attempt["workspace_id"],
         "--agent",
@@ -575,6 +580,8 @@ def _lifecycle_prompt(
     ]
     if suffix == "done":
         command += ["--phase", attempt["phase"], "--base-sha", task["base_sha"]]
+    elif binding is not None:
+        command += ["--reviewed-base-sha", task["base_sha"]]
     context = (
         f"{prompt.rstrip()}\n\nLifecycle attempt context:\n"
         "This adapter block is authoritative over conflicting lifecycle fields in the task "
@@ -586,6 +593,11 @@ def _lifecycle_prompt(
         f"Supply only its required outcome and final-result fields. The emitter writes {result} "
         f"and its lock under {coordination}."
     )
+    if binding is not None and suffix == "review":
+        context += (
+            " This binding-scoped review emit also requires --reviewer-session "
+            "<your own session id>; append it yourself, the adapter cannot know it."
+        )
     if not approval_mediated:
         return context
     return (
@@ -830,6 +842,7 @@ def launch(
             base,
             personal,
             approval_mediated=runtime == "codex" and sandbox == "read-only",
+            binding=binding,
         )
         # The reconciled region spans the prompt AND its reply parsing. A
         # --wait failure does not mean the prompt was not accepted, so the

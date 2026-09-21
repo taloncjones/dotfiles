@@ -851,6 +851,40 @@ def test_read_only_codex_launch_does_not_claim_lifecycle_writes():
         fixture.close()
 
 
+def test_bound_prompt_carries_binding_emitter_and_review_fields():
+    fixture = LeadFixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.launch(route=claude_route())
+        prompt = fixture.prompt_calls()[0][3]
+        row = fixture.bound_workers()[-1]
+        assert "Lifecycle attempt context:" in prompt, prompt
+        assert f"--binding {fixture.binding}" in prompt, prompt
+        assert "--phase implement" in prompt and "--base-sha" in prompt, prompt
+        assert "--reviewed-base-sha" not in prompt and "--reviewer-session" not in prompt, prompt
+        assert f"leads/{fixture.binding}/tasks/td-a.done.json" in prompt, prompt
+        assert row["launch_id"] in prompt and row["source_head_sha"] in prompt, prompt
+    finally:
+        fixture.close()
+    head = None
+    fixture = LeadFixture()
+    try:
+        head = fixture.lead_context["head"]
+        fixture.write_bound_task(
+            bound_task_record(fixture, fixture.lead_context, review_head_sha=head)
+        )
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = "rev-td-a"
+        fixture.launch(route=claude_route(), phase="review", agent="rev-td-a")
+        prompt = fixture.prompt_calls()[0][3]
+        assert "emit-review" in prompt and f"--binding {fixture.binding}" in prompt, prompt
+        assert f"--reviewed-base-sha {head}" in prompt, prompt
+        assert "--reviewer-session <your own session id>" in prompt, prompt
+        assert f"leads/{fixture.binding}/tasks/td-a.review.json" in prompt, prompt
+    finally:
+        fixture.close()
+
+
 def test_wrong_worktree_rejects_before_attempt_or_start():
     fixture = Fixture()
     try:
@@ -2083,6 +2117,7 @@ for name, test in (
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
+    ("bound prompt carries the binding emitter and review fields", test_bound_prompt_carries_binding_emitter_and_review_fields),
     ("wrong pane worktree rejects before mutation", test_wrong_worktree_rejects_before_attempt_or_start),
     ("invalid task base SHA rejects before mutation", test_invalid_task_base_sha_rejects_before_attempt_or_start),
     ("task designated linked worktree rejects other checkout", test_task_designated_linked_worktree_rejects_other_checkout),
