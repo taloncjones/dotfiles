@@ -409,6 +409,200 @@ class Fixture:
         return [c for c in self.calls() if c[:2] == ["agent", "prompt"]]
 
 
+def bound_task_record(fixture, context, **extra):
+    return {
+        "v": 1,
+        "task_id": "td-a",
+        "repo_slug": fixture.slug,
+        "branch": context["branch"],
+        "worktree": str(fixture.lead_ws.resolve()),
+        "base_sha": context["head"],
+        "status": "in-progress",
+        "workers": [],
+        **extra,
+    }
+
+
+class LeadFixture(Fixture):
+    """A claimed dispatch binding whose lead launches into its linked worktree.
+
+    The gate record and capability marker are seeded the way the core suite's
+    lead checks seed them inline; the binding, lead lease, and bound task
+    record are produced by the real core CLI.
+    """
+
+    def __init__(self, **task_extra):
+        super().__init__()
+        self.lead_ws = self.root / "lead-ws"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-q", str(self.lead_ws)],
+            check=True,
+        )
+        self.lead_context = core.repository_context(self.lead_ws)
+        scope = core.account_scope(self.repo, "claude")
+        core.write_json_atomic(self.rd / "task-lead-gate.json", {
+            "schema_version": 1, "repo_slug": self.slug, "repo_id": None,
+            "account_id": scope["account_id"], "enabled": True,
+        })
+        marker = self.home / ".claude" / "skills" / "herdr-orchestration" / "SKILL.md"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n'
+        )
+        self.binding = self.core(
+            "issue-binding", "--session", "S", "--fence", "1", "--task-id", "td-a",
+            "--workspace-root", str(self.lead_ws), "--expected-session", "LS",
+            repo_path=self.repo,
+        ).strip()
+        self.lead_fence = int(self.core(
+            "claim-owner", "--session", "LS", "--host", "host", "--pid", "2",
+            "--control-tier", "lead", "--workspace-root", str(self.lead_ws),
+            "--binding", self.binding, repo_path=self.repo,
+        ).strip())
+        self.bound_task_file = self.rd / "leads" / self.binding / "tasks" / "td-a.json"
+        self.write_bound_task(bound_task_record(self, self.lead_context, **task_extra))
+        self.env.update({
+            "FAKE_CWD": str(self.lead_ws.resolve()),
+            "FAKE_TASK_FILE": str(self.bound_task_file),
+        })
+
+    def core(self, verb, *args, repo_path):
+        process = subprocess.run(
+            [sys.executable, str(Path(core.__file__).resolve()), verb,
+             "--repo-slug", self.slug, "--repo-path", str(repo_path), *args],
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        assert process.returncode == 0, (verb, process.stderr)
+        return process.stdout
+
+    def write_bound_task(self, record):
+        self.core(
+            "write-task", "--session", "LS", "--fence", str(self.lead_fence),
+            "--binding", self.binding, "--task-id", "td-a",
+            "--json", json.dumps(record), repo_path=self.lead_ws,
+        )
+
+    def bound_workers(self):
+        return json.loads(self.bound_task_file.read_text())["workers"]
+
+    def launch(self, sandbox="workspace-write", route=None, **kwargs):
+        # Every identity field is overridable: later tests re-dispatch to a
+        # second pane, launch a review agent, or probe a foreign task id.
+        options = {
+            "session": "LS",
+            "fence": self.lead_fence,
+            "cwd": self.lead_ws,
+            "binding": self.binding,
+            "task_id": "td-a",
+            "workspace_id": "w1",
+            "pane_id": "w1:p1",
+            "phase": "implement",
+            "agent": "impl-td-a",
+            **kwargs,
+        }
+        return herdr_dispatch.launch(
+            repo_slug=self.slug,
+            route=route or codex_route(),
+            sandbox=sandbox,
+            prompt="brief $HOME; `literal`",
+            herdr_cli=str(self.bin),
+            env=self.env,
+            start_timeout_ms=4000,
+            prompt_timeout_ms=1000,
+            **options,
+        )
+
+
+def test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row():
+    fixture = LeadFixture()
+    try:
+        result = fixture.launch()
+        assert result["status"] == "launched", result
+        assert (fixture.root / "attempt-seen").read_text() == "yes"
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        rows = fixture.bound_workers()
+        assert len(rows) == 1, rows
+        row = rows[-1]
+        assert row["status"] == "launched", row
+        assert result["launch_id"] == row["launch_id"], (result, row)
+        for key in core.ATTEMPT_FIELDS:
+            assert row.get(key), (key, row)
+        assert row["source_head_sha"] == fixture.lead_context["head"], row
+        assert row["pane_id"] == "w1:p1" and row["workspace_id"] == "w1", row
+        assert row["role"] == "implementation" and row["agent"] == "impl-td-a", row
+        assert row["model"] == "gpt-5.6-terra" and row["effort"] == "high", row
+        for key in ("runtime_binary", "started_ns", "capture_before_sha256",
+                    "capture_after_sha256", "account_id", "personal",
+                    "prompt_state", "prompt_wait"):
+            assert key in row, (key, row)
+        assert row["prompt_wait"] == "accepted", row
+        for key in ("task_id", "repo_slug", "worktree", "branch"):
+            assert key not in row, (key, row)
+        assert result["completion_candidate"] is False, result
+        assert result["completion_authoritative"] is False, result
+    finally:
+        fixture.close()
+
+
+def test_bound_cross_scope_fences_refuse_before_start():
+    fixture = LeadFixture()
+    try:
+        # A launcher fence carrying --binding: the core's lead_check refuses.
+        try:
+            fixture.launch(session="S", fence=1)
+        except herdr_dispatch.DispatchError as exc:
+            assert "bound record write refused: reserve-dispatch" in str(exc), exc
+            assert "lead fence" in str(exc), exc
+        else:
+            raise AssertionError("launcher fence with --binding was accepted")
+        assert fixture.bound_workers() == []
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
+        # A lead fence without --binding: owner_transaction validates against
+        # the launcher's owner.json and refuses in-process.
+        fixture.task_file.write_text(json.dumps(bound_task_record(fixture, fixture.lead_context)))
+        try:
+            fixture.launch(binding=None, cwd=fixture.lead_ws)
+        except herdr_dispatch.DispatchError as exc:
+            assert "missing owner fence" in str(exc), exc
+        else:
+            raise AssertionError("lead fence without --binding was accepted")
+        assert fixture.bound_workers() == []
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
+    finally:
+        fixture.close()
+
+
+def test_bound_start_failure_keeps_pane_outstanding_until_redispatch():
+    fixture = LeadFixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "start-fail"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert "agent_not_ready" in str(exc), exc
+        else:
+            raise AssertionError("failed native start was accepted")
+        rows = fixture.bound_workers()
+        assert len(rows) == 1 and rows[-1]["status"] == "launch_failed", rows
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == ["w1:p1"]
+        assert not (fixture.rd / "leads" / fixture.binding / "tasks" / "td-a.done.json").exists()
+        # A re-dispatch appends a successor row; the failed pane stops gating.
+        fixture.env["FAKE_HERDR_MODE"] = "ok"
+        fixture.env["FAKE_PANE"] = "w1:p2"
+        for name in ("read-count", "attempt-seen"):
+            (fixture.root / name).unlink(missing_ok=True)
+        result = fixture.launch(pane_id="w1:p2")
+        assert result["status"] == "launched", result
+        rows = fixture.bound_workers()
+        assert [row["pane_id"] for row in rows] == ["w1:p1", "w1:p2"], rows
+        assert rows[0]["status"] == "launch_failed" and rows[1]["status"] == "launched", rows
+        assert core.outstanding_descendants(fixture.rd, fixture.binding) == ["w1:p2"]
+    finally:
+        fixture.close()
+
+
 def test_launch_records_attempt_before_native_start():
     fixture = Fixture()
     try:
@@ -653,6 +847,40 @@ def test_read_only_codex_launch_does_not_claim_lifecycle_writes():
             assert value in prompt[3], (value, prompt)
         assert result["completion_authoritative"] is False, result
         assert result["strict_ready"] is False, result
+    finally:
+        fixture.close()
+
+
+def test_bound_prompt_carries_binding_emitter_and_review_fields():
+    fixture = LeadFixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.launch(route=claude_route())
+        prompt = fixture.prompt_calls()[0][3]
+        row = fixture.bound_workers()[-1]
+        assert "Lifecycle attempt context:" in prompt, prompt
+        assert f"--binding {fixture.binding}" in prompt, prompt
+        assert "--phase implement" in prompt and "--base-sha" in prompt, prompt
+        assert "--reviewed-base-sha" not in prompt and "--reviewer-session" not in prompt, prompt
+        assert f"leads/{fixture.binding}/tasks/td-a.done.json" in prompt, prompt
+        assert row["launch_id"] in prompt and row["source_head_sha"] in prompt, prompt
+    finally:
+        fixture.close()
+    head = None
+    fixture = LeadFixture()
+    try:
+        head = fixture.lead_context["head"]
+        fixture.write_bound_task(
+            bound_task_record(fixture, fixture.lead_context, review_head_sha=head)
+        )
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = "rev-td-a"
+        fixture.launch(route=claude_route(), phase="review", agent="rev-td-a")
+        prompt = fixture.prompt_calls()[0][3]
+        assert "emit-review" in prompt and f"--binding {fixture.binding}" in prompt, prompt
+        assert f"--reviewed-base-sha {head}" in prompt, prompt
+        assert "--reviewer-session <your own session id>" in prompt, prompt
+        assert f"leads/{fixture.binding}/tasks/td-a.review.json" in prompt, prompt
     finally:
         fixture.close()
 
@@ -1320,6 +1548,25 @@ def test_dispatch_entrypoint_preserves_machine_readable_cli_contract():
         "reason": "native-queue-not-smoke-validated",
         "status": "unsupported",
     }, process.stdout
+    for command in ("launch", "inspect"):
+        help_text = subprocess.run(
+            [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), command, "--help"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert "--binding" in help_text, (command, help_text)
+    # No --help here: argparse's help action exits 0 before it reports an
+    # unrecognized flag, so the rejection is only observable without it.
+    # argparse also checks required arguments before unrecognized ones, so
+    # every other required reprompt flag must be present or the "unrecognized
+    # arguments" error never fires.
+    rejected = subprocess.run(
+        [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), "reprompt",
+         "--repo-slug", "r", "--task-id", "t", "--session", "s",
+         "--workspace-id", "w1", "--launch-id", "l", "--phase", "implement",
+         "--cwd", ".", "--prompt-file", "p", "--fence", "1", "--binding", "x"],
+        capture_output=True, text=True, check=False,
+    )
+    assert rejected.returncode == 2 and "unrecognized arguments" in rejected.stderr, rejected
 
 
 def test_reprompt_cli_subcommand_reaches_the_function():
@@ -1860,6 +2107,94 @@ def test_reprompt_cli_rejects_non_utf8_prompt_file():
         fx.close()
 
 
+def test_bound_prechecks_refuse_before_any_herdr_call():
+    def refused(fixture, message, **kwargs):
+        try:
+            fixture.launch(**kwargs)
+        except herdr_dispatch.DispatchError as exc:
+            assert message in str(exc), (message, exc)
+        else:
+            raise AssertionError(f"accepted: {message}")
+        assert fixture.calls() == [], fixture.calls()
+        assert fixture.bound_workers() == []
+
+    fixture = LeadFixture()
+    try:
+        refused(fixture, "invalid binding id", binding="ldb-not-hex")
+        refused(fixture, "unknown or corrupt dispatch binding",
+                binding="ldb-" + "0" * 32)
+        refused(fixture, "binding does not name this task",
+                binding=fixture.binding, task_id="td-b")
+        refused(fixture, "a binding-scoped launch supports only", phase="think")
+        refused(fixture, "review_head_sha equal to HEAD", phase="review",
+                agent="rev-td-a")
+        fixture.write_bound_task(bound_task_record(
+            fixture, fixture.lead_context, review_head_sha="f" * 40))
+        refused(fixture, "review_head_sha equal to HEAD", phase="review",
+                agent="rev-td-a")
+        # workspace_root mismatch: the binding names the lead worktree, the
+        # launch targets the primary checkout. Refused before any record read.
+        refused(fixture, "binding workspace does not match", cwd=fixture.repo)
+    finally:
+        fixture.close()
+    fixture = LeadFixture()
+    try:
+        fixture.core("set-binding-status", "--session", "S", "--fence", "1",
+                     "--binding", fixture.binding, "--status", "revoked",
+                     repo_path=fixture.repo)
+        refused(fixture, "binding is not claimed")
+    finally:
+        fixture.close()
+
+
+def test_inspect_binding_reads_lead_subtree():
+    fixture = LeadFixture()
+    try:
+        result = fixture.launch()
+        row = fixture.bound_workers()[-1]
+        bound = herdr_dispatch.inspect(
+            fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws,
+            runtime="codex", binding=fixture.binding,
+        )
+        assert bound["current_attempt"]["launch_id"] == result["launch_id"], bound
+        assert bound["completion_candidate"] is False, bound
+        # The launcher-scope inspect must pass _validate_task_context against
+        # the lead worktree, so point the launcher record there first; its
+        # workers list stays empty because the bound launch never wrote to it.
+        fixture.task_file.write_text(
+            json.dumps(bound_task_record(fixture, fixture.lead_context))
+        )
+        launcher = herdr_dispatch.inspect(
+            fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws, runtime="codex",
+        )
+        assert launcher["current_attempt"] is None, launcher
+        fixture.core(
+            "emit-done", "--binding", fixture.binding, "--task-id", "td-a",
+            "--workspace", "w1", "--agent", "impl-td-a", "--phase", "implement",
+            "--outcome", "completed", "--head-sha", fixture.lead_context["head"],
+            "--base-sha", fixture.lead_context["head"], "--runtime", "codex",
+            "--launch-id", row["launch_id"], "--pane-id", "w1:p1",
+            "--source-head-sha", row["source_head_sha"], repo_path=fixture.lead_ws,
+        )
+        bound = herdr_dispatch.inspect(
+            fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws,
+            runtime="codex", binding=fixture.binding,
+        )
+        assert bound["result_matches_attempt"] is True, bound
+        assert bound["completion_candidate"] is True, bound
+        try:
+            herdr_dispatch.inspect(
+                fixture.slug, "td-a", "implement", "w1", cwd=fixture.lead_ws,
+                runtime="codex", binding="ldb-" + "0" * 32,
+            )
+        except herdr_dispatch.DispatchError as exc:
+            assert "unknown or corrupt dispatch binding" in str(exc), exc
+        else:
+            raise AssertionError("inspect accepted an unknown binding")
+    finally:
+        fixture.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -1889,6 +2224,7 @@ for name, test in (
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
+    ("bound prompt carries the binding emitter and review fields", test_bound_prompt_carries_binding_emitter_and_review_fields),
     ("wrong pane worktree rejects before mutation", test_wrong_worktree_rejects_before_attempt_or_start),
     ("invalid task base SHA rejects before mutation", test_invalid_task_base_sha_rejects_before_attempt_or_start),
     ("task designated linked worktree rejects other checkout", test_task_designated_linked_worktree_rejects_other_checkout),
@@ -1921,6 +2257,11 @@ for name, test in (
     ("attempt record carries difficulty provenance", test_attempt_record_carries_difficulty_provenance),
     ("attempt record carries absent difficulty shape", test_attempt_record_carries_absent_difficulty_shape),
     ("tampered unconfirmed difficulty route rejects launch", test_tampered_unconfirmed_difficulty_route_rejects_launch),
+    ("bound launch reserves before native start and writes no launcher row", test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row),
+    ("bound cross-scope fences refuse before start", test_bound_cross_scope_fences_refuse_before_start),
+    ("bound start failure keeps the pane outstanding until re-dispatch", test_bound_start_failure_keeps_pane_outstanding_until_redispatch),
+    ("bound prechecks refuse before any herdr call", test_bound_prechecks_refuse_before_any_herdr_call),
+    ("inspect --binding reads the lead subtree", test_inspect_binding_reads_lead_subtree),
 ):
     check(name, test)
 

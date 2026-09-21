@@ -418,11 +418,13 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     launch.add_argument("--start-timeout-ms", type=int, default=30_000)
     launch.add_argument("--prompt-timeout-ms", type=int, default=120_000)
     launch.add_argument("--personal", action="store_true")
+    launch.add_argument("--binding", default=None)
     inspect = commands.add_parser("inspect")
     for flag in ("repo-slug", "task-id", "phase", "workspace-id", "cwd"):
         inspect.add_argument(f"--{flag}", required=True)
     inspect.add_argument("--runtime", default="claude", choices=("claude", "codex"))
     inspect.add_argument("--personal", action="store_true")
+    inspect.add_argument("--binding", default=None)
     wake = commands.add_parser("wake")
     for flag in ("thread-id", "event", "repo-slug", "workspace-id"):
         wake.add_argument(f"--{flag}", required=True)
@@ -469,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
                 start_timeout_ms=args.start_timeout_ms,
                 prompt_timeout_ms=args.prompt_timeout_ms,
                 personal=args.personal,
+                binding=args.binding,
             )
         elif args.command == "inspect":
             output = herdr_dispatch.inspect(
@@ -479,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
                 runtime=args.runtime,
                 personal=args.personal,
+                binding=args.binding,
             )
         elif args.command == "reprompt":
             output = herdr_dispatch.reprompt(

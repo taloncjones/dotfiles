@@ -10,12 +10,14 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 import agent_runtime
+import herdr_bindings as bindings
 import herdr_orch_core as core
 from herdr_dispatch_cli import (
     fresh_codex_hook_review_required as _fresh_codex_hook_review_required,
@@ -35,6 +37,22 @@ class DispatchError(RuntimeError):
 PHASES = ("plan", "implement", "review", "think", "read", "mechanical")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
 AGENT_STATES = ("idle", "done")
+
+# Launch-time facts copied from the attempt dict onto a bound row by the first
+# enrichment. Record-level keys (task_id, repo_slug, worktree, branch) are
+# deliberately absent: enrich-dispatch refuses the first three.
+BOUND_LAUNCH_FACTS = (
+    "runtime_binary",
+    "difficulty",
+    "difficulty_proposed",
+    "difficulty_confirmed",
+    "status",
+    "started_ns",
+    "capture_before_sha256",
+    "account_id",
+    "personal",
+)
+CORE_CALL_TIMEOUT_SECS = 30
 
 
 def _runtime_binary(runtime: str, env: dict[str, str]) -> str:
@@ -368,17 +386,165 @@ def _update_attempt(
         return updated
 
 
+class _LauncherRecords:
+    """Launcher-scope attempt writer: the in-process owner-transaction path."""
+
+    def __init__(self, rd, task_id, session, fence, repository, scope, repo_slug, todo_binding):
+        self.rd = rd
+        self.task_id = task_id
+        self.session = session
+        self.fence = fence
+        self.repository = repository
+        self.scope = scope
+        self.repo_slug = repo_slug
+        self.todo_binding = todo_binding
+
+    def reserve(self, attempt: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _write_attempt(
+                self.rd, self.task_id, self.session, self.fence, self.repository,
+                self.scope, self.repo_slug, attempt, self.todo_binding,
+            )
+        except ValueError as exc:
+            # owner_transaction refuses a stale or foreign fence with a bare
+            # ValueError; the adapter's callers only handle DispatchError.
+            raise DispatchError(f"launcher record write refused: {exc}") from exc
+
+    def update(self, launch_id: str, **fields: Any) -> dict[str, Any]:
+        try:
+            return _update_attempt(
+                self.rd, self.task_id, self.session, self.fence, self.repository,
+                self.scope, self.repo_slug, launch_id, **fields,
+            )
+        except ValueError as exc:
+            raise DispatchError(f"launcher record write refused: {exc}") from exc
+
+
+class _BoundRecords:
+    """Binding-scoped attempt writer: the core's reserve/enrich verbs as
+    subprocesses, each followed by a read-back of the bound record.
+
+    The adapter never writes a leads/ record itself, so the bound row keeps
+    its sole-writer property (introduced only by reserve-dispatch, mutated
+    only by enrich-dispatch)."""
+
+    def __init__(self, *, rd, task_id, session, fence, repository, repo_slug,
+                 binding, runtime, personal, cwd, env, todo_binding):
+        self.rd = rd
+        self.base = rd / "leads" / binding
+        self.task_id = task_id
+        self.session = session
+        self.fence = fence
+        self.repository = repository
+        self.repo_slug = repo_slug
+        self.binding = binding
+        self.runtime = runtime
+        self.personal = personal
+        self.cwd = os.fspath(cwd)
+        self.env = env
+        self.todo_binding = todo_binding
+        self.identity: tuple[str, ...] | None = None
+
+    def _core(self, verb: str, *args: str) -> None:
+        argv = [
+            sys.executable, str(Path(core.__file__).resolve()), verb,
+            "--repo-slug", self.repo_slug, "--repo-path", self.cwd,
+            "--runtime", self.runtime,
+        ]
+        if self.personal:
+            argv.append("--personal")
+        argv += [
+            "--session", self.session, "--fence", str(self.fence),
+            "--binding", self.binding, "--task-id", self.task_id, *args,
+        ]
+        try:
+            process = subprocess.run(
+                argv, check=False, capture_output=True, text=True,
+                timeout=CORE_CALL_TIMEOUT_SECS, env=self.env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DispatchError(
+                f"bound record write failed: {verb}: {type(exc).__name__}"
+            ) from exc
+        if process.returncode != 0:
+            lines = process.stderr.strip().splitlines() or ["no reason given"]
+            raise DispatchError(f"bound record write refused: {verb}: {lines[0][:200]}")
+
+    def _identity_args(self) -> list[str]:
+        assert self.identity is not None
+        launch_id, phase, _runtime, workspace_id, pane_id, source_head_sha = self.identity
+        return [
+            "--launch-id", launch_id, "--phase", phase,
+            "--workspace-id", workspace_id, "--pane-id", pane_id,
+            "--source-head-sha", source_head_sha,
+        ]
+
+    def _current(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        task = _read_task(self.base / "tasks" / f"{self.task_id}.json", self.task_id)
+        workers = task.get("workers", [])
+        row = workers[-1] if workers and isinstance(workers[-1], dict) else None
+        if row is None or tuple(row.get(key) for key in core.ATTEMPT_FIELDS) != self.identity:
+            raise DispatchError("bound reservation is not the current row")
+        return task, row
+
+    def reserve(self, attempt: dict[str, Any]) -> dict[str, Any]:
+        self.identity = tuple(attempt[key] for key in core.ATTEMPT_FIELDS)
+        route = ["--role", attempt["role"], "--agent", attempt["agent"],
+                 "--model", attempt["model"]]
+        if isinstance(attempt.get("effort"), str):
+            route += ["--effort", attempt["effort"]]
+        self._core("reserve-dispatch", *self._identity_args(), *route)
+        facts = {key: attempt.get(key) for key in BOUND_LAUNCH_FACTS}
+        self._core("enrich-dispatch", *self._identity_args(), "--json", json.dumps(facts))
+        task, _row = self._current()
+        _validate_task_context(task, self.repository, self.repo_slug)
+        if ("todo_id" in task, task.get("todo_id")) != self.todo_binding:
+            raise DispatchError("persisted TODO binding changed before dispatch")
+        return task
+
+    def update(self, launch_id: str, **fields: Any) -> dict[str, Any]:
+        if self.identity is None or launch_id != self.identity[0]:
+            raise DispatchError("readiness does not belong to the current attempt")
+        self._core("enrich-dispatch", *self._identity_args(), "--json", json.dumps(fields))
+        _task, row = self._current()
+        # task_id is a record-level key the bound row never carries; the
+        # in-memory copy needs it for metadata_argv only.
+        return {**row, "task_id": self.task_id}
+
+
+def _read_binding_record(rd: Path, binding: Any) -> dict[str, Any]:
+    if not isinstance(binding, str) or not bindings.BINDING_ID_RE.fullmatch(binding):
+        raise DispatchError("invalid binding id")
+    try:
+        record = bindings.read_binding(rd, binding)
+    except ValueError as exc:
+        raise DispatchError("unknown or corrupt dispatch binding") from exc
+    if record is None:
+        raise DispatchError("unknown or corrupt dispatch binding")
+    return record
+
+
+def _check_bound_launch(record: dict[str, Any], task_id: str, repository: dict) -> None:
+    if record.get("status") != "claimed":
+        raise DispatchError("binding is not claimed")
+    if record.get("task_id") != task_id:
+        raise DispatchError("binding does not name this task")
+    if not _same_directory(record.get("workspace_root"), repository["root"]):
+        raise DispatchError("binding workspace does not match the launch worktree")
+
+
 def _lifecycle_prompt(
     prompt: str,
     attempt: dict[str, Any],
     task: dict[str, Any],
-    rd: Path,
+    base: Path,
     personal: bool,
     *,
     approval_mediated: bool,
+    binding: str | None = None,
 ) -> str:
     suffix = "review" if attempt["phase"] == "review" else "done"
-    result = (rd / "tasks" / f"{attempt['task_id']}.{suffix}.json").resolve()
+    result = (base / "tasks" / f"{attempt['task_id']}.{suffix}.json").resolve()
     emitter = Path(core.__file__).resolve()
     coordination = core.coordination.coordination_root().resolve()
     command = [
@@ -397,6 +563,10 @@ def _lifecycle_prompt(
         attempt["repo_slug"],
         "--task-id",
         attempt["task_id"],
+    ]
+    if binding is not None:
+        command += ["--binding", binding]
+    command += [
         "--workspace",
         attempt["workspace_id"],
         "--agent",
@@ -410,6 +580,8 @@ def _lifecycle_prompt(
     ]
     if suffix == "done":
         command += ["--phase", attempt["phase"], "--base-sha", task["base_sha"]]
+    elif binding is not None:
+        command += ["--reviewed-base-sha", task["base_sha"]]
     context = (
         f"{prompt.rstrip()}\n\nLifecycle attempt context:\n"
         "This adapter block is authoritative over conflicting lifecycle fields in the task "
@@ -421,6 +593,11 @@ def _lifecycle_prompt(
         f"Supply only its required outcome and final-result fields. The emitter writes {result} "
         f"and its lock under {coordination}."
     )
+    if binding is not None and suffix == "review":
+        context += (
+            " This binding-scoped review emit also requires --reviewer-session "
+            "<your own session id>; append it yourself, the adapter cannot know it."
+        )
     if not approval_mediated:
         return context
     return (
@@ -451,10 +628,13 @@ def launch(
     prompt_timeout_ms: int = 120_000,
     personal: bool = False,
     todos_cli: str | os.PathLike[str] | None = None,
+    binding: str | None = None,
 ) -> dict[str, Any]:
     """Launch into an explicit existing shell pane and record strict provenance."""
     if phase not in PHASES:
         raise DispatchError(f"unsupported phase: {phase}")
+    if binding is not None and phase not in core.DESCENDANT_PHASES:
+        raise DispatchError("a binding-scoped launch supports only plan, implement, or review")
     if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
         raise DispatchError("invalid task or workspace identity")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -479,6 +659,7 @@ def launch(
         )
 
     child_env = dict(os.environ if env is None else env)
+    base_env = dict(child_env)
     if child_env.get("HERDR_ENV") != "1":
         raise DispatchError("launch requires a Herdr-managed environment")
 
@@ -490,14 +671,35 @@ def launch(
     if repo_slug != _expected_slug(repository, cwd):
         raise DispatchError("repo slug does not match repository context")
     rd = _payload_repo_dir(scope, repo_slug)
-    pending_task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    base = rd
+    if binding is not None:
+        _check_bound_launch(_read_binding_record(rd, binding), task_id, repository)
+        base = rd / "leads" / binding
+    pending_task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
     _validate_task_context(pending_task, repository, repo_slug)
+    if binding is not None and phase == "review":
+        head = pending_task.get("review_head_sha")
+        if not isinstance(head, str) or head != repository["head"]:
+            raise DispatchError(
+                "a binding-scoped review dispatch requires review_head_sha equal to HEAD"
+            )
     todo_binding = ("todo_id" in pending_task, pending_task.get("todo_id"))
     if todos_cli is None:
         todos_cli = (
             Path(__file__).resolve().parents[1] / "skills/todos/scripts/todos.sh"
         )
     _check_todo_ready(pending_task, repository["root"], todos_cli, child_env)
+    if binding is None:
+        records = _LauncherRecords(
+            rd, task_id, session, fence, repository, scope, repo_slug, todo_binding
+        )
+    else:
+        records = _BoundRecords(
+            rd=rd, task_id=task_id, session=session, fence=fence,
+            repository=repository, repo_slug=repo_slug, binding=binding,
+            runtime=runtime, personal=personal, cwd=cwd, env=base_env,
+            todo_binding=todo_binding,
+        )
     agent_runtime._apply_launch_environment(child_env, scope)
     runtime_binary = _runtime_binary(runtime, child_env)
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
@@ -547,17 +749,7 @@ def launch(
         "worktree": repository["root"],
         "branch": repository["branch"],
     }
-    task = _write_attempt(
-        rd,
-        task_id,
-        session,
-        fence,
-        repository,
-        scope,
-        repo_slug,
-        attempt,
-        todo_binding,
-    )
+    task = records.reserve(attempt)
 
     try:
         launch_route = route
@@ -616,14 +808,7 @@ def launch(
         if runtime == "codex" and _fresh_codex_hook_review_required(
             pre_capture, post_capture
         ):
-            _update_attempt(
-                rd,
-                task_id,
-                session,
-                fence,
-                repository,
-                scope,
-                repo_slug,
+            records.update(
                 launch_id,
                 status="blocked",
                 blocked_reason="codex-hook-review-required",
@@ -645,14 +830,7 @@ def launch(
                     "reason": "blocked-before-prompt",
                 },
             }
-        _update_attempt(
-            rd,
-            task_id,
-            session,
-            fence,
-            repository,
-            scope,
-            repo_slug,
+        records.update(
             launch_id,
             status="ready",
             capture_after_sha256=capture_after_sha256,
@@ -661,9 +839,10 @@ def launch(
             prompt,
             attempt,
             task,
-            rd,
+            base,
             personal,
             approval_mediated=runtime == "codex" and sandbox == "read-only",
+            binding=binding,
         )
         # The reconciled region spans the prompt AND its reply parsing. A
         # --wait failure does not mean the prompt was not accepted, so the
@@ -742,14 +921,7 @@ def launch(
             # Bounded because a nonzero exit carries herdr's whole stderr and
             # this string is persisted into the shared task record.
             prompt_wait_cause = str(exc)[:200]
-        final_attempt = _update_attempt(
-            rd,
-            task_id,
-            session,
-            fence,
-            repository,
-            scope,
-            repo_slug,
+        final_attempt = records.update(
             launch_id,
             status="launched",
             prompt_state=prompt_state,
@@ -769,17 +941,7 @@ def launch(
             presentation = {"status": "unsupported", "reason": str(exc)}
     except DispatchError:
         try:
-            _update_attempt(
-                rd,
-                task_id,
-                session,
-                fence,
-                repository,
-                scope,
-                repo_slug,
-                launch_id,
-                status="launch_failed",
-            )
+            records.update(launch_id, status="launch_failed")
         except DispatchError:
             pass
         raise
@@ -792,6 +954,7 @@ def launch(
         cwd=cwd,
         runtime=runtime,
         personal=personal,
+        binding=binding,
     )
     candidate = inspected["completion_candidate"]
     return {
@@ -819,6 +982,7 @@ def inspect(
     cwd: str | os.PathLike[str],
     runtime: str = "claude",
     personal: bool = False,
+    binding: str | None = None,
 ) -> dict[str, Any]:
     """Inspect current attempt provenance without treating pane state as completion."""
     if (
@@ -835,7 +999,11 @@ def inspect(
     if repo_slug != _expected_slug(repository, cwd):
         raise DispatchError("repo slug does not match repository context")
     rd = _payload_repo_dir(scope, repo_slug)
-    task = _read_task(rd / "tasks" / f"{task_id}.json", task_id)
+    base = rd
+    if binding is not None:
+        _read_binding_record(rd, binding)
+        base = rd / "leads" / binding
+    task = _read_task(base / "tasks" / f"{task_id}.json", task_id)
     _validate_task_context(task, repository, repo_slug)
     workers = task.get("workers", [])
     matches = [
@@ -845,7 +1013,7 @@ def inspect(
     ]
     attempt = matches[-1] if matches else None
     suffix = "review" if phase == "review" else "done"
-    result_path = rd / "tasks" / f"{task_id}.{suffix}.json"
+    result_path = base / "tasks" / f"{task_id}.{suffix}.json"
     try:
         result = _read_json(result_path, "attempt result")
     except DispatchError:

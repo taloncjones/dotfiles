@@ -862,6 +862,11 @@ flags. The adapter owns argv quoting, environment binding, attempt reservation,
 readiness inspection, and presentation updates. It never creates a worktree
 or chooses a different account for the caller.
 
+A lead passes `--binding <bid>` with its own session and fence; the adapter then
+routes every record write through `reserve-dispatch` and `enrich-dispatch`
+under the lead subtree instead of writing launcher-scope records (see "Lead
+worker dispatch (binding-scoped)").
+
 - Native Herd fixes the executable name. The adapter resolves that executable
   through the dispatch environment, removes its alias/function only in the
   designated idle task pane, and verifies its PATH resolution alongside account
@@ -1242,41 +1247,57 @@ accept` on the director launch line safe. The hook side posts only a
 
 ## Lead worker dispatch (binding-scoped)
 
-Four steps, in this order. The bootstrap step is not optional:
-`reserve-dispatch` requires the task record to exist, and a missing record
-reads as absent rather than empty.
+Two steps, in this order. The bootstrap step is not optional: `launch --binding`
+requires the bound task record to exist, and a missing record reads as absent
+rather than empty.
 
-1. `write-task --binding <bid> --task-id <t> --json '{"task_id":"<t>", ...}'`
-   with `workers` omitted or `[]`, creating the record.
-2. `reserve-dispatch --binding <bid> --task-id <t> --launch-id <id> --phase
-<plan|implement|review> --runtime <claude|codex> --workspace-id <w>
---pane-id <p> --source-head-sha <40hex>`, after the pane exists and BEFORE
-   starting an agent in it. Optionally `--role --agent --model --effort`.
-3. Start the agent in that pane.
-4. `enrich-dispatch --binding <bid> --task-id <t>` plus the SAME full identity
-   you reserved (`--launch-id --phase --runtime --workspace-id --pane-id
---source-head-sha`) and `--json '{"peer_name":"..."}'`, for facts
-   discovered after launch. The update may not name an identity field; the
-   identity is how the verb finds the row, and it must equal the current
-   attempt. Passing the full tuple is what stops a replayed enrichment from
-   landing on a later attempt that happens to share a `launch_id`.
+1. `write-task --binding <bid> --task-id <t> --json '{...}'` with `workers`
+   omitted or `[]`, creating the record. The record must carry `task_id`,
+   `repo_slug`, `branch`, `worktree` (the lead's workspace root), and a 40-hex
+   `base_sha`; before a review dispatch, also `review_head_sha` equal to the
+   worktree's HEAD.
+2. `herdr_dispatch.py launch --binding <bid>` with the lead's own `--session`
+   and `--fence`, the existing pane/workspace, `--cwd` at the lead's workspace
+   root, the phase (`plan|implement|review`), a unique agent name, the resolved
+   route JSON, sandbox, and prompt file. Read `--help` for the current flags.
+
+The adapter does what the four-step procedure used to ask of the lead by hand:
+it validates the binding (claimed, naming this task, its `workspace_root` equal
+to `--cwd`), reserves the attempt through `reserve-dispatch --binding` AFTER
+the pane exists and BEFORE `agent start`, starts the agent, and records
+readiness, prompt acceptance, and failure through `enrich-dispatch --binding`
+with the full identity tuple on every call. It never writes a `leads/` record
+itself. The worker's brief carries `--binding` on its emitter line; a review
+brief also carries `--reviewed-base-sha` and tells the reviewer to append
+`--reviewer-session`.
 
 Reserving before the agent starts is what makes teardown safe: a `write-task`
 refused afterwards cannot erase the row, so `outstanding_descendants` still
 sees the pane and `teardown-binding --abandon` refuses instead of releasing the
-lease over a live worker. Skipping step 2 reintroduces that fail-open.
+lease over a live worker. A launch that fails after the reservation (for
+example `agent start` refused) leaves the row at `status: launch_failed` and
+its pane outstanding on purpose; re-dispatching appends a successor row, or an
+operator passes `--descendants-terminated` after terminating the pane.
 
-Re-dispatch appends a new reservation. **Mint a fresh `launch_id` for every new
-dispatch**, as the mech relaunch rule above already requires. Nothing enforces
-uniqueness, so reuse is accepted where the rest of the identity differs -- a
-review detour returning to a prior head, for instance -- but reusing one for a
-genuinely new pane makes the record harder to read for no benefit.
+Cross-scope use fails closed before `agent start`: a launcher fence with
+`--binding` is refused by the lead-fence check, and a lead fence without it is
+refused by the launcher owner check. Neither writes a row.
 
-Two repeats are handled differently. An exact repeat of the current row, while
-that attempt is unsettled, is the crashed-lead retry: it succeeds and writes
-nothing, so one pane is never counted twice. A repeat of any identity that a
-settlement record already matches is refused, because it would arrive already
-settled and hide the pane it names from teardown.
+Re-dispatch is another `launch --binding` call; the adapter mints a fresh
+`launch_id` every time. Two repeats are handled by `reserve-dispatch`
+differently. An exact repeat of the current row, while that attempt is
+unsettled, is the crashed-lead retry: it succeeds and writes nothing, so one
+pane is never counted twice. A repeat of any identity that a settlement record
+already matches is refused, because it would arrive already settled and hide
+the pane it names from teardown.
+
+`inspect --binding <bid>` reads the bound attempt and its settlement record.
+`emit-done --binding` and `emit-review --binding` require a live,
+registry-corroborated lead lease, so a worker cannot settle on a dead lead's
+behalf. `reprompt` has no bound form yet: a bound worker that needs a second
+brief is re-dispatched or prompted by hand (follow-up todo). The worker-side
+hooks (`herdr_stop_gate.py`, `scratch_policy.py`) still read launcher scope
+only, so a bound worker's stop is not gated (follow-up todo).
 
 ## Rolling back task leads
 
