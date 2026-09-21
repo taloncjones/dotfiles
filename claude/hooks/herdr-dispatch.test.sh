@@ -409,6 +409,141 @@ class Fixture:
         return [c for c in self.calls() if c[:2] == ["agent", "prompt"]]
 
 
+def bound_task_record(fixture, context, **extra):
+    return {
+        "v": 1,
+        "task_id": "td-a",
+        "repo_slug": fixture.slug,
+        "branch": context["branch"],
+        "worktree": str(fixture.lead_ws.resolve()),
+        "base_sha": context["head"],
+        "status": "in-progress",
+        "workers": [],
+        **extra,
+    }
+
+
+class LeadFixture(Fixture):
+    """A claimed dispatch binding whose lead launches into its linked worktree.
+
+    The gate record and capability marker are seeded the way the core suite's
+    lead checks seed them inline; the binding, lead lease, and bound task
+    record are produced by the real core CLI.
+    """
+
+    def __init__(self, **task_extra):
+        super().__init__()
+        self.lead_ws = self.root / "lead-ws"
+        subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "-q", str(self.lead_ws)],
+            check=True,
+        )
+        self.lead_context = core.repository_context(self.lead_ws)
+        scope = core.account_scope(self.repo, "claude")
+        core.write_json_atomic(self.rd / "task-lead-gate.json", {
+            "schema_version": 1, "repo_slug": self.slug, "repo_id": None,
+            "account_id": scope["account_id"], "enabled": True,
+        })
+        marker = self.home / ".claude" / "skills" / "herdr-orchestration" / "SKILL.md"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            '<!-- herdr-capabilities: {"marker_version":1,"capability":1} -->\n'
+        )
+        self.binding = self.core(
+            "issue-binding", "--session", "S", "--fence", "1", "--task-id", "td-a",
+            "--workspace-root", str(self.lead_ws), "--expected-session", "LS",
+            repo_path=self.repo,
+        ).strip()
+        self.lead_fence = int(self.core(
+            "claim-owner", "--session", "LS", "--host", "host", "--pid", "2",
+            "--control-tier", "lead", "--workspace-root", str(self.lead_ws),
+            "--binding", self.binding, repo_path=self.repo,
+        ).strip())
+        self.bound_task_file = self.rd / "leads" / self.binding / "tasks" / "td-a.json"
+        self.write_bound_task(bound_task_record(self, self.lead_context, **task_extra))
+        self.env.update({
+            "FAKE_CWD": str(self.lead_ws.resolve()),
+            "FAKE_TASK_FILE": str(self.bound_task_file),
+        })
+
+    def core(self, verb, *args, repo_path):
+        process = subprocess.run(
+            [sys.executable, str(Path(core.__file__).resolve()), verb,
+             "--repo-slug", self.slug, "--repo-path", str(repo_path), *args],
+            capture_output=True, text=True, env=self.env, check=False,
+        )
+        assert process.returncode == 0, (verb, process.stderr)
+        return process.stdout
+
+    def write_bound_task(self, record):
+        self.core(
+            "write-task", "--session", "LS", "--fence", str(self.lead_fence),
+            "--binding", self.binding, "--task-id", "td-a",
+            "--json", json.dumps(record), repo_path=self.lead_ws,
+        )
+
+    def bound_workers(self):
+        return json.loads(self.bound_task_file.read_text())["workers"]
+
+    def launch(self, sandbox="workspace-write", route=None, **kwargs):
+        # Every identity field is overridable: later tests re-dispatch to a
+        # second pane, launch a review agent, or probe a foreign task id.
+        options = {
+            "session": "LS",
+            "fence": self.lead_fence,
+            "cwd": self.lead_ws,
+            "binding": self.binding,
+            "task_id": "td-a",
+            "workspace_id": "w1",
+            "pane_id": "w1:p1",
+            "phase": "implement",
+            "agent": "impl-td-a",
+            **kwargs,
+        }
+        return herdr_dispatch.launch(
+            repo_slug=self.slug,
+            route=route or codex_route(),
+            sandbox=sandbox,
+            prompt="brief $HOME; `literal`",
+            herdr_cli=str(self.bin),
+            env=self.env,
+            start_timeout_ms=4000,
+            prompt_timeout_ms=1000,
+            **options,
+        )
+
+
+def test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row():
+    fixture = LeadFixture()
+    try:
+        result = fixture.launch()
+        assert result["status"] == "launched", result
+        assert (fixture.root / "attempt-seen").read_text() == "yes"
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        rows = fixture.bound_workers()
+        assert len(rows) == 1, rows
+        row = rows[-1]
+        assert row["status"] == "launched", row
+        assert result["launch_id"] == row["launch_id"], (result, row)
+        for key in core.ATTEMPT_FIELDS:
+            assert row.get(key), (key, row)
+        assert row["source_head_sha"] == fixture.lead_context["head"], row
+        assert row["pane_id"] == "w1:p1" and row["workspace_id"] == "w1", row
+        assert row["role"] == "implementation" and row["agent"] == "impl-td-a", row
+        assert row["model"] == "gpt-5.6-terra" and row["effort"] == "high", row
+        for key in ("runtime_binary", "started_ns", "capture_before_sha256",
+                    "capture_after_sha256", "account_id", "personal",
+                    "prompt_state", "prompt_wait"):
+            assert key in row, (key, row)
+        assert row["prompt_wait"] == "accepted", row
+        for key in ("task_id", "repo_slug", "worktree", "branch"):
+            assert key not in row, (key, row)
+        assert result["completion_candidate"] is False, result
+        assert result["completion_authoritative"] is False, result
+    finally:
+        fixture.close()
+
+
 def test_launch_records_attempt_before_native_start():
     fixture = Fixture()
     try:
@@ -1921,6 +2056,7 @@ for name, test in (
     ("attempt record carries difficulty provenance", test_attempt_record_carries_difficulty_provenance),
     ("attempt record carries absent difficulty shape", test_attempt_record_carries_absent_difficulty_shape),
     ("tampered unconfirmed difficulty route rejects launch", test_tampered_unconfirmed_difficulty_route_rejects_launch),
+    ("bound launch reserves before native start and writes no launcher row", test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row),
 ):
     check(name, test)
 
