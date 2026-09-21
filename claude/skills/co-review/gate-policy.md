@@ -190,6 +190,46 @@ production actions. Append the complete `## Classes` section from
 the report record coverage; the appended class text supplies the required probe
 descriptions.
 
+### Changed-file set and out-of-diff reads
+
+The frozen diff is the three-dot change from the merge-base to the reviewed
+head. Seats review that diff and the frozen tree it produces. No seat runs a
+two-dot `git diff <branch>` or `git diff <branch> <head>` against a base-branch
+tip: on a head behind its base branch, that diff shows every file the base
+gained since the merge-base as a deletion or reversion the change never made.
+
+The coordinator supplies every seat the changed-file set (`git diff
+--name-only --no-renames <base> <snapshot_head>` from the verified manifest,
+so both sides of a rename are listed) and the base context (`base_ref_tip`
+from one fresh `review.py resolve-base` run before dispatch, pinned for the
+run). A finding that asserts this change added, modified, deleted, or
+reverted a path outside the changed-file set is a stale-base artifact and is
+discarded. Absence from the set means the change did not touch that path; it
+never means the change forgot or missed it. The frozen three-dot diff is
+enforcement, not an enumeration of observations: the changed-file set lists
+every path the change touched, so absence from it positively disproves the
+premise "this change touched X". That is the refutation the Findings section
+requires. A finding about an unchanged path as an affected caller, consumer,
+or contract of a changed path is legitimate when its content is read from the
+base tip and the finding says so.
+
+A claim about any path outside the changed-file set is read only with
+`git show <base_tip>:<path>` inside the seat's snapshot root. The snapshot
+worktree, the review worktree, and any local checkout of the base branch hold
+that path at the merge-base and are not evidence for it. A failed read is an
+evidence gap on that finding, never permission to read the snapshot instead.
+A local `--base` review has no base tip; an unchanged-path claim there is
+labelled merge-base content.
+
+Before assembling the report, the coordinator checks each seat finding's
+claim against the changed-file set and reads the snapshot head tree (changed
+path) or `git show <base_tip>:<path>` (unchanged path) for its cited content.
+A stale-base artifact enters `findings` with `disposition: refuted`, its
+original ID and severity, and `evidence` naming the changed-file set check
+and the base tip SHA; `snapshot_integrity` records the count and the tip. A
+deletion or reversion claim is the highest-risk shape; a finding about newly
+added lines verified in the head tree is the safe shape.
+
 ### Findings, blockers, and coverage
 
 Each finding has a stable ID, severity, disposition, concrete scenario, and
