@@ -1922,6 +1922,11 @@ def refresh_owner(rd, session_id, fence, messaging_socket=None) -> bool:
 
 ATTEMPT_FIELDS = ("launch_id", "phase", "runtime", "workspace_id", "pane_id", "source_head_sha")
 
+# The pane-id list outstanding_descendants returns for a record it cannot
+# read. Reserved: no dispatch row may carry it, or the row is indistinguishable
+# from the error sentinel teardown-binding fails closed on.
+UNREADABLE_SENTINEL = "<unreadable>"
+
 
 def _no_dup_pairs(pairs):
     """object_pairs_hook that rejects duplicate keys in a JSON object."""
@@ -2079,12 +2084,22 @@ def _phased_worker_row(row) -> bool:
 def _native_worker_row(row) -> bool:
     """The bound row rule: the native dispatch identity that
     outstanding_descendants requires of binding-scoped history -- a known
-    phase, a runtime key, and a non-empty string for every attempt field."""
+    phase, a runtime key, a non-empty string for every attempt field -- plus
+    the identity VALUES settlement (attempt_matches) requires, so a row this
+    accepts can always be settled and can never block teardown forever."""
     if not isinstance(row, dict):
         return False
     if row.get("phase") not in DESCENDANT_PHASES or "runtime" not in row:
         return False
-    return all(_nonempty_str(row.get(key)) for key in ATTEMPT_FIELDS)
+    if not all(_nonempty_str(row.get(key)) for key in ATTEMPT_FIELDS):
+        return False
+    if row["runtime"] not in ("claude", "codex"):
+        return False
+    if not SHA40_RE.fullmatch(row["source_head_sha"]):
+        return False
+    if not valid_workspace_id(row["workspace_id"]):
+        return False
+    return row["pane_id"] != UNREADABLE_SENTINEL
 
 
 def _attempt_tuple(row):
@@ -2383,7 +2398,7 @@ def outstanding_descendants(rd, binding_id):
     phase, or any row missing the native identity tuple (binding-scoped
     dispatch history is native-only) marks the binding
     unreadable-outstanding -- teardown must never treat unreadable state
-    as terminated."""
+    as terminated. The sentinel is reserved at the writer by _native_worker_row."""
     base = rd / "leads" / binding_id
     panes = set()
     for tf in payload_files(base / "tasks", "*.json"):
@@ -2392,9 +2407,9 @@ def outstanding_descendants(rd, binding_id):
         try:
             task = json.loads(read_payload_text(tf))
         except (OSError, ValueError):
-            return ["<unreadable>"]
+            return [UNREADABLE_SENTINEL]
         if not _valid_task_shape(task):
-            return ["<unreadable>"]
+            return [UNREADABLE_SENTINEL]
         tid = tf.name[: -len(".json")]
         workers = task.get("workers") or []
         for w in workers:
@@ -2404,7 +2419,7 @@ def outstanding_descendants(rd, binding_id):
                 or "runtime" not in w
                 or not all(_nonempty_str(w.get(key)) for key in ATTEMPT_FIELDS)
             ):
-                return ["<unreadable>"]
+                return [UNREADABLE_SENTINEL]
         if not workers:
             continue
         att = workers[-1]
@@ -2415,7 +2430,7 @@ def outstanding_descendants(rd, binding_id):
         except FileNotFoundError:
             settle = None
         except (OSError, ValueError):
-            return ["<unreadable>"]
+            return [UNREADABLE_SENTINEL]
         if not _attempt_settled(att, settle):
             panes.add(att["pane_id"])
     return sorted(panes)

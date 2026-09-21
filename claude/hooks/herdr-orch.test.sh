@@ -8506,6 +8506,65 @@ if CLAUDE_CONFIG_DIR="$root" $CLI enrich-dispatch \
 grep -q "must be scalars" "$ERRFILE"
 SH
 
+check "write-task bound path refuses invalid identity values per field" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-rv.git
+root=$(mktemp -d)
+SHA40=$(printf 'a%.0s' $(seq 1 40))
+SHA39=$(printf 'a%.0s' $(seq 1 39))
+SHAUP=$(printf 'A%.0s' $(seq 1 40))
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-v \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 \
+   --control-tier lead --workspace-root "$LF_WS" --binding "$bid")
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-v \
+   --json '{"task_id":"td-v","workers":[]}'
+TASKFILE="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-v.json"
+BEFORE=$(cat "$TASKFILE")
+# One invalid VALUE per attempt; every other field is valid, so the refusal
+# can only come from the value rule. The message is the existing row-rule
+# string, asserted so a stale fence or bad task id cannot pass this check.
+for row in \
+  '{"launch_id":"L1","phase":"implement","runtime":"other","workspace_id":"w1","pane_id":"p1","source_head_sha":"'"$SHA40"'"}' \
+  '{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"p1","source_head_sha":"'"$SHA39"'"}' \
+  '{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"p1","source_head_sha":"'"$SHAUP"'"}' \
+  '{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w 1","pane_id":"p1","source_head_sha":"'"$SHA40"'"}' \
+  '{"launch_id":"L1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"<unreadable>","source_head_sha":"'"$SHA40"'"}'
+do
+  if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+     --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-v \
+     --json '{"task_id":"td-v","workers":['"$row"']}' 2>"$ERRFILE"; then
+    echo "accepted invalid row: $row" >&2; exit 1
+  fi
+  grep -q 'new task workers must be native dispatch rows' "$ERRFILE"
+  [ "$(cat "$TASKFILE")" = "$BEFORE" ]
+done
+# The fully valid row is still accepted, so the rule is not simply "refuse".
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-v \
+   --json '{"task_id":"td-v","workers":[{"launch_id":"L1","phase":"implement","runtime":"codex","workspace_id":"w1","pane_id":"p1","source_head_sha":"'"$SHA40"'"}]}'
+python3 -c "
+import json
+d=json.load(open('$TASKFILE'))
+assert len(d['workers'])==1 and d['workers'][0]['runtime']=='codex', d
+"
+# Unit view of the same rule, and the sentinel constant the reader shares.
+python3 -c "
+import importlib.util
+s=importlib.util.spec_from_file_location('core','claude/hooks/herdr_orch_core.py')
+c=importlib.util.module_from_spec(s); s.loader.exec_module(c)
+row=dict(launch_id='L1',phase='implement',runtime='claude',workspace_id='w1',pane_id='p1',source_head_sha='a'*40)
+assert c._native_worker_row(row)
+for k,v in (('runtime','other'),('source_head_sha','a'*39),('source_head_sha','A'*40),('workspace_id','w 1'),('pane_id','<unreadable>')):
+    assert not c._native_worker_row({**row,k:v}), (k,v)
+assert c.UNREADABLE_SENTINEL=='<unreadable>'
+"
+SH
+
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
