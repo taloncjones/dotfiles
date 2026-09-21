@@ -64,7 +64,7 @@
     },
     {
       "name": "readme-remote-access-section",
-      "run": "f=\"${TMPDIR:-/tmp}/ra-section.$$\"; awk '/^### Remote Access$/{s=1;next} /^### /{if(s)exit} s{print}' README.md > \"$f\"; if ! test -s \"$f\"; then rm -f \"$f\"; exit 1; fi; for k in '**Status:**' 'cloudflared access ssh' 'cloudflared access login' 'herdr --remote' 'claude remote-control' 'remote-access-doctor' 'herdr integration install' 'WARP' 'Tailscale' 'Proton'; do grep -q -F -- \"$k\" \"$f\" || { rm -f \"$f\"; exit 1; }; done; rm -f \"$f\"",
+      "run": "f=\"${TMPDIR:-/tmp}/ra-section.$$\"; awk '/^### Remote Access$/{s=1;next} /^### /{if(s)exit} s{print}' README.md > \"$f\"; if ! test -s \"$f\"; then rm -f \"$f\"; exit 1; fi; for k in '**Status:**' 'cloudflared access ssh' 'cloudflared access login' 'herdr --remote' 'claude --remote-control' 'remote-access-doctor' 'herdr integration install' 'WARP' 'Tailscale' 'Proton'; do grep -q -F -- \"$k\" \"$f\" || { rm -f \"$f\"; exit 1; }; done; rm -f \"$f\"",
       "timeout_secs": 30
     },
     {

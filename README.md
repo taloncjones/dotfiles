@@ -284,7 +284,7 @@ to the internet and fails behind CGNAT. Cloudflare Tunnel + Access needs
 no inbound port, adds an identity login in front of sshd, and uses the
 `cloudflared` binary already in the common Brewfile.
 
-**Claude sessions need no tunnel.** `claude remote-control` on the host
+**Claude sessions need no tunnel.** `claude --remote-control` on the host
 dials out to Anthropic; connect from claude.ai/code or the mobile app.
 Run it inside a herdr pane so it survives terminal close and sleep.
 The tunnel is for `herdr --remote` (a full terminal workspace) and
@@ -339,7 +339,7 @@ key from `authorized_keys`.
 the Status line above: P1 tunnel connector up across sleep; P2 ssh
 through Access; P3 client on Proton; P4 host on Proton (http2 fallback
 if QUIC flaps); P5 herdr --remote attach, repeated after the Access
-token expires; P6 claude remote-control from the mobile app; P7 ssh
+token expires; P6 claude --remote-control from the mobile app; P7 ssh
 refused after removing the pubkey (second gate).
 
 ### Worktree Hydration
