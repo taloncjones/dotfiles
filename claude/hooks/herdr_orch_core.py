@@ -1591,6 +1591,9 @@ def run_headless(argv, cwd, stdin_text, timeout_secs):
     if coordination.locks_held():
         raise RuntimeError("model subprocess cannot run under coordination locks")
     child_env = _selected_headless_environment(cwd)
+    if child_env is None:
+        child_env = dict(os.environ)
+    agent_runtime.strip_pane_identity(child_env)
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,

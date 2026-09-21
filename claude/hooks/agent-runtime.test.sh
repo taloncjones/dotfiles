@@ -780,6 +780,43 @@ def test_run_uses_argv_and_unsets_default_claude_config():
         assert result["status"] == "success", result
 
 
+def test_run_bounded_strips_pane_identity_from_the_child():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os,sys\n"
+            "json.dump({k:os.environ.get(k,'UNSET') for k in ('HERDR_PANE_ID','HERDR_TAB_ID','HERDR_ENV','HERDR_WORKSPACE_ID')},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-fable-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = dict(os.environ)
+        env.update(
+            {
+                "PATH": f"{bindir}:{env['PATH']}",
+                "RUN_LOG": str(log),
+                "HERDR_ENV": "1",
+                "HERDR_WORKSPACE_ID": "w1",
+                "HERDR_PANE_ID": "w1:p1",
+                "HERDR_TAB_ID": "w1:t1",
+            }
+        )
+        route = runtime.resolve_route(
+            "claude", "planner", capabilities={"models": {"fable": model()}}
+        )
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        call = json.loads(log.read_text())
+        assert call["HERDR_PANE_ID"] == "UNSET" and call["HERDR_TAB_ID"] == "UNSET", call
+        assert call["HERDR_ENV"] == "1" and call["HERDR_WORKSPACE_ID"] == "w1", call
+
+
 def test_run_consumes_shared_work_account_scope():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -1660,6 +1697,7 @@ for name, test in (
     ("Codex JSONL joins multiple agent messages", test_codex_result_joins_multiple_agent_messages),
     ("error and malformed runtime output fail closed", test_result_errors_and_malformed_output_fail_closed),
     ("bounded run uses argv and native personal Claude env", test_run_uses_argv_and_unsets_default_claude_config),
+    ("run_bounded strips the pane identity from the child", test_run_bounded_strips_pane_identity_from_the_child),
     ("bounded run consumes the shared work account scope", test_run_consumes_shared_work_account_scope),
     ("bounded Codex launch applies repository plugin policy", test_bounded_codex_plugin_policy_uses_resolved_repository_scope),
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),

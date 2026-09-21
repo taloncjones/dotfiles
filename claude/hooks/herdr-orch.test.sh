@@ -1876,6 +1876,40 @@ assert c.SHA40_RE.match("0"*40) and not c.SHA40_RE.match("abc") and not c.SHA40_
 sys.exit(0)
 PY
 
+check "run_headless strips the pane identity" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-hl1.git
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+export FAKE_CLAUDE_LOG="$root/log"
+export FAKE_CLAUDE_HOOK='printf "%s|%s|%s|%s\n" "${HERDR_PANE_ID:-UNSET}" "${HERDR_TAB_ID:-UNSET}" "${HERDR_ENV:-UNSET}" "${HERDR_WORKSPACE_ID:-UNSET}" > "$FAKE_CLAUDE_LOG.env"'
+HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p1 HERDR_TAB_ID=w1:t1 PATH="$FAKE_CLAUDE_DIR:$PATH" python3 - "$LF_REPO" <<'PY'
+import os
+import sys
+sys.path.insert(0, "claude/hooks")
+import herdr_orch_core as c
+repo = sys.argv[1]
+env_dump = os.environ["FAKE_CLAUDE_LOG"] + ".env"
+context = c.repository_context(repo)
+scope = c.account_scope(repo, "claude")
+# selected path (the one run-mech uses)
+token = c._PAYLOAD_SELECTION.set({"context": context, "scope": scope})
+try:
+    c.run_headless(["claude", "-p"], repo, "hello", 30)
+finally:
+    c._PAYLOAD_SELECTION.reset(token)
+seen = open(env_dump).read().strip()
+assert seen == "UNSET|UNSET|1|w1", seen
+# unselected path inherits the caller's environment minus the pane identity
+os.unlink(env_dump)
+token = c._PAYLOAD_SELECTION.set(None)
+try:
+    c.run_headless(["claude", "-p"], repo, "hello", 30)
+finally:
+    c._PAYLOAD_SELECTION.reset(token)
+seen = open(env_dump).read().strip()
+assert seen == "UNSET|UNSET|1|w1", seen
+PY
+SH
+
 check "run-mech: success with fresh worker record; argv/stdin/cwd exact; ledger start+end" <<'SH'
 export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
 export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
