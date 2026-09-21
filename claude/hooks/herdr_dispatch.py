@@ -368,6 +368,32 @@ def _update_attempt(
         return updated
 
 
+class _LauncherRecords:
+    """Launcher-scope attempt writer: the in-process owner-transaction path."""
+
+    def __init__(self, rd, task_id, session, fence, repository, scope, repo_slug, todo_binding):
+        self.rd = rd
+        self.task_id = task_id
+        self.session = session
+        self.fence = fence
+        self.repository = repository
+        self.scope = scope
+        self.repo_slug = repo_slug
+        self.todo_binding = todo_binding
+
+    def reserve(self, attempt: dict[str, Any]) -> dict[str, Any]:
+        return _write_attempt(
+            self.rd, self.task_id, self.session, self.fence, self.repository,
+            self.scope, self.repo_slug, attempt, self.todo_binding,
+        )
+
+    def update(self, launch_id: str, **fields: Any) -> dict[str, Any]:
+        return _update_attempt(
+            self.rd, self.task_id, self.session, self.fence, self.repository,
+            self.scope, self.repo_slug, launch_id, **fields,
+        )
+
+
 def _lifecycle_prompt(
     prompt: str,
     attempt: dict[str, Any],
@@ -498,6 +524,9 @@ def launch(
             Path(__file__).resolve().parents[1] / "skills/todos/scripts/todos.sh"
         )
     _check_todo_ready(pending_task, repository["root"], todos_cli, child_env)
+    records = _LauncherRecords(
+        rd, task_id, session, fence, repository, scope, repo_slug, todo_binding
+    )
     agent_runtime._apply_launch_environment(child_env, scope)
     runtime_binary = _runtime_binary(runtime, child_env)
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
@@ -547,17 +576,7 @@ def launch(
         "worktree": repository["root"],
         "branch": repository["branch"],
     }
-    task = _write_attempt(
-        rd,
-        task_id,
-        session,
-        fence,
-        repository,
-        scope,
-        repo_slug,
-        attempt,
-        todo_binding,
-    )
+    task = records.reserve(attempt)
 
     try:
         launch_route = route
@@ -616,14 +635,7 @@ def launch(
         if runtime == "codex" and _fresh_codex_hook_review_required(
             pre_capture, post_capture
         ):
-            _update_attempt(
-                rd,
-                task_id,
-                session,
-                fence,
-                repository,
-                scope,
-                repo_slug,
+            records.update(
                 launch_id,
                 status="blocked",
                 blocked_reason="codex-hook-review-required",
@@ -645,14 +657,7 @@ def launch(
                     "reason": "blocked-before-prompt",
                 },
             }
-        _update_attempt(
-            rd,
-            task_id,
-            session,
-            fence,
-            repository,
-            scope,
-            repo_slug,
+        records.update(
             launch_id,
             status="ready",
             capture_after_sha256=capture_after_sha256,
@@ -742,14 +747,7 @@ def launch(
             # Bounded because a nonzero exit carries herdr's whole stderr and
             # this string is persisted into the shared task record.
             prompt_wait_cause = str(exc)[:200]
-        final_attempt = _update_attempt(
-            rd,
-            task_id,
-            session,
-            fence,
-            repository,
-            scope,
-            repo_slug,
+        final_attempt = records.update(
             launch_id,
             status="launched",
             prompt_state=prompt_state,
@@ -769,17 +767,7 @@ def launch(
             presentation = {"status": "unsupported", "reason": str(exc)}
     except DispatchError:
         try:
-            _update_attempt(
-                rd,
-                task_id,
-                session,
-                fence,
-                repository,
-                scope,
-                repo_slug,
-                launch_id,
-                status="launch_failed",
-            )
+            records.update(launch_id, status="launch_failed")
         except DispatchError:
             pass
         raise
