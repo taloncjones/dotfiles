@@ -99,7 +99,11 @@ worker" is shipped as `herdr_dispatch reprompt` (CLI subcommand):
 validates the worktree/task context, targets the worker by `launch_id` (not the
 latest attempt), and holds the owner fence across re-validating that the target
 is still the current attempt for its phase AND delivering acceptance, so no
-superseding attempt or ownership transfer can slip in between. It requires the
+superseding attempt or ownership transfer can slip in between. Acceptance is
+what the wait actually stops at: the delivery passes `--until working --until
+blocked`, because herdr's default `--wait` predicate is `idle|done|blocked` --
+the turn FINISHING -- which would hold the fence for the whole turn and time
+out on any normal one. It requires the
 live agent idle on its recorded pane. Delivery is classified so an incorporation
 turn is never double-delivered: confirmed rejection (only a provable
 process-creation failure, retry-safe), uncertain (timeout, nonzero exit,
