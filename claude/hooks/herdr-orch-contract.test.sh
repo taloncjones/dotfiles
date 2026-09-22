@@ -66,6 +66,9 @@ $CLI write-index --repo-slug "$SLUG" --workspace w1 --session S --fence "$F" \
 ok "kickoff wrote one task record" "[ -f '$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json' ]"
 
 # 1b. the worker hook (Stop) appends the hint AND pushes one wake to the inbox
+# A wake pushes only on a completion-record change or a block transition now,
+# so a done.json record must exist before this Stop for the push to fire.
+echo '{}' > "$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json"
 printf '{"hook_event_name":"Stop"}' | HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 python3 claude/hooks/herdr_worker_status.py
 wait "$INBOX_PID" 2>/dev/null || true
 ok "hook appended the stopped hint" "grep -q '\"event\":\"stopped\"' '$ROOT/herdr-orch/$SLUG/workspaces/w1.events.jsonl'"
