@@ -49,6 +49,7 @@ native child-agent model and reasoning-effort fields, never Claude aliases:
 - plan: <model> / <effort|inherit>
 - impl: <model> / <effort|inherit>
 - review: <model> / <effort|inherit>
+- plan-review: <model> / <effort|inherit>   (the plan-review seat, not `review`)
 - mech: <model> / <effort|inherit>
 - think: <model|unavailable> / <effort>
 <workflow-opt-in-line>

@@ -32,6 +32,7 @@ CODEX_ROUTES = {
     "controller": ("gpt-6-astra", "high"),
     "planner": ("gpt-6-astra", "high"),
     "reviewer": ("gpt-6-astra", "high"),
+    "plan_reviewer": ("gpt-6-astra", "high"),
     "development_reviewer": ("gpt-5.6-sol", "high"),
     "skeptic": ("gpt-6-astra", "high"),
     "implementation": ("gpt-5.6-terra", "high"),
@@ -42,8 +43,9 @@ CODEX_ROUTES = {
 
 CLAUDE_ROUTES = {
     "controller": ("opus", "medium"),
-    "planner": ("fable", "high"),
+    "planner": ("opus", "high"),
     "reviewer": ("opus", "high"),
+    "plan_reviewer": ("fable", "medium"),
     "development_reviewer": ("sonnet", "high"),
     "skeptic": ("opus", "high"),
     "implementation": ("sonnet", "high"),
@@ -52,18 +54,49 @@ CLAUDE_ROUTES = {
     "think": ("fable", "high"),
 }
 
+# Quality tier: comparable model/effort strength for the floor checks below,
+# so a fallback or override is judged by capability rather than by effort
+# label alone. fable/medium is a peer of opus/high (fable needs one less
+# effort step for the same design quality), so fable carries a +1 tier offset
+# over opus at any given effort label; sonnet and haiku progressively trail
+# opus at that label. Codex models have no established peer relationships to
+# each other, so their table keeps the prior effort-only comparison uniformly
+# (offset 0) rather than special-casing the Codex runtime in the check itself.
+CLAUDE_MODEL_TIER = {"fable": 1, "opus": 0, "sonnet": -1, "haiku": -2}
+CODEX_MODEL_TIER = {codex_model: 0 for codex_model in CODEX_MODELS}
+
+
+def _quality_tier(runtime: str, model: str, effort: str) -> int:
+    offsets = CLAUDE_MODEL_TIER if runtime == "claude" else CODEX_MODEL_TIER
+    return EFFORT_RANK[effort] + offsets[model]
+
+
 # Same-account fallbacks applied when a role's DEFAULT model -- the one in the
 # route table above -- is unavailable and the caller supplied no fallbacks for
-# that role. Fable is the top tier for both fable-rooted roles, so losing it
-# drops a tier; xhigh on opus compensates rather than silently working at a
-# lower standard. Two deliberate limits:
+# that role. planner and plan_reviewer swap to a fable entry at the tier that
+# matches their opus default (fable/medium peers opus/high; fable/high peers
+# opus/xhigh) rather than a literal same-effort swap, so a fable fallback is
+# never actually weaker than the opus seat it replaces. The planner carries
+# two entries so the swap lands on whichever quality floor applies -- the
+# opus/high tier normally, the opus/xhigh tier under difficulty=hard, where a
+# single fable/medium entry would be skipped by the tier rule and block the
+# dispatch. think still roots on fable and keeps its opus/xhigh fallback,
+# which only clears the tier check at think's base floor: risk=critical
+# raises think's floor to fable/xhigh's own tier, one tier above anything
+# opus can reach, so a critical-risk think dispatch with fable down now
+# blocks for re-decision instead of silently under-serving on opus. Two
+# deliberate limits:
 #   - A caller who overrides the route to a different model owns that choice, so
 #     the default does not fire. An explicit cheaper pick is never silently
-#     escalated back to opus/xhigh.
+#     escalated back to a higher tier.
 #   - A config "fallbacks" entry for a role replaces the default outright,
 #     including an empty list to disable fallback for that role.
 CLAUDE_FALLBACKS: dict[str, list[dict[str, str]]] = {
-    "planner": [{"model": "opus", "effort": "xhigh"}],
+    "planner": [
+        {"model": "fable", "effort": "medium"},
+        {"model": "fable", "effort": "high"},
+    ],
+    "plan_reviewer": [{"model": "opus", "effort": "high"}],
     "think": [{"model": "opus", "effort": "xhigh"}],
 }
 
@@ -109,9 +142,9 @@ CONFIG_KEYS = (
 PIPELINE_ROUTES: dict[str, str] = {
     "brainstorming": "planner",
     "spec": "planner",
-    "plan": "planner",
+    "writing-plans": "planner",
     "spec-review": "reviewer",
-    "plan-review": "reviewer",
+    "plan-review": "plan_reviewer",
     "implement": "implementation",
     "implementation-review": "development_reviewer",
     "review-change": "development_reviewer",
@@ -249,9 +282,12 @@ def _route_override(
         raise RouteError(f"unsupported Claude model: {model}")
     if effort not in EFFORTS:
         raise RouteError(f"unsupported effort: {effort}")
-    if EFFORT_RANK[effort] < EFFORT_RANK[default_effort]:
+    if _quality_tier(runtime, model, effort) < _quality_tier(
+        runtime, default_model, default_effort
+    ):
         raise RouteError(
-            f"configured effort {effort} is below the {default_effort} role floor"
+            f"configured {model}/{effort} is below the "
+            f"{default_model}/{default_effort} role floor"
         )
     return model, effort
 
@@ -433,7 +469,9 @@ def resolve_route(
     )
     if availability == "unavailable":
         for candidate_model, candidate_effort in candidates:
-            if EFFORT_RANK[candidate_effort] < EFFORT_RANK[quality_floor]:
+            if _quality_tier(runtime, candidate_model, candidate_effort) < _quality_tier(
+                runtime, default_model, quality_floor
+            ):
                 continue
             candidate_availability, candidate_capability = _capability(
                 capabilities, candidate_model, candidate_effort

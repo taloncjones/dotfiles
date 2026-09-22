@@ -16,7 +16,7 @@ python3 "$RUNTIME" route --step <step> --runtime <claude|codex>
 ```
 
 `--step` looks the step up in `agent_runtime.PIPELINE_ROUTES` (brainstorming ->
-planner -> fable/high, implement -> implementation -> sonnet/high, and so on) and
+planner -> opus/high, implement -> implementation -> sonnet/high, and so on) and
 resolves model/effort through the same `resolve_route` as `--role`. `--step` and
 `--role` are mutually exclusive; exactly one is required; an unknown step is a
 hard error.

@@ -52,21 +52,24 @@ environment. The partner remains read-only and receives bounded requested
 output: severity, location, problem, concrete fix, and verdict. Empty, error,
 or malformed output is incomplete.
 
-Resolve model and effort through `agent_runtime.resolve_route("claude",
-"reviewer")` through the shared runtime runner; do not duplicate a route table
-in this skill.
+Resolve model and effort through `agent_runtime.py route --step plan-review`
+through the shared runtime runner; do not duplicate a route table in this
+skill.
 
 ```bash
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-plan-review.XXXXXX")
 printf '%s\n' "Independently review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Return severity, location, problem, concrete fix, and one verdict. Do not invoke co-review, another partner, skills, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
-  --runtime claude --role reviewer --risk normal --provisional \
+  --runtime claude --step plan-review --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
 
-Add `--personal` only for a deliberate personal override. Use `--risk critical`
-only for explicit critical risk; preserve unknown observed metadata as unknown.
+Add `--personal` only for a deliberate personal override. The plan-review seat
+refuses `--risk critical` and `difficulty`; escalate a plan that needs a
+heavier review with a recorded `--config-json` `routes` override on
+`plan_reviewer` (for example `{"model": "opus", "effort": "xhigh"}`); preserve
+unknown observed metadata as unknown.
 
 Verify each finding against the frozen plan, present a deduplicated list, and
 retain uncertain findings as unresolved. Apply fixes within existing user

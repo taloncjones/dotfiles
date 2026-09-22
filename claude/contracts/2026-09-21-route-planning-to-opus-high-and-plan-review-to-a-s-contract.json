@@ -1,0 +1,71 @@
+{
+  "v": 1,
+  "task_id": "2026-09-21-route-planning-to-opus-high-and-plan-review-to-a-s",
+  "commands": [
+    {
+      "name": "planner-steps-route-to-opus-high",
+      "run": "python3 claude/hooks/agent_runtime.py route --runtime claude --step writing-plans | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('planner','opus','high'), r\" && python3 claude/hooks/agent_runtime.py route --runtime claude --step spec | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('planner','opus','high'), r\" && python3 claude/hooks/agent_runtime.py route --runtime claude --step brainstorming | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('planner','opus','high'), r\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "plan-review-step-routes-to-fable-medium",
+      "run": "python3 claude/hooks/agent_runtime.py route --runtime claude --step plan-review | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('plan_reviewer','fable','medium'), r\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "review-seats-unchanged",
+      "run": "python3 claude/hooks/agent_runtime.py route --runtime claude --step spec-review | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('reviewer','opus','high'), r\" && python3 claude/hooks/agent_runtime.py route --runtime claude --step co-review | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('reviewer','opus','high'), r\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "implementation-seats-unchanged",
+      "run": "python3 claude/hooks/agent_runtime.py route --runtime claude --step implement | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('implementation','sonnet','high'), r\" && python3 claude/hooks/agent_runtime.py route --runtime claude --step implementation-review | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('development_reviewer','sonnet','high'), r\" && python3 claude/hooks/agent_runtime.py route --runtime claude --step gateway | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('controller','opus','medium'), r\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "renamed-step-key-is-retired",
+      "run": "python3 claude/hooks/agent_runtime.py route --runtime claude --step plan 2>&1 | grep -qF \"unknown pipeline step: 'plan'\" && python3 claude/hooks/agent_runtime.py route --runtime claude --step spec | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('planner','opus','high'), r\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "plan-review-skills-use-the-step",
+      "run": "grep -q -- '--runtime claude --step plan-review' codex/skills/claude-plan-review/SKILL.md && grep -q -- '--runtime codex --step plan-review' claude/skills/codex-plan-review/SKILL.md && ! grep -q -- '--role reviewer' codex/skills/claude-plan-review/SKILL.md && ! grep -q -- '--role reviewer' claude/skills/codex-plan-review/SKILL.md && ! grep -qF 'resolve_route(\"claude\", \"reviewer\")' codex/skills/claude-plan-review/SKILL.md && grep -q -- '--role reviewer' codex/skills/claude-spec-review/SKILL.md && grep -q -- '--role reviewer' claude/skills/codex-spec-review/SKILL.md && grep -qF '\"plan_reviewer\"' claude/hooks/herdr_stop_gate.py && python3 claude/hooks/agent_runtime.py route --runtime codex --step plan-review --capabilities-json '{\"models\":{}}' | python3 -c \"import json,sys; r=json.load(sys.stdin); assert (r['role'],r['model'],r['effort'])==('plan_reviewer','gpt-6-astra','high'), r\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "planner-falls-back-to-fable-at-either-floor",
+      "run": "python3 -c \"import importlib.util,sys; spec=importlib.util.spec_from_file_location('ar','claude/hooks/agent_runtime.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); caps={'models':{'opus':{'status':'unavailable','efforts':['high','xhigh']},'fable':{'status':'available','efforts':['medium','high']}}}; n=m.resolve_route('claude','planner',capabilities=caps); assert (n['model'],n['effort'],n['ready'])==('fable','medium',True), n; h=m.resolve_route('claude','planner',capabilities=caps,config={'difficulty':{'level':'hard','proposed':'hard','confirmed':True}}); assert (h['model'],h['effort'],h['ready'])==('fable','high',True), h; r=m.resolve_route('claude','plan_reviewer',capabilities={'models':{'fable':{'status':'unavailable','efforts':['high']},'opus':{'status':'available','efforts':['high','xhigh']}}}); assert (r['model'],r['effort'],r['ready'])==('opus','high',True), r; assert 'plan_reviewer' not in m.CRITICAL_ROLES and 'plan_reviewer' not in m.DIFFICULTY_ROLES\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "agent-runtime-suite-count-and-green",
+      "run": "f=\"${TMPDIR:-/tmp}/ar-suite.$$\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/agent-runtime.test.sh > \"$f\" 2>&1; rc=$?; tail -1 \"$f\" | grep -qE '^(5[4-9]|[6-9][0-9]) passed, 0 failed$'; grc=$?; rm -f \"$f\"; [ \"$rc\" -eq 0 ] && [ \"$grc\" -eq 0 ]",
+      "timeout_secs": 600
+    },
+    {
+      "name": "policy-document-names-both-review-seats",
+      "run": "grep -qE '\\| *planner *\\| *opus/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qE '\\| *plan_reviewer *\\| *fable/medium *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qE '\\| *codex plan_reviewer *\\| *gpt-6-astra/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && ! grep -qE '\\| *planner *\\| *fable/high *\\|' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && grep -qF 'read-only sandbox, single pass' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md && ! grep -qF 'carries a configured `opus/xhigh` fallback' claude/skills/herdr-orchestration/references/pipeline-worker-mapping.md",
+      "timeout_secs": 60
+    },
+    {
+      "name": "brief-and-skill-carry-the-new-seats",
+      "run": "grep -q -- '- plan-review: <model> / <effort|inherit>' claude/skills/herdr-orchestration/references/brief-template.md && test \"$(grep -c 'plan_reviewer' claude/skills/herdr-orchestration/SKILL.md)\" -ge 2 && grep -qE '^\\| Director .*\\| opus ' claude/skills/herdr-orchestration/SKILL.md && ! grep -qE '^\\| Director .*fable' claude/skills/herdr-orchestration/SKILL.md && ! grep -qF 'planner -> fable/high' claude/skills/herdr-orchestration/references/dispatch-mechanism.md",
+      "timeout_secs": 60
+    },
+    {
+      "name": "legacy-wrapper-routing-untouched",
+      "run": "python3 -c \"import importlib.util; spec=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); assert m.ROLE_DEFAULTS['plan']==('fable','opus'), m.ROLE_DEFAULTS\" && grep -qE '^\\| Planning worker .*fable -> opus' claude/skills/herdr-orchestration/SKILL.md",
+      "timeout_secs": 60
+    },
+    {
+      "name": "orchestration-and-stop-gate-suites",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/herdr-orch.test.sh && env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/herdr-orch-contract.test.sh && env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/herdr-stop-gate.test.sh",
+      "timeout_secs": 2400
+    },
+    {
+      "name": "public-safety-scan",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 300
+    }
+  ]
+}
