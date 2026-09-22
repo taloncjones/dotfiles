@@ -2661,6 +2661,47 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     return facts
 
 
+def _checkin_poll(ns):
+    """-> (poll, reason). run_herdr collapses every failure kind into one
+    DispatchError without preserving the return code, so the vocabulary is two
+    tokens: `unavailable` for any subprocess fault, `malformed` for a reply
+    whose shape is wrong."""
+    def _load(path):
+        with open(path, "rb") as fh:
+            return json.loads(fh.read().decode())
+
+    if bool(ns.agents_json) != bool(ns.workspaces_json):
+        # A half-override would silently fall through to the real binary, and
+        # herdr IS on PATH on a dev machine -- that would break the suite's
+        # no-herdr guarantee without any visible failure.
+        return None, "malformed"
+    if ns.agents_json:
+        try:
+            agents, spaces = _load(ns.agents_json), _load(ns.workspaces_json)
+        except (OSError, ValueError):
+            return None, "malformed"
+    else:
+        # Lazy: herdr_dispatch imports this module, so a module-level import
+        # of its CLI wrapper would close the cycle.
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = shutil.which("herdr")
+        if not exe:
+            return None, "unavailable"
+        try:
+            # run_herdr already unwraps the JSON-RPC envelope down to its
+            # "result" object (herdr_dispatch_cli.result_object), but
+            # parse_poll expects the raw {"result": {...}} shape -- rewrap it
+            # rather than loosen parse_poll's contract, which the unit tests
+            # above pin to the raw-reply shape.
+            agents = {"result": run_herdr(exe, ["agent", "list"], env=dict(os.environ))}
+            spaces = {"result": run_herdr(exe, ["workspace", "list"], env=dict(os.environ))}
+        except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+            return None, "unavailable"
+    poll = parse_poll(agents, spaces)
+    return (poll, "") if poll is not None else (None, "malformed")
+
+
 def is_reviewed(task, done, head_sha, workspace) -> bool:
     """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
     live HEAD all agree, the record comes from the dispatched review workspace,
@@ -2999,6 +3040,11 @@ def _main(argv=None) -> int:
     rl.add_argument("--apply", action="store_true")
     rl.add_argument("--stale-secs", type=int, default=900)
     rl.add_argument("--descendants-terminated", action="store_true")
+    ck = add("checkin", "--session", "--fence")
+    ck.add_argument("--messaging-socket", default=None)
+    ck.add_argument("--agents-json", default=None)
+    ck.add_argument("--workspaces-json", default=None)
+    ck.add_argument("--all", action="store_true")
     add("status")
     add("task-lead-status")
     add("deactivate-task-leads", fenced=True)
@@ -4796,6 +4842,37 @@ def _main(argv=None) -> int:
             "sequence": env["sequence"],
             "pr": summary["pr"],
         }, separators=(",", ":")))
+        return 0
+    if ns.cmd == "checkin":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        if not refresh_owner(rd, ns.session, ns.fence, ns.messaging_socket):
+            print("owner: stale-fence")
+            return 1
+        poll, reason = _checkin_poll(ns)
+        if poll is None:
+            print(f"poll: failed ({reason})")
+        payload_root = state_root().parent
+        changed = poll is None
+        for tf in sorted(payload_files(rd / "tasks", "*.json")):
+            if tf.name.endswith((".done.json", ".review.json")):
+                continue
+            try:
+                task = json.loads(read_payload_text(tf))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(task, dict):
+                continue
+            if not ns.all and task.get("status") in CHECKIN_TERMINAL:
+                continue
+            f = checkin_facts(rd, task, poll, payload_root)
+            if f["action"] != "none":
+                changed = True
+            print(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
+                  f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
+                  f"dirty={f['dirty']} done={f['done']} review={f['review']} "
+                  f"hint={f['hint']} action={f['action']}")
+        print(f"changed: {'yes' if changed else 'no'}")
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")

@@ -9119,5 +9119,74 @@ facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
 assert facts["action"] == "abandoned-candidate", facts
 PY
 
+check "checkin reports poll failed and changed yes on an unparseable poll" <<PY
+$LOAD
+class NS:
+    agents_json = None; workspaces_json = None
+bad = tempfile.mkdtemp()
+a = os.path.join(bad, "a.json"); w = os.path.join(bad, "w.json")
+open(a, "w").write("{not json"); open(w, "w").write("{}")
+NS.agents_json, NS.workspaces_json = a, w
+poll, reason = c._checkin_poll(NS)
+assert poll is None and reason == "malformed", (poll, reason)
+open(a, "w").write(json.dumps({"result": {"agents": []}}))
+open(w, "w").write(json.dumps({"result": {"workspaces": []}}))
+poll, reason = c._checkin_poll(NS)
+assert poll is not None and poll["known"] == set(), (poll, reason)
+PY
+
+check "checkin leaves every state file but owner.json byte-identical" <<PY
+$LOAD
+import hashlib
+root = tempfile.mkdtemp()
+rd = os.path.join(root, "herdr-orch", "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+open(os.path.join(rd, "tasks", "PROJ-1.json"), "w").write(json.dumps(
+    {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "workers": []}))
+def digest():
+    out = {}
+    for base, _d, files in os.walk(rd):
+        for name in files:
+            p = os.path.join(base, name)
+            out[p] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+    return out
+before = {k: v for k, v in digest().items() if not k.endswith("owner.json")}
+poll = {"live": {}, "known": set(), "worktrees": {}}
+task = json.load(open(os.path.join(rd, "tasks", "PROJ-1.json")))
+c.checkin_facts(rd, task, poll, c.state_root().parent)
+after = {k: v for k, v in digest().items() if not k.endswith("owner.json")}
+assert before == after, "checkin mutated state beyond owner.json"
+PY
+
+check "checkin lists non-terminal tasks, honours --all, and refuses a stale fence" <<'SH'
+root=$(mktemp -d)
+FIX="python3 claude/hooks/herdr_legacy_fixture.py"
+f=$(CLAUDE_CONFIG_DIR="$root" $FIX claim-owner --repo-slug slug-x --session S --host h --pid 1)
+live='{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress","workers":[]}'
+gone='{"task_id":"PROJ-2","base_sha":"b0","status":"merged","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$live"
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-2 \
+    --session S --fence "$f" --json "$gone"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 ' || exit 1
+if printf '%s\n' "$out" | grep -q '^PROJ-2 '; then exit 1; fi   # merged is terminal
+printf '%s\n' "$out" | grep -q '^changed: ' || exit 1
+all=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" --all \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$all" | grep -q '^PROJ-2 ' || exit 1
+printf 'not json' > "$root/a.json"
+bad=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$bad" | grep -q 'poll: failed (malformed)' || exit 1
+printf '%s\n' "$bad" | grep -q '^changed: yes' || exit 1
+if stale=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence 999 \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json"); then exit 1; fi
+printf '%s\n' "$stale" | grep -q 'owner: stale-fence' || exit 1
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
