@@ -66,6 +66,9 @@ $CLI write-index --repo-slug "$SLUG" --workspace w1 --session S --fence "$F" \
 ok "kickoff wrote one task record" "[ -f '$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.json' ]"
 
 # 1b. the worker hook (Stop) appends the hint AND pushes one wake to the inbox
+# A wake pushes only on a completion-record change or a block transition now,
+# so a done.json record must exist before this Stop for the push to fire.
+echo '{}' > "$ROOT/herdr-orch/$SLUG/tasks/PROJ-1.done.json"
 printf '{"hook_event_name":"Stop"}' | HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 python3 claude/hooks/herdr_worker_status.py
 wait "$INBOX_PID" 2>/dev/null || true
 ok "hook appended the stopped hint" "grep -q '\"event\":\"stopped\"' '$ROOT/herdr-orch/$SLUG/workspaces/w1.events.jsonl'"
@@ -192,10 +195,10 @@ ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
   "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $SKILL"
 ok "skill: watch armed at relaxed cadence when messaging is live, default otherwise" \
   "grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
-ok "skill: re-subscription eligible only for working/blocked workers" \
-  "grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
+ok "skill: idle-subscription re-wake mechanism is retired" \
+  "! grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
 ok "skill: no-lost-wake rule, capped at three passes" \
-  "grep -Fq 'capped at three passes per turn' $SKILL"
+  "grep -Fq 'capped at three passes' $SKILL"
 ok "skill: transport readiness never grants task completion" \
   "grep -Fq 'are transport evidence' $SKILL && grep -Fq 'milestone/contract/review gates advance' $SKILL"
 ok "skill: safety names cross-session messages as wake-only" \
@@ -428,7 +431,10 @@ ok "every pane run line carries CLAUDE_CONFIG_DIR=" \
 if command -v zsh >/dev/null 2>&1; then
   PAYLOAD=$(grep -- '--name plan-proj-e$' "$BIN/pane-runs.log" | head -1 | sed 's/^pane run w1:p1 //')
   : > "$FAKE_CLAUDE_LOG.cfg"
-  env -u CLAUDE_CONFIG_DIR FAKE_CLAUDE_HOOK= HOME="$FAKE" PATH="$FAKE:$PATH" \
+  # The replay asserts the pinned-dir rung, not the machine's account policy:
+  # scrub CLAUDE_PERSONAL_ONLY/WORKFLOW_PERSONAL_ACCOUNT so a personal-only
+  # runner's own env doesn't win over the pinned dir under test.
+  env -u CLAUDE_CONFIG_DIR -u CLAUDE_PERSONAL_ONLY -u WORKFLOW_PERSONAL_ACCOUNT FAKE_CLAUDE_HOOK= HOME="$FAKE" PATH="$FAKE:$PATH" \
     zsh -c "source zsh/claude-account.zsh && $PAYLOAD" </dev/null >/dev/null 2>&1 || true
   # Compare against the resolved path: the wrapper normalizes with zsh's :A
   # (symlinks and ".."), and on macOS $CFG (a mktemp -d path under /var) is

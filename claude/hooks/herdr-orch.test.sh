@@ -644,23 +644,118 @@ if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w2 --
 if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h2 2>/dev/null; then exit 1; fi
 SH
 
+check "wake_decision: three consecutive Stops with no record change push zero wakes" <<PY
+$LOAD
+m = {"v": 1, "records": {"/t/d.json": [5, 9]}, "last_push": {"stopped": 100.0}}
+fp = {"/t/d.json": [5, 9]}
+pushes = []
+for t in (200.0, 300.0, 400.0):
+    p, m = c.wake_decision(m, "stopped", fp, "stopped", t)
+    pushes.append(p)
+assert pushes == [False, False, False], pushes
+PY
+
+check "wake_decision: a Stop after a done.json write pushes exactly one wake" <<PY
+$LOAD
+m = {"v": 1, "records": {}, "last_push": {}}
+fp = {"/t/d.json": [5, 9]}
+p1, m = c.wake_decision(m, "stopped", fp, "stopped", 1000.0)
+p2, m = c.wake_decision(m, "stopped", fp, "stopped", 2000.0)
+assert (p1, p2) == (True, False), (p1, p2)
+assert m["last_push"]["stopped"] == 1000.0, m
+PY
+
+check "wake_decision: a blocking Notification pushes once per transition into blocked" <<PY
+$LOAD
+m = {"v": 1, "records": {}, "last_push": {}}
+p1, m = c.wake_decision(m, "blocked", {}, "stopped", 1000.0)
+p2, m = c.wake_decision(m, "blocked", {}, "blocked", 1001.0)
+p3, m = c.wake_decision(m, "blocked", {}, "blocked", 99000.0)
+assert (p1, p2, p3) == (True, False, False), (p1, p2, p3)
+PY
+
+check "wake_decision: a debounced record change fires on the next Stop" <<PY
+$LOAD
+m = {"v": 1, "records": {"/t/d.json": [1, 1]}, "last_push": {"stopped": 1000.0}}
+fp = {"/t/d.json": [2, 2]}
+p1, m = c.wake_decision(m, "stopped", fp, "stopped", 1010.0)
+assert p1 is False, "inside the debounce window"
+assert m["records"] == {"/t/d.json": [1, 1]}, "suppression must not advance the fingerprint"
+p2, m = c.wake_decision(m, "stopped", fp, "stopped", 1100.0)
+assert p2 is True and m["records"] == fp, (p2, m)
+PY
+
+check "wake_decision: a deleted completion record pushes no wake" <<PY
+$LOAD
+m = {"v": 1, "records": {"/t/d.json": [5, 9]}, "last_push": {}}
+p, m2 = c.wake_decision(m, "stopped", {}, "stopped", 9000.0)
+assert p is False, "a vanished record must never signal"
+assert m2["records"] == {"/t/d.json": [5, 9]}, m2
+PY
+
+check "wake_decision: a corrupt marker reads as empty and biases toward pushing" <<PY
+$LOAD
+p, m = c.wake_decision({"garbage": 1}, "stopped", {"/t/d.json": [5, 9]}, "stopped", 9000.0)
+assert p is True and m["records"] == {"/t/d.json": [5, 9]}, (p, m)
+p2, m2 = c.wake_decision("not-a-dict", "stopped", {"/t/d.json": [5, 9]}, None, 9000.0)
+assert p2 is True, p2
+PY
+
+check "record_fingerprint: only the task's own two sidecars, absent paths omitted" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+open(os.path.join(rd, "tasks", "PROJ-2.done.json"), "w").write("{}")
+fp = c.record_fingerprint(rd, "PROJ-1")
+assert list(fp) == [os.path.join(rd, "tasks", "PROJ-1.done.json")], fp
+assert all(isinstance(v, list) and len(v) == 2 for v in fp.values()), fp
+assert c.record_fingerprint(rd, "../escape") == {}, "unsafe task id must yield nothing"
+PY
+
+check "prior_hint: the last event, and None when the tail names another task" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "workspaces"))
+p = os.path.join(rd, "workspaces", "w1.events.jsonl")
+with open(p, "w") as fh:
+    fh.write(json.dumps({"v": 1, "ts": "t", "workspace_id": "w1", "event": "stopped", "task_id": "PROJ-1"}) + "\n")
+    fh.write(json.dumps({"v": 1, "ts": "t", "workspace_id": "w1", "event": "blocked", "task_id": "PROJ-1"}) + "\n")
+assert c.prior_hint(rd, "w1", "PROJ-1") == "blocked"
+assert c.prior_hint(rd, "w1", "PROJ-2") is None, "a rebound workspace must reset the transition"
+assert c.prior_hint(rd, "w9", "PROJ-1") is None, "no log means no prior hint"
+PY
+
 # args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)
+# args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)  [expect_push(push|nopush)]
 hook_case() {
-    label="$1"; env_ws="$2"; henv="$3"; payload="$4"; expect="$5"
+    label="$1"; env_ws="$2"; henv="$3"; payload="$4"; expect="$5"; expect_push="${6:-}"
     outdir=$(mktemp -d); wsdir="$outdir/herdr-orch/slug-x/workspaces"; mkdir -p "$wsdir"
     if [ "$env_ws" = "REGISTER" ]; then
         printf '{"task_id":"PROJ-1","repo_slug":"slug-x","role":"impl"}' > "$wsdir/w1.json"; ws="w1"
     elif [ "$env_ws" = "REGISTER_REVIEW" ]; then
         printf '{"task_id":"PROJ-1","repo_slug":"slug-x","role":"review"}' > "$wsdir/w9.json"; ws="w9"
+    elif [ "$env_ws" = "REGISTER_BAD_TASK" ]; then
+        printf '{"task_id":"../escape","repo_slug":"slug-x","role":"impl"}' > "$wsdir/w1.json"; ws="w1"
     else ws="$env_ws"; fi
     printf '%s' "$payload" | env CLAUDE_CONFIG_DIR="$outdir" HERDR_ENV="$henv" \
         HERDR_WORKSPACE_ID="$ws" claude/hooks/herdr_worker_status.py >/dev/null 2>&1
     got=$(tail -1 "$wsdir/$ws.events.jsonl" 2>/dev/null) || true
+    ok=1
     if [ "$expect" = "none" ]; then
-        [ -z "$got" ] && { printf 'PASS  %s\n' "$label"; PASS=$((PASS+1)); } || { printf 'FAIL  %s (got %s)\n' "$label" "$got" >&2; FAIL=$((FAIL+1)); }
+        [ -z "$got" ] || ok=0
     else
-        printf '%s' "$got" | grep -q "\"event\":\"$expect\"" && { printf 'PASS  %s\n' "$label"; PASS=$((PASS+1)); } || { printf 'FAIL  %s (want %s got %s)\n' "$label" "$expect" "$got" >&2; FAIL=$((FAIL+1)); }
+        printf '%s' "$got" | grep -q "\"event\":\"$expect\"" || ok=0
     fi
+    if [ -n "$expect_push" ]; then
+        marker=$(cat "$wsdir/$ws.wake.json" 2>/dev/null || echo '{}')
+        case "$expect_push" in
+            push) printf '%s' "$marker" | grep -q "\"$expect\":" || ok=0 ;;
+            nopush) printf '%s' "$marker" | grep -q "\"$expect\":" && ok=0 ;;
+        esac
+    fi
+    if [ "$ok" = "1" ]; then printf 'PASS  %s\n' "$label"; PASS=$((PASS+1));
+    else printf 'FAIL  %s (want %s/%s got %s)\n' "$label" "$expect" "$expect_push" "$got" >&2; FAIL=$((FAIL+1)); fi
     rm -rf "$outdir"
 }
 hook_case "no HERDR_ENV -> no-op" REGISTER "" '{"hook_event_name":"Stop"}' none
@@ -671,6 +766,29 @@ hook_case "review Stop -> review-stopped" REGISTER_REVIEW "1" '{"hook_event_name
 hook_case "permission Notification -> blocked" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"permission_prompt"}' blocked
 hook_case "elicitation Notification -> blocked" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}' blocked
 hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"idle_prompt"}' none
+hook_case "hook: three consecutive Stops with no record change push zero wakes" REGISTER "1" '{"hook_event_name":"Stop"}' stopped nopush
+hook_case "hook: an unsafe task_id in the index is a no-op" REGISTER_BAD_TASK "1" '{"hook_event_name":"Stop"}' none
+
+check "hook: a Stop after a done.json write pushes exactly one wake" <<PY
+$LOAD
+import subprocess
+outdir = tempfile.mkdtemp()
+rd = os.path.join(outdir, "herdr-orch", "slug-x")
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "workspaces", "w1.json"), "w").write(
+    json.dumps({"task_id": "PROJ-1", "repo_slug": "slug-x", "role": "impl"}))
+env = dict(os.environ, CLAUDE_CONFIG_DIR=outdir, HERDR_ENV="1", HERDR_WORKSPACE_ID="w1")
+def run():
+    return subprocess.run(["claude/hooks/herdr_worker_status.py"],
+                          input=b'{"hook_event_name":"Stop"}', env=env, capture_output=True)
+run(); run(); run()
+marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert "stopped" not in marker["last_push"], "bare Stops must post nothing: %r" % (marker,)
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write('{"outcome":"completed"}')
+run()
+marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert "stopped" in marker["last_push"], "a done.json write must post exactly one wake"
+PY
 
 # --- model discovery: write-capabilities / resolve-model / disable-model / classify-probe ---
 
@@ -823,11 +941,27 @@ rd=c.repo_dir("github-com-org-repo-deadbeef")
 (rd/"tasks"/"notes.txt").write_text("")                 # outside globs: ignored
 snap,failed=c.watch_scan(rd,{})
 names=sorted(pathlib.Path(k).name for k in snap)
-assert names==["PROJ-1.done.json","PROJ-1.review.json","w1.events.jsonl"],names
+assert names==["PROJ-1.done.json","PROJ-1.review.json"],names
 assert failed==set()
 for v in snap.values():
     assert isinstance(v,tuple) and len(v)==2
 sys.exit(0)
+PY
+
+check "watch no longer signals on an events.jsonl append" <<PY
+$LOAD
+assert "workspaces" not in c.WATCH_DIRS, sorted(c.WATCH_DIRS)
+assert set(c.WATCH_DIRS) == {"tasks", "think"}, sorted(c.WATCH_DIRS)
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+prev, _f = c.watch_scan(rd, {})
+with open(os.path.join(rd, "workspaces", "w1.events.jsonl"), "a") as fh:
+    fh.write('{"v":1,"event":"stopped"}\n')
+snap, _f = c.watch_scan(rd, prev)
+assert not c.watch_changed(prev, snap), "an events.jsonl append must not signal"
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+snap2, _f = c.watch_scan(rd, snap)
+assert c.watch_changed(snap, snap2), "a done.json write must still signal"
 PY
 
 check "watch_scan missing dirs empty; watch_changed semantics" <<PY
@@ -1308,40 +1442,43 @@ try:
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":None},open(os.path.join(rd,"owner.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
     assert wait_got(1,0.3)==0 and events()==1
-    # 2. socket registered: append + one post
+    # 2. socket registered: append, no post without a record change
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(1)==1,got
-    assert "event=stopped" in J.loads(got[0])["message"]["content"]
+    assert wait_got(1,0.3)==0,got
     assert events()==2
-    # 3. own socket equals target: append, no post
+    # 3. own socket equals target: still no record change, so still no post
     os.environ["CLAUDE_CODE_MESSAGING_SOCKET"]=path
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(2,0.3)==1 and events()==3
+    assert wait_got(1,0.3)==0 and events()==3
     os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET")
     # An idle accept timeout must not expire the fixture before the next wake.
     idle.clear(); assert idle.wait(2) and listener.is_alive()
-    # 4. blocking notification posts blocked; non-blocking posts nothing and appends nothing
+    # 4. a transition into blocked posts regardless of any record; non-blocking posts nothing and appends nothing
     assert run({"hook_event_name":"Notification","notification_type":"permission_prompt"})==0
-    assert wait_got(2)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
+    assert wait_got(1)==1,got
+    assert "event=blocked" in J.loads(got[0])["message"]["content"]
     assert run({"hook_event_name":"Notification","notification_type":"idle_prompt"})==0
-    assert wait_got(3,0.3)==2 and events()==4
-    # 5. review role posts review-stopped
+    assert wait_got(2,0.3)==1 and events()==4
+    # 5. review role appends review-stopped, but still no record -> still no post
     json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"review"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(3)==3 and "event=review-stopped" in J.loads(got[2])["message"]["content"]
-    # 6. append_event raising still posts
+    assert wait_got(2,0.3)==1 and events()==5
+    # 6. a completion record is what earns the wake; a failed append must not suppress it
+    open(os.path.join(rd,"tasks","PROJ-1.done.json"),"w").write('{"outcome":"completed"}')
     core=h.core; real_append=core.append_event
     def boom(*a,**k): raise RuntimeError("disk")
     core.append_event=boom
+    events_before=events()
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(4)==4,got
+    assert wait_got(2)==2,got
+    assert events()==events_before   # the raise swallowed the audit line
     core.append_event=real_append
-    # 6b. post_wake raising still appends exactly one event and exits 0
+    # 6b. post_wake raising still appends; no NEW record change means no new push
     real_post=core.post_wake; core.post_wake=boom
     before=events()
     assert run({"hook_event_name":"Stop"})==0
-    assert events()==before+1 and wait_got(5,0.3)==4
+    assert events()==before+1 and wait_got(3,0.3)==2
     core.post_wake=real_post
     # 7. server gone: exit 0 within 2.5s
     stop.set(); srv.close(); os.unlink(path)
@@ -8871,6 +9008,195 @@ if CLAUDE_CONFIG_DIR="$root" $CLI reset-task --repo-slug slug-rs --session S --f
    --task-id td-a --new-task-id td-a4 --json '{"task_id":"td-a4"}' 2>/dev/null; then exit 1; fi
 test ! -e "$TASKS/td-a4.json"
 SH
+
+check "the idle-subscription layer is fully retired from the skill" <<PY
+$LOAD
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+for token in ("notify_when_idle", "idle notice", "Cross-session idle"):
+    assert token not in skill, "%s still present in SKILL.md" % token
+layout = open("claude/skills/herdr-orchestration/references/state-layout.md").read()
+assert "notify_when_idle" not in layout, "state-layout still calls peer_name a subscription target"
+assert "peer_name" in layout, "the peer_name field itself stays documented"
+PY
+
+check "checkin_action: precedence, and a settled task reports none" <<PY
+$LOAD
+base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
+            head="a" * 40, completed=False, plan_completed=False, reviewed=False,
+            review_correlates=False, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+assert c.checkin_action(base) == "none", c.checkin_action(base)
+assert c.checkin_action({**base, "poll_ok": False}) == "unknown"
+assert c.checkin_action({**base, "head": None}) == "unknown"
+assert c.checkin_action({**base, "live": "absent", "worktree_exists": False}) == "abandoned-candidate"
+assert c.checkin_action({**base, "live": "blocked"}) == "blocked"
+assert c.checkin_action({**base, "status": "blocked", "live": "blocked"}) == "none"
+assert c.checkin_action({**base, "status": "blocked", "live": "working"}) == "unblocked"
+assert c.checkin_action({**base, "status": "completed", "dispatch_review": True}) == "dispatch-review"
+assert c.checkin_action({**base, "completed": True}) == "confirm-completion"
+assert c.checkin_action({**base, "plan_completed": True}) == "confirm-plan"
+assert c.checkin_action({**base, "mech_unsettled": True}) == "mech-ledger"
+assert c.checkin_action({**base, "done_outcome": "paused"}) == "paused"
+assert c.checkin_action({**base, "done_outcome": "failed"}) == "failed"
+PY
+
+check "checkin_action: a landed review verdict stops firing once recorded" <<PY
+$LOAD
+base = dict(status="review-dispatched", poll_ok=True, live="idle", worktree_exists=True,
+            head="a" * 40, completed=False, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+assert c.checkin_action(base) == "confirm-review", c.checkin_action(base)
+# Regression: once the director has recorded it, the same evidence must stop
+# producing an action, or "changed: yes" would be permanent.
+assert c.checkin_action({**base, "status": "reviewed"}) == "none"
+cr = {**base, "reviewed": False}
+assert c.checkin_action(cr) == "changes-requested", c.checkin_action(cr)
+assert c.checkin_action({**cr, "status": "changes-requested"}) == "none"
+assert c.checkin_action({**base, "review_stale": True}) == "stale-review-reset"
+PY
+
+check "checkin_action: a terminal status never produces work" <<PY
+$LOAD
+base = dict(status="merged", poll_ok=True, live="absent", worktree_exists=False,
+            head="a" * 40, completed=True, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, dispatch_review=False,
+            mech_unsettled=True, plan_advanced=False, done_outcome="failed")
+for terminal in ("merged", "failed", "abandoned"):
+    got = c.checkin_action({**base, "status": terminal})
+    assert got == "none", "%s -> %s" % (terminal, got)
+PY
+
+check "checkin passes each correlation helper its own phase workspace" <<PY
+$LOAD
+task = {"task_id": "PROJ-1", "workers": [
+    {"phase": "plan", "workspace_id": "w1", "runtime": "claude"},
+    {"phase": "implement", "workspace_id": "w2", "runtime": "claude"},
+    {"phase": "review", "workspace_id": "w3", "runtime": "claude"}]}
+assert c.phase_workspace(task, "plan") == "w1"
+assert c.phase_workspace(task, "implement") == "w2"
+assert c.phase_workspace(task, "review") == "w3"
+assert c.phase_workspace({"workers": []}, "implement") is None
+PY
+
+check "checkin parse_poll maps workspace ids to live state and worktrees" <<PY
+$LOAD
+agents = {"result": {"agents": [{"workspace_id": "w2", "agent_status": "working"}]}}
+spaces = {"result": {"workspaces": [
+    {"workspace_id": "w2", "worktree": {"checkout_path": "/tmp/wt"}},
+    {"workspace_id": "w3", "worktree": {"checkout_path": "/tmp/wt3"}}]}}
+poll = c.parse_poll(agents, spaces)
+assert poll["live"]["w2"] == "working", poll
+assert poll["known"] == {"w2", "w3"}, poll
+assert poll["worktrees"]["w3"] == "/tmp/wt3", poll
+assert c.parse_poll({"result": {}}, spaces) is None, "a malformed reply is not an empty poll"
+PY
+
+check "checkin reports changed no on an all-steady queue" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": "b" * 40,
+        "review_head_sha": "a" * 40, "worktree": os.path.join(rd, "gone"),
+        "workers": [{"phase": "review", "workspace_id": "w3", "runtime": "claude"}]}
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["action"] == "none", facts
+assert facts["head"] is None and facts["dirty"] == "unknown", facts
+PY
+
+check "checkin action precedence resolves an overlapping task to the earlier rule" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+# Worktree gone AND poll absent: rule 1 (unknown) must not claim it, because
+# head is unreadable only when the worktree EXISTS; rule 2 wins.
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "b" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [
+            {"phase": "implement", "workspace_id": "w2", "runtime": "claude"}]}
+poll = {"live": {}, "known": set(), "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["action"] == "abandoned-candidate", facts
+PY
+
+check "checkin reports poll failed and changed yes on an unparseable poll" <<PY
+$LOAD
+class NS:
+    agents_json = None; workspaces_json = None
+bad = tempfile.mkdtemp()
+a = os.path.join(bad, "a.json"); w = os.path.join(bad, "w.json")
+open(a, "w").write("{not json"); open(w, "w").write("{}")
+NS.agents_json, NS.workspaces_json = a, w
+poll, reason = c._checkin_poll(NS)
+assert poll is None and reason == "malformed", (poll, reason)
+open(a, "w").write(json.dumps({"result": {"agents": []}}))
+open(w, "w").write(json.dumps({"result": {"workspaces": []}}))
+poll, reason = c._checkin_poll(NS)
+assert poll is not None and poll["known"] == set(), (poll, reason)
+PY
+
+check "checkin leaves every state file but owner.json byte-identical" <<PY
+$LOAD
+import hashlib
+root = tempfile.mkdtemp()
+rd = os.path.join(root, "herdr-orch", "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+open(os.path.join(rd, "tasks", "PROJ-1.json"), "w").write(json.dumps(
+    {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "workers": []}))
+def digest():
+    out = {}
+    for base, _d, files in os.walk(rd):
+        for name in files:
+            p = os.path.join(base, name)
+            out[p] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+    return out
+before = {k: v for k, v in digest().items() if not k.endswith("owner.json")}
+poll = {"live": {}, "known": set(), "worktrees": {}}
+task = json.load(open(os.path.join(rd, "tasks", "PROJ-1.json")))
+c.checkin_facts(rd, task, poll, c.state_root().parent)
+after = {k: v for k, v in digest().items() if not k.endswith("owner.json")}
+assert before == after, "checkin mutated state beyond owner.json"
+PY
+
+check "checkin lists non-terminal tasks, honours --all, and refuses a stale fence" <<'SH'
+root=$(mktemp -d)
+FIX="python3 claude/hooks/herdr_legacy_fixture.py"
+f=$(CLAUDE_CONFIG_DIR="$root" $FIX claim-owner --repo-slug slug-x --session S --host h --pid 1)
+live='{"task_id":"PROJ-1","base_sha":"b0","status":"in-progress","workers":[]}'
+gone='{"task_id":"PROJ-2","base_sha":"b0","status":"merged","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$live"
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-2 \
+    --session S --fence "$f" --json "$gone"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 ' || exit 1
+if printf '%s\n' "$out" | grep -q '^PROJ-2 '; then exit 1; fi   # merged is terminal
+printf '%s\n' "$out" | grep -q '^changed: ' || exit 1
+all=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" --all \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$all" | grep -q '^PROJ-2 ' || exit 1
+printf 'not json' > "$root/a.json"
+bad=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$bad" | grep -q 'poll: failed (malformed)' || exit 1
+printf '%s\n' "$bad" | grep -q '^changed: yes' || exit 1
+if stale=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence 999 \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json"); then exit 1; fi
+printf '%s\n' "$stale" | grep -q 'owner: stale-fence' || exit 1
+SH
+
+check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
+$LOAD
+s = open("claude/skills/herdr-orchestration/SKILL.md").read()
+for token in ("checkin --repo-slug", "changed: no", "Prompt and pause",
+              "AskUserQuestion", "unblocked"):
+    assert token in s, "missing %s" % token
+layout = open("claude/skills/herdr-orchestration/references/state-layout.md").read()
+assert "wake.json" in layout and "last_push" in layout, "the wake marker is undocumented"
+PY
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

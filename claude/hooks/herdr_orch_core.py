@@ -970,6 +970,122 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
             pass
 
 
+WAKE_DEBOUNCE_SECS = 60
+_RECORD_SUFFIXES = (".done.json", ".review.json")
+
+
+def wake_marker_path(rd, ws) -> Path:
+    return Path(rd) / "workspaces" / f"{ws}.wake.json"
+
+
+def _empty_marker() -> dict:
+    return {"v": 1, "records": {}, "last_push": {}}
+
+
+def read_wake_marker(rd, ws) -> dict:
+    """Never raises. A missing, unreadable, or malformed marker reads as empty,
+    which biases toward pushing -- a spurious wake costs one cheap check-in,
+    a lost one stalls a task."""
+    if not valid_workspace_id(ws):
+        return _empty_marker()
+    try:
+        data = json.loads(read_payload_text(wake_marker_path(rd, ws)))
+    except (OSError, ValueError):
+        return _empty_marker()
+    if not isinstance(data, dict):
+        return _empty_marker()
+    out = _empty_marker()
+    for key in ("records", "last_push"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            out[key] = value
+    return out
+
+
+def write_wake_marker(rd, ws, marker) -> bool:
+    if not valid_workspace_id(ws):
+        return False
+    try:
+        write_json_atomic(wake_marker_path(rd, ws), marker)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def record_fingerprint(rd, task_id) -> dict:
+    """{path: [mtime_ns, size]} for the task's own two completion sidecars.
+    An absent path is OMITTED, never recorded as None -- the one-directional
+    predicate in wake_decision matches watch_changed only under that shape."""
+    out = {}
+    if not valid_task_id(task_id):
+        return out
+    d = Path(rd) / "tasks"
+    for suffix in _RECORD_SUFFIXES:
+        p = d / f"{task_id}{suffix}"
+        try:
+            with coordination.payload_parent(p) as (parent, basename):
+                st = os.stat(basename, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                continue
+        except (OSError, ValueError):
+            continue
+        out[str(p)] = [st.st_mtime_ns, st.st_size]
+    return out
+
+
+def prior_hint(rd, ws, task_id):
+    """The event of the last events.jsonl record, read BEFORE this invocation
+    appends its own. None when the tail belongs to a different task: a
+    workspace rebound to a new task must not inherit the old attempt's
+    `blocked` tail, or the new attempt's first prompt would never push."""
+    try:
+        records = parse_events(read_payload_text(events_path(rd, ws)).splitlines())
+    except (OSError, ValueError):
+        return None
+    for rec in reversed(records):
+        if rec.get("task_id") != task_id:
+            return None
+        return rec.get("event")
+    return None
+
+
+def wake_decision(marker, event, fingerprint, prior, now,
+                  debounce_secs=WAKE_DEBOUNCE_SECS):
+    """Decide whether this hint earns a wake push. Pure; clock injected.
+
+    Returns (push, new_marker). The marker's `records` advances ONLY on a
+    push, so a change suppressed by the debounce is delayed, never dropped --
+    advancing it under suppression would swallow a completion record for good.
+    """
+    if isinstance(marker, dict):
+        records = marker.get("records") if isinstance(marker.get("records"), dict) else {}
+        last_push = marker.get("last_push") if isinstance(marker.get("last_push"), dict) else {}
+    else:
+        records, last_push = {}, {}
+    new = {"v": 1, "records": dict(records), "last_push": dict(last_push)}
+
+    if event == "blocked":
+        # Transition rule only, no time debounce: a block means a worker is
+        # waiting on a human, and the appended hint becomes the next
+        # invocation's `prior`, so repeats are already self-limiting.
+        return prior != "blocked", new
+    if event not in ("stopped", "review-stopped"):
+        return False, new
+
+    changed = any(records.get(k) != v for k, v in fingerprint.items())
+    if not changed:
+        return False, new
+    since = last_push.get(event)
+    if isinstance(since, (int, float)) and not isinstance(since, bool):
+        if now - since < debounce_secs:
+            return False, new
+    # Merge, not replace: a key the fingerprint no longer carries stays, so a
+    # deletion never signals and a later recreate does.
+    new["records"] = {**records, **fingerprint}
+    new["last_push"] = {**last_push, event: now}
+    return True, new
+
+
 def parse_events(lines):
     out = []
     for ln in lines:
@@ -1589,10 +1705,12 @@ def fold_spend(lines, task_id):
     return out
 
 
+# The watch and the worker-status hook share one wake predicate: a completion
+# record changed. workspaces/*.events.jsonl is deliberately absent -- watching
+# it would re-admit a signal per worker turn end through the fallback.
 WATCH_DIRS = {
     "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
               (".spend.jsonl", valid_task_id)),
-    "workspaces": ((".events.jsonl", valid_workspace_id),),
     "think": ((".launch.json", valid_think_id), (".answer.json", valid_think_id)),
 }
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
@@ -2356,6 +2474,234 @@ def should_dispatch_review(task, head_sha) -> bool:
     return task.get("review_head_sha") != head_sha
 
 
+CHECKIN_TERMINAL = frozenset({"failed", "abandoned", "merged"})
+_REVIEW_STATES = frozenset({"review-dispatched", "reviewed", "changes-requested"})
+
+
+def checkin_action(f) -> str:
+    """The transition the director still has to write, or "none".
+
+    Every rule is gated on the transition NOT already being recorded. Firing
+    on evidence alone would make `changed: yes` permanent: is_reviewed
+    consults only the review record and review_head_sha, never task.status, so
+    a task parked in `reviewed` awaiting a human merge would ask for
+    confirm-review on every check-in forever.
+    """
+    status = f.get("status")
+    if status in CHECKIN_TERMINAL:
+        return "none"
+    rules = (
+        ("unknown", not f.get("poll_ok")
+                    or (f.get("head") is None and f.get("worktree_exists"))),
+        ("abandoned-candidate", f.get("live") == "absent"
+                                and not f.get("worktree_exists")
+                                and not f.get("completed")),
+        ("blocked", f.get("live") == "blocked" and status != "blocked"),
+        ("unblocked", status == "blocked" and f.get("live") != "blocked"),
+        ("stale-review-reset", status in _REVIEW_STATES and f.get("review_stale")),
+        ("confirm-review", f.get("reviewed") and status != "reviewed"),
+        ("changes-requested", f.get("review_correlates") and not f.get("reviewed")
+                              and status != "changes-requested"),
+        ("dispatch-review", f.get("dispatch_review")),
+        ("confirm-completion", f.get("completed") and status != "completed"),
+        ("confirm-plan", f.get("plan_completed") and not f.get("plan_advanced")),
+        ("mech-ledger", f.get("mech_unsettled")),
+        # done_outcome is already gated on correlating to the CURRENT attempt
+        # (Task 6), which is what stops a superseded record firing forever.
+        # Section 9 has no `paused` status, so there is no status gate to add.
+        ("paused", f.get("done_outcome") == "paused"),
+        ("failed", f.get("done_outcome") == "failed"),
+    )
+    for name, fires in rules:
+        if fires:
+            return name
+    return "none"
+
+
+def phase_workspace(task, phase):
+    """The latest workers[] row OF THAT PHASE. attempt_matches compares the
+    latest row of the requested phase, so handing every helper the single
+    newest row resolves the wrong workspace for any task past its first
+    phase."""
+    workers = task.get("workers")
+    if not isinstance(workers, list):
+        return None
+    rows = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
+    return rows[-1].get("workspace_id") if rows else None
+
+
+def parse_poll(agents, workspaces):
+    """-> {"live": {ws: state}, "known": {ws}, "worktrees": {ws: path}}, or
+    None when either reply lacks its list. A malformed poll is a tool failure,
+    never an empty queue."""
+    a = agents.get("result", {}).get("agents") if isinstance(agents, dict) else None
+    w = workspaces.get("result", {}).get("workspaces") if isinstance(workspaces, dict) else None
+    if not isinstance(a, list) or not isinstance(w, list):
+        return None
+    live, known, worktrees = {}, set(), {}
+    for row in w:
+        if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
+            continue
+        ws = row["workspace_id"]
+        known.add(ws)
+        tree = row.get("worktree")
+        if isinstance(tree, dict) and isinstance(tree.get("checkout_path"), str):
+            worktrees[ws] = tree["checkout_path"]
+    for row in a:
+        if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
+            continue
+        ws = row["workspace_id"]
+        known.add(ws)
+        state = row.get("agent_status")
+        live[ws] = state if isinstance(state, str) else "unknown"
+    return {"live": live, "known": known, "worktrees": worktrees}
+
+
+def _git_ancestor(worktree, base, head) -> str:
+    """yes / no / unknown. Not routed through _git, which collapses exit 1
+    (not an ancestor) and exit 128 (git failed) to the same None."""
+    if not base or not head:
+        return "unknown"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(worktree), "merge-base", "--is-ancestor", base, head],
+            capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if proc.returncode == 0:
+        return "yes" if head != base else "no"
+    return "no" if proc.returncode == 1 else "unknown"
+
+
+def checkin_facts(rd, task, poll, payload_root) -> dict:
+    """One task's check-in line, as a dict. Read-only: no writes, no herdr,
+    no verify-contract."""
+    tid = task.get("task_id")
+    status = task.get("status") or "unknown"
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    latest = workers[-1] if workers and isinstance(workers[-1], dict) else {}
+    ws = latest.get("workspace_id") or "none"
+    worktree = task.get("worktree")
+    worktree_exists = bool(worktree) and Path(worktree).is_dir()
+
+    if poll is None:
+        live = "unknown"
+    elif ws in poll["live"]:
+        live = poll["live"][ws]
+    elif ws in poll["known"]:
+        live = "idle"
+    else:
+        live = "absent"
+
+    head = _git(worktree, "rev-parse", "HEAD") if worktree_exists else None
+    porcelain = _git(worktree, "status", "--porcelain") if worktree_exists else None
+    dirty = "unknown" if porcelain is None else ("yes" if porcelain else "no")
+    ahead = _git_ancestor(worktree, task.get("base_sha"), head) if worktree_exists else "unknown"
+
+    def _sidecar(suffix):
+        try:
+            rec = json.loads(read_payload_text(Path(rd) / "tasks" / f"{tid}{suffix}"))
+        except (OSError, ValueError):
+            return None
+        return rec if isinstance(rec, dict) else None
+
+    done, review = _sidecar(".done.json"), _sidecar(".review.json")
+    impl_ws = phase_workspace(task, "implement")
+    plan_ws = phase_workspace(task, "plan")
+    rev_ws = phase_workspace(task, "review")
+    completed = bool(head and impl_ws and is_completed(task, done, head, impl_ws))
+    plan_completed = bool(head and plan_ws
+                          and is_plan_completed(task, done, head, plan_ws, payload_root))
+    reviewed = bool(head and rev_ws and is_reviewed(task, review, head, rev_ws))
+    review_correlates = bool(
+        review and rev_ws and head
+        and attempt_matches(task, review, "review", rev_ws)
+        and review.get("reviewed_head_sha") == head)
+    review_stale = bool(task.get("review_head_sha") and head
+                        and task["review_head_sha"] != head)
+    mech_unsettled = bool(latest.get("role") == "mech"
+                          and status not in CHECKIN_TERMINAL
+                          and not _attempt_settled(latest, done))
+
+    events = []
+    for row in workers:
+        if isinstance(row, dict) and valid_workspace_id(row.get("workspace_id")):
+            try:
+                events.extend(parse_events(
+                    read_payload_text(events_path(rd, row["workspace_id"])).splitlines()))
+            except (OSError, ValueError):
+                continue
+    hint = fold_status(events).get("last_hint") or "none"
+
+    facts = {
+        "task_id": tid, "status": status, "ws": ws, "live": live,
+        "head": head, "ahead": ahead, "dirty": dirty,
+        "done": f"{done.get('phase')}:{done.get('outcome')}" if done else "none",
+        "review": (review.get("outcome") or "none") if review else "none",
+        "hint": hint,
+        "poll_ok": poll is not None, "worktree_exists": worktree_exists,
+        "completed": completed, "plan_completed": plan_completed,
+        "reviewed": reviewed, "review_correlates": review_correlates,
+        "review_stale": review_stale,
+        "dispatch_review": bool(head and should_dispatch_review(task, head)),
+        "mech_unsettled": mech_unsettled,
+        "plan_advanced": any(isinstance(w, dict) and w.get("phase") == "implement"
+                             for w in workers),
+        # Correlated to the CURRENT attempt, never the raw sidecar. Section 9
+        # has no `paused` STATUS, so a status-based gate is vacuous and a
+        # stale record from a superseded attempt would fire forever; nothing
+        # in the core deletes done.json on relaunch.
+        "done_outcome": (done.get("outcome")
+                         if done and latest
+                         and attempt_matches(task, done, latest.get("phase"),
+                                             latest.get("workspace_id"))
+                         else None),
+    }
+    facts["action"] = checkin_action(facts)
+    return facts
+
+
+def _checkin_poll(ns):
+    """-> (poll, reason). run_herdr collapses every failure kind into one
+    DispatchError without preserving the return code, so the vocabulary is two
+    tokens: `unavailable` for any subprocess fault, `malformed` for a reply
+    whose shape is wrong."""
+    def _load(path):
+        with open(path, "rb") as fh:
+            return json.loads(fh.read().decode())
+
+    if bool(ns.agents_json) != bool(ns.workspaces_json):
+        # A half-override would silently fall through to the real binary, and
+        # herdr IS on PATH on a dev machine -- that would break the suite's
+        # no-herdr guarantee without any visible failure.
+        return None, "malformed"
+    if ns.agents_json:
+        try:
+            agents, spaces = _load(ns.agents_json), _load(ns.workspaces_json)
+        except (OSError, ValueError):
+            return None, "malformed"
+    else:
+        # Lazy: herdr_dispatch imports this module, so a module-level import
+        # of its CLI wrapper would close the cycle.
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = shutil.which("herdr")
+        if not exe:
+            return None, "unavailable"
+        try:
+            # run_herdr already unwraps the JSON-RPC envelope down to its
+            # "result" object (herdr_dispatch_cli.result_object), but
+            # parse_poll expects the raw {"result": {...}} shape -- rewrap it
+            # rather than loosen parse_poll's contract, which the unit tests
+            # above pin to the raw-reply shape.
+            agents = {"result": run_herdr(exe, ["agent", "list"], env=dict(os.environ))}
+            spaces = {"result": run_herdr(exe, ["workspace", "list"], env=dict(os.environ))}
+        except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+            return None, "unavailable"
+    poll = parse_poll(agents, spaces)
+    return (poll, "") if poll is not None else (None, "malformed")
+
+
 def is_reviewed(task, done, head_sha, workspace) -> bool:
     """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
     live HEAD all agree, the record comes from the dispatched review workspace,
@@ -2694,6 +3040,11 @@ def _main(argv=None) -> int:
     rl.add_argument("--apply", action="store_true")
     rl.add_argument("--stale-secs", type=int, default=900)
     rl.add_argument("--descendants-terminated", action="store_true")
+    ck = add("checkin", "--session", "--fence")
+    ck.add_argument("--messaging-socket", default=None)
+    ck.add_argument("--agents-json", default=None)
+    ck.add_argument("--workspaces-json", default=None)
+    ck.add_argument("--all", action="store_true")
     add("status")
     add("task-lead-status")
     add("deactivate-task-leads", fenced=True)
@@ -4491,6 +4842,37 @@ def _main(argv=None) -> int:
             "sequence": env["sequence"],
             "pr": summary["pr"],
         }, separators=(",", ":")))
+        return 0
+    if ns.cmd == "checkin":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        if not refresh_owner(rd, ns.session, ns.fence, ns.messaging_socket):
+            print("owner: stale-fence")
+            return 1
+        poll, reason = _checkin_poll(ns)
+        if poll is None:
+            print(f"poll: failed ({reason})")
+        payload_root = state_root().parent
+        changed = poll is None
+        for tf in sorted(payload_files(rd / "tasks", "*.json")):
+            if tf.name.endswith((".done.json", ".review.json")):
+                continue
+            try:
+                task = json.loads(read_payload_text(tf))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(task, dict):
+                continue
+            if not ns.all and task.get("status") in CHECKIN_TERMINAL:
+                continue
+            f = checkin_facts(rd, task, poll, payload_root)
+            if f["action"] != "none":
+                changed = True
+            print(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
+                  f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
+                  f"dirty={f['dirty']} done={f['done']} review={f['review']} "
+                  f"hint={f['hint']} action={f['action']}")
+        print(f"changed: {'yes' if changed else 'no'}")
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")

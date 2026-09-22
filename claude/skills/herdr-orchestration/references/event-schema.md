@@ -25,9 +25,16 @@ each names the conceptual transition the director makes to `status` via
 append them as real log records is a documented future option, out of scope
 here.
 
+The hook appends a hint on every Stop and every blocking Notification. The
+WAKE PUSH is conditional: it happens only when the task's `done.json` /
+`review.json` fingerprint changed, or on a transition into `blocked`. The
+watch uses the same predicate -- `WATCH_DIRS` does not include
+`workspaces/*.events.jsonl` -- so both wake paths agree on what "something
+happened" means. The hint remains authoritative for `fold_status`.
+
 The `$CORE watch` subcommand (director wake, SKILL.md section 1 step 6)
-is a READER of `events.jsonl` and the `tasks/` sidecars: it emits only the
-closed stdout vocabulary `signal` / `heartbeat` and never appends events.
+emits only the closed stdout vocabulary `signal` / `heartbeat` and never
+appends events.
 
 `tasks/<task_id>.spend.jsonl` (the mech spend ledger, written by `$CORE
 run-mech`) is watched like the completion sidecars so an append wakes the

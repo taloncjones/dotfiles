@@ -1,0 +1,106 @@
+{
+  "v": 1,
+  "task_id": "2026-09-21-cut-director-wake-and-check-in-cost-with-a-checkin",
+  "commands": [
+    {
+      "name": "py-compile-core-and-hook",
+      "run": "python3 -m py_compile claude/hooks/herdr_orch_core.py claude/hooks/herdr_worker_status.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "wake-decision-three-stops-no-push",
+      "run": "python3 -c \"import importlib.util as u; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); m={'v':1,'records':{'/t/d.json':[5,9]},'last_push':{'stopped':100.0}}; fp={'/t/d.json':[5,9]}; p1,n=c.wake_decision(m,'stopped',fp,'stopped',200.0); p2,n=c.wake_decision(n,'stopped',fp,'stopped',300.0); p3,n=c.wake_decision(n,'stopped',fp,'stopped',400.0); assert (p1,p2,p3)==(False,False,False), (p1,p2,p3)\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "wake-decision-record-write-pushes-once",
+      "run": "python3 -c \"import importlib.util as u; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); m={'v':1,'records':{},'last_push':{}}; p1,n=c.wake_decision(m,'stopped',{'/t/d.json':[5,9]},'stopped',1000.0); p2,n=c.wake_decision(n,'stopped',{'/t/d.json':[5,9]},'stopped',2000.0); assert p1 is True and p2 is False, (p1,p2)\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "wake-decision-blocked-is-transition-only",
+      "run": "python3 -c \"import importlib.util as u; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); m={'v':1,'records':{},'last_push':{}}; p1,n=c.wake_decision(m,'blocked',{},'stopped',1000.0); p2,n=c.wake_decision(n,'blocked',{},'blocked',1001.0); p3,n=c.wake_decision(n,'blocked',{},'blocked',99000.0); assert (p1,p2,p3)==(True,False,False), (p1,p2,p3)\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "wake-decision-debounce-delays-never-drops",
+      "run": "python3 -c \"import importlib.util as u; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); m={'v':1,'records':{'/t/d.json':[1,1]},'last_push':{'stopped':1000.0}}; fp={'/t/d.json':[2,2]}; p1,n=c.wake_decision(m,'stopped',fp,'stopped',1010.0); assert p1 is False and n['records']=={'/t/d.json':[1,1]}, n; p2,n=c.wake_decision(n,'stopped',fp,'stopped',1100.0); assert p2 is True and n['records']==fp, (p2,n)\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "wake-decision-deletion-never-fires",
+      "run": "python3 -c \"import importlib.util as u; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); m={'v':1,'records':{'/t/d.json':[5,9]},'last_push':{}}; p,n=c.wake_decision(m,'stopped',{},'stopped',9000.0); assert p is False, 'a vanished record must not signal'\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "wake-decision-corrupt-marker-reads-empty",
+      "run": "python3 -c \"import importlib.util as u; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); p,n=c.wake_decision({'garbage':1},'stopped',{'/t/d.json':[5,9]},'stopped',9000.0); assert p is True and n['records']=={'/t/d.json':[5,9]}, (p,n)\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "watch-no-longer-watches-events-jsonl",
+      "run": "python3 -c \"import importlib.util as u; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); assert 'workspaces' not in c.WATCH_DIRS, sorted(c.WATCH_DIRS); assert 'tasks' in c.WATCH_DIRS and 'think' in c.WATCH_DIRS; sfx=[s for s,_v in c.WATCH_DIRS['tasks']]; assert '.done.json' in sfx and '.review.json' in sfx, sfx\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "checkin-verb-registered-with-poll-overrides",
+      "run": "python3 claude/hooks/herdr_orch_core.py checkin --help > /tmp/checkin-help.$$ 2>&1 && grep -q -- '--agents-json' /tmp/checkin-help.$$ && grep -q -- '--workspaces-json' /tmp/checkin-help.$$ && grep -q -- '--fence' /tmp/checkin-help.$$ && rm -f /tmp/checkin-help.$$",
+      "timeout_secs": 60
+    },
+    {
+      "name": "checkin-reuses-existing-correlation-helpers",
+      "run": "python3 -c \"src=open('claude/hooks/herdr_orch_core.py').read(); i=src.index('ns.cmd == \\\"checkin\\\"'); body=src[i:i+30000]; missing=[h for h in ('is_completed','is_plan_completed','is_reviewed','should_dispatch_review') if h not in body]; assert not missing, missing\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "checkin-emits-the-full-action-vocabulary",
+      "run": "python3 -c \"src=open('claude/hooks/herdr_orch_core.py').read(); i=src.index('def checkin_action'); body=src[i:i+6000]; missing=[a for a in ('confirm-review','changes-requested','stale-review-reset','dispatch-review', 'confirm-completion','confirm-plan','abandoned-candidate','mech-ledger','unblocked') if a not in body]; assert not missing, missing; j=src.index('ns.cmd == \\\"checkin\\\"'); assert 'changed: ' in src[j:j+8000], 'checkin branch prints no changed flag'\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "checkin-reuses-the-existing-herdr-wrapper",
+      "run": "python3 -c \"src=open('claude/hooks/herdr_orch_core.py').read(); assert 'run_herdr' in src, 'checkin must reuse herdr_dispatch_cli.run_herdr, not a second wrapper'\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "hook-decides-before-pushing-and-validates-task-id",
+      "run": "python3 -c \"src=open('claude/hooks/herdr_worker_status.py').read(); assert 'wake_decision' in src, 'hook does not consult the wake decision'; assert 'valid_task_id' in src, 'hook must validate task_id before building record paths'; body=src[src.index('def main'):]; assert body.index('post_wake') > body.index('append_event'), 'the hint must be appended before the push is decided'\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "skill-retires-idle-subscriptions",
+      "run": "if grep -q 'notify_when_idle' claude/skills/herdr-orchestration/SKILL.md; then exit 1; fi",
+      "timeout_secs": 30
+    },
+    {
+      "name": "skill-documents-checkin-and-prompt-and-pause",
+      "run": "grep -q 'checkin --repo-slug' claude/skills/herdr-orchestration/SKILL.md && grep -q 'changed: no' claude/skills/herdr-orchestration/SKILL.md && grep -qi 'prompt and pause' claude/skills/herdr-orchestration/SKILL.md && grep -q 'AskUserQuestion' claude/skills/herdr-orchestration/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "state-layout-documents-wake-marker",
+      "run": "grep -q 'wake.json' claude/skills/herdr-orchestration/references/state-layout.md && grep -q 'last_push' claude/skills/herdr-orchestration/references/state-layout.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "regression-checks-present",
+      "run": "grep -qF 'checkin lists non-terminal tasks, honours --all, and refuses a stale fence' claude/hooks/herdr-orch.test.sh && grep -qF 'a landed review verdict stops firing once recorded' claude/hooks/herdr-orch.test.sh && grep -qF 'a terminal status never produces work' claude/hooks/herdr-orch.test.sh && grep -qF 'three consecutive Stops with no record change push zero wakes' claude/hooks/herdr-orch.test.sh && grep -qF 'a Stop after a done.json write pushes exactly one wake' claude/hooks/herdr-orch.test.sh && grep -qF 'a blocking Notification pushes once per transition into blocked' claude/hooks/herdr-orch.test.sh && grep -qF 'a debounced record change fires on the next Stop' claude/hooks/herdr-orch.test.sh && grep -qF 'a deleted completion record pushes no wake' claude/hooks/herdr-orch.test.sh && grep -qF 'an unsafe task_id in the index is a no-op' claude/hooks/herdr-orch.test.sh && grep -qF 'a done.json write must post exactly one wake' claude/hooks/herdr-orch.test.sh && grep -qF 'bare Stops must post nothing' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin leaves every state file but owner.json byte-identical' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin reports changed no on an all-steady queue' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin reports poll failed and changed yes on an unparseable poll' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin action precedence resolves an overlapping task to the earlier rule' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin passes each correlation helper its own phase workspace' claude/hooks/herdr-orch.test.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "herdr-orch-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/herdr-orch.test.sh",
+      "timeout_secs": 2400
+    },
+    {
+      "name": "herdr-orch-contract-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/herdr-orch-contract.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "public-safety-and-private-artifact-exclusion",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 120
+    }
+  ]
+}
