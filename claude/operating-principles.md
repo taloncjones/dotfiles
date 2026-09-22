@@ -21,11 +21,16 @@ Standing engineering discipline for all sessions, all repos.
 - Review the three-dot change plus working-tree and untracked edits, never a
   two-dot diff against a branch tip. That changed-file set is authoritative: a
   finding claiming the change touched a file outside it is a stale-base artifact
-  -- discard it; absence never means the change "missed" the file.
+  -- discard it; absence never means the change "missed" the file. A finding
+  about an unchanged path as an affected caller, consumer, or contract of a
+  changed path is legitimate when its content is read from the base tip and the
+  finding says so -- absence from the set disproves "this change touched X", not
+  "X needed no change".
   Read an unchanged file with `git show <fresh base tip>:<path>` after fetching
-  that tip into a private ref (or via `review.py resolve-base`), never from the
-  review worktree, the snapshot, a local base checkout, or a shared
-  remote-tracking ref you rewrote.
+  that tip into a private ref and pinning it there with `git update-ref` for the
+  life of the review (`review.py resolve-base` alone does not pin: it deletes
+  its own fetch ref before returning), never from the review worktree, the
+  snapshot, a local base checkout, or a shared remote-tracking ref you rewrote.
 
 ## Scope and safety
 
