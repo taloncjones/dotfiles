@@ -54,7 +54,7 @@
     },
     {
       "name": "checkin-emits-the-full-action-vocabulary",
-      "run": "python3 -c \"src=open('claude/hooks/herdr_orch_core.py').read(); i=src.index('ns.cmd == \\\"checkin\\\"'); body=src[i:i+30000]; missing=[a for a in ('confirm-review','changes-requested','stale-review-reset','dispatch-review', 'confirm-completion','confirm-plan','abandoned-candidate','mech-ledger') if a not in body]; assert not missing, missing; assert 'changed: ' in body or 'changed:' in body, 'no changed flag'\"",
+      "run": "python3 -c \"src=open('claude/hooks/herdr_orch_core.py').read(); i=src.index('def checkin_action'); body=src[i:i+6000]; missing=[a for a in ('confirm-review','changes-requested','stale-review-reset','dispatch-review', 'confirm-completion','confirm-plan','abandoned-candidate','mech-ledger','unblocked') if a not in body]; assert not missing, missing; j=src.index('ns.cmd == \\\"checkin\\\"'); assert 'changed: ' in src[j:j+8000], 'checkin branch prints no changed flag'\"",
       "timeout_secs": 60
     },
     {
@@ -64,7 +64,7 @@
     },
     {
       "name": "hook-decides-before-pushing-and-validates-task-id",
-      "run": "python3 -c \"src=open('claude/hooks/herdr_worker_status.py').read(); assert 'wake_decision' in src, 'hook does not consult the wake decision'; assert 'valid_task_id' in src, 'hook must validate task_id before building record paths'; assert src.index('post_wake') > src.index('append_event'), 'hint must be appended before the push is decided'\"",
+      "run": "python3 -c \"src=open('claude/hooks/herdr_worker_status.py').read(); assert 'wake_decision' in src, 'hook does not consult the wake decision'; assert 'valid_task_id' in src, 'hook must validate task_id before building record paths'; body=src[src.index('def main'):]; assert body.index('post_wake') > body.index('append_event'), 'the hint must be appended before the push is decided'\"",
       "timeout_secs": 60
     },
     {
@@ -84,7 +84,7 @@
     },
     {
       "name": "regression-checks-present",
-      "run": "grep -qF 'a landed review verdict stops firing once recorded' claude/hooks/herdr-orch.test.sh && grep -qF 'a terminal status never produces work' claude/hooks/herdr-orch.test.sh && grep -qF 'three consecutive Stops with no record change push zero wakes' claude/hooks/herdr-orch.test.sh && grep -qF 'a Stop after a done.json write pushes exactly one wake' claude/hooks/herdr-orch.test.sh && grep -qF 'a blocking Notification pushes once per transition into blocked' claude/hooks/herdr-orch.test.sh && grep -qF 'a debounced record change fires on the next Stop' claude/hooks/herdr-orch.test.sh && grep -qF 'a deleted completion record pushes no wake' claude/hooks/herdr-orch.test.sh && grep -qF 'an unsafe task_id in the index is a no-op' claude/hooks/herdr-orch.test.sh && grep -qF 'a real socket receives exactly one wake line after emit-done' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin leaves every state file but owner.json byte-identical' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin reports changed no on an all-steady queue' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin reports poll failed and changed yes on an unparseable poll' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin action precedence resolves an overlapping task to the earlier rule' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin passes each correlation helper its own phase workspace' claude/hooks/herdr-orch.test.sh",
+      "run": "grep -qF 'checkin lists non-terminal tasks, honours --all, and refuses a stale fence' claude/hooks/herdr-orch.test.sh && grep -qF 'a landed review verdict stops firing once recorded' claude/hooks/herdr-orch.test.sh && grep -qF 'a terminal status never produces work' claude/hooks/herdr-orch.test.sh && grep -qF 'three consecutive Stops with no record change push zero wakes' claude/hooks/herdr-orch.test.sh && grep -qF 'a Stop after a done.json write pushes exactly one wake' claude/hooks/herdr-orch.test.sh && grep -qF 'a blocking Notification pushes once per transition into blocked' claude/hooks/herdr-orch.test.sh && grep -qF 'a debounced record change fires on the next Stop' claude/hooks/herdr-orch.test.sh && grep -qF 'a deleted completion record pushes no wake' claude/hooks/herdr-orch.test.sh && grep -qF 'an unsafe task_id in the index is a no-op' claude/hooks/herdr-orch.test.sh && grep -qF 'a done.json write must post exactly one wake' claude/hooks/herdr-orch.test.sh && grep -qF 'bare Stops must post nothing' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin leaves every state file but owner.json byte-identical' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin reports changed no on an all-steady queue' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin reports poll failed and changed yes on an unparseable poll' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin action precedence resolves an overlapping task to the earlier rule' claude/hooks/herdr-orch.test.sh && grep -qF 'checkin passes each correlation helper its own phase workspace' claude/hooks/herdr-orch.test.sh",
       "timeout_secs": 30
     },
     {
