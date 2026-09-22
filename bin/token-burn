@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from datetime import datetime, timedelta
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+
+@dataclass
+class TokenCount:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+    def __add__(self, other):
+        return TokenCount(
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.cache_creation_input_tokens + other.cache_creation_input_tokens,
+            self.cache_read_input_tokens + other.cache_read_input_tokens,
+        )
+
+    def total_priced(self):
+        return self.cache_creation_input_tokens + self.output_tokens
+
+    def total_all(self):
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+        )
+
+
+@dataclass
+class SessionStat:
+    model: str
+    session_id: str
+    project: str
+    day: str
+    tokens: TokenCount = field(default_factory=TokenCount)
+
+
+def parse_timestamp(ts_str):
+    if not ts_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return dt.date()
+    except (ValueError, AttributeError):
+        return None
+
+
+def get_cutoff_date(since_str):
+    today = datetime.now().date()
+    if since_str in (None, "all", "0"):
+        return None
+    try:
+        days = int(since_str.rstrip("dD"))
+        return today - timedelta(days=days)
+    except (ValueError, AttributeError):
+        return None
+
+
+def read_claude_jsonl(config_dir):
+    results = []
+    projects_path = Path(config_dir) / "projects"
+    if not projects_path.exists():
+        return results
+
+    for jsonl_file in projects_path.rglob("*.jsonl"):
+        try:
+            with open(jsonl_file, "r") as f:
+                for line_no, line in enumerate(f, 1):
+                    try:
+                        obj = json.loads(line)
+                        if "message" not in obj or "usage" not in obj["message"]:
+                            continue
+
+                        usage = obj["message"]["usage"]
+                        ts = obj.get("timestamp")
+                        day = parse_timestamp(ts)
+                        if not day:
+                            continue
+
+                        model = obj["message"].get("model", "unknown")
+                        session_id = obj.get("sessionId", "unknown")
+                        project_name = jsonl_file.parent.name
+
+                        tokens = TokenCount(
+                            input_tokens=usage.get("input_tokens", 0),
+                            output_tokens=usage.get("output_tokens", 0),
+                            cache_creation_input_tokens=usage.get(
+                                "cache_creation_input_tokens", 0
+                            ),
+                            cache_read_input_tokens=usage.get(
+                                "cache_read_input_tokens", 0
+                            ),
+                        )
+
+                        results.append(
+                            SessionStat(model, session_id, project_name, str(day), tokens)
+                        )
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        except (IOError, OSError):
+            pass
+
+    return results
+
+
+def read_codex_jsonl(codex_home):
+    results = []
+    sessions_path = Path(codex_home) / "archived_sessions"
+    if not sessions_path.exists():
+        return results
+
+    for jsonl_file in sessions_path.rglob("*.jsonl"):
+        try:
+            with open(jsonl_file, "r") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        if obj.get("type") != "event_msg":
+                            continue
+                        payload = obj.get("payload", {})
+                        if payload.get("type") != "token_count":
+                            continue
+
+                        info = payload.get("info", {})
+                        ts_ms = obj.get("timestamp", 0)
+                        if isinstance(ts_ms, str):
+                            ts_ms = int(float(ts_ms))
+                        if ts_ms:
+                            ts = datetime.fromtimestamp(ts_ms / 1000.0).date()
+                        else:
+                            ts = datetime.now().date()
+
+                        model = "codex-unknown"
+                        session_id = obj.get("session_id", "unknown")
+                        project_name = "codex"
+
+                        tokens = TokenCount(
+                            input_tokens=info.get("input_tokens", 0),
+                            output_tokens=info.get("output_tokens", 0),
+                            cache_creation_input_tokens=0,
+                            cache_read_input_tokens=info.get("cached_input_tokens", 0),
+                        )
+
+                        results.append(
+                            SessionStat(model, session_id, project_name, str(ts), tokens)
+                        )
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+        except (IOError, OSError):
+            pass
+
+    return results
+
+
+def format_number(n):
+    if isinstance(n, str):
+        return n
+    return f"{n:,}"
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Report local token burn from Claude and Codex transcripts"
+    )
+    parser.add_argument(
+        "--since",
+        default="7d",
+        help="Window: Nd (default 7d), all, or 0. Filter by calendar day.",
+    )
+    parser.add_argument("--model", default=None, help="Filter by model name")
+    parser.add_argument(
+        "--session-limit", type=int, default=10, help="Max sessions per table"
+    )
+
+    args = parser.parse_args()
+
+    cutoff = get_cutoff_date(args.since)
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
+    codex_home = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+
+    all_stats = []
+    all_stats.extend(read_claude_jsonl(config_dir))
+    all_stats.extend(read_codex_jsonl(codex_home))
+
+    if cutoff:
+        all_stats = [
+            s
+            for s in all_stats
+            if datetime.fromisoformat(s.day).date() >= cutoff
+        ]
+
+    if args.model:
+        all_stats = [s for s in all_stats if args.model in s.model]
+
+    totals_by_model = defaultdict(TokenCount)
+    sessions_by_key = defaultdict(TokenCount)
+
+    for stat in all_stats:
+        totals_by_model[stat.model] = totals_by_model[stat.model] + stat.tokens
+        key = (stat.model, stat.session_id, stat.project)
+        sessions_by_key[key] = sessions_by_key[key] + stat.tokens
+
+    print("Grand Total by Model:")
+    print("-" * 90)
+    for model in sorted(totals_by_model.keys()):
+        t = totals_by_model[model]
+        print(
+            f"{model:40} input:{format_number(t.input_tokens):>12} "
+            f"output:{format_number(t.output_tokens):>12} "
+            f"cache_creation:{format_number(t.cache_creation_input_tokens):>12} "
+            f"cache_read:{format_number(t.cache_read_input_tokens):>12}"
+        )
+
+    print("\n\nTop Sessions by Priced Tokens (cache_creation + output):")
+    print("-" * 90)
+    sessions_by_priced = sorted(
+        sessions_by_key.items(),
+        key=lambda x: x[1].total_priced(),
+        reverse=True,
+    )[: args.session_limit]
+
+    for (model, session_id, project), tokens in sessions_by_priced:
+        print(
+            f"{model:40} {session_id[:8]:8} {project:20} "
+            f"input:{format_number(tokens.input_tokens):>10} "
+            f"output:{format_number(tokens.output_tokens):>10} "
+            f"cache_cr:{format_number(tokens.cache_creation_input_tokens):>10} "
+            f"cache_rd:{format_number(tokens.cache_read_input_tokens):>10}"
+        )
+
+    print("\n\nTop Sessions by Cache Read Volume:")
+    print("-" * 90)
+    sessions_by_cache_read = sorted(
+        sessions_by_key.items(),
+        key=lambda x: x[1].cache_read_input_tokens,
+        reverse=True,
+    )[: args.session_limit]
+
+    for (model, session_id, project), tokens in sessions_by_cache_read:
+        print(
+            f"{model:40} {session_id[:8]:8} {project:20} "
+            f"input:{format_number(tokens.input_tokens):>10} "
+            f"output:{format_number(tokens.output_tokens):>10} "
+            f"cache_cr:{format_number(tokens.cache_creation_input_tokens):>10} "
+            f"cache_rd:{format_number(tokens.cache_read_input_tokens):>10}"
+        )
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

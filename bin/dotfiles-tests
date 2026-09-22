@@ -43,6 +43,7 @@ SUITES="
 sh install/install.test.sh
 sh bin/remote-access-doctor.test.sh
 sh bin/zed-claude-agent.test.sh
+sh bin/token-burn.test.sh
 sh bin/herdr-zed-attach.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
