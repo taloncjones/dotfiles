@@ -941,11 +941,27 @@ rd=c.repo_dir("github-com-org-repo-deadbeef")
 (rd/"tasks"/"notes.txt").write_text("")                 # outside globs: ignored
 snap,failed=c.watch_scan(rd,{})
 names=sorted(pathlib.Path(k).name for k in snap)
-assert names==["PROJ-1.done.json","PROJ-1.review.json","w1.events.jsonl"],names
+assert names==["PROJ-1.done.json","PROJ-1.review.json"],names
 assert failed==set()
 for v in snap.values():
     assert isinstance(v,tuple) and len(v)==2
 sys.exit(0)
+PY
+
+check "watch no longer signals on an events.jsonl append" <<PY
+$LOAD
+assert "workspaces" not in c.WATCH_DIRS, sorted(c.WATCH_DIRS)
+assert set(c.WATCH_DIRS) == {"tasks", "think"}, sorted(c.WATCH_DIRS)
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+prev, _f = c.watch_scan(rd, {})
+with open(os.path.join(rd, "workspaces", "w1.events.jsonl"), "a") as fh:
+    fh.write('{"v":1,"event":"stopped"}\n')
+snap, _f = c.watch_scan(rd, prev)
+assert not c.watch_changed(prev, snap), "an events.jsonl append must not signal"
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+snap2, _f = c.watch_scan(rd, snap)
+assert c.watch_changed(snap, snap2), "a done.json write must still signal"
 PY
 
 check "watch_scan missing dirs empty; watch_changed semantics" <<PY

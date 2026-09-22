@@ -1705,10 +1705,12 @@ def fold_spend(lines, task_id):
     return out
 
 
+# The watch and the worker-status hook share one wake predicate: a completion
+# record changed. workspaces/*.events.jsonl is deliberately absent -- watching
+# it would re-admit a signal per worker turn end through the fallback.
 WATCH_DIRS = {
     "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
               (".spend.jsonl", valid_task_id)),
-    "workspaces": ((".events.jsonl", valid_workspace_id),),
     "think": ((".launch.json", valid_think_id), (".answer.json", valid_think_id)),
 }
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
