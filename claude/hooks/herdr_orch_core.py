@@ -2474,6 +2474,50 @@ def should_dispatch_review(task, head_sha) -> bool:
     return task.get("review_head_sha") != head_sha
 
 
+CHECKIN_TERMINAL = frozenset({"failed", "abandoned", "merged"})
+_REVIEW_STATES = frozenset({"review-dispatched", "reviewed", "changes-requested"})
+
+
+def checkin_action(f) -> str:
+    """The transition the director still has to write, or "none".
+
+    Every rule is gated on the transition NOT already being recorded. Firing
+    on evidence alone would make `changed: yes` permanent: is_reviewed
+    consults only the review record and review_head_sha, never task.status, so
+    a task parked in `reviewed` awaiting a human merge would ask for
+    confirm-review on every check-in forever.
+    """
+    status = f.get("status")
+    if status in CHECKIN_TERMINAL:
+        return "none"
+    rules = (
+        ("unknown", not f.get("poll_ok")
+                    or (f.get("head") is None and f.get("worktree_exists"))),
+        ("abandoned-candidate", f.get("live") == "absent"
+                                and not f.get("worktree_exists")
+                                and not f.get("completed")),
+        ("blocked", f.get("live") == "blocked" and status != "blocked"),
+        ("unblocked", status == "blocked" and f.get("live") != "blocked"),
+        ("stale-review-reset", status in _REVIEW_STATES and f.get("review_stale")),
+        ("confirm-review", f.get("reviewed") and status != "reviewed"),
+        ("changes-requested", f.get("review_correlates") and not f.get("reviewed")
+                              and status != "changes-requested"),
+        ("dispatch-review", f.get("dispatch_review")),
+        ("confirm-completion", f.get("completed") and status != "completed"),
+        ("confirm-plan", f.get("plan_completed") and not f.get("plan_advanced")),
+        ("mech-ledger", f.get("mech_unsettled")),
+        # done_outcome is already gated on correlating to the CURRENT attempt
+        # (Task 6), which is what stops a superseded record firing forever.
+        # Section 9 has no `paused` status, so there is no status gate to add.
+        ("paused", f.get("done_outcome") == "paused"),
+        ("failed", f.get("done_outcome") == "failed"),
+    )
+    for name, fires in rules:
+        if fires:
+            return name
+    return "none"
+
+
 def is_reviewed(task, done, head_sha, workspace) -> bool:
     """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
     live HEAD all agree, the record comes from the dispatched review workspace,

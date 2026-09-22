@@ -9019,5 +9019,53 @@ assert "notify_when_idle" not in layout, "state-layout still calls peer_name a s
 assert "peer_name" in layout, "the peer_name field itself stays documented"
 PY
 
+check "checkin_action: precedence, and a settled task reports none" <<PY
+$LOAD
+base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
+            head="a" * 40, completed=False, plan_completed=False, reviewed=False,
+            review_correlates=False, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+assert c.checkin_action(base) == "none", c.checkin_action(base)
+assert c.checkin_action({**base, "poll_ok": False}) == "unknown"
+assert c.checkin_action({**base, "head": None}) == "unknown"
+assert c.checkin_action({**base, "live": "absent", "worktree_exists": False}) == "abandoned-candidate"
+assert c.checkin_action({**base, "live": "blocked"}) == "blocked"
+assert c.checkin_action({**base, "status": "blocked", "live": "blocked"}) == "none"
+assert c.checkin_action({**base, "status": "blocked", "live": "working"}) == "unblocked"
+assert c.checkin_action({**base, "status": "completed", "dispatch_review": True}) == "dispatch-review"
+assert c.checkin_action({**base, "completed": True}) == "confirm-completion"
+assert c.checkin_action({**base, "plan_completed": True}) == "confirm-plan"
+assert c.checkin_action({**base, "mech_unsettled": True}) == "mech-ledger"
+assert c.checkin_action({**base, "done_outcome": "paused"}) == "paused"
+assert c.checkin_action({**base, "done_outcome": "failed"}) == "failed"
+PY
+
+check "checkin_action: a landed review verdict stops firing once recorded" <<PY
+$LOAD
+base = dict(status="review-dispatched", poll_ok=True, live="idle", worktree_exists=True,
+            head="a" * 40, completed=False, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+assert c.checkin_action(base) == "confirm-review", c.checkin_action(base)
+# Regression: once the director has recorded it, the same evidence must stop
+# producing an action, or "changed: yes" would be permanent.
+assert c.checkin_action({**base, "status": "reviewed"}) == "none"
+cr = {**base, "reviewed": False}
+assert c.checkin_action(cr) == "changes-requested", c.checkin_action(cr)
+assert c.checkin_action({**cr, "status": "changes-requested"}) == "none"
+assert c.checkin_action({**base, "review_stale": True}) == "stale-review-reset"
+PY
+
+check "checkin_action: a terminal status never produces work" <<PY
+$LOAD
+base = dict(status="merged", poll_ok=True, live="absent", worktree_exists=False,
+            head="a" * 40, completed=True, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, dispatch_review=False,
+            mech_unsettled=True, plan_advanced=False, done_outcome="failed")
+for terminal in ("merged", "failed", "abandoned"):
+    got = c.checkin_action({**base, "status": terminal})
+    assert got == "none", "%s -> %s" % (terminal, got)
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
