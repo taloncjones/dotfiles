@@ -3647,11 +3647,14 @@ def _main(argv=None) -> int:
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
-        if ns.runtime is not None and ns.pane_id and os.environ.get("HERDR_ENV") == "1":
+        if ns.runtime is not None and os.environ.get("HERDR_ENV") == "1":
             # Inside herdr the emitting pane must be the dispatched pane. The
             # caller-supplied --pane-id is matched against the task record
             # later; this ties it to the process that is running. Runs before
-            # any directory is created. Exit 3 is distinct from _require (2).
+            # any directory is created, including when --pane-id is omitted
+            # entirely: a native call with no pane id is never the dispatched
+            # agent either, and must not reach create_payload_dir below.
+            # Exit 3 is distinct from _require (2).
             if (os.environ.get("HERDR_PANE_ID") != ns.pane_id
                     or os.environ.get("HERDR_WORKSPACE_ID") != ns.workspace):
                 sys.stderr.write("[X] not the designated agent\n")

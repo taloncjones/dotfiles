@@ -4443,6 +4443,18 @@ test "$rc" = 3
 test ! -e "$REVIEW_JSON"
 SH
 
+check "emit provenance: omitted --pane-id still exits 3 before any directory is created" <<'SH'
+. "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-prov6.git
+rc=0; HERDR_ENV=1 HERDR_WORKSPACE_ID=w2 HERDR_PANE_ID=pane2 CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$SHA40" --reviewed-base-sha "$SHA40" --blocking-count 0 \
+   --runtime claude --launch-id L2 --source-head-sha "$SHA40" \
+   --reviewer-session R1 --findings-ref "$FINDINGS_OK" 2>"$ERRFILE" || rc=$?
+test "$rc" = 3
+grep -q 'not the designated agent' "$ERRFILE"
+test ! -e "$REVIEW_JSON"
+SH
+
 check "emit provenance: designated pane records emitter fields" <<'SH'
 . "$PROV_FIXTURE_HELPER"; prov_fixture https://example.com/repo-prov4.git
 HERDR_ENV=1 HERDR_PANE_ID=pane2 HERDR_WORKSPACE_ID=w2 CLAUDE_CODE_SESSION_ID=sess-1 prov_emit_review --findings-ref "$FINDINGS_OK"
