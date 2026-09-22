@@ -269,6 +269,35 @@ def test_route_cli_honors_config_routes_effort():
     assert route["requested_effort"] == "medium", route
 
 
+def test_route_cli_rejects_repeated_config_json():
+    difficulty_config = json.dumps(
+        {"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}}
+    )
+    repeated = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--role", "implementation", "--risk", "normal",
+         "--config-json", difficulty_config,
+         "--config-json", json.dumps({"routes": {}})],
+        capture_output=True, text=True,
+    )
+    assert repeated.returncode != 0, repeated.stdout
+    error = json.loads(repeated.stdout)
+    assert "--config-json may be given once" in error["error"], error
+
+    merged = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--role", "implementation", "--risk", "normal",
+         "--config-json", json.dumps(
+             {"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
+              "routes": {}}
+         )],
+        check=True, capture_output=True, text=True,
+    )
+    route = json.loads(merged.stdout)
+    assert route["requested_effort"] == "high", route
+    assert route["difficulty"] == "hard", route
+
+
 def test_critical_routes_are_explicit_xhigh():
     caps = codex_capabilities()
     for role in ("reviewer", "think"):
@@ -1776,6 +1805,7 @@ for name, test in (
     ("unknown pipeline step is rejected", test_unknown_pipeline_step_is_rejected),
     ("route --step derives role from pipeline step", test_route_step_cli_derives_role_from_pipeline_step),
     ("route CLI honors config routes effort", test_route_cli_honors_config_routes_effort),
+    ("route CLI rejects repeated config-json", test_route_cli_rejects_repeated_config_json),
 ):
     check(name, test)
 
