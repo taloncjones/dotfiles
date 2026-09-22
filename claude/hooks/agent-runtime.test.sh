@@ -808,8 +808,12 @@ def test_run_bounded_strips_pane_identity_from_the_child():
                 "HERDR_TAB_ID": "w1:t1",
             }
         )
+        # "planner"'s default claude model is opus (agent_runtime.py's route
+        # table), not fable; the capabilities dict must cover whichever model
+        # the bare default actually resolves to, or the route comes back
+        # indeterminate rather than ready.
         route = runtime.resolve_route(
-            "claude", "planner", capabilities={"models": {"fable": model()}}
+            "claude", "planner", capabilities={"models": {"opus": model()}}
         )
         runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
         call = json.loads(log.read_text())
