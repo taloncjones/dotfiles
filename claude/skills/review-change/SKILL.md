@@ -80,12 +80,15 @@ as `--findings-ref`, which binds the sidecars to the findings.
 : "${REVIEW_REPO:?}" "${REVIEW_BASE:?}" "${REVIEW_ROOT:?}"
 REVIEW_OUT="${REVIEW_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/review-change-out.XXXXXX")}" || exit 2
 {
-  git -C "$REVIEW_REPO" -c core.quotePath=false diff --name-only --no-renames "${REVIEW_BASE}...HEAD" || exit 2
-  git -C "$REVIEW_REPO" -c core.quotePath=false diff --name-only --no-renames HEAD || exit 2
-  git -C "$REVIEW_REPO" -c core.quotePath=false ls-files --others --exclude-standard || exit 2
-} >"$REVIEW_OUT/changed-files.raw" || exit 2
+  git -C "$REVIEW_REPO" diff --name-only --no-renames -z "${REVIEW_BASE}...HEAD" || exit 2
+  git -C "$REVIEW_REPO" diff --name-only --no-renames -z HEAD || exit 2
+  git -C "$REVIEW_REPO" ls-files --others --exclude-standard -z || exit 2
+} >"$REVIEW_OUT/changed-files.nul" || exit 2
+tr '\0' '\n' <"$REVIEW_OUT/changed-files.nul" >"$REVIEW_OUT/changed-files.raw" || exit 2
+rm -f -- "$REVIEW_OUT/changed-files.nul"
 LC_ALL=C sort -u "$REVIEW_OUT/changed-files.raw" >"$REVIEW_OUT/changed-files.txt" || exit 2
 rm -f -- "$REVIEW_OUT/changed-files.raw"
+[ -s "$REVIEW_OUT/changed-files.txt" ] || exit 2
 if [ -n "${REVIEW_BASE_REF:-}" ]; then
   uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/review.py" resolve-base \
     --repo "$REVIEW_REPO" --base-ref "$REVIEW_BASE_REF" --head HEAD >"$REVIEW_OUT/base-context.json" || exit 2
@@ -96,6 +99,9 @@ printf 'review-change sidecars: %s\n' "$REVIEW_OUT"
 ```
 
 ```bash
+: "${REVIEW_OUT:?}"
+[ -s "$REVIEW_OUT/changed-files.txt" ] || exit 2
+[ -f "$REVIEW_OUT/base-context.json" ] || exit 2
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/review-change.XXXXXX")
 if [ -n "${REVIEW_REPAIR_PACKET:-}" ]; then
   [ -f "$REVIEW_REPAIR_PACKET" ] || exit 2

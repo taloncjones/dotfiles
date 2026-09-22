@@ -111,12 +111,15 @@ folds local work into the snapshot) and check head identity directly. Then
 resolve the base tip exactly once and pin it for the run.
 
 ```bash
+# co-review-changed-files:start
 : "${REPO:?}" "${RUN_DIR:?}" "${MANIFEST:?}" "${RUN_ID:?}" "${REVIEW_HELPER:?}"
 read -r BASE SNAPSHOT_HEAD HEAD <<EOF2
 $(uv run --no-project python -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["source"]["base"], m["snapshot"]["snapshot_head"], m["source"]["head"])' "$MANIFEST")
 EOF2
 [ -n "$BASE" ] && [ -n "$SNAPSHOT_HEAD" ] && [ -n "$HEAD" ] || exit 2
-git -C "$REPO" -c core.quotePath=false diff --name-only --no-renames "$BASE" "$SNAPSHOT_HEAD" >"$RUN_DIR/changed-files.raw" || exit 2
+git -C "$REPO" diff --name-only --no-renames -z "$BASE" "$SNAPSHOT_HEAD" >"$RUN_DIR/changed-files.nul" || exit 2
+tr '\0' '\n' <"$RUN_DIR/changed-files.nul" >"$RUN_DIR/changed-files.raw" || exit 2
+rm -f -- "$RUN_DIR/changed-files.nul"
 LC_ALL=C sort "$RUN_DIR/changed-files.raw" >"$RUN_DIR/changed-files.txt" || exit 2
 [ -s "$RUN_DIR/changed-files.txt" ] || exit 2
 rm -f -- "$RUN_DIR/changed-files.raw" "$RUN_DIR/base-context.json.tmp"
@@ -169,6 +172,7 @@ else
     "$BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$RUN_DIR/base-context.json.tmp" || exit 2
   mv "$RUN_DIR/base-context.json.tmp" "$RUN_DIR/base-context.json" || exit 2
 fi
+# co-review-changed-files:end
 ```
 
 Each nonzero exit here is `INCOMPLETE`. A failed manifest read leaves `read`
@@ -225,7 +229,9 @@ frozen values, never placeholders: repository identity; `snapshot.codex_root`;
 base, head, expected tree, and reviewed tree; frozen diff path and digest;
 target repository/PR/base-branch identity; the extracted policy; full rubric;
 declared threat model; and changed-symbol callers; the contents of
-`RUN_DIR/changed-files.txt` and `RUN_DIR/base-context.json`; and the read form
+`RUN_DIR/changed-files.txt` (verified non-empty before use; a missing or
+empty file is `INCOMPLETE`, never a dispatch with a blank changed-file set)
+and `RUN_DIR/base-context.json`; and the read form
 `git -C <seat root> show <base_ref_tip>:<path>` for any path outside the
 changed-file set. A finding that says this change touched a path outside that
 set is a stale-base artifact the seat discards. State the requested finding

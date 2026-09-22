@@ -115,18 +115,26 @@ required by scope/coverage changes stops for a new user decision.
 
 Compute the changed-file set from the verified manifest, never from the
 caller: it is the three-dot change, and `--no-renames` lists both sides of a
-rename. For a PR, cross-check GitHub's list one-directionally (every PR path
+rename. Use `git diff --name-only -z` and translate the NUL output to
+newlines: a quote, backslash, tab, or other control byte in a path is
+C-quoted by the default (non-`-z`) form even with `core.quotePath=false`
+(which covers only non-ASCII bytes), so that form silently mismatches
+GitHub's raw path strings and any seat's literal citation of the path.
+For a PR, cross-check GitHub's list one-directionally (every PR path
 must be in the frozen set; the frozen set may be larger because `prepare`
 folds local work into the snapshot) and check head identity directly. Then
 resolve the base tip exactly once and pin it for the run.
 
 ```bash
+# co-review-changed-files:start
 : "${REPO:?}" "${RUN_DIR:?}" "${MANIFEST:?}" "${RUN_ID:?}" "${REVIEW_HELPER:?}"
 read -r BASE SNAPSHOT_HEAD HEAD <<EOF2
 $(uv run --no-project python -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["source"]["base"], m["snapshot"]["snapshot_head"], m["source"]["head"])' "$MANIFEST")
 EOF2
 [ -n "$BASE" ] && [ -n "$SNAPSHOT_HEAD" ] && [ -n "$HEAD" ] || exit 2
-git -C "$REPO" -c core.quotePath=false diff --name-only --no-renames "$BASE" "$SNAPSHOT_HEAD" >"$RUN_DIR/changed-files.raw" || exit 2
+git -C "$REPO" diff --name-only --no-renames -z "$BASE" "$SNAPSHOT_HEAD" >"$RUN_DIR/changed-files.nul" || exit 2
+tr '\0' '\n' <"$RUN_DIR/changed-files.nul" >"$RUN_DIR/changed-files.raw" || exit 2
+rm -f -- "$RUN_DIR/changed-files.nul"
 LC_ALL=C sort "$RUN_DIR/changed-files.raw" >"$RUN_DIR/changed-files.txt" || exit 2
 [ -s "$RUN_DIR/changed-files.txt" ] || exit 2
 rm -f -- "$RUN_DIR/changed-files.raw" "$RUN_DIR/base-context.json.tmp"
@@ -179,6 +187,7 @@ else
     "$BASE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$RUN_DIR/base-context.json.tmp" || exit 2
   mv "$RUN_DIR/base-context.json.tmp" "$RUN_DIR/base-context.json" || exit 2
 fi
+# co-review-changed-files:end
 ```
 
 Each nonzero exit here is `INCOMPLETE`. A failed manifest read leaves `read`
@@ -210,6 +219,9 @@ returns a genuine successful completion; preserve requested and observed route
 metadata from that result.
 
 ```bash
+: "${RUN_DIR:?}"
+[ -s "$RUN_DIR/changed-files.txt" ] || exit 2
+[ -f "$RUN_DIR/base-context.json" ] || exit 2
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 grep -q '^## Classes' "$RUBRIC" || exit 2
 for seat in claude codex breaker verifier; do
