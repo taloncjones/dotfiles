@@ -250,24 +250,27 @@ def test_route_step_cli_derives_role_from_pipeline_step():
 
 
 def test_route_cli_honors_config_routes_effort():
-    below_floor = subprocess.run(
-        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
-         "--role", "implementation", "--risk", "normal",
-         "--config-json", json.dumps({"routes": {"implementation": {"effort": "low"}}})],
-        capture_output=True, text=True,
-    )
-    assert below_floor.returncode != 0, below_floor.stdout
-    error = json.loads(below_floor.stdout)
-    assert "below the sonnet/medium role floor" in error["error"], error
-
     at_floor = subprocess.run(
         [sys.executable, runtime.__file__, "route", "--runtime", "claude",
          "--role", "implementation", "--risk", "normal",
-         "--config-json", json.dumps({"routes": {"implementation": {"effort": "medium"}}})],
+         "--config-json", json.dumps({"routes": {"implementation": {"effort": "low"}}})],
         check=True, capture_output=True, text=True,
     )
     route = json.loads(at_floor.stdout)
-    assert route["requested_effort"] == "medium", route
+    assert route["requested_effort"] == "low", route
+
+    below_raised_floor = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--role", "implementation", "--risk", "normal",
+         "--config-json", json.dumps({
+             "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
+             "routes": {"implementation": {"effort": "low"}},
+         })],
+        capture_output=True, text=True,
+    )
+    assert below_raised_floor.returncode != 0, below_raised_floor.stdout
+    error = json.loads(below_raised_floor.stdout)
+    assert "below the sonnet/high role floor" in error["error"], error
 
 
 def test_route_cli_rejects_repeated_config_json():
@@ -1256,14 +1259,21 @@ def test_claude_controller_is_opus_medium():
     route = runtime.resolve_route("claude", "controller")
     assert (route["model"], route["effort"]) == ("opus", "medium"), route
     assert route["quality_floor"] == "medium", route
-    # An override below the new medium floor is rejected.
+    # A model trade-down below the opus/low floor is still rejected; opus/low
+    # itself is a valid config choice.
     raises(
         runtime.RouteError,
         lambda: runtime.resolve_route(
-            "claude", "controller", config={"routes": {"controller": {"effort": "low"}}}
+            "claude",
+            "controller",
+            config={"routes": {"controller": {"model": "sonnet", "effort": "low"}}},
         ),
-        "below the opus/medium role floor",
+        "configured sonnet/low is below the opus/low role floor",
     )
+    controller_low = runtime.resolve_route(
+        "claude", "controller", config={"routes": {"controller": {"effort": "low"}}}
+    )
+    assert (controller_low["model"], controller_low["effort"]) == ("opus", "low"), controller_low
     # Every other Claude role tuple is unchanged.
     expected = {
         "planner": ("opus", "high"),
@@ -1363,22 +1373,21 @@ def test_claude_planner_falls_back_to_fable():
     assert disabled["ready"] is False, disabled
     assert disabled["blocked_reason"] == "no-fallback-meets-quality-floor", disabled
 
-    # A caller who routes planning to a strictly weaker model at the same
-    # effort label owns that choice, but the tier-aware floor check now
-    # refuses it immediately rather than deferring to availability-based
-    # blocking -- haiku/high never reaches opus/high's tier regardless of
-    # whether haiku itself is reachable.
+    # A caller who routes planning to a strictly weaker model owns that
+    # choice, but the tier-aware floor check refuses it immediately rather
+    # than deferring to availability-based blocking -- haiku/medium never
+    # reaches opus/low's tier regardless of whether haiku is reachable.
     raises(
         runtime.RouteError,
         lambda: runtime.resolve_route(
             "claude",
             "planner",
-            config={"routes": {"planner": {"model": "haiku", "effort": "high"}}},
+            config={"routes": {"planner": {"model": "haiku", "effort": "medium"}}},
             capabilities={
                 "models": {"haiku": model(status="unavailable"), "opus": model()}
             },
         ),
-        "configured haiku/high is below the opus/medium role floor",
+        "configured haiku/medium is below the opus/low role floor",
     )
 
 
@@ -1413,21 +1422,34 @@ def test_planner_sonnet_fallback_refused_below_opus_high_tier():
 
 
 def test_route_override_is_tier_aware_not_effort_only():
-    # opus/low sits below planner's medium role floor, so it is refused;
-    # opus/medium meets the floor directly; fable/medium is a tier peer of
-    # opus/high, so it is accepted even though "medium" is a lower effort
-    # label than "high".
+    # sonnet/low sits below planner's opus/low role floor, so it is refused;
+    # opus/low meets the floor directly; sonnet/medium is a tier peer of
+    # opus/low, so a config may trade the model down at a higher effort;
+    # fable/medium is a tier peer of opus/high and is accepted even though
+    # "medium" is a lower effort label than "high".
     raises(
         runtime.RouteError,
         lambda: runtime.resolve_route(
-            "claude", "planner", config={"routes": {"planner": {"effort": "low"}}}
+            "claude",
+            "planner",
+            config={"routes": {"planner": {"model": "sonnet", "effort": "low"}}},
         ),
-        "configured opus/low is below the opus/medium role floor",
+        "configured sonnet/low is below the opus/low role floor",
     )
     at_floor = runtime.resolve_route(
+        "claude", "planner", config={"routes": {"planner": {"effort": "low"}}}
+    )
+    assert (at_floor["model"], at_floor["effort"]) == ("opus", "low"), at_floor
+    medium = runtime.resolve_route(
         "claude", "planner", config={"routes": {"planner": {"effort": "medium"}}}
     )
-    assert (at_floor["model"], at_floor["effort"]) == ("opus", "medium"), at_floor
+    assert (medium["model"], medium["effort"]) == ("opus", "medium"), medium
+    traded_down = runtime.resolve_route(
+        "claude",
+        "planner",
+        config={"routes": {"planner": {"model": "sonnet", "effort": "medium"}}},
+    )
+    assert (traded_down["model"], traded_down["effort"]) == ("sonnet", "medium"), traded_down
     accepted = runtime.resolve_route(
         "claude",
         "planner",
@@ -1453,22 +1475,36 @@ def test_config_effort_below_floor_refused_at_or_above_honored():
         lambda: runtime.resolve_route(
             "claude",
             "implementation",
-            config={"routes": {"implementation": {"effort": "low"}}},
+            config={"routes": {"implementation": {"model": "haiku", "effort": "low"}}},
         ),
-        "configured sonnet/low is below the sonnet/medium role floor",
+        "configured haiku/low is below the sonnet/low role floor",
     )
     at_floor = runtime.resolve_route(
         "claude",
         "implementation",
-        config={"routes": {"implementation": {"effort": "medium"}}},
+        config={"routes": {"implementation": {"effort": "low"}}},
     )
-    assert (at_floor["model"], at_floor["effort"]) == ("sonnet", "medium"), at_floor
+    assert (at_floor["model"], at_floor["effort"]) == ("sonnet", "low"), at_floor
     above_floor = runtime.resolve_route(
         "claude",
         "implementation",
         config={"routes": {"implementation": {"effort": "high"}}},
     )
     assert (above_floor["model"], above_floor["effort"]) == ("sonnet", "high"), above_floor
+    reviewer_low = runtime.resolve_route(
+        "claude",
+        "reviewer",
+        config={"routes": {"reviewer": {"effort": "low"}}},
+    )
+    assert (reviewer_low["model"], reviewer_low["effort"]) == ("opus", "low"), reviewer_low
+    # The floor is shared by both runtimes; Codex models carry tier offset 0.
+    codex_low = runtime.resolve_route(
+        "codex",
+        "implementation",
+        config={"routes": {"implementation": {"effort": "low"}}},
+        capabilities=codex_capabilities(),
+    )
+    assert (codex_low["model"], codex_low["effort"]) == ("gpt-5.6-terra", "low"), codex_low
 
 
 def test_critical_floor_still_binds_override():
