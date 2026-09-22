@@ -115,7 +115,7 @@ def test_codex_role_table():
         "planner": ("gpt-6-astra", "high"),
         "reviewer": ("gpt-6-astra", "high"),
         "skeptic": ("gpt-6-astra", "high"),
-        "implementation": ("gpt-5.6-terra", "high"),
+        "implementation": ("gpt-5.6-terra", "medium"),
         "read_only": ("gpt-5.6-luna", "medium"),
         "think": ("gpt-6-astra", "high"),
     }
@@ -132,7 +132,7 @@ def test_pipeline_steps_bind_to_policy_routes():
         "brainstorming": ("claude", "planner", "opus", "high"),
         "spec": ("claude", "planner", "opus", "high"),
         "writing-plans": ("claude", "planner", "opus", "high"),
-        "implement": ("claude", "implementation", "sonnet", "high"),
+        "implement": ("claude", "implementation", "sonnet", "medium"),
         "implementation-review": ("claude", "development_reviewer", "sonnet", "high"),
         "review-change": ("codex", "development_reviewer", "gpt-5.6-sol", "high"),
         "gateway": ("claude", "controller", "opus", "medium"),
@@ -246,6 +246,27 @@ def test_route_step_cli_derives_role_from_pipeline_step():
         capture_output=True, text=True,
     )
     assert neither.returncode != 0, neither.stdout
+
+
+def test_route_cli_honors_config_routes_effort():
+    below_floor = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--role", "implementation", "--risk", "normal",
+         "--config-json", json.dumps({"routes": {"implementation": {"effort": "low"}}})],
+        capture_output=True, text=True,
+    )
+    assert below_floor.returncode != 0, below_floor.stdout
+    error = json.loads(below_floor.stdout)
+    assert "below the sonnet/medium role floor" in error["error"], error
+
+    at_floor = subprocess.run(
+        [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+         "--role", "implementation", "--risk", "normal",
+         "--config-json", json.dumps({"routes": {"implementation": {"effort": "medium"}}})],
+        check=True, capture_output=True, text=True,
+    )
+    route = json.loads(at_floor.stdout)
+    assert route["requested_effort"] == "medium", route
 
 
 def test_critical_routes_are_explicit_xhigh():
@@ -464,7 +485,7 @@ def test_native_argv_mappings_are_exact():
         "-m",
         "gpt-5.6-terra",
         "-c",
-        'model_reasoning_effort="high"',
+        'model_reasoning_effort="medium"',
         "-C",
         "/tmp/work tree",
         "--sandbox",
@@ -482,7 +503,7 @@ def test_native_argv_mappings_are_exact():
         "-m",
         "gpt-5.6-terra",
         "-c",
-        'model_reasoning_effort="high"',
+        'model_reasoning_effort="medium"',
         "-C",
         "/tmp/work tree",
         "--sandbox",
@@ -528,7 +549,7 @@ def test_personal_repository_codex_argv_disables_atlassian_plugin():
         "-m",
         "gpt-5.6-terra",
         "-c",
-        'model_reasoning_effort="high"',
+        'model_reasoning_effort="medium"',
         "-c",
         'plugins."atlassian@claude-plugins-official".enabled=false',
         "-C",
@@ -1049,7 +1070,7 @@ def test_route_and_launch_plan_cli_emit_json_contracts():
     route = json.loads(route_process.stdout)
     assert route["model"] == "gpt-5.6-terra" and route["ready"] is True, route
     provisional_caps = json.dumps(
-        {"models": {"gpt-5.6-terra": {"status": "indeterminate", "efforts": ["high"]}}}
+        {"models": {"gpt-5.6-terra": {"status": "indeterminate", "efforts": ["medium"]}}}
     )
     provisional_process = subprocess.run(
         [
@@ -1149,7 +1170,7 @@ def test_claude_controller_is_opus_medium():
         "plan_reviewer": ("fable", "medium"),
         "reviewer": ("opus", "high"),
         "skeptic": ("opus", "high"),
-        "implementation": ("sonnet", "high"),
+        "implementation": ("sonnet", "medium"),
         "read_only": ("haiku", "medium"),
     }
     for role, tup in expected.items():
@@ -1257,7 +1278,7 @@ def test_claude_planner_falls_back_to_fable():
                 "models": {"haiku": model(status="unavailable"), "opus": model()}
             },
         ),
-        "configured haiku/high is below the opus/high role floor",
+        "configured haiku/high is below the opus/medium role floor",
     )
 
 
@@ -1292,16 +1313,21 @@ def test_planner_sonnet_fallback_refused_below_opus_high_tier():
 
 
 def test_route_override_is_tier_aware_not_effort_only():
-    # opus/medium sits below planner's opus/high floor by rank alone, so it is
-    # refused; fable/medium is a tier peer of opus/high, so it is accepted
-    # even though "medium" is a lower effort label than "high".
+    # opus/low sits below planner's medium role floor, so it is refused;
+    # opus/medium meets the floor directly; fable/medium is a tier peer of
+    # opus/high, so it is accepted even though "medium" is a lower effort
+    # label than "high".
     raises(
         runtime.RouteError,
         lambda: runtime.resolve_route(
-            "claude", "planner", config={"routes": {"planner": {"effort": "medium"}}}
+            "claude", "planner", config={"routes": {"planner": {"effort": "low"}}}
         ),
-        "configured opus/medium is below the opus/high role floor",
+        "configured opus/low is below the opus/medium role floor",
     )
+    at_floor = runtime.resolve_route(
+        "claude", "planner", config={"routes": {"planner": {"effort": "medium"}}}
+    )
+    assert (at_floor["model"], at_floor["effort"]) == ("opus", "medium"), at_floor
     accepted = runtime.resolve_route(
         "claude",
         "planner",
@@ -1310,6 +1336,61 @@ def test_route_override_is_tier_aware_not_effort_only():
     )
     assert accepted["ready"] is True, accepted
     assert (accepted["model"], accepted["effort"]) == ("fable", "medium"), accepted
+
+
+def test_implementation_defaults_to_medium():
+    claude_route = runtime.resolve_route("claude", "implementation")
+    assert (claude_route["model"], claude_route["effort"]) == ("sonnet", "medium"), claude_route
+    codex_route = runtime.resolve_route(
+        "codex", "implementation", capabilities=codex_capabilities()
+    )
+    assert (codex_route["model"], codex_route["effort"]) == ("gpt-5.6-terra", "medium"), codex_route
+
+
+def test_config_effort_below_floor_refused_at_or_above_honored():
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "implementation",
+            config={"routes": {"implementation": {"effort": "low"}}},
+        ),
+        "configured sonnet/low is below the sonnet/medium role floor",
+    )
+    at_floor = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={"routes": {"implementation": {"effort": "medium"}}},
+    )
+    assert (at_floor["model"], at_floor["effort"]) == ("sonnet", "medium"), at_floor
+    above_floor = runtime.resolve_route(
+        "claude",
+        "implementation",
+        config={"routes": {"implementation": {"effort": "high"}}},
+    )
+    assert (above_floor["model"], above_floor["effort"]) == ("sonnet", "high"), above_floor
+
+
+def test_critical_floor_still_binds_override():
+    # risk=critical raises think's floor to xhigh, so a configured medium
+    # override -- which would clear the base EFFORT_FLOOR -- is still refused.
+    raises(
+        runtime.RouteError,
+        lambda: runtime.resolve_route(
+            "claude",
+            "think",
+            risk="critical",
+            config={"routes": {"think": {"effort": "medium"}}},
+        ),
+        "configured fable/medium is below the fable/xhigh role floor",
+    )
+    at_raised_floor = runtime.resolve_route(
+        "claude",
+        "think",
+        risk="critical",
+        config={"routes": {"think": {"effort": "xhigh"}}},
+    )
+    assert (at_raised_floor["model"], at_raised_floor["effort"]) == ("fable", "xhigh"), at_raised_floor
 
 
 def test_claude_fallback_defaults_are_scoped():
@@ -1454,8 +1535,8 @@ def test_hard_difficulty_raises_implementation_effort():
         config={"difficulty": {"level": "hard", "proposed": "hard", "confirmed": True}},
     )
     assert route["model"] == "sonnet", route
-    assert route["effort"] == "xhigh", route
-    assert route["quality_floor"] == "xhigh", route
+    assert route["effort"] == "high", route
+    assert route["quality_floor"] == "high", route
     assert route["difficulty"] == "hard", route
     assert route["difficulty_proposed"] == "hard", route
     assert route["difficulty_confirmed"] is True, route
@@ -1467,14 +1548,14 @@ def test_routine_difficulty_leaves_effort_unchanged():
         "implementation",
         config={"difficulty": {"level": "routine", "proposed": "routine", "confirmed": True}},
     )
-    assert route["effort"] == "high", route
-    assert route["quality_floor"] == "high", route
+    assert route["effort"] == "medium", route
+    assert route["quality_floor"] == "medium", route
     assert route["difficulty"] == "routine", route
 
 
 def test_absent_difficulty_preserves_existing_semantics():
     plain = runtime.resolve_route("claude", "implementation")
-    assert plain["effort"] == "high", plain
+    assert plain["effort"] == "medium", plain
     assert plain["difficulty"] is None, plain
     assert plain["difficulty_proposed"] is None, plain
     assert plain["difficulty_confirmed"] is None, plain
@@ -1523,10 +1604,10 @@ def test_route_override_below_raised_floor_is_refused():
             "implementation",
             config={
                 "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
-                "routes": {"implementation": {"effort": "high"}},
+                "routes": {"implementation": {"effort": "medium"}},
             },
         ),
-        "configured sonnet/high is below the sonnet/xhigh role floor",
+        "configured sonnet/medium is below the sonnet/high role floor",
     )
 
 
@@ -1544,7 +1625,7 @@ def test_hard_implementation_without_fallback_blocks():
     )
     assert route["ready"] is False, route
     assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
-    assert route["quality_floor"] == "xhigh", route
+    assert route["quality_floor"] == "high", route
 
 
 def test_hard_planner_selects_fable_high_at_the_opus_xhigh_tier():
@@ -1576,18 +1657,18 @@ def test_configured_fallback_below_raised_floor_is_skipped_not_promoted():
         "implementation",
         config={
             "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
-            "fallbacks": {"implementation": [{"model": "opus", "effort": "medium"}]},
+            "fallbacks": {"implementation": [{"model": "haiku", "effort": "medium"}]},
         },
         capabilities={
             "models": {
                 "sonnet": model("unavailable", ["high", "xhigh"]),
-                "opus": model("available", ["high", "xhigh"]),
+                "haiku": model("available", ["medium", "high"]),
             }
         },
     )
     assert route["ready"] is False, route
     assert route["blocked_reason"] == "no-fallback-meets-quality-floor", route
-    assert route["effort"] != "high", route
+    assert route["effort"] == "high", route
 
 
 def test_policy_document_matches_the_route_table():
@@ -1641,6 +1722,9 @@ for name, test in (
     ("route override is tier-aware, not effort-only", test_route_override_is_tier_aware_not_effort_only),
     ("Claude fallback defaults are scoped to the fable-rooted role", test_claude_fallback_defaults_are_scoped),
     ("Claude controller fallback respects the medium floor", test_claude_controller_fallback_respects_medium_floor),
+    ("implementation defaults to medium", test_implementation_defaults_to_medium),
+    ("config effort below floor refused, at or above honored", test_config_effort_below_floor_refused_at_or_above_honored),
+    ("critical floor still binds override", test_critical_floor_still_binds_override),
     ("model catalog separates effort support from availability", test_model_catalog_discovers_effort_without_claiming_availability),
     ("Codex role table uses Astra, Terra and Luna", test_codex_role_table),
     ("critical review and think explicitly use xhigh", test_critical_routes_are_explicit_xhigh),
@@ -1691,6 +1775,7 @@ for name, test in (
     ("pipeline route mutation breaks conformance", test_pipeline_route_mutation_breaks_conformance),
     ("unknown pipeline step is rejected", test_unknown_pipeline_step_is_rejected),
     ("route --step derives role from pipeline step", test_route_step_cli_derives_role_from_pipeline_step),
+    ("route CLI honors config routes effort", test_route_cli_honors_config_routes_effort),
 ):
     check(name, test)
 
