@@ -431,7 +431,10 @@ ok "every pane run line carries CLAUDE_CONFIG_DIR=" \
 if command -v zsh >/dev/null 2>&1; then
   PAYLOAD=$(grep -- '--name plan-proj-e$' "$BIN/pane-runs.log" | head -1 | sed 's/^pane run w1:p1 //')
   : > "$FAKE_CLAUDE_LOG.cfg"
-  env -u CLAUDE_CONFIG_DIR FAKE_CLAUDE_HOOK= HOME="$FAKE" PATH="$FAKE:$PATH" \
+  # The replay asserts the pinned-dir rung, not the machine's account policy:
+  # scrub CLAUDE_PERSONAL_ONLY/WORKFLOW_PERSONAL_ACCOUNT so a personal-only
+  # runner's own env doesn't win over the pinned dir under test.
+  env -u CLAUDE_CONFIG_DIR -u CLAUDE_PERSONAL_ONLY -u WORKFLOW_PERSONAL_ACCOUNT FAKE_CLAUDE_HOOK= HOME="$FAKE" PATH="$FAKE:$PATH" \
     zsh -c "source zsh/claude-account.zsh && $PAYLOAD" </dev/null >/dev/null 2>&1 || true
   # Compare against the resolved path: the wrapper normalizes with zsh's :A
   # (symlinks and ".."), and on macOS $CFG (a mktemp -d path under /var) is
