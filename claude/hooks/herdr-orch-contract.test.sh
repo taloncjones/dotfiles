@@ -195,10 +195,10 @@ ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
   "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $SKILL"
 ok "skill: watch armed at relaxed cadence when messaging is live, default otherwise" \
   "grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
-ok "skill: re-subscription eligible only for working/blocked workers" \
-  "grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
+ok "skill: idle-subscription re-wake mechanism is retired" \
+  "! grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
 ok "skill: no-lost-wake rule, capped at three passes" \
-  "grep -Fq 'capped at three passes per turn' $SKILL"
+  "grep -Fq 'capped at three passes' $SKILL"
 ok "skill: transport readiness never grants task completion" \
   "grep -Fq 'are transport evidence' $SKILL && grep -Fq 'milestone/contract/review gates advance' $SKILL"
 ok "skill: safety names cross-session messages as wake-only" \
