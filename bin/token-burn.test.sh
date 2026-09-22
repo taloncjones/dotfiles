@@ -84,6 +84,15 @@ assert_contains "sess-3 listed" "$output" "sess-3"
 # Codex should be present
 assert_contains "codex model present" "$output" "codex-unknown"
 
+# Codex cache_creation must be reported as unknown, never a fabricated 0
+codex_line=$(printf '%s\n' "$output" | grep "codex-unknown")
+assert_contains "codex cache_creation is unknown, not 0" "$codex_line" "cache_creation:     unknown"
+
+# Per-day grouping (Goal 1) must surface in the output
+assert_contains "grand total by day header" "$output" "Grand Total by Day:"
+assert_contains "per-day totals include 2026-09-22" "$output" "2026-09-22"
+assert_contains "per-day totals include 2026-09-21" "$output" "2026-09-21"
+
 # Top sessions should list the big ones
 assert_contains "top sessions header" "$output" "Top Sessions by Priced Tokens"
 assert_contains "top sessions by cache read" "$output" "Top Sessions by Cache Read Volume"
@@ -91,6 +100,19 @@ assert_contains "top sessions by cache read" "$output" "Top Sessions by Cache Re
 # Malformed line should not crash (task requirement: fail soft)
 assert_not_contains "no crash on malformed" "$output" "JSONDecodeError"
 assert_not_contains "no crash on malformed" "$output" "Traceback"
+
+# Malformed line must emit a stderr diagnostic and keep going (PRD requirement 6)
+assert_contains "stderr warning on malformed line" "$output" "token-burn: warning: malformed line"
+assert_contains "stderr warning names the file" "$output" "broken.jsonl"
+
+# Unreadable file must emit a stderr diagnostic and keep going (PRD requirement 6)
+chmod 000 "$WORK/claude_home/projects/proj2/session2.jsonl"
+output_unreadable=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
+    "$REPO/bin/token-burn" --since 7d 2>&1)
+chmod 644 "$WORK/claude_home/projects/proj2/session2.jsonl"
+assert_contains "stderr warning on unreadable file" "$output_unreadable" "token-burn: warning: unreadable file"
+assert_contains "unreadable file warning names the file" "$output_unreadable" "session2.jsonl"
+assert_not_contains "unreadable file does not crash" "$output_unreadable" "Traceback"
 
 # Test --since filter: cutoff to just 2026-09-22 data
 output_filtered=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
@@ -101,7 +123,7 @@ assert_contains "--since 0d excludes older" "$output_filtered" "claude-haiku-4-5
 output_model=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
     "$REPO/bin/token-burn" --since 7d --model opus 2>&1)
 assert_contains "--model filter includes opus" "$output_model" "claude-opus-5-5"
-assert_not_contains "--model filter excludes haiku" "$output_model" "claude-haiku-4-5-20251001.*input:.*600"
+assert_not_contains "--model filter excludes haiku" "$output_model" "claude-haiku-4-5-20251001"
 
 # Test --session-limit
 output_limit=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \

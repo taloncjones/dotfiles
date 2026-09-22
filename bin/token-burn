@@ -18,21 +18,28 @@ class TokenCount:
     cache_read_input_tokens: int = 0
 
     def __add__(self, other):
+        if self.cache_creation_input_tokens == "unknown" or other.cache_creation_input_tokens == "unknown":
+            cache_creation = "unknown"
+        else:
+            cache_creation = self.cache_creation_input_tokens + other.cache_creation_input_tokens
         return TokenCount(
             self.input_tokens + other.input_tokens,
             self.output_tokens + other.output_tokens,
-            self.cache_creation_input_tokens + other.cache_creation_input_tokens,
+            cache_creation,
             self.cache_read_input_tokens + other.cache_read_input_tokens,
         )
 
+    def _cache_creation_numeric(self):
+        return 0 if self.cache_creation_input_tokens == "unknown" else self.cache_creation_input_tokens
+
     def total_priced(self):
-        return self.cache_creation_input_tokens + self.output_tokens
+        return self._cache_creation_numeric() + self.output_tokens
 
     def total_all(self):
         return (
             self.input_tokens
             + self.output_tokens
-            + self.cache_creation_input_tokens
+            + self._cache_creation_numeric()
             + self.cache_read_input_tokens
         )
 
@@ -106,10 +113,13 @@ def read_claude_jsonl(config_dir):
                         results.append(
                             SessionStat(model, session_id, project_name, str(day), tokens)
                         )
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-        except (IOError, OSError):
-            pass
+                    except (json.JSONDecodeError, ValueError) as e:
+                        print(
+                            f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
+                            file=sys.stderr,
+                        )
+        except (IOError, OSError) as e:
+            print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
 
     return results
 
@@ -123,7 +133,7 @@ def read_codex_jsonl(codex_home):
     for jsonl_file in sessions_path.rglob("*.jsonl"):
         try:
             with open(jsonl_file, "r") as f:
-                for line in f:
+                for line_no, line in enumerate(f, 1):
                     try:
                         obj = json.loads(line)
                         if obj.get("type") != "event_msg":
@@ -145,20 +155,25 @@ def read_codex_jsonl(codex_home):
                         session_id = obj.get("session_id", "unknown")
                         project_name = "codex"
 
+                        # Codex JSONL has no reliable cache-write field; report
+                        # unknown rather than a fabricated 0 (PRD requirement 5).
                         tokens = TokenCount(
                             input_tokens=info.get("input_tokens", 0),
                             output_tokens=info.get("output_tokens", 0),
-                            cache_creation_input_tokens=0,
+                            cache_creation_input_tokens="unknown",
                             cache_read_input_tokens=info.get("cached_input_tokens", 0),
                         )
 
                         results.append(
                             SessionStat(model, session_id, project_name, str(ts), tokens)
                         )
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-        except (IOError, OSError):
-            pass
+                    except (json.JSONDecodeError, ValueError) as e:
+                        print(
+                            f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
+                            file=sys.stderr,
+                        )
+        except (IOError, OSError) as e:
+            print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
 
     return results
 
@@ -204,10 +219,12 @@ def main():
         all_stats = [s for s in all_stats if args.model in s.model]
 
     totals_by_model = defaultdict(TokenCount)
+    totals_by_day = defaultdict(TokenCount)
     sessions_by_key = defaultdict(TokenCount)
 
     for stat in all_stats:
         totals_by_model[stat.model] = totals_by_model[stat.model] + stat.tokens
+        totals_by_day[stat.day] = totals_by_day[stat.day] + stat.tokens
         key = (stat.model, stat.session_id, stat.project)
         sessions_by_key[key] = sessions_by_key[key] + stat.tokens
 
@@ -217,6 +234,17 @@ def main():
         t = totals_by_model[model]
         print(
             f"{model:40} input:{format_number(t.input_tokens):>12} "
+            f"output:{format_number(t.output_tokens):>12} "
+            f"cache_creation:{format_number(t.cache_creation_input_tokens):>12} "
+            f"cache_read:{format_number(t.cache_read_input_tokens):>12}"
+        )
+
+    print("\n\nGrand Total by Day:")
+    print("-" * 90)
+    for day in sorted(totals_by_day.keys()):
+        t = totals_by_day[day]
+        print(
+            f"{day:40} input:{format_number(t.input_tokens):>12} "
             f"output:{format_number(t.output_tokens):>12} "
             f"cache_creation:{format_number(t.cache_creation_input_tokens):>12} "
             f"cache_read:{format_number(t.cache_read_input_tokens):>12}"
