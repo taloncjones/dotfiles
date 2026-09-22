@@ -9484,6 +9484,48 @@ assert facts["action"] == "none", facts
 assert facts["head"] is None and facts["dirty"] == "unknown", facts
 PY
 
+check "checkin: review_correlates requires findings evidence, matching is_reviewed" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root())
+os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t",
+                 "commit", "--allow-empty", "-q", "-m", "x"], check=True, env=genv)
+head = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], check=True,
+                       capture_output=True, text=True, env=genv).stdout.strip()
+# The findings file must resolve under state_root() (CLAUDE_CONFIG_DIR
+# above), not under an unrelated tempdir, or findings_bytes refuses it as
+# outside the orchestration state root before the digest is ever checked.
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No blocking findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L2", "pane_id": "pane2", "source_head_sha": head}
+task = {"v": 1, "task_id": "PROJ-1", "status": "review-dispatched", "base_sha": head,
+        "review_head_sha": head, "worktree": wt, "workers": [row]}
+review_ok = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=head,
+                  blocking_count=0, findings_ref=findings, findings_sha256=digest)
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(review_ok))
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["review_correlates"] is True and facts["reviewed"] is True, facts
+assert facts["action"] == "confirm-review", facts
+# Same record, but the findings file was tampered with after the verdict
+# landed: is_reviewed refuses it, and review_correlates must refuse it too --
+# not report "changes-requested", which would misread an integrity failure
+# as an ordinary reviewer rejection.
+open(findings, "w").write("Tampered after the verdict.\n")
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["review_correlates"] is False and facts["reviewed"] is False, facts
+assert facts["action"] == "none", facts
+PY
+
 check "checkin action precedence resolves an overlapping task to the earlier rule" <<PY
 $LOAD
 rd = tempfile.mkdtemp()

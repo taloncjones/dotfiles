@@ -2668,7 +2668,8 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     review_correlates = bool(
         review and rev_ws and head
         and attempt_matches(task, review, "review", rev_ws)
-        and review.get("reviewed_head_sha") == head)
+        and review.get("reviewed_head_sha") == head
+        and _findings_evidence_ok(review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
     mech_unsettled = bool(latest.get("role") == "mech"
@@ -2754,6 +2755,27 @@ def _checkin_poll(ns):
     return (poll, "") if poll is not None else (None, "malformed")
 
 
+def _findings_evidence_ok(done) -> bool:
+    """True unless a native record's (`"runtime" in done`) findings evidence
+    is missing, altered, or outside the state root; legacy records pass
+    through untouched. Never raises: two callers wrap this in _require under
+    an owner transaction, and findings_bytes raises only its own reasons (it
+    does not go through payload_parent), so this cannot mask a coordination
+    fence failure. Shared by is_reviewed and checkin_facts' review_correlates
+    so a check-in cannot call a review "correlated" on evidence is_reviewed
+    would itself refuse."""
+    if not isinstance(done, dict) or "runtime" not in done:
+        return True
+    digest = done.get("findings_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        return False
+    try:
+        evidence = findings_bytes(done.get("findings_ref"), state_root())
+    except ValueError:
+        return False
+    return hashlib.sha256(evidence).hexdigest() == digest
+
+
 def is_reviewed(task, done, head_sha, workspace) -> bool:
     """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
     live HEAD all agree, the record comes from the dispatched review workspace,
@@ -2777,22 +2799,8 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
         return False
     if type(done.get("blocking_count")) is not int or done["blocking_count"] != 0:
         return False
-    # Native verdicts carry their evidence: the findings file must still be a
-    # readable, non-blank regular file under the state root at gate time, and
-    # hash to the digest pinned at emit. Never raise: two callers wrap this
-    # predicate in _require under an owner transaction. findings_bytes raises
-    # only its own reasons (it does not go through payload_parent), so the
-    # except below cannot mask a coordination fence failure.
-    if "runtime" in done:
-        digest = done.get("findings_sha256")
-        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
-            return False
-        try:
-            evidence = findings_bytes(done.get("findings_ref"), state_root())
-        except ValueError:
-            return False
-        if hashlib.sha256(evidence).hexdigest() != digest:
-            return False
+    if not _findings_evidence_ok(done):
+        return False
     return task.get("review_head_sha") == head_sha and (
         done.get("reviewed_head_sha") == head_sha
     )
