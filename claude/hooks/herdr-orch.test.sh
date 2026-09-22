@@ -9009,5 +9009,15 @@ if CLAUDE_CONFIG_DIR="$root" $CLI reset-task --repo-slug slug-rs --session S --f
 test ! -e "$TASKS/td-a4.json"
 SH
 
+check "the idle-subscription layer is fully retired from the skill" <<PY
+$LOAD
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+for token in ("notify_when_idle", "idle notice", "Cross-session idle"):
+    assert token not in skill, "%s still present in SKILL.md" % token
+layout = open("claude/skills/herdr-orchestration/references/state-layout.md").read()
+assert "notify_when_idle" not in layout, "state-layout still calls peer_name a subscription target"
+assert "peer_name" in layout, "the peer_name field itself stays documented"
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

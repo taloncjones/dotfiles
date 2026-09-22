@@ -490,9 +490,10 @@ attempt identity. It does not require HEAD ahead of base. Implementation
 completion requires its own current HEAD/base/contract gates.
 
 `peer_name` is the worker's Claude Code session name as `ListAgents` showed
-it after launch (the target of `notify_when_idle` subscriptions), or `null`
-when discovery found zero or several candidates. The second `workers[]`
-entry above shows a `mech` dispatch: `peer_name` is always `null` (no
+it after launch (dispatch-time discovery metadata, retained for
+diagnostics), or `null` when discovery found zero or several candidates.
+The second `workers[]` entry above shows a `mech` dispatch: `peer_name` is
+always `null` (no
 `ListAgents` discovery for a headless worker; see SKILL.md section 8, Mech
 launch), and `caps` is a legacy mech-specific field -- its `launch_id` names
 the live headless run (`<agent>-<YYYYMMDDTHHMMSSZ>`, also correlated in the
