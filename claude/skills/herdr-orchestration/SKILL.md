@@ -142,6 +142,40 @@ for the provider's `launch_env` mapping.
    `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|plan_reviewer|development_reviewer|read_only|mechanical|think> --risk <normal|critical>`.
    Step-to-worker defaults and the two effort-raising axes are in
    `references/pipeline-worker-mapping.md`.
+
+   Every native `route` call in this skill also passes the repo's `routes`
+   config block (empty when `config.json` has no `routes` key), so a repo can
+   lower a role's effort down to the resolver's floor without a code change.
+   Build ONE config object per call: read `routes` from `config.json`
+   (default `{}`), then merge in the `DIFFICULTY_JSON` environment variable
+   when it is non-empty (a difficulty object the human confirmed). Export it
+   in the SAME shell call as the snippet -- shell state does not survive
+   between Bash tool calls -- and only for a route whose role accepts
+   difficulty (`planner`, `implementation`, `development_reviewer`,
+   `reviewer`, `skeptic`, `think`; `DIFFICULTY_ROLES` in
+   `agent_runtime.py`); leave it unset for `controller`, `plan_reviewer`,
+   `read_only` and `mechanical`, which refuse it:
+
+   ```bash
+   ROUTE_CONFIG="$(python3 - "$STATE_ROOT/<slug>/config.json" <<'PY'
+   import json, os, sys
+   cfg = json.load(open(sys.argv[1]))
+   config = {"routes": cfg.get("routes", {})}
+   difficulty = os.environ.get("DIFFICULTY_JSON", "").strip()
+   if difficulty:
+       config["difficulty"] = json.loads(difficulty)
+   print(json.dumps(config))
+   PY
+   )"
+   python3 "$RUNTIME" route --runtime claude --role implementation --risk normal --config-json "$ROUTE_CONFIG"
+   ```
+
+   `--config-json` is passed once per route call; routes and difficulty
+   travel in the same object. Re-run this snippet immediately before each
+   route call rather than reusing a stale shell variable.
+
+   A malformed `routes` block fails the `route` call with the resolver's
+   message, which blocks that dispatch.
    Inspect the returned readiness and capability evidence before dispatch;
    retain unknown availability as unknown and block an unready route. Use
    explicit policy/capability inputs when needed, as described under Model
@@ -227,10 +261,12 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
   worker directly (only after the contract pinning steps at the end of this
   section; a plan-ready item without a committed contract is treated as raw),
   using `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-  and the native adapter (section 8). An unready route blocks this dispatch.
+  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  (section 8). An unready route blocks this dispatch.
 - **Raw item** -- a bare todo/handoff with no spec/plan: dispatch a `plan`
   worker using `python3 "$RUNTIME" route --runtime <claude|codex> --role planner --risk normal`
-  and the native adapter first. It runs the repo's brainstorm -> spec ->
+  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  first. It runs the repo's brainstorm -> spec ->
   independent spec review -> plan -> independent plan review pipeline;
   Claude uses the Codex review skills and Codex uses the Claude review skills.
   It freezes private spec/plan artifacts and emits completion as phase `plan`. On
@@ -378,7 +414,8 @@ phase; it never marks the task `completed` and never dispatches review.
    are recorded for different checks.
 3. Reuse the task's branch/workspace after the plan worker is idle or exited.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-   again, require readiness, append a new strict attempt through
+   again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
+   append a new strict attempt through
    the adapter, update the display role, and give the worker the exact frozen
    plan paths and hashes. Status remains `in-progress`.
 4. Failed/paused planning never launches implementation. `confirm-completion`
@@ -402,7 +439,7 @@ agent_runtime.resolve_route(
 )
 ```
 
-The generic Codex implementation route remains Terra/high for non-UI work. Run
+The generic Codex implementation route remains Terra/medium for non-UI work. Run
 the existing `run_bounded`/`launch_argv` path through `agent_runtime.py` from
 the Claude worker's own worktree. `TASK_WORKTREE`, `UI_BRIEF`, and `UI_RESULT`
 must be absolute paths; the brief and result are private paths outside public
@@ -707,7 +744,7 @@ also avoids wasting work and preserves one live reviewer per task.
    it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
    repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
    applies to every `worktree create`/`open`, no exceptions.)
-3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional`, then reserve and launch a
+3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional --config-json "$ROUTE_CONFIG"` (step 5 snippet), then reserve and launch a
    fresh review attempt through the adapter. This derives
    `development_reviewer` (Claude Sonnet/high or Codex Sol/high) from the
    selected runtime. `--provisional` is permitted only when availability or
@@ -876,10 +913,19 @@ do not pass its Claude-only aliases to Codex.
 
 One snapshot per dispatch: use `route --runtime <claude|codex> --role
 <planner|implementation|reviewer|plan_reviewer|read_only|mechanical|think> --risk
-<normal|critical>` and optional explicit policy/capability files. Inspect the
+<normal|critical> --config-json "$ROUTE_CONFIG"` (step 5 snippet) and optional
+explicit policy/capability files. Inspect the
 returned readiness, availability reason, model, and effort before launch.
 Catalog presence is not proof that the selected account can run a model.
 Unknown availability is reported; no silent downgrade of a critical route.
+
+`config.json`'s optional `routes` block lets a repo pin a role's model and/or
+effort: `{role: {model?, effort?}}`. The resolver, not the core, enforces a
+floor that compares the configured model/effort's quality tier against the
+role's default model at `medium` (`EFFORT_FLOOR`) -- a stronger model may
+pass at a lower effort label -- raised under critical risk or
+`difficulty=hard`; a malformed `routes` block fails the `route` call and
+blocks that dispatch rather than silently falling back.
 
 Use `herdr_dispatch.py launch` with the existing shell pane/workspace,
 canonical repo path, task, session/fence, phase, unique agent name, resolved

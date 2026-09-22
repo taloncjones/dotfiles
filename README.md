@@ -436,7 +436,7 @@ ordinary removals continue through each runtime's approval policy.
 
 Herd resolves model and effort together through `claude/hooks/agent_runtime.py`.
 Claude controls, plans, and implements by default. Codex UI implementation uses
-the shared skill's explicit Astra/high override; Terra/high remains the general
+the shared skill's explicit Astra/high override; Terra/medium remains the general
 Codex implementation default. Luna/medium serves bounded reads; Sol/high is the
 Codex development-review route. Critical review uses xhigh explicitly.
 A running controller keeps its actual launch model/effort until restarted.
