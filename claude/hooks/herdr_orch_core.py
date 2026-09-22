@@ -970,6 +970,122 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
             pass
 
 
+WAKE_DEBOUNCE_SECS = 60
+_RECORD_SUFFIXES = (".done.json", ".review.json")
+
+
+def wake_marker_path(rd, ws) -> Path:
+    return Path(rd) / "workspaces" / f"{ws}.wake.json"
+
+
+def _empty_marker() -> dict:
+    return {"v": 1, "records": {}, "last_push": {}}
+
+
+def read_wake_marker(rd, ws) -> dict:
+    """Never raises. A missing, unreadable, or malformed marker reads as empty,
+    which biases toward pushing -- a spurious wake costs one cheap check-in,
+    a lost one stalls a task."""
+    if not valid_workspace_id(ws):
+        return _empty_marker()
+    try:
+        data = json.loads(read_payload_text(wake_marker_path(rd, ws)))
+    except (OSError, ValueError):
+        return _empty_marker()
+    if not isinstance(data, dict):
+        return _empty_marker()
+    out = _empty_marker()
+    for key in ("records", "last_push"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            out[key] = value
+    return out
+
+
+def write_wake_marker(rd, ws, marker) -> bool:
+    if not valid_workspace_id(ws):
+        return False
+    try:
+        write_json_atomic(wake_marker_path(rd, ws), marker)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def record_fingerprint(rd, task_id) -> dict:
+    """{path: [mtime_ns, size]} for the task's own two completion sidecars.
+    An absent path is OMITTED, never recorded as None -- the one-directional
+    predicate in wake_decision matches watch_changed only under that shape."""
+    out = {}
+    if not valid_task_id(task_id):
+        return out
+    d = Path(rd) / "tasks"
+    for suffix in _RECORD_SUFFIXES:
+        p = d / f"{task_id}{suffix}"
+        try:
+            with coordination.payload_parent(p) as (parent, basename):
+                st = os.stat(basename, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                continue
+        except (OSError, ValueError):
+            continue
+        out[str(p)] = [st.st_mtime_ns, st.st_size]
+    return out
+
+
+def prior_hint(rd, ws, task_id):
+    """The event of the last events.jsonl record, read BEFORE this invocation
+    appends its own. None when the tail belongs to a different task: a
+    workspace rebound to a new task must not inherit the old attempt's
+    `blocked` tail, or the new attempt's first prompt would never push."""
+    try:
+        records = parse_events(read_payload_text(events_path(rd, ws)).splitlines())
+    except (OSError, ValueError):
+        return None
+    for rec in reversed(records):
+        if rec.get("task_id") != task_id:
+            return None
+        return rec.get("event")
+    return None
+
+
+def wake_decision(marker, event, fingerprint, prior, now,
+                  debounce_secs=WAKE_DEBOUNCE_SECS):
+    """Decide whether this hint earns a wake push. Pure; clock injected.
+
+    Returns (push, new_marker). The marker's `records` advances ONLY on a
+    push, so a change suppressed by the debounce is delayed, never dropped --
+    advancing it under suppression would swallow a completion record for good.
+    """
+    if isinstance(marker, dict):
+        records = marker.get("records") if isinstance(marker.get("records"), dict) else {}
+        last_push = marker.get("last_push") if isinstance(marker.get("last_push"), dict) else {}
+    else:
+        records, last_push = {}, {}
+    new = {"v": 1, "records": dict(records), "last_push": dict(last_push)}
+
+    if event == "blocked":
+        # Transition rule only, no time debounce: a block means a worker is
+        # waiting on a human, and the appended hint becomes the next
+        # invocation's `prior`, so repeats are already self-limiting.
+        return prior != "blocked", new
+    if event not in ("stopped", "review-stopped"):
+        return False, new
+
+    changed = any(records.get(k) != v for k, v in fingerprint.items())
+    if not changed:
+        return False, new
+    since = last_push.get(event)
+    if isinstance(since, (int, float)) and not isinstance(since, bool):
+        if now - since < debounce_secs:
+            return False, new
+    # Merge, not replace: a key the fingerprint no longer carries stays, so a
+    # deletion never signals and a later recreate does.
+    new["records"] = {**records, **fingerprint}
+    new["last_push"] = {**last_push, event: now}
+    return True, new
+
+
 def parse_events(lines):
     out = []
     for ln in lines:

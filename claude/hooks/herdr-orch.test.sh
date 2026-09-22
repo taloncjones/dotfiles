@@ -644,6 +644,88 @@ if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w2 --
 if $CLI confirm-completion --repo-slug slug-x --task-id PROJ-1 --workspace w1 --head-sha h2 2>/dev/null; then exit 1; fi
 SH
 
+check "wake_decision: three consecutive Stops with no record change push zero wakes" <<PY
+$LOAD
+m = {"v": 1, "records": {"/t/d.json": [5, 9]}, "last_push": {"stopped": 100.0}}
+fp = {"/t/d.json": [5, 9]}
+pushes = []
+for t in (200.0, 300.0, 400.0):
+    p, m = c.wake_decision(m, "stopped", fp, "stopped", t)
+    pushes.append(p)
+assert pushes == [False, False, False], pushes
+PY
+
+check "wake_decision: a Stop after a done.json write pushes exactly one wake" <<PY
+$LOAD
+m = {"v": 1, "records": {}, "last_push": {}}
+fp = {"/t/d.json": [5, 9]}
+p1, m = c.wake_decision(m, "stopped", fp, "stopped", 1000.0)
+p2, m = c.wake_decision(m, "stopped", fp, "stopped", 2000.0)
+assert (p1, p2) == (True, False), (p1, p2)
+assert m["last_push"]["stopped"] == 1000.0, m
+PY
+
+check "wake_decision: a blocking Notification pushes once per transition into blocked" <<PY
+$LOAD
+m = {"v": 1, "records": {}, "last_push": {}}
+p1, m = c.wake_decision(m, "blocked", {}, "stopped", 1000.0)
+p2, m = c.wake_decision(m, "blocked", {}, "blocked", 1001.0)
+p3, m = c.wake_decision(m, "blocked", {}, "blocked", 99000.0)
+assert (p1, p2, p3) == (True, False, False), (p1, p2, p3)
+PY
+
+check "wake_decision: a debounced record change fires on the next Stop" <<PY
+$LOAD
+m = {"v": 1, "records": {"/t/d.json": [1, 1]}, "last_push": {"stopped": 1000.0}}
+fp = {"/t/d.json": [2, 2]}
+p1, m = c.wake_decision(m, "stopped", fp, "stopped", 1010.0)
+assert p1 is False, "inside the debounce window"
+assert m["records"] == {"/t/d.json": [1, 1]}, "suppression must not advance the fingerprint"
+p2, m = c.wake_decision(m, "stopped", fp, "stopped", 1100.0)
+assert p2 is True and m["records"] == fp, (p2, m)
+PY
+
+check "wake_decision: a deleted completion record pushes no wake" <<PY
+$LOAD
+m = {"v": 1, "records": {"/t/d.json": [5, 9]}, "last_push": {}}
+p, m2 = c.wake_decision(m, "stopped", {}, "stopped", 9000.0)
+assert p is False, "a vanished record must never signal"
+assert m2["records"] == {"/t/d.json": [5, 9]}, m2
+PY
+
+check "wake_decision: a corrupt marker reads as empty and biases toward pushing" <<PY
+$LOAD
+p, m = c.wake_decision({"garbage": 1}, "stopped", {"/t/d.json": [5, 9]}, "stopped", 9000.0)
+assert p is True and m["records"] == {"/t/d.json": [5, 9]}, (p, m)
+p2, m2 = c.wake_decision("not-a-dict", "stopped", {"/t/d.json": [5, 9]}, None, 9000.0)
+assert p2 is True, p2
+PY
+
+check "record_fingerprint: only the task's own two sidecars, absent paths omitted" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+open(os.path.join(rd, "tasks", "PROJ-2.done.json"), "w").write("{}")
+fp = c.record_fingerprint(rd, "PROJ-1")
+assert list(fp) == [os.path.join(rd, "tasks", "PROJ-1.done.json")], fp
+assert all(isinstance(v, list) and len(v) == 2 for v in fp.values()), fp
+assert c.record_fingerprint(rd, "../escape") == {}, "unsafe task id must yield nothing"
+PY
+
+check "prior_hint: the last event, and None when the tail names another task" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "workspaces"))
+p = os.path.join(rd, "workspaces", "w1.events.jsonl")
+with open(p, "w") as fh:
+    fh.write(json.dumps({"v": 1, "ts": "t", "workspace_id": "w1", "event": "stopped", "task_id": "PROJ-1"}) + "\n")
+    fh.write(json.dumps({"v": 1, "ts": "t", "workspace_id": "w1", "event": "blocked", "task_id": "PROJ-1"}) + "\n")
+assert c.prior_hint(rd, "w1", "PROJ-1") == "blocked"
+assert c.prior_hint(rd, "w1", "PROJ-2") is None, "a rebound workspace must reset the transition"
+assert c.prior_hint(rd, "w9", "PROJ-1") is None, "no log means no prior hint"
+PY
+
 # args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)
 hook_case() {
     label="$1"; env_ws="$2"; henv="$3"; payload="$4"; expect="$5"
