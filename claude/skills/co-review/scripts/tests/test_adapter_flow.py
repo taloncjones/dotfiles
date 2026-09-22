@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -210,10 +211,16 @@ class AdapterChangedFileSetTests(unittest.TestCase):
                 }
             )
         )
+        # uv's own resolution of its managed Python/venv can be HOME-sensitive
+        # (observed in CI); pin its real directory onto PATH explicitly so
+        # overriding HOME below for git isolation can't hide the uv binary.
+        uv_path = shutil.which("uv")
+        uv_dir = os.path.dirname(uv_path) if uv_path else ""
         env = {
             **os.environ,
             "GIT_CONFIG_NOSYSTEM": "1",
             "HOME": str(repo.parent),
+            "PATH": f"{uv_dir}:{os.environ.get('PATH', '')}" if uv_dir else os.environ.get("PATH", ""),
             "REPO": str(repo),
             "RUN_DIR": str(run_dir),
             "MANIFEST": str(manifest),
