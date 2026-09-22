@@ -268,7 +268,7 @@ must be an object keyed by the resolver's own role names (`controller`,
 `development_reviewer`, `read_only`, `mechanical`, `think`); each value is an
 object containing only `model` and/or `effort`. `model` must be a model the
 runtime recognizes (a supported alias for Claude, a full model ID for
-Codex); `effort` must be one of `low`/`medium`/`high`/`xhigh`/`max`. A route
+Codex); `effort` must be one of `low`/`medium`/`high`/`xhigh`. A route
 cannot go below the role's own floor: the resolver enforces a `medium` floor
 (`EFFORT_FLOOR` in `agent_runtime.py`) on top of the role's default, raised
 to the role's own default effort when a critical-risk or otherwise

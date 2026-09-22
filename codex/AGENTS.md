@@ -206,7 +206,7 @@ When asked to review, default to a code review mindset:
 Use the shared resolver in `claude/hooks/agent_runtime.py` through the
 Herd/review skills. Pin model and effort for each new role; a parent's xhigh
 setting is not a normal-review default. Astra/high plans and reviews;
-Astra/xhigh handles explicitly critical reviews and deep judgments. Terra/high
+Astra/xhigh handles explicitly critical reviews and deep judgments. Terra/medium
 implements bounded tasks; Luna/medium reads and extracts. Sol/high is an
 explicit review or fallback choice. Mechanical writing on Luna requires an
 explicit task designation and an independent review gate. Escalate when a
