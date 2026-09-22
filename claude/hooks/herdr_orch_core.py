@@ -2761,7 +2761,9 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     `review_head_sha` too (not just `done.reviewed_head_sha` == HEAD) stops a
     branch advance after dispatch from slipping an unreviewed revision through;
     the `blocking_count` guard stops an `approved` verdict that still carries
-    blocking findings from clearing the gate."""
+    blocking findings from clearing the gate; the findings check stops a
+    native verdict whose evidence is missing, altered, or outside the state
+    root."""
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
     if not attempt_matches(task, done, "review", workspace):
@@ -2775,6 +2777,22 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
         return False
     if type(done.get("blocking_count")) is not int or done["blocking_count"] != 0:
         return False
+    # Native verdicts carry their evidence: the findings file must still be a
+    # readable, non-blank regular file under the state root at gate time, and
+    # hash to the digest pinned at emit. Never raise: two callers wrap this
+    # predicate in _require under an owner transaction. findings_bytes raises
+    # only its own reasons (it does not go through payload_parent), so the
+    # except below cannot mask a coordination fence failure.
+    if "runtime" in done:
+        digest = done.get("findings_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            return False
+        try:
+            evidence = findings_bytes(done.get("findings_ref"), state_root())
+        except ValueError:
+            return False
+        if hashlib.sha256(evidence).hexdigest() != digest:
+            return False
     return task.get("review_head_sha") == head_sha and (
         done.get("reviewed_head_sha") == head_sha
     )
