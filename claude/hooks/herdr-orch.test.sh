@@ -727,22 +727,35 @@ assert c.prior_hint(rd, "w9", "PROJ-1") is None, "no log means no prior hint"
 PY
 
 # args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)
+# args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)  [expect_push(push|nopush)]
 hook_case() {
-    label="$1"; env_ws="$2"; henv="$3"; payload="$4"; expect="$5"
+    label="$1"; env_ws="$2"; henv="$3"; payload="$4"; expect="$5"; expect_push="${6:-}"
     outdir=$(mktemp -d); wsdir="$outdir/herdr-orch/slug-x/workspaces"; mkdir -p "$wsdir"
     if [ "$env_ws" = "REGISTER" ]; then
         printf '{"task_id":"PROJ-1","repo_slug":"slug-x","role":"impl"}' > "$wsdir/w1.json"; ws="w1"
     elif [ "$env_ws" = "REGISTER_REVIEW" ]; then
         printf '{"task_id":"PROJ-1","repo_slug":"slug-x","role":"review"}' > "$wsdir/w9.json"; ws="w9"
+    elif [ "$env_ws" = "REGISTER_BAD_TASK" ]; then
+        printf '{"task_id":"../escape","repo_slug":"slug-x","role":"impl"}' > "$wsdir/w1.json"; ws="w1"
     else ws="$env_ws"; fi
     printf '%s' "$payload" | env CLAUDE_CONFIG_DIR="$outdir" HERDR_ENV="$henv" \
         HERDR_WORKSPACE_ID="$ws" claude/hooks/herdr_worker_status.py >/dev/null 2>&1
     got=$(tail -1 "$wsdir/$ws.events.jsonl" 2>/dev/null) || true
+    ok=1
     if [ "$expect" = "none" ]; then
-        [ -z "$got" ] && { printf 'PASS  %s\n' "$label"; PASS=$((PASS+1)); } || { printf 'FAIL  %s (got %s)\n' "$label" "$got" >&2; FAIL=$((FAIL+1)); }
+        [ -z "$got" ] || ok=0
     else
-        printf '%s' "$got" | grep -q "\"event\":\"$expect\"" && { printf 'PASS  %s\n' "$label"; PASS=$((PASS+1)); } || { printf 'FAIL  %s (want %s got %s)\n' "$label" "$expect" "$got" >&2; FAIL=$((FAIL+1)); }
+        printf '%s' "$got" | grep -q "\"event\":\"$expect\"" || ok=0
     fi
+    if [ -n "$expect_push" ]; then
+        marker=$(cat "$wsdir/$ws.wake.json" 2>/dev/null || echo '{}')
+        case "$expect_push" in
+            push) printf '%s' "$marker" | grep -q "\"$expect\":" || ok=0 ;;
+            nopush) printf '%s' "$marker" | grep -q "\"$expect\":" && ok=0 ;;
+        esac
+    fi
+    if [ "$ok" = "1" ]; then printf 'PASS  %s\n' "$label"; PASS=$((PASS+1));
+    else printf 'FAIL  %s (want %s/%s got %s)\n' "$label" "$expect" "$expect_push" "$got" >&2; FAIL=$((FAIL+1)); fi
     rm -rf "$outdir"
 }
 hook_case "no HERDR_ENV -> no-op" REGISTER "" '{"hook_event_name":"Stop"}' none
@@ -753,6 +766,29 @@ hook_case "review Stop -> review-stopped" REGISTER_REVIEW "1" '{"hook_event_name
 hook_case "permission Notification -> blocked" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"permission_prompt"}' blocked
 hook_case "elicitation Notification -> blocked" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}' blocked
 hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"Notification","notification_type":"idle_prompt"}' none
+hook_case "hook: three consecutive Stops with no record change push zero wakes" REGISTER "1" '{"hook_event_name":"Stop"}' stopped nopush
+hook_case "hook: an unsafe task_id in the index is a no-op" REGISTER_BAD_TASK "1" '{"hook_event_name":"Stop"}' none
+
+check "hook: a Stop after a done.json write pushes exactly one wake" <<PY
+$LOAD
+import subprocess
+outdir = tempfile.mkdtemp()
+rd = os.path.join(outdir, "herdr-orch", "slug-x")
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "workspaces", "w1.json"), "w").write(
+    json.dumps({"task_id": "PROJ-1", "repo_slug": "slug-x", "role": "impl"}))
+env = dict(os.environ, CLAUDE_CONFIG_DIR=outdir, HERDR_ENV="1", HERDR_WORKSPACE_ID="w1")
+def run():
+    return subprocess.run(["claude/hooks/herdr_worker_status.py"],
+                          input=b'{"hook_event_name":"Stop"}', env=env, capture_output=True)
+run(); run(); run()
+marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert "stopped" not in marker["last_push"], marker
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write('{"outcome":"completed"}')
+run()
+marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert "stopped" in marker["last_push"], "a record write must push"
+PY
 
 # --- model discovery: write-capabilities / resolve-model / disable-model / classify-probe ---
 
@@ -1390,40 +1426,43 @@ try:
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":None},open(os.path.join(rd,"owner.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
     assert wait_got(1,0.3)==0 and events()==1
-    # 2. socket registered: append + one post
+    # 2. socket registered: append, no post without a record change
     json.dump({"session_id":"S","host":"h","pid":4242,"heartbeat_ts":time.time(),"fence":1,"messaging_socket":path},open(os.path.join(rd,"owner.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(1)==1,got
-    assert "event=stopped" in J.loads(got[0])["message"]["content"]
+    assert wait_got(1,0.3)==0,got
     assert events()==2
-    # 3. own socket equals target: append, no post
+    # 3. own socket equals target: still no record change, so still no post
     os.environ["CLAUDE_CODE_MESSAGING_SOCKET"]=path
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(2,0.3)==1 and events()==3
+    assert wait_got(1,0.3)==0 and events()==3
     os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET")
     # An idle accept timeout must not expire the fixture before the next wake.
     idle.clear(); assert idle.wait(2) and listener.is_alive()
-    # 4. blocking notification posts blocked; non-blocking posts nothing and appends nothing
+    # 4. a transition into blocked posts regardless of any record; non-blocking posts nothing and appends nothing
     assert run({"hook_event_name":"Notification","notification_type":"permission_prompt"})==0
-    assert wait_got(2)==2 and "event=blocked" in J.loads(got[1])["message"]["content"]
+    assert wait_got(1)==1,got
+    assert "event=blocked" in J.loads(got[0])["message"]["content"]
     assert run({"hook_event_name":"Notification","notification_type":"idle_prompt"})==0
-    assert wait_got(3,0.3)==2 and events()==4
-    # 5. review role posts review-stopped
+    assert wait_got(2,0.3)==1 and events()==4
+    # 5. review role appends review-stopped, but still no record -> still no post
     json.dump({"task_id":"PROJ-1","repo_slug":slug,"role":"review"},open(os.path.join(rd,"workspaces","w1.json"),"w"))
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(3)==3 and "event=review-stopped" in J.loads(got[2])["message"]["content"]
-    # 6. append_event raising still posts
+    assert wait_got(2,0.3)==1 and events()==5
+    # 6. a completion record is what earns the wake; a failed append must not suppress it
+    open(os.path.join(rd,"tasks","PROJ-1.done.json"),"w").write('{"outcome":"completed"}')
     core=h.core; real_append=core.append_event
     def boom(*a,**k): raise RuntimeError("disk")
     core.append_event=boom
+    events_before=events()
     assert run({"hook_event_name":"Stop"})==0
-    assert wait_got(4)==4,got
+    assert wait_got(2)==2,got
+    assert events()==events_before   # the raise swallowed the audit line
     core.append_event=real_append
-    # 6b. post_wake raising still appends exactly one event and exits 0
+    # 6b. post_wake raising still appends; no NEW record change means no new push
     real_post=core.post_wake; core.post_wake=boom
     before=events()
     assert run({"hook_event_name":"Stop"})==0
-    assert events()==before+1 and wait_got(5,0.3)==4
+    assert events()==before+1 and wait_got(3,0.3)==2
     core.post_wake=real_post
     # 7. server gone: exit 0 within 2.5s
     stop.set(); srv.close(); os.unlink(path)

@@ -4,14 +4,17 @@
 No-ops unless HERDR_ENV=1, a basename-safe HERDR_WORKSPACE_ID, and a workspace
 index the orchestrator placed under STATE_ROOT. Derives all paths from the fixed
 state root; never trusts a payload path. Notifications map to `blocked` only for
-permission/input-needed types. Fails OPEN (always exit 0). After appending,
-pushes one wake line to the owning orchestrator's inbox socket
-(core.post_wake) when owner.json names one.
+permission/input-needed types. Fails OPEN (always exit 0).
+Appends the lifecycle hint (core.append_event) on every Stop and every
+blocking Notification. Pushes one wake line to the owning orchestrator's inbox
+socket ONLY when a completion record for this task changed, or on a transition
+into `blocked`.
 """
 
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,6 +48,7 @@ def main() -> int:
         if not index:
             continue
         role = index.get("role")
+        task_id = index.get("task_id")
         if payload.get("hook_event_name") == "Notification":
             if (payload.get("notification_type") or "") not in _BLOCKING_NOTIFICATIONS:
                 return 0  # idle_prompt and other notifications are not a hard block
@@ -53,18 +57,34 @@ def main() -> int:
             event = "review-stopped"
         else:
             event = "stopped"
-        # Audit line first, wake second, each independently fail-open: a wake
-        # without its audit line is harmless (check-in finds nothing new); a
-        # lost wake is not.
+        # An unsafe task id would reach a path join below, so refuse it
+        # outright rather than half-processing this workspace.
+        if not core.valid_task_id(task_id):
+            return 0
+        # Read the prior hint BEFORE appending this one: append_event is a
+        # single O_APPEND write, so "the last record" is unambiguous only
+        # under read-before-append.
+        prior = core.prior_hint(rd, ws, task_id)
         try:
-            core.append_event(rd, ws, event, task_id=index.get("task_id"), role=role)
+            core.append_event(rd, ws, event, task_id=task_id, role=role)
         except Exception:  # noqa: BLE001 -- never block the worker
             pass
+        # The push is conditional; the hint above never is. A wake costs the
+        # director a check-in, so it is spent only on a completion record or
+        # a transition into blocked.
         try:
-            core.post_wake(rd, ws, event,
-                           own_socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""))
+            marker = core.read_wake_marker(rd, ws)
+            push, marker = core.wake_decision(
+                marker, event, core.record_fingerprint(rd, task_id), prior, time.time())
+            core.write_wake_marker(rd, ws, marker)
         except Exception:  # noqa: BLE001
-            pass
+            push = False
+        if push:
+            try:
+                core.post_wake(rd, ws, event,
+                               own_socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""))
+            except Exception:  # noqa: BLE001
+                pass
         break
     return 0
 
