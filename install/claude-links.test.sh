@@ -58,6 +58,7 @@ cat >"$TMPL" <<'EOF'
     ]
   },
   "statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"},
+  "promptSuggestionEnabled": false,
   "enabledPlugins": {"ecc@ecc": true, "conflict@market": true}
 }
 EOF
@@ -91,6 +92,11 @@ if jget "$DEST" "d['feedbackSurveyState']['lastShown'] == 1"; then
     pass "unknown platform key preserved"
 else
     fail "unknown platform key preserved"
+fi
+if jget "$DEST" "d.get('promptSuggestionEnabled') is False"; then
+    pass "template-owned promptSuggestionEnabled reasserted"
+else
+    fail "template-owned promptSuggestionEnabled reasserted"
 fi
 if grep -q "\[test\] Reconciled settings.json (SessionStart: account_guard.py)." "$TMP/out"; then
     pass "reconcile reports its SessionStart basenames"

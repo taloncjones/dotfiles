@@ -466,6 +466,24 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# Prompt suggestions: the feature reads the whole context window with the main
+# model after each turn to propose a next prompt. The setting is template-owned
+# so it stays disabled across updates and reconciles drift away.
+if python3 - <<'PY'
+import json
+import sys
+
+tmpl = json.load(open("claude/settings.json.tmpl"))
+sys.exit(0 if tmpl.get("promptSuggestionEnabled") is False else 1)
+PY
+then
+    printf 'PASS  prompt-suggestions: template pins promptSuggestionEnabled=false\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  prompt-suggestions: template pins promptSuggestionEnabled=false\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # Permissions floor: the template must not ask (or allow) for rm, so auto
 # mode's classifier decides scratch cleanup; must keep the force-push and
 # Jira-create ask rules; and must deny the literal root / home / .git
