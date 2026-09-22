@@ -207,6 +207,10 @@ STATE_ROOT/
     "think": ["fable", "opus"]
   },
   "effort": { "plan": "high", "impl": null, "review": "high", "think": "high" },
+  "routes": {
+    "implementation": { "model": "sonnet", "effort": "medium" },
+    "mechanical": { "effort": "medium" }
+  },
   "mech": {
     "max_turns": 40,
     "max_budget_usd": 2.0,
@@ -255,6 +259,24 @@ a boolean or number, or a value outside the set makes every effort-resolving
 verb (`resolve-effort`, `routing-table`) exit 5. Absent keys fall back to the
 built-in defaults (`plan` high, `impl` inherit, `review` high, `mech`
 inherit, `think` high).
+
+`routes` is optional and is validated by the native `agent_runtime.py`
+resolver, not the core: `models`/`effort` above govern only the legacy
+`routing-table`/`run-mech`/`run-think` wrapper path. When present, `routes`
+must be an object keyed by the resolver's own role names (`controller`,
+`planner`, `implementation`, `reviewer`, `plan_reviewer`,
+`development_reviewer`, `read_only`, `mechanical`, `think`); each value is an
+object containing only `model` and/or `effort`. `model` must be a model the
+runtime recognizes (a supported alias for Claude, a full model ID for
+Codex); `effort` must be one of `low`/`medium`/`high`/`xhigh`/`max`. A route
+cannot go below the role's own floor: the resolver enforces a `medium` floor
+(`EFFORT_FLOOR` in `agent_runtime.py`) on top of the role's default, raised
+to the role's own default effort when a critical-risk or otherwise
+hard-floored dispatch calls for it, and a configured `model`/`effort` below
+that floor is rejected. A malformed `routes` block (non-object, an unknown
+role, an override key other than `model`/`effort`, an unrecognized model, an
+unsupported effort, or a below-floor override) fails the `route` call and
+blocks that dispatch.
 
 `mech` is optional and fails closed: absent -> `mech_caps` falls back to the
 built-in defaults above (`max_turns` 40, `max_budget_usd` 2.0, `timeout_secs`

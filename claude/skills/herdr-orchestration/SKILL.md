@@ -244,10 +244,12 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
   worker directly (only after the contract pinning steps at the end of this
   section; a plan-ready item without a committed contract is treated as raw),
   using `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-  and the native adapter (section 8). An unready route blocks this dispatch.
+  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  (section 8). An unready route blocks this dispatch.
 - **Raw item** -- a bare todo/handoff with no spec/plan: dispatch a `plan`
   worker using `python3 "$RUNTIME" route --runtime <claude|codex> --role planner --risk normal`
-  and the native adapter first. It runs the repo's brainstorm -> spec ->
+  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  first. It runs the repo's brainstorm -> spec ->
   independent spec review -> plan -> independent plan review pipeline;
   Claude uses the Codex review skills and Codex uses the Claude review skills.
   It freezes private spec/plan artifacts and emits completion as phase `plan`. On
@@ -395,7 +397,8 @@ phase; it never marks the task `completed` and never dispatches review.
    are recorded for different checks.
 3. Reuse the task's branch/workspace after the plan worker is idle or exited.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-   again, require readiness, append a new strict attempt through
+   again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
+   append a new strict attempt through
    the adapter, update the display role, and give the worker the exact frozen
    plan paths and hashes. Status remains `in-progress`.
 4. Failed/paused planning never launches implementation. `confirm-completion`
@@ -724,7 +727,7 @@ also avoids wasting work and preserves one live reviewer per task.
    it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
    repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
    applies to every `worktree create`/`open`, no exceptions.)
-3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional`, then reserve and launch a
+3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional --config-json "$ROUTE_CONFIG"` (step 5 snippet), then reserve and launch a
    fresh review attempt through the adapter. This derives
    `development_reviewer` (Claude Sonnet/high or Codex Sol/high) from the
    selected runtime. `--provisional` is permitted only when availability or
@@ -893,10 +896,17 @@ do not pass its Claude-only aliases to Codex.
 
 One snapshot per dispatch: use `route --runtime <claude|codex> --role
 <planner|implementation|reviewer|plan_reviewer|read_only|mechanical|think> --risk
-<normal|critical>` and optional explicit policy/capability files. Inspect the
+<normal|critical> --config-json "$ROUTE_CONFIG"` (step 5 snippet) and optional
+explicit policy/capability files. Inspect the
 returned readiness, availability reason, model, and effort before launch.
 Catalog presence is not proof that the selected account can run a model.
 Unknown availability is reported; no silent downgrade of a critical route.
+
+`config.json`'s optional `routes` block lets a repo pin a role's model and/or
+effort: `{role: {model?, effort?}}`. The resolver, not the core, enforces a
+`medium` floor (`EFFORT_FLOOR`) on any effort it sets, raised under critical
+risk or a role's own hard floor; a malformed `routes` block fails the `route`
+call and blocks that dispatch rather than silently falling back.
 
 Use `herdr_dispatch.py launch` with the existing shell pane/workspace,
 canonical repo path, task, session/fence, phase, unique agent name, resolved
