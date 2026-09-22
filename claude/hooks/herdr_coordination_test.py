@@ -1217,20 +1217,37 @@ class AttemptTests(unittest.TestCase):
             )
         review = dict(worker, phase="review", source_head_sha="b" * 40)
         task = dict(task, workers=[worker, review], review_head_sha="b" * 40)
-        done = dict(
-            review,
-            task_id="td-a",
-            outcome="approved",
-            reviewed_head_sha="b" * 40,
-            blocking_count=0,
-        )
-        self.assertTrue(core.is_reviewed(task, done, "b" * 40, "w1"))
-        self.assertFalse(
-            core.is_reviewed(task, dict(done, launch_id="old"), "b" * 40, "w1")
-        )
-        self.assertFalse(
-            core.is_reviewed(task, dict(done, blocking_count="bad"), "b" * 40, "w1")
-        )
+        with tempfile.TemporaryDirectory() as config_dir:
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": config_dir}):
+                findings = core.state_root() / "findings.md"
+                findings.parent.mkdir(parents=True, exist_ok=True)
+                findings.write_text("No blocking findings. Inspected: fixture.\n")
+                import hashlib
+
+                digest = hashlib.sha256(findings.read_bytes()).hexdigest()
+                done = dict(
+                    review,
+                    task_id="td-a",
+                    outcome="approved",
+                    reviewed_head_sha="b" * 40,
+                    blocking_count=0,
+                    findings_ref=str(findings),
+                    findings_sha256=digest,
+                )
+                self.assertTrue(core.is_reviewed(task, done, "b" * 40, "w1"))
+                self.assertFalse(
+                    core.is_reviewed(task, dict(done, launch_id="old"), "b" * 40, "w1")
+                )
+                self.assertFalse(
+                    core.is_reviewed(
+                        task, dict(done, blocking_count="bad"), "b" * 40, "w1"
+                    )
+                )
+                self.assertFalse(
+                    core.is_reviewed(
+                        task, dict(done, findings_sha256="0" * 64), "b" * 40, "w1"
+                    )
+                )
 
     def test_plan_completion_uses_hashed_private_artifacts_without_commit(self):
         with tempfile.TemporaryDirectory() as directory:
