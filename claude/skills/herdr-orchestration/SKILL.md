@@ -142,6 +142,23 @@ for the provider's `launch_env` mapping.
    `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|plan_reviewer|development_reviewer|read_only|mechanical|think> --risk <normal|critical>`.
    Step-to-worker defaults and the two effort-raising axes are in
    `references/pipeline-worker-mapping.md`.
+
+   Every native `route` call in this skill also passes the repo's `routes`
+   config block (empty when `config.json` has no `routes` key), so a repo can
+   lower a role's effort down to the resolver's floor without a code change:
+
+   ```bash
+   ROUTE_CONFIG="$(python3 - "$STATE_ROOT/<slug>/config.json" <<'PY'
+   import json, sys
+   cfg = json.load(open(sys.argv[1]))
+   print(json.dumps({"routes": cfg.get("routes", {})}))
+   PY
+   )"
+   python3 "$RUNTIME" route --runtime claude --role implementation --risk normal --config-json "$ROUTE_CONFIG"
+   ```
+
+   A malformed `routes` block fails the `route` call with the resolver's
+   message, which blocks that dispatch.
    Inspect the returned readiness and capability evidence before dispatch;
    retain unknown availability as unknown and block an unready route. Use
    explicit policy/capability inputs when needed, as described under Model
@@ -402,7 +419,7 @@ agent_runtime.resolve_route(
 )
 ```
 
-The generic Codex implementation route remains Terra/high for non-UI work. Run
+The generic Codex implementation route remains Terra/medium for non-UI work. Run
 the existing `run_bounded`/`launch_argv` path through `agent_runtime.py` from
 the Claude worker's own worktree. `TASK_WORKTREE`, `UI_BRIEF`, and `UI_RESULT`
 must be absolute paths; the brief and result are private paths outside public
