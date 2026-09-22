@@ -146,6 +146,7 @@ Brewfile.rb.lock.json
 /docs/plans/
 /docs/specs/
 /claude/contracts/
+/.planning/
 
 # ruff lint cache
 .ruff_cache/

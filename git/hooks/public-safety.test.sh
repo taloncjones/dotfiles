@@ -66,7 +66,7 @@ assert "no tracked local backlog file" \
 # One pathspec list for the scan and its self-test: a planted tracked
 # contract and spec must be found before the clean run is trusted.
 tracked_artifacts() {
-    git -C "$1" ls-files -- 'docs/superpowers/**' 'docs/plans/**' 'docs/specs/**' 'claude/contracts/**'
+    git -C "$1" ls-files -- 'docs/superpowers/**' 'docs/plans/**' 'docs/specs/**' 'claude/contracts/**' '.planning/**'
 }
 tracked_artifacts_clean() { ! tracked_artifacts . | grep -q .; }
 tracked_artifacts_detect_plants() {

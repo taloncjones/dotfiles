@@ -155,6 +155,12 @@ def classify(pathspec, d, top, home):
     top-level-relative, so a `cd "$var"` or a failed git call cannot hide
     `docs/specs/x.md` either."""
     spec = pathspec[2:] if pathspec.startswith("./") and len(pathspec) > 2 else pathspec
+    if spec.startswith(":"):
+        # Git pathspec magic (":/...", ":(top)...", ":^...") resolves under
+        # rules neither a literal-path join nor a top-level-relative string
+        # match can reproduce; scan it and let git's own status/diff resolve
+        # the magic instead of risking a silent false "skip".
+        return ("scan", spec)
     rel = None
     if top is not None and d is not None and grg.literal(spec):
         abs_path = grg.resolve_filesystem(spec, d, home)
