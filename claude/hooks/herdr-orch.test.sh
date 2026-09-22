@@ -9067,5 +9067,57 @@ for terminal in ("merged", "failed", "abandoned"):
     assert got == "none", "%s -> %s" % (terminal, got)
 PY
 
+check "checkin passes each correlation helper its own phase workspace" <<PY
+$LOAD
+task = {"task_id": "PROJ-1", "workers": [
+    {"phase": "plan", "workspace_id": "w1", "runtime": "claude"},
+    {"phase": "implement", "workspace_id": "w2", "runtime": "claude"},
+    {"phase": "review", "workspace_id": "w3", "runtime": "claude"}]}
+assert c.phase_workspace(task, "plan") == "w1"
+assert c.phase_workspace(task, "implement") == "w2"
+assert c.phase_workspace(task, "review") == "w3"
+assert c.phase_workspace({"workers": []}, "implement") is None
+PY
+
+check "checkin parse_poll maps workspace ids to live state and worktrees" <<PY
+$LOAD
+agents = {"result": {"agents": [{"workspace_id": "w2", "agent_status": "working"}]}}
+spaces = {"result": {"workspaces": [
+    {"workspace_id": "w2", "worktree": {"checkout_path": "/tmp/wt"}},
+    {"workspace_id": "w3", "worktree": {"checkout_path": "/tmp/wt3"}}]}}
+poll = c.parse_poll(agents, spaces)
+assert poll["live"]["w2"] == "working", poll
+assert poll["known"] == {"w2", "w3"}, poll
+assert poll["worktrees"]["w3"] == "/tmp/wt3", poll
+assert c.parse_poll({"result": {}}, spaces) is None, "a malformed reply is not an empty poll"
+PY
+
+check "checkin reports changed no on an all-steady queue" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": "b" * 40,
+        "review_head_sha": "a" * 40, "worktree": os.path.join(rd, "gone"),
+        "workers": [{"phase": "review", "workspace_id": "w3", "runtime": "claude"}]}
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["action"] == "none", facts
+assert facts["head"] is None and facts["dirty"] == "unknown", facts
+PY
+
+check "checkin action precedence resolves an overlapping task to the earlier rule" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+# Worktree gone AND poll absent: rule 1 (unknown) must not claim it, because
+# head is unreadable only when the worktree EXISTS; rule 2 wins.
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": "b" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [
+            {"phase": "implement", "workspace_id": "w2", "runtime": "claude"}]}
+poll = {"live": {}, "known": set(), "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["action"] == "abandoned-candidate", facts
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

@@ -2518,6 +2518,149 @@ def checkin_action(f) -> str:
     return "none"
 
 
+def phase_workspace(task, phase):
+    """The latest workers[] row OF THAT PHASE. attempt_matches compares the
+    latest row of the requested phase, so handing every helper the single
+    newest row resolves the wrong workspace for any task past its first
+    phase."""
+    workers = task.get("workers")
+    if not isinstance(workers, list):
+        return None
+    rows = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
+    return rows[-1].get("workspace_id") if rows else None
+
+
+def parse_poll(agents, workspaces):
+    """-> {"live": {ws: state}, "known": {ws}, "worktrees": {ws: path}}, or
+    None when either reply lacks its list. A malformed poll is a tool failure,
+    never an empty queue."""
+    a = agents.get("result", {}).get("agents") if isinstance(agents, dict) else None
+    w = workspaces.get("result", {}).get("workspaces") if isinstance(workspaces, dict) else None
+    if not isinstance(a, list) or not isinstance(w, list):
+        return None
+    live, known, worktrees = {}, set(), {}
+    for row in w:
+        if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
+            continue
+        ws = row["workspace_id"]
+        known.add(ws)
+        tree = row.get("worktree")
+        if isinstance(tree, dict) and isinstance(tree.get("checkout_path"), str):
+            worktrees[ws] = tree["checkout_path"]
+    for row in a:
+        if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
+            continue
+        ws = row["workspace_id"]
+        known.add(ws)
+        state = row.get("agent_status")
+        live[ws] = state if isinstance(state, str) else "unknown"
+    return {"live": live, "known": known, "worktrees": worktrees}
+
+
+def _git_ancestor(worktree, base, head) -> str:
+    """yes / no / unknown. Not routed through _git, which collapses exit 1
+    (not an ancestor) and exit 128 (git failed) to the same None."""
+    if not base or not head:
+        return "unknown"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(worktree), "merge-base", "--is-ancestor", base, head],
+            capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if proc.returncode == 0:
+        return "yes" if head != base else "no"
+    return "no" if proc.returncode == 1 else "unknown"
+
+
+def checkin_facts(rd, task, poll, payload_root) -> dict:
+    """One task's check-in line, as a dict. Read-only: no writes, no herdr,
+    no verify-contract."""
+    tid = task.get("task_id")
+    status = task.get("status") or "unknown"
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    latest = workers[-1] if workers and isinstance(workers[-1], dict) else {}
+    ws = latest.get("workspace_id") or "none"
+    worktree = task.get("worktree")
+    worktree_exists = bool(worktree) and Path(worktree).is_dir()
+
+    if poll is None:
+        live = "unknown"
+    elif ws in poll["live"]:
+        live = poll["live"][ws]
+    elif ws in poll["known"]:
+        live = "idle"
+    else:
+        live = "absent"
+
+    head = _git(worktree, "rev-parse", "HEAD") if worktree_exists else None
+    porcelain = _git(worktree, "status", "--porcelain") if worktree_exists else None
+    dirty = "unknown" if porcelain is None else ("yes" if porcelain else "no")
+    ahead = _git_ancestor(worktree, task.get("base_sha"), head) if worktree_exists else "unknown"
+
+    def _sidecar(suffix):
+        try:
+            rec = json.loads(read_payload_text(Path(rd) / "tasks" / f"{tid}{suffix}"))
+        except (OSError, ValueError):
+            return None
+        return rec if isinstance(rec, dict) else None
+
+    done, review = _sidecar(".done.json"), _sidecar(".review.json")
+    impl_ws = phase_workspace(task, "implement")
+    plan_ws = phase_workspace(task, "plan")
+    rev_ws = phase_workspace(task, "review")
+    completed = bool(head and impl_ws and is_completed(task, done, head, impl_ws))
+    plan_completed = bool(head and plan_ws
+                          and is_plan_completed(task, done, head, plan_ws, payload_root))
+    reviewed = bool(head and rev_ws and is_reviewed(task, review, head, rev_ws))
+    review_correlates = bool(
+        review and rev_ws and head
+        and attempt_matches(task, review, "review", rev_ws)
+        and review.get("reviewed_head_sha") == head)
+    review_stale = bool(task.get("review_head_sha") and head
+                        and task["review_head_sha"] != head)
+    mech_unsettled = bool(latest.get("role") == "mech"
+                          and status not in CHECKIN_TERMINAL
+                          and not _attempt_settled(latest, done))
+
+    events = []
+    for row in workers:
+        if isinstance(row, dict) and valid_workspace_id(row.get("workspace_id")):
+            try:
+                events.extend(parse_events(
+                    read_payload_text(events_path(rd, row["workspace_id"])).splitlines()))
+            except (OSError, ValueError):
+                continue
+    hint = fold_status(events).get("last_hint") or "none"
+
+    facts = {
+        "task_id": tid, "status": status, "ws": ws, "live": live,
+        "head": head, "ahead": ahead, "dirty": dirty,
+        "done": f"{done.get('phase')}:{done.get('outcome')}" if done else "none",
+        "review": (review.get("outcome") or "none") if review else "none",
+        "hint": hint,
+        "poll_ok": poll is not None, "worktree_exists": worktree_exists,
+        "completed": completed, "plan_completed": plan_completed,
+        "reviewed": reviewed, "review_correlates": review_correlates,
+        "review_stale": review_stale,
+        "dispatch_review": bool(head and should_dispatch_review(task, head)),
+        "mech_unsettled": mech_unsettled,
+        "plan_advanced": any(isinstance(w, dict) and w.get("phase") == "implement"
+                             for w in workers),
+        # Correlated to the CURRENT attempt, never the raw sidecar. Section 9
+        # has no `paused` STATUS, so a status-based gate is vacuous and a
+        # stale record from a superseded attempt would fire forever; nothing
+        # in the core deletes done.json on relaunch.
+        "done_outcome": (done.get("outcome")
+                         if done and latest
+                         and attempt_matches(task, done, latest.get("phase"),
+                                             latest.get("workspace_id"))
+                         else None),
+    }
+    facts["action"] = checkin_action(facts)
+    return facts
+
+
 def is_reviewed(task, done, head_sha, workspace) -> bool:
     """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
     live HEAD all agree, the record comes from the dispatched review workspace,
