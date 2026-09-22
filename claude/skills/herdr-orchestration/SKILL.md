@@ -213,6 +213,9 @@ for the provider's `launch_env` mapping.
      The watch reads only `STATE_ROOT` and prints a closed vocabulary
      (`signal` / `heartbeat`); worst-case wake latency is one `--interval`
      (default 15s) plus one `--debounce-secs` (default 60s) after a burst.
+     The watch fires on completion-record writes only -- the same predicate
+     the worker hook uses -- so an ordinary worker turn end produces no
+     signal.
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
@@ -485,6 +488,39 @@ ranked list above; this section stays read-only, so nothing here ever
 creates a task/worktree/agent/index/record off an escalation's answer.
 
 ## 4. Status (check-in; turn- or watch-driven) -- full live-state reconciliation
+
+**Run the verb first.** A wake-driven check-in is one call:
+
+`python3 "$CORE" checkin --repo-slug <slug> --session <id> --fence <fence> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
+
+It refreshes the ownership heartbeat itself, so a wake turn runs it IN PLACE
+OF preflight step 3's `refresh-owner` and skips the dashboard regeneration,
+which is a kickoff-time concern. It polls `herdr agent list` / `herdr
+workspace list`, correlates each task's records, reads HEAD and ancestry, and
+prints one line per non-terminal task plus a final `changed:` line. It mutates
+nothing but the heartbeat; every status transition below is still the
+director's own `write-task`.
+
+- `changed: no` -- end the turn. Do not read panes, do not re-poll.
+- `changed: yes`, any `action=unknown`, or `poll: failed (...)` -- fall through
+  to the full reconciliation below, for the named tasks only.
+- exit 1 with `owner: stale-fence` -- re-claim before acting.
+
+Each `action` names the transition still to be written: `confirm-completion`,
+`confirm-plan`, `dispatch-review`, `confirm-review`, `changes-requested`,
+`stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
+`mech-ledger`, `paused`, `failed`. An action fires only while that transition
+is unrecorded, so a settled task reports `none` instead of re-reporting its
+evidence forever.
+
+**Prompt and pause.** When a human decision is needed, ask ONCE with
+`AskUserQuestion` -- labeled options, recommendation first -- and then END THE
+TURN. No polling while idle, no periodic "still waiting" check-ins, no
+re-reading panes or records between wakes: every idle turn is a full-context
+cache read. A hook wake or the next human message resumes it. A question in
+prose is not a substitute; the prompt is what raises the notification on the
+user's other devices. Without the tool (a `-p` session), ask in prose and end
+the turn anyway -- ending the turn is the half that saves tokens.
 
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
@@ -1142,8 +1178,8 @@ the new `status`; that write is the authoritative record.
 | From                                         | Evidence / trigger                                                                                                                 | Event                                          | To                      | Terminal? |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------- | --------- |
 | (none)                                       | kickoff (raw item -> plan phase; plan-ready -> implement)                                                                          | `kickoff`                                      | in-progress             | no        |
-| in-progress                                  | hook `blocked` + live `blocked`                                                                                                    | `blocked`                                      | blocked                 | no        |
-| blocked                                      | live no longer blocked                                                                                                             | (recheck)                                      | in-progress             | no        |
+| in-progress                                  | live `blocked` (the hint alone is not evidence: `fold_status` returns the last hint ever seen, with no timestamp)                  | `blocked`                                      | blocked                 | no        |
+| blocked                                      | live no longer blocked                                                                                                             | (recheck; `checkin` reports `unblocked`)       | in-progress             | no        |
 | in-progress (plan phase)                     | `confirm-plan` + private artifact hashes + current attempt                                                                         | `phase-advance` (launch implement, section 2a) | in-progress (implement) | no        |
 | in-progress/blocked (implement)              | correlated `done.json` `phase: implement` completed + git ahead                                                                    | `completed`                                    | completed               | no        |
 | in-progress (mech)                           | ledger `end` + `done.json` `paused` for the live launch                                                                            | `paused`                                       | in-progress             | no        |

@@ -91,6 +91,12 @@ STATE_ROOT/
     workspaces/
       <HERDR_WORKSPACE_ID>.json               # reverse index (task/repo/role)
       <HERDR_WORKSPACE_ID>.events.jsonl       # per-workspace hint log
+      <HERDR_WORKSPACE_ID>.wake.json          # worker-status hook's wake marker: {"v":1,
+                                               # "records":{path:[mtime_ns,size]},
+                                               # "last_push":{event:epoch}}. Machine-local,
+                                               # written only by the hook. `records` advances
+                                               # only on a push, so a debounced record change
+                                               # is delayed, never dropped.
 ```
 
 ## Identity

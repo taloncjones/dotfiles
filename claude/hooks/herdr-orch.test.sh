@@ -783,11 +783,11 @@ def run():
                           input=b'{"hook_event_name":"Stop"}', env=env, capture_output=True)
 run(); run(); run()
 marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
-assert "stopped" not in marker["last_push"], marker
+assert "stopped" not in marker["last_push"], "bare Stops must post nothing: %r" % (marker,)
 open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write('{"outcome":"completed"}')
 run()
 marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
-assert "stopped" in marker["last_push"], "a record write must push"
+assert "stopped" in marker["last_push"], "a done.json write must post exactly one wake"
 PY
 
 # --- model discovery: write-capabilities / resolve-model / disable-model / classify-probe ---
@@ -9187,6 +9187,16 @@ if stale=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S
     --agents-json "$root/a.json" --workspaces-json "$root/w.json"); then exit 1; fi
 printf '%s\n' "$stale" | grep -q 'owner: stale-fence' || exit 1
 SH
+
+check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
+$LOAD
+s = open("claude/skills/herdr-orchestration/SKILL.md").read()
+for token in ("checkin --repo-slug", "changed: no", "Prompt and pause",
+              "AskUserQuestion", "unblocked"):
+    assert token in s, "missing %s" % token
+layout = open("claude/skills/herdr-orchestration/references/state-layout.md").read()
+assert "wake.json" in layout and "last_push" in layout, "the wake marker is undocumented"
+PY
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
