@@ -147,17 +147,23 @@ for the provider's `launch_env` mapping.
    config block (empty when `config.json` has no `routes` key), so a repo can
    lower a role's effort down to the resolver's floor without a code change.
    Build ONE config object per call: read `routes` from `config.json`
-   (default `{}`), then merge in a `DIFFICULTY_JSON` shell variable when one
-   is set (a difficulty object confirmed by the human; empty when none):
+   (default `{}`), then merge in the `DIFFICULTY_JSON` environment variable
+   when it is non-empty (a difficulty object the human confirmed). Export it
+   in the SAME shell call as the snippet -- shell state does not survive
+   between Bash tool calls -- and only for a route whose role accepts
+   difficulty (`planner`, `implementation`, `development_reviewer`,
+   `reviewer`, `skeptic`, `think`; `DIFFICULTY_ROLES` in
+   `agent_runtime.py`); leave it unset for `controller`, `plan_reviewer`,
+   `read_only` and `mechanical`, which refuse it:
 
    ```bash
-   ROUTE_CONFIG="$(python3 - "$STATE_ROOT/<slug>/config.json" "${DIFFICULTY_JSON:-{}}" <<'PY'
-   import json, sys
+   ROUTE_CONFIG="$(python3 - "$STATE_ROOT/<slug>/config.json" <<'PY'
+   import json, os, sys
    cfg = json.load(open(sys.argv[1]))
    config = {"routes": cfg.get("routes", {})}
-   difficulty = json.loads(sys.argv[2])
+   difficulty = os.environ.get("DIFFICULTY_JSON", "").strip()
    if difficulty:
-       config["difficulty"] = difficulty
+       config["difficulty"] = json.loads(difficulty)
    print(json.dumps(config))
    PY
    )"

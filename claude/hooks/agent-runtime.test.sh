@@ -14,6 +14,7 @@ fi
 "${PYTHON[@]}" - <<'PY'
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -296,6 +297,76 @@ def test_route_cli_rejects_repeated_config_json():
     route = json.loads(merged.stdout)
     assert route["requested_effort"] == "high", route
     assert route["difficulty"] == "hard", route
+
+
+def _extract_route_config_snippet():
+    doc = (
+        Path(os.environ["DOTFILES_TEST_ROOT"])
+        / "claude/skills/herdr-orchestration/SKILL.md"
+    )
+    text = doc.read_text()
+    for block in re.findall(r"```bash\n(.*?)```", text, re.DOTALL):
+        lines = block.splitlines()
+        if lines and lines[0].strip().startswith('ROUTE_CONFIG="$(python3 -'):
+            unindented = [line[3:] if line.startswith("   ") else line for line in lines]
+            return "\n".join(
+                line for line in unindented
+                if not line.strip().startswith('python3 "$RUNTIME" route')
+            )
+    raise AssertionError("route config snippet not found in SKILL.md")
+
+
+def test_skill_route_config_snippet_merges_difficulty():
+    snippet = _extract_route_config_snippet()
+    with tempfile.TemporaryDirectory() as tmp:
+        config_path = Path(tmp) / "config.json"
+        config_path.write_text(
+            json.dumps({"routes": {"development_reviewer": {"effort": "high"}}})
+        )
+        script = snippet.replace(
+            '"$STATE_ROOT/<slug>/config.json"', f'"{config_path}"'
+        )
+        script += "\nprintf '%s\\n' \"$ROUTE_CONFIG\"\n"
+
+        env_without_difficulty = {
+            k: v for k, v in os.environ.items() if k != "DIFFICULTY_JSON"
+        }
+        without_difficulty = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True, text=True,
+            env=env_without_difficulty,
+        )
+        assert without_difficulty.returncode == 0, without_difficulty.stderr
+        route_config = json.loads(without_difficulty.stdout)
+        assert route_config == {
+            "routes": {"development_reviewer": {"effort": "high"}}
+        }, route_config
+
+        env_with_difficulty = dict(os.environ)
+        env_with_difficulty["DIFFICULTY_JSON"] = json.dumps(
+            {"level": "hard", "proposed": "hard", "confirmed": True}
+        )
+        with_difficulty = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True, text=True,
+            env=env_with_difficulty,
+        )
+        assert with_difficulty.returncode == 0, with_difficulty.stderr
+        route_config_with_difficulty = json.loads(with_difficulty.stdout)
+        assert route_config_with_difficulty == {
+            "routes": {"development_reviewer": {"effort": "high"}},
+            "difficulty": {"level": "hard", "proposed": "hard", "confirmed": True},
+        }, route_config_with_difficulty
+
+        routed = subprocess.run(
+            [sys.executable, runtime.__file__, "route", "--runtime", "claude",
+             "--role", "implementation", "--risk", "normal",
+             "--config-json", with_difficulty.stdout.strip()],
+            check=True, capture_output=True, text=True,
+        )
+        route = json.loads(routed.stdout)
+        assert route["difficulty"] == "hard", route
+        assert route["requested_effort"] == "high", route
 
 
 def test_critical_routes_are_explicit_xhigh():
@@ -1806,6 +1877,7 @@ for name, test in (
     ("route --step derives role from pipeline step", test_route_step_cli_derives_role_from_pipeline_step),
     ("route CLI honors config routes effort", test_route_cli_honors_config_routes_effort),
     ("route CLI rejects repeated config-json", test_route_cli_rejects_repeated_config_json),
+    ("skill route config snippet merges difficulty", test_skill_route_config_snippet_merges_difficulty),
 ):
     check(name, test)
 
