@@ -61,8 +61,9 @@ the task worker as `review`.
 ## Deviating from the defaults
 
 Two axes raise effort within the role's chosen model. Neither lowers it. A
-repo lowers effort through `config.json` `routes`, down to the `medium`
-floor (`EFFORT_FLOOR`); a raising axis raises the floor with it.
+repo lowers effort through `config.json` `routes`, down to the tier of the
+role's default model at `medium` (`EFFORT_FLOOR`); a raising axis raises the
+floor with it.
 
 - `risk=critical` -- blast radius. Restricted to `development_reviewer`,
   `reviewer`, `skeptic`, `think`.
@@ -121,8 +122,8 @@ Each is resolved here, with the reason, so none is silently re-litigated.
    statements about the same role.
 8. **`planner` is deliberately not in `CRITICAL_ROLES`.** Risk is about blast
    radius; hard-plan escalation is what `difficulty=hard` is for.
-9. **Superseded 2026-09-22.** The implementer ran at `high` from 2026-09-21 to
-   2026-09-22; measured 2026-09-06..09, Sonnet implementers at `high`
+9. **Superseded 2026-09-22.** The implementer ran at `high` since 2026-09-08
+   (92c049a) to 2026-09-22; measured 2026-09-06..09, Sonnet implementers at `high`
    confabulated as often as not (todo
    `2026-09-08-lower-orchestrator-effort-floors-and-restore-impl`), so `high`
    bought cost, not reliability. Implementation now defaults to `medium`;

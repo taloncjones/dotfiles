@@ -23,8 +23,10 @@ CODEX_MODELS = ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 CLAUDE_MODELS = ("fable", "opus", "sonnet", "haiku")
 EFFORTS = ("low", "medium", "high", "xhigh")
 EFFORT_RANK = {effort: rank for rank, effort in enumerate(EFFORTS)}
-# Lowest effort a config override may select for a role. A raising axis
-# (critical risk, hard difficulty) raises the floor to the raised default.
+# Quality-tier floor for a config override, compared against the role's
+# default model at this effort -- a stronger model may pass at a lower
+# effort label. A raising axis (critical risk, hard difficulty) raises the
+# floor to the raised default.
 EFFORT_FLOOR = "medium"
 RISK_LEVELS = ("normal", "critical")
 DIFFICULTIES = ("routine", "hard")

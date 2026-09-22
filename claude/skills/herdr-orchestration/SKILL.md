@@ -145,17 +145,28 @@ for the provider's `launch_env` mapping.
 
    Every native `route` call in this skill also passes the repo's `routes`
    config block (empty when `config.json` has no `routes` key), so a repo can
-   lower a role's effort down to the resolver's floor without a code change:
+   lower a role's effort down to the resolver's floor without a code change.
+   Build ONE config object per call: read `routes` from `config.json`
+   (default `{}`), then merge in a `DIFFICULTY_JSON` shell variable when one
+   is set (a difficulty object confirmed by the human; empty when none):
 
    ```bash
-   ROUTE_CONFIG="$(python3 - "$STATE_ROOT/<slug>/config.json" <<'PY'
+   ROUTE_CONFIG="$(python3 - "$STATE_ROOT/<slug>/config.json" "${DIFFICULTY_JSON:-{}}" <<'PY'
    import json, sys
    cfg = json.load(open(sys.argv[1]))
-   print(json.dumps({"routes": cfg.get("routes", {})}))
+   config = {"routes": cfg.get("routes", {})}
+   difficulty = json.loads(sys.argv[2])
+   if difficulty:
+       config["difficulty"] = difficulty
+   print(json.dumps(config))
    PY
    )"
    python3 "$RUNTIME" route --runtime claude --role implementation --risk normal --config-json "$ROUTE_CONFIG"
    ```
+
+   `--config-json` is passed once per route call; routes and difficulty
+   travel in the same object. Re-run this snippet immediately before each
+   route call rather than reusing a stale shell variable.
 
    A malformed `routes` block fails the `route` call with the resolver's
    message, which blocks that dispatch.
@@ -904,9 +915,11 @@ Unknown availability is reported; no silent downgrade of a critical route.
 
 `config.json`'s optional `routes` block lets a repo pin a role's model and/or
 effort: `{role: {model?, effort?}}`. The resolver, not the core, enforces a
-`medium` floor (`EFFORT_FLOOR`) on any effort it sets, raised under critical
-risk or a role's own hard floor; a malformed `routes` block fails the `route`
-call and blocks that dispatch rather than silently falling back.
+floor that compares the configured model/effort's quality tier against the
+role's default model at `medium` (`EFFORT_FLOOR`) -- a stronger model may
+pass at a lower effort label -- raised under critical risk or
+`difficulty=hard`; a malformed `routes` block fails the `route` call and
+blocks that dispatch rather than silently falling back.
 
 Use `herdr_dispatch.py launch` with the existing shell pane/workspace,
 canonical repo path, task, session/fence, phase, unique agent name, resolved
