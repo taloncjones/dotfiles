@@ -4,7 +4,7 @@
 # Cloud sessions (claude.ai/code web, remote sandboxes) get a fresh container
 # whose ~/.claude dies with it. This script recreates the dotfiles-managed
 # Claude layer only: symlinked assets (CLAUDE.md, commands, agents, hooks,
-# skills, rules, statusline), the ECC and Superpowers plugins, and a
+# skills, rules, statusline), the Superpowers plugin, and a
 # settings.json reconciled from the template so the full dotfiles config
 # (SessionStart orchestrator + account_guard hooks, statusLine, permissions,
 # env) is present -- not just the keys the plugin installers write. It also
@@ -45,7 +45,6 @@
 set -euo pipefail
 
 DOTFILEDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
 # Add the official marketplace by git URL so bootstrap REGISTERS it itself
 # (synchronous ~1s clone) instead of waiting on the platform's async, launch-time
 # default registration -- which is undeclared in this repo and is not guaranteed
@@ -92,14 +91,12 @@ marketplace_lists_plugin() {
 # Deterministically install one plugin and PROVE it landed.
 #   $1 plugin id          e.g. superpowers@claude-plugins-official
 #   $2 marketplace name   e.g. claude-plugins-official
-#   $3 marketplace add url (optional; for marketplaces not pre-bundled, e.g. ECC)
+#   $3 marketplace add url (optional; for marketplaces not pre-bundled)
 #
 # Why the retry loop: on a cold container the github-backed official marketplace
 # may not have finished its first network fetch, so `plugins install` resolves
 # the plugin to "nothing to do" and exits 0 WITHOUT installing -- the silent
-# failure this script exists to defeat. ECC's plain git marketplace clones
-# synchronously and usually wins the race, which is why it appeared to "work."
-# A later SessionStart:resume succeeded only because the cache had since warmed.
+# failure this script exists to defeat.
 # We first WAIT for the marketplace manifest to actually list the plugin (the
 # condition the install resolver checks), refreshing the cache to force warmup,
 # then install and verify against installed_plugins.json instead of trusting the
@@ -243,15 +240,12 @@ elif ! command -v claude >/dev/null 2>&1; then
   echo "[bootstrap-cloud] WARNING: claude CLI not on PATH; skipping plugin installs." >&2
 else
   echo "[bootstrap-cloud] Ensuring plugin marketplaces + installs..."
-  # Both plugins go through the same verify-then-retry path so neither can fail
-  # silently, and BOTH are now registered by git URL so the marketplace is cloned
-  # synchronously before install (no async warmup race). ECC ships its own git
-  # marketplace; superpowers comes from the official marketplace repo, which we
-  # add by URL ourselves rather than relying on the platform's launch-time default
-  # (absent during the pre-launch Setup script). The marketplace add is guarded by
-  # ensure_plugin so it no-ops if the platform already registered it.
+  # The plugin goes through the verify-then-retry path so it cannot fail
+  # silently. Superpowers comes from the official marketplace repo, which we
+  # add by URL ourselves rather than relying on the platform's launch-time
+  # default (absent during the pre-launch Setup script). The marketplace add is
+  # guarded by ensure_plugin so it no-ops if the platform already registered it.
   plugin_status=0
-  ensure_plugin "ecc@ecc" "ecc" "$ECC_REPO_URL" || plugin_status=1
   ensure_plugin "superpowers@claude-plugins-official" "claude-plugins-official" "$OFFICIAL_REPO_URL" || plugin_status=1
   if [ "$plugin_status" -ne 0 ]; then
     echo "[bootstrap-cloud] WARNING: one or more plugins did not install; see FAILED lines above." >&2

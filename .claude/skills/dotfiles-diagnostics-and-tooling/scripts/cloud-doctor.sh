@@ -114,7 +114,7 @@ IPJ="$CLAUDE_DIR/plugins/installed_plugins.json"
 if [ ! -f "$IPJ" ]; then
   fail "installed_plugins.json missing at $IPJ -- NO plugins are installed"
 else
-  for plugin_id in "ecc@ecc" "superpowers@claude-plugins-official"; do
+  for plugin_id in "superpowers@claude-plugins-official"; do
     if grep -q "$plugin_id" "$IPJ"; then
       ok "$plugin_id recorded in installed_plugins.json"
     else
