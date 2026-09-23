@@ -1019,7 +1019,6 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
             pass
 
 
-WAKE_DEBOUNCE_SECS = 60
 _RECORD_SUFFIXES = (".done.json", ".review.json")
 
 
@@ -1028,23 +1027,24 @@ def wake_marker_path(rd, ws) -> Path:
 
 
 def _empty_marker() -> dict:
-    return {"v": 1, "records": {}, "last_push": {}}
+    return {"v": 2, "records": {}, "last_push": {}}
 
 
 def read_wake_marker(rd, ws) -> dict:
-    """Never raises. A missing, unreadable, or malformed marker reads as empty,
-    which biases toward pushing -- a spurious wake costs one cheap check-in,
-    a lost one stalls a task."""
+    """Never raises. A missing, unreadable, malformed, or non-v2 marker reads
+    as empty, which biases toward pushing -- a spurious wake costs one cheap
+    check-in, a lost one stalls a task. A v1 marker was written before the
+    hook delivered, so it never counts as delivery evidence."""
     if not valid_workspace_id(ws):
         return _empty_marker()
     try:
         data = json.loads(read_payload_text(wake_marker_path(rd, ws)))
     except (OSError, ValueError):
         return _empty_marker()
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("v") != 2:
         return _empty_marker()
     out = _empty_marker()
-    for key in ("records", "last_push"):
+    for key in ("records", "last_push", "last_delivery"):
         value = data.get(key)
         if isinstance(value, dict):
             out[key] = value
@@ -1082,52 +1082,25 @@ def record_fingerprint(rd, task_id) -> dict:
     return out
 
 
-def prior_hint(rd, ws, task_id):
-    """The event of the last events.jsonl record, read BEFORE this invocation
-    appends its own. None when the tail belongs to a different task: a
-    workspace rebound to a new task must not inherit the old attempt's
-    `blocked` tail, or the new attempt's first prompt would never push."""
-    try:
-        records = parse_events(read_payload_text(events_path(rd, ws)).splitlines())
-    except (OSError, ValueError):
-        return None
-    for rec in reversed(records):
-        if rec.get("task_id") != task_id:
-            return None
-        return rec.get("event")
-    return None
-
-
-def wake_decision(marker, event, fingerprint, prior, now,
-                  debounce_secs=WAKE_DEBOUNCE_SECS):
+def wake_decision(marker, event, fingerprint, now):
     """Decide whether this hint earns a wake push. Pure; clock injected.
 
-    Returns (push, new_marker). The marker's `records` advances ONLY on a
-    push, so a change suppressed by the debounce is delayed, never dropped --
-    advancing it under suppression would swallow a completion record for good.
+    Every blocking notification and every completion-record change pushes.
+    Returns (push, new_marker); `records` advances only on a push, and the
+    caller writes the new marker only after a `sent` delivery.
     """
     if isinstance(marker, dict):
         records = marker.get("records") if isinstance(marker.get("records"), dict) else {}
         last_push = marker.get("last_push") if isinstance(marker.get("last_push"), dict) else {}
     else:
         records, last_push = {}, {}
-    new = {"v": 1, "records": dict(records), "last_push": dict(last_push)}
-
+    new = {"v": 2, "records": dict(records), "last_push": dict(last_push)}
     if event == "blocked":
-        # Transition rule only, no time debounce: a block means a worker is
-        # waiting on a human, and the appended hint becomes the next
-        # invocation's `prior`, so repeats are already self-limiting.
-        return prior != "blocked", new
+        return True, new
     if event not in ("stopped", "review-stopped"):
         return False, new
-
-    changed = any(records.get(k) != v for k, v in fingerprint.items())
-    if not changed:
+    if not any(records.get(k) != v for k, v in fingerprint.items()):
         return False, new
-    since = last_push.get(event)
-    if isinstance(since, (int, float)) and not isinstance(since, bool):
-        if now - since < debounce_secs:
-            return False, new
     # Merge, not replace: a key the fingerprint no longer carries stays, so a
     # deletion never signals and a later recreate does.
     new["records"] = {**records, **fingerprint}

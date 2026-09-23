@@ -61,10 +61,6 @@ def main() -> int:
         # outright rather than half-processing this workspace.
         if not core.valid_task_id(task_id):
             return 0
-        # Read the prior hint BEFORE appending this one: append_event is a
-        # single O_APPEND write, so "the last record" is unambiguous only
-        # under read-before-append.
-        prior = core.prior_hint(rd, ws, task_id)
         try:
             core.append_event(rd, ws, event, task_id=task_id, role=role)
         except Exception:  # noqa: BLE001 -- never block the worker
@@ -75,7 +71,7 @@ def main() -> int:
         try:
             marker = core.read_wake_marker(rd, ws)
             push, marker = core.wake_decision(
-                marker, event, core.record_fingerprint(rd, task_id), prior, time.time())
+                marker, event, core.record_fingerprint(rd, task_id), time.time())
             core.write_wake_marker(rd, ws, marker)
         except Exception:  # noqa: BLE001
             push = False
