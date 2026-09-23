@@ -115,8 +115,8 @@ link_claude_config_dir "$HOME/.claude"
 
 reattribute_git_identity || true
 
-# No plugin is installed in cloud sessions any more (Superpowers and ECC are
-# retired). --no-plugins is still accepted for existing callers.
+# No plugin is installed in cloud sessions any more (Superpowers and ECC are retired).
+# --no-plugins is still accepted for existing callers.
 if [ "$NO_PLUGINS" -eq 1 ]; then
   echo "[bootstrap-cloud] --no-plugins: nothing to skip (no plugins are installed)."
 fi

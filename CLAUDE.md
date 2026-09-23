@@ -17,36 +17,23 @@ reload                      # Reload ZSH config (alias)
 setup-claude                # Add CLAUDE.md/.claude to .git/info/exclude in any repo
 ```
 
-**Cloud sessions:** claude.ai/code containers are ephemeral. The Claude layer is
-restored two ways, both first-session-safe (no next-session lag):
+**Cloud sessions:** claude.ai/code containers are ephemeral. No plugin is
+declared or installed in a cloud session any more (Superpowers is retired,
+2026-09, like ECC). The repo SessionStart hook
+(`.claude/hooks/session-start.sh`, gated on `CLAUDE_CODE_REMOTE`, matcher
+`startup|resume`) runs `bootstrap-cloud.sh` to symlink the `~/.claude` assets,
+reconcile `settings.json` from the template, and set the personal git author.
 
-- **Plugins** — the repo's committed `.claude/settings.json` declares
-  Superpowers in `enabledPlugins` and pins its marketplace by git URL in
-  `extraKnownMarketplaces`. The platform installs declared plugins natively at
-  session start (pre-launch, from the cloned repo), so they are live on session 1
-  with zero per-environment config. This is the primary mechanism.
-- **Assets, settings, git identity** — the repo SessionStart hook
-  (`.claude/hooks/session-start.sh`, gated on `CLAUDE_CODE_REMOTE`, matcher
-  `startup|resume`) runs `bootstrap-cloud.sh` to symlink the `~/.claude` assets,
-  reconcile `settings.json` from the template, and set the personal git author.
-  It also self-heals the plugin install if the native declaration is ever missed.
-
-Optional belt-and-suspenders (e.g. a repo that does NOT commit the declaration,
-or to pre-snapshot a slow install): paste this into the cloud environment's
-**Setup script** field — pre-launch and filesystem-snapshotted; the repo is
-public, so no GitHub grant is needed:
+Optional belt-and-suspenders (e.g. to pre-snapshot the install): paste this
+into the cloud environment's **Setup script** field — pre-launch and
+filesystem-snapshotted; the repo is public, so no GitHub grant is needed:
 
 ```bash
 git clone https://github.com/taloncjones/dotfiles "$HOME/dotfiles" 2>/dev/null || git -C "$HOME/dotfiles" pull
 "$HOME/dotfiles/bootstrap-cloud.sh"
 ```
 
-Placement is load-bearing: plugins load at Claude Code launch, so only pre-launch
-placements (the native `.claude/settings.json` declaration, or the Setup script)
-make them usable on session 1. The SessionStart hook runs _after_ launch, so a
-plugin it installs is not usable until the NEXT session — which is why it is the
-self-heal, not the primary path. Custom base images are unsupported; the snapshot
-is the equivalent.
+Custom base images are unsupported; the snapshot is the equivalent.
 
 ## Architecture
 
@@ -73,7 +60,7 @@ is the equivalent.
 - `bin/herdr-zed-attach` -> `~/bin/herdr-zed-attach` -- run from a Zed Terminal Thread (`agent: new terminal thread`), resolves the herdr agent whose `cwd` or `foreground_cwd` is at or under the current git toplevel from `herdr agent list` and execs `herdr agent attach <pane_id>`; lists candidates on stderr and exits 1 (none) or 2 (several); an explicit pane ID or agent name argument bypasses resolution; no account routing because attaching joins an already-bound pane; the sidebar label does not follow the agent's title and `agent.terminal_init_command` stays unused (tested by `bin/herdr-zed-attach.test.sh`)
 - `vscode/` -> VS Code settings/keybindings
 - `zed/` -> `~/.config/zed/settings.json` (per-file link, vscode pattern; the link must target the MAIN checkout's `zed/settings.json`, never a worktree copy, because worktrees die at merge -- `update` after merge re-links it). The `agent_servers` block defines three Claude entries: `claude-personal`, `claude-work`, and `claude-acp`, a compat alias for the personal account that stays until every saved Zed space created under that name is migrated (Zed resolves saved spaces by agent name; removing the entry broke every saved space on 2026-09-19). Each entry launches `~/bin/zed-claude-agent <personal|work>` (linked from `bin/`) and unsets `ANTHROPIC_API_KEY` -- Zed's env values are passed literally, so account routing cannot live in this file; the command field IS tilde-expanded, which is why the wrapper does the work. The wrapper resolves the account through `claude/skills/lib/workflow_context.py`, the same provider the `claude()` shell wrapper uses, keyed on the project root Zed passes as the adapter's cwd, and applies the returned `launch_env`; when the resolved account disagrees with the entry's argument it exits 3 with a message instead of launching, which is how a work entry behaves on a machine with no work account. Never reintroduce a hardcoded account-to-directory map: setting `CLAUDE_CONFIG_DIR` selects a separate authentication namespace even when it names the default directory (every explicit value gets its own `Claude Code-credentials-<hash>` Keychain item), so the personal account MUST launch with it unset, as `workflow_context.py`'s own docstring requires. Pinning it to `$HOME/.claude` put every Zed thread in a namespace that had never been logged in, surfacing as `OAuth session expired and could not be refreshed` (2026-09-20). A machine-local `~/.claude/.credentials.json` is not the remedy: a copied token is a static snapshot that cannot rotate, so it expires again -- never commit credentials or put a token in this tracked file. `themes/`, `prompts/`, and the rest of `~/.config/zed/` stay machine-local.
-- `claude/` -> `~/.claude/` AND `~/.claude-work/` (CLAUDE.md, commands, agents, hooks, skills, rules). Two config dirs, one asset source: `~/.claude` is the personal Claude account (default -- desktop app and unwrapped launches), `~/.claude-work` is the work account, selected by the `claude()` wrapper in `zsh/claude-account.zsh` whenever claude is launched under `~/Git/work` (`claude --personal` or a pre-set `CLAUDE_CONFIG_DIR` overrides; `claude-account` shows the routing). A linked worktree of a repo under `~/Git/work` (herdr, EnterWorktree, `.worktrees/`) routes to work too, resolved through the shared canonical repository/account provider; `account_guard.py` uses the same ownership metadata while permitting personal quota. Herd dispatch explicitly binds the selected account and runtime environment in the server-spawned pane, including unsetting the default personal Claude directory. Each dir keeps its own machine-local `settings.json` (seeded from the template; both drift-checked by `claude/hooks/claude-hooks.test.sh`) and its own plugin installs. `superpowers-install` maintains Claude and Codex independently; `bootstrap` and every `update` run both through `install/common/claude-plugins.sh`. `claude/agents/` is whitelist-tracked (committed `claude/agents/.gitignore`: everything ignored except named personas) because installers (historically the retired ECC full install) wrote vendored agent files into it through the symlink; `claude/agents/director.md` is the tracked `claude --agent director` entrypoint for the standing per-repo herdr director (the role's user-facing name; the `tier: "launcher"` schema value is unchanged).
+- `claude/` -> `~/.claude/` AND `~/.claude-work/` (CLAUDE.md, commands, agents, hooks, skills, rules). Two config dirs, one asset source: `~/.claude` is the personal Claude account (default -- desktop app and unwrapped launches), `~/.claude-work` is the work account, selected by the `claude()` wrapper in `zsh/claude-account.zsh` whenever claude is launched under `~/Git/work` (`claude --personal` or a pre-set `CLAUDE_CONFIG_DIR` overrides; `claude-account` shows the routing). A linked worktree of a repo under `~/Git/work` (herdr, EnterWorktree, `.worktrees/`) routes to work too, resolved through the shared canonical repository/account provider; `account_guard.py` uses the same ownership metadata while permitting personal quota. Herd dispatch explicitly binds the selected account and runtime environment in the server-spawned pane, including unsetting the default personal Claude directory. Each dir keeps its own machine-local `settings.json` (seeded from the template; both drift-checked by `claude/hooks/claude-hooks.test.sh`) and its own plugin installs, though no plugin installs any more since the retired Superpowers install path (like the retired ECC's) is gone; `bootstrap` and every `update` run `install/common/claude-plugins.sh`, which now only keeps retired plugin copies disabled. `claude/agents/` is whitelist-tracked (committed `claude/agents/.gitignore`: everything ignored except named personas) because installers (historically the retired ECC full install) wrote vendored agent files into it through the symlink; `claude/agents/director.md` is the tracked `claude --agent director` entrypoint for the standing per-repo herdr director (the role's user-facing name; the `tier: "launcher"` schema value is unchanged).
 - `claude/rules/` -> `~/.claude*/rules`. Claude Code natively auto-loads every `.md` under `~/.claude/rules/` at launch (verified live in a cloud session, 2026-07-02): files with a `paths:` frontmatter load only when matching files are in context, files without one load every session. Only our own always-on rules under `claude/rules/personal/` are tracked (e.g. `claude-prompting.md`, the cross-model model-tuning layer, and `team-roles.md`, the always-on director/lead/worker/reviewer contract; the dir serves both config dirs via the `claude/rules` symlink). Language dirs left in `claude/rules/` by the retired ECC rules vendoring are NOT inert -- they auto-load per the semantics above -- so delete any that remain (`claude/rules/.gitignore` keeps them uncommitted).
 - `claude/operating-principles.md` -> `~/.claude*/` (both config dirs). `claude/CLAUDE.md` `@import`s it into every session as standing, model-agnostic engineering discipline. Linked by `link_claude_config_dir`. (Per-model audit deep-dives `Fable5.md`/`Opus4.md`, if present locally, are gitignored and never committed — they hold private session content.)
 - `codex/` -> `~/.codex/` (AGENTS.md, hooks)
@@ -91,7 +78,7 @@ is the equivalent.
 
 **Codex plugin integration:**
 
-Superpowers uses native, independent plugin installations in both runtimes (Claude: `superpowers@claude-plugins-official` in both account config dirs; Codex: a self-contained staged copy installed as `superpowers@dotfiles-workflows`). ECC is retired (2026-09): the settings reconcile forces `ecc@ecc` off and prunes its env keys, the Codex dedupe disables its copies, and `ecc-uninstall` removes what is on disk, including legacy vendored agents and commands. GateGuard's destructive-Bash gate went with it; the auto-mode classifier plus `rm_guard.py`, `push_guard.py`, and `git_remote_guard.py` remain. If a destructive git incident occurs, add template `ask` rules for the specific forms. Never copy a personal handoff into a work account's state. Full reconciliation mechanics (`codex-surfaces.py`, `codex-roles.py`, shared skill linking, staging provenance, `--focus` mode, restart caveats): load the `dotfiles-architecture-contract` skill.
+ECC is retired (2026-09): the settings reconcile forces `ecc@ecc` off and prunes its env keys, the Codex dedupe disables its copies, and `ecc-uninstall` removes what is on disk, including legacy vendored agents and commands. Superpowers is retired too (2026-09), the same way: the settings reconcile forces `superpowers@claude-plugins-official` off, the Codex dedupe disables its copies (`superpowers@dotfiles-workflows`, `superpowers@openai-curated`), and `superpowers-uninstall` removes what is on disk. GateGuard's destructive-Bash gate went with ECC; the auto-mode classifier plus `rm_guard.py`, `push_guard.py`, and `git_remote_guard.py` remain. If a destructive git incident occurs, add template `ask` rules for the specific forms. Never copy a personal handoff into a work account's state. Full reconciliation mechanics (`codex-surfaces.py`, `codex-roles.py`, shared skill linking, `--focus` mode, restart caveats): load the `dotfiles-architecture-contract` skill.
 
 **Herdr (agent terminal multiplexer):**
 

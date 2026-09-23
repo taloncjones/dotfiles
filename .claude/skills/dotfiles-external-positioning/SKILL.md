@@ -1,6 +1,6 @@
 ---
 name: dotfiles-external-positioning
-description: Load BEFORE any action that touches the public surface of this repo -- committing new file types, vendoring or deriving from upstream code, adding a dependency or plugin, publishing/README changes, or deciding whether something belongs in this repo at all. Covers what may NEVER land in the tree (secrets, employer config, 1Password vault names, per-model audit files), the enforcement stack (block_secrets hooks, retired-ECC-derived pre-commit scan, public-safety.test.sh, .gitignore), MIT/NOTICE licensing duties, the upstream trust map (Superpowers, the retired ECC, the compromised GSD original), and the public/private split. Trigger phrases -- "is this safe to commit", "can this go in the repo", "add this upstream tool", "update NOTICE", "license question", "is the repo safe to be public", "should this be private". NOT for the mechanics of committing (dotfiles-change-control), running the test suites (dotfiles-validation-and-qa), or why a hook blocked you (dotfiles-debugging-playbook).
+description: Load BEFORE any action that touches the public surface of this repo -- committing new file types, vendoring or deriving from upstream code, adding a dependency or plugin, publishing/README changes, or deciding whether something belongs in this repo at all. Covers what may NEVER land in the tree (secrets, employer config, 1Password vault names, per-model audit files), the enforcement stack (block_secrets hooks, retired-ECC-derived pre-commit scan, public-safety.test.sh, .gitignore), MIT/NOTICE licensing duties, the upstream trust map (the retired Superpowers, the retired ECC, the compromised GSD original), and the public/private split. Trigger phrases -- "is this safe to commit", "can this go in the repo", "add this upstream tool", "update NOTICE", "license question", "is the repo safe to be public", "should this be private". NOT for the mechanics of committing (dotfiles-change-control), running the test suites (dotfiles-validation-and-qa), or why a hook blocked you (dotfiles-debugging-playbook).
 ---
 
 # Dotfiles External Positioning
@@ -100,21 +100,21 @@ When vendoring or deriving from any upstream, in the same PR:
 
 ## Upstream ecosystem map
 
-| Upstream                                             | Pinned source                                                                                                                                    | Trust posture                                                                                                                                                                                   | Repo integration                                                                                                        |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| ECC v2 (Everything Claude Code) -- RETIRED (2026-09) | was `https://github.com/affaan-m/ECC.git` (plugin id `ecc@ecc`; the `ECC_REPO_URL` var and `ecc-install`/`ecc-sync-rules` functions are removed) | Was trusted-but-verified while installed: reproducible vendoring, plugin installed from a pinned git URL. Fully retired: no plugin, no vendored rules, `ecc-uninstall` sweeps leftovers.        | `git/hooks/pre-commit`/`pre-push` remain as tracked, adapted-and-diverged code (NOTICE-listed); everything else is gone |
-| Superpowers                                          | `https://github.com/anthropics/claude-plugins-official.git` (official marketplace, plugin id `superpowers@claude-plugins-official`)              | Trusted (Anthropic-official). `superpowers-install` registers the marketplace by git URL before installing (commit 5b799dd) rather than assuming it is pre-registered.                          | Plugin only; nothing vendored into the tree                                                                             |
-| GSD original (`get-shit-done-cc` npm)                | none -- COMPROMISED                                                                                                                              | HOSTILE. Token rug-pull with retained npm publish access. Never reinstall. `gsd-uninstall` purges the package, its npx caches, and all leftover state (retirement completed at commit 9ad4dc8). | Nothing remains installed                                                                                               |
-| GSD redux fork                                       | npm `@opengsd/get-shit-done-redux`; repo `https://github.com/open-gsd/gsd-core` per `NOTICE` (formerly `get-shit-done-redux`)                    | Retired (install path removed 2026-07-10); the package is referenced only by `gsd-uninstall`'s official-uninstaller call. Only the ported statusline survives, as tracked code.                 | `claude/statusline.js`, NOTICE-listed                                                                                   |
+| Upstream                                             | Pinned source                                                                                                                                    | Trust posture                                                                                                                                                                                   | Repo integration                                                                                                                                     |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ECC v2 (Everything Claude Code) -- RETIRED (2026-09) | was `https://github.com/affaan-m/ECC.git` (plugin id `ecc@ecc`; the `ECC_REPO_URL` var and `ecc-install`/`ecc-sync-rules` functions are removed) | Was trusted-but-verified while installed: reproducible vendoring, plugin installed from a pinned git URL. Fully retired: no plugin, no vendored rules, `ecc-uninstall` sweeps leftovers.        | `git/hooks/pre-commit`/`pre-push` remain as tracked, adapted-and-diverged code (NOTICE-listed); everything else is gone                              |
+| Superpowers -- RETIRED (2026-09)                     | was `https://github.com/anthropics/claude-plugins-official.git` (official marketplace, plugin id `superpowers@claude-plugins-official`)          | Was trusted (Anthropic-official) while installed. Fully retired: no plugin remains; `superpowers-uninstall` sweeps leftovers.                                                                   | `claude/skills/brainstorming/`, `writing-specs/`, `writing-plans/` are tracked, adapted-and-diverged code (NOTICE-listed); the plugin itself is gone |
+| GSD original (`get-shit-done-cc` npm)                | none -- COMPROMISED                                                                                                                              | HOSTILE. Token rug-pull with retained npm publish access. Never reinstall. `gsd-uninstall` purges the package, its npx caches, and all leftover state (retirement completed at commit 9ad4dc8). | Nothing remains installed                                                                                                                            |
+| GSD redux fork                                       | npm `@opengsd/get-shit-done-redux`; repo `https://github.com/open-gsd/gsd-core` per `NOTICE` (formerly `get-shit-done-redux`)                    | Retired (install path removed 2026-07-10); the package is referenced only by `gsd-uninstall`'s official-uninstaller call. Only the ported statusline survives, as tracked code.                 | `claude/statusline.js`, NOTICE-listed                                                                                                                |
 
 ### Supply-chain rules (paid for in incidents)
 
 1. **Pin by git URL, not by name.** A marketplace/plugin name resolves through
-   mutable registries; a git URL is what you audited. Both cloud
-   (`.claude/settings.json` `extraKnownMarketplaces`) and the machine
-   installer (the official-marketplace URL in `superpowers-install`; the
-   retired ECC's `ECC_REPO_URL` did the same before removal) already do this
-   -- keep it that way.
+   mutable registries; a git URL is what you audited. Cloud
+   (`.claude/settings.json` `extraKnownMarketplaces`) still pins this way; the
+   retired Superpowers and ECC install paths did too, via a pinned
+   official-marketplace URL (the retired ECC's `ECC_REPO_URL` did the same
+   before removal) -- keep any future plugin install to this same pattern.
 2. **Prefer reproducible, auditable artifacts over trusting installers.** A
    pinned git clone holds bytes you can diff; an installer runs code you did
    not read. (The retired ECC's `ecc-sync-rules` vendoring copy was itself
@@ -166,10 +166,11 @@ public credibility is the install path. Cheapest proof: a fresh claude.ai/code
 cloud container (ephemeral, clean clone every session).
 
 ```bash
-# In a fresh cloud container the platform clones the repo and the committed
-# .claude/settings.json declares the plugins; verify the claim chain held:
-claude plugins list                          # expect superpowers@claude-plugins-official (ECC retired 2026-09)
-cat ~/.claude/plugins/installed_plugins.json # ground truth, not CLI output
+# In a fresh cloud container the platform clones the repo; no plugin is
+# declared any more (Superpowers and ECC are both retired), so verify the
+# assets/settings/identity claim chain held instead:
+readlink ~/.claude/CLAUDE.md                 # points into the cloned checkout
+cat ~/.claude/plugins/installed_plugins.json # ground truth: expect no entries
 bin/dotfiles-tests                           # all suites green on a clean clone
 ```
 
