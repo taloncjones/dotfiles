@@ -799,7 +799,7 @@ hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"
 hook_case "hook: three consecutive Stops with no record change push zero wakes" REGISTER "1" '{"hook_event_name":"Stop"}' stopped nopush
 hook_case "hook: an unsafe task_id in the index is a no-op" REGISTER_BAD_TASK "1" '{"hook_event_name":"Stop"}' none
 
-check "hook: a Stop after a done.json write pushes exactly one wake" <<PY
+check "hook: a done.json change with no owner records last_delivery and stays unadvanced" <<PY
 $LOAD
 import subprocess
 outdir = tempfile.mkdtemp()
@@ -811,13 +811,68 @@ env = dict(os.environ, CLAUDE_CONFIG_DIR=outdir, HERDR_ENV="1", HERDR_WORKSPACE_
 def run():
     return subprocess.run(["claude/hooks/herdr_worker_status.py"],
                           input=b'{"hook_event_name":"Stop"}', env=env, capture_output=True)
-run(); run(); run()
-marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
-assert "stopped" not in marker["last_push"], "bare Stops must post nothing: %r" % (marker,)
+run()
+assert not os.path.exists(os.path.join(rd, "workspaces", "w1.wake.json")), "no push, no write"
 open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write('{"outcome":"completed"}')
 run()
 marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
-assert "stopped" in marker["last_push"], "a done.json write must post exactly one wake"
+assert marker["v"] == 2 and marker["records"] == {}, marker
+assert marker["last_delivery"]["reason"] == "no-owner", marker
+run()
+again = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert again["last_delivery"]["reason"] == "no-owner" and again["records"] == {}, again
+PY
+
+check "deliver_wake: retries transient failures twice, never raises" <<PY
+$LOAD
+calls = []; sleeps = []
+c._sleep = sleeps.append
+def fake(results):
+    it = iter(results)
+    def post(rd, ws, event, own_socket=""):
+        calls.append(event); return next(it)
+    return post
+c.post_wake = fake(["connect-failed", "connect-failed", "sent"])
+assert c.deliver_wake("/r", "w1", "stopped") == "sent" and len(calls) == 3 and sleeps == [0.25, 0.75]
+calls.clear(); sleeps.clear()
+c.post_wake = fake(["connect-failed"] * 3)
+assert c.deliver_wake("/r", "w1", "stopped") == "connect-failed" and len(calls) == 3
+calls.clear()
+c.post_wake = fake(["stale-heartbeat"])
+assert c.deliver_wake("/r", "w1", "stopped") == "stale-heartbeat" and len(calls) == 1
+def boom(*a, **k): raise RuntimeError("x")
+c.post_wake = boom
+assert c.deliver_wake("/r", "w1", "stopped") == "send-failed"
+PY
+
+check "wake_for_event: sent advances v2 records; failure keeps them and retries next call" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+c._sleep = lambda s: None
+c.post_wake = lambda *a, **k: "connect-failed"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=10.0) == "connect-failed"
+m = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert m["v"] == 2 and m["records"] == {} and m["last_delivery"]["reason"] == "connect-failed", m
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=20.0) == "sent"
+m = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert m["records"] and m["last_delivery"]["reason"] == "sent", m
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=30.0) is None, "same fingerprint"
+PY
+
+check "wake_for_event: a v1 marker whose records match is ignored and rewritten as v2" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+fp = c.record_fingerprint(rd, "PROJ-1")
+json.dump({"v": 1, "records": fp, "last_push": {}},
+          open(os.path.join(rd, "workspaces", "w1.wake.json"), "w"))
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=1.0) == "sent"
+assert json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))["v"] == 2
 PY
 
 # --- model discovery: write-capabilities / resolve-model / disable-model / classify-probe ---

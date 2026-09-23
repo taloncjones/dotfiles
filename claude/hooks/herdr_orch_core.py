@@ -1019,6 +1019,44 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
             pass
 
 
+WAKE_RETRY_DELAYS = (0.25, 0.75)
+_TRANSIENT_WAKE_REASONS = frozenset({"connect-failed", "send-failed"})
+_sleep = time.sleep   # test seam
+
+
+def deliver_wake(rd, ws, event, own_socket="") -> str:
+    """post_wake with two bounded retries on transient failures. Never raises."""
+    reason = "send-failed"
+    for delay in (0.0, *WAKE_RETRY_DELAYS):
+        if delay:
+            _sleep(delay)
+        try:
+            reason = post_wake(rd, ws, event, own_socket=own_socket)
+        except Exception:  # noqa: BLE001 -- a hook must never raise
+            reason = "send-failed"
+        if reason not in _TRANSIENT_WAKE_REASONS:
+            return reason
+    return reason
+
+
+def wake_for_event(rd, ws, task_id, event, own_socket="", now=None):
+    """Decide, deliver, then write the marker once. None when no push was due.
+
+    The marker's `records` advance only on `sent`, so an undelivered record
+    change is retried by the next call and stays visible to the backstop.
+    """
+    now = time.time() if now is None else now
+    prior = read_wake_marker(rd, ws)
+    push, advanced = wake_decision(prior, event, record_fingerprint(rd, task_id), now)
+    if not push:
+        return None
+    reason = deliver_wake(rd, ws, event, own_socket)
+    base = advanced if reason == "sent" else {**prior, "v": 2}
+    write_wake_marker(rd, ws, {**base, "last_delivery": {
+        "event": event, "reason": reason, "ts": int(now)}})
+    return reason
+
+
 _RECORD_SUFFIXES = (".done.json", ".review.json")
 
 

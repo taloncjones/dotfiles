@@ -6,15 +6,14 @@ index the orchestrator placed under STATE_ROOT. Derives all paths from the fixed
 state root; never trusts a payload path. Notifications map to `blocked` only for
 permission/input-needed types. Fails OPEN (always exit 0).
 Appends the lifecycle hint (core.append_event) on every Stop and every
-blocking Notification. Pushes one wake line to the owning orchestrator's inbox
-socket ONLY when a completion record for this task changed, or on a transition
-into `blocked`.
+blocking Notification. Pushes one wake line to the owning orchestrator's
+inbox socket on every blocking notification and every completion-record
+change, then records the delivery.
 """
 
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -65,22 +64,12 @@ def main() -> int:
             core.append_event(rd, ws, event, task_id=task_id, role=role)
         except Exception:  # noqa: BLE001 -- never block the worker
             pass
-        # The push is conditional; the hint above never is. A wake costs the
-        # director a check-in, so it is spent only on a completion record or
-        # a transition into blocked.
+        # Deliver first, record after: the marker advances only on a sent push.
         try:
-            marker = core.read_wake_marker(rd, ws)
-            push, marker = core.wake_decision(
-                marker, event, core.record_fingerprint(rd, task_id), time.time())
-            core.write_wake_marker(rd, ws, marker)
+            core.wake_for_event(rd, ws, task_id, event,
+                                own_socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""))
         except Exception:  # noqa: BLE001
-            push = False
-        if push:
-            try:
-                core.post_wake(rd, ws, event,
-                               own_socket=os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", ""))
-            except Exception:  # noqa: BLE001
-                pass
+            pass
         break
     return 0
 
