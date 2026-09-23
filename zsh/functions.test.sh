@@ -416,6 +416,33 @@ else
     fail "ecc-uninstall keeps tracked, symlinked and non-matching files"
 fi
 
+# 6b-nobareglobqual. The sweep's globs must resolve deterministically
+# regardless of the calling shell's bareglobqual setting: a shell that has
+# turned it off (e.g. after `reload`) must not hard-error out of the glob
+# qualifiers and abort the whole sweep.
+SWEEP_REPO_NBG="$TMP/sweep-dotfiles-nbg"
+SWEEP_ECC_NBG="$TMP/sweep-ecc-nbg"
+SWEEP_STATE_NBG="$TMP/sweep-state-nbg"
+mkdir -p "$SWEEP_REPO_NBG/claude/agents" "$SWEEP_ECC_NBG/agents"
+git -C "$SWEEP_REPO_NBG" init -q
+printf 'upstream\n' >"$SWEEP_ECC_NBG/agents/planner.md"
+printf 'vendored\n' >"$SWEEP_REPO_NBG/claude/agents/planner.md"
+if run_case broken "setopt nobareglobqual
+    DOTFILEDIR='$SWEEP_REPO_NBG'
+    ECC_REPO_DIR='$SWEEP_ECC_NBG'
+    CLAUDE_WORK_CONFIG_DIR='$TMP/sweep-no-work-nbg'
+    CODEX_WORKFLOW_MARKETPLACE_DIR='$TMP/sweep-codex-stage-nbg'
+    XDG_STATE_HOME='$SWEEP_STATE_NBG'
+    _codex_remove_plugin() { return 0; }
+    ecc-uninstall" &&
+   [ ! -e "$SWEEP_REPO_NBG/claude/agents/planner.md" ] &&
+   [ "$(cat "$SWEEP_STATE_NBG"/dotfiles/ecc-retired-*/claude/agents/planner.md)" = vendored ] &&
+   [ ! -e "$SWEEP_ECC_NBG" ]; then
+    pass "ecc-uninstall sweep succeeds under nobareglobqual"
+else
+    fail "ecc-uninstall sweep succeeds under nobareglobqual"
+fi
+
 # 6c. Without the checkout there is nothing to match against: list, move nothing.
 printf 'vendored\n' >"$SWEEP_REPO/claude/agents/architect.md"
 if run_case broken "$SWEEP_SETUP ECC_REPO_DIR='$TMP/sweep-missing-ecc'; ecc-uninstall" &&

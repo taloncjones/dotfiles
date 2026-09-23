@@ -1,6 +1,6 @@
 ---
 name: dotfiles-architecture-contract
-description: Load BEFORE proposing any structural or design change to the dotfiles repo, and whenever you catch yourself asking "why is it built this way", "can I just track this file", "why is settings.json not symlinked", "why two config dirs", "why is this untracked", or "can the SessionStart hook install the plugin". Documents the eight load-bearing design decisions with rationale, the invariants that must hold, and the known weak points, plus the Codex plugin integration reference (codex-surfaces.py / codex-roles.py reconciliation, staging provenance, focus mode). NOT for making/committing a change (dotfiles-change-control), diagnosing a breakage (dotfiles-debugging-playbook), or the blow-by-blow incident history (dotfiles-failure-archaeology).
+description: Load BEFORE proposing any structural or design change to the dotfiles repo, and whenever you catch yourself asking "why is it built this way", "can I just track this file", "why is settings.json not symlinked", "why two config dirs", "why is this untracked", or "can the SessionStart hook install the plugin". Documents the eight load-bearing design decisions with rationale, the invariants that must hold, and the known weak points, plus the Codex plugin integration reference (codex-surfaces.py / codex-roles.py reconciliation, staging provenance). NOT for making/committing a change (dotfiles-change-control), diagnosing a breakage (dotfiles-debugging-playbook), or the blow-by-blow incident history (dotfiles-failure-archaeology).
 ---
 
 # Dotfiles Architecture Contract
@@ -281,9 +281,11 @@ git-hook surfaces. `install/common/link.sh` continues to sweep stale direct
 skill/agent mirrors from older installs.
 
 `install/common/codex-surfaces.py` reconciles native discovery during install
-and update. It disables proven duplicate skill copies and incompatible or inert
-Claude-only imports of `security-guidance`, `code-review`, and
-`code-simplifier`; custom or compatible implementations are preserved. It
+and update. The surviving `legacy-copy`/`legacy-command` blocks it wrote for
+the retired ECC's standalone skill copies are kept disabled verbatim; nothing
+regenerates them. It also disables incompatible or inert Claude-only imports
+of `security-guidance`, `code-review`, and `code-simplifier`; custom or
+compatible implementations are preserved. It
 supplies `skills.max_context_tokens = 10000` only when unset; an explicit
 budget wins. The helper preserves skill files and unrelated configuration.
 Unsupported TOML layouts fail without being rewritten. Optional installer
@@ -314,12 +316,14 @@ could contain a current upstream payload; verify installed bytes/provenance
 before declaring anything stale. Automatic Plan Canvas session/stop hooks (an ECC-only feature) are gone along with the rest of the retired ECC.
 
 Run the helper with `--check` to preview changes or `--apply` to write them.
-The old `--focus --apply` flag opted into the retired ECC's core skill catalog in `codex/ecc-skills.txt` (also removed); subsequent updates
-retained that choice. Explicit skill overrides are preserved. Any leftover
-focused-discovery `[[skills.config]]` blocks marked with the retired ECC's `# dotfiles-managed: ecc-focus` should be removed by hand, then reconcile
-without `--focus`. Proven duplicates remain disabled. The compatibility
-checks run again on later updates; simply re-enabling an incompatible import
-does not opt it out.
+The old `--focus --apply` flag, which opted into the retired ECC's core skill
+catalog in `codex/ecc-skills.txt`, no longer exists; there is no focused-
+discovery mode. Explicit skill overrides are preserved. Leftover
+`[[skills.config]]` blocks marked `# dotfiles-managed: ecc-focus` from that
+retired mode are cleared automatically by `clear_managed_disabled` on every
+repair run; there is no manual removal step. The `legacy-copy`/`legacy-command`
+blocks remain disabled. The compatibility checks run again on later updates;
+simply re-enabling an incompatible import does not opt it out.
 
 Restart Claude or Codex after changing plugin or hook configuration. A running
 session may retain old registrations, including across compaction. Verify a

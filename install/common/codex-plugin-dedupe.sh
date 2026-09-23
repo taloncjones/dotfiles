@@ -100,8 +100,7 @@ dedupe_codex_workflow_plugins() {
   fi
 
   # Keep repo-owned compatibility repairs in the same install/update lifecycle.
-  # Focused discovery is opt-in; the helper remembers a previously adopted
-  # catalog and never removes skill files or rewrites Claude configuration.
+  # The helper never removes skill files or rewrites Claude configuration.
   local surface_helper="$DOTFILEDIR/install/common/codex-surfaces.py"
   if [ -f "$surface_helper" ]; then
     if command -v uv >/dev/null 2>&1; then

@@ -395,7 +395,7 @@ function _claude_ensure_plugin() {
 }
 
 # --- Codex plugin lifecycle ---
-# Codex plugins are global to CODEX_HOME. ECC and Superpowers are staged into a
+# Codex plugins are global to CODEX_HOME. Superpowers is staged into a
 # dedicated local marketplace so every manifest reference is copied into the
 # plugin cache without depending on account-provisioned marketplaces.
 CODEX_WORKFLOW_MARKETPLACE_DIR="${CODEX_WORKFLOW_MARKETPLACE_DIR:-$HOME/.local/share/dotfiles/codex-workflows}"
@@ -783,6 +783,7 @@ unset _ecc_fn
 # most files since, so content matching would miss them. Tracked files and
 # symlinks are never touched. Returns 1 on any git or move failure.
 function _ecc_sweep_legacy_vendored() {
+    emulate -L zsh
     local ecc_dir="$1" pair target origin f rel rc backup
     local -aU candidates
     git -C "$DOTFILEDIR" rev-parse --is-inside-work-tree &>/dev/null \
