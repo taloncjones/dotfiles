@@ -1869,9 +1869,50 @@ def owner_transaction(rd, session=None, fence=None, context=None, expected_slug=
     )
 
 
+def _is_ancestor(pid) -> bool:
+    """True when pid is a strict ancestor of this process. Any ps failure
+    reads as False, so same-process adoption fails closed."""
+    if type(pid) is not int or pid <= 1:
+        return False
+    cur = os.getppid()
+    for _ in range(32):
+        if cur == pid:
+            return True
+        if cur <= 1:
+            return False
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(cur)],
+                                 capture_output=True, text=True, timeout=5, check=False)
+            if out.returncode != 0:
+                return False
+            cur = int(out.stdout.strip())
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return False
+    return False
+
+
+class NotLeaseHolder(ValueError):
+    """resume-owner's precondition failed: this process holds no lease."""
+
+
+def _resume_eligible(cur, require_pid, adopt_pid, account_id) -> bool:
+    """True when the shared owner record cur is this Claude process's own
+    launcher lease: same pid (proven an ancestor), account, runtime, tier.
+    Freshness is not required; a stale lease that passes is ours."""
+    return (
+        cur is not None
+        and cur.get("pid") == require_pid
+        and adopt_pid == require_pid
+        and cur.get("account_id") == account_id
+        and cur.get("runtime", "claude") == "claude"
+        and cur.get("thread_id") is None
+        and cur.get("control_tier", "launcher") == "launcher"
+    )
+
+
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
                 context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
-                control_tier="launcher", workspace_root=None, binding_id=None):
+                control_tier="launcher", workspace_root=None, binding_id=None, require_pid=None):
     sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
     if reason == "ok" and int(pid) != sock_pid:
         print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; using {sock_pid}", file=sys.stderr)
@@ -1879,6 +1920,10 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
         print(f"[WARNING] messaging socket ignored ({reason}): {messaging_socket}", file=sys.stderr)
     if control_tier not in ("launcher", "lead"):
         raise ValueError("invalid owner control_tier")
+    if require_pid is not None and control_tier != "launcher":
+        raise ValueError("require_pid is launcher-only")
+    adopt_pid = (sock_pid if control_tier == "launcher" and reason == "ok"
+                 and _is_ancestor(sock_pid) else None)
     if control_tier == "launcher":
         if workspace_root is not None or binding_id is not None:
             raise ValueError("workspace_root/binding are only valid for a lead claim")
@@ -1999,13 +2044,84 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                 lease = tx.lead_read(workspace_root)
                 write_json_atomic(mirror, dict(lease, messaging_socket=sock))
             return fence
+        if require_pid is not None and not _resume_eligible(
+            tx.current, require_pid, adopt_pid, tx.account_id
+        ):
+            raise NotLeaseHolder("no lease held by this process")
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
-                         runtime=runtime, thread_id=thread_id)
+                         runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
             write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))
         return fence
+
+
+# Whole-token subcommand: "watch-pids" (this scan's own verb) must not match.
+_WATCH_CMD_RE = re.compile(r"herdr_orch_core\.py\s+watch(\s|$)")
+
+
+def watch_state(root_pid, slug):
+    """([pids], "live") for every core watch on slug whose ancestor chain
+    reaches root_pid; ([], "none") when there is none; ([], "unknown") when
+    ps fails. Read-only."""
+    try:
+        out = subprocess.run(["ps", "-Ao", "pid=,ppid=,command="],
+                             capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return [], "unknown"
+    if out.returncode != 0:
+        return [], "unknown"
+    parent, command = {}, {}
+    for line in out.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            parent[int(parts[0])] = int(parts[1])
+            command[int(parts[0])] = parts[2]
+    slug_re = re.compile(r"--repo-slug\s+" + re.escape(slug) + r"(\s|$)")
+    live = []
+    for pid, cmd in sorted(command.items()):
+        # Only the python process itself: the Monitor's zsh -c wrapper carries
+        # the same text in its own command line and would double-count.
+        # Lower-cased: macOS framework builds run as .../MacOS/Python.
+        if not os.path.basename(cmd.split()[0]).lower().startswith("python"):
+            continue
+        if not _WATCH_CMD_RE.search(cmd) or not slug_re.search(cmd):
+            continue
+        cur = parent.get(pid)
+        for _ in range(64):
+            if cur is None or cur <= 1:
+                break
+            if cur == root_pid:
+                live.append(pid)
+                break
+            cur = parent.get(cur)
+    return live, ("live" if live else "none")
+
+
+def rollover_warning(reason) -> str:
+    return (f"[WARNING] herdr director rollover: lease NOT re-established ({reason}).\n"
+            "Run the herdr-orchestration section-1 preflight; if it reports BUSY, stop\n"
+            "and ask the human (takeover is a human decision).")
+
+
+def rollover_info(slug, session, fence, watch) -> str:
+    pids, wstate = watch
+    lines = ["[INFO] herdr director rollover: lease re-established in place.",
+             f"repo_slug={slug} session={session} fence={fence}"]
+    if wstate == "live":
+        lines += [f"watch: live (pids {','.join(map(str, pids))}); do not arm another. Its Monitor task id",
+                  "did not survive /clear; on yielding ownership, stop it from a fresh scan:",
+                  f'kill $(python3 "$CORE" watch-pids --repo-slug {slug} '
+                  '--messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET")']
+    elif wstate == "none":
+        lines.append("watch: none found; arm it per herdr-orchestration section 1 step 6")
+    else:
+        lines.append("watch: unknown (ps failed); arm it per herdr-orchestration section 1 step 6")
+    lines += [f"Next: load the herdr-orchestration skill. Use fence {fence} and session {session}.",
+              "Skip the initial-claim-only steps (workspace label, dashboard --open) and run",
+              "a section-4 check-in before any dispatch."]
+    return "\n".join(lines)
 
 
 def check_fence(rd, session_id, fence) -> bool:
@@ -2895,6 +3011,39 @@ def _fenced_scoped(ns):
         yield rd, base
 
 
+def _resume_owner(ns) -> int:
+    """resume-owner: re-claim a lease this Claude process already holds.
+    Exit 0 INFO, 1 WARNING, 3 silent (not the lease holder)."""
+    sock, sock_pid, reason = validate_messaging_socket(ns.messaging_socket)
+    if reason != "ok":
+        return 3
+    try:
+        context = repository_context(ns.repo_path)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 3
+    ns.repo_slug = _context_slug(context)
+    ns.runtime = "claude"
+    if not valid_repo_slug(ns.repo_slug):
+        return 3
+    select_payload(ns)
+    selected = _PAYLOAD_SELECTION.get()
+    try:
+        fence = claim_owner(repo_dir(ns.repo_slug), ns.session, socket.gethostname(), sock_pid,
+                            messaging_socket=sock, context=selected["context"],
+                            expected_slug=ns.repo_slug, runtime="claude",
+                            scope=selected["scope"], require_pid=sock_pid)
+    except NotLeaseHolder:
+        return 3
+    except (OSError, ValueError) as exc:
+        print(rollover_warning(f"error: {exc}"))
+        return 1
+    if fence is None:
+        print(rollover_warning("BUSY"))
+        return 1
+    print(rollover_info(ns.repo_slug, ns.session, fence, watch_state(sock_pid, ns.repo_slug)))
+    return 0
+
+
 def _main(argv=None) -> int:
     import argparse
 
@@ -2922,6 +3071,13 @@ def _main(argv=None) -> int:
     co.add_argument("--control-tier", choices=("launcher", "lead"), default="launcher")
     co.add_argument("--workspace-root", default=None)
     co.add_argument("--binding", default=None)
+    ro = sub.add_parser("resume-owner")
+    ro.add_argument("--repo-path", required=True)
+    ro.add_argument("--session", required=True)
+    ro.add_argument("--messaging-socket", required=True)
+    ro.add_argument("--personal", action="store_true")
+    wp = add("watch-pids")
+    wp.add_argument("--messaging-socket", required=True)
     ib = add("issue-binding", "--task-id", fenced=True)
     ib.add_argument("--workspace-root", required=True)
     ib.add_argument("--expected-session", required=True)
@@ -3066,8 +3222,20 @@ def _main(argv=None) -> int:
     vc.add_argument("--validate-only", action="store_true")
     ns = ap.parse_args(argv)
 
+    if ns.cmd == "resume-owner":
+        return _resume_owner(ns)
+
     if ns.repo_path is not None or ns.runtime is not None or ns.personal:
         select_payload(ns)
+
+    if ns.cmd == "watch-pids":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _sock, sock_pid, reason = validate_messaging_socket(ns.messaging_socket)
+        _require(reason == "ok", f"invalid messaging socket ({reason})")
+        pids, state = watch_state(sock_pid, ns.repo_slug)
+        for pid in pids:
+            print(pid)
+        return 1 if state == "unknown" else 0
 
     if ns.cmd == "claim-owner":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -5342,6 +5510,15 @@ def _main(argv=None) -> int:
     return 2
 
 
+def _context_slug(context):
+    """The repo slug for a resolved repository context (origin URL + common dir)."""
+    try:
+        remote = context_git(context["root"], "remote", "get-url", "origin")
+    except subprocess.SubprocessError:
+        remote = ""
+    return repo_slug(remote, context["common_dir"])
+
+
 def select_payload(ns):
     """Resolve context and scope, verify the slug, and pin the selection.
 
@@ -5359,11 +5536,7 @@ def select_payload(ns):
         return
     context = repository_context(ns.repo_path or os.getcwd())
     scope = account_scope(context["root"], ns.runtime or "claude", personal=ns.personal)
-    try:
-        remote = context_git(context["root"], "remote", "get-url", "origin")
-    except subprocess.SubprocessError:
-        remote = ""
-    _require(ns.repo_slug == repo_slug(remote, context["common_dir"]),
+    _require(ns.repo_slug == _context_slug(context),
              "repo-slug does not match repository identity")
     _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
 

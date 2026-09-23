@@ -708,6 +708,7 @@ class OwnerTransaction:
         thread_id=None,
         control_tier="launcher",
         workspace_root=None,
+        adopt_pid=None,
     ):
         if (
             not isinstance(session, str)
@@ -746,6 +747,7 @@ class OwnerTransaction:
                 or old.get("thread_id") != thread_id
                 or old.get("account_id") != self.account_id
             )
+            and not self._adoptable(old, adopt_pid, runtime, thread_id)
         ):
             return None
         fence = (
@@ -778,6 +780,19 @@ class OwnerTransaction:
         }
         self._owner_write(self.current)
         return fence
+
+    def _adoptable(self, old, adopt_pid, runtime, thread_id):
+        # A fresh lease held by the same Claude process under an older session
+        # id (after /clear). The caller proves process identity (ancestry).
+        return (
+            type(adopt_pid) is int
+            and old.get("pid") == adopt_pid
+            and runtime == "claude"
+            and old.get("runtime", "claude") == "claude"
+            and old.get("thread_id") == thread_id
+            and old.get("account_id") == self.account_id
+            and old.get("control_tier", "launcher") == "launcher"
+        )
 
     def refresh(self, session, fence):
         if not self.check(session, fence):
