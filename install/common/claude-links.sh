@@ -125,8 +125,11 @@ for key in [k for k in env if k.startswith("ANTHROPIC_DEFAULT_") and k.endswith(
 # where live state wins, so dropping a plugin from the template alone would
 # leave it enabled on every machine that had it. Force it off and stop
 # refreshing its marketplace; `<name>-uninstall` removes the files.
-RETIRED_PLUGINS = ("ecc@ecc",)
+RETIRED_PLUGINS = ("ecc@ecc", "superpowers@claude-plugins-official")
+# claude-plugins-official stays: other plugins come from it.
 RETIRED_MARKETPLACES = ("ecc",)
+# Only ECC carries isolation env keys, so only an installed ECC may hold them.
+RETIRED_ENV_OWNERS = ("ecc@ecc",)
 
 # Env keys of retired plugins are swept the same way, but only once the
 # plugin they isolate is actually gone from THIS config dir. Disabling
@@ -151,8 +154,8 @@ if os.path.isfile(installed_plugins_path):
     except (json.JSONDecodeError, AttributeError):
         # Unreadable installed_plugins.json: assume the plugin may still be
         # there rather than sweep isolation keys on a guess.
-        installed_names = set(RETIRED_PLUGINS)
-    retired_plugins_still_installed = bool(installed_names & set(RETIRED_PLUGINS))
+        installed_names = set(RETIRED_ENV_OWNERS)
+    retired_plugins_still_installed = bool(installed_names & set(RETIRED_ENV_OWNERS))
 if retired_plugins_still_installed:
     # A corrupt or empty dest (handled above by falling back to {}) has no
     # existing env to inherit these keys from, and the template no longer

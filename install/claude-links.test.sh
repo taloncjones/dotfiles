@@ -155,7 +155,7 @@ RETTMPL="$TMP/ret-tmpl.json"
 cat >"$RETTMPL" <<'EOF'
 {
   "env": {"TEMPLATE_KEY": "t"},
-  "enabledPlugins": {"superpowers@claude-plugins-official": true},
+  "enabledPlugins": {"sample@claude-plugins-official": true},
   "extraKnownMarketplaces": {"claude-plugins-official": {"source": {"source": "git", "url": "https://example.invalid/official.git"}}}
 }
 EOF
@@ -200,7 +200,7 @@ if jget "$RETDEST" "d['env']['ECC_SKIP_PRECOMMIT'] == '1'"; then
 else
     fail "reconcile keeps the git-hook ECC_SKIP knobs"
 fi
-if jget "$RETDEST" "d['enabledPlugins']['other@market'] is True and d['enabledPlugins']['superpowers@claude-plugins-official'] is True and set(d['extraKnownMarketplaces']) == {'other', 'claude-plugins-official'} and d['env']['MACHINE_LOCAL'] == 'keep' and d['env']['TEMPLATE_KEY'] == 't'"; then
+if jget "$RETDEST" "d['enabledPlugins']['other@market'] is True and d['enabledPlugins']['sample@claude-plugins-official'] is True and set(d['extraKnownMarketplaces']) == {'other', 'claude-plugins-official'} and d['env']['MACHINE_LOCAL'] == 'keep' and d['env']['TEMPLATE_KEY'] == 't'"; then
     pass "retirement keeps other plugins, marketplaces and env keys"
 else
     fail "retirement keeps other plugins, marketplaces and env keys"
@@ -212,6 +212,55 @@ if cmp -s "$RETDEST" "$TMP/ret-first.json"; then
 else
     fail "retirement is idempotent"
 fi
+
+# Superpowers is retired too: forced off like ECC, but its marketplace is the
+# shared official one and must survive.
+SPDEST="$TMP/sp-dest.json"
+cat >"$SPDEST" <<'EOF'
+{
+  "enabledPlugins": {"superpowers@claude-plugins-official": true, "sample@claude-plugins-official": true},
+  "extraKnownMarketplaces": {"claude-plugins-official": {"source": {"source": "git", "url": "https://example.invalid/official.git"}}}
+}
+EOF
+reconcile_claude_settings_file "$RETTMPL" "$SPDEST" "[test]" >/dev/null 2>&1
+if jget "$SPDEST" "d['enabledPlugins']['superpowers@claude-plugins-official'] is False and d['enabledPlugins']['sample@claude-plugins-official'] is True"; then
+    pass "reconcile forces retired superpowers off"
+else
+    fail "reconcile forces retired superpowers off"
+fi
+if jget "$SPDEST" "'claude-plugins-official' in d['extraKnownMarketplaces']"; then
+    pass "retirement keeps the shared claude-plugins-official marketplace"
+else
+    fail "retirement keeps the shared claude-plugins-official marketplace"
+fi
+
+# Only ECC owns isolation env keys. A config dir that still has Superpowers
+# installed but no ECC must not get ECC isolation env keys restored.
+SPCFG="$TMP/sp-config"
+mkdir -p "$SPCFG/plugins"
+printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}]}}\n' \
+    >"$SPCFG/plugins/installed_plugins.json"
+printf '{"env": {"MACHINE_LOCAL": "keep"}}\n' >"$SPCFG/settings.json"
+reconcile_claude_settings_file "$RETTMPL" "$SPCFG/settings.json" "[test]" >/dev/null 2>&1
+if jget "$SPCFG/settings.json" "not [k for k in d['env'] if k.startswith(('ECC_', 'GATEGUARD_'))] and d['env']['MACHINE_LOCAL'] == 'keep'"; then
+    pass "superpowers installed without ECC restores no ECC env key"
+else
+    fail "superpowers installed without ECC restores no ECC env key"
+fi
+
+# An unreadable registry means "ECC may still be installed", never
+# "Superpowers may be": ECC rescue keys return, superpowers stays retired.
+BADCFG="$TMP/bad-registry"
+mkdir -p "$BADCFG/plugins"
+printf 'not json\n' >"$BADCFG/plugins/installed_plugins.json"
+printf '{"env": {}}\n' >"$BADCFG/settings.json"
+reconcile_claude_settings_file "$RETTMPL" "$BADCFG/settings.json" "[test]" >/dev/null 2>&1
+if jget "$BADCFG/settings.json" "d['env'].get('ECC_DISABLED_HOOKS') and d['enabledPlugins']['superpowers@claude-plugins-official'] is False"; then
+    pass "unreadable registry keeps ECC rescue keys and still retires superpowers"
+else
+    fail "unreadable registry keeps ECC rescue keys and still retires superpowers"
+fi
+
 # A config dir where the retired plugin is disabled in settings.json but
 # still physically installed (installed_plugins.json still lists it, e.g.
 # from a project-level override or a machine that has not run
