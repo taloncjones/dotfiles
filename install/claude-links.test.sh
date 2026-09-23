@@ -212,6 +212,48 @@ if cmp -s "$RETDEST" "$TMP/ret-first.json"; then
 else
     fail "retirement is idempotent"
 fi
+# A config dir where the retired plugin is disabled in settings.json but
+# still physically installed (installed_plugins.json still lists it, e.g.
+# from a project-level override or a machine that has not run
+# ecc-uninstall yet) must keep the isolation env keys -- sweeping them
+# ahead of the actual uninstall would let the still-loadable plugin read
+# state without ECC_DISABLED_HOOKS/ECC_AGENT_DATA_HOME in place.
+STILLDIR="$TMP/still-installed-cdir"
+mkdir -p "$STILLDIR/plugins"
+cat >"$STILLDIR/plugins/installed_plugins.json" <<'EOF'
+{"plugins": {"ecc@ecc": [{"scope": "user"}]}}
+EOF
+STILLDEST="$STILLDIR/settings.json"
+cp "$RETTMPL" "$TMP/still-tmpl.json"
+cat >"$STILLDEST" <<'EOF'
+{
+  "enabledPlugins": {"ecc@ecc": true},
+  "env": {
+    "ECC_DISABLED_HOOKS": "a,b",
+    "ECC_AGENT_DATA_HOME": "/somewhere",
+    "MACHINE_LOCAL": "keep"
+  }
+}
+EOF
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$STILLDEST" "[test]" >/dev/null 2>&1
+if jget "$STILLDEST" "d['enabledPlugins']['ecc@ecc'] is False"; then
+    pass "reconcile still forces the plugin off when it remains installed"
+else
+    fail "reconcile still forces the plugin off when it remains installed"
+fi
+if jget "$STILLDEST" "d['env']['ECC_DISABLED_HOOKS'] == 'a,b' and d['env']['ECC_AGENT_DATA_HOME'] == '/somewhere'"; then
+    pass "reconcile keeps isolation env keys while the plugin is still installed"
+else
+    fail "reconcile keeps isolation env keys while the plugin is still installed"
+fi
+rm -f "$STILLDIR/plugins/installed_plugins.json"
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$STILLDEST" "[test]" >/dev/null 2>&1
+if jget "$STILLDEST" "not set(d['env']) & {'ECC_DISABLED_HOOKS', 'ECC_AGENT_DATA_HOME'}"; then
+    pass "reconcile sweeps isolation env keys once the plugin is actually gone"
+else
+    fail "reconcile sweeps isolation env keys once the plugin is actually gone"
+fi
+
 # A dest whose only marketplace is the retired one must not keep an empty map.
 ONLYDEST="$TMP/only-ecc-dest.json"
 printf '{"extraKnownMarketplaces": {"ecc": {"source": {"source": "git", "url": "https://example.invalid/ecc.git"}}}}\n' >"$ONLYDEST"

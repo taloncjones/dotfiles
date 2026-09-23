@@ -120,15 +120,47 @@ for key in [k for k in env if k.startswith("ANTHROPIC_DEFAULT_") and k.endswith(
     if key not in tmpl.get("env", {}):
         del env[key]
 
-# Env keys of retired plugins are swept the same way. An explicit list, not
-# a prefix: the ECC-derived git hooks still read ECC_SKIP_* and
-# ECC_PREPUSH_AUDIT, and a machine-local value of those must survive.
+# Retired plugins: declared here (ahead of the env sweep below, which needs
+# the name list) because enabledPlugins/extraKnownMarketplaces are unions
+# where live state wins, so dropping a plugin from the template alone would
+# leave it enabled on every machine that had it. Force it off and stop
+# refreshing its marketplace; `<name>-uninstall` removes the files.
+RETIRED_PLUGINS = ("ecc@ecc",)
+RETIRED_MARKETPLACES = ("ecc",)
+
+# Env keys of retired plugins are swept the same way, but only once the
+# plugin they isolate is actually gone from THIS config dir. Disabling
+# ecc@ecc in enabledPlugins does not uninstall it -- Claude Code leaves the
+# plugin (and any project-level override that re-enables it) in
+# plugins/installed_plugins.json until `ecc-uninstall` runs. Sweeping the
+# isolation env keys ahead of that removal would strip ECC_DISABLED_HOOKS
+# and ECC_AGENT_DATA_HOME from a machine where ECC can still load, sending
+# its state through the wrong account. An explicit key list, not a prefix:
+# the ECC-derived git hooks still read ECC_SKIP_* and ECC_PREPUSH_AUDIT, and
+# a machine-local value of those must survive.
 RETIRED_ENV_KEYS = ("ECC_CONTEXT_MONITOR_COST_WARNINGS", "ECC_DISABLED_HOOKS", "ECC_AGENT_DATA_HOME",
                     "ECC_PLAN_CANVAS_STATE_DIR", "GATEGUARD_BASH_ROUTINE_DISABLED",
                     "GATEGUARD_EXEMPT_GLOBS")
-for key in RETIRED_ENV_KEYS:
-    if key not in tmpl.get("env", {}):
-        env.pop(key, None)
+installed_plugins_path = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plugins", "installed_plugins.json")
+retired_plugins_still_installed = False
+if os.path.isfile(installed_plugins_path):
+    try:
+        with open(installed_plugins_path) as fh:
+            installed = json.load(fh)
+        installed_names = set(installed.get("plugins", {}) if isinstance(installed, dict) else {})
+    except (json.JSONDecodeError, AttributeError):
+        # Unreadable installed_plugins.json: assume the plugin may still be
+        # there rather than sweep isolation keys on a guess.
+        installed_names = set(RETIRED_PLUGINS)
+    retired_plugins_still_installed = bool(installed_names & set(RETIRED_PLUGINS))
+if retired_plugins_still_installed:
+    print(label + " NOTE: a retired plugin is still installed in "
+          + os.path.dirname(installed_plugins_path)
+          + "; keeping its isolation env keys until `ecc-uninstall` removes it.")
+else:
+    for key in RETIRED_ENV_KEYS:
+        if key not in tmpl.get("env", {}):
+            env.pop(key, None)
 result["env"] = env
 
 # Preserve any platform/installer keys the template does not define.
@@ -136,12 +168,6 @@ for key, value in dest.items():
     if key not in result:
         result[key] = value
 
-# Retired plugins: enabledPlugins and extraKnownMarketplaces are unions where
-# live state wins, so dropping a plugin from the template alone would leave it
-# enabled on every machine that had it. Force it off and stop refreshing its
-# marketplace; `<name>-uninstall` removes the files.
-RETIRED_PLUGINS = ("ecc@ecc",)
-RETIRED_MARKETPLACES = ("ecc",)
 result["enabledPlugins"] = {
     **result.get("enabledPlugins", {}),
     **{plugin: False for plugin in RETIRED_PLUGINS},
