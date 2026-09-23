@@ -265,8 +265,8 @@ points deleted and `superpowers-uninstall` made scope-aware (026b1a6),
 installers/Codex/cloud stop installing it (70d56c0), routing text updated
 (9618b23).
 
-**Resolution.** Superpowers is fully retired: no plugin installs in Claude,
-Codex, or cloud; `superpowers-uninstall` sweeps what remains on disk.
+**Resolution.** Superpowers retired: no plugin installs in Claude, Codex, or
+cloud any more; `superpowers-uninstall` sweeps what remains on disk.
 
 **Status: settled (2026-09).** Lesson: a second-model review gate (here,
 `codex-spec-review`) catches design defects a plugin cannot enforce on its

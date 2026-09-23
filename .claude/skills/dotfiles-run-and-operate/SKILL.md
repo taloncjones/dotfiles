@@ -1,6 +1,6 @@
 ---
 name: dotfiles-run-and-operate
-description: Day-to-day operation of an already-installed dotfiles machine. Load when asked to "update the dotfiles", "reload zsh", clean up leftovers from a retired plugin (superpowers-uninstall, ecc-uninstall; the install/update entry points for both are retired and no longer exist), run dotfiles-repair, prep a repo with setup-claude, explain claude account routing (claude-account, the claude() wrapper, work vs personal), find where machine state lives (~/.claude, ~/.claude-work, cache stamps, plugin dirs), or understand .todos/.planning worktree hydration. NOT for first-time environment setup (dotfiles-build-and-env), debugging a broken symptom (dotfiles-debugging-playbook), or Claude Code platform internals (claude-code-platform-reference).
+description: Day-to-day operation of an already-installed dotfiles machine. Load when asked to "update the dotfiles", "reload zsh", clean up leftovers from a retired plugin (its uninstall function is the only surviving entry point for both Superpowers and ECC; their install/update entry points are retired and no longer exist), run dotfiles-repair, prep a repo with setup-claude, explain claude account routing (claude-account, the claude() wrapper, work vs personal), find where machine state lives (~/.claude, ~/.claude-work, cache stamps, plugin dirs), or understand .todos/.planning worktree hydration. NOT for first-time environment setup (dotfiles-build-and-env), debugging a broken symptom (dotfiles-debugging-playbook), or Claude Code platform internals (claude-code-platform-reference).
 ---
 
 # Dotfiles: Run and Operate
@@ -39,18 +39,18 @@ exited N`, and returns that status. `$?` is trustworthy again.
 All shell functions live in zsh/functions.zsh; aliases in zsh/aliases.zsh;
 bin scripts are symlinked into `~/bin` by install/common/link.sh.
 
-| Command                 | What it is   | What it does                                                                                                                                                               |
-| ----------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `update`                | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                                                                                  |
-| `reload`                | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                                                                         |
-| `ecc-uninstall`         | zsh function | Sweep ECC leftovers (plugin, repo clone, metadata, cache stamp); the only surviving ECC-named function -- `ecc-install`/`ecc-update` are retired (2026-09)                 |
-| `superpowers-uninstall` | zsh function | Uninstall Superpowers from both config dirs and Codex, scope-aware; the only surviving Superpowers-named function -- its install/update entry points are retired (2026-09) |
-| `dotfiles-repair`       | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                                                              |
-| `setup-claude`          | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                                                                         |
-| `claude-account`        | zsh function | Print which account a launch from `$PWD` would use                                                                                                                         |
-| `claude [--personal]`   | zsh wrapper  | Launch Claude Code with directory-based account routing                                                                                                                    |
-| `identity-doctor`       | bin script   | Read-only git/ssh identity chain verifier (also `git identity`)                                                                                                            |
-| `dotfiles-tests`        | bin script   | Aggregate runner for all nine test suites                                                                                                                                  |
+| Command                                                             | What it is   | What it does                                                                                                                                                               |
+| ------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update`                                                            | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                                                                                  |
+| `reload`                                                            | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                                                                         |
+| `ecc-uninstall`                                                     | zsh function | Sweep ECC leftovers (plugin, repo clone, metadata, cache stamp); the only surviving ECC-named function -- `ecc-install`/`ecc-update` are retired (2026-09)                 |
+| the Superpowers uninstaller (see "Post-merge operator steps" below) | zsh function | Uninstall Superpowers from both config dirs and Codex, scope-aware; the only surviving Superpowers-named function -- its install/update entry points are retired (2026-09) |
+| `dotfiles-repair`                                                   | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                                                              |
+| `setup-claude`                                                      | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                                                                         |
+| `claude-account`                                                    | zsh function | Print which account a launch from `$PWD` would use                                                                                                                         |
+| `claude [--personal]`                                               | zsh wrapper  | Launch Claude Code with directory-based account routing                                                                                                                    |
+| `identity-doctor`                                                   | bin script   | Read-only git/ssh identity chain verifier (also `git identity`)                                                                                                            |
+| `dotfiles-tests`                                                    | bin script   | Aggregate runner for all nine test suites                                                                                                                                  |
 
 ## Update lifecycle
 
@@ -86,10 +86,11 @@ Notes:
 No plugin is installed by this repo any more. Superpowers (retired 2026-09,
 formerly `superpowers@claude-plugins-official`, retired 2026-09) and ECC
 (formerly `ecc@ecc`, upstream github.com/affaan-m/ECC, retired 2026-09) are
-both fully retired: their install/update entry points are removed, and
-`superpowers-uninstall`/`ecc-uninstall` are the only surviving,
-retired-plugin-named functions, for sweeping leftovers (plugin registration,
-staged Codex copy or repo clone, cache stamp). ECC's
+both fully retired: their install/update entry points are removed, and each
+one's uninstall function is the only surviving retired-plugin-named
+function, for sweeping leftovers (plugin registration, staged Codex copy or
+repo clone, cache stamp; see "Post-merge operator steps" below for the exact
+command). ECC's
 language-rules vendoring was retired earlier still (2026-07-02) -- any
 leftover `claude/rules/` language dirs from an older machine are inert and
 should be deleted by hand; only `claude/rules/personal/` is tracked (our
