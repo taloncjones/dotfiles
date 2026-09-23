@@ -1,0 +1,101 @@
+{
+  "v": 1,
+  "task_id": "2026-09-22-tier-co-review-by-change-class-to-skip-full-gates",
+  "commands": [
+    {
+      "name": "py-compile",
+      "run": "python3 -m py_compile claude/skills/co-review/scripts/change_class.py claude/skills/co-review/scripts/gate_report.py claude/hooks/herdr_orch_core.py claude/hooks/herdr_worker_status.py claude/hooks/agent_runtime.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "co-review-unit-suite",
+      "run": "sh claude/skills/co-review/scripts/tests/review_test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "co-review-named-tests",
+      "run": "cd claude/skills/co-review/scripts && out=$(python3 -m unittest discover -s tests -p 'test_*.py' -k test_light_class_over_code_diff_is_incomplete -k test_light_seats_need_one_claude_and_one_codex_runtime -k test_light_recompute_uses_digest_bound_diff -k test_light_report_over_markdown_diff_approves -k test_class_mismatch_and_missing_class_are_incomplete -k test_seat_set_must_match_class -k test_audit_comment_renders_every_field_once -k test_audit_comment_refuses_non_approval -k test_both_entrypoints_pin_the_frozen_diff_and_class -k test_both_entrypoints_name_the_light_seats -k test_mirror_launches_light_verifier_through_claude_runner -k test_policy_describes_both_tiers -k test_ship_has_the_audit_comment_step -k test_rename_quoted_and_empty_are_unparseable -k test_code_and_gate_paths_are_full 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -5; [ \"$rc\" = 0 ] && printf '%s\\n' \"$out\" | grep -qx 'Ran 15 tests in [0-9.]*s'",
+      "timeout_secs": 300
+    },
+    {
+      "name": "classify-cli-light",
+      "run": "printf 'diff --git a/README.md b/README.md\\n+x\\ndiff --git a/docs/a b.md b/docs/a b.md\\n+y\\n' | python3 claude/skills/co-review/scripts/gate_report.py classify --diff /dev/stdin | grep -qx light",
+      "timeout_secs": 30
+    },
+    {
+      "name": "classify-cli-full",
+      "run": "printf 'diff --git a/README.md b/README.md\\n+x\\ndiff --git a/claude/hooks/x.py b/claude/hooks/x.py\\n+y\\n' | python3 claude/skills/co-review/scripts/gate_report.py classify --diff /dev/stdin | grep -qx full",
+      "timeout_secs": 30
+    },
+    {
+      "name": "classify-cli-gate-skill",
+      "run": "printf 'diff --git a/claude/skills/co-review/SKILL.md b/claude/skills/co-review/SKILL.md\\n+x\\n' | python3 claude/skills/co-review/scripts/gate_report.py classify --diff /dev/stdin | grep -qx full && printf 'diff --git a/old.md b/new.md\\n' | python3 claude/skills/co-review/scripts/gate_report.py classify --diff /dev/stdin | grep -qx full",
+      "timeout_secs": 30
+    },
+    {
+      "name": "gate-schema-seat-sets",
+      "run": "python3 claude/skills/co-review/scripts/gate_report.py schema | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"light_seats\"]==[\"codex\",\"verifier\"], d.get(\"light_seats\"); assert d[\"full_seats\"]==[\"claude\",\"codex\",\"breaker\",\"verifier\"]; assert d[\"report_example\"][\"class\"]==\"full\" and d[\"expected_example\"][\"class\"]==\"full\"; assert \"required_seats\" not in d'",
+      "timeout_secs": 30
+    },
+    {
+      "name": "gate-policy-tiers",
+      "run": "p=$(python3 claude/skills/co-review/scripts/gate_report.py policy --section POLICY) && printf '%s' \"$p\" | grep -Fq 'light tier' && printf '%s' \"$p\" | grep -Fq 'full tier' && printf '%s' \"$p\" | grep -Fq '`codex` and `verifier`' && printf '%s' \"$p\" | grep -Fq 'change_class.py' && ! printf '%s' \"$p\" | grep -Fq 'All four seats'",
+      "timeout_secs": 30
+    },
+    {
+      "name": "codex-skills-suite",
+      "run": "sh codex/skills/codex-skills.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "herdr-orch-suite-named",
+      "run": "out=$(env -u WORKFLOW_PERSONAL_ACCOUNT -u HERDR_PERSONAL -u CLAUDE_PERSONAL_ONLY -u CLAUDE_WORK_TREE -u CLAUDE_WORK_CONFIG_DIR -u CODEX_HOME -u XDG_STATE_HOME -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID sh claude/hooks/herdr-orch.test.sh 2>&1); rc=$?; printf '%s\\n' \"$out\" | tail -3; [ \"$rc\" = 0 ] || exit 1; for l in 'wake_decision: every blocking Notification pushes' 'wake_decision: a record change 10 s after a push pushes' 'read_wake_marker: a v1 marker reads as empty; v2 keeps last_delivery' 'hook: a done.json change with no owner records last_delivery and stays unadvanced' 'deliver_wake: retries transient failures twice, never raises' 'wake_for_event: sent advances v2 records; failure keeps them and retries next call' 'wake_for_event: a v1 marker whose records match is ignored and rewritten as v2' 'watch: a think launch record and a write-task never signal; answers and done do' 'backstop_tick: undelivered signals at the grace; delivered never; stale marker values do not count' 'delivered_records: v2 only, keyed by file name, unreadable markers ignored' 'watch CLI: backstop flags validated' 'checkin: unreadable task and sidecar lines force changed: yes; missing sidecar is silent' 'checkin: wake= column from the marker, read-only' 'checkin: unverifiable review findings are reported, then clear on byte-identical restore' 'plan_record_matches: identity only, independent of artifacts' 'review-deadlines: ceil remaining from the review row; unknown without one'; do printf '%s\\n' \"$out\" | grep -Fqx \"PASS  $l\" || { echo \"missing: $l\"; exit 1; }; done; ! printf '%s\\n' \"$out\" | grep -Fq 'pushes once per transition into blocked'",
+      "timeout_secs": 1800
+    },
+    {
+      "name": "herdr-orch-contract-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT -u HERDR_PERSONAL -u CLAUDE_PERSONAL_ONLY -u CLAUDE_WORK_TREE -u CLAUDE_WORK_CONFIG_DIR -u CODEX_HOME -u XDG_STATE_HOME -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID sh claude/hooks/herdr-orch-contract.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "herdr-skill-text",
+      "run": "S=claude/skills/herdr-orchestration/SKILL.md; grep -Fq -- '--undelivered-only --exit-on-signal' $S && ! grep -Fq -- '--interval 60 --debounce-secs 300' $S && grep -Fq 'sleep 300' $S && grep -Fq 'review-deadlines' $S && grep -Fq 'sleep <remaining + 30>' $S && grep -Fq 'unverifiable-evidence' $S && grep -Fq 'dirty=yes' $S && grep -Fq 'Bash(gh pr merge:*)' $S && grep -Fq \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $S && grep -Fq 'director` shell function' $S && ! grep -Fq 'both are watch wakes' $S && ! grep -Fq 'at the next heartbeat' $S && grep -Fq 'backstop' claude/agents/director.md && grep -Fq '`director`' claude/agents/director.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "agent-runtime-suite",
+      "run": "bash claude/hooks/agent-runtime.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "agent-runtime-named",
+      "run": "python3 -c 'import json,sys; sys.path.insert(0,\"claude/hooks\"); import agent_runtime as r; route=r.resolve_route(\"claude\",\"reviewer\",config={\"provisional\":True}); s={\"personal_repository\":False}; a=r.launch_argv(route,\"/w/t\",\"read-only\",mode=\"interactive\",scope=s); assert a[a.index(\"--permission-mode\")+1]==\"auto\" and \"plan\" not in a, a; assert json.loads(a[a.index(\"--settings\")+1])=={\"permissions\":{\"deny\":[\"Edit(//w/t/**)\",\"Write(//w/t/**)\"]}}, a; h=r.launch_argv(route,\"/w/t\",\"read-only\",mode=\"headless\",scope=s); assert h[h.index(\"--permission-mode\")+1]==\"plan\", h; w=r.launch_argv(route,\"/w/t\",\"workspace-write\",mode=\"interactive\",scope=s); assert w[w.index(\"--permission-mode\")+1]==\"auto\" and \"--settings\" not in w, w'",
+      "timeout_secs": 60
+    },
+    {
+      "name": "herdr-dispatch-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT -u HERDR_PERSONAL -u CLAUDE_PERSONAL_ONLY -u CLAUDE_WORK_TREE -u CLAUDE_WORK_CONFIG_DIR -u CODEX_HOME -u XDG_STATE_HOME -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID bash claude/hooks/herdr-dispatch.test.sh",
+      "timeout_secs": 600
+    },
+    {
+      "name": "claude-account-suite",
+      "run": "sh zsh/claude-account.test.sh",
+      "timeout_secs": 300
+    },
+    {
+      "name": "zsh-syntax",
+      "run": "zsh -n zsh/claude-account.zsh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "dotfiles-tests-selftest",
+      "run": "sh bin/dotfiles-tests.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "dotfiles-tests-registers-selftest",
+      "run": "bin/dotfiles-tests --list | grep -qx 'sh bin/dotfiles-tests.test.sh'",
+      "timeout_secs": 30
+    }
+  ]
+}
