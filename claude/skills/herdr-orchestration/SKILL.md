@@ -103,6 +103,14 @@ for the provider's `launch_env` mapping.
    - `<id>` is `$CLAUDE_CODE_SESSION_ID` (the session id every hook payload
      carries); the director edit guard keys on it, so never substitute
      another identifier.
+   - **Same-process adoption.** A fresh lease whose `pid` equals the
+     `--messaging-socket` pid AND is an ancestor of the claiming process is
+     adopted under the new session id with a fence bump, instead of `BUSY`.
+     This is the `/clear` case: the session id changes, the Claude process
+     does not. Launcher-tier Claude leases only; a pid claimed from another
+     process tree still gets `BUSY`. Never run `claim-owner` in the
+     background: a background process started before `/clear` would pass the
+     ancestry check under the old session id.
    - **On the initial claim only** (not on refresh), label THIS session's own
      workspace so the Herdr UI shows the standing director, not a bare
      name: `herdr workspace rename "$HERDR_WORKSPACE_ID" "director:<repo>"`
@@ -127,7 +135,11 @@ for the provider's `launch_env` mapping.
      an unusable value stores `null` with one `[WARNING]` and ownership still
      succeeds. Director launch line (documented, not enforced --
      preflight cannot read its own permission class or inbound policy):
-     `claude --permission-mode auto --settings '{"crossSessionInbound":"accept"}'`.
+     `claude --agent director --settings '{"crossSessionInbound":"accept"}'`.
+     Auto mode is no longer the documented launch: its classifier refuses
+     `gh pr merge`. Nothing in the director flow assumes a permission mode;
+     the rollover hook runs in every mode, and a `rollover` Bash call may
+     prompt in manual mode.
      The explicit `accept` is safe here because every inbound message is
      wake-only (Safety); a bypass-mode director without it has every
      hook wake held behind a dialog and dropped after `dialogExpiry`, and a
@@ -238,8 +250,16 @@ for the provider's `launch_env` mapping.
      task is a harmless no-op -- and re-arm. Monitors die with the session;
      the next turn's preflight re-arms (self-healing, like the ownership
      heartbeat).
+   - A persistent Monitor survives `/clear` and keeps delivering into the new
+     context (verified 2026-09-22), but the new context does not know its
+     task id. After a rollover, the hook's `watch:` line decides: `live`
+     means do not arm; `none` or `unknown` means arm now.
    - **On yielding ownership** (stale fence, or explicit takeover), TaskStop
      this session's watch before going read-only.
+     A watch inherited across `/clear` has no task id in this context; stop
+     it from a fresh scan in one Bash call (never a pid remembered from the
+     rollover block, which may have been reused):
+     `kill $(python3 "$CORE" watch-pids --repo-slug <slug> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET")`
    - **Fallback** (no Monitor tool): `Bash run_in_background` with
      `python3 "$CORE" watch --repo-slug <slug> --exit-on-signal --since-epoch $EPOCH`.
      Its exit IS the wake; re-arm only on the wake turn it produced or after
@@ -250,6 +270,36 @@ for the provider's `launch_env` mapping.
      The watch fires on completion-record writes only -- the same predicate
      the worker hook uses -- so an ordinary worker turn end produces no
      signal.
+
+## 1a. Rollover in place
+
+Roll over when the human asks, or when this session's context is heavy
+enough that the next few check-ins would crowd it. (The automatic
+context-fill threshold is tracked separately and is not implemented here.)
+
+1. Finish or park the current action. Never roll over mid-kickoff or
+   mid-dispatch.
+2. Say in this turn's message anything `STATE_ROOT` does not hold: pending
+   human questions, standing directives from chat, a decision in progress.
+   Nothing carries them across `/clear`; the human reads the message and can
+   restate them. Task state is already on disk; do not restate it.
+3. Run, as the LAST tool call of the turn:
+   `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence>`
+4. End the turn. The verb typed `/clear` into this pane; it runs when the
+   turn ends. If the verb reports that `/clear` was typed but Enter failed,
+   say so; the human presses Enter or clears the input.
+5. In the fresh context, the `director_rollover` SessionStart hook has
+   already re-claimed the lease under the new session id and printed an
+   `[INFO] herdr director rollover` block with the fence and the watch
+   state. Follow its `Next:` line: load this skill, use the printed fence,
+   skip the initial-claim-only steps (workspace label, `dashboard --open`),
+   and run a section-4 check-in before any dispatch.
+6. If the block is a `[WARNING]`, or no block appears, run section 1
+   preflight. Its `claim-owner` adopts the lease the same way; on `BUSY`,
+   stop and ask the human.
+
+No handoff record, second pane, `/exit`, or `--stale-secs` wait is part of
+a director rollover.
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
