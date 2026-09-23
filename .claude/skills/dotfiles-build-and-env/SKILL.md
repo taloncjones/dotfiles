@@ -25,7 +25,7 @@ on 2026-07-02.
 - Never copy the 1Password signing block from `git/personal/.gitconfig-personal`
   into a container or Linux box -- `op-ssh-sign` is macOS-only (Trap 9).
 - Never run ECC's global Codex sync or its retired wrapper. Use native plugin
-  staging (see repo CLAUDE.md, "Codex plugin integration").
+  staging (see `.claude/skills/dotfiles-architecture-contract/references/install-layout.md`, "Codex plugin integration").
 
 Jargon used below, defined once:
 

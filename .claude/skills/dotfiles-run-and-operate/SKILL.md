@@ -17,7 +17,7 @@ this file is safe to re-run.
   install status before the final `cd`, prints `[X] update failed: install.sh
 exited N`, and returns that status. `$?` is trustworthy again.
 - `claude plugins install` can exit 0 without installing (commits 722c653, f91d7d2); this is now historical, since the retired Superpowers install path (the retired ECC's had the same gap) is deleted and no plugin installs in this repo any more.
-- Never run the retired ECC's `sync-ecc-to-codex.sh` directly -- it overwrote `core.hooksPath` and wrote through the `~/.codex/AGENTS.md` symlink into the repo. The old sync wrapper and ECC itself are both retired, and the Superpowers install path it used to route diagnostics to is retired too; see repo CLAUDE.md.
+- Never run the retired ECC's `sync-ecc-to-codex.sh` directly -- it overwrote `core.hooksPath` and wrote through the `~/.codex/AGENTS.md` symlink into the repo. The old sync wrapper and ECC itself are both retired, and the Superpowers install path it used to route diagnostics to is retired too; see `.claude/skills/dotfiles-architecture-contract/references/install-layout.md`.
 - The `claude` desktop app and IDE extensions bypass the `claude()` zsh
   wrapper and always land on `~/.claude` (personal), even under `~/Git/work`.
   The `account_guard.py` SessionStart hook warns inside the session.

@@ -187,13 +187,13 @@ punch through the symlinks and global git config.
 
 **Evidence.** Pre-public -- public history starts at 93f2573 ("dotfiles:
 Initial public release"), so no incident hash exists. The scars are in the
-live tree: the CLAUDE.md "Codex plugin integration" warning and the leftover
+live tree: the install-layout reference's "Codex plugin integration" warning and the leftover
 sweep in install/common/link.sh (search `ecc-\|superpowers-`). The former
 redirecting sync wrapper was later retired too.
 
 **Resolution.** Never run `sync-ecc-to-codex.sh`. `ecc-install` and
 `ecc-update` stage self-contained native Codex plugins; global guidance and
-git-hook ownership remain with dotfiles. See repo CLAUDE.md for current
+git-hook ownership remain with dotfiles. See `.claude/skills/dotfiles-architecture-contract/references/install-layout.md` for current
 lifecycle and discovery repair.
 
 **Status: settled (abandoned).** Lesson: before letting any upstream installer
