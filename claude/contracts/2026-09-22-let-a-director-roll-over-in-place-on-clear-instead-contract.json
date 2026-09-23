@@ -18,6 +18,11 @@
       "timeout_secs": 60
     },
     {
+      "name": "resume-eligibility-unit",
+      "run": "PYTHONDONTWRITEBYTECODE=1 python3 -c \"import sys; sys.path.insert(0,'claude/hooks'); import herdr_orch_core as c; cur={'pid':42,'account_id':'a','runtime':'claude','thread_id':None,'control_tier':'launcher','session_id':'s','fence':3,'heartbeat_ts':0}; ok=c._resume_eligible; assert ok(cur,42,42,'a'); assert not ok(None,42,42,'a'); assert not ok(cur,43,43,'a'); assert not ok(cur,42,None,'a'); assert not ok(dict(cur,account_id='b'),42,42,'a'); assert not ok(dict(cur,runtime='codex'),42,42,'a'); assert not ok(dict(cur,thread_id='t'),42,42,'a'); assert not ok(dict(cur,control_tier='lead'),42,42,'a')\"",
+      "timeout_secs": 60
+    },
+    {
       "name": "resume-owner-and-watch-pids-registered",
       "run": "python3 claude/hooks/herdr_orch_core.py resume-owner --help | grep -q -- '--messaging-socket' && python3 claude/hooks/herdr_orch_core.py watch-pids --help | grep -q -- '--messaging-socket'",
       "timeout_secs": 60
