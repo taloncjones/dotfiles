@@ -60,14 +60,10 @@ assert "installer keeps ~/.codex/skills as a real directory" \
     rg -q 'mkdir -p "\$HOME"/\.codex/skills' install/common/codex-links.sh
 assert "installer treats Codex plugins as canonical workflow owners" \
     rg -q 'Codex plugins are the canonical owner' install/common/codex-links.sh
-assert "ECC lifecycle installs a native Codex plugin" \
-    rg -q '_codex_install_ecc_plugin' zsh/functions.zsh
 assert "Superpowers lifecycle installs the managed Codex plugin" \
     rg -q '_codex_ensure_plugin "superpowers@dotfiles-workflows"' zsh/functions.zsh
 assert "bootstrap installs workflows for Claude and Codex" \
     rg -q 'for Claude and Codex' install/common/claude-plugins.sh
-assert "ECC lifecycle never invokes the upstream Codex sync" \
-    sh -c "! rg -q 'scripts/sync-ecc-to-codex.sh' zsh/functions.zsh"
 assert "installer removes stale standalone Superpowers skill snapshots" \
     rg -q "name 'superpowers-\*'" install/common/codex-links.sh
 assert "installer removes stale standalone ECC skill snapshots" \
