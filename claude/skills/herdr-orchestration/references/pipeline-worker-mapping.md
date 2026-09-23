@@ -62,8 +62,9 @@ the task worker as `review`.
 
 Two axes raise effort within the role's chosen model. Neither lowers it. A
 repo lowers effort through `config.json` `routes`, down to the tier of the
-role's default model at `medium` (`EFFORT_FLOOR`); a raising axis raises the
-floor with it.
+role's default model at `low` (`EFFORT_FLOOR`); a raising axis raises the
+floor with it. Because the floor is a tier, the same override can trade the
+model down at a higher effort (an opus role accepts `sonnet/medium`).
 
 - `risk=critical` -- blast radius. Restricted to `development_reviewer`,
   `reviewer`, `skeptic`, `think`.

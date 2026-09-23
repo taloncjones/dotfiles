@@ -273,7 +273,8 @@ runtime-specific and does not travel between `claude` and `codex` configs;
 `effort` must be one of `low`/`medium`/`high`/`xhigh`. A route cannot fall
 below the role's own floor: the resolver enforces a floor that compares the
 configured model/effort's quality tier against the role's default model at
-`medium` (`EFFORT_FLOOR` in `agent_runtime.py`), raised to the role's own
+`low` (`EFFORT_FLOOR` in `agent_runtime.py`; an opus role therefore accepts
+`sonnet/medium` but not `sonnet/low`), raised to the role's own
 default effort when a critical-risk or otherwise hard-floored dispatch calls
 for it, and a configured `model`/`effort` below that floor is rejected. A
 malformed `routes` block (non-object, an unknown role, an override key other

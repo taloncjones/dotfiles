@@ -922,8 +922,10 @@ Unknown availability is reported; no silent downgrade of a critical route.
 `config.json`'s optional `routes` block lets a repo pin a role's model and/or
 effort: `{role: {model?, effort?}}`. The resolver, not the core, enforces a
 floor that compares the configured model/effort's quality tier against the
-role's default model at `medium` (`EFFORT_FLOOR`) -- a stronger model may
-pass at a lower effort label -- raised under critical risk or
+role's default model at `low` (`EFFORT_FLOOR`) -- a stronger model may
+pass at a lower effort label, and a weaker model at a higher one (an opus
+role accepts `sonnet/medium` but not `sonnet/low`) -- raised under critical
+risk or
 `difficulty=hard`; a malformed `routes` block fails the `route` call and
 blocks that dispatch rather than silently falling back.
 

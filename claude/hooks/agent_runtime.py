@@ -25,9 +25,9 @@ EFFORTS = ("low", "medium", "high", "xhigh")
 EFFORT_RANK = {effort: rank for rank, effort in enumerate(EFFORTS)}
 # Quality-tier floor for a config override, compared against the role's
 # default model at this effort -- a stronger model may pass at a lower
-# effort label. A raising axis (critical risk, hard difficulty) raises the
-# floor to the raised default.
-EFFORT_FLOOR = "medium"
+# effort label, and a weaker model may pass at a higher one. A raising axis
+# (critical risk, hard difficulty) raises the floor to the raised default.
+EFFORT_FLOOR = "low"
 RISK_LEVELS = ("normal", "critical")
 DIFFICULTIES = ("routine", "hard")
 AVAILABILITY = ("available", "unavailable", "indeterminate")
