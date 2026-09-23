@@ -18,6 +18,10 @@ Standing engineering discipline for all sessions, all repos.
   not a completion report.
 - Treat empty or near-empty findings on a large diff as a tool-failure signal, not
   as cleanliness.
+- For new behavior or a bug fix, write the failing test first and watch it
+  fail for the expected reason before writing the fix.
+- Debug by reproducing first, then change one variable per hypothesis; fix
+  the root cause, not the symptom.
 
 ## Scope and safety
 
