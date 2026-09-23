@@ -59,7 +59,7 @@
     },
     {
       "name": "codex-skills-suite-green-with-retirement-case",
-      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh codex/skills/codex-skills.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && grep -qF \"PASS  installer disables retired ECC Codex plugins and dedupes Superpowers\" \"$f\" && grep -qF \"PASS  Codex AGENTS no longer routes to retired ECC skills\" \"$f\" && grep -qF \"PASS  installer preserves an inherited caller Codex home\" \"$f\" && ok=0; rm -f \"$f\"; exit $ok",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh codex/skills/codex-skills.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && grep -qF \"PASS  installer disables retired ECC Codex plugins and dedupes Superpowers\" \"$f\" && grep -qF \"PASS  Codex AGENTS no longer routes to retired ECC skills\" \"$f\" && grep -qF \"PASS  installer fixtures preserve an inherited caller Codex home\" \"$f\" && ok=0; rm -f \"$f\"; exit $ok",
       "timeout_secs": 600
     },
     {
