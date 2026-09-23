@@ -11,7 +11,9 @@ from pathlib import Path
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_SEATS = ("claude", "codex", "breaker", "verifier")
+LIGHT_SEATS = ("codex", "verifier")
+FULL_SEATS = ("claude", "codex", "breaker", "verifier")
+_TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS}
 _AXES = (
     "ownership_authority",
     "dependency_boundaries",
@@ -90,6 +92,24 @@ def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> No
         reasons.append(f"seat {name} artifact is empty")
     if hashlib.sha256(content).hexdigest() != expected:
         reasons.append(f"seat {name} artifact digest does not match")
+
+
+def _light_diff_ok(preconditions: object, root: Path) -> bool:
+    """True when the digest-bound frozen diff still classifies as light."""
+    entry = preconditions.get("diff") if isinstance(preconditions, dict) else None
+    if not isinstance(entry, dict):
+        return False
+    try:
+        path = (root / entry["artifact"]).resolve()
+        path.relative_to(root.resolve())
+        content = path.read_bytes()
+    except (KeyError, TypeError, OSError, ValueError):
+        return False
+    if hashlib.sha256(content).hexdigest() != entry.get("sha256"):
+        return False
+    change_class = _load_change_class()
+    paths = change_class.paths_from_diff(content.decode("utf-8", "replace"))
+    return paths is not None and change_class.classify(paths) == "light"
 
 
 def _coverage(report: dict, reasons: list[str], visible: list[str]) -> None:
@@ -224,12 +244,26 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
             reasons.append(f"report {field} is invalid")
     if report.get("reviewed_tree") != report.get("tree"):
         reasons.append("reviewed tree is dirty")
+    tier = report.get("class")
+    if "class" not in expected or tier != expected.get("class"):
+        reasons.append("identity mismatch: class")
+    required = _TIER_SEATS.get(tier) if isinstance(tier, str) else None
+    if required is None:
+        reasons.append("report class is invalid")
     seats = report.get("seats")
-    if not isinstance(seats, dict) or set(seats) != set(_SEATS):
+    if required is None or not isinstance(seats, dict) or set(seats) != set(required):
         reasons.append("required seats are missing")
     else:
-        for name in _SEATS:
+        for name in required:
             _artifact_ok(seats[name], artifact_root, name, reasons)
+        if tier == "light":
+            runtimes = {seats[name].get("runtime") for name in required
+                        if isinstance(seats[name], dict)
+                        and isinstance(seats[name].get("runtime"), str)}
+            if runtimes != {"claude", "codex"}:
+                reasons.append("light seats must be one claude and one codex runtime")
+    if tier == "light" and not _light_diff_ok(report.get("preconditions"), artifact_root):
+        reasons.append("class light does not match the frozen diff")
     _coverage(report, reasons, visible)
     changes = _findings(report, expected, reasons)
     source = report.get("preconditions")
@@ -263,7 +297,9 @@ def schema() -> dict:
     }
     return {
         "schema_version": 1,
-        "required_seats": list(_SEATS),
+        "light_seats": list(LIGHT_SEATS),
+        "full_seats": list(FULL_SEATS),
+        "class": "light or full; the evaluator recomputes light from the frozen diff",
         "finding_fields": {
             "id": "nonempty unique identifier",
             "severity": "critical, high, major, minor, low, nit, or advisory",
@@ -283,6 +319,7 @@ def schema() -> dict:
             "base_ref": "main",
             "tree": "40-char SHA",
             "reviewed_tree": "40-char SHA",
+            "class": "full",
             "seats": {
                 seat: {
                     "status": "complete",
@@ -292,7 +329,7 @@ def schema() -> dict:
                     "model": "observed or unknown",
                     "effort": "observed or unknown",
                 }
-                for seat in _SEATS
+                for seat in FULL_SEATS
             },
             "findings": [],
             "prior_blockers": [],
@@ -312,6 +349,7 @@ def schema() -> dict:
             "base_ref": "main",
             "tree": "40-char SHA",
             "known_blockers": [],
+            "class": "full",
         },
         "bindings": {
             "manifest.source.source_tree": "expected.tree",

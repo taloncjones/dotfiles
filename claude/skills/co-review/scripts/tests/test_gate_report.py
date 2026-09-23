@@ -66,6 +66,7 @@ class GateReportTests(unittest.TestCase):
             "base_ref": "main",
             "tree": SHA_A,
             "known_blockers": ["old-1"],
+            "class": "full",
         }
         self.report = self._report()
 
@@ -124,6 +125,7 @@ class GateReportTests(unittest.TestCase):
             "base_ref": "main",
             "tree": SHA_A,
             "reviewed_tree": SHA_A,
+            "class": "full",
             "seats": seats,
             "findings": [],
             "prior_blockers": [
@@ -138,6 +140,71 @@ class GateReportTests(unittest.TestCase):
 
     def verdict(self):
         return gate.evaluate(self.report, self.expected, self.root)
+
+    def _light(self, diff_text: str, runtimes=("codex", "claude")):
+        self.expected["class"] = "light"
+        self.report["class"] = "light"
+        seats = {}
+        for name, runtime in zip(("codex", "verifier"), runtimes):
+            seat = self._write(f"{name}.txt", f"{name} evidence\n")
+            seats[name] = {"status": "complete", **seat, "runtime": runtime,
+                           "model": "unknown", "effort": "unknown"}
+        self.report["seats"] = seats
+        self.report["preconditions"]["diff"] = self._write("review.diff", diff_text)
+
+    def test_light_report_over_markdown_diff_approves(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n")
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_light_class_over_code_diff_is_incomplete(self):
+        self._light("diff --git a/claude/hooks/x.py b/claude/hooks/x.py\n+x\n")
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("class light does not match the frozen diff", result["reasons"])
+
+    def test_light_recompute_uses_digest_bound_diff(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n")
+        (self.root / "review.diff").write_text("diff --git a/x.py b/x.py\n", encoding="utf-8")
+        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+
+    def test_class_mismatch_and_missing_class_are_incomplete(self):
+        self.expected["class"] = "light"
+        self.assertIn("identity mismatch: class", self.verdict()["reasons"])
+        self.expected["class"] = "full"
+        del self.report["class"]
+        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+
+    def test_seat_set_must_match_class(self):
+        self.report["class"] = self.expected["class"] = "light"
+        self.assertIn("required seats are missing", self.verdict()["reasons"])
+        self._light("diff --git a/README.md b/README.md\n+x\n")
+        self.report["class"] = self.expected["class"] = "full"
+        self.assertIn("required seats are missing", self.verdict()["reasons"])
+
+    def test_light_seats_need_one_claude_and_one_codex_runtime(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("codex", "unknown"))
+        self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+
+    def test_light_seat_runtime_must_be_a_string(self):
+        for bad in ([], {}):
+            self._light("diff --git a/README.md b/README.md\n+x\n")
+            self.report["seats"]["verifier"]["runtime"] = bad
+            self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
+
+    def test_full_report_over_markdown_diff_approves(self):
+        self.report["preconditions"]["diff"] = self._write(
+            "review.diff", "diff --git a/README.md b/README.md\n+x\n")
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_schema_documents_class_and_seat_sets(self):
+        shape = gate.schema()
+        self.assertEqual(shape["light_seats"], ["codex", "verifier"])
+        self.assertEqual(shape["full_seats"], ["claude", "codex", "breaker", "verifier"])
+        self.assertEqual(shape["report_example"]["class"], "full")
+        self.assertEqual(shape["expected_example"]["class"], "full")
+        self.assertNotIn("required_seats", shape)
 
     def test_valid_report_approves(self):
         result = self.verdict()
