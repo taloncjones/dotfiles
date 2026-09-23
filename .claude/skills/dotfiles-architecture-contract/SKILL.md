@@ -316,11 +316,10 @@ could contain a current upstream payload; verify installed bytes/provenance
 before declaring anything stale. Automatic Plan Canvas session/stop hooks (an ECC-only feature) are gone along with the rest of the retired ECC.
 
 Run the helper with `--check` to preview changes or `--apply` to write them.
-The old `--focus --apply` flag, which opted into the retired ECC's core skill
-catalog in `codex/ecc-skills.txt`, no longer exists; there is no focused-
-discovery mode. Explicit skill overrides are preserved. Leftover
-`[[skills.config]]` blocks marked `# dotfiles-managed: ecc-focus` from that
-retired mode are cleared automatically by `clear_managed_disabled` on every
+The old `--focus --apply` flag, which opted into the now-retired `codex/ecc-skills.txt` core skill catalog, no longer exists; there is no
+focused-discovery mode. Explicit skill overrides are preserved.
+Leftover `[[skills.config]]` blocks marked with the now-retired `# dotfiles-managed: ecc-focus` tag are cleared automatically by
+`clear_managed_disabled` on every
 repair run; there is no manual removal step. The `legacy-copy`/`legacy-command`
 blocks remain disabled. The compatibility checks run again on later updates;
 simply re-enabling an incompatible import does not opt it out.
