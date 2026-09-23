@@ -229,10 +229,14 @@ def read_codex_jsonl(codex_home):
                             project_name = "codex"
 
                             # Report unknown rather than a fabricated 0 when
-                            # the real cache-write field is absent (PRD
-                            # requirement 5).
-                            if "cache_write_input_tokens" in last:
-                                cache_creation = last["cache_write_input_tokens"]
+                            # the real cache-write field is absent or exactly
+                            # 0 -- real Codex data observed it present and 0
+                            # in 100% of sampled events, so a present-but-0
+                            # value carries no more signal than an absent one
+                            # (PRD requirement 5).
+                            cache_write = last.get("cache_write_input_tokens")
+                            if cache_write:
+                                cache_creation = cache_write
                             else:
                                 cache_creation = "unknown"
 

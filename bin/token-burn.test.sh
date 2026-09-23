@@ -139,6 +139,17 @@ cat > "$CODEX_UNKNOWN_FILE" <<EOF
 {"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":20,"total_tokens":80},"last_token_usage":{"input_tokens":50,"cached_input_tokens":10,"output_tokens":20,"total_tokens":80}}}}
 EOF
 
+# Codex session with cache_write_input_tokens present but exactly 0 -- the
+# real-world shape (observed in 100% of sampled real events). Must land in
+# the unranked unknown section like the field-absent case, not be treated as
+# a measured zero.
+mkdir -p "$WORK/codex_home/sessions/2026/09/18"
+CODEX_ZEROWRITE_FILE="$WORK/codex_home/sessions/2026/09/18/rollout-2026-09-18T11-00-00-01a0Z-codex-zerowrite.jsonl"
+cat > "$CODEX_ZEROWRITE_FILE" <<EOF
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0Z-codex-zerowrite","cwd":"/repo"}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":50,"cache_write_input_tokens":0,"output_tokens":75,"reasoning_output_tokens":10,"total_tokens":275},"last_token_usage":{"input_tokens":200,"cached_input_tokens":50,"cache_write_input_tokens":0,"output_tokens":75,"reasoning_output_tokens":10,"total_tokens":275}}}}
+EOF
+
 output=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
     "$REPO/bin/token-burn" --since 7d 2>&1)
 
@@ -168,6 +179,13 @@ assert_contains "codex known cache_write is numeric" "$known_section" "cache_cr:
 unknown_section=$(section "$output" "Unknown-Priced Sessions")
 assert_contains "codex unknown cache_write in unknown section" "$unknown_section" "01a0U-co"
 assert_not_contains "codex unknown session absent from ranked section" "$known_section" "01a0U-co"
+
+# Finding 1 (review round 3): cache_write_input_tokens present but exactly 0
+# is the real-world shape (observed in 100% of sampled real events) and must
+# be treated as unknown, not as a measured 0 -- otherwise every real Codex
+# session lands in the ranked table with a fabricated priced total.
+assert_contains "codex present-but-zero cache_write in unknown section" "$unknown_section" "01a0Z-co"
+assert_not_contains "codex present-but-zero session absent from ranked section" "$known_section" "01a0Z-co"
 
 # V-4: both codex-schema malformed lines in the unknown-priced file (the
 # JSON array line and the info:null token_count event) must each warn.
