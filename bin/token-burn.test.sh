@@ -206,6 +206,30 @@ cat > "$CODEX_LEAF_FILE" <<EOF
 {"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":1,"output_tokens":"2","total_tokens":13},"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":1,"output_tokens":"2","total_tokens":13}}}}
 EOF
 
+# R-6, bad-then-valid ordering: a bad-timestamp event must not poison the
+# re-emit dedup state against a later legitimate event repeating the same
+# cumulative total. Usage must be kept (from the second, valid event) and
+# exactly one warning emitted (for the first, invalid-timestamp event).
+mkdir -p "$WORK/codex_home/sessions/2026/09/21"
+CODEX_BADFIRST_FILE="$WORK/codex_home/sessions/2026/09/21/rollout-2026-09-21T05-00-00-01a0F-codex-badfirst.jsonl"
+cat > "$CODEX_BADFIRST_FILE" <<EOF
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0F-codex-badfirst","cwd":"/repo"}}
+{"timestamp":"not-a-date","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"total_tokens":600},"last_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"total_tokens":600}}}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":5,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"total_tokens":600},"last_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"total_tokens":600}}}}
+EOF
+
+# R-6, valid-then-bad ordering: a legitimate re-emit event that itself has a
+# bad timestamp must still keep the already-recorded usage (from the first,
+# valid event) AND still emit its own bad-timestamp warning -- the dedup
+# skip must not suppress the V-6 diagnostic.
+mkdir -p "$WORK/codex_home/sessions/2026/09/22"
+CODEX_BADSECOND_FILE="$WORK/codex_home/sessions/2026/09/22/rollout-2026-09-22T05-00-00-01a0G-codex-badsecond.jsonl"
+cat > "$CODEX_BADSECOND_FILE" <<EOF
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0G-codex-badsecond","cwd":"/repo"}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":600,"cached_input_tokens":110,"cache_write_input_tokens":25,"output_tokens":300,"total_tokens":710},"last_token_usage":{"input_tokens":600,"cached_input_tokens":110,"cache_write_input_tokens":25,"output_tokens":300,"total_tokens":710}}}}
+{"timestamp":"not-a-date","ordinal":5,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":600,"cached_input_tokens":110,"cache_write_input_tokens":25,"output_tokens":300,"total_tokens":710},"last_token_usage":{"input_tokens":600,"cached_input_tokens":110,"cache_write_input_tokens":25,"output_tokens":300,"total_tokens":710}}}}
+EOF
+
 set +e
 output=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
     "$REPO/bin/token-burn" --since 7d 2>&1)
@@ -269,6 +293,24 @@ assert_eq "codex re-emitted event counted once, not twice" "$(field_value "$reem
 assert_not_contains "no false-positive warning on rate-limit-only event" "$output" "codex-ratelimit.jsonl"
 ratelimit_line=$(printf '%s\n' "$output" | grep "01a0L-co" | head -1)
 assert_eq "codex rate-limit-only session still counts its real event" "$(field_value "$ratelimit_line" "output")" "15"
+
+# R-6, bad-then-valid: a bad-timestamp event must not poison the re-emit
+# dedup state -- the later valid repeat of the same cumulative total must
+# still be counted, and exactly one warning (for the bad-timestamp event)
+# must be emitted. Warning lines are excluded from the row lookup since
+# they also embed the fixture's session-id-bearing filename.
+badfirst_line=$(printf '%s\n' "$output" | grep -v "^token-burn:" | grep "01a0F-co" | head -1)
+assert_eq "R-6 bad-then-valid keeps the usage" "$(field_value "$badfirst_line" "output")" "200"
+badfirst_ts_warnings=$(printf '%s\n' "$output" | grep "unparseable timestamp" | grep -c "codex-badfirst.jsonl" || true)
+assert_eq "R-6 bad-then-valid warns exactly once" "$badfirst_ts_warnings" "1"
+
+# R-6, valid-then-bad: a legitimate re-emit that itself has a bad timestamp
+# must not suppress its own bad-timestamp warning, even though its usage is
+# already counted from the earlier valid event.
+badsecond_line=$(printf '%s\n' "$output" | grep -v "^token-burn:" | grep "01a0G-co" | head -1)
+assert_eq "R-6 valid-then-bad keeps the usage" "$(field_value "$badsecond_line" "output")" "300"
+badsecond_ts_warnings=$(printf '%s\n' "$output" | grep "unparseable timestamp" | grep -c "codex-badsecond.jsonl" || true)
+assert_eq "R-6 valid-then-bad still warns once" "$badsecond_ts_warnings" "1"
 
 # V-4-residual: leaf-level malformed values (null/string token counts, a
 # null sessionId, a non-string model) must warn and be skipped, never crash

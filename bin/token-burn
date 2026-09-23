@@ -268,16 +268,12 @@ def read_codex_jsonl(codex_home):
                             ):
                                 _require_leaf_number(last, field)
 
-                            # Codex sometimes re-emits a token_count event
-                            # whose cumulative total is unchanged from the
-                            # previous one; summing last_token_usage for it
-                            # would double count that delta.
-                            total_usage = info.get("total_token_usage")
-                            if isinstance(total_usage, dict):
-                                if total_usage == prev_total_usage:
-                                    continue
-                                prev_total_usage = total_usage
-
+                            # Validate the timestamp -- and every other
+                            # per-event acceptance check -- before touching
+                            # any dedup state below, so a rejected event
+                            # (e.g. a bad timestamp) never marks a
+                            # cumulative total as "seen" and cannot poison a
+                            # later legitimate repeat of that total.
                             ts_str = obj.get("timestamp")
                             day = parse_timestamp(ts_str)
                             if not day:
@@ -288,6 +284,18 @@ def read_codex_jsonl(codex_home):
                                         file=sys.stderr,
                                     )
                                 continue
+
+                            # Codex sometimes re-emits a token_count event
+                            # whose cumulative total is unchanged from the
+                            # previous one; summing last_token_usage for it
+                            # would double count that delta. Only an event
+                            # that has passed every check above -- and will
+                            # therefore be counted -- may update this state.
+                            total_usage = info.get("total_token_usage")
+                            if isinstance(total_usage, dict):
+                                if total_usage == prev_total_usage:
+                                    continue
+                                prev_total_usage = total_usage
 
                             model = "codex-unknown"
                             project_name = "codex"
