@@ -286,6 +286,15 @@
             "command": "~/.claude/hooks/handoff_notice.py"
           }
         ]
+      },
+      {
+        "matcher": "clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/director_rollover.py"
+          }
+        ]
       }
     ],
     "Stop": [

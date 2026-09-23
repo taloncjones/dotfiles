@@ -24,5 +24,12 @@ On launch:
    takeover is a human decision.
 3. After a successful preflight, report what is queued and await direction.
 
+After `/clear` or compaction in herdr mode, the `director_rollover`
+SessionStart hook has already re-claimed the lease. Its
+`[INFO] herdr director rollover` block is authoritative: follow its `Next:`
+line instead of re-running the launch steps above. On a `[WARNING]` block,
+or when no block appears, run the section-1 preflight. To roll over
+deliberately, use the skill's section 1a.
+
 In herdr mode the skill file is the single source of procedure. Never
 restate or adapt its steps from memory; follow the loaded skill text.
