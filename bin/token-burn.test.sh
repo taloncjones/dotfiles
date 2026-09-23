@@ -39,32 +39,40 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# token-burn resolves "today" via the local clock (datetime.now()), so the
+# fixture's two days must be computed relative to that same clock rather than
+# pinned to a fixed calendar date - a hardcoded date goes stale and breaks the
+# --since 0d cutoff test the moment the wall clock moves past it.
+TODAY=$(python3 -c "from datetime import datetime; print(datetime.now().date().isoformat())")
+YESTERDAY=$(python3 -c "from datetime import datetime, timedelta; print((datetime.now().date() - timedelta(days=1)).isoformat())")
+CODEX_TS_MS=$(python3 -c "from datetime import datetime; print(int(datetime.now().replace(hour=10, minute=0, second=0, microsecond=0).timestamp() * 1000))")
+
 mkdir -p "$WORK/claude_home/projects/proj1"
 mkdir -p "$WORK/claude_home/projects/proj2"
 mkdir -p "$WORK/codex_home/archived_sessions"
 
 # Claude project 1, session 1, two days of data
-cat > "$WORK/claude_home/projects/proj1/session1.jsonl" <<'EOF'
-{"type":"message","sessionId":"sess-1","timestamp":"2026-09-21T10:00:00Z","message":{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":1000,"cache_read_input_tokens":500}}}
-{"type":"message","sessionId":"sess-1","timestamp":"2026-09-21T11:00:00Z","message":{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":200,"output_tokens":100,"cache_creation_input_tokens":2000,"cache_read_input_tokens":1000}}}
-{"type":"message","sessionId":"sess-1","timestamp":"2026-09-22T10:00:00Z","message":{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":150,"output_tokens":75,"cache_creation_input_tokens":1500,"cache_read_input_tokens":750}}}
+cat > "$WORK/claude_home/projects/proj1/session1.jsonl" <<EOF
+{"type":"message","sessionId":"sess-1","timestamp":"${YESTERDAY}T10:00:00Z","message":{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":1000,"cache_read_input_tokens":500}}}
+{"type":"message","sessionId":"sess-1","timestamp":"${YESTERDAY}T11:00:00Z","message":{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":200,"output_tokens":100,"cache_creation_input_tokens":2000,"cache_read_input_tokens":1000}}}
+{"type":"message","sessionId":"sess-1","timestamp":"${TODAY}T10:00:00Z","message":{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":150,"output_tokens":75,"cache_creation_input_tokens":1500,"cache_read_input_tokens":750}}}
 EOF
 
 # Claude project 2, session 2, different model
-cat > "$WORK/claude_home/projects/proj2/session2.jsonl" <<'EOF'
-{"type":"message","sessionId":"sess-2","timestamp":"2026-09-22T12:00:00Z","message":{"model":"claude-opus-5-5","usage":{"input_tokens":300,"output_tokens":200,"cache_creation_input_tokens":3000,"cache_read_input_tokens":1500}}}
-{"type":"message","sessionId":"sess-2","timestamp":"2026-09-22T13:00:00Z","message":{"model":"claude-opus-5-5","usage":{"input_tokens":400,"output_tokens":250,"cache_creation_input_tokens":4000,"cache_read_input_tokens":2000}}}
+cat > "$WORK/claude_home/projects/proj2/session2.jsonl" <<EOF
+{"type":"message","sessionId":"sess-2","timestamp":"${TODAY}T12:00:00Z","message":{"model":"claude-opus-5-5","usage":{"input_tokens":300,"output_tokens":200,"cache_creation_input_tokens":3000,"cache_read_input_tokens":1500}}}
+{"type":"message","sessionId":"sess-2","timestamp":"${TODAY}T13:00:00Z","message":{"model":"claude-opus-5-5","usage":{"input_tokens":400,"output_tokens":250,"cache_creation_input_tokens":4000,"cache_read_input_tokens":2000}}}
 EOF
 
 # Malformed line (should be skipped, not crash)
-cat > "$WORK/claude_home/projects/proj1/broken.jsonl" <<'EOF'
+cat > "$WORK/claude_home/projects/proj1/broken.jsonl" <<EOF
 this is not json
-{"type":"message","sessionId":"sess-3","timestamp":"2026-09-22T15:00:00Z","message":{"model":"claude-fable-5-1","usage":{"input_tokens":500,"output_tokens":300,"cache_creation_input_tokens":5000,"cache_read_input_tokens":2500}}}
+{"type":"message","sessionId":"sess-3","timestamp":"${TODAY}T15:00:00Z","message":{"model":"claude-fable-5-1","usage":{"input_tokens":500,"output_tokens":300,"cache_creation_input_tokens":5000,"cache_read_input_tokens":2500}}}
 EOF
 
-# Codex archived session (timestamp for 2026-09-22 in milliseconds)
-cat > "$WORK/codex_home/archived_sessions/codex_sess.jsonl" <<'EOF'
-{"type":"event_msg","session_id":"codex-1","timestamp":1790096400000,"payload":{"type":"token_count","info":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":500,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}}
+# Codex archived session (timestamp for today in milliseconds)
+cat > "$WORK/codex_home/archived_sessions/codex_sess.jsonl" <<EOF
+{"type":"event_msg","session_id":"codex-1","timestamp":${CODEX_TS_MS},"payload":{"type":"token_count","info":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":500,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}}
 EOF
 
 output=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
@@ -90,8 +98,8 @@ assert_contains "codex cache_creation is unknown, not 0" "$codex_line" "cache_cr
 
 # Per-day grouping (Goal 1) must surface in the output
 assert_contains "grand total by day header" "$output" "Grand Total by Day:"
-assert_contains "per-day totals include 2026-09-22" "$output" "2026-09-22"
-assert_contains "per-day totals include 2026-09-21" "$output" "2026-09-21"
+assert_contains "per-day totals include today" "$output" "$TODAY"
+assert_contains "per-day totals include yesterday" "$output" "$YESTERDAY"
 
 # Top sessions should list the big ones
 assert_contains "top sessions header" "$output" "Top Sessions by Priced Tokens"
@@ -114,7 +122,7 @@ assert_contains "stderr warning on unreadable file" "$output_unreadable" "token-
 assert_contains "unreadable file warning names the file" "$output_unreadable" "session2.jsonl"
 assert_not_contains "unreadable file does not crash" "$output_unreadable" "Traceback"
 
-# Test --since filter: cutoff to just 2026-09-22 data
+# Test --since filter: cutoff to just today's data
 output_filtered=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
     "$REPO/bin/token-burn" --since 0d 2>&1)
 assert_contains "--since 0d excludes older" "$output_filtered" "claude-haiku-4-5-20251001"
