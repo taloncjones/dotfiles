@@ -133,9 +133,13 @@ for the provider's `launch_env` mapping.
      core stores it as `owner.json.messaging_socket` and takes the owner
      `pid` from the socket basename (the Claude process, not a Bash `$PPID`);
      an unusable value stores `null` with one `[WARNING]` and ownership still
-     succeeds. Director launch line (documented, not enforced --
-     preflight cannot read its own permission class or inbound policy):
-     `claude --agent director --settings '{"crossSessionInbound":"accept"}'`.
+     succeeds. Launch with the `director` shell function
+     (`zsh/claude-account.zsh`), which runs `claude --agent director
+--settings '{"crossSessionInbound":"accept"}' --permission-mode manual`
+     through the account-routing wrapper and refuses outside a herdr pane.
+     Unattended merges also need the machine-local `Bash(gh pr merge:*)`
+     allow rule in the project's `.claude/settings.local.json`; this repo
+     does not create it.
      Auto mode is no longer the documented launch: its classifier refuses
      `gh pr merge`. Nothing in the director flow assumes a permission mode;
      the rollover hook runs in every mode, and a `rollover` Bash call may
@@ -235,16 +239,23 @@ for the provider's `launch_env` mapping.
      per role at dispatch time.
 
 6. **Arm the standing wake watch (owner only; a `BUSY` non-owner never
-   arms).** If this session has no live watch for this repo: capture
-   `EPOCH=$(date +%s)` FIRST, then start one via the `Monitor` tool --
+   arms).** If `CLAUDE_CODE_MESSAGING_SOCKET` is set (the hook push is the
+   wake path), run only the silent backstop: capture `EPOCH=$(date +%s)`
+   FIRST, stop any Monitor-based watch this session still has (including one
+   inherited across `/clear`, with the `watch-pids` kill below), then start
+   `python3 "$CORE" watch --repo-slug <slug> --undelivered-only --exit-on-signal --since-epoch $EPOCH`
+   with `Bash run_in_background` and note its task id. It prints nothing
+   while pushes are delivered, never prints a heartbeat, and exits with one
+   `signal` line when a completion record stays undelivered for 120 s; that
+   exit is the wake. Re-arm it on that wake turn and on any preflight where
+   this context has no live backstop task. If the socket is unset, arm the
+   watch at the default cadence via the `Monitor` tool instead: if this
+   session has no live watch for this repo, capture `EPOCH=$(date +%s)`
+   FIRST, then start one via the `Monitor` tool --
    `command: python3 "$CORE" watch --repo-slug <slug> --since-epoch $EPOCH`,
    `persistent: true`, description `herdr worker activity (<repo>)` -- and
    note the returned task id. The pre-captured epoch makes any event landing
    while the watch subprocess starts up count as changed on its first pass.
-   Cadence: when `CLAUDE_CODE_MESSAGING_SOCKET` is set in this session's
-   environment (messaging live; the hook push below is the fast path) add
-   `--interval 60 --debounce-secs 300`; when it is unset,
-   arm at the default cadence. Same verb, same rules either way.
    Rules:
    - **Arm BEFORE this turn's section-4 check-in.** Together with the epoch
      seed there is no gap: an event before the epoch is caught by the
@@ -272,9 +283,9 @@ for the provider's `launch_env` mapping.
      The watch reads only `STATE_ROOT` and prints a closed vocabulary
      (`signal` / `heartbeat`); worst-case wake latency is one `--interval`
      (default 15s) plus one `--debounce-secs` (default 60s) after a burst.
-     The watch fires on completion-record writes only -- the same predicate
-     the worker hook uses -- so an ordinary worker turn end produces no
-     signal.
+     The default watch fires on completion-record, think-answer, and
+     mech-ledger writes; the hook pushes on completion-record changes and
+     blocks; an ordinary worker turn end produces neither.
 
 ## 1a. Rollover in place
 
@@ -629,10 +640,24 @@ every wake observed must be followed by authoritative reads that BEGAN after
 it. Messages land between tool calls, so if a wake appears in the transcript
 during a check-in, run another check-in pass before ending the turn, and
 repeat until a pass began after the last wake seen, capped at three passes per
-turn; past the cap, end the turn and let the watch (or the next push) wake the
-next one. A worker that exits without emitting a record is no longer
-announced; the live `herdr agent list` poll in section 4 reports it `absent`
-at the next heartbeat, which is what decides `abandoned`.
+turn; past the cap, arm the retry timer below and end the turn. A worker that
+exits without emitting a record is no longer announced; the live `herdr agent
+list` poll in section 4 reports it `absent` at the next check-in, which is
+what decides `abandoned`.
+
+**Incomplete check-ins retry on a timer, not a heartbeat.** A check-in is
+incomplete when `checkin` exits nonzero, prints no `changed:` line, or
+prints `poll: failed`, `unreadable-task`, `unreadable-record`, or a task
+line with `action=unknown`; a turn is also unfinished when it hit the
+three-pass cap with a wake seen after its last pass began. Then arm one
+retry timer (`Bash run_in_background` running `sleep 300`, at most one per
+context) whose exit re-runs the check-in. After three consecutive
+incomplete check-ins, ask the human once (AskUserQuestion) and stop
+re-arming. The count lives in this context only; a `/clear` resets it.
+`owner: stale-fence` is not retried: yield read-only as always.
+`unverifiable-evidence <task> <review|plan>` is not retried either: it is
+the section-5 integrity halt, surfaced to the human at once with no status
+change and no re-dispatch.
 
 `python3 "$CORE" status --repo-slug <slug>` folds the per-workspace event logs into
 per-task status. Reconcile that against a live `herdr agent list` /
@@ -831,6 +856,15 @@ for a foreign or missing pane).
    recomputes that value after a coordinator restart rather than adding a second
    state field. This is the `600-second deadline`. Refresh both agent and
    workspace display metadata.
+
+   **Deadline timer.** Right after the dispatch, and at every preflight,
+   run `python3 "$CORE" review-deadlines --repo-slug <slug>`. For each
+   `review-deadline` line this context has no live timer for, arm one
+   `Bash run_in_background` timer running `sleep <remaining + 30>`; for
+   `remaining=0` or `remaining=unknown`, run the check-in now instead. The
+   timer's exit runs the check-in, which enforces step 6's bound. On
+   yielding ownership, TaskStop these timers.
+
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
 5. Prompt the review agent to run **`review-change`** over the pinned base,
@@ -915,6 +949,10 @@ deadline, <launch_id>`, and never fabricate a review record, blocker count,
    - only `approved` with no blocking findings and complete evidence ->
      `status: reviewed`, event `reviewed`. Advisories remain visible and do not
      create an automatic fix queue.
+
+When a Claude review record arrives and `checkin` shows the task `dirty=yes`,
+tell the human before any phase advance; acceptance itself is unchanged
+(`reviewed_head_sha`, stale-verdict rule).
 
 ## 6. Surface task-local readiness -- only on `reviewed`
 
@@ -1178,11 +1216,11 @@ then launch:
 python3 "$CORE" run-think --repo-slug <slug> --session <id> --fence <fence> --think-id <think_id> --kind <kind> [--task-id <task_id>] --model $MODEL --effort $EFFORT --cwd <repo_worktree> --max-turns <N> --max-budget-usd <X> --timeout-secs <T> [--add-dir tasks] [--add-dir think]
 ```
 
-launched with `Bash run_in_background` (or a self-managed `pane split` in
-the director's OWN workspace, section 7) so the director does not
-block. `run-think` writes `<think_id>.launch.json` (the durable live
+`run-think` always runs under `Bash run_in_background`, whose exit notifies
+the director whether or not an answer was published; do not use a pane
+split for it. `run-think` writes `<think_id>.launch.json` (the durable live
 record) before the run and `<think_id>.answer.json` (the output contract)
-after; both are watch wakes. `$MODEL`/`$EFFORT` come from the same
+after; without messaging the answer is a watch wake. `$MODEL`/`$EFFORT` come from the same
 `routing-table` snapshot as another legacy wrapper dispatch (`think` role). A
 model-attributable failure (`downgrade`, or an execution error naming the
 alias/"model"): `disable-model` on the requested alias, `routing-table`
