@@ -1786,6 +1786,7 @@ WATCH_DIRS = {
 }
 BACKSTOP_DIRS = {"tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id))}
 BACKSTOP_GRACE_SECS = 120
+REVIEW_BOUND_NS = 600_000_000_000
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
 
@@ -3392,6 +3393,7 @@ def _main(argv=None) -> int:
     ck.add_argument("--workspaces-json", default=None)
     ck.add_argument("--all", action="store_true")
     add("status")
+    add("review-deadlines")
     add("task-lead-status")
     add("deactivate-task-leads", fenced=True)
     add("should-dispatch-review", "--task-id", "--head-sha")
@@ -5300,6 +5302,29 @@ def _main(argv=None) -> int:
                   f"dirty={f['dirty']} done={f['done']} review={f['review']} "
                   f"hint={f['hint']} action={f['action']} wake={f['wake']}")
         print(f"changed: {'yes' if changed else 'no'}")
+        return 0
+    if ns.cmd == "review-deadlines":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        now_ns = time.time_ns()
+        for tf in sorted(payload_files(rd / "tasks", "*.json")):
+            if tf.name.endswith((".done.json", ".review.json")):
+                continue
+            try:
+                task = json.loads(read_payload_text(tf))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(task, dict) or task.get("status") != "review-dispatched":
+                continue
+            row = latest_native_attempt(task, "review")
+            started = row.get("started_ns") if row else None
+            if isinstance(started, int) and not isinstance(started, bool):
+                left = started + REVIEW_BOUND_NS - now_ns
+                remaining = str(max(0, -(-left // 1_000_000_000)))
+            else:
+                remaining = "unknown"
+            launch = row.get("launch_id") if row else "unknown"
+            print(f"review-deadline task={task.get('task_id')} launch={launch} remaining={remaining}")
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")

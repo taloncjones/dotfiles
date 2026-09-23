@@ -9841,6 +9841,31 @@ assert c.plan_record_matches(task, done, "h" * 40, "w1")
 assert not c.plan_record_matches(task, dict(done, outcome="failed"), "h" * 40, "w1")
 PY
 
+check "review-deadlines: ceil remaining from the review row; unknown without one" <<PY
+$LOAD
+import subprocess, time
+root = tempfile.mkdtemp(); slug = "github-com-org-deadline-cafe0002"
+rd = os.path.join(root, "herdr-orch", slug); os.makedirs(os.path.join(rd, "tasks"))
+row = {"phase": "review", "runtime": "claude", "launch_id": "rev-1", "workspace_id": "w2",
+       "pane_id": "w2:p1", "source_head_sha": "a" * 40}
+def task(tid, status, started):
+    rows = [dict(row, started_ns=started)] if started is not None else []
+    json.dump({"task_id": tid, "status": status, "workers": rows},
+              open(os.path.join(rd, "tasks", f"{tid}.json"), "w"))
+now = time.time_ns()
+task("PROJ-1", "review-dispatched", now - 100 * 10**9)
+task("PROJ-2", "review-dispatched", now - 700 * 10**9)
+task("PROJ-3", "completed", now)
+task("PROJ-4", "review-dispatched", None)
+out = subprocess.run([sys.executable, "claude/hooks/herdr_legacy_fixture.py", "review-deadlines",
+                      "--repo-slug", slug], env=dict(os.environ, CLAUDE_CONFIG_DIR=root),
+                     capture_output=True, text=True, check=True).stdout.splitlines()
+assert "review-deadline task=PROJ-1 launch=rev-1 remaining=500" in out, out
+assert "review-deadline task=PROJ-2 launch=rev-1 remaining=0" in out, out
+assert not any("PROJ-3" in l for l in out), out
+assert "review-deadline task=PROJ-4 launch=unknown remaining=unknown" in out, out
+PY
+
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
 $LOAD
 s = open("claude/skills/herdr-orchestration/SKILL.md").read()
