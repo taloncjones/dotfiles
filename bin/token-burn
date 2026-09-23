@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+from datetime import datetime, timedelta
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+# Codex rollout filenames: rollout-<ISO timestamp with :/T replaced by ->-<session_id>.jsonl
+CODEX_FILENAME_RE = re.compile(r"^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$")
+
+
+@dataclass
+class TokenCount:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+    def __add__(self, other):
+        if self.cache_creation_input_tokens == "unknown" or other.cache_creation_input_tokens == "unknown":
+            cache_creation = "unknown"
+        else:
+            cache_creation = self.cache_creation_input_tokens + other.cache_creation_input_tokens
+        return TokenCount(
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            cache_creation,
+            self.cache_read_input_tokens + other.cache_read_input_tokens,
+        )
+
+    def _cache_creation_numeric(self):
+        return 0 if self.cache_creation_input_tokens == "unknown" else self.cache_creation_input_tokens
+
+    def total_priced(self):
+        return self._cache_creation_numeric() + self.output_tokens
+
+    def total_all(self):
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self._cache_creation_numeric()
+            + self.cache_read_input_tokens
+        )
+
+
+@dataclass
+class SessionStat:
+    model: str
+    session_id: str
+    project: str
+    day: str
+    tokens: TokenCount = field(default_factory=TokenCount)
+
+
+def parse_timestamp(ts_str):
+    if not ts_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return dt.date()
+    except (ValueError, AttributeError):
+        return None
+
+
+def get_cutoff_date(since_str):
+    today = datetime.now().date()
+    if since_str in (None, "all", "0"):
+        return None
+    try:
+        days = int(since_str.rstrip("dD"))
+        return today - timedelta(days=days)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _iter_regular_jsonl_files(root):
+    """Yield *.jsonl files under root, skipping symlinks/FIFOs/etc so an
+    unconditional open() can never block on a planted non-regular entry."""
+    for jsonl_file in root.rglob("*.jsonl"):
+        try:
+            st = jsonl_file.lstat()
+        except OSError as e:
+            print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            print(f"token-burn: warning: skipping non-regular file {jsonl_file}", file=sys.stderr)
+            continue
+        yield jsonl_file
+
+
+def _require_leaf_number(container, field):
+    """Raise if field is present in container but not a real number (catches
+    null/string leaf values that would otherwise crash arithmetic or
+    formatting downstream, outside any per-line try/except)."""
+    if field in container:
+        value = container[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{field} is not a number: {value!r}")
+
+
+def _require_leaf_string(container, field):
+    """Raise if field is present in container but not a string (catches a
+    null or wrong-type value that would otherwise crash slicing/formatting
+    downstream, outside any per-line try/except)."""
+    if field in container:
+        value = container[field]
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{field} is not a string: {value!r}")
+
+
+def read_claude_jsonl(config_dir):
+    results = []
+    seen_message_keys = {}
+    projects_path = Path(config_dir) / "projects"
+    if not projects_path.exists():
+        return results
+
+    for jsonl_file in _iter_regular_jsonl_files(projects_path):
+        try:
+            with open(jsonl_file, "r", errors="replace") as f:
+                for line_no, line in enumerate(f, 1):
+                    try:
+                        obj = json.loads(line)
+                        if not isinstance(obj, dict):
+                            raise ValueError("line is not a JSON object")
+
+                        if "message" not in obj:
+                            continue
+                        message = obj["message"]
+                        if not isinstance(message, dict):
+                            raise ValueError("message field is not an object")
+                        if "usage" not in message:
+                            continue
+                        usage = message["usage"]
+                        if not isinstance(usage, dict):
+                            raise ValueError("usage field is not an object")
+                        for field in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cache_creation_input_tokens",
+                            "cache_read_input_tokens",
+                        ):
+                            _require_leaf_number(usage, field)
+                        # A present-but-null sessionId is malformed, not a
+                        # legitimate "no session" case -- skip the record
+                        # rather than defaulting it, so a garbled session id
+                        # is never silently folded into the "unknown" bucket.
+                        if "sessionId" in obj and obj["sessionId"] is None:
+                            raise ValueError("sessionId is null")
+                        _require_leaf_string(obj, "sessionId")
+                        _require_leaf_string(message, "model")
+
+                        ts = obj.get("timestamp")
+                        day = parse_timestamp(ts)
+                        if not day:
+                            if ts:
+                                print(
+                                    f"token-burn: warning: unparseable timestamp on line "
+                                    f"{line_no} in {jsonl_file}: {ts!r}",
+                                    file=sys.stderr,
+                                )
+                            continue
+
+                        model = message.get("model") or "unknown"
+                        session_id = obj.get("sessionId") or "unknown"
+                        project_name = jsonl_file.parent.name
+
+                        tokens = TokenCount(
+                            input_tokens=usage.get("input_tokens", 0),
+                            output_tokens=usage.get("output_tokens", 0),
+                            cache_creation_input_tokens=usage.get(
+                                "cache_creation_input_tokens", 0
+                            ),
+                            cache_read_input_tokens=usage.get(
+                                "cache_read_input_tokens", 0
+                            ),
+                        )
+
+                        # Claude Code writes one transcript line per content
+                        # block, repeating the same message.usage value on
+                        # each line, with the true final usage landing on the
+                        # last line for a given key -- an earlier line's
+                        # output_tokens is only a provisional in-progress
+                        # count. Keep the last line seen per key.
+                        dedup_key = (message.get("id"), obj.get("requestId"))
+                        if dedup_key == (None, None):
+                            dedup_key = ("line", str(jsonl_file), line_no)
+                        stat = SessionStat(model, session_id, project_name, str(day), tokens)
+                        if dedup_key in seen_message_keys:
+                            results[seen_message_keys[dedup_key]] = stat
+                        else:
+                            seen_message_keys[dedup_key] = len(results)
+                            results.append(stat)
+                    except (json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as e:
+                        print(
+                            f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
+                            file=sys.stderr,
+                        )
+        except (IOError, OSError, UnicodeDecodeError) as e:
+            print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
+
+    return results
+
+
+def _codex_session_id(jsonl_file):
+    match = CODEX_FILENAME_RE.match(jsonl_file.stem)
+    return match.group(1) if match else jsonl_file.stem
+
+
+def read_codex_jsonl(codex_home):
+    results = []
+    roots = [Path(codex_home) / "sessions", Path(codex_home) / "archived_sessions"]
+
+    for root in roots:
+        if not root.exists():
+            continue
+
+        for jsonl_file in _iter_regular_jsonl_files(root):
+            session_id = _codex_session_id(jsonl_file)
+            # Tracks the previous event's cumulative total_token_usage for
+            # this session so a re-emitted event (e.g. a rate-limit-only
+            # update) that repeats it can be skipped instead of double
+            # counted via last_token_usage.
+            prev_total_usage = None
+            try:
+                with open(jsonl_file, "r", errors="replace") as f:
+                    for line_no, line in enumerate(f, 1):
+                        try:
+                            obj = json.loads(line)
+                            if not isinstance(obj, dict):
+                                raise ValueError("line is not a JSON object")
+                            if obj.get("type") != "event_msg":
+                                continue
+
+                            payload = obj.get("payload")
+                            if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                                continue
+
+                            info = payload.get("info")
+                            if not isinstance(info, dict):
+                                # A legitimate rate-limit-only event carries
+                                # info:null alongside a populated rate_limits
+                                # payload -- not malformed, just nothing to
+                                # count.
+                                if info is None and isinstance(payload.get("rate_limits"), dict):
+                                    continue
+                                raise ValueError("token_count event has no usable info")
+
+                            # last_token_usage is the delta since the previous
+                            # token_count event, so summing it across a
+                            # session's events reconstructs the session total
+                            # without double-counting total_token_usage's
+                            # running cumulative figure.
+                            last = info.get("last_token_usage")
+                            if not isinstance(last, dict):
+                                raise ValueError("token_count event has no usable last_token_usage")
+                            for field in (
+                                "input_tokens",
+                                "output_tokens",
+                                "cached_input_tokens",
+                                "cache_write_input_tokens",
+                            ):
+                                _require_leaf_number(last, field)
+
+                            # Validate the timestamp -- and every other
+                            # per-event acceptance check -- before touching
+                            # any dedup state below, so a rejected event
+                            # (e.g. a bad timestamp) never marks a
+                            # cumulative total as "seen" and cannot poison a
+                            # later legitimate repeat of that total.
+                            ts_str = obj.get("timestamp")
+                            day = parse_timestamp(ts_str)
+                            if not day:
+                                if ts_str:
+                                    print(
+                                        f"token-burn: warning: unparseable timestamp on line "
+                                        f"{line_no} in {jsonl_file}: {ts_str!r}",
+                                        file=sys.stderr,
+                                    )
+                                continue
+
+                            # Codex sometimes re-emits a token_count event
+                            # whose cumulative total is unchanged from the
+                            # previous one; summing last_token_usage for it
+                            # would double count that delta. Only an event
+                            # that has passed every check above -- and will
+                            # therefore be counted -- may update this state.
+                            total_usage = info.get("total_token_usage")
+                            if isinstance(total_usage, dict):
+                                if total_usage == prev_total_usage:
+                                    continue
+                                prev_total_usage = total_usage
+
+                            model = "codex-unknown"
+                            project_name = "codex"
+
+                            # Report unknown rather than a fabricated 0 when
+                            # the real cache-write field is absent or exactly
+                            # 0 -- real Codex data observed it present and 0
+                            # in 100% of sampled events, so a present-but-0
+                            # value carries no more signal than an absent one
+                            # (PRD requirement 5).
+                            cache_write = last.get("cache_write_input_tokens")
+                            if cache_write:
+                                cache_creation = cache_write
+                            else:
+                                cache_creation = "unknown"
+
+                            tokens = TokenCount(
+                                input_tokens=last.get("input_tokens", 0),
+                                output_tokens=last.get("output_tokens", 0),
+                                cache_creation_input_tokens=cache_creation,
+                                cache_read_input_tokens=last.get("cached_input_tokens", 0),
+                            )
+
+                            results.append(
+                                SessionStat(model, session_id, project_name, str(day), tokens)
+                            )
+                        except (json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as e:
+                            print(
+                                f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
+                                file=sys.stderr,
+                            )
+            except (IOError, OSError, UnicodeDecodeError) as e:
+                print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
+
+    return results
+
+
+def format_number(n):
+    if isinstance(n, str):
+        return n
+    return f"{n:,}"
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Report local token burn from Claude and Codex transcripts"
+    )
+    parser.add_argument(
+        "--since",
+        default="7d",
+        help="Window: Nd (default 7d), all, or 0. Filter by calendar day.",
+    )
+    parser.add_argument("--model", default=None, help="Filter by model name")
+    parser.add_argument(
+        "--session-limit", type=int, default=10, help="Max sessions per table"
+    )
+
+    args = parser.parse_args()
+
+    cutoff = get_cutoff_date(args.since)
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
+    codex_home = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+
+    all_stats = []
+    all_stats.extend(read_claude_jsonl(config_dir))
+    all_stats.extend(read_codex_jsonl(codex_home))
+
+    if cutoff:
+        all_stats = [
+            s
+            for s in all_stats
+            if datetime.fromisoformat(s.day).date() >= cutoff
+        ]
+
+    if args.model:
+        all_stats = [s for s in all_stats if args.model in s.model]
+
+    totals_by_model = defaultdict(TokenCount)
+    totals_by_day = defaultdict(TokenCount)
+    sessions_by_key = defaultdict(TokenCount)
+
+    for stat in all_stats:
+        totals_by_model[stat.model] = totals_by_model[stat.model] + stat.tokens
+        totals_by_day[stat.day] = totals_by_day[stat.day] + stat.tokens
+        key = (stat.model, stat.session_id, stat.project)
+        sessions_by_key[key] = sessions_by_key[key] + stat.tokens
+
+    print("Grand Total by Model:")
+    print("-" * 90)
+    for model in sorted(totals_by_model.keys()):
+        t = totals_by_model[model]
+        print(
+            f"{model:40} input:{format_number(t.input_tokens):>12} "
+            f"output:{format_number(t.output_tokens):>12} "
+            f"cache_creation:{format_number(t.cache_creation_input_tokens):>12} "
+            f"cache_read:{format_number(t.cache_read_input_tokens):>12}"
+        )
+
+    print("\n\nGrand Total by Day:")
+    print("-" * 90)
+    for day in sorted(totals_by_day.keys()):
+        t = totals_by_day[day]
+        print(
+            f"{day:40} input:{format_number(t.input_tokens):>12} "
+            f"output:{format_number(t.output_tokens):>12} "
+            f"cache_creation:{format_number(t.cache_creation_input_tokens):>12} "
+            f"cache_read:{format_number(t.cache_read_input_tokens):>12}"
+        )
+
+    # The 'unknown' cache-creation sentinel must never collapse to 0 in the
+    # ranking sort key -- split unknown-priced sessions into their own
+    # unranked section instead, so --session-limit can never silently drop
+    # them from the report.
+    known_priced_sessions = [
+        item for item in sessions_by_key.items()
+        if item[1].cache_creation_input_tokens != "unknown"
+    ]
+    unknown_priced_sessions = [
+        item for item in sessions_by_key.items()
+        if item[1].cache_creation_input_tokens == "unknown"
+    ]
+
+    print("\n\nTop Sessions by Priced Tokens (cache_creation + output):")
+    print("-" * 90)
+    sessions_by_priced = sorted(
+        known_priced_sessions,
+        key=lambda x: x[1].total_priced(),
+        reverse=True,
+    )[: args.session_limit]
+
+    for (model, session_id, project), tokens in sessions_by_priced:
+        print(
+            f"{model:40} {session_id[:8]:8} {project:20} "
+            f"input:{format_number(tokens.input_tokens):>10} "
+            f"output:{format_number(tokens.output_tokens):>10} "
+            f"cache_cr:{format_number(tokens.cache_creation_input_tokens):>10} "
+            f"cache_rd:{format_number(tokens.cache_read_input_tokens):>10}"
+        )
+
+    if unknown_priced_sessions:
+        print("\n\nUnknown-Priced Sessions (cache_creation unavailable, not ranked):")
+        print("-" * 90)
+        for (model, session_id, project), tokens in unknown_priced_sessions:
+            print(
+                f"{model:40} {session_id[:8]:8} {project:20} "
+                f"input:{format_number(tokens.input_tokens):>10} "
+                f"output:{format_number(tokens.output_tokens):>10} "
+                f"cache_cr:{format_number(tokens.cache_creation_input_tokens):>10} "
+                f"cache_rd:{format_number(tokens.cache_read_input_tokens):>10}"
+            )
+
+    print("\n\nTop Sessions by Cache Read Volume:")
+    print("-" * 90)
+    sessions_by_cache_read = sorted(
+        sessions_by_key.items(),
+        key=lambda x: x[1].cache_read_input_tokens,
+        reverse=True,
+    )[: args.session_limit]
+
+    for (model, session_id, project), tokens in sessions_by_cache_read:
+        print(
+            f"{model:40} {session_id[:8]:8} {project:20} "
+            f"input:{format_number(tokens.input_tokens):>10} "
+            f"output:{format_number(tokens.output_tokens):>10} "
+            f"cache_cr:{format_number(tokens.cache_creation_input_tokens):>10} "
+            f"cache_rd:{format_number(tokens.cache_read_input_tokens):>10}"
+        )
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
