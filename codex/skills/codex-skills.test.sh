@@ -37,6 +37,10 @@ assert "co-review extracts the canonical policy and schema" \
     sh -c 'rg -q "policy --section POLICY" claude/skills/co-review/SKILL.md && rg -q "policy --section POLICY" codex/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" claude/skills/co-review/SKILL.md && rg -q "GATE_REPORT.*schema" codex/skills/co-review/SKILL.md'
 assert "co-review requires four named independent seats" \
     sh -c 'rg -q "Run four" codex/skills/co-review/SKILL.md && rg -q "fresh, independent read-only 600-second seats" codex/skills/co-review/SKILL.md && rg -q "claude.*,.*codex.*,.*breaker.*,.*verifier" codex/skills/co-review/SKILL.md'
+assert "co-review names the light tier seats" \
+    sh -c 'rg -q "light tier runs \`codex\` and \`verifier\`" codex/skills/co-review/SKILL.md'
+assert "co-review pins the frozen diff and class" \
+    sh -c 'rg -q -- "--no-renames" codex/skills/co-review/SKILL.md && rg -q "classify --diff" codex/skills/co-review/SKILL.md'
 assert "co-review freezes evaluates and cleans up through shared helpers" \
     sh -c 'rg -q "REVIEW_HELPER.*prepare" claude/skills/co-review/SKILL.md && rg -q "REVIEW_HELPER.*verify" claude/skills/co-review/SKILL.md && rg -q "REVIEW_HELPER.*cleanup" claude/skills/co-review/SKILL.md && rg -q "report.json.*EXPECTED_IDENTITY" codex/skills/co-review/SKILL.md'
 assert "co-review prevents generic partner dispatch and automatic repeat loops" \
