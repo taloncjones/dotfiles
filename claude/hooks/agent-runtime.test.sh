@@ -660,14 +660,11 @@ def test_slim_boot_roles_launch_without_mcp_servers():
             mode="interactive",
             scope={"personal_repository": False},
         )
+        settings = json.dumps({"permissions": {"deny": [
+            "Edit(//tmp/work tree/**)", "Write(//tmp/work tree/**)"]}})
         assert interactive == [
-            "claude",
-            "--model",
-            model,
-            "--effort",
-            effort,
-            "--permission-mode",
-            "plan",
+            "claude", "--model", model, "--effort", effort,
+            "--permission-mode", "auto", "--settings", settings,
             "--strict-mcp-config",
         ], (role, interactive)
         headless = runtime.launch_argv(
@@ -690,6 +687,26 @@ def test_slim_boot_roles_launch_without_mcp_servers():
             "--output-format",
             "json",
         ], (role, headless)
+
+
+def test_interactive_read_only_rejects_glob_cwd():
+    route = runtime.resolve_route("claude", "reviewer", config={"provisional": True})
+    for bad in ("/tmp/a*b", "/tmp/[x]", "relative/dir"):
+        try:
+            runtime.launch_argv(route, bad, "read-only", mode="interactive",
+                                scope={"personal_repository": False})
+        except runtime.RouteError:
+            continue
+        raise AssertionError(bad)
+
+
+def test_interactive_read_only_settings_parse_to_two_deny_rules():
+    route = runtime.resolve_route("claude", "reviewer", config={"provisional": True})
+    argv = runtime.launch_argv(route, "/w/t", "read-only", mode="interactive",
+                               scope={"personal_repository": False})
+    assert "plan" not in argv
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert settings == {"permissions": {"deny": ["Edit(//w/t/**)", "Write(//w/t/**)"]}}
 
 
 def test_full_boot_roles_and_codex_keep_mcp_servers():
@@ -2072,6 +2089,8 @@ for name, test in (
     ("explicit provisional launch preserves unknown capability", test_explicit_provisional_launch_preserves_unknown_capability),
     ("native Claude and Codex argv are exact", test_native_argv_mappings_are_exact),
     ("slim boot roles launch without MCP servers", test_slim_boot_roles_launch_without_mcp_servers),
+    ("interactive read-only rejects a glob cwd", test_interactive_read_only_rejects_glob_cwd),
+    ("interactive read-only settings parse to two deny rules", test_interactive_read_only_settings_parse_to_two_deny_rules),
     ("full boot roles and Codex keep MCP servers", test_full_boot_roles_and_codex_keep_mcp_servers),
     ("bounded reviewer run passes strict MCP config", test_bounded_run_passes_strict_mcp_config_for_reviewer),
     ("personal Codex argv requires valid scope", test_personal_repository_codex_argv_disables_atlassian_plugin),
