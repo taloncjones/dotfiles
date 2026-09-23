@@ -54,7 +54,7 @@
     },
     {
       "name": "no-stale-claude-md-pointers",
-      "run": "! git grep -n -F -e 'repo CLAUDE.md, \"Codex plugin integration\"' -e 'CLAUDE.md \"Codex plugin integration\"' -e 'CLAUDE.md \"Symlink targets\"' -e 'CLAUDE.md symlink table' -e 'the CLAUDE.md bullet' -e 'see repo CLAUDE.md.' -e 'See repo CLAUDE.md for current' -- . ':!docs' && grep -q -F 'orch_edit_guard.py' .claude/skills/dotfiles-architecture-contract/references/install-layout.md && grep -q -F \"grep -q 'orch_edit_guard.py' .claude/skills/dotfiles-architecture-contract/references/install-layout.md\" claude/hooks/orch-edit-guard.test.sh",
+      "run": "! git grep -n -F -e 'repo CLAUDE.md, \"Codex plugin integration\"' -e 'CLAUDE.md \"Codex plugin integration\"' -e 'CLAUDE.md \"Symlink targets\"' -e 'CLAUDE.md symlink table' -e 'the CLAUDE.md bullet' -e 'see repo CLAUDE.md.' -e 'See repo CLAUDE.md for current' -- . ':!docs' ':!claude/contracts' && grep -q -F 'orch_edit_guard.py' .claude/skills/dotfiles-architecture-contract/references/install-layout.md && grep -q -F \"grep -q 'orch_edit_guard.py' .claude/skills/dotfiles-architecture-contract/references/install-layout.md\" claude/hooks/orch-edit-guard.test.sh",
       "timeout_secs": 60
     },
     {
