@@ -227,13 +227,11 @@ link_codex_surfaces() {
 
   reconcile_codex_workflow_plugins_for_install
 
-  # Codex plugins are the canonical owner for Superpowers workflow surfaces.
-  # The dotfiles only link repo-managed bridge skills above. Older installs
-  # mirrored plugin skills and agent roles into ~/.codex directly, creating
-  # duplicate skill entries such as both $brainstorming and
-  # $superpowers:brainstorming for byte-identical content. The sweep below wipes
-  # those stale standalone snapshots so `update` self-heals. (ecc-* entries are
-  # leftovers of the retired ECC plugin.)
+  # Retired plugins (ECC, Superpowers) left standalone skill and agent
+  # snapshots in ~/.codex from older installs that mirrored plugin surfaces
+  # directly, creating duplicate skill entries (a plain and a plugin-qualified
+  # name for the same content). The sweep below wipes them so `update`
+  # self-heals.
   find "$HOME"/.codex/skills -maxdepth 1 \
     \( -name 'ecc-*' -o -name 'superpowers-*' \) -exec rm -rf {} + 2>/dev/null || true
   find "$HOME"/.codex/agents -maxdepth 1 \
