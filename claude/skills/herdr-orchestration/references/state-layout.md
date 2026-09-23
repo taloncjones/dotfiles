@@ -57,7 +57,7 @@ STATE_ROOT/
     config.json                       # machine-local config
     task-lead-gate.json               # task-lead activation gate record; absence,
                                       # damage, or an identity mismatch reads as disabled
-    probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append from the section-1 probe step; safe to delete
+    probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
     tasks/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record

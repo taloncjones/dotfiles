@@ -1210,11 +1210,18 @@ python3 claude/hooks/herdr_legacy_fixture.py watch --repo-slug "$S" \
 [ "$(cat "$out")" = "signal" ]
 SH
 
-check "SKILL.md pins the non-available probe-sample capture bullet" <<'SH'
+check "SKILL.md pins the every-probe sample capture and the safe-mode probe line" <<'SH'
 SKILL="claude/skills/herdr-orchestration/SKILL.md"
 rg -q -F 'probe-samples.jsonl' "$SKILL"
-rg -q -F 'If `CLS` is not `available`' "$SKILL"
+rg -q -F 'diagnostic sample for every probe, whatever `CLS` is' "$SKILL"
+ind=$(grep -n -F -- '- `indeterminate` (no `claude`' "$SKILL" | head -1 | cut -d: -f1)
+app=$(grep -n -F -- '- After the map is written or the launches are aborted, append a' "$SKILL" | head -1 | cut -d: -f1)
+[ -n "$ind" ] && [ -n "$app" ] && [ "$app" -gt "$ind" ]
+! rg -q -F 'If `CLS` is not `available`' "$SKILL"
 rg -q -F '|| true`' "$SKILL"
+rg -q -F -- "PROBE_JSON=\"\$(claude --model fable --safe-mode --max-turns 1 -p 'Reply with the single word: ok' --output-format json </dev/null)\"" "$SKILL"
+! rg -q -F 'claude --model fable -p' "$SKILL"
+! rg -q 'PROBE_JSON=.*(mktemp|cd )' "$SKILL"
 SH
 
 check "validate_messaging_socket: canonical dirs, pid basename, /private alias, rejects" <<PY
