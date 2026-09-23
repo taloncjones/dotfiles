@@ -29,7 +29,7 @@
     },
     {
       "name": "orch-provenance-and-findings-checks-present",
-      "run": "for l in 'findings_ref_error table' 'run_headless strips the pane identity' 'emit provenance: other pane exits 3' 'emit provenance: other workspace exits 3' 'emit provenance: missing pane variable exits 3' 'emit provenance: refused before any directory is created' 'emit provenance: designated pane records emitter fields' 'emit-done provenance: other pane exits 3' 'findings-ref: invalid files are refused' 'findings-ref: wrong pane wins over bad findings' 'findings-ref: required under HERDR_ENV' 'findings-ref: same-head content rewrite is refused' 'confirm-review: native record needs a readable findings file' 'pr_ready grounding: deleted findings file refuses the approval'; do grep -qF \"check \\\"$l\" claude/hooks/herdr-orch.test.sh || { echo \"missing: $l\"; exit 1; }; done",
+      "run": "for l in 'findings_ref_error table' 'run_headless preserves the pane identity for its own emit-done' 'run-mech: a brief-compliant native emit-done succeeds inside a real pane' 'emit provenance: other pane exits 3' 'emit provenance: other workspace exits 3' 'emit provenance: missing pane variable exits 3' 'emit provenance: refused before any directory is created' 'emit provenance: designated pane records emitter fields' 'emit-done provenance: other pane exits 3' 'findings-ref: invalid files are refused' 'findings-ref: wrong pane wins over bad findings' 'findings-ref: required under HERDR_ENV' 'findings-ref: same-head content rewrite is refused' 'confirm-review: native record needs a readable findings file' 'pr_ready grounding: deleted findings file refuses the approval'; do grep -qF \"check \\\"$l\" claude/hooks/herdr-orch.test.sh || { echo \"missing: $l\"; exit 1; }; done",
       "timeout_secs": 30
     },
     {
@@ -44,7 +44,7 @@
     },
     {
       "name": "headless-scrub-present",
-      "run": "grep -q 'def strip_pane_identity(' claude/hooks/agent_runtime.py && grep -q 'strip_pane_identity(child_env)' claude/hooks/agent_runtime.py && grep -q 'strip_pane_identity(child_env)' claude/hooks/herdr_orch_core.py",
+      "run": "grep -q 'def strip_pane_identity(' claude/hooks/agent_runtime.py && grep -q 'strip_pane_identity(child_env)' claude/hooks/agent_runtime.py && ! grep -q 'strip_pane_identity(child_env)' claude/hooks/herdr_orch_core.py",
       "timeout_secs": 30
     },
     {

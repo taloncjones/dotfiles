@@ -1587,13 +1587,20 @@ def _selected_headless_environment(cwd):
 def run_headless(argv, cwd, stdin_text, timeout_secs):
     """Run `claude -p` with the text on stdin in its own process group; kill
     the group on timeout. (subtype, result, exit_code) where subtype is
-    'timeout', 'unparseable', or the result's subtype."""
+    'timeout', 'unparseable', or the result's subtype.
+
+    Unlike run_bounded, the pane identity is NOT stripped here: a `-p`
+    one-shot child has no further turn in which to act on a stop-hook
+    nudge, so the co-review-helper risk strip_pane_identity defends against
+    does not apply, and its callers (run_mech's legacy Claude worker,
+    run_think) are never indexed by the stop gate regardless. A legacy
+    mech worker's OWN emit-done call (per its brief) needs the inherited
+    pane identity to be accepted as the designated agent."""
     if coordination.locks_held():
         raise RuntimeError("model subprocess cannot run under coordination locks")
     child_env = _selected_headless_environment(cwd)
     if child_env is None:
         child_env = dict(os.environ)
-    agent_runtime.strip_pane_identity(child_env)
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,

@@ -1882,11 +1882,15 @@ assert c.SHA40_RE.match("0"*40) and not c.SHA40_RE.match("abc") and not c.SHA40_
 sys.exit(0)
 PY
 
-check "run_headless strips the pane identity" <<'SH'
+check "run_headless preserves the pane identity for its own emit-done" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-hl1.git
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 export FAKE_CLAUDE_LOG="$root/log"
 export FAKE_CLAUDE_HOOK='printf "%s|%s|%s|%s\n" "${HERDR_PANE_ID:-UNSET}" "${HERDR_TAB_ID:-UNSET}" "${HERDR_ENV:-UNSET}" "${HERDR_WORKSPACE_ID:-UNSET}" > "$FAKE_CLAUDE_LOG.env"'
+# Unlike run_bounded, run_headless does NOT strip HERDR_PANE_ID/HERDR_TAB_ID:
+# its only callers (run_mech, run_think) are one-shot `-p` processes with no
+# further turn to act on a stop-hook nudge, and a legacy mech worker's own
+# emit-done call (per its brief) needs the inherited identity to be accepted.
 HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p1 HERDR_TAB_ID=w1:t1 PATH="$FAKE_CLAUDE_DIR:$PATH" python3 - "$LF_REPO" <<'PY'
 import os
 import sys
@@ -1903,8 +1907,8 @@ try:
 finally:
     c._PAYLOAD_SELECTION.reset(token)
 seen = open(env_dump).read().strip()
-assert seen == "UNSET|UNSET|1|w1", seen
-# unselected path inherits the caller's environment minus the pane identity
+assert seen == "w1:p1|w1:t1|1|w1", seen
+# unselected path inherits the caller's full environment, pane identity included
 os.unlink(env_dump)
 token = c._PAYLOAD_SELECTION.set(None)
 try:
@@ -1912,8 +1916,42 @@ try:
 finally:
     c._PAYLOAD_SELECTION.reset(token)
 seen = open(env_dump).read().strip()
-assert seen == "UNSET|UNSET|1|w1", seen
+assert seen == "w1:p1|w1:t1|1|w1", seen
 PY
+SH
+
+check "run-mech: a brief-compliant native emit-done succeeds inside a real pane" <<'SH'
+# Regression for the bug run_headless's old pane-stripping caused: a legacy
+# mech worker's own emit-done call, exactly as brief-template.md documents it
+# (--runtime, --pane-id, --source-head-sha alongside <core-context>), must be
+# accepted -- not refused as a foreign pane -- and its own outcome must land,
+# not the wrapper's paused/no_emit fallback.
+export CLAUDE_CONFIG_DIR=$(mktemp -d); PATH="$FAKE_CLAUDE_DIR:$PATH"; L=$(mktemp -d)
+export FAKE_CLAUDE_LOG="$L/log"; export FAKE_CLAUDE_JSON="$L/res.json"; unset FAKE_CLAUDE_HOOK FAKE_CLAUDE_SLEEP FAKE_CLAUDE_RC
+CLI="python3 $PWD/claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" remote add origin https://example.com/repo-r2.git
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+# A native (--runtime) emit-done validates --repo-slug against the caller's
+# own repository identity (CWD/--repo-path), unlike a legacy emit; compute
+# the slug the same way the CLI does rather than picking an arbitrary string.
+SLUG=$(python3 -c "import importlib.util,sys; s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=importlib.util.module_from_spec(s); s.loader.exec_module(c); print(c.repo_slug('https://example.com/repo-r2.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"; mkdir -p "$RD/tasks"
+printf 'do the thing\n' > "$RD/tasks/td-r2.brief.md"
+# A native emit-done requires attempt_matches against a dispatched task
+# record: write the row the mech worker's own emit-done will present,
+# exactly as the orchestrator does before launching a native mech worker.
+F=$($CLI claim-owner --repo-slug $SLUG --repo-path $WT --session S1 --host h --pid 1)
+$CLI write-task --repo-slug $SLUG --task-id td-r2 --session S1 --fence "$F" \
+  --json '{"task_id":"td-r2","workers":[{"role":"impl","launch_id":"mech-td-r2-20260901T000000Z","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$BASE"'"}]}'
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"total_cost_usd":0.11,"duration_ms":10,"session_id":"sid","modelUsage":{"claude-haiku-4-5-20251001":{}}}' > "$FAKE_CLAUDE_JSON"
+export FAKE_CLAUDE_HOOK="H=\$(git -C $WT rev-parse HEAD); git -C $WT -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; $CLI emit-done --repo-slug $SLUG --repo-path $WT --task-id td-r2 --workspace w1 --agent mech-td-r2 --phase implement --outcome completed --head-sha \$(git -C $WT rev-parse HEAD) --base-sha $BASE --runtime claude --launch-id mech-td-r2-20260901T000000Z --pane-id w1:p1 --source-head-sha \$H"
+HERDR_ENV=1 HERDR_WORKSPACE_ID=w1 HERDR_PANE_ID=w1:p1 HERDR_TAB_ID=w1:t1 $CLI run-mech --repo-slug $SLUG --task-id td-r2 --workspace w1 --agent mech-td-r2 --launch-id mech-td-r2-20260901T000000Z \
+  --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/td-r2.brief.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60
+python3 -c '
+import json
+d = json.load(open("'"$RD"'/tasks/td-r2.done.json"))
+assert d["outcome"] == "completed" and "reason" not in d and d["runtime"] == "claude" and d["pane_id"] == "w1:p1", d
+'
 SH
 
 check "run-mech: success with fresh worker record; argv/stdin/cwd exact; ledger start+end" <<'SH'
