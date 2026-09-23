@@ -143,7 +143,7 @@ TOML
     [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@dotfiles-workflows")" = true ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@openai-curated")" = false ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@claude-plugins-official")" = false ] &&
-        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@dotfiles-workflows")" = true ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@dotfiles-workflows")" = false ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@ecc")" = false ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "unrelated@example")" = true ] || {
             rm -rf "$tmp_home"
@@ -157,7 +157,7 @@ TOML
     [ "$first_cksum" = "$second_cksum" ]
 }
 
-assert "installer disables duplicate managed workflow providers" \
+assert "installer disables retired ECC Codex plugins and dedupes Superpowers" \
     dedupes_managed_workflow_plugins
 
 assert "plugin lifecycle re-runs workflow dedupe post-install" \

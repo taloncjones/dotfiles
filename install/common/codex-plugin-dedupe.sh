@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # codex-plugin-dedupe.sh - Disable duplicate Codex workflow plugin providers
 #
-# The dotfiles-workflows marketplace copies of ECC and Superpowers are
-# canonical for Codex; when one is enabled, its upstream/account-provisioned
-# duplicate entries in CODEX_HOME/config.toml are flipped to enabled = false.
+# The dotfiles-workflows marketplace copy of Superpowers is canonical for
+# Codex; when it is enabled, its duplicates are flipped to enabled = false.
+# Retired ECC entries are always disabled.
 # Function definitions only -- callers invoke dedupe_codex_workflow_plugins.
 #
 # Sourced twice per install/update cycle:
@@ -89,9 +89,10 @@ dedupe_codex_workflow_plugins() {
 
   [ -f "$config" ] || return 0
 
-  if codex_plugin_enabled "$config" "ecc@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "ecc@ecc" || return 1
-  fi
+  # ECC is retired: keep any leftover Codex copies disabled until
+  # ecc-uninstall removes them.
+  disable_codex_plugin "$config" "ecc@dotfiles-workflows" || return 1
+  disable_codex_plugin "$config" "ecc@ecc" || return 1
 
   if codex_plugin_enabled "$config" "superpowers@dotfiles-workflows"; then
     disable_codex_plugin "$config" "superpowers@openai-curated" || return 1
