@@ -24,7 +24,7 @@ authorizes publishing, account changes, or new work.
    Account scope describes routing; it is not proof of a logged-in identity.
 4. Write a concise, self-contained brief to a unique private text file. In
    work/custom scope, author it in an existing ignored private directory of
-   the selected repository, such as `.superpowers/` or `.claude/`; verify the
+   the selected repository, such as `.planning/` or `.claude/`; verify the
    directory is ignored before writing. Personal scope may use a private
    temporary file outside the repository. Use an absolute path with filesystem
    aliases resolved. Include intent, scope, constraints, pending user instructions,

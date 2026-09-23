@@ -1,6 +1,6 @@
 # Pipeline worker mapping
 
-Policy a director follows when dispatching a superpowers pipeline. The
+Policy a director follows when dispatching a planning pipeline. The
 model and effort columns are not read from this file: `claude/hooks/agent_runtime.py`
 is authoritative for every model and effort named here, and the `policy document
 matches the route table` case in `agent-runtime.test.sh` parses this file and

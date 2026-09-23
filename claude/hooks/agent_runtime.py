@@ -141,7 +141,7 @@ CONFIG_KEYS = (
 )
 
 # Pipeline step -> role binding. The single source of truth for which role a
-# superpowers pipeline step dispatches under; role -> model/effort stays in
+# planning pipeline step dispatches under; role -> model/effort stays in
 # CLAUDE_ROUTES / CODEX_ROUTES. Steps are runtime-independent; the runtime
 # picks the model table.
 PIPELINE_ROUTES: dict[str, str] = {
@@ -171,7 +171,7 @@ if _UNKNOWN_STEP_ROLES:
 
 
 def role_for_step(step: str) -> str:
-    """Map a superpowers pipeline step to its policy role."""
+    """Map a planning pipeline step to its policy role."""
     try:
         return PIPELINE_ROUTES[step]
     except (KeyError, TypeError):
