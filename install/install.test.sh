@@ -20,12 +20,12 @@ assert "macOS Brewfile uses current Docker Desktop cask" \
     rg -q 'cask "docker-desktop"' install/macos/Brewfile.rb
 assert "macOS Brewfile avoids renamed docker cask" \
     sh -c "! rg -q 'cask \"docker\"' install/macos/Brewfile.rb"
-assert "workflow bootstrap supports a Codex-only machine" \
-    rg -q 'command -v claude.*command -v codex' install/common/claude-plugins.sh
-assert "workflow bootstrap attempts Superpowers after an ECC failure" \
-    sh -c "rg -q 'ecc-install \\|\\| ecc_status=' install/common/claude-plugins.sh && rg -q 'superpowers-install \\|\\| superpowers_status=' install/common/claude-plugins.sh"
-assert "workflow bootstrap reports combined runtime status" \
-    rg -q 'ecc_status.*superpowers_status' install/common/claude-plugins.sh
+assert "workflow bootstrap no longer installs ECC" \
+    sh -c "! rg -q 'ecc-install|ecc_status' install/common/claude-plugins.sh"
+assert "workflow bootstrap no longer installs Superpowers" \
+    sh -c "! rg -q 'superpowers-install|superpowers_status' install/common/claude-plugins.sh"
+assert "cloud bootstrap installs no plugin" \
+    sh -c "! rg -q 'ensure_plugin' bootstrap-cloud.sh && rg -q -- '--no-plugins' bootstrap-cloud.sh"
 
 assert "ssh config includes config_cloudflared between config_local and config_personal" \
     awk '/^Include ~\/.ssh\/config_local$/{a=NR} /^Include ~\/.ssh\/config_cloudflared$/{b=NR} /^Include ~\/.ssh\/config_personal$/{c=NR} END{exit !(a && b && c && a<b && b<c)}' ssh/configs/config

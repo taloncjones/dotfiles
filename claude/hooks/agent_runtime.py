@@ -23,6 +23,11 @@ CODEX_MODELS = ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 CLAUDE_MODELS = ("fable", "opus", "sonnet", "haiku")
 EFFORTS = ("low", "medium", "high", "xhigh")
 EFFORT_RANK = {effort: rank for rank, effort in enumerate(EFFORTS)}
+# Quality-tier floor for a config override, compared against the role's
+# default model at this effort -- a stronger model may pass at a lower
+# effort label, and a weaker model may pass at a higher one. A raising axis
+# (critical risk, hard difficulty) raises the floor to the raised default.
+EFFORT_FLOOR = "low"
 RISK_LEVELS = ("normal", "critical")
 DIFFICULTIES = ("routine", "hard")
 AVAILABILITY = ("available", "unavailable", "indeterminate")
@@ -35,7 +40,7 @@ CODEX_ROUTES = {
     "plan_reviewer": ("gpt-6-astra", "high"),
     "development_reviewer": ("gpt-5.6-sol", "high"),
     "skeptic": ("gpt-6-astra", "high"),
-    "implementation": ("gpt-5.6-terra", "high"),
+    "implementation": ("gpt-5.6-terra", "medium"),
     "read_only": ("gpt-5.6-luna", "medium"),
     "mechanical": ("gpt-5.6-luna", "medium"),
     "think": ("gpt-6-astra", "high"),
@@ -48,7 +53,7 @@ CLAUDE_ROUTES = {
     "plan_reviewer": ("fable", "medium"),
     "development_reviewer": ("sonnet", "high"),
     "skeptic": ("opus", "high"),
-    "implementation": ("sonnet", "high"),
+    "implementation": ("sonnet", "medium"),
     "read_only": ("haiku", "medium"),
     "mechanical": ("haiku", "medium"),
     "think": ("fable", "high"),
@@ -136,7 +141,7 @@ CONFIG_KEYS = (
 )
 
 # Pipeline step -> role binding. The single source of truth for which role a
-# superpowers pipeline step dispatches under; role -> model/effort stays in
+# planning pipeline step dispatches under; role -> model/effort stays in
 # CLAUDE_ROUTES / CODEX_ROUTES. Steps are runtime-independent; the runtime
 # picks the model table.
 PIPELINE_ROUTES: dict[str, str] = {
@@ -166,7 +171,7 @@ if _UNKNOWN_STEP_ROLES:
 
 
 def role_for_step(step: str) -> str:
-    """Map a superpowers pipeline step to its policy role."""
+    """Map a planning pipeline step to its policy role."""
     try:
         return PIPELINE_ROUTES[step]
     except (KeyError, TypeError):
@@ -272,6 +277,7 @@ def _route_override(
     default_model: str,
     default_effort: str,
     config: dict[str, Any],
+    floor_effort: str,
 ) -> tuple[str, str]:
     routes = config.get("routes", {})
     if not isinstance(routes, dict):
@@ -292,11 +298,11 @@ def _route_override(
     if effort not in EFFORTS:
         raise RouteError(f"unsupported effort: {effort}")
     if _quality_tier(runtime, model, effort) < _quality_tier(
-        runtime, default_model, default_effort
+        runtime, default_model, floor_effort
     ):
         raise RouteError(
             f"configured {model}/{effort} is below the "
-            f"{default_model}/{default_effort} role floor"
+            f"{default_model}/{floor_effort} role floor"
         )
     return model, effort
 
@@ -457,13 +463,16 @@ def resolve_route(
         targets.append(EFFORT_RANK[_bump_effort(default_effort)])
     if risk == "critical":
         targets.append(EFFORT_RANK["xhigh"])
+    raised = len(targets) > 1
     default_effort = EFFORTS[max(targets)]
+    floor_effort = default_effort if raised else EFFORT_FLOOR
     requested_model, requested_effort = _route_override(
         runtime,
         role,
         default_model,
         default_effort,
         selected_config,
+        floor_effort,
     )
     quality_floor = default_effort
     availability, capability = _capability(

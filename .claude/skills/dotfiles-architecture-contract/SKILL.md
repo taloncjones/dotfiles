@@ -1,6 +1,6 @@
 ---
 name: dotfiles-architecture-contract
-description: Load BEFORE proposing any structural or design change to the dotfiles repo, and whenever you catch yourself asking "why is it built this way", "can I just track this file", "why is settings.json not symlinked", "why two config dirs", "why is this untracked", or "can the SessionStart hook install the plugin". Documents the eight load-bearing design decisions with rationale, the invariants that must hold, and the known weak points, plus the Codex plugin integration reference (codex-surfaces.py / codex-roles.py reconciliation, staging provenance, focus mode). NOT for making/committing a change (dotfiles-change-control), diagnosing a breakage (dotfiles-debugging-playbook), or the blow-by-blow incident history (dotfiles-failure-archaeology).
+description: Load BEFORE proposing any structural or design change to the dotfiles repo, and whenever you catch yourself asking "why is it built this way", "can I just track this file", "why is settings.json not symlinked", "why two config dirs", "why is this untracked", or "can the SessionStart hook install the plugin". Documents the eight load-bearing design decisions with rationale, the invariants that must hold, and the known weak points, plus the Codex plugin integration reference (codex-surfaces.py / codex-roles.py reconciliation, staging provenance). NOT for making/committing a change (dotfiles-change-control), diagnosing a breakage (dotfiles-debugging-playbook), or the blow-by-blow incident history (dotfiles-failure-archaeology).
 ---
 
 # Dotfiles Architecture Contract
@@ -21,8 +21,7 @@ Jargon, defined once:
   then owned by the machine; the repo never sees its contents again.
 - **Vendored-untracked**: upstream content copied onto disk inside the repo
   tree by an installer, deliberately gitignored.
-- **ECC / Superpowers**: the two Claude Code plugins this repo depends on
-  (`ecc@ecc` from github.com/affaan-m/ECC; `superpowers@claude-plugins-official`).
+- **Superpowers** (retired 2026-09): `superpowers@claude-plugins-official` (retired), a Claude Code plugin this repo used to depend on, like the retired ECC (formerly `ecc@ecc` from github.com/affaan-m/ECC).
 
 ## Front-loaded warnings
 
@@ -104,29 +103,28 @@ Verify the whole chain read-only: `git identity` (alias for
 Invariant: identity comes only from the conditional includes. Never add a
 `[user]` block to `git/.gitconfig`; never commit `~/.gitconfig-work` contents.
 
-## Decision 4: vendored-but-untracked upstream content
+## Decision 4: vendored-but-untracked upstream content (historical; ECC retired)
 
-ECC skills/commands/hooks live on disk inside the repo tree but are gitignored;
-installers re-vendor them byte-identical from upstream. Why: tracking them once
-caused 39-file churn on every upstream sync (fixed at e140ab3). They are
-reproducible from the installer, so tracking adds noise and invites local edits
-that die on the next `ecc-update` -- which is why
-`install/common/claude-plugins.sh` runs during bootstrap and every `update`.
+This decision was born from the retired ECC: its skills/commands/hooks lived
+on disk inside the repo tree but were gitignored, and installers re-vendored
+them byte-identical from upstream. Why: tracking them once caused 39-file
+churn on every upstream sync (fixed at e140ab3). They were reproducible from
+the installer, so tracking added noise and invited local edits that died on
+the next `ecc-update` (both `ecc-install`/`ecc-update` are now removed along with the retired ECC itself, 2026-09).
 
-ECC RULES vendoring is fully RETIRED (2026-07-02, settling the former open
-question): the upstream tree ships in the ECC marketplace clone
-(`~/.claude/plugins/marketplaces/ecc/rules/`), so local copies bought sync code
-for nothing. Claude Code natively auto-loads every `.md` under
-`~/.claude/rules` (`paths:` frontmatter scopes to matching files; none = every
-session) -- verified live in a cloud session 2026-07-02. The retirement-era
-"nothing auto-loads" finding came from fresh cloud clones where the untracked
-vendored dirs did not exist; leftover language dirs on older machines therefore
-still auto-load and should be deleted (`ecc-install`/`ecc-update` flag them).
+ECC RULES vendoring was fully RETIRED ahead of ECC itself (2026-07-02,
+settling the former open question): the upstream tree shipped from the retired ECC's marketplace clone, so local copies bought sync code for nothing. Claude Code
+natively auto-loads every `.md` under `~/.claude/rules` (`paths:` frontmatter
+scopes to matching files; none = every session) -- verified live in a cloud
+session 2026-07-02. The retirement-era "nothing auto-loads" finding came from
+fresh cloud clones where the untracked vendored dirs did not exist; leftover
+language dirs on older machines therefore still auto-load and should be
+deleted by hand (the flagging function, `_ecc_legacy_rules_notice`, is gone along with the rest of the retired ECC).
 
-Invariant: never hand-edit vendored dirs; never `git add -f` them. Own rules
-go under `claude/rules/personal/` only (always-on unless given a `paths:`
-frontmatter; `claude/rules/.gitignore` whitelists only `.gitignore` and
-`personal/`).
+Invariant: never hand-edit any leftover vendored dirs; never `git add -f`
+them. Own rules go under `claude/rules/personal/` only (always-on unless
+given a `paths:` frontmatter; `claude/rules/.gitignore` whitelists only
+`.gitignore` and `personal/`).
 
 ## Decision 5: the pre-launch placement INVARIANT (cloud plugins)
 
@@ -166,10 +164,9 @@ harness-agnostic, so guard logic (commit-msg format, secret blocking,
 worktree hydration via post-checkout) applies no matter who commits.
 
 Why it is fragile by design: anything that rewrites `core.hooksPath` orphans
-ALL of it silently. That is exactly what ECC's `sync-ecc-to-codex.sh` did
-pre-public (plus writing through the `~/.codex/AGENTS.md` symlink into the
-repo). Both direct sync and its wrapper are retired. `ecc-install` and
-`ecc-update` stage self-contained native plugins without upstream global sync.
+ALL of it silently. That is exactly what the retired ECC's `sync-ecc-to-codex.sh` did pre-public (plus writing through the
+`~/.codex/AGENTS.md` symlink into the repo). Both direct sync and its
+wrapper are retired along with ECC itself (2026-09), and the retired Superpowers install path never used any upstream global sync either.
 `install/common/link.sh` sweeps leftover mirror artifacts on every `update`.
 
 Invariant: no tool may set `core.hooksPath`; hook additions go into
@@ -217,8 +214,8 @@ Before approving a structural change, confirm each still holds:
       `~/.claude` and `~/.claude-work` never diverge in assets.
 - [ ] `git/.gitconfig` has no `[user]` block; `useConfigOnly` stays true;
       signing stays inside the per-identity includes.
-- [ ] Vendored ECC dirs stay untracked and hand-edit-free; own content stays
-      in whitelisted `personal/` paths.
+- [ ] Any leftover vendored dirs from the retired ECC stay untracked and
+      hand-edit-free; own content stays in whitelisted `personal/` paths.
 - [ ] Anything needed at Claude launch in cloud is placed pre-launch
       (settings declaration or Setup script); SessionStart remains self-heal.
 - [ ] `core.hooksPath` points at the dotfiles hooks dir and nothing rewrites it.
@@ -229,14 +226,14 @@ Before approving a structural change, confirm each still holds:
 
 ## Known weak points (open -- stated plainly, not oversold)
 
-| Weak point                                                                                                                                                                                                                               | Status                                                                         |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `claude/settings.json.tmpl` changes need MANUAL merge on existing machines (seed-once); only cloud runs `reconcile_claude_settings` automatically                                                                                        | Open. Accepted cost of Decision 1; change-control skill has the merge protocol |
-| Machine-path plugin installs (`ecc-install`/`superpowers-install`) trust CLI output (grep of plugins list), not `installed_plugins.json`; `bootstrap-cloud.sh` `ensure_plugin` is the gold standard                                      | Open. Candidate: port ensure_plugin to the zsh functions                       |
-| ECC-vendored git hooks `pre-commit`/`pre-push` are UNTESTED; `post-checkout` test is static-shape-only                                                                                                                                   | Open coverage gap                                                              |
-| `op-ssh-sign` path is macOS-only -- commit signing fails on Linux (bootstrap-cloud disables signing in containers); `install/common/zsh.sh` hardcodes the `/home/linuxbrew` path; `defaults.sh` PlistBuddy `Set` lacks an `Add` fallback | Open portability debts                                                         |
-| Cloud containers are personal-account only; no `~/.claude-work` story in cloud                                                                                                                                                           | Open                                                                           |
-| Whether ECC rules vendoring is still needed at all                                                                                                                                                                                       | Open question (Decision 4)                                                     |
+| Weak point                                                                                                                                                                                                                                   | Status                                                                         |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `claude/settings.json.tmpl` changes need MANUAL merge on existing machines (seed-once); only cloud runs `reconcile_claude_settings` automatically                                                                                            | Open. Accepted cost of Decision 1; change-control skill has the merge protocol |
+| Machine-path plugin install weak point (retired): the retired Superpowers and ECC install paths trusted CLI output (grep of plugins list), not `installed_plugins.json`; the `ensure_plugin` gold standard they never adopted is deleted too | Closed by retirement: no plugin install path remains to carry the weak point   |
+| Git hooks `pre-commit`/`pre-push` (derived from the retired ECC) have behavioral suites; `post-checkout` test remains static-shape-only                                                                                                      | Partially closed; see dotfiles-validation-and-qa                               |
+| `op-ssh-sign` path is macOS-only -- commit signing fails on Linux (bootstrap-cloud disables signing in containers); `install/common/zsh.sh` hardcodes the `/home/linuxbrew` path; `defaults.sh` PlistBuddy `Set` lacks an `Add` fallback     | Open portability debts                                                         |
+| Cloud containers are personal-account only; no `~/.claude-work` story in cloud                                                                                                                                                               | Open                                                                           |
+| Whether ECC rules vendoring is still needed at all                                                                                                                                                                                           | CLOSED: ECC is fully retired (2026-09), question moot (Decision 4)             |
 
 ## When NOT to use this skill
 
@@ -267,21 +264,16 @@ before trusting them:
 - Incident hashes: `git show <hash> --stat` for c1c4500, 8d4507f, 722c653, 7cb28b7, da54e17, 2304015, e140ab3
 - Weak-point status may have improved since 2026-07-02 -- check `git log --oneline -20` and the failure-archaeology skill before repeating an "open" claim.
 
-## Codex plugin integration (reference; migrated from CLAUDE.md 2026-09-13)
+## Codex plugin integration (reference; ECC retired 2026-09, Superpowers retired 2026-09)
 
-ECC and Superpowers use native, independent plugin installations in both
-runtimes. Claude installs `ecc@ecc` and `superpowers@claude-plugins-official`
-into both account config dirs. Codex stages self-contained copies from separate
-upstream checkouts under `~/.local/share/dotfiles/codex-workflows`, then
-installs `ecc@dotfiles-workflows` and `superpowers@dotfiles-workflows`. Never
-run ECC's `sync-ecc-to-codex.sh` on a dotfiles-managed machine: it mutates
-shared `AGENTS.md`, MCP, agent, and git-hook surfaces. `install/common/link.sh`
-continues to sweep stale direct skill/agent mirrors from older installs.
+Superpowers (retired) and ECC (retired) used the same native, independent plugin shape in both runtimes: Claude installed a `claude-plugins-official` id in both account config dirs (`superpowers@claude-plugins-official`, `ecc@ecc`); Codex staged a self-contained copy under `~/.local/share/dotfiles/codex-workflows` (`superpowers@dotfiles-workflows`, `ecc@dotfiles-workflows`). Both are retired: the settings reconcile and the Codex plugin dedupe force every copy off, and `ecc-uninstall`/`superpowers-uninstall` remove what remains on disk. Never run the retired ECC's `sync-ecc-to-codex.sh` on a dotfiles-managed machine: it mutated shared `AGENTS.md`, MCP, agent, and git-hook surfaces. `install/common/link.sh` continues to sweep stale direct skill/agent mirrors from older installs.
 
 `install/common/codex-surfaces.py` reconciles native discovery during install
-and update. It disables proven duplicate skill copies and incompatible or inert
-Claude-only imports of `security-guidance`, `code-review`, and
-`code-simplifier`; custom or compatible implementations are preserved. It
+and update. The surviving `legacy-copy`/`legacy-command` blocks it wrote for
+the retired ECC's standalone skill copies are kept disabled verbatim; nothing
+regenerates them. It also disables incompatible or inert Claude-only imports
+of `security-guidance`, `code-review`, and `code-simplifier`; custom or
+compatible implementations are preserved. It
 supplies `skills.max_context_tokens = 10000` only when unset; an explicit
 budget wins. The helper preserves skill files and unrelated configuration.
 Unsupported TOML layouts fail without being rewritten. Optional installer
@@ -298,27 +290,27 @@ repository being worked on. `workflow_context.py` owns repository/account
 identity; handoff history is account/repository/task scoped. Never copy a
 personal handoff into a work account's state.
 
-`install/common/codex-roles.py` migrates only byte-exact historical managed ECC
-roles to Luna/medium explorer, Terra/medium documentation research, and
-Astra/high reviewer. Custom role files and model choices remain untouched;
-`--check --codex-home <path>` previews its decision. Repo-owned
-`codex/AGENTS.md` does not carry a copied upstream ECC instruction block.
+`install/common/codex-roles.py` migrates only byte-exact historical managed
+roles left over from the retired ECC (identified by the SHA256 of its
+`.codex/agents` files) to Luna/medium explorer, Terra/medium documentation
+research, and Astra/high reviewer. Custom role files and model choices
+remain untouched; `--check --codex-home <path>` previews its decision.
+Repo-owned `codex/AGENTS.md` does not carry a copied upstream instruction
+block from any plugin.
 
 Plugin staging records upstream revision and payload digest independently of
-the wrapper version. A Codex ECC cache directory named `2.0.0` can contain a
-current upstream payload; verify installed bytes/provenance before declaring it
-stale. Automatic ECC Plan Canvas session/stop hooks are narrowly disabled.
-Managed hook state is account-scoped; a manually started Canvas server still
-needs its own account-specific state directory and port.
+the wrapper version. A now-retired Codex ECC cache directory named `2.0.0`
+could contain a current upstream payload; verify installed bytes/provenance
+before declaring anything stale. Automatic Plan Canvas session/stop hooks (an ECC-only feature) are gone along with the rest of the retired ECC.
 
 Run the helper with `--check` to preview changes or `--apply` to write them.
-`--focus --apply` opts into the core ECC catalog in `codex/ecc-skills.txt`;
-subsequent updates retain that choice. Explicit skill overrides are preserved.
-To leave focused discovery, remove the complete `[[skills.config]]` blocks
-marked `# dotfiles-managed: ecc-focus` and their marker comments, then
-reconcile without `--focus`. Proven duplicates remain disabled. The
-compatibility checks run again on later updates; simply re-enabling an
-incompatible import does not opt it out.
+The old `--focus --apply` flag, which opted into the now-retired `codex/ecc-skills.txt` core skill catalog, no longer exists; there is no
+focused-discovery mode. Explicit skill overrides are preserved.
+Leftover `[[skills.config]]` blocks marked with the now-retired `# dotfiles-managed: ecc-focus` tag are cleared automatically by
+`clear_managed_disabled` on every
+repair run; there is no manual removal step. The `legacy-copy`/`legacy-command`
+blocks remain disabled. The compatibility checks run again on later updates;
+simply re-enabling an incompatible import does not opt it out.
 
 Restart Claude or Codex after changing plugin or hook configuration. A running
 session may retain old registrations, including across compaction. Verify a

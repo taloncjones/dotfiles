@@ -154,7 +154,7 @@ cd "$WORKTREE_PATH"
 
 Default to plan-then-code — do not jump straight to implementation.
 
-1. **Design pass check.** Read the ticket description and comments (including carry-over findings triaged from prior tickets). Run a short brainstorm (superpowers:brainstorming) and write a plan (superpowers:writing-plans) BEFORE implementing if the ticket involves any of:
+1. **Design pass check.** Read the ticket description and comments (including carry-over findings triaged from prior tickets). Run a short brainstorm (brainstorming), write a spec (writing-specs), and write a plan (writing-plans) BEFORE implementing if the ticket involves any of:
    - an interface or contract that later tickets will build on (wire formats, schemas, shared APIs, subprocess pipe handling)
    - a security/auth model (what is open vs. token-gated)
    - a multi-component skeleton that future work extends

@@ -6,7 +6,7 @@
 # DOTFILEDIR and runs it after the Claude config dirs are linked.
 
 # These are repo-owned workflows, shared from one maintained source. Native
-# ECC and Superpowers plugin installations remain independent per runtime.
+# Superpowers plugin installations remain independent per runtime.
 link_codex_path() {
   local source="$1"
   local destination="$2"
@@ -141,7 +141,7 @@ link_codex_surfaces() {
   link_codex_path "$DOTFILEDIR/codex/hooks/orch_edit_guard.py" "$HOME/.codex/hooks/orch_edit_guard.py"
   link_codex_path "$DOTFILEDIR/claude/hooks/git_remote_guard.py" "$HOME/.codex/hooks/git_remote_guard.py"
 
-  for shared_skill in repo-recall post-merge todos handoff kickoff voice; do
+  for shared_skill in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do
     link_codex_path "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
   done
   mkdir -p "$HOME/.codex/rules"
@@ -227,12 +227,11 @@ link_codex_surfaces() {
 
   reconcile_codex_workflow_plugins_for_install
 
-  # Codex plugins are the canonical owner for ECC and Superpowers workflow
-  # surfaces. The dotfiles only link repo-managed bridge skills above. Older
-  # installs mirrored plugin skills and agent roles into ~/.codex directly,
-  # creating duplicate skill entries such as both $brainstorming and
-  # $superpowers:brainstorming for byte-identical content. The sweep below wipes
-  # those stale standalone snapshots so `update` self-heals.
+  # Retired plugins (ECC, Superpowers) left standalone skill and agent
+  # snapshots in ~/.codex from older installs that mirrored plugin surfaces
+  # directly, creating duplicate skill entries (a plain and a plugin-qualified
+  # name for the same content). The sweep below wipes them so `update`
+  # self-heals.
   find "$HOME"/.codex/skills -maxdepth 1 \
     \( -name 'ecc-*' -o -name 'superpowers-*' \) -exec rm -rf {} + 2>/dev/null || true
   find "$HOME"/.codex/agents -maxdepth 1 \

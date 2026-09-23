@@ -33,10 +33,11 @@ _worktree_ is a linked `git worktree` checkout; _hydration_ is the
 
 ## Front-loaded warnings
 
-- [WARNING] Never run ECC's `sync-ecc-to-codex.sh` directly to "fix" Codex
-  state -- it overwrites `core.hooksPath`, writes through the `~/.codex/AGENTS.md`
-  symlink into this repo, and leaves nameless agent files. Both direct sync
-  and its old wrapper are retired. Use native `ecc-install`/`ecc-update` and
+- [WARNING] Never run the retired ECC's `sync-ecc-to-codex.sh` to "fix" Codex
+  state -- it overwrote `core.hooksPath`, wrote through the `~/.codex/AGENTS.md`
+  symlink into this repo, and left nameless agent files. Both direct sync
+  and its old wrapper are retired along with ECC itself, and the Superpowers
+  install path it used to point to is retired too and no longer exists. See
   the diagnostics in the `dotfiles-architecture-contract` skill's "Codex
   plugin integration" reference section.
 - [WARNING] Never "fix" a cloud container's git identity by copying the
@@ -52,52 +53,33 @@ _worktree_ is a linked `git worktree` checkout; _hydration_ is the
 
 ## Quick index
 
-| #   | Symptom                                          | Most likely cause                                          |
-| --- | ------------------------------------------------ | ---------------------------------------------------------- |
-| 1   | Plugin skills/commands missing in a session      | Post-launch install, cold marketplace, or wrong config dir |
-| 2   | settings.json truncated or missing dotfiles keys | Write-through stale symlink, or seed-once template drift   |
-| 3   | Dangling or write-through symlinks               | Old checkout deleted, or machine-local file got symlinked  |
-| 4   | git refuses to commit                            | `useConfigOnly` outside `~/Git/{personal,work}` (intended) |
-| 5   | Wrong commit identity used                       | includeIf miss, or cloud platform default author           |
-| 6   | Commit signing fails                             | `op-ssh-sign` is macOS-only                                |
-| 7   | SSH auth fails / wrong key offered               | Agent down, work pubkey absent, or pinning not applied     |
-| 8   | Commit blocked by a guard hook                   | Prohibited term/emoji in message -- read the stderr reason |
-| 9   | Cloud session missing config                     | SessionStart hook did not run or ran too late              |
-| 10  | Statusline blank / hooks dead                    | `node` / `python3` absent from PATH                        |
-| 11  | zsh stale-plugin nag or slow start               | 14-day epoch stamp expired; update check spawn             |
-| 12  | File reformatted after your edit                 | `format_files.py` ran prettier -- re-read before next edit |
-| 13  | Worktree missing .todos/.planning                | Hook guards not met, wrong shape, or workspace mode        |
+| #   | Symptom                                          | Most likely cause                                                |
+| --- | ------------------------------------------------ | ---------------------------------------------------------------- |
+| 1   | Plugin skills/commands missing in a session      | Retired scenario -- no plugin is installed by this repo any more |
+| 2   | settings.json truncated or missing dotfiles keys | Write-through stale symlink, or seed-once template drift         |
+| 3   | Dangling or write-through symlinks               | Old checkout deleted, or machine-local file got symlinked        |
+| 4   | git refuses to commit                            | `useConfigOnly` outside `~/Git/{personal,work}` (intended)       |
+| 5   | Wrong commit identity used                       | includeIf miss, or cloud platform default author                 |
+| 6   | Commit signing fails                             | `op-ssh-sign` is macOS-only                                      |
+| 7   | SSH auth fails / wrong key offered               | Agent down, work pubkey absent, or pinning not applied           |
+| 8   | Commit blocked by a guard hook                   | Prohibited term/emoji in message -- read the stderr reason       |
+| 9   | Cloud session missing config                     | SessionStart hook did not run or ran too late                    |
+| 10  | Statusline blank / hooks dead                    | `node` / `python3` absent from PATH                              |
+| 11  | zsh stale-plugin nag or slow start               | 14-day epoch stamp expired; update check spawn                   |
+| 12  | File reformatted after your edit                 | `format_files.py` ran prettier -- re-read before next edit       |
+| 13  | Worktree missing .todos/.planning                | Hook guards not met, wrong shape, or workspace mode              |
 
-## 1. Plugin skills/commands missing in a session
+## 1. Plugin skills/commands missing in a session (retired scenario)
 
-Three distinct causes. Discriminate in this order:
-
-```bash
-# (a) Is it installed at all, per the ground-truth file?
-grep -o '"[a-z-]*@[a-z-]*"' ~/.claude/plugins/installed_plugins.json
-# (b) Is the session even using ~/.claude? (work dirs route to ~/.claude-work)
-claude-account            # zsh wrapper; or: echo "$CLAUDE_CONFIG_DIR"
-# (c) Is the marketplace manifest warm (cloud/fresh machine)?
-cat ~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json | head -5
-```
-
-| Check result                                          | Cause                                                                                                        | Fix                                                                                                                                                 |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| (a) lists the plugin, session still lacks it          | Installed AFTER launch -- plugins load at CLI launch only (commit c1c4500, the root cause of the cloud saga) | Restart the session; nothing mid-session will help                                                                                                  |
-| (a) missing, (c) manifest absent/does not list plugin | Cold marketplace: `plugins install` no-ops with exit 0 while the manifest is mid-fetch (commit 7cb28b7)      | `claude plugin marketplace add <git-url>` (synchronous clone), then install, then re-check (a). `bootstrap-cloud.sh` `ensure_plugin` automates this |
-| (b) shows `~/.claude-work`                            | Right install, wrong config dir -- each dir has its own plugin installs                                      | `ecc-install` / `superpowers-install` maintain BOTH dirs; run them, or install with `CLAUDE_CONFIG_DIR` set                                         |
-
-Cloud first session: the PRIMARY mechanism is the repo's committed
-`.claude/settings.json` declaring `enabledPlugins` + `extraKnownMarketplaces`
-(native pre-launch install, commit 8d4507f). The SessionStart hook is only the
-self-heal -- a plugin it installs is dark until the NEXT session. On machines,
-`superpowers-install` registers the official marketplace by git URL before
-installing (commit 5b799dd; previously a silent no-op risk).
-
-[WARNING] Open weak point: the machine-path installers (`ecc-install`,
-`superpowers-install`) still trust `claude plugins list` output, not
-`installed_plugins.json`. `bootstrap-cloud.sh` `ensure_plugin` is the gold
-standard; when in doubt, check the JSON yourself.
+Retired (2026-09): Superpowers is the only plugin this repo ever declared,
+and it is now retired, like ECC before it. No plugin is installed by
+`update`/`install.sh`/`bootstrap-cloud.sh` any more, so this symptom class no
+longer applies. If a plugin is ever installed by hand, the ground-truth file
+is still `~/.claude/plugins/installed_plugins.json`
+(`grep -o '"[a-z-]*@[a-z-]*"' ~/.claude/plugins/installed_plugins.json`); a
+plugin installed after launch is dark until the session restarts (commit
+c1c4500, the root cause of the historical cloud saga), and each config dir
+(`~/.claude`, `~/.claude-work`) has its own installs.
 
 ## 2. settings.json truncated or missing dotfiles keys
 
@@ -288,11 +270,10 @@ outage, not cosmetic.
 
 ## 11. zsh stale-plugin nag or slow start
 
-- `[INFO] Stale: ecc (Nd). Run 'ecc-update' to refresh.` comes from
-  `_claude_plugin_check_update` (zsh/functions.zsh): a per-plugin day-epoch
-  stamp in `${ZSH_CACHE_DIR:-~/.cache/zsh}/.ecc-update`, threshold 14 days.
-  Fix: run `ecc-update`. GSD is deliberately absent from the loop (commit
-  9ad4dc8) -- a gsd nag on a current checkout means an old functions.zsh.
+- The per-plugin stale-nag (`_claude_plugin_check_update`, retired ECC only)
+  is retired along with `ecc-install`/`ecc-update`; a checkout that still
+  nags about the retired ecc means an old `functions.zsh`. GSD is likewise
+  deliberately absent from any update loop (commit 9ad4dc8).
 - `[INFO] Claude Code update available: ...` comes from
   `_claude_code_update_check`: the `npm view` runs backgrounded and cached 24h
   (`~/.cache/dotfiles/claude-code-update-check`), so it should not block
@@ -332,15 +313,15 @@ ls -ld /path/to/main/.todos                  # main must actually have .todos/
 
 | Finding                                               | Cause                                                                                                                                       | Fix                                                                                                   |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `core.hooksPath` wrong/absent                         | Something rewrote it (the classic culprit: running ECC's sync script directly -- see warnings)                                              | Re-link `~/.gitconfig` (`dotfiles-repair`); use native `ecc-install`/`ecc-update` only                |
+| `core.hooksPath` wrong/absent                         | Something rewrote it (the classic culprit: running the retired ECC's sync script directly -- see warnings)                                  | Re-link `~/.gitconfig` (`dotfiles-repair`); never run the retired ECC sync script directly            |
 | Hook fired but printed `WARN: .todos has wrong shape` | Existing dir/symlink does not match the canonical symlink; hook refuses destructive replace by default                                      | Re-run checkout with `GSD_HOOK_REPAIR=1` (destructive -- rsync worktree-unique content to main FIRST) |
 | Hook printed `workspace mode detected`                | `.planning/config.json` declares `"mode": "workspace"` or phases/PROJECT.md exist -- hydration is skipped by design; leftover symlinks warn | `GSD_HOOK_ISOLATE=1` converts leftover symlinks to per-worktree copies                                |
 | No output at all                                      | File checkout (not branch), or `.git` is a directory (main checkout), or main has no `.todos/`                                              | Expected no-ops -- see the guard chain at the top of `git/hooks/post-checkout`                        |
 | Symlinks broken after moving the main checkout        | Hydration symlinks are ABSOLUTE paths to main (known limit #4 in the hook header)                                                           | Re-run in each worktree with `GSD_HOOK_REPAIR=1`                                                      |
 
-[WARNING] Coverage gap: `git/hooks/post-checkout.test.sh` is static-shape-only,
-and the ECC-vendored `pre-commit`/`pre-push` in the same dir are untested. Do
-not assume test-green covers live hook behavior here.
+[WARNING] Coverage gap: `git/hooks/post-checkout.test.sh` is static-shape-only.
+The `pre-commit`/`pre-push` hooks in the same dir, derived from the retired ECC, have their own behavioral suites (see dotfiles-validation-and-qa); do
+not assume `post-checkout.test.sh` alone covers live hook behavior here.
 
 ## Discriminating-experiment discipline
 
@@ -389,13 +370,12 @@ to re-verify:
 | SessionStart cloud matcher `startup\|resume`                                                                        | `grep -A3 SessionStart .claude/settings.json`                                            |
 | `ensure_plugin` retry budget (8 tries, 15s cap)                                                                     | `grep -n 'PLUGIN_RETR' bootstrap-cloud.sh`                                               |
 | Settings seed threshold (<50% of template)                                                                          | `grep -n 'dest_size \* 2' install/common/claude-links.sh bin/dotfiles-repair`            |
-| Stale-plugin nag threshold (14 days, ecc only)                                                                      | `grep -n 'update_days\|for plugin in' zsh/functions.zsh`                                 |
+| Stale-plugin nag (14-day threshold, retired ECC only) removed                                                       | `! grep -q '_claude_plugin_check_update' zsh/functions.zsh`                              |
 | post-checkout guard chain and env flags                                                                             | `sed -n '85,100p' git/hooks/post-checkout; grep -n 'GSD_HOOK_' git/hooks/post-checkout`  |
 | SSH pinning per host                                                                                                | `grep -n IdentityFile ssh/configs/personal/config_personal ssh/configs/work/config_work` |
 | `useConfigOnly` + includeIf routing                                                                                 | `grep -n 'useConfigOnly\|includeIf' git/.gitconfig`                                      |
 | Test suite list (10 suites as of 2026-07-02)                                                                        | `bin/dotfiles-tests --list`                                                              |
 
 Open items carried as open (do not document as fixed): machine-path plugin
-installers trust CLI output; template changes need manual merge on machines;
-Linux commit signing; pre-commit/pre-push untested; ECC rules vendoring
-necessity.
+installer trusts CLI output; template changes need manual merge on machines;
+Linux commit signing; retired ECC rules vendoring cleanup on older machines.

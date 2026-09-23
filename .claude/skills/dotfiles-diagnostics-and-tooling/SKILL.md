@@ -116,25 +116,26 @@ dotfiles-failure-archaeology).
 | `plugins/cache/<marketplace>/<plugin>/<version>/`             | the installed payload itself                                                                                           |
 
 ```bash
-# The two dotfiles-required plugins, straight from ground truth:
-grep -E '"(ecc@ecc|superpowers@claude-plugins-official)"' ~/.claude/plugins/installed_plugins.json
+# Any installed plugin, straight from ground truth (Superpowers retired 2026-09,
+# ECC retired 2026-09; no plugin is required by this repo any more):
+grep -E '"<plugin-id>"' ~/.claude/plugins/installed_plugins.json
 
 # CLI views (convenient, but derived):
 claude plugin list            # installed + enabled status (also: list --json)
 claude plugin marketplace list
 claude plugin marketplace update <name>   # force a manifest refresh
 
-# Is the plugin even resolvable yet? (the wait condition bootstrap-cloud polls)
-grep '"name"' ~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json | head
+# Is the plugin even resolvable yet? (the wait condition a manual install polls)
+grep '"name"' ~/.claude/plugins/marketplaces/<marketplace>/.claude-plugin/marketplace.json | head
 ```
 
 CLI verbs (from `claude plugin --help`, 2026-07-02): `details, disable,
 enable, eval, init|new, install|i, list,
 marketplace {add,list,remove,update}, prune|autoremove, tag,
-uninstall|remove, update, validate`. Machine installs go through the zsh functions `ecc-install` /
-`superpowers-install` (`zsh/functions.zsh`), which maintain BOTH config dirs;
-cloud installs go through `bootstrap-cloud.sh` `ensure_plugin` -- the gold
-standard because it verifies against `installed_plugins.json`.
+uninstall|remove, update, validate`. Neither runtime installs a plugin during
+`update`/`install.sh`/`bootstrap-cloud.sh` any more; the retired Superpowers
+install path verified against `installed_plugins.json` the same way this
+table still documents.
 
 ## Settings drift inspection
 
@@ -201,9 +202,6 @@ Captured in this cloud container, 2026-07-02 (abridged):
 ...
 --- settings.json ---
 [OK]      SessionStart hooks registered: account_guard.py
---- plugins ---
-[OK]      ecc@ecc recorded in installed_plugins.json
-[OK]      superpowers@claude-plugins-official recorded in installed_plugins.json
 --- git identity ---
 [OK]      git author: Talon Jones <taloncjones@gmail.com>
 --- runtimes ---
@@ -265,19 +263,19 @@ script's entry list -- it is a transcription, not a parser.
 All facts verified against the working tree and live container on 2026-07-02.
 Volatile facts and how to re-verify:
 
-| Fact (as of 2026-07-02)                                                  | Re-verify                                                                                                                                                             |
-| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Nine test suites in the runner                                           | `bin/dotfiles-tests --list`                                                                                                                                           |
-| CI runs the runner                                                       | `grep dotfiles-tests .github/workflows/tests.yml`                                                                                                                     |
-| identity-doctor sections/labels                                          | `grep -n 'section ' bin/identity-doctor`                                                                                                                              |
-| repair's five steps                                                      | `grep -n 'step "' bin/dotfiles-repair`                                                                                                                                |
-| plugin CLI verbs                                                         | `claude plugin --help; claude plugin marketplace --help`                                                                                                              |
-| plugin state paths                                                       | `ls ~/.claude/plugins/`                                                                                                                                               |
-| required plugin ids (ecc@ecc, superpowers@claude-plugins-official)       | `grep ensure_plugin bootstrap-cloud.sh`                                                                                                                               |
-| template-vs-live drift checker coverage                                  | `sed -n '80,110p' claude/hooks/claude-hooks.test.sh`                                                                                                                  |
-| symlink map (script transcription)                                       | `diff <(grep 'ln -sf' install/common/link.sh) <(grep check_link .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh)` -- eyeball, formats differ |
+| Fact (as of 2026-07-02)                                                | Re-verify                                                                                                                                                             |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nine test suites in the runner                                         | `bin/dotfiles-tests --list`                                                                                                                                           |
+| CI runs the runner                                                     | `grep dotfiles-tests .github/workflows/tests.yml`                                                                                                                     |
+| identity-doctor sections/labels                                        | `grep -n 'section ' bin/identity-doctor`                                                                                                                              |
+| repair's five steps                                                    | `grep -n 'step "' bin/dotfiles-repair`                                                                                                                                |
+| plugin CLI verbs                                                       | `claude plugin --help; claude plugin marketplace --help`                                                                                                              |
+| plugin state paths                                                     | `ls ~/.claude/plugins/`                                                                                                                                               |
+| no plugin is required (ECC and Superpowers both retired 2026-09)       | `grep -q ensure_plugin bootstrap-cloud.sh; echo $?` (expect 1)                                                                                                        |
+| template-vs-live drift checker coverage                                | `sed -n '80,110p' claude/hooks/claude-hooks.test.sh`                                                                                                                  |
+| symlink map (script transcription)                                     | `diff <(grep 'ln -sf' install/common/link.sh) <(grep check_link .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh)` -- eyeball, formats differ |
 | baseline (all suites pass; any public-safety failure is stop-the-line) | `bin/dotfiles-tests`                                                                                                                                                  |
-| platform default author email `noreply@anthropic.com`                    | `grep PLATFORM_DEFAULT_EMAIL bootstrap-cloud.sh`                                                                                                                      |
+| platform default author email `noreply@anthropic.com`                  | `grep PLATFORM_DEFAULT_EMAIL bootstrap-cloud.sh`                                                                                                                      |
 
 Update triggers: adding/removing a test suite, renaming a doctor, changing the
 symlink map, template key changes, or a new plugin becoming dotfiles-required.

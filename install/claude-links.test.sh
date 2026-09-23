@@ -59,7 +59,7 @@ cat >"$TMPL" <<'EOF'
   },
   "statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"},
   "promptSuggestionEnabled": false,
-  "enabledPlugins": {"ecc@ecc": true, "conflict@market": true}
+  "enabledPlugins": {"template@market": true, "conflict@market": true}
 }
 EOF
 
@@ -146,41 +146,209 @@ else
     fail "dest untouched when template missing"
 fi
 
-# 6. Config-dir token: env string values carry {{CLAUDE_CONFIG_DIR}} in the
-# template; reconcile replaces it with the absolute dir it writes into, and
-# only inside env (a token elsewhere is left alone). No token survives in env.
-TOKTMPL="$TMP/tok-tmpl.json"
-cat >"$TOKTMPL" <<'EOF'
+# 6. Retired plugins stay retired. enabledPlugins and extraKnownMarketplaces
+#    are unions where live state wins, and env keeps live keys, so a template
+#    that merely drops ECC would leave it enabled forever. The reconcile forces
+#    the retired plugin off, drops its marketplace, and prunes its six env keys,
+#    while every other plugin, marketplace, and env key survives.
+RETTMPL="$TMP/ret-tmpl.json"
+cat >"$RETTMPL" <<'EOF'
 {
-  "env": {
-    "ECC_AGENT_DATA_HOME": "{{CLAUDE_CONFIG_DIR}}",
-    "ECC_FIXTURE_MULTI": "a:{{CLAUDE_CONFIG_DIR}}/x:{{CLAUDE_CONFIG_DIR}}/y",
-    "PLAIN": "unchanged"
-  },
-  "statusLine": {"type": "command", "command": "echo {{CLAUDE_CONFIG_DIR}}"}
+  "env": {"TEMPLATE_KEY": "t"},
+  "enabledPlugins": {"sample@claude-plugins-official": true},
+  "extraKnownMarketplaces": {"claude-plugins-official": {"source": {"source": "git", "url": "https://example.invalid/official.git"}}}
 }
 EOF
-mkdir -p "$TMP/tok-cfg"
-reconcile_claude_settings_file "$TOKTMPL" "$TMP/tok-cfg/settings.json" >/dev/null 2>&1
-if jget "$TMP/tok-cfg/settings.json" "d['env']['ECC_AGENT_DATA_HOME'] == '$TMP/tok-cfg'"; then
-    pass "reconcile substitutes the config-dir token with the dest dir"
+RETDEST="$TMP/ret-dest.json"
+cat >"$RETDEST" <<'EOF'
+{
+  "enabledPlugins": {"ecc@ecc": true, "other@market": true},
+  "extraKnownMarketplaces": {
+    "ecc": {"source": {"source": "git", "url": "https://example.invalid/ecc.git"}},
+    "other": {"source": {"source": "git", "url": "https://example.invalid/other.git"}}
+  },
+  "env": {
+    "ECC_CONTEXT_MONITOR_COST_WARNINGS": "0",
+    "ECC_DISABLED_HOOKS": "a,b",
+    "ECC_AGENT_DATA_HOME": "/somewhere",
+    "ECC_PLAN_CANVAS_STATE_DIR": "/somewhere/plan-canvas",
+    "GATEGUARD_BASH_ROUTINE_DISABLED": "1",
+    "GATEGUARD_EXEMPT_GLOBS": "/**",
+    "ECC_SKIP_PRECOMMIT": "1",
+    "MACHINE_LOCAL": "keep"
+  }
+}
+EOF
+reconcile_claude_settings_file "$RETTMPL" "$RETDEST" "[test]" >/dev/null 2>&1
+if jget "$RETDEST" "d['enabledPlugins']['ecc@ecc'] is False"; then
+    pass "reconcile forces retired plugin ecc@ecc to false"
 else
-    fail "reconcile substitutes the config-dir token with the dest dir"
+    fail "reconcile forces retired plugin ecc@ecc to false"
 fi
-if jget "$TMP/tok-cfg/settings.json" "d['env']['ECC_FIXTURE_MULTI'] == 'a:$TMP/tok-cfg/x:$TMP/tok-cfg/y'"; then
-    pass "reconcile substitutes every token occurrence in one value"
+if jget "$RETDEST" "'ecc' not in d['extraKnownMarketplaces']"; then
+    pass "reconcile drops the retired ecc marketplace"
 else
-    fail "reconcile substitutes every token occurrence in one value"
+    fail "reconcile drops the retired ecc marketplace"
 fi
-if jget "$TMP/tok-cfg/settings.json" "d['env']['PLAIN'] == 'unchanged' and d['statusLine']['command'] == 'echo {{CLAUDE_CONFIG_DIR}}'"; then
-    pass "reconcile leaves non-env values and token-free env values alone"
+if jget "$RETDEST" "not set(d['env']) & {'ECC_CONTEXT_MONITOR_COST_WARNINGS', 'ECC_DISABLED_HOOKS', 'ECC_AGENT_DATA_HOME', 'ECC_PLAN_CANVAS_STATE_DIR', 'GATEGUARD_BASH_ROUTINE_DISABLED', 'GATEGUARD_EXEMPT_GLOBS'}"; then
+    pass "reconcile prunes the six retired ECC env keys"
 else
-    fail "reconcile leaves non-env values and token-free env values alone"
+    fail "reconcile prunes the six retired ECC env keys"
 fi
-if ! grep -q '{{CLAUDE_CONFIG_DIR}}' "$TMP/tok-cfg/settings.json" 2>/dev/null || jget "$TMP/tok-cfg/settings.json" "all('{{CLAUDE_CONFIG_DIR}}' not in v for v in d['env'].values())"; then
-    pass "reconcile leaves no token in env"
+if jget "$RETDEST" "d['env']['ECC_SKIP_PRECOMMIT'] == '1'"; then
+    pass "reconcile keeps the git-hook ECC_SKIP knobs"
 else
-    fail "reconcile leaves no token in env"
+    fail "reconcile keeps the git-hook ECC_SKIP knobs"
+fi
+if jget "$RETDEST" "d['enabledPlugins']['other@market'] is True and d['enabledPlugins']['sample@claude-plugins-official'] is True and set(d['extraKnownMarketplaces']) == {'other', 'claude-plugins-official'} and d['env']['MACHINE_LOCAL'] == 'keep' and d['env']['TEMPLATE_KEY'] == 't'"; then
+    pass "retirement keeps other plugins, marketplaces and env keys"
+else
+    fail "retirement keeps other plugins, marketplaces and env keys"
+fi
+cp "$RETDEST" "$TMP/ret-first.json"
+reconcile_claude_settings_file "$RETTMPL" "$RETDEST" "[test]" >/dev/null 2>&1
+if cmp -s "$RETDEST" "$TMP/ret-first.json"; then
+    pass "retirement is idempotent"
+else
+    fail "retirement is idempotent"
+fi
+
+# Superpowers is retired too: forced off like ECC, but its marketplace is the
+# shared official one and must survive.
+SPDEST="$TMP/sp-dest.json"
+cat >"$SPDEST" <<'EOF'
+{
+  "enabledPlugins": {"superpowers@claude-plugins-official": true, "sample@claude-plugins-official": true},
+  "extraKnownMarketplaces": {"claude-plugins-official": {"source": {"source": "git", "url": "https://example.invalid/official.git"}}}
+}
+EOF
+reconcile_claude_settings_file "$RETTMPL" "$SPDEST" "[test]" >/dev/null 2>&1
+if jget "$SPDEST" "d['enabledPlugins']['superpowers@claude-plugins-official'] is False and d['enabledPlugins']['sample@claude-plugins-official'] is True"; then
+    pass "reconcile forces retired superpowers off"
+else
+    fail "reconcile forces retired superpowers off"
+fi
+if jget "$SPDEST" "'claude-plugins-official' in d['extraKnownMarketplaces']"; then
+    pass "retirement keeps the shared claude-plugins-official marketplace"
+else
+    fail "retirement keeps the shared claude-plugins-official marketplace"
+fi
+
+# Only ECC owns isolation env keys. A config dir that still has Superpowers
+# installed but no ECC must not get ECC isolation env keys restored.
+SPCFG="$TMP/sp-config"
+mkdir -p "$SPCFG/plugins"
+printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}]}}\n' \
+    >"$SPCFG/plugins/installed_plugins.json"
+printf '{"env": {"MACHINE_LOCAL": "keep"}}\n' >"$SPCFG/settings.json"
+reconcile_claude_settings_file "$RETTMPL" "$SPCFG/settings.json" "[test]" >/dev/null 2>&1
+if jget "$SPCFG/settings.json" "not [k for k in d['env'] if k.startswith(('ECC_', 'GATEGUARD_'))] and d['env']['MACHINE_LOCAL'] == 'keep'"; then
+    pass "superpowers installed without ECC restores no ECC env key"
+else
+    fail "superpowers installed without ECC restores no ECC env key"
+fi
+
+# An unreadable registry means "ECC may still be installed", never
+# "Superpowers may be": ECC rescue keys return, superpowers stays retired.
+BADCFG="$TMP/bad-registry"
+mkdir -p "$BADCFG/plugins"
+printf 'not json\n' >"$BADCFG/plugins/installed_plugins.json"
+printf '{"env": {}}\n' >"$BADCFG/settings.json"
+reconcile_claude_settings_file "$RETTMPL" "$BADCFG/settings.json" "[test]" >/dev/null 2>&1
+if jget "$BADCFG/settings.json" "d['env'].get('ECC_DISABLED_HOOKS') and d['enabledPlugins']['superpowers@claude-plugins-official'] is False"; then
+    pass "unreadable registry keeps ECC rescue keys and still retires superpowers"
+else
+    fail "unreadable registry keeps ECC rescue keys and still retires superpowers"
+fi
+
+# A config dir where the retired plugin is disabled in settings.json but
+# still physically installed (installed_plugins.json still lists it, e.g.
+# from a project-level override or a machine that has not run
+# ecc-uninstall yet) must keep the isolation env keys -- sweeping them
+# ahead of the actual uninstall would let the still-loadable plugin read
+# state without ECC_DISABLED_HOOKS/ECC_AGENT_DATA_HOME in place.
+STILLDIR="$TMP/still-installed-cdir"
+mkdir -p "$STILLDIR/plugins"
+cat >"$STILLDIR/plugins/installed_plugins.json" <<'EOF'
+{"plugins": {"ecc@ecc": [{"scope": "user"}]}}
+EOF
+STILLDEST="$STILLDIR/settings.json"
+cp "$RETTMPL" "$TMP/still-tmpl.json"
+cat >"$STILLDEST" <<'EOF'
+{
+  "enabledPlugins": {"ecc@ecc": true},
+  "env": {
+    "ECC_DISABLED_HOOKS": "a,b",
+    "ECC_AGENT_DATA_HOME": "/somewhere",
+    "MACHINE_LOCAL": "keep"
+  }
+}
+EOF
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$STILLDEST" "[test]" >/dev/null 2>&1
+if jget "$STILLDEST" "d['enabledPlugins']['ecc@ecc'] is False"; then
+    pass "reconcile still forces the plugin off when it remains installed"
+else
+    fail "reconcile still forces the plugin off when it remains installed"
+fi
+if jget "$STILLDEST" "d['env']['ECC_DISABLED_HOOKS'] == 'a,b' and d['env']['ECC_AGENT_DATA_HOME'] == '/somewhere'"; then
+    pass "reconcile keeps isolation env keys while the plugin is still installed"
+else
+    fail "reconcile keeps isolation env keys while the plugin is still installed"
+fi
+rm -f "$STILLDIR/plugins/installed_plugins.json"
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$STILLDEST" "[test]" >/dev/null 2>&1
+if jget "$STILLDEST" "not set(d['env']) & {'ECC_DISABLED_HOOKS', 'ECC_AGENT_DATA_HOME'}"; then
+    pass "reconcile sweeps isolation env keys once the plugin is actually gone"
+else
+    fail "reconcile sweeps isolation env keys once the plugin is actually gone"
+fi
+
+# A dest that is corrupt or empty is rebuilt from {} (case 3 above). If the
+# plugin is still installed at that point, the union of an empty dest env
+# and a template that no longer declares these keys would otherwise leave
+# isolation silently absent from the rebuilt file. The rescue defaults must
+# fill the gap instead of leaving it open.
+cat >"$STILLDIR/plugins/installed_plugins.json" <<'EOF'
+{"plugins": {"ecc@ecc": [{"scope": "user"}]}}
+EOF
+CORRUPTDEST="$STILLDIR/settings.json"
+printf '' >"$CORRUPTDEST"
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$CORRUPTDEST" "[test]" >/dev/null 2>&1
+if jget "$CORRUPTDEST" "d['env'].get('ECC_DISABLED_HOOKS') and d['env'].get('ECC_AGENT_DATA_HOME') == os.path.dirname(os.path.abspath(sys.argv[1]))"; then
+    pass "reconcile restores isolation env defaults when rebuilding a corrupt dest with the plugin still installed"
+else
+    fail "reconcile restores isolation env defaults when rebuilding a corrupt dest with the plugin still installed"
+fi
+
+# Same rescue, but the dest file is entirely absent (a config dir that was
+# never seeded) rather than present-but-corrupt.
+cat >"$STILLDIR/plugins/installed_plugins.json" <<'EOF'
+{"plugins": {"ecc@ecc": [{"scope": "user"}]}}
+EOF
+MISSINGDEST="$STILLDIR/newsettings.json"
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$MISSINGDEST" "[test]" >/dev/null 2>&1
+if jget "$MISSINGDEST" "d['env'].get('ECC_DISABLED_HOOKS') and d['env'].get('ECC_AGENT_DATA_HOME') == os.path.dirname(os.path.abspath(sys.argv[1]))"; then
+    pass "reconcile restores isolation env defaults for a never-seeded dest with the plugin still installed"
+else
+    fail "reconcile restores isolation env defaults for a never-seeded dest with the plugin still installed"
+fi
+if jget "$MISSINGDEST" "d['env'].get('ECC_PLAN_CANVAS_STATE_DIR') == os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), 'plan-canvas')"; then
+    pass "reconcile restores the plan-canvas state dir alongside the other rescue defaults"
+else
+    fail "reconcile restores the plan-canvas state dir alongside the other rescue defaults"
+fi
+rm -f "$STILLDIR/plugins/installed_plugins.json"
+
+# A dest whose only marketplace is the retired one must not keep an empty map.
+ONLYDEST="$TMP/only-ecc-dest.json"
+printf '{"extraKnownMarketplaces": {"ecc": {"source": {"source": "git", "url": "https://example.invalid/ecc.git"}}}}\n' >"$ONLYDEST"
+ONLYTMPL="$TMP/only-tmpl.json"
+printf '{"env": {}}\n' >"$ONLYTMPL"
+if reconcile_claude_settings_file "$ONLYTMPL" "$ONLYDEST" "[test]" >/dev/null 2>&1 &&
+   jget "$ONLYDEST" "'extraKnownMarketplaces' not in d"; then
+    pass "retirement removes an emptied marketplace map"
+else
+    fail "retirement removes an emptied marketplace map"
 fi
 
 # 6b. Retired model-alias pins are swept. env is otherwise a union, so a
@@ -274,25 +442,10 @@ if jget "$CFG/settings.json" "not any(k.startswith('ANTHROPIC_DEFAULT_') for k i
 else
     fail "link path leaves every model alias un-pinned"
 fi
-if jget "$CFG/settings.json" "{x.strip().lower() for x in d['env']['ECC_DISABLED_HOOKS'].split(',') if x.strip()} == {'session-start:plan-canvas-sessions', 'stop:plan-canvas-pending', 'post:bash:command-log-audit', 'post:bash:command-log-cost', 'post:skill:track', 'pre:mcp-health-check', 'post:mcp-health-check'}"; then
-    pass "link path delivers the seven-id ECC hook exclusion"
+if jget "$CFG/settings.json" "d['enabledPlugins']['ecc@ecc'] is False and 'ecc' not in d.get('extraKnownMarketplaces', {}) and not [k for k in d.get('env', {}) if k.startswith(('ECC_', 'GATEGUARD_'))] and 'CLAUDE_CONFIG_DIR' not in json.dumps(d)"; then
+    pass "link path delivers no ECC env and disables ecc@ecc"
 else
-    fail "link path delivers the seven-id ECC hook exclusion"
-fi
-if jget "$CFG/settings.json" "d['env']['ECC_AGENT_DATA_HOME'] == '$CFG'"; then
-    pass "link path scopes the ECC data home to this config dir"
-else
-    fail "link path scopes the ECC data home to this config dir"
-fi
-# A second config dir (the work account) must receive its own path, not a
-# copy of the first dir's.
-CFG2="$TMP/cfg-work"
-mkdir -p "$CFG2"
-link_claude_config_dir "$CFG2" >/dev/null 2>&1
-if jget "$CFG2/settings.json" "d['env']['ECC_AGENT_DATA_HOME'] == '$CFG2'"; then
-    pass "link path gives a second config dir its own ECC data home"
-else
-    fail "link path gives a second config dir its own ECC data home"
+    fail "link path delivers no ECC env and disables ecc@ecc"
 fi
 # Two consecutive update runs must converge: the exclusion is delivered once
 # and never re-written differently.
@@ -327,62 +480,6 @@ if jget "$ACCOUNT_HOME/.claude-work/settings.json" "d['enabledPlugins']['atlassi
     pass "work Claude config retains Atlassian"
 else
     fail "work Claude config retains Atlassian"
-fi
-
-# 7. Canvas hooks from ECC 2.2.1 resolve their state under the default
-# ~/.claude path even when CLAUDE_CONFIG_DIR selects another account. Keep the
-# two automatic hooks disabled in every account settings file, retain existing
-# hook opt-outs and unrelated env keys, and set the manual Canvas state dir
-# beside the settings file so the two accounts do not share it.
-PERSONAL_HOOKS='keep-me,session-start:plan-canvas-sessions'
-WORK_HOOKS='work-only,stop:plan-canvas-pending'
-printf '{"env":{"PERSONAL_ONLY":"yes","ECC_DISABLED_HOOKS":"%s"}}\n' "$PERSONAL_HOOKS" \
-    > "$ACCOUNT_HOME/.claude/settings.json"
-printf '{"env":{"WORK_ONLY":"yes","ECC_DISABLED_HOOKS":"%s"}}\n' "$WORK_HOOKS" \
-    > "$ACCOUNT_HOME/.claude-work/settings.json"
-HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
-    "$ACCOUNT_HOME/.claude/settings.json" >/dev/null
-HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
-    "$ACCOUNT_HOME/.claude-work/settings.json" >/dev/null
-cp "$ACCOUNT_HOME/.claude/settings.json" "$TMP/personal-canvas.before"
-cp "$ACCOUNT_HOME/.claude-work/settings.json" "$TMP/work-canvas.before"
-HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
-    "$ACCOUNT_HOME/.claude/settings.json" >/dev/null
-HOME="$ACCOUNT_HOME" reconcile_claude_settings_file "$DOTFILEDIR/claude/settings.json.tmpl" \
-    "$ACCOUNT_HOME/.claude-work/settings.json" >/dev/null
-if jget "$ACCOUNT_HOME/.claude/settings.json" "d['env']['PERSONAL_ONLY'] == 'yes' and d['env']['ECC_DISABLED_HOOKS'].split(',').count('keep-me') == 1 and set(('session-start:plan-canvas-sessions', 'stop:plan-canvas-pending')).issubset(d['env']['ECC_DISABLED_HOOKS'].split(',')) and d['env']['ECC_PLAN_CANVAS_STATE_DIR'] == os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), 'plan-canvas'))"; then
-    pass "personal Canvas policy preserves env and scopes state"
-else
-    fail "personal Canvas policy preserves env and scopes state"
-fi
-if jget "$ACCOUNT_HOME/.claude-work/settings.json" "d['env']['WORK_ONLY'] == 'yes' and d['env']['ECC_DISABLED_HOOKS'].split(',').count('work-only') == 1 and set(('session-start:plan-canvas-sessions', 'stop:plan-canvas-pending')).issubset(d['env']['ECC_DISABLED_HOOKS'].split(',')) and d['env']['ECC_PLAN_CANVAS_STATE_DIR'] == os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), 'plan-canvas'))"; then
-    pass "work Canvas policy preserves env and scopes state"
-else
-    fail "work Canvas policy preserves env and scopes state"
-fi
-if cmp -s "$ACCOUNT_HOME/.claude/settings.json" "$TMP/personal-canvas.before" &&
-   cmp -s "$ACCOUNT_HOME/.claude-work/settings.json" "$TMP/work-canvas.before"; then
-    pass "Canvas reconcile is stable across account namespaces"
-else
-    fail "Canvas reconcile is stable across account namespaces"
-fi
-
-# A pre-existing custom opt-out list must not mask new template exclusions.
-if python3 - "$DOTFILEDIR/claude/settings.json.tmpl" "$ACCOUNT_HOME" <<'PY'
-import json, os, sys
-with open(sys.argv[1]) as stream:
-    required = set(json.load(stream)['env']['ECC_DISABLED_HOOKS'].split(','))
-for account in ('.claude', '.claude-work'):
-    root = os.path.join(sys.argv[2], account)
-    with open(os.path.join(root, 'settings.json')) as stream:
-        env = json.load(stream)['env']
-    assert required.issubset(env['ECC_DISABLED_HOOKS'].split(','))
-    assert env['ECC_AGENT_DATA_HOME'] == root
-PY
-then
-    pass "existing opt-outs retain every template isolation rule and account root"
-else
-    fail "existing opt-outs retain every template isolation rule and account root"
 fi
 
 # --- reconcile writes a template stamp ---------------------------------

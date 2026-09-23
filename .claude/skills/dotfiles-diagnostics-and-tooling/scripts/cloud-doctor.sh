@@ -107,23 +107,7 @@ else
   fi
 fi
 
-# --- 3. plugins -----------------------------------------------------------
-section "plugins"
-
-IPJ="$CLAUDE_DIR/plugins/installed_plugins.json"
-if [ ! -f "$IPJ" ]; then
-  fail "installed_plugins.json missing at $IPJ -- NO plugins are installed"
-else
-  for plugin_id in "ecc@ecc" "superpowers@claude-plugins-official"; do
-    if grep -q "$plugin_id" "$IPJ"; then
-      ok "$plugin_id recorded in installed_plugins.json"
-    else
-      fail "$plugin_id NOT in installed_plugins.json (recover: claude plugins install $plugin_id)"
-    fi
-  done
-fi
-
-# --- 4. git identity ------------------------------------------------------
+# --- 3. git identity ------------------------------------------------------
 section "git identity"
 
 if command -v git >/dev/null 2>&1; then
@@ -140,7 +124,7 @@ else
   fail "git not on PATH"
 fi
 
-# --- 5. runtimes ----------------------------------------------------------
+# --- 4. runtimes ----------------------------------------------------------
 section "runtimes"
 
 command -v python3 >/dev/null 2>&1 \

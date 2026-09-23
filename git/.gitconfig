@@ -17,8 +17,8 @@
 	editor = vscode
 	excludesfile = ~/.gitignore_global
 	# dotfiles-managed hooks dir (symlinked from this repo's git/hooks by link.sh).
-	# Holds post-checkout (hydrates .planning/ into new worktrees) plus ECC's
-	# secret-blocking pre-commit/pre-push (refreshed by codex-ecc-sync). One dir
+	# Holds post-checkout (hydrates .planning/ into new worktrees) plus the
+	# secret-blocking pre-commit/pre-push (derived from the retired ECC; see NOTICE). One dir
 	# serves Claude, Codex, and manual commits -- git hooks are harness-agnostic.
 	hooksPath = ~/.config/git/hooks
 [difftool "sourcetree"]

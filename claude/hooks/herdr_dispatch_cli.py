@@ -281,7 +281,7 @@ def _add_route_args(parser: argparse.ArgumentParser) -> None:
     role_or_step.add_argument("--role")
     role_or_step.add_argument("--step")
     parser.add_argument("--risk", default="normal")
-    parser.add_argument("--config-json")
+    parser.add_argument("--config-json", action="append")
     parser.add_argument("--capabilities-json")
     parser.add_argument("--provisional", action="store_true")
 
@@ -290,7 +290,12 @@ def _route(args: argparse.Namespace) -> dict[str, Any]:
     capabilities = _json_arg(args.capabilities_json, "capabilities-json")
     if capabilities is None:
         capabilities = agent_runtime.discover_capabilities(args.runtime)
-    config = _json_arg(args.config_json, "config-json") or {}
+    if args.config_json is not None and len(args.config_json) > 1:
+        raise agent_runtime.RouteError(
+            "--config-json may be given once; merge routes and difficulty into one object"
+        )
+    config_json = args.config_json[0] if args.config_json else None
+    config = _json_arg(config_json, "config-json") or {}
     if args.provisional:
         config = {**config, "provisional": True}
     role = args.role if args.role is not None else agent_runtime.role_for_step(args.step)

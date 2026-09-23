@@ -6,12 +6,10 @@ from __future__ import annotations
 import argparse
 import ast
 import fcntl
-import hashlib
 import json
 import os
 import re
 import stat
-import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
@@ -28,8 +26,11 @@ except ModuleNotFoundError:
 
 
 SECURITY_PLUGIN = "security-guidance@claude-plugins-official"
-ECC_PLUGIN = "ecc@dotfiles-workflows"
 INERT_PLUGINS = ("code-review", "code-simplifier")
+# Tags written by the retired ECC skill repairs. Nothing generates them now.
+# legacy-copy/legacy-command blocks keep standalone ECC copies under
+# ~/.agents/skills disabled and are left verbatim; only ecc-focus blocks,
+# which pointed into the retired plugin cache, are cleared.
 MANAGED_BLOCK = re.compile(
     r"(?ms)^# dotfiles-managed: (legacy-copy|legacy-command|ecc-focus)"
     r"(?: sha256=([a-f0-9]{64}))?\n\[\[skills.config\]\]\n"
@@ -153,258 +154,10 @@ def unsupported_plugins(data: dict, codex: Path) -> list[str]:
     return disabled
 
 
-def file_tree(root: Path) -> dict[str, tuple[str, str]] | None:
-    """Use Git blob identities and executable modes; reject symlink/custom trees."""
-    if not root.is_dir() or root.is_symlink():
-        return None
-    result = {}
-    try:
-        for path in root.rglob("*"):
-            if path.is_symlink():
-                return None
-            if path.is_dir():
-                continue
-            if not path.is_file():
-                return None
-            content = path.read_bytes()
-            blob = hashlib.sha1(
-                f"blob {len(content)}\0".encode() + content, usedforsecurity=False
-            ).hexdigest()
-            mode = "100755" if path.stat().st_mode & 0o111 else "100644"
-            result[path.relative_to(root).as_posix()] = (mode, blob)
-    except OSError:
-        return None
-    return result
-
-
-def git_read(repo: Path, *args: str) -> bytes:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, timeout=15, check=False
-    )
-    return result.stdout if result.returncode == 0 else b""
-
-
-def tree_signature(tree: dict) -> str:
-    return hashlib.sha256(json.dumps(tree, sort_keys=True).encode()).hexdigest()
-
-
-def legacy_migration_text(text: str) -> str:
-    """Recognize the old importer's rewrite; never apply it to installed files."""
-    return re.sub(
-        r"claude(?:[ -]code)?",
-        "Codex",
-        text.replace("CLAUDE.md", "AGENTS.md"),
-        flags=re.IGNORECASE,
-    )
-
-
-def translated_tree_matches(repo: Path, snapshot: dict, expected: dict) -> bool:
-    if snapshot.keys() != expected.keys():
-        return False
-    for path, (mode, blob) in snapshot.items():
-        if mode != expected[path][0]:
-            return False
-        content = git_read(repo, "cat-file", "blob", blob)
-        if (
-            hashlib.sha1(
-                f"blob {len(content)}\0".encode() + content, usedforsecurity=False
-            ).hexdigest()
-            != blob
-        ):
-            return False
-        try:
-            content = legacy_migration_text(content.decode()).encode()
-        except UnicodeDecodeError:
-            pass
-        translated = hashlib.sha1(
-            f"blob {len(content)}\0".encode() + content, usedforsecurity=False
-        ).hexdigest()
-        if translated != expected[path][1]:
-            return False
-    return True
-
-
-def managed_provenance(text: str) -> dict[str, str]:
-    proven = {}
-    for match in MANAGED_BLOCK.finditer(text):
-        entry = tomllib.loads("[[skills.config]]\n" + match[3])["skills"]["config"][0]
-        if (
-            match[2]
-            and entry.get("enabled") is False
-            and set(entry) == {"path", "enabled"}
-        ):
-            proven[entry["path"]] = match[2]
-    return proven
-
-
-def historical_match(repo: Path, name: str, expected: dict) -> bool:
-    if not (repo / ".git").exists():
-        return False
-    prefix = f"skills/{name}/"
-    try:
-        commits = git_read(repo, "log", "--all", "-64", "--format=%H", "--", prefix)
-        for commit in commits.decode().splitlines():
-            entries = git_read(repo, "ls-tree", "-r", "-z", commit, "--", prefix)
-            snapshot = {}
-            for entry in entries.split(b"\0"):
-                if not entry:
-                    continue
-                metadata, path = entry.decode().split("\t", 1)
-                mode, kind, blob = metadata.split()
-                if kind != "blob" or mode not in ("100644", "100755"):
-                    break
-                snapshot[path.removeprefix(prefix)] = (mode, blob)
-            else:
-                if snapshot == expected or translated_tree_matches(
-                    repo, snapshot, expected
-                ):
-                    return True
-    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
-        return False
-    return False
-
-
-def explicit_skill_override(entries: list, skill: Path, config: Path) -> bool:
-    for entry in entries:
-        if entry.get("name") in (skill.name, legacy_migration_text(skill.name)):
-            return True
-        if entry.get("path"):
-            path = Path(entry["path"]).expanduser()
-            resolved = (path if path.is_absolute() else config.parent / path).resolve()
-            if resolved in (skill.resolve(), (skill / "SKILL.md").resolve()):
-                return True
-    return False
-
-
-def legacy_duplicates(
-    data: dict, codex: Path, skills: Path, repo: Path, proven: dict
-) -> list[Path]:
-    if data.get("plugins", {}).get(ECC_PLUGIN, {}).get("enabled") is not True:
-        return []
-    versions = [
-        path / "skills"
-        for path in (codex / "plugins/cache/dotfiles-workflows/ecc").glob("*")
-        if path.is_dir()
-    ]
-    if not versions or not skills.is_dir():
-        return []
-    overrides = data.get("skills", {}).get("config", [])
-    duplicates = []
-    for skill in sorted(skills.iterdir()):
-        # Cache directory order/version numbers do not identify the active
-        # plugin. Require a replacement under every possible cached version.
-        if not all(
-            (version / skill.name / "SKILL.md").is_file() for version in versions
-        ):
-            continue
-        if explicit_skill_override(overrides, skill, codex / "config.toml"):
-            continue
-        tree = file_tree(skill)
-        if not tree or "SKILL.md" not in tree:
-            continue
-        if (
-            proven.get(str(skill / "SKILL.md")) == tree_signature(tree)
-            or any(tree == file_tree(version / skill.name) for version in versions)
-            or tree == file_tree(repo / "skills" / skill.name)
-            or historical_match(repo, skill.name, tree)
-        ):
-            duplicates.append(skill / "SKILL.md")
-    return duplicates
-
-
-def translated_command(content: str, name: str) -> str | None:
-    """Recreate the exact wrapper used for old imported slash commands."""
-    match = re.match(r"\A---\n(.*?)\n---\n(.*)\Z", content, re.DOTALL)
-    if not match:
-        return None
-    description = re.search(r"(?m)^description: (.+)$", match[1])
-    if not description:
-        return None
-    value = description[1]
-    if value.startswith('"'):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return None
-    skill = f"source-command-{name}"
-    return (
-        f"---\nname: {json.dumps(skill)}\ndescription: {json.dumps(value)}\n---\n\n"
-        f"# {skill}\n\nUse this skill when the user asks to run the migrated source command `{name}`.\n\n"
-        f"## Command Template\n\n{match[2].strip()}\n"
-    )
-
-
-def imported_commands(
-    data: dict, codex: Path, skills: Path, repo: Path, proven: dict
-) -> list[Path]:
-    if data.get("plugins", {}).get(ECC_PLUGIN, {}).get("enabled") is not True:
-        return []
-    disabled = []
-    for skill in sorted(skills.glob("source-command-*")):
-        if explicit_skill_override(
-            data.get("skills", {}).get("config", []), skill, codex / "config.toml"
-        ):
-            continue
-        tree = file_tree(skill)
-        if not tree or set(tree) != {"SKILL.md"}:
-            continue
-        if proven.get(str(skill / "SKILL.md")) == tree_signature(tree):
-            disabled.append(skill / "SKILL.md")
-            continue
-        name = skill.name.removeprefix("source-command-")
-        source_path = f"commands/{name}.md"
-        try:
-            command = repo / source_path
-            versions = [command.read_text()] if command.is_file() else []
-            commits = git_read(
-                repo, "log", "--all", "-64", "--format=%H", "--", source_path
-            )
-            versions += [
-                git_read(repo, "show", f"{commit}:{source_path}").decode()
-                for commit in commits.decode().splitlines()
-            ]
-            existing = (skill / "SKILL.md").read_text()
-            for content in versions:
-                wrapper = translated_command(content, name)
-                if wrapper is not None and existing in (
-                    wrapper,
-                    legacy_migration_text(wrapper),
-                ):
-                    disabled.append(skill / "SKILL.md")
-                    break
-        except (OSError, UnicodeError, subprocess.TimeoutExpired):
-            continue
-    return disabled
-
-
-def focused_skills(data: dict, codex: Path, catalog: Path) -> list[Path]:
-    if data.get("plugins", {}).get(ECC_PLUGIN, {}).get("enabled") is not True:
-        return []
-    keep = {
-        line.strip()
-        for line in catalog.read_text().splitlines()
-        if line.strip() and not line.startswith("#")
-    }
-    if not keep:
-        raise ValueError("The ECC focus catalog is empty")
-    candidates = (codex / "plugins/cache/dotfiles-workflows/ecc").glob("*/skills/*")
-    return sorted(
-        skill / "SKILL.md"
-        for skill in candidates
-        if (skill / "SKILL.md").is_file()
-        and skill.name not in keep
-        and not explicit_skill_override(
-            data.get("skills", {}).get("config", []), skill, codex / "config.toml"
-        )
-        and not any(
-            entry.get("name") == f"ecc:{skill.name}"
-            for entry in data.get("skills", {}).get("config", [])
-        )
-    )
-
-
 def clear_managed_disabled(text: str) -> str:
     def preserve_override(match: re.Match) -> str:
+        if match[1] != "ecc-focus":
+            return match[0]
         entry = tomllib.loads("[[skills.config]]\n" + match[3])["skills"]["config"][0]
         if set(entry) == {"path", "enabled"} and entry["enabled"] is False:
             return preserve_managed_comments(match)
@@ -434,7 +187,7 @@ def preserve_managed_comments(match: re.Match) -> str:
     return "".join(kept) if removed == 2 else match[0]
 
 
-def add_skill_settings(text: str, data: dict, disabled: dict[str, list[Path]]) -> str:
+def add_skill_settings(text: str, data: dict) -> str:
     settings = data.get("skills", {})
     # Inline tables cannot be extended elsewhere in TOML. Preserve this valid
     # user layout instead of rewriting it or producing a conflicting table.
@@ -450,18 +203,6 @@ def add_skill_settings(text: str, data: dict, disabled: dict[str, list[Path]]) -
             )
         else:
             text = text.rstrip() + "\n\n[skills]\nmax_context_tokens = 10000\n"
-    for reason, paths in disabled.items():
-        for path in paths:
-            provenance = (
-                f" sha256={tree_signature(file_tree(path.parent))}"
-                if reason != "ecc-focus"
-                else ""
-            )
-            text = text.rstrip() + (
-                f"\n\n# dotfiles-managed: {reason}{provenance}\n[[skills.config]]\n"
-                f"path = {json.dumps(str(path))}\n"
-                "enabled = false\n"
-            )
     return text
 
 
@@ -524,24 +265,12 @@ def unrelated_config(data: dict, plugins: list[str]) -> dict:
 def repair_config(args: argparse.Namespace, config: Path) -> dict:
     before = config.read_text()
     original = tomllib.loads(before)
-    proven = managed_provenance(before)
     after = clear_managed_disabled(before)
     data = tomllib.loads(after)
-    focus = args.focus or "# dotfiles-managed: ecc-focus\n" in before
-    disabled = {
-        "legacy-copy": legacy_duplicates(
-            data, args.codex_home, args.agents_skills, args.ecc_repo, proven
-        )
-    }
-    if focus:
-        disabled["legacy-command"] = imported_commands(
-            data, args.codex_home, args.agents_skills, args.ecc_repo, proven
-        )
-        disabled["ecc-focus"] = focused_skills(data, args.codex_home, args.catalog)
     plugins = unsupported_plugins(data, args.codex_home)
     for plugin in plugins:
         after = disable_plugin(after, plugin)
-    after = add_skill_settings(after, data, disabled)
+    after = add_skill_settings(after, data)
     result = tomllib.loads(after)
     expected_budget = original.get("skills", {}).get("max_context_tokens", 10000)
     if result.get("skills", {}).get("max_context_tokens") != expected_budget:
@@ -558,31 +287,12 @@ def repair_config(args: argparse.Namespace, config: Path) -> dict:
                 f"Cannot safely disable {plugin} in this TOML layout; "
                 'config was not changed. Use a [plugins."plugin-id"] table.'
             )
-    configured_paths = {
-        entry.get("path")
-        for entry in result.get("skills", {}).get("config", [])
-        if entry.get("enabled") is False
-    }
-    if any(
-        str(path) not in configured_paths
-        for paths in disabled.values()
-        for path in paths
-    ):
-        raise ValueError(
-            "Cannot safely disable skills in this TOML layout; config was not changed. "
-            "Use a [skills] table instead of an inline table."
-        )
     if args.apply:
         atomic_replace(config, before, after)
     return {
         "changed": after != before,
         "applied": args.apply,
         "disabled_plugins": plugins,
-        "focus": focus,
-        "skill_counts": {reason: len(paths) for reason, paths in disabled.items()},
-        "disabled_skill_paths": [
-            str(path) for paths in disabled.values() for path in paths
-        ],
         "max_context_tokens": result.get("skills", {}).get("max_context_tokens"),
     }
 
@@ -596,19 +306,6 @@ def main() -> int:
     )
     parser.add_argument(
         "--agents-skills", type=Path, default=Path.home() / ".agents/skills"
-    )
-    parser.add_argument(
-        "--ecc-repo", type=Path, default=Path.home() / "Git/personal/ECC"
-    )
-    parser.add_argument(
-        "--focus",
-        action="store_true",
-        help="Use the focused ECC catalog; preserve all skill files",
-    )
-    parser.add_argument(
-        "--catalog",
-        type=Path,
-        default=Path(__file__).resolve().parents[2] / "codex/ecc-skills.txt",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

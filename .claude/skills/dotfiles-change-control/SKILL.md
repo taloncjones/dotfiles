@@ -21,8 +21,8 @@ your first blocked commit.
 - [WARNING] Plans and specs are private working artifacts. Keep
   `docs/superpowers/`, `docs/plans/`, and `docs/specs/` ignored and untracked;
   approval to create one is not approval to publish it.
-- [WARNING] Never hand-edit vendored content: the ECC language dirs under
-  `claude/rules/` (everything except `personal/`) and native plugin payloads.
+- [WARNING] Never hand-edit vendored content: the retired-ECC language dirs
+  under `claude/rules/` (everything except `personal/`) and native plugin payloads.
   Change their lifecycle or owned adapters. `codex/AGENTS.md` is now fully
   repo-owned; the stale copied upstream instruction block is retired.
 - [WARNING] `claude/settings.json.tmpl` changes reach existing machines only at
@@ -46,12 +46,13 @@ your change needs.
 | Installer logic                | `bootstrap.sh`, `bootstrap-cloud.sh`, `install/**`, `zsh/functions.zsh` install helpers                 | Must stay idempotent (`update` re-runs `install.sh`). Update `install/install.test.sh` if flow shape changes. Platform-gate macOS/Linux paths.                                                                    |
 | Machine-local template         | `claude/settings.json.tmpl`, `git/work/.gitconfig-work.tmpl`, `ssh/configs/agent.toml`                  | Seed-once: template edits reach only FRESH machines automatically. Follow the settings.json.tmpl protocol below.                                                                                                  |
 | Private planning artifact      | `docs/superpowers/`, `docs/plans/`, `docs/specs/`                                                       | Keep local-only and ignored. Never force-add or publish these files in this public repository.                                                                                                                    |
-| Vendored-untracked             | `claude/rules/{common,cpp,python,rust,typescript,web}/`, ECC skills/commands                            | NEVER edit by hand. Re-vendor via `ecc-update`/`ecc-sync-rules`. Untracked by design (`claude/rules/.gitignore` whitelists only `personal/`). To change behavior, change it upstream in ECC or wrap it.           |
+| Vendored-untracked             | `claude/rules/{common,cpp,python,rust,typescript,web}/` (retired-ECC leftovers)                         | NEVER edit by hand; delete leftovers (`ecc-update`/`ecc-sync-rules` are retired). Untracked by design (`claude/rules/.gitignore` whitelists only `personal/`).                                                    |
 | Project `.claude/` config      | `.claude/settings.json`, `.claude/hooks/session-start.sh`, `.claude/skills/`                            | Tracked, load-bearing for CLOUD sessions (plugin declaration is the pre-launch install path -- see claude-code-platform-reference). Changes here alter what every fresh cloud container gets on session 1.        |
 
 Vendored-but-TRACKED special case: `git/hooks/pre-commit` and `pre-push` are
-adapted ECC copies that ARE tracked (and NOTICE-listed) -- do not hand-patch
-them; re-vendor or fix upstream (see "Special protocol: vendored content").
+copies adapted from the retired ECC that ARE tracked (and NOTICE-listed) --
+do not hand-patch them; fix them here directly (see "Special protocol:
+vendored content").
 
 Quick classification checks:
 
@@ -92,12 +93,12 @@ In order, for a change made inside a Claude Code session:
    does not link `~/.gitconfig`), so none of these hooks fire there and the
    Claude guard hooks plus CI are the only gates):
 
-   | Hook                        | Fires                 | Blocks                                                                                             | Bypass (EMERGENCY ONLY)                          |
-   | --------------------------- | --------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-   | `commit-msg`                | commit                | attribution terms, AI co-author lines, emojis in the message                                       | `DOTFILES_SKIP_COMMIT_MSG_GUARD=1`               |
-   | `pre-commit` (ECC-vendored) | commit                | staged high-signal secrets                                                                         | `ECC_SKIP_PRECOMMIT=1` or `ECC_SKIP_GIT_HOOKS=1` |
-   | `pre-push` (ECC-vendored)   | push                  | failing lint/typecheck/test/build in Node projects (verification flow -- it does NOT scan secrets) | `ECC_SKIP_PREPUSH=1` or `ECC_SKIP_GIT_HOOKS=1`   |
-   | `post-checkout`             | checkout/worktree add | nothing -- hydrates `.todos`/`.planning` into worktrees                                            | n/a                                              |
+   | Hook                                    | Fires                 | Blocks                                                                                             | Bypass (EMERGENCY ONLY)                          |
+   | --------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+   | `commit-msg`                            | commit                | attribution terms, AI co-author lines, emojis in the message                                       | `DOTFILES_SKIP_COMMIT_MSG_GUARD=1`               |
+   | `pre-commit` (derived from retired ECC) | commit                | staged high-signal secrets                                                                         | `ECC_SKIP_PRECOMMIT=1` or `ECC_SKIP_GIT_HOOKS=1` |
+   | `pre-push` (derived from retired ECC)   | push                  | failing lint/typecheck/test/build in Node projects (verification flow -- it does NOT scan secrets) | `ECC_SKIP_PREPUSH=1` or `ECC_SKIP_GIT_HOOKS=1`   |
+   | `post-checkout`                         | checkout/worktree add | nothing -- hydrates `.todos`/`.planning` into worktrees                                            | n/a                                              |
 
    Bypass discipline: use only when the hook itself is broken (e.g. `rg`
    missing false-positive), never to land content the hook correctly rejects.
@@ -141,7 +142,8 @@ In order, for a change made inside a Claude Code session:
 ## Special protocol: claude/settings.json.tmpl
 
 Why it is special: `~/.claude/settings.json` and `~/.claude-work/settings.json`
-are machine-local because plugin installers (ECC) WRITE into them at runtime.
+are machine-local because the settings reconcile and, historically, the now
+retired Superpowers and ECC plugin installers WRITE into them at runtime.
 The installer therefore seeds the file from the template only if it is absent
 (`seed_machine_local_file` in `install/common/claude-links.sh`, called by
 `link_claude_config_dir`) -- re-copying on every `update` would clobber the
@@ -172,26 +174,28 @@ When you change the template:
 
 ## Special protocol: vendored content
 
-- ECC language rules: vendoring RETIRED (2026-07-02) -- `ecc-sync-rules` and
-  `ECC_VENDOR_LANGS` are gone; the upstream rules tree lives in the ECC
-  marketplace clone (`~/.claude/plugins/marketplaces/ecc/rules/`). Claude Code
-  natively auto-loads every `.md` under `~/.claude/rules` (`paths:` frontmatter
-  scopes to matching files; none = every session), so language dirs still under
-  `claude/rules/` are NOT inert -- they auto-load and should be deleted
-  (`_ecc_legacy_rules_notice` flags them; `claude/rules/.gitignore` keeps them
-  uncommitted). Your own rules go in `claude/rules/personal/` -- the only
-  whitelisted, tracked subdir. History: tracked vendored rules caused 39-file
-  churn (untracked at e140ab3); vendoring was retired after consumer
-  enumeration found no runtime reader of `~/.claude/rules` -- a finding later
-  corrected (it ran in fresh cloud clones where the untracked vendored dirs did
-  not exist; the harness loader is real). The retirement stands on the
-  marketplace-clone-superset argument alone.
+- ECC language rules: vendoring RETIRED (2026-07-02) and ECC itself is
+  retired (2026-09) -- `ecc-sync-rules`, `ECC_VENDOR_LANGS`, and the ECC
+  plugin/marketplace itself are all gone; there is no longer an upstream
+  clone to point at. Claude Code natively auto-loads every `.md` under
+  `~/.claude/rules` (`paths:` frontmatter scopes to matching files; none =
+  every session), so language dirs still under `claude/rules/` are NOT inert
+  -- they auto-load and should be deleted (`claude/rules/.gitignore` keeps
+  them uncommitted; the notice function that used to flag them,
+  `_ecc_legacy_rules_notice`, was removed with the rest of the retired ECC). Your own
+  rules go in `claude/rules/personal/` -- the only whitelisted, tracked
+  subdir. History: tracked vendored rules caused 39-file churn (untracked at
+  e140ab3); vendoring was retired after consumer enumeration found no
+  runtime reader of `~/.claude/rules` -- a finding later corrected (it ran in
+  fresh cloud clones where the untracked vendored dirs did not exist; the
+  harness loader is real).
 - `codex/AGENTS.md` is repo-owned global policy. Native plugins own upstream
   guidance; do not reintroduce a copied instruction block or upstream global
   sync. See repo CLAUDE.md, "Codex plugin integration".
-- ECC git hooks `git/hooks/pre-commit` and `pre-push` are vendored copies
-  that are TRACKED in git (adapted from ECC, listed in `NOTICE`): do not patch
-  them by hand; fix upstream or re-vendor.
+- The git hooks `git/hooks/pre-commit` and `pre-push` are copies that are
+  TRACKED in git (adapted from the retired ECC, listed in `NOTICE`): do not
+  patch them against an upstream that no longer exists -- fix them here
+  directly.
 
 ## Non-negotiables, with rationale and incident
 
@@ -250,7 +254,7 @@ containers use the platform checkout):
 | Guard-hook registrations and matchers                                                  | `grep -n -A4 'matcher' claude/settings.json.tmpl`                                                                          |
 | Hook inventory                                                                         | `ls claude/hooks/ git/hooks/`                                                                                              |
 | `DOTFILES_SKIP_COMMIT_MSG_GUARD` still the commit-msg bypass                           | `grep -n 'SKIP' git/hooks/commit-msg`                                                                                      |
-| ECC bypass vars                                                                        | `grep -n 'ECC_SKIP' git/hooks/pre-commit git/hooks/pre-push`                                                               |
+| Bypass vars (named ECC_SKIP_*, retired ECC's naming)                                   | `grep -n 'ECC_SKIP' git/hooks/pre-commit git/hooks/pre-push`                                                               |
 | hooksPath indirection                                                                  | `git config --get core.hooksPath` (expect `~/.config/git/hooks`; EMPTY in cloud containers -- git hooks do not fire there) |
 | Seed-once settings behavior                                                            | `grep -n 'seed_machine_local_file' install/common/claude-links.sh`                                                         |
 | Cloud settings reconcile                                                               | `grep -n 'reconcile_claude_settings' bootstrap-cloud.sh`                                                                   |
@@ -262,6 +266,6 @@ Known-open as of 2026-07-02: all three original entries closed the same day --
 machine-path plugin installs verify against `installed_plugins.json`
 (`_claude_ensure_plugin` + `zsh/functions.test.sh`); machine-side auto-merge
 for `settings.json.tmpl` (`reconcile_claude_settings_file` +
-`install/claude-links.test.sh`); ECC `pre-commit`/`pre-push` behavioral suites
-and a post-checkout runtime suite
+`install/claude-links.test.sh`); `pre-commit`/`pre-push` (derived from the
+retired ECC) behavioral suites and a post-checkout runtime suite
 (`git/hooks/{pre-commit,pre-push,post-checkout-runtime}.test.sh`).

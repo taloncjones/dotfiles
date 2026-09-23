@@ -271,40 +271,11 @@ function vscode-ext-sync() {    # vscode-ext-sync() will rewrite vscode/extensio
 ###### Claude Code Plugins
 ##############################
 
-# helper: record update epoch for a plugin
-function _claude_plugin_epoch_write() {
-    local name="$1"
-    zmodload zsh/datetime
-    mkdir -p "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}"
-    echo "LAST_${name:u}_EPOCH=$(( EPOCHSECONDS / 60 / 60 / 24 ))" > "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.${name}-update"
-}
-
-# helper: resolve install scope from args. Echoes "global" (the default) or "local".
-function _claude_plugin_scope() {
-    local scope="global" arg
-    for arg in "$@"; do
-        case "$arg" in
-            -l|--local)  scope="local" ;;
-            -g|--global) scope="global" ;;
-        esac
-    done
-    echo "$scope"
-}
-
 # --- Plugin install ground truth (ported from bootstrap-cloud.sh) ---
 # `claude plugins install` can exit 0 without installing: a marketplace that is
 # registered but still mid-fetch resolves the plugin to "nothing to do" and the
 # command "succeeds". Exit codes and CLI output are therefore not evidence; the
-# on-disk record <config-dir>/plugins/installed_plugins.json is. These helpers
-# mirror bootstrap-cloud.sh's plugin_installed / marketplace_lists_plugin /
-# ensure_plugin, parameterized by config dir because machines have TWO
-# (~/.claude personal, ~/.claude-work work). The retry budget is smaller than
-# the cloud one: machines do not face the ~70s cold-container marketplace
-# warmup, only transient network blips.
-CLAUDE_OFFICIAL_MARKETPLACE_URL="https://github.com/anthropics/claude-plugins-official.git"
-CLAUDE_PLUGIN_RETRIES=3
-CLAUDE_PLUGIN_RETRY_DELAY=2
-CLAUDE_PLUGIN_RETRY_MAX_DELAY=5
+# on-disk record <config-dir>/plugins/installed_plugins.json is.
 
 # helper: true iff the plugin id is recorded in the config dir's installed_plugins.json
 function _claude_plugin_installed() {
@@ -326,102 +297,11 @@ function _claude_plugin_run() {
     fi
 }
 
-# helper: true iff the marketplace's on-disk manifest declares the plugin --
-# the condition the install resolver actually checks, so waiting on it is
-# deterministic rather than a blind timer.
-function _claude_marketplace_lists_plugin() {
-    local cfg_dir="$1" plugin_name="$2" marketplace="$3"
-    local manifest="$cfg_dir/plugins/marketplaces/$marketplace/.claude-plugin/marketplace.json"
-    [[ -f "$manifest" ]] && grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${plugin_name}\"" "$manifest"
-}
-
-# helper: install one plugin into one config dir and PROVE it landed.
-# Usage: _claude_ensure_plugin <config-dir> <plugin-id> <marketplace> [add-url]
-function _claude_ensure_plugin() {
-    local cfg_dir="$1" plugin_id="$2" marketplace="$3" add_url="${4:-}"
-    local plugin_name="${plugin_id%@*}"
-
-    if _claude_plugin_installed "$cfg_dir" "$plugin_id"; then
-        echo "[INFO] $plugin_id already installed ($cfg_dir)"
-        return 0
-    fi
-
-    # Register the marketplace if missing (idempotent). A pre-registered one
-    # (e.g. added by the platform or an earlier run) is left alone.
-    if ! _claude_plugin_run "$cfg_dir" plugin marketplace list 2>/dev/null | grep -qiw "$marketplace"; then
-        if [[ -n "$add_url" ]]; then
-            echo "[INFO] Adding $marketplace marketplace ($cfg_dir)..."
-            _claude_plugin_run "$cfg_dir" plugin marketplace add "$add_url" \
-                || { echo "[X] marketplace add failed for $marketplace ($cfg_dir)"; return 1; }
-        else
-            echo "[WARNING] Marketplace $marketplace not registered and no add URL known ($cfg_dir)"
-        fi
-    fi
-
-    # Phase 1: wait until the marketplace manifest lists the plugin, refreshing
-    # the cache between checks.
-    local attempt=1 delay=$CLAUDE_PLUGIN_RETRY_DELAY
-    while ! _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace"; do
-        _claude_plugin_run "$cfg_dir" plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
-        _claude_marketplace_lists_plugin "$cfg_dir" "$plugin_name" "$marketplace" && break
-        if [[ "$attempt" -ge "$CLAUDE_PLUGIN_RETRIES" ]]; then
-            echo "[WARNING] $marketplace manifest never listed $plugin_name after $CLAUDE_PLUGIN_RETRIES refreshes; installing anyway ($cfg_dir)"
-            break
-        fi
-        echo "[INFO] $marketplace manifest not warm yet (attempt $attempt/$CLAUDE_PLUGIN_RETRIES); retrying in ${delay}s..."
-        sleep "$delay"
-        delay=$(( delay * 2 ))
-        [[ "$delay" -gt "$CLAUDE_PLUGIN_RETRY_MAX_DELAY" ]] && delay=$CLAUDE_PLUGIN_RETRY_MAX_DELAY
-        attempt=$(( attempt + 1 ))
-    done
-
-    # Phase 2: install, then verify against installed_plugins.json.
-    attempt=1; delay=$CLAUDE_PLUGIN_RETRY_DELAY
-    while [[ "$attempt" -le "$CLAUDE_PLUGIN_RETRIES" ]]; do
-        _claude_plugin_run "$cfg_dir" plugin marketplace update "$marketplace" >/dev/null 2>&1 || true
-        _claude_plugin_run "$cfg_dir" plugins install "$plugin_id" >/dev/null 2>&1 || true
-        if _claude_plugin_installed "$cfg_dir" "$plugin_id"; then
-            echo "[OK] Installed $plugin_id ($cfg_dir, attempt $attempt/$CLAUDE_PLUGIN_RETRIES)"
-            return 0
-        fi
-        if [[ "$attempt" -lt "$CLAUDE_PLUGIN_RETRIES" ]]; then
-            echo "[INFO] $plugin_id not in installed_plugins.json yet (attempt $attempt/$CLAUDE_PLUGIN_RETRIES); retrying in ${delay}s..."
-            sleep "$delay"
-            delay=$(( delay * 2 ))
-            [[ "$delay" -gt "$CLAUDE_PLUGIN_RETRY_MAX_DELAY" ]] && delay=$CLAUDE_PLUGIN_RETRY_MAX_DELAY
-        fi
-        attempt=$(( attempt + 1 ))
-    done
-
-    echo "[X] $plugin_id not installed after $CLAUDE_PLUGIN_RETRIES attempts ($cfg_dir)."
-    if [[ "$cfg_dir" == "$HOME/.claude" ]]; then
-        echo "[X] Recover with: env -u CLAUDE_CONFIG_DIR claude plugins install $plugin_id"
-    else
-        echo "[X] Recover with: CLAUDE_CONFIG_DIR=$cfg_dir claude plugins install $plugin_id"
-    fi
-    return 1
-}
-
 # --- Codex plugin lifecycle ---
-# Codex plugins are global to CODEX_HOME. ECC and Superpowers are staged into a
+# Codex plugins are global to CODEX_HOME. Superpowers is staged into a
 # dedicated local marketplace so every manifest reference is copied into the
 # plugin cache without depending on account-provisioned marketplaces.
 CODEX_WORKFLOW_MARKETPLACE_DIR="${CODEX_WORKFLOW_MARKETPLACE_DIR:-$HOME/.local/share/dotfiles/codex-workflows}"
-
-function _codex_plugin_installed() {
-    local plugin_id="$1"
-    command codex plugin list --json 2>/dev/null | awk -v target="$plugin_id" '
-        /"pluginId"[[:space:]]*:/ {
-            current = index($0, "\"" target "\"") > 0
-            installed = 0
-            enabled = 0
-        }
-        current && /"installed"[[:space:]]*:[[:space:]]*true/ { installed = 1 }
-        current && /"enabled"[[:space:]]*:[[:space:]]*true/ { enabled = 1 }
-        current && installed && enabled { found = 1 }
-        END { exit found ? 0 : 1 }
-    '
-}
 
 function _codex_plugin_present() {
     local plugin_id="$1"
@@ -429,39 +309,6 @@ function _codex_plugin_present() {
         /"pluginId"[[:space:]]*:/ && index($0, "\"" target "\"") > 0 { found = 1 }
         END { exit found ? 0 : 1 }
     '
-}
-
-function _codex_marketplace_installed() {
-    local marketplace="$1"
-    command codex plugin marketplace list 2>/dev/null | awk -v target="$marketplace" 'NR > 1 && $1 == target { found = 1 } END { exit found ? 0 : 1 }'
-}
-
-# Usage: _codex_ensure_plugin <plugin-id> [marketplace-source]
-function _codex_ensure_plugin() {
-    local plugin_id="$1" marketplace_source="${2:-}"
-    local marketplace="${plugin_id#*@}"
-
-    if _codex_plugin_installed "$plugin_id"; then
-        echo "[INFO] $plugin_id already installed (Codex)"
-        return 0
-    fi
-
-    if [[ -n "$marketplace_source" ]] && ! _codex_marketplace_installed "$marketplace"; then
-        echo "[INFO] Adding $marketplace marketplace (Codex)..."
-        command codex plugin marketplace add "$marketplace_source" \
-            || { echo "[X] marketplace add failed for $marketplace (Codex)"; return 1; }
-    fi
-
-    echo "[INFO] Installing $plugin_id (Codex)..."
-    command codex plugin add "$plugin_id" \
-        || { echo "[X] install failed for $plugin_id (Codex)"; return 1; }
-    if _codex_plugin_installed "$plugin_id"; then
-        echo "[OK] Installed $plugin_id (Codex; start a new thread to apply)"
-        return 0
-    fi
-
-    echo "[X] $plugin_id is not installed and enabled after Codex reported success"
-    return 1
 }
 
 function _codex_remove_plugin() {
@@ -481,476 +328,75 @@ function _codex_remove_plugin() {
     echo "[OK] Removed $plugin_id (Codex)"
 }
 
-function _codex_reinstall_plugin() {
-    local plugin_id="$1" marketplace_source="${2:-}"
-    _codex_remove_plugin "$plugin_id" || return 1
-    _codex_ensure_plugin "$plugin_id" "$marketplace_source"
-}
-
-function _codex_reconcile_workflow_surfaces() {
-    local surface_policy="$DOTFILEDIR/install/common/codex-plugin-dedupe.sh"
-    [[ -f "$surface_policy" ]] \
-        || { echo "[X] Codex surface reconciliation helper is missing: $surface_policy"; return 1; }
-    # Share the installer policy while keeping its shell helpers local to this
-    # invocation. The policy resolves the caller's selected CODEX_HOME.
-    (
-        source "$surface_policy" || return 1
-        dedupe_codex_workflow_plugins
-    )
-}
-
-# Verify the payload selected by Codex's native plugin registry. `source.path`
-# identifies the configured marketplace source, not the effective cache, so
-# derive the cache location from the selected plugin's registry identity and
-# version and hash its actual payload before accepting it.
-#
-# Return 3 only when a selected plugin has a missing, malformed, or stale cache
-# payload. Callers may then refresh that exact managed plugin through Codex's
-# native lifecycle. Registry and staged-payload failures return 1 and must not
-# trigger removal.
-function _codex_staged_plugin_is_effective() {
-    local plugin_id="$1" staged_dir="$2" listing cache_root
-    [[ -f "$staged_dir/.dotfiles-provenance.json" ]] \
-        || { echo "[X] staged $plugin_id lacks provenance metadata"; return 1; }
-    listing="$(command codex plugin list --json 2>/dev/null)" \
-        || { echo "[X] cannot inspect native Codex plugin state for $plugin_id"; return 1; }
-    command -v python3 &>/dev/null \
-        || { echo "[X] python3 is required to verify Codex plugin provenance"; return 1; }
-    cache_root="${CODEX_HOME:-$HOME/.codex}/plugins/cache"
-    CODEX_PLUGIN_LISTING="$listing" CODEX_CACHE_ROOT="$cache_root" python3 - "$plugin_id" "$staged_dir" <<'PY'
-import hashlib
-import json
-import os
-from pathlib import Path
-import re
-import sys
-
-plugin_id, staged_dir = sys.argv[1:]
-cache_root = Path(os.environ["CODEX_CACHE_ROOT"])
-
-
-def fail_cache(message):
-    print(f"effective native payload is not current: {message}", file=sys.stderr)
-    raise SystemExit(3)
-
-
-def payload_digest(root):
-    digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise ValueError(f"payload contains a symlink: {path}")
-        if not path.is_file() or path.name == ".dotfiles-provenance.json":
-            continue
-        relative = path.relative_to(root).as_posix().encode()
-        digest.update(relative + b"\0")
-        digest.update(f"{path.stat().st_mode & 0o777:o}".encode() + b"\0")
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-def valid_provenance(record):
-    if not isinstance(record, dict):
-        return False
-    if type(record.get("schemaVersion")) is not int or record["schemaVersion"] != 1:
-        return False
-    if not isinstance(record.get("wrapperVersion"), str) or not record["wrapperVersion"]:
-        return False
-    commit = record.get("upstreamCommit")
-    if not isinstance(commit, str) or not (commit == "unavailable" or re.fullmatch(r"[0-9a-f]{40,64}", commit)):
-        return False
-    if not isinstance(record.get("upstreamVersion"), str) or not record["upstreamVersion"]:
-        return False
-    return isinstance(record.get("payloadDigest"), str) and bool(
-        re.fullmatch(r"[0-9a-f]{64}", record["payloadDigest"])
-    )
-
-
-try:
-    plugins = json.loads(os.environ["CODEX_PLUGIN_LISTING"]).get("installed", [])
-    entry = next(
-        item for item in plugins
-        if item.get("pluginId") == plugin_id
-        and item.get("installed") is True
-        and item.get("enabled") is True
-    )
-    plugin_name, marketplace = plugin_id.split("@", 1)
-    if entry.get("name") != plugin_name or entry.get("marketplaceName") != marketplace:
-        raise ValueError("native registry identity does not match the requested plugin")
-    version = entry.get("version")
-    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
-        raise ValueError("native registry did not expose a safe plugin version")
-    expected = json.loads((Path(staged_dir) / ".dotfiles-provenance.json").read_text())
-except (KeyError, OSError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as error:
-    raise SystemExit(f"cannot verify effective native payload: {error}")
-
-if not valid_provenance(expected):
-    raise SystemExit("cannot verify effective native payload: staged provenance is invalid")
-try:
-    staged_digest = payload_digest(Path(staged_dir))
-except (OSError, ValueError) as error:
-    raise SystemExit(f"cannot verify effective native payload: {error}")
-if staged_digest != expected["payloadDigest"]:
-    raise SystemExit("cannot verify effective native payload: staged payload digest differs from its provenance")
-
-effective_root = cache_root / marketplace / plugin_name / version
-if not effective_root.is_dir() or effective_root.is_symlink():
-    fail_cache(f"cache directory is unavailable for {plugin_id}@{version}")
-try:
-    effective = json.loads((effective_root / ".dotfiles-provenance.json").read_text())
-except (OSError, ValueError, json.JSONDecodeError) as error:
-    fail_cache(f"cache provenance is unreadable: {error}")
-if not valid_provenance(effective):
-    fail_cache("cache provenance has an unsupported schema or missing fields")
-fields = ("schemaVersion", "wrapperVersion", "upstreamCommit", "upstreamVersion", "payloadDigest")
-if any(expected.get(field) != effective.get(field) for field in fields):
-    fail_cache("cache provenance differs from the staged payload")
-try:
-    effective_digest = payload_digest(effective_root)
-except (OSError, ValueError) as error:
-    fail_cache(str(error))
-if effective_digest != expected["payloadDigest"]:
-    fail_cache("cache bytes differ from the staged payload digest")
-PY
-}
-
-# Refresh only an inspected stale managed plugin. This uses the native remove
-# and add operations; it never writes into Codex's cache or touches unrelated
-# plugin registrations.
-function _codex_verify_or_refresh_managed_plugin() {
-    local plugin_id="$1" staged_dir="$2" marketplace_source="$3" verify_status
-    _codex_staged_plugin_is_effective "$plugin_id" "$staged_dir"
-    verify_status=$?
-    if (( verify_status == 0 )); then
-        return 0
-    fi
-    if (( verify_status != 3 )); then
-        return "$verify_status"
-    fi
-    echo "[INFO] Refreshing stale $plugin_id cache through Codex..."
-    _codex_remove_plugin "$plugin_id" || return 1
-    _codex_ensure_plugin "$plugin_id" "$marketplace_source" || return 1
-    _codex_staged_plugin_is_effective "$plugin_id" "$staged_dir"
-}
-
-function _codex_normalize_skill_frontmatter() {
-    local skills_dir="$1"
-    command -v perl &>/dev/null \
-        || { echo "[X] perl is required to normalize Codex skill frontmatter"; return 1; }
-    find "$skills_dir" -name SKILL.md -exec perl -pi -e \
-        'if (/^description: (?!["\x27|>])(.+)$/) { $_ = "description: >-\n  $1\n" }' {} +
-}
-
-# Write provenance next to a staged native plugin. The wrapper manifest version
-# is deliberately not used as a payload identity: it is fixed by this repo
-# while the source checkout can advance. No upstream manifest or hooks are
-# imported; the digest covers only the self-contained staged payload.
-function _codex_write_stage_provenance() {
-    local source_dir="$1" wrapper_manifest="$2" staged_dir="$3"
-    command -v python3 &>/dev/null \
-        || { echo "[X] python3 is required to record Codex plugin provenance"; return 1; }
-    SOURCE_DIR="$source_dir" WRAPPER_MANIFEST="$wrapper_manifest" STAGED_DIR="$staged_dir" python3 - <<'PY'
-import hashlib
-import json
-import os
-from pathlib import Path
-import subprocess
-import sys
-
-source = Path(os.environ["SOURCE_DIR"])
-manifest = Path(os.environ["WRAPPER_MANIFEST"])
-staged = Path(os.environ["STAGED_DIR"])
-
-try:
-    wrapper_version = json.loads(manifest.read_text())["version"]
-except (OSError, ValueError, KeyError, TypeError) as error:
-    raise SystemExit(f"invalid Codex wrapper manifest: {error}")
-
-upstream_version = "unavailable"
-for version_file in (source / "package.json", source / "VERSION"):
-    try:
-        if version_file.name == "package.json":
-            upstream_version = str(json.loads(version_file.read_text())["version"])
-        else:
-            upstream_version = version_file.read_text().strip()
-        if upstream_version:
-            break
-    except (OSError, ValueError, KeyError, TypeError):
-        continue
-
-commit = subprocess.run(
-    ["git", "-C", str(source), "rev-parse", "HEAD"],
-    capture_output=True,
-    text=True,
-    check=False,
-).stdout.strip() or "unavailable"
-
-digest = hashlib.sha256()
-for path in sorted(staged.rglob("*")):
-    if path.is_symlink():
-        raise SystemExit(f"staged plugin contains a symlink: {path}")
-    if not path.is_file() or path.name == ".dotfiles-provenance.json":
-        continue
-    relative = path.relative_to(staged).as_posix().encode()
-    digest.update(relative + b"\0")
-    digest.update(f"{path.stat().st_mode & 0o777:o}".encode() + b"\0")
-    digest.update(path.read_bytes())
-
-(staged / ".dotfiles-provenance.json").write_text(
-    json.dumps(
-        {
-            "schemaVersion": 1,
-            "wrapperVersion": str(wrapper_version),
-            "upstreamCommit": commit,
-            "upstreamVersion": upstream_version,
-            "payloadDigest": digest.hexdigest(),
-        },
-        indent=2,
-        sort_keys=True,
-    )
-    + "\n"
-)
-PY
-}
-
-function _codex_stage_ecc_plugin() {
-    local source_dir="$ECC_REPO_DIR"
-    local destination="$CODEX_WORKFLOW_MARKETPLACE_DIR"
-    local template_dir="$DOTFILEDIR/codex/plugins/ecc"
-    local marketplace_template="$DOTFILEDIR/codex/.agents/plugins/marketplace.json"
-    local plugins_dir="$destination/plugins"
-    local staging="$plugins_dir/.ecc.tmp.$$"
-    local plugin_dir="$staging"
-
-    [[ -n "$destination" && "$destination" != "/" ]] \
-        || { echo "[X] invalid Codex workflow marketplace path"; return 1; }
-    [[ -d "$source_dir/skills" && -f "$source_dir/.mcp.json" ]] \
-        || { echo "[X] ECC checkout lacks Codex skills or MCP config: $source_dir"; return 1; }
-    [[ -f "$template_dir/.codex-plugin/plugin.json" && -f "$marketplace_template" ]] \
-        || { echo "[X] dotfiles ECC Codex plugin templates are incomplete"; return 1; }
-
-    rm -rf "$staging"
-    mkdir -p "$destination/.agents/plugins" "$plugin_dir/.codex-plugin" || return 1
-    cp "$marketplace_template" "$destination/.agents/plugins/marketplace.json" || return 1
-    cp "$template_dir/.codex-plugin/plugin.json" "$plugin_dir/.codex-plugin/plugin.json" || return 1
-    cp "$source_dir/.mcp.json" "$plugin_dir/.mcp.json" || return 1
-    cp -R "$source_dir/skills" "$plugin_dir/skills" || return 1
-    # Codex validates skill frontmatter as strict YAML. Convert upstream's
-    # single-line descriptions to folded scalars so embedded colons remain
-    # valid without changing the rendered description.
-    _codex_normalize_skill_frontmatter "$plugin_dir/skills" || return 1
-    if [[ -d "$source_dir/assets" ]]; then
-        cp -R "$source_dir/assets" "$plugin_dir/assets" || return 1
-    fi
-    _codex_write_stage_provenance "$source_dir" "$template_dir/.codex-plugin/plugin.json" "$plugin_dir" || return 1
-
-    rm -rf "$plugins_dir/ecc"
-    mv "$staging" "$plugins_dir/ecc" || return 1
-    echo "[OK] Staged self-contained ECC Codex plugin at $plugins_dir/ecc"
-}
-
-function _codex_install_ecc_plugin() {
-    command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
-    _codex_stage_ecc_plugin || return 1
-    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_verify_or_refresh_managed_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_reconcile_workflow_surfaces
-}
-
-function _codex_update_ecc_plugin() {
-    command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
-    _codex_stage_ecc_plugin || return 1
-    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_verify_or_refresh_managed_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_reconcile_workflow_surfaces
-}
-
-function _codex_stage_superpowers_plugin() {
-    local source_dir="$SUPERPOWERS_REPO_DIR"
-    local destination="$CODEX_WORKFLOW_MARKETPLACE_DIR"
-    local marketplace_template="$DOTFILEDIR/codex/.agents/plugins/marketplace.json"
-    local plugins_dir="$destination/plugins"
-    local staging="$plugins_dir/.superpowers.tmp.$$"
-
-    [[ -n "$destination" && "$destination" != "/" ]] \
-        || { echo "[X] invalid Codex workflow marketplace path"; return 1; }
-    [[ -f "$source_dir/.codex-plugin/plugin.json" && -d "$source_dir/skills" ]] \
-        || { echo "[X] Superpowers checkout lacks its Codex plugin: $source_dir"; return 1; }
-    [[ -f "$marketplace_template" ]] \
-        || { echo "[X] dotfiles Codex marketplace template is missing"; return 1; }
-
-    rm -rf "$staging"
-    mkdir -p "$destination/.agents/plugins" "$staging/.codex-plugin" || return 1
-    cp "$marketplace_template" "$destination/.agents/plugins/marketplace.json" || return 1
-    cp "$source_dir/.codex-plugin/plugin.json" "$staging/.codex-plugin/plugin.json" || return 1
-    # Superpowers 6.1.1 added an empty top-level hooks object that Codex's
-    # plugin validator rejects. Hooks are not part of this skills-only package.
-    perl -0pi -e 's/\s*"hooks"\s*:\s*(?:"[^"]*"|\{[^{}]*\})\s*,//s' \
-        "$staging/.codex-plugin/plugin.json" || return 1
-    if grep -q '"hooks"[[:space:]]*:' "$staging/.codex-plugin/plugin.json"; then
-        echo "[X] unsupported Superpowers hooks field could not be removed"
-        return 1
-    fi
-    cp -R "$source_dir/skills" "$staging/skills" || return 1
-    _codex_normalize_skill_frontmatter "$staging/skills" || return 1
-    if [[ -d "$source_dir/assets" ]]; then
-        cp -R "$source_dir/assets" "$staging/assets" || return 1
-    fi
-    _codex_write_stage_provenance "$source_dir" "$source_dir/.codex-plugin/plugin.json" "$staging" || return 1
-
-    rm -rf "$plugins_dir/superpowers"
-    mv "$staging" "$plugins_dir/superpowers" || return 1
-    echo "[OK] Staged self-contained Superpowers Codex plugin at $plugins_dir/superpowers"
-}
-
-function _codex_install_superpowers_plugin() {
-    _codex_stage_superpowers_plugin || return 1
-    # Remove the account-provisioned variant before installing the managed
-    # marketplace copy, preventing duplicate superpowers:* skill names.
-    _codex_remove_plugin "superpowers@openai-curated" || return 1
-    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_verify_or_refresh_managed_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/superpowers" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_reconcile_workflow_surfaces
-}
-
-function _codex_update_superpowers_plugin() {
-    _codex_stage_superpowers_plugin || return 1
-    _codex_remove_plugin "superpowers@openai-curated" || return 1
-    _codex_ensure_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_verify_or_refresh_managed_plugin "superpowers@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/superpowers" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_reconcile_workflow_surfaces
-}
-
-# --- ECC (Everything Claude Code) ---
-# Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
-# Rules: NOT vendored (retired 2026-07-02). Claude Code natively auto-loads
-#   every .md under ~/.claude/rules at launch: a `paths:` frontmatter scopes a
-#   rule to sessions with matching files in context; none = every session.
-#   (Verified live in a cloud session 2026-07-02; the earlier "nothing
-#   auto-loads" finding came from fresh clones where the untracked vendored
-#   dirs did not exist.) The full upstream rules tree ships inside the
-#   marketplace clone at ~/.claude/plugins/marketplaces/ecc/rules/ on every
-#   machine and container with the plugin installed -- point on-demand
-#   consumers (e.g. rules-distill's scan-rules.sh) there. Only our own
-#   always-on rules (claude/rules/personal/, tracked) live at ~/.claude/rules
-#   now; leftover vendored language dirs from older installs still AUTO-LOAD
-#   (common/ and web/ have no `paths:`, so they load every session) and should
-#   be deleted (_ecc_legacy_rules_notice flags them). The ECC repo clone also
-#   provides source content for an independent, self-contained Codex plugin.
-# Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
-#   everything-claude-code v1 repo/marketplace is retired.
-ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
+# --- ECC (Everything Claude Code) -- RETIRED; uninstall tooling only ---
+# ECC cost ~10.6k context tokens per session boot for skills nothing here
+# called, plus an account-isolation layer re-audited on every upgrade. The
+# settings reconcile forces ecc@ecc off and the Codex dedupe disables its
+# Codex copies; ecc-uninstall removes what is still on disk.
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
-SUPERPOWERS_REPO_URL="https://github.com/obra/superpowers.git"
 SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.local/share/dotfiles/sources/superpowers}"
 
-# helper: flag vendored rules left behind by pre-retirement installs. Not
-# inert: Claude Code auto-loads them (common/web every session, language dirs
-# on matching files), so leftovers inject stale upstream guidance until removed.
-function _ecc_legacy_rules_notice() {
-    local l
-    local -a leftovers=()
-    for l in common cpp python rust typescript web; do
-        [[ -d "$DOTFILEDIR/claude/rules/$l" ]] && leftovers+=("$l")
+# Retired entry points survive `reload` in a long-running shell -- drop them.
+for _ecc_fn in ecc-install ecc-update _ecc_legacy_rules_notice _codex_stage_ecc_plugin \
+        _codex_install_ecc_plugin _codex_update_ecc_plugin \
+        _claude_plugin_check_update _claude_plugin_epoch_write; do
+    (( ${+functions[$_ecc_fn]} )) && unfunction "$_ecc_fn"
+done
+unset _ecc_fn
+
+for _sp_fn in superpowers-install superpowers-update _codex_stage_superpowers_plugin \
+        _codex_install_superpowers_plugin _codex_update_superpowers_plugin; do
+    (( ${+functions[$_sp_fn]} )) && unfunction "$_sp_fn"
+done
+unset _sp_fn
+
+# helper: move the untracked copies an old full ECC install vendored into the
+# symlinked asset dirs to a backup. A candidate is untracked (ls-files exit 1,
+# never a git error) and shares a basename with the checkout; upstream edited
+# most files since, so content matching would miss them. Tracked files and
+# symlinks are never touched. Returns 1 on any git or move failure.
+function _ecc_sweep_legacy_vendored() {
+    emulate -L zsh
+    local ecc_dir="$1" pair target origin f rel rc backup
+    local -aU candidates
+    git -C "$DOTFILEDIR" rev-parse --is-inside-work-tree &>/dev/null \
+        || { echo "[X] Cannot read the dotfiles git index at $DOTFILEDIR; not sweeping."; return 1; }
+    if [[ ! -d "$ecc_dir" ]]; then
+        echo "[INFO] ECC checkout absent; nothing to match. Untracked candidates to review by hand:"
+        for target in claude/agents claude/commands; do
+            for f in "$DOTFILEDIR/$target"/*.md(N.); do
+                git -C "$DOTFILEDIR" ls-files --error-unmatch -- "$target/${f:t}" &>/dev/null \
+                    || echo "[INFO]   $f"
+            done
+        done
+        return 0
+    fi
+    for pair in claude/agents:agents claude/commands:commands \
+            claude/commands:legacy-command-shims/commands claude/hooks:hooks; do
+        target="${pair%%:*}" origin="${pair#*:}"
+        # (N.) = plain files only: symlinks and dirs are skipped.
+        for f in "$DOTFILEDIR/$target"/*(N.); do
+            [[ -f "$ecc_dir/$origin/${f:t}" ]] || continue
+            rel="$target/${f:t}"
+            git -C "$DOTFILEDIR" ls-files --error-unmatch -- "$rel" &>/dev/null
+            rc=$?
+            (( rc == 0 )) && continue
+            (( rc == 1 )) || { echo "[X] git ls-files failed ($rc) on $rel; not sweeping."; return 1; }
+            candidates+=("$rel")
+        done
     done
-    if (( ${#leftovers} > 0 )); then
-        echo "[WARNING] Legacy vendored ECC rules present (${leftovers[*]}); vendoring is retired."
-        echo "[WARNING] They are untracked but still auto-load into sessions. Remove with:"
-        # No brace form here: a single-element {web} does not brace-expand when
-        # pasted, so rm -rf would hit a literal '{web}' path and silently no-op.
-        echo "[WARNING]   rm -rf" "${leftovers[@]/#/$DOTFILEDIR/claude/rules/}"
-        echo "[INFO] The full upstream tree lives at ~/.claude/plugins/marketplaces/ecc/rules/"
-    fi
-}
-
-function ecc-install() {    # ecc-install([--local]) installs ECC independently for Claude and Codex. ex: $ ecc-install
-    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local."
-    local ecc_dir="$ECC_REPO_DIR"
-
-    # clone repo if not present
-    if [[ ! -d "$ecc_dir" ]]; then
-        echo "[INFO] Cloning ECC repo..."
-        git clone "$ECC_REPO_URL" "$ecc_dir" || { echo "[X] clone failed"; return 1; }
-    else
-        echo "[INFO] ECC repo already exists, pulling latest..."
-        (cd "$ecc_dir" && git pull origin main) || { echo "[X] git pull failed"; return 1; }
-    fi
-
-    # clean previous full install to avoid duplicates with plugin
-    if [[ -f "$HOME/.claude/ecc/install-state.json" ]]; then
-        echo "[INFO] Cleaning previous ECC install..."
-        (cd "$ecc_dir" && node scripts/uninstall.js 2>/dev/null)
-    fi
-
-    # rules vendoring retired (2026-07-02): the marketplace clone carries the
-    # upstream rules tree; flag active leftovers from older installs.
-    _ecc_legacy_rules_notice
-
-    # ensure the ecc marketplace + plugin exist in EVERY account config dir
-    # (~/.claude personal, ~/.claude-work work), verified against each dir's
-    # installed_plugins.json rather than CLI output (_claude_ensure_plugin uses
-    # explicit CLAUDE_CONFIG_DIR + `command claude`, so the result does not
-    # depend on $PWD via the claude() wrapper). A dir that does not exist yet
-    # (e.g. work not set up) is skipped.
-    local cfg_dir install_status=0
-    if command -v claude &>/dev/null; then
-        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-            [[ -d "$cfg_dir" ]] || continue
-            _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || install_status=1
-        done
-    else
-        echo "[INFO] Claude CLI not installed; skipping ECC Claude plugins."
-    fi
-
-    _codex_install_ecc_plugin || install_status=1
-
-    if (( install_status == 0 )); then
-        _claude_plugin_epoch_write ecc
-        echo "[OK] ECC installed for available Claude and Codex runtimes"
-    else
-        echo "[X] ECC installation was incomplete; review the runtime-specific errors above"
-        return 1
-    fi
-}
-
-function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and update rules. ex: $ ecc-update
-    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local."
-    local ecc_dir="$ECC_REPO_DIR"
-
-    if [[ ! -d "$ecc_dir" ]]; then
-        echo "[X] ECC repo not found. Run 'ecc-install' first."
-        return 1
-    fi
-
-    echo "[INFO] Syncing ECC to upstream main..."
-    # ECC is a read-only source mirror: fetch + hard-reset guarantees the staged
-    # Codex plugin and Claude marketplace both derive from upstream main.
-    (cd "$ecc_dir" && git fetch origin main && git reset --hard origin/main) \
-        || { echo "[X] ECC sync failed"; return 1; }
-
-    # rules vendoring retired (2026-07-02); flag active leftovers only.
-    _ecc_legacy_rules_notice
-
-    local cfg_dir update_status=0
-    if command -v claude &>/dev/null; then
-        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-            [[ -d "$cfg_dir" ]] || continue
-            _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || { update_status=1; continue; }
-            _claude_plugin_run "$cfg_dir" plugin marketplace update ecc >/dev/null 2>&1 \
-                || { echo "[X] ECC marketplace refresh failed ($cfg_dir)"; update_status=1; continue; }
-            _claude_plugin_run "$cfg_dir" plugins update ecc@ecc \
-                || { echo "[X] ECC update failed ($cfg_dir)"; update_status=1; }
-        done
-    fi
-
-    _codex_update_ecc_plugin || update_status=1
-
-    if (( update_status == 0 )); then
-        _claude_plugin_epoch_write ecc
-        echo "[OK] ECC updated for available Claude and Codex runtimes"
-    else
-        echo "[X] ECC update was incomplete; review the runtime-specific errors above"
-        return 1
-    fi
+    (( ${#candidates} )) || return 0
+    backup="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/ecc-retired-$(date +%Y%m%d%H%M%S)"
+    for rel in "${candidates[@]}"; do
+        # Copy, verify, then remove: a plain mv across filesystems is
+        # copy-and-unlink, and an interruption there could lose the only copy.
+        mkdir -p "$backup/${rel:h}" \
+            && cp -p "$DOTFILEDIR/$rel" "$backup/$rel" \
+            && cmp -s "$DOTFILEDIR/$rel" "$backup/$rel" \
+            && rm -f "$DOTFILEDIR/$rel" \
+            || { echo "[X] Could not back up $rel to $backup; rerun ecc-uninstall."; return 1; }
+    done
+    echo "[OK] Moved ${#candidates} legacy ECC copies to $backup"
 }
 
 function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Codex plus its source checkout. ex: $ ecc-uninstall
@@ -977,10 +423,20 @@ function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Code
 
     _codex_remove_plugin "ecc@dotfiles-workflows" || uninstall_status=1
 
-    # remove repo
+    _ecc_sweep_legacy_vendored "$ecc_dir" || uninstall_status=1
+    if [[ -n "$CODEX_WORKFLOW_MARKETPLACE_DIR" && -d "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" ]]; then
+        rm -rf "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" || uninstall_status=1
+    fi
+
+    # The checkout is the sweep's evidence: delete it last, and only when every
+    # step above succeeded, so a rerun can still match what is left.
     if [[ -d "$ecc_dir" ]]; then
-        echo "[INFO] Removing ECC repo..."
-        rm -rf "$ecc_dir"
+        if (( uninstall_status == 0 )); then
+            echo "[INFO] Removing ECC repo..."
+            rm -rf "$ecc_dir"
+        else
+            echo "[INFO] Keeping $ecc_dir so a rerun can finish the cleanup."
+        fi
     fi
 
     rm -f "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.ecc-update"
@@ -1164,142 +620,82 @@ function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) full
 }
 
 # Codex integration:
-#   - ECC: staged as a self-contained plugin under
-#     ~/.local/share/dotfiles/codex-workflows and installed from the
-#     dotfiles-workflows marketplace. Claude and Codex installations do not
-#     share runtime files.
-#   - Superpowers: staged from its upstream repository into the same native
-#     marketplace without sharing Claude's installed plugin files.
+#   - Superpowers is retired (2026-09), like ECC; only its uninstaller remains.
 # install/common/link.sh still sweeps leftover mirror-style skill/agent links.
 
-# --- Superpowers ---
-# Claude uses its official plugin marketplace. Codex uses a separate upstream
-# checkout staged into the dotfiles-owned native marketplace.
+# --- Superpowers -- RETIRED; uninstall tooling only ---
+# The settings reconcile forces superpowers@claude-plugins-official off and
+# the Codex dedupe disables its Codex copies; superpowers-uninstall removes
+# what is still on disk.
 
-function superpowers-install() {    # superpowers-install([--local]) will install the Superpowers plugin. ex: $ superpowers-install
-    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] Claude Code plugins are global-only; ignoring --local."
-    # The official marketplace is usually pre-registered by Claude Code, but on
-    # a fresh machine it may be absent or still mid-fetch -- and `plugins
-    # install` then no-ops with exit 0. _claude_ensure_plugin registers the
-    # marketplace by git URL (synchronous clone), installs, and verifies against
-    # installed_plugins.json, mirroring bootstrap-cloud.sh ensure_plugin.
-    local cfg_dir install_status=0 codex_source_status=0
-    if command -v claude &>/dev/null; then
-        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-            [[ -d "$cfg_dir" ]] || continue
-            _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
-                "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || install_status=1
-        done
-    else
-        echo "[INFO] Claude CLI not installed; skipping Superpowers Claude plugins."
-    fi
-    if command -v codex &>/dev/null; then
-        if [[ ! -d "$SUPERPOWERS_REPO_DIR" ]]; then
-            echo "[INFO] Cloning Superpowers source for Codex..."
-            if mkdir -p "${SUPERPOWERS_REPO_DIR:h}"; then
-                git clone "$SUPERPOWERS_REPO_URL" "$SUPERPOWERS_REPO_DIR" || codex_source_status=1
-            else
-                codex_source_status=1
-            fi
-        else
-            echo "[INFO] Superpowers source already exists, pulling latest..."
-            (cd "$SUPERPOWERS_REPO_DIR" && git pull origin main) || codex_source_status=1
-        fi
-        if (( codex_source_status == 0 )); then
-            _codex_install_superpowers_plugin || install_status=1
-        else
-            install_status=1
-        fi
-    else
-        echo "[INFO] Codex CLI not installed; skipping Superpowers Codex plugin."
-    fi
-    (( install_status == 0 )) || return 1
-    echo "[OK] Superpowers installed for available Claude and Codex runtimes"
+# helper: print "<scope>\t<projectPath>" for each install record of a plugin
+# in one config dir. No registry file means nothing is installed (exit 0);
+# an unreadable one exits 2 so callers cannot mistake it for "absent".
+function _claude_plugin_records() {
+    local cfg_dir="$1" plugin_id="$2"
+    local record="$cfg_dir/plugins/installed_plugins.json"
+    [[ -f "$record" ]] || return 0
+    command python3 - "$record" "$plugin_id" <<'PY'
+import json, sys
+path, plugin = sys.argv[1:]
+try:
+    with open(path) as fh:
+        records = json.load(fh).get("plugins", {}).get(plugin, [])
+except (OSError, ValueError, AttributeError):
+    sys.exit(2)
+if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+    sys.exit(2)
+for rec in records:
+    print(f"{rec.get('scope', 'user')}\t{rec.get('projectPath', '')}")
+PY
 }
 
-function superpowers-update() {    # superpowers-update([--local]) will update the Superpowers plugin. ex: $ superpowers-update
-    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] Claude Code plugins are global-only; ignoring --local."
-    local cfg_dir update_status=0 codex_source_status=0
-    if command -v claude &>/dev/null; then
-        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-            [[ -d "$cfg_dir" ]] || continue
-            _claude_ensure_plugin "$cfg_dir" "superpowers@claude-plugins-official" \
-                "claude-plugins-official" "$CLAUDE_OFFICIAL_MARKETPLACE_URL" || { update_status=1; continue; }
-            echo "[INFO] Updating Superpowers plugin ($cfg_dir)..."
-            _claude_plugin_run "$cfg_dir" plugins update superpowers@claude-plugins-official \
-                || { echo "[X] update failed ($cfg_dir)"; update_status=1; }
-        done
-    fi
-    if command -v codex &>/dev/null; then
-        if [[ ! -d "$SUPERPOWERS_REPO_DIR" ]]; then
-            echo "[X] Superpowers source not found. Run 'superpowers-install' first."
-            update_status=1
-        else
-            echo "[INFO] Syncing Superpowers source to upstream main..."
-            (cd "$SUPERPOWERS_REPO_DIR" && git fetch origin main && git reset --hard origin/main) \
-                || codex_source_status=1
-            if (( codex_source_status == 0 )); then
-                _codex_update_superpowers_plugin || update_status=1
-            else
-                update_status=1
-            fi
-        fi
-    fi
-    (( update_status == 0 )) || return 1
-    echo "[OK] Superpowers updated for available Claude and Codex runtimes; start new sessions to apply"
-}
-
-function superpowers-uninstall() {    # superpowers-uninstall() will remove the Superpowers plugin. ex: $ superpowers-uninstall
-    local cfg_dir uninstall_status=0
+function superpowers-uninstall() {    # superpowers-uninstall() removes the retired Superpowers plugin from Claude and Codex. ex: $ superpowers-uninstall
+    local plugin_id="superpowers@claude-plugins-official"
+    local cfg_dir records remaining scope project dir_status uninstall_status=0
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if ! _claude_plugin_installed "$cfg_dir" "superpowers@claude-plugins-official"; then
+        if ! records=$(_claude_plugin_records "$cfg_dir" "$plugin_id"); then
+            echo "[X] unreadable plugin registry in $cfg_dir; trying one user-scope uninstall"
+            _claude_plugin_run "$cfg_dir" plugin uninstall --scope user "$plugin_id" </dev/null
+            uninstall_status=1
+            continue
+        fi
+        if [[ -z "$records" ]]; then
             echo "[INFO] Superpowers not installed ($cfg_dir)"
             continue
         fi
-        echo "[INFO] Removing Superpowers plugin ($cfg_dir)..."
-        _claude_plugin_run "$cfg_dir" plugins uninstall superpowers@claude-plugins-official 2>/dev/null || uninstall_status=1
-        echo "[OK] Superpowers uninstalled ($cfg_dir)"
+        dir_status=0
+        while IFS=$'\t' read -r scope project; do
+            if [[ "$scope" == user ]]; then
+                _claude_plugin_run "$cfg_dir" plugin uninstall --scope user "$plugin_id" </dev/null || dir_status=1
+            elif [[ -n "$project" && -d "$project" ]]; then
+                ( cd "$project" && _claude_plugin_run "$cfg_dir" plugin uninstall --scope "$scope" "$plugin_id" </dev/null ) || dir_status=1
+            else
+                echo "[X] $scope-scope Superpowers record names a missing project: ${project:-<none>} ($cfg_dir)"
+                dir_status=1
+            fi
+        done <<< "$records"   # CLI calls read /dev/null so they cannot eat these lines
+        # The registry, not the CLI exit code, decides success.
+        remaining=$(_claude_plugin_records "$cfg_dir" "$plugin_id") && [[ -z "$remaining" ]] || dir_status=1
+        if (( dir_status == 0 )); then
+            echo "[OK] Superpowers uninstalled ($cfg_dir)"
+        else
+            echo "[X] Superpowers still recorded in $cfg_dir"
+            uninstall_status=1
+        fi
     done
     _codex_remove_plugin "superpowers@dotfiles-workflows" || uninstall_status=1
     _codex_remove_plugin "superpowers@openai-curated" || uninstall_status=1
+    if [[ -n "$CODEX_WORKFLOW_MARKETPLACE_DIR" && -d "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/superpowers" ]]; then
+        rm -rf "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/superpowers" || uninstall_status=1
+    fi
     if [[ -d "$SUPERPOWERS_REPO_DIR" ]]; then
         echo "[INFO] Removing Superpowers source checkout..."
-        rm -rf "$SUPERPOWERS_REPO_DIR"
+        rm -rf "$SUPERPOWERS_REPO_DIR" || uninstall_status=1
     fi
-    (( uninstall_status == 0 )) || return 1
+    (( uninstall_status == 0 ))
 }
-
-# --- Startup update check (OMZ-style) ---
-
-function _claude_plugin_check_update() {
-    [[ ! -t 1 ]] && return
-    zmodload zsh/datetime
-    local current_epoch=$(( EPOCHSECONDS / 60 / 60 / 24 ))
-    local update_days=14
-    local cache_dir="${ZSH_CACHE_DIR:-$HOME/.cache/zsh}"
-    local stale=()
-
-    # gsd is deliberately absent: GSD is retired, and a leftover cache stamp
-    # would nag 'gsd-update' on machines where the right move is gsd-uninstall.
-    for plugin in ecc; do
-        local update_file="$cache_dir/.${plugin}-update"
-        # Only remind for plugins actually managed here: the cache is written by
-        # {plugin}-install/update and removed by {plugin}-uninstall, so an
-        # uninstalled plugin has no cache file and is silently skipped (no nag).
-        [[ -f "$update_file" ]] || continue
-        source "$update_file"
-        local epoch_var="LAST_${plugin:u}_EPOCH"
-        local last=${(P)epoch_var:-0}
-        local days_since=$(( current_epoch - last ))
-        (( days_since >= update_days )) && stale+=("$plugin (${days_since}d)")
-    done
-
-    if (( ${#stale} > 0 )); then
-        echo "[INFO] Stale: ${(j:, :)stale}. Run '${stale[1]%% *}-update' to refresh."
-    fi
-}
-_claude_plugin_check_update
 
 # Check for Claude Code CLI updates (async, cached 24h)
 _claude_code_update_check() {

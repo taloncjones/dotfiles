@@ -1,0 +1,96 @@
+{
+  "v": 1,
+  "task_id": "2026-09-22-let-a-director-roll-over-in-place-on-clear-instead",
+  "commands": [
+    {
+      "name": "hook-executable-and-compiles",
+      "run": "test -x claude/hooks/director_rollover.py && head -n 1 claude/hooks/director_rollover.py | grep -qxF '#!/usr/bin/env python3' && python3 -c \"import ast,sys; [ast.parse(open(p).read(), p) for p in sys.argv[1:]]\" claude/hooks/director_rollover.py claude/hooks/herdr_orch_core.py claude/hooks/herdr_coordination.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "is-ancestor-unit",
+      "run": "PYTHONDONTWRITEBYTECODE=1 python3 -c \"import importlib.util as u, os, subprocess; s=u.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=u.module_from_spec(s); s.loader.exec_module(c); p=subprocess.Popen(['sleep','5']); ok=(c._is_ancestor(os.getppid()) is True and c._is_ancestor(p.pid) is False and c._is_ancestor(1) is False and c._is_ancestor(True) is False); p.kill(); assert ok\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "adoptable-refuses-foreign-shapes",
+      "run": "PYTHONDONTWRITEBYTECODE=1 python3 -c \"import sys, time; sys.path.insert(0,'claude/hooks'); import herdr_coordination as co; tx=object.__new__(co.OwnerTransaction); tx.account_id='a'; o={'session_id':'s','pid':42,'runtime':'claude','thread_id':None,'account_id':'a','control_tier':'launcher','heartbeat_ts':time.time(),'fence':3}; assert tx._adoptable(o,42,'claude',None); assert not tx._adoptable(o,43,'claude',None); assert not tx._adoptable(o,None,'claude',None); assert not tx._adoptable(o,True,'claude',None); assert not tx._adoptable(dict(o,account_id='b'),42,'claude',None); assert not tx._adoptable(dict(o,control_tier='lead'),42,'claude',None); assert not tx._adoptable(dict(o,runtime='codex',thread_id='t'),42,'codex','t')\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "resume-eligibility-unit",
+      "run": "PYTHONDONTWRITEBYTECODE=1 python3 -c \"import sys; sys.path.insert(0,'claude/hooks'); import herdr_orch_core as c; cur={'pid':42,'account_id':'a','runtime':'claude','thread_id':None,'control_tier':'launcher','session_id':'s','fence':3,'heartbeat_ts':0}; ok=c._resume_eligible; assert ok(cur,42,42,'a'); assert not ok(None,42,42,'a'); assert not ok(cur,43,43,'a'); assert not ok(cur,42,None,'a'); assert not ok(dict(cur,account_id='b'),42,42,'a'); assert not ok(dict(cur,runtime='codex'),42,42,'a'); assert not ok(dict(cur,thread_id='t'),42,42,'a'); assert not ok(dict(cur,control_tier='lead'),42,42,'a')\"",
+      "timeout_secs": 60
+    },
+    {
+      "name": "resume-owner-and-watch-pids-registered",
+      "run": "python3 claude/hooks/herdr_orch_core.py resume-owner --help | grep -q -- '--messaging-socket' && python3 claude/hooks/herdr_orch_core.py watch-pids --help | grep -q -- '--messaging-socket'",
+      "timeout_secs": 60
+    },
+    {
+      "name": "rollover-verb-registered",
+      "run": "python3 claude/hooks/herdr_orch_core.py rollover --help | grep -q -- '--fence' && if python3 claude/hooks/herdr_orch_core.py rollover --help | grep -q -- '--note'; then exit 1; fi",
+      "timeout_secs": 60
+    },
+    {
+      "name": "template-registers-hook",
+      "run": "python3 -c \"import json; t=json.load(open('claude/settings.json.tmpl')); h=[e for e in t['hooks']['SessionStart'] if any(x.get('command')=='~/.claude/hooks/director_rollover.py' for x in e['hooks'])]; assert len(h)==1 and h[0]['matcher']=='clear|compact', h\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "director-rollover-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/director-rollover.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "herdr-orch-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/herdr-orch.test.sh",
+      "timeout_secs": 2400
+    },
+    {
+      "name": "herdr-coordination-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/herdr-coordination.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "orch-edit-guard-suite",
+      "run": "env -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/orch-edit-guard.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "handoff-notice-suite",
+      "run": "sh claude/hooks/handoff-notice.test.sh",
+      "timeout_secs": 120
+    },
+    {
+      "name": "skill-documents-rollover",
+      "run": "grep -qxF '## 1a. Rollover in place' claude/skills/herdr-orchestration/SKILL.md && grep -qF 'Same-process adoption' claude/skills/herdr-orchestration/SKILL.md && grep -qF 'rollover --repo-path' claude/skills/herdr-orchestration/SKILL.md && grep -qF 'watch-pids' claude/skills/herdr-orchestration/SKILL.md && grep -qF 'Monitor survives' claude/skills/herdr-orchestration/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "skill-drops-auto-mode-launch",
+      "run": "if grep -q -- '--permission-mode auto' claude/skills/herdr-orchestration/SKILL.md; then exit 1; fi; grep -qF 'claude --agent director --settings' claude/skills/herdr-orchestration/SKILL.md && grep -qF 'gh pr merge' claude/skills/herdr-orchestration/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "docs-name-hook-and-verbs",
+      "run": "grep -qF 'claude/hooks/director_rollover.py' CLAUDE.md && grep -qF 'director-rollover.test.sh' CLAUDE.md && grep -qF 'resume-owner' CLAUDE.md && grep -qF 'director_rollover' claude/agents/director.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "suite-registered",
+      "run": "grep -qxF 'sh claude/hooks/director-rollover.test.sh' bin/dotfiles-tests",
+      "timeout_secs": 30
+    },
+    {
+      "name": "new-files-ascii-lf",
+      "run": "python3 -c \"import sys; bad=[p for p in sys.argv[1:] if b'\\\\r' in open(p,'rb').read() or (p!='CLAUDE.md' and any(b>126 for b in open(p,'rb').read()))]; assert not bad, bad\" claude/hooks/director_rollover.py claude/hooks/director-rollover.test.sh claude/hooks/herdr_orch_core.py claude/hooks/herdr_coordination.py claude/skills/herdr-orchestration/SKILL.md claude/agents/director.md claude/settings.json.tmpl bin/dotfiles-tests CLAUDE.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "public-safety-scan",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 120
+    }
+  ]
+}

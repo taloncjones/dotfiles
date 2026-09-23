@@ -16,7 +16,7 @@ python3 "$RUNTIME" route --step <step> --runtime <claude|codex>
 ```
 
 `--step` looks the step up in `agent_runtime.PIPELINE_ROUTES` (brainstorming ->
-planner -> opus/high, implement -> implementation -> sonnet/high, and so on) and
+planner -> opus/high, implement -> implementation -> sonnet/medium, and so on) and
 resolves model/effort through the same `resolve_route` as `--role`. `--step` and
 `--role` are mutually exclusive; exactly one is required; an unknown step is a
 hard error.
@@ -43,7 +43,7 @@ as `resolve_route` already treats overrides. Dispatch pipeline steps through
 - Reach for the Workflow tool for independent sub-tasks WITHIN an already-planned
   slice. It sits behind its own opt-in/size gate; workers edit in isolated
   worktrees respecting the orch/edit guards. A Workflow does NOT re-run
-  brainstorm/spec per task -- the superpowers pipeline gates wrap it, once,
+  brainstorm/spec per task -- the planning pipeline gates wrap it, once,
   upstream. There is no Codex Workflow API; Workflow is Claude-only.
 
 ## Gate policy for dispatched work

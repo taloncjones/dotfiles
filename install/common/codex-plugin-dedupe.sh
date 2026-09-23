@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # codex-plugin-dedupe.sh - Disable duplicate Codex workflow plugin providers
 #
-# The dotfiles-workflows marketplace copies of ECC and Superpowers are
-# canonical for Codex; when one is enabled, its upstream/account-provisioned
-# duplicate entries in CODEX_HOME/config.toml are flipped to enabled = false.
+# Retired plugins (ECC, Superpowers) stay disabled here across every copy: no
+# id is treated as canonical any more. `<name>-uninstall` removes what is
+# still on disk.
 # Function definitions only -- callers invoke dedupe_codex_workflow_plugins.
 #
 # Sourced twice per install/update cycle:
@@ -89,18 +89,19 @@ dedupe_codex_workflow_plugins() {
 
   [ -f "$config" ] || return 0
 
-  if codex_plugin_enabled "$config" "ecc@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "ecc@ecc" || return 1
-  fi
+  # ECC is retired: keep any leftover Codex copies disabled until
+  # ecc-uninstall removes them.
+  disable_codex_plugin "$config" "ecc@dotfiles-workflows" || return 1
+  disable_codex_plugin "$config" "ecc@ecc" || return 1
 
-  if codex_plugin_enabled "$config" "superpowers@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "superpowers@openai-curated" || return 1
-    disable_codex_plugin "$config" "superpowers@claude-plugins-official" || return 1
-  fi
+  # Superpowers is retired too: keep every copy disabled until
+  # superpowers-uninstall removes them.
+  disable_codex_plugin "$config" "superpowers@dotfiles-workflows" || return 1
+  disable_codex_plugin "$config" "superpowers@openai-curated" || return 1
+  disable_codex_plugin "$config" "superpowers@claude-plugins-official" || return 1
 
   # Keep repo-owned compatibility repairs in the same install/update lifecycle.
-  # Focused discovery is opt-in; the helper remembers a previously adopted
-  # catalog and never removes skill files or rewrites Claude configuration.
+  # The helper never removes skill files or rewrites Claude configuration.
   local surface_helper="$DOTFILEDIR/install/common/codex-surfaces.py"
   if [ -f "$surface_helper" ]; then
     if command -v uv >/dev/null 2>&1; then

@@ -1,6 +1,6 @@
 # Pipeline worker mapping
 
-Policy a director follows when dispatching a superpowers pipeline. The
+Policy a director follows when dispatching a planning pipeline. The
 model and effort columns are not read from this file: `claude/hooks/agent_runtime.py`
 is authoritative for every model and effort named here, and the `policy document
 matches the route table` case in `agent-runtime.test.sh` parses this file and
@@ -27,7 +27,7 @@ is tracked separately.
 | writing-plans             | planner              | opus/high        | Claude  | auto                                                       |
 | plan-review               | plan_reviewer        | fable/medium     | Claude  | read-only sandbox, single pass                             |
 | codex-plan-review         | codex plan_reviewer  | gpt-6-astra/high | Codex   | Codex, auto-resolve                                        |
-| implement                 | implementation       | sonnet/high      | Claude  | auto + per-task review                                     |
+| implement                 | implementation       | sonnet/medium    | Claude  | auto + per-task review                                     |
 | implement, UX/UI override | codex implementation | gpt-6-astra/high | Codex   | fresh Claude review before commit                          |
 | implementation review     | development_reviewer | sonnet/high      | Claude  | task-local advisory review; blockers return to development |
 | voice pass (outward text) | codex voice          | gpt-6-astra/high | Codex   | auto, before the write                                     |
@@ -60,7 +60,11 @@ the task worker as `review`.
 
 ## Deviating from the defaults
 
-Two axes raise effort within the role's chosen model. Neither lowers it.
+Two axes raise effort within the role's chosen model. Neither lowers it. A
+repo lowers effort through `config.json` `routes`, down to the tier of the
+role's default model at `low` (`EFFORT_FLOOR`); a raising axis raises the
+floor with it. Because the floor is a tier, the same override can trade the
+model down at a higher effort (an opus role accepts `sonnet/medium`).
 
 - `risk=critical` -- blast radius. Restricted to `development_reviewer`,
   `reviewer`, `skeptic`, `think`.
@@ -119,8 +123,12 @@ Each is resolved here, with the reason, so none is silently re-litigated.
    statements about the same role.
 8. **`planner` is deliberately not in `CRITICAL_ROLES`.** Risk is about blast
    radius; hard-plan escalation is what `difficulty=hard` is for.
-9. **High effort is not reserved to planner and reviewer.** The implementer runs
-   at `high` too. The doctrine is about keeping high effort off the _gateway_.
+9. **Superseded 2026-09-22.** The implementer ran at `high` since 2026-09-08
+   (92c049a) to 2026-09-22; measured 2026-09-06..09, Sonnet implementers at `high`
+   confabulated as often as not (todo
+   `2026-09-08-lower-orchestrator-effort-floors-and-restore-impl`), so `high`
+   bought cost, not reliability. Implementation now defaults to `medium`;
+   planner and reviewers keep `high`.
 10. **The voice pass is `gpt-6-astra/high`**, matching every other Astra row.
     Nothing argued for a different value; the source simply omitted it.
 11. **Tier doctrine describes defaults, not exclusivity.** `opus` is the reviewer
@@ -129,3 +137,7 @@ Each is resolved here, with the reason, so none is silently re-litigated.
     newest release.
 12. **Skeptic is `opus/high`**, rising to `xhigh` under `risk=critical` or
     `difficulty=hard` -- the same as reviewer, which the source left unstated.
+13. **A fallback candidate is filtered at the role's default quality tier, not
+    the configured one.** A caller who overrides a role to a cheaper model or
+    effort owns that choice; the fallback ladder still protects the role's
+    own default floor, not the caller's lowered request.

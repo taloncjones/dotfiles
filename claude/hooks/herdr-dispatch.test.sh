@@ -538,7 +538,7 @@ def test_bound_launch_reserves_before_native_start_and_writes_no_launcher_row():
         assert row["source_head_sha"] == fixture.lead_context["head"], row
         assert row["pane_id"] == "w1:p1" and row["workspace_id"] == "w1", row
         assert row["role"] == "implementation" and row["agent"] == "impl-td-a", row
-        assert row["model"] == "gpt-5.6-terra" and row["effort"] == "high", row
+        assert row["model"] == "gpt-5.6-terra" and row["effort"] == "medium", row
         for key in ("runtime_binary", "started_ns", "capture_before_sha256",
                     "capture_after_sha256", "account_id", "personal",
                     "prompt_state", "prompt_wait"):
@@ -631,7 +631,7 @@ def test_launch_records_attempt_before_native_start():
             "-m",
             "gpt-5.6-terra",
             "-c",
-            'model_reasoning_effort="high"',
+            'model_reasoning_effort="medium"',
             "-c",
             'plugins."atlassian@claude-plugins-official".enabled=false',
             "-C",

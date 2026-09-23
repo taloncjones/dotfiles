@@ -45,34 +45,36 @@ including the negative ones (the things that did NOT fail) -- and survives
 adversarial refutation. A mechanism that explains only the failure is a
 candidate, not a finding.
 
-### Worked example: the superpowers cloud install failure (settled)
+### Worked example: the Superpowers cloud install failure (settled; Superpowers itself is now retired, 2026-09)
 
 Observations, all from real cloud sessions:
 
-| #   | Observation                                          | Polarity                   |
-| --- | ---------------------------------------------------- | -------------------------- |
-| 1   | Superpowers plugin missing after first cloud session | failure                    |
-| 2   | ECC plugin installed fine in the same run            | negative (did NOT fail)    |
-| 3   | `claude plugins install` exited 0                    | negative (no error signal) |
-| 4   | Resumed sessions installed superpowers successfully  | negative (worked later)    |
+| #   | Observation                                                            | Polarity                   |
+| --- | ---------------------------------------------------------------------- | -------------------------- |
+| 1   | Retired Superpowers plugin missing after first cloud session           | failure                    |
+| 2   | ECC plugin (retired 2026-09) installed fine in the same run            | negative (did NOT fail)    |
+| 3   | `claude plugins install` exited 0                                      | negative (no error signal) |
+| 4   | Resumed sessions installed the retired Superpowers plugin successfully | negative (worked later)    |
 
 Rejected candidates and why:
 
-- "Flaky network" -- explains 1, not 2 (same network installed ECC) and not 4's
-  consistency.
+- "Flaky network" -- explains 1, not 2 (same network installed the retired ECC)
+  and not 4's consistency.
 - "Bad plugin id / typo" -- explains 1, contradicts 4 (same id worked on resume).
 - "Installer bug" -- explains nothing about 2 or 4.
 
 Winning mechanism: **async marketplace fetch race**. The github-backed official
 marketplace is registered at launch but its first manifest fetch is
 asynchronous; on a cold container `plugins install` resolves against an empty
-manifest and no-ops with exit 0. This explains all four rows: (1) superpowers
-lives in the async marketplace; (2) ECC's plain-git marketplace clones
-synchronously, so it won the race; (3) "plugin not listed" resolves to
-"nothing to do", which is exit 0; (4) by resume time the cache had warmed.
-The mechanism and each observation are written into the `ensure_plugin`
-comment block in bootstrap-cloud.sh -- read it as the house-style reference
-for documenting a mechanism at the fix site.
+manifest and no-ops with exit 0. This explains all four rows: (1) the now-retired
+Superpowers plugin (retired 2026-09) lived in the async marketplace; (2) the retired ECC's
+plain-git marketplace cloned synchronously, so it won the race; (3) "plugin
+not listed" resolves to "nothing to do", which is exit 0; (4) by resume time
+the cache had warmed. The mechanism and each observation were written into the
+now-deleted `ensure_plugin` comment block in `bootstrap-cloud.sh` (removed
+along with the retired Superpowers install path, 2026-09) -- it remains the
+house-style reference for documenting a mechanism at the fix site, in git
+history if not on disk.
 
 Fixes then targeted the mechanism, not the symptom: wait on the manifest
 condition the resolver actually checks (7cb28b7), register the marketplace by
@@ -93,10 +95,12 @@ rationalization.
 
 - Good: "If the race mechanism is right, polling
   `~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json`
-  until it lists `superpowers` will make install succeed deterministically on a
-  cold container, with zero blind sleeps." That is exactly the design shipped in
-  `marketplace_lists_plugin` / `ensure_plugin` (bootstrap-cloud.sh) -- the
-  comments there explicitly contrast the deterministic wait with a blind timer.
+  until it lists the (now retired) Superpowers plugin id will make install
+  succeed deterministically on a cold container, with zero blind sleeps."
+  That was exactly the design shipped in `marketplace_lists_plugin` /
+  `ensure_plugin` (`bootstrap-cloud.sh`, both since deleted along with the
+  now-retired Superpowers install path) -- the comments there explicitly
+  contrasted the deterministic wait with a blind timer.
 - Bad: "Let's add a 30s sleep and see if it helps." No falsifiable prediction;
   a pass teaches nothing and a fail is ambiguous.
 
@@ -142,8 +146,9 @@ failure outcome.
    orchestrator checkout instead of the task worktree and passed vacuously.
 3. Partial retreat: e401175 removed the per-task gate.
 4. Full retirement: 7fefcb5 removed the whole subsystem (596 deletions) with
-   the rationale in the commit body -- slower and costlier than superpowers
-   subagent-driven-development + co-review. The fable->opus planner stopgap
+   the rationale in the commit body -- slower and costlier than the (now also
+   retired) Superpowers plugin's subagent-driven-development + co-review. The
+   fable->opus planner stopgap
    (4d8255d) died with it.
 
 Retirement with a written why is a success outcome. The commit body is the

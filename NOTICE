@@ -33,6 +33,20 @@ reproduced here as required.
    License:  MIT
    Copyright (c) 2025 Lex Christopherson
 
+3. Superpowers
+
+   Paths in this repository:
+     claude/skills/brainstorming/   (adapted from the brainstorming skill)
+     claude/skills/writing-specs/   (spec self-review loop adapted from the
+                                     brainstorming skill)
+     claude/skills/writing-plans/   (adapted from the writing-plans skill)
+   (Historical: the plugin itself was installed, not vendored, until its
+   retirement in 2026-09.)
+
+   Upstream: https://github.com/obra/superpowers
+   License:  MIT
+   Copyright (c) 2025 Jesse Vincent
+
 --------------------------------------------------------------------------
 
 MIT License text applicable to the components above:

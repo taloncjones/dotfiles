@@ -1,5 +1,5 @@
 # Personal, version-controlled skills are whitelisted below. Everything else in
-# this directory lives on disk but stays untracked: ECC marketplace skills,
+# this directory lives on disk but stays untracked: installer-managed skills,
 # continuous-learning's generated `learned/`, and any other installer-managed
 # skills. They are reproducible (re-install via their installers) and machine-
 # local, so they do not belong in the dotfiles history.
@@ -25,3 +25,7 @@
 !/weekly/
 !/wrap/
 !/voice/
+!/brainstorming/
+!/writing-specs/
+!/writing-plans/
+!/planning-skills.test.sh

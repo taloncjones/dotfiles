@@ -58,30 +58,26 @@ assert "installer links repo-managed codex skills" \
     rg -q 'codex/skills' install/common/codex-links.sh
 assert "installer keeps ~/.codex/skills as a real directory" \
     rg -q 'mkdir -p "\$HOME"/\.codex/skills' install/common/codex-links.sh
-assert "installer treats Codex plugins as canonical workflow owners" \
-    rg -q 'Codex plugins are the canonical owner' install/common/codex-links.sh
-assert "ECC lifecycle installs a native Codex plugin" \
-    rg -q '_codex_install_ecc_plugin' zsh/functions.zsh
-assert "Superpowers lifecycle installs the managed Codex plugin" \
-    rg -q '_codex_ensure_plugin "superpowers@dotfiles-workflows"' zsh/functions.zsh
-assert "bootstrap installs workflows for Claude and Codex" \
-    rg -q 'for Claude and Codex' install/common/claude-plugins.sh
-assert "ECC lifecycle never invokes the upstream Codex sync" \
-    sh -c "! rg -q 'scripts/sync-ecc-to-codex.sh' zsh/functions.zsh"
+assert "installer sweeps snapshots of retired plugins" \
+    rg -q 'Retired plugins \(ECC, Superpowers\)' install/common/codex-links.sh
+assert "no Superpowers Codex install path remains" \
+    sh -c "! rg -q '_codex_(stage|install|update)_superpowers_plugin\(\)' zsh/functions.zsh"
+assert "plugin step no longer installs Superpowers" \
+    sh -c "! rg -q 'superpowers-install' install/common/claude-plugins.sh"
 assert "installer removes stale standalone Superpowers skill snapshots" \
     rg -q "name 'superpowers-\*'" install/common/codex-links.sh
 assert "installer removes stale standalone ECC skill snapshots" \
     rg -q "name 'ecc-\*'" install/common/codex-links.sh
-assert "Codex AGENTS references plugin-qualified Superpowers skills" \
-    rg -q 'superpowers:brainstorming' codex/AGENTS.md
+assert "Codex AGENTS routes to the owned planning skills" \
+    sh -c "rg -q '\`writing-specs\`' codex/AGENTS.md && ! rg -q 'superpowers:' codex/AGENTS.md"
+assert "Codex workflow marketplace manifest is retired" \
+    test ! -e codex/.agents/plugins/marketplace.json
 assert "Codex AGENTS defaults implementation work to worktrees" \
     rg -q '## Worktree Default' codex/AGENTS.md
 assert "Codex AGENTS defines default skill routing" \
     rg -q '## Default Skill Routing' codex/AGENTS.md
-assert "Codex AGENTS routes security and deployment skills by default" \
-    sh -c "rg -q 'ecc:security-review' codex/AGENTS.md && rg -q 'ecc:deployment-patterns' codex/AGENTS.md"
-assert "Codex AGENTS uses plugin-qualified ECC skills" \
-    sh -c "rg -q 'ecc:tdd-workflow' codex/AGENTS.md && rg -q 'ecc:workspace-surface-audit' codex/AGENTS.md"
+assert "Codex AGENTS no longer routes to retired ECC skills" \
+    sh -c "! rg -q 'ecc:' codex/AGENTS.md"
 assert "Codex AGENTS keeps project-specific product names out of global defaults" \
     sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
 
@@ -144,10 +140,10 @@ TOML
 
     HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
 
-    [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@dotfiles-workflows")" = true ] &&
+    [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@dotfiles-workflows")" = false ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@openai-curated")" = false ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@claude-plugins-official")" = false ] &&
-        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@dotfiles-workflows")" = true ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@dotfiles-workflows")" = false ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "ecc@ecc")" = false ] &&
         [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "unrelated@example")" = true ] || {
             rm -rf "$tmp_home"
@@ -161,8 +157,29 @@ TOML
     [ "$first_cksum" = "$second_cksum" ]
 }
 
-assert "installer disables duplicate managed workflow providers" \
+assert "installer disables retired ECC and Superpowers Codex plugins" \
     dedupes_managed_workflow_plugins
+
+dedupes_without_managed_copy() {
+    tmp_home="$(mktemp -d)"
+    mkdir -p "$tmp_home/.codex"
+    cat >"$tmp_home/.codex/config.toml" <<'TOML'
+[plugins."superpowers@openai-curated"]
+enabled = true
+
+[plugins."superpowers@claude-plugins-official"]
+enabled = true
+TOML
+    HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
+    [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@openai-curated")" = false ] &&
+        [ "$(plugin_enabled_value "$tmp_home/.codex/config.toml" "superpowers@claude-plugins-official")" = false ]
+    rc=$?
+    rm -rf "$tmp_home"
+    return $rc
+}
+
+assert "installer disables Superpowers copies when the managed copy is absent" \
+    dedupes_without_managed_copy
 
 assert "plugin lifecycle re-runs workflow dedupe post-install" \
     rg -q '^reconcile_codex_workflow_plugins_for_install$' install/common/claude-plugins.sh
@@ -271,7 +288,7 @@ links_shared_workflow_surfaces() (
     trap 'rm -rf "$tmp_home"' EXIT
     HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
     HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
-    for skill in repo-recall post-merge todos handoff kickoff voice; do
+    for skill in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do
         [ "$(readlink "$tmp_home/.codex/skills/$skill")" = "$PWD/claude/skills/$skill" ] || return 1
         [ -f "$tmp_home/.codex/skills/$skill/SKILL.md" ] || return 1
     done

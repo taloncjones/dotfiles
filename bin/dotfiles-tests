@@ -50,15 +50,13 @@ SUITES="
 sh install/install.test.sh
 sh bin/remote-access-doctor.test.sh
 sh bin/zed-claude-agent.test.sh
+sh bin/token-burn.test.sh
 sh bin/herdr-zed-attach.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
 sh zsh/claude-account.test.sh
 sh zsh/codex-account.test.sh
 sh claude/hooks/claude-hooks.test.sh
-sh claude/hooks/plan-canvas-isolation.test.sh
-sh claude/hooks/ecc-hook-isolation.test.sh
-sh claude/hooks/gateguard-tuning.test.sh
 sh claude/hooks/herdr-capabilities.test.sh
 sh claude/hooks/herdr-orch.test.sh
 sh claude/hooks/herdr-orch-contract.test.sh
@@ -71,6 +69,7 @@ sh claude/hooks/orch-edit-guard.test.sh
 sh claude/hooks/git-remote-guard.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
+sh claude/skills/planning-skills.test.sh
 sh git/hooks/commit-msg.test.sh
 sh git/hooks/post-checkout.test.sh
 sh git/hooks/post-checkout-runtime.test.sh
@@ -81,6 +80,7 @@ bash claude/skills/lib/test_work_state.sh
 sh claude/skills/lib/workflow-context.test.sh
 sh claude/skills/handoff/scripts/tests/handoff_test.sh
 sh claude/hooks/handoff-notice.test.sh
+sh claude/hooks/director-rollover.test.sh
 sh claude/skills/co-review/scripts/tests/review_test.sh
 bash claude/skills/todos/scripts/tests/todos_test.sh
 bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh
