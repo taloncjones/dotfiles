@@ -294,5 +294,71 @@ $CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
 SH
 
+check "rollover: sends /clear then enter to HERDR_PANE_ID" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+printf '{"id":"x","result":{"type":"ok"}}\n'
+STUB
+chmod +x "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
+grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
+test "$(wc -l < "$FX/herdr.log" | tr -d ' ')" = 2
+test "$(sed -n 1p "$FX/herdr.log")" = "pane send-text w9:p1 /clear"
+test "$(sed -n 2p "$FX/herdr.log")" = "pane send-keys w9:p1 enter"
+SH
+
+check "rollover: stale fence sends nothing" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+printf '{"id":"x","result":{"type":"ok"}}\n'
+STUB
+chmod +x "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+out=$(PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence $((F + 5))) && rc=0 || rc=$?
+test "$rc" = 1
+test "$out" = "owner: stale-fence"
+test ! -e "$FX/herdr.log"
+SH
+
+check "rollover: outside a herdr pane exits 2 and sends nothing" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+printf '{"id":"x","result":{"type":"ok"}}\n'
+STUB
+chmod +x "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+(unset HERDR_PANE_ID; PATH="$FX/bin:$PATH" $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2>/dev/null) && rc=0 || rc=$?
+test "$rc" = 2
+test ! -e "$FX/herdr.log"
+SH
+
+check "rollover: Enter failing after /clear was typed exits 1 with the delivery-unknown message" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$2" in send-keys) echo boom >&2; exit 7 ;; esac
+printf '{"id":"x","result":{"type":"ok"}}\n'
+STUB
+chmod +x "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" && rc=0 || rc=$?
+test "$rc" = 1
+grep -q 'delivery unknown' "$FX/e"
+grep -q 'do not re-run rollover' "$FX/e"
+test "$(grep -c 'send-text' "$FX/herdr.log")" = 1
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

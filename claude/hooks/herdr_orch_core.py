@@ -3089,6 +3089,7 @@ def _main(argv=None) -> int:
     ro = add("refresh-owner", "--session", "--fence")
     ro.add_argument("--messaging-socket", default=None)
     add("check-fence", "--session", "--fence")
+    add("rollover", fenced=True)
     wt = add("write-task", "--task-id", "--json", fenced=True)
     wt.add_argument("--binding", default=None)
     # Launcher-scope only: no --binding, so _fenced_scoped never resolves a
@@ -3290,6 +3291,30 @@ def _main(argv=None) -> int:
             0 if refresh_owner(repo_dir(ns.repo_slug), ns.session, int(ns.fence),
                                messaging_socket=ns.messaging_socket) else 1
         )
+    if ns.cmd == "rollover":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        pane = os.environ.get("HERDR_PANE_ID", "")
+        _require(pane, "rollover must run inside a herdr pane (HERDR_PANE_ID is unset)")
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = shutil.which("herdr")
+        _require(exe, "herdr is not on PATH")
+        if not refresh_owner(repo_dir(ns.repo_slug), ns.session, ns.fence):
+            print("owner: stale-fence")
+            return 1
+        env = dict(os.environ)
+        try:
+            run_herdr(exe, ["pane", "send-text", pane, "/clear"], env=env)
+            run_herdr(exe, ["pane", "send-keys", pane, "enter"], env=env)
+        except Exception as exc:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+            # Either send may have partly reached the pane; a blind retry could
+            # append a second /clear to a half-typed line.
+            print(f"rollover: delivery unknown ({exc}); do not re-run rollover. Check this "
+                  "pane's input line: if it shows exactly /clear, press Enter; otherwise "
+                  "clear it.", file=sys.stderr)
+            return 1
+        print(f"rollover: queued /clear for pane {pane}; end this turn now")
+        return 0
     if ns.cmd == "write-task":
         with _fenced_scoped(ns) as (rd, base):
             if ns.binding is not None:
