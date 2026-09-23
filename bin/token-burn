@@ -3,11 +3,16 @@
 import argparse
 import json
 import os
+import re
+import stat
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
 from dataclasses import dataclass, field
+
+# Codex rollout filenames: rollout-<ISO timestamp with :/T replaced by ->-<session_id>.jsonl
+CODEX_FILENAME_RE = re.compile(r"^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$")
 
 
 @dataclass
@@ -74,28 +79,71 @@ def get_cutoff_date(since_str):
         return None
 
 
+def _iter_regular_jsonl_files(root):
+    """Yield *.jsonl files under root, skipping symlinks/FIFOs/etc so an
+    unconditional open() can never block on a planted non-regular entry."""
+    for jsonl_file in root.rglob("*.jsonl"):
+        try:
+            st = jsonl_file.lstat()
+        except OSError as e:
+            print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            print(f"token-burn: warning: skipping non-regular file {jsonl_file}", file=sys.stderr)
+            continue
+        yield jsonl_file
+
+
 def read_claude_jsonl(config_dir):
     results = []
+    seen_message_keys = set()
     projects_path = Path(config_dir) / "projects"
     if not projects_path.exists():
         return results
 
-    for jsonl_file in projects_path.rglob("*.jsonl"):
+    for jsonl_file in _iter_regular_jsonl_files(projects_path):
         try:
-            with open(jsonl_file, "r") as f:
+            with open(jsonl_file, "r", errors="replace") as f:
                 for line_no, line in enumerate(f, 1):
                     try:
                         obj = json.loads(line)
-                        if "message" not in obj or "usage" not in obj["message"]:
-                            continue
+                        if not isinstance(obj, dict):
+                            raise ValueError("line is not a JSON object")
 
-                        usage = obj["message"]["usage"]
+                        if "message" not in obj:
+                            continue
+                        message = obj["message"]
+                        if not isinstance(message, dict):
+                            raise ValueError("message field is not an object")
+                        if "usage" not in message:
+                            continue
+                        usage = message["usage"]
+                        if not isinstance(usage, dict):
+                            raise ValueError("usage field is not an object")
+
                         ts = obj.get("timestamp")
                         day = parse_timestamp(ts)
                         if not day:
+                            if ts:
+                                print(
+                                    f"token-burn: warning: unparseable timestamp on line "
+                                    f"{line_no} in {jsonl_file}: {ts!r}",
+                                    file=sys.stderr,
+                                )
                             continue
 
-                        model = obj["message"].get("model", "unknown")
+                        # Claude Code writes one transcript line per content
+                        # block, repeating the same message.usage value on
+                        # each line -- dedupe by (message id, request id) so
+                        # a message's usage is counted exactly once.
+                        dedup_key = (message.get("id"), obj.get("requestId"))
+                        if dedup_key == (None, None):
+                            dedup_key = ("line", str(jsonl_file), line_no)
+                        if dedup_key in seen_message_keys:
+                            continue
+                        seen_message_keys.add(dedup_key)
+
+                        model = message.get("model", "unknown")
                         session_id = obj.get("sessionId", "unknown")
                         project_name = jsonl_file.parent.name
 
@@ -113,67 +161,98 @@ def read_claude_jsonl(config_dir):
                         results.append(
                             SessionStat(model, session_id, project_name, str(day), tokens)
                         )
-                    except (json.JSONDecodeError, ValueError) as e:
+                    except (json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as e:
                         print(
                             f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
                             file=sys.stderr,
                         )
-        except (IOError, OSError) as e:
+        except (IOError, OSError, UnicodeDecodeError) as e:
             print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
 
     return results
 
 
+def _codex_session_id(jsonl_file):
+    match = CODEX_FILENAME_RE.match(jsonl_file.stem)
+    return match.group(1) if match else jsonl_file.stem
+
+
 def read_codex_jsonl(codex_home):
     results = []
-    sessions_path = Path(codex_home) / "archived_sessions"
-    if not sessions_path.exists():
-        return results
+    roots = [Path(codex_home) / "sessions", Path(codex_home) / "archived_sessions"]
 
-    for jsonl_file in sessions_path.rglob("*.jsonl"):
-        try:
-            with open(jsonl_file, "r") as f:
-                for line_no, line in enumerate(f, 1):
-                    try:
-                        obj = json.loads(line)
-                        if obj.get("type") != "event_msg":
-                            continue
-                        payload = obj.get("payload", {})
-                        if payload.get("type") != "token_count":
-                            continue
+    for root in roots:
+        if not root.exists():
+            continue
 
-                        info = payload.get("info", {})
-                        ts_ms = obj.get("timestamp", 0)
-                        if isinstance(ts_ms, str):
-                            ts_ms = int(float(ts_ms))
-                        if ts_ms:
-                            ts = datetime.fromtimestamp(ts_ms / 1000.0).date()
-                        else:
-                            ts = datetime.now().date()
+        for jsonl_file in _iter_regular_jsonl_files(root):
+            session_id = _codex_session_id(jsonl_file)
+            try:
+                with open(jsonl_file, "r", errors="replace") as f:
+                    for line_no, line in enumerate(f, 1):
+                        try:
+                            obj = json.loads(line)
+                            if not isinstance(obj, dict):
+                                raise ValueError("line is not a JSON object")
+                            if obj.get("type") != "event_msg":
+                                continue
 
-                        model = "codex-unknown"
-                        session_id = obj.get("session_id", "unknown")
-                        project_name = "codex"
+                            payload = obj.get("payload")
+                            if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                                continue
 
-                        # Codex JSONL has no reliable cache-write field; report
-                        # unknown rather than a fabricated 0 (PRD requirement 5).
-                        tokens = TokenCount(
-                            input_tokens=info.get("input_tokens", 0),
-                            output_tokens=info.get("output_tokens", 0),
-                            cache_creation_input_tokens="unknown",
-                            cache_read_input_tokens=info.get("cached_input_tokens", 0),
-                        )
+                            info = payload.get("info")
+                            if not isinstance(info, dict):
+                                raise ValueError("token_count event has no usable info")
 
-                        results.append(
-                            SessionStat(model, session_id, project_name, str(ts), tokens)
-                        )
-                    except (json.JSONDecodeError, ValueError) as e:
-                        print(
-                            f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
-                            file=sys.stderr,
-                        )
-        except (IOError, OSError) as e:
-            print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
+                            # last_token_usage is the delta since the previous
+                            # token_count event, so summing it across a
+                            # session's events reconstructs the session total
+                            # without double-counting total_token_usage's
+                            # running cumulative figure.
+                            last = info.get("last_token_usage")
+                            if not isinstance(last, dict):
+                                raise ValueError("token_count event has no usable last_token_usage")
+
+                            ts_str = obj.get("timestamp")
+                            day = parse_timestamp(ts_str)
+                            if not day:
+                                if ts_str:
+                                    print(
+                                        f"token-burn: warning: unparseable timestamp on line "
+                                        f"{line_no} in {jsonl_file}: {ts_str!r}",
+                                        file=sys.stderr,
+                                    )
+                                continue
+
+                            model = "codex-unknown"
+                            project_name = "codex"
+
+                            # Report unknown rather than a fabricated 0 when
+                            # the real cache-write field is absent (PRD
+                            # requirement 5).
+                            if "cache_write_input_tokens" in last:
+                                cache_creation = last["cache_write_input_tokens"]
+                            else:
+                                cache_creation = "unknown"
+
+                            tokens = TokenCount(
+                                input_tokens=last.get("input_tokens", 0),
+                                output_tokens=last.get("output_tokens", 0),
+                                cache_creation_input_tokens=cache_creation,
+                                cache_read_input_tokens=last.get("cached_input_tokens", 0),
+                            )
+
+                            results.append(
+                                SessionStat(model, session_id, project_name, str(day), tokens)
+                            )
+                        except (json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as e:
+                            print(
+                                f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
+                                file=sys.stderr,
+                            )
+            except (IOError, OSError, UnicodeDecodeError) as e:
+                print(f"token-burn: warning: unreadable file {jsonl_file}: {e}", file=sys.stderr)
 
     return results
 
@@ -250,10 +329,23 @@ def main():
             f"cache_read:{format_number(t.cache_read_input_tokens):>12}"
         )
 
+    # The 'unknown' cache-creation sentinel must never collapse to 0 in the
+    # ranking sort key -- split unknown-priced sessions into their own
+    # unranked section instead, so --session-limit can never silently drop
+    # them from the report.
+    known_priced_sessions = [
+        item for item in sessions_by_key.items()
+        if item[1].cache_creation_input_tokens != "unknown"
+    ]
+    unknown_priced_sessions = [
+        item for item in sessions_by_key.items()
+        if item[1].cache_creation_input_tokens == "unknown"
+    ]
+
     print("\n\nTop Sessions by Priced Tokens (cache_creation + output):")
     print("-" * 90)
     sessions_by_priced = sorted(
-        sessions_by_key.items(),
+        known_priced_sessions,
         key=lambda x: x[1].total_priced(),
         reverse=True,
     )[: args.session_limit]
@@ -266,6 +358,18 @@ def main():
             f"cache_cr:{format_number(tokens.cache_creation_input_tokens):>10} "
             f"cache_rd:{format_number(tokens.cache_read_input_tokens):>10}"
         )
+
+    if unknown_priced_sessions:
+        print("\n\nUnknown-Priced Sessions (cache_creation unavailable, not ranked):")
+        print("-" * 90)
+        for (model, session_id, project), tokens in unknown_priced_sessions:
+            print(
+                f"{model:40} {session_id[:8]:8} {project:20} "
+                f"input:{format_number(tokens.input_tokens):>10} "
+                f"output:{format_number(tokens.output_tokens):>10} "
+                f"cache_cr:{format_number(tokens.cache_creation_input_tokens):>10} "
+                f"cache_rd:{format_number(tokens.cache_read_input_tokens):>10}"
+            )
 
     print("\n\nTop Sessions by Cache Read Volume:")
     print("-" * 90)
