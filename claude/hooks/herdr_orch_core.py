@@ -2656,14 +2656,19 @@ def is_completed(task, done, live_head_sha, workspace) -> bool:
     )  # at least one commit ahead of base
 
 
+def plan_record_matches(task, done, head_sha, workspace) -> bool:
+    """The done record is this task's completed plan attempt at head_sha."""
+    return (isinstance(task, dict) and isinstance(done, dict)
+            and done.get("task_id") == task.get("task_id")
+            and done.get("phase") == "plan" and done.get("outcome") == "completed"
+            and done.get("head_sha") == head_sha
+            and done.get("base_sha") == task.get("base_sha")
+            and attempt_matches(task, done, "plan", workspace))
+
+
 def is_plan_completed(task, done, head_sha, workspace, payload_root) -> bool:
     """Confirm the current planning milestone using immutable private artifacts."""
-    if not isinstance(task, dict) or not isinstance(done, dict):
-        return False
-    if (done.get("task_id") != task.get("task_id") or done.get("phase") != "plan"
-            or done.get("outcome") != "completed" or done.get("head_sha") != head_sha
-            or done.get("base_sha") != task.get("base_sha")
-            or not attempt_matches(task, done, "plan", workspace)):
+    if not plan_record_matches(task, done, head_sha, workspace):
         return False
     artifacts = task.get("plan_artifacts")
     if not isinstance(artifacts, list) or len(artifacts) != 2 or done.get("plan_artifacts") != artifacts:
@@ -2850,12 +2855,21 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     dirty = "unknown" if porcelain is None else ("yes" if porcelain else "no")
     ahead = _git_ancestor(worktree, task.get("base_sha"), head) if worktree_exists else "unknown"
 
+    unreadable = []
+
     def _sidecar(suffix):
+        name = f"{tid}{suffix}"
         try:
-            rec = json.loads(read_payload_text(Path(rd) / "tasks" / f"{tid}{suffix}"))
-        except (OSError, ValueError):
+            rec = json.loads(read_payload_text(Path(rd) / "tasks" / name))
+        except FileNotFoundError:
             return None
-        return rec if isinstance(rec, dict) else None
+        except (OSError, ValueError):
+            unreadable.append(name)
+            return None
+        if not isinstance(rec, dict):
+            unreadable.append(name)
+            return None
+        return rec
 
     done, review = _sidecar(".done.json"), _sidecar(".review.json")
     impl_ws = phase_workspace(task, "implement")
@@ -2875,6 +2889,18 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     mech_unsettled = bool(latest.get("role") == "mech"
                           and status not in CHECKIN_TERMINAL
                           and not _attempt_settled(latest, done))
+
+    unverifiable = []
+    if (review and rev_ws and head
+            and attempt_matches(task, review, "review", rev_ws)
+            and review.get("reviewed_head_sha") == head
+            and not _findings_evidence_ok(review)):
+        unverifiable.append("review")
+    if (done and plan_ws and head and plan_record_matches(task, done, head, plan_ws)
+            and not plan_completed):
+        unverifiable.append("plan")
+    last = read_wake_marker(rd, ws).get("last_delivery") if valid_workspace_id(ws) else None
+    wake = last.get("reason") if isinstance(last, dict) and isinstance(last.get("reason"), str) else "none"
 
     events = []
     for row in workers:
@@ -2904,6 +2930,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # has no `paused` STATUS, so a status-based gate is vacuous and a
         # stale record from a superseded attempt would fire forever; nothing
         # in the core deletes done.json on relaunch.
+        "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "done_outcome": (done.get("outcome")
                          if done and latest
                          and attempt_matches(task, done, latest.get("phase"),
@@ -5250,18 +5277,28 @@ def _main(argv=None) -> int:
             try:
                 task = json.loads(read_payload_text(tf))
             except (OSError, ValueError):
+                print(f"unreadable-task {tf.name}")
+                changed = True
                 continue
             if not isinstance(task, dict):
+                print(f"unreadable-task {tf.name}")
+                changed = True
                 continue
             if not ns.all and task.get("status") in CHECKIN_TERMINAL:
                 continue
             f = checkin_facts(rd, task, poll, payload_root)
             if f["action"] != "none":
                 changed = True
+            for name in f["unreadable"]:
+                print(f"unreadable-record {name}")
+                changed = True
+            for kind in f["unverifiable"]:
+                print(f"unverifiable-evidence {f['task_id']} {kind}")
+                changed = True
             print(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
                   f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
                   f"dirty={f['dirty']} done={f['done']} review={f['review']} "
-                  f"hint={f['hint']} action={f['action']}")
+                  f"hint={f['hint']} action={f['action']} wake={f['wake']}")
         print(f"changed: {'yes' if changed else 'no'}")
         return 0
     if ns.cmd == "status":

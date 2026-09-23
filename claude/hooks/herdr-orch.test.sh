@@ -9762,6 +9762,85 @@ if stale=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S
 printf '%s\n' "$stale" | grep -q 'owner: stale-fence' || exit 1
 SH
 
+check "checkin: unreadable task and sidecar lines force changed: yes; missing sidecar is silent" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"in-progress","base_sha":"'"$BASE"'","workers":[]}'
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf '{not json' > "$RD/tasks/PROJ-9.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'unreadable-task PROJ-9.json'
+printf '%s\n' "$out" | grep -qx 'changed: yes'
+! printf '%s\n' "$out" | grep -q 'unreadable-record'
+printf '{not json' > "$RD/tasks/PROJ-1.done.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'unreadable-record PROJ-1.done.json'
+SH
+
+check "checkin: wake= column from the marker, read-only" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/workspaces"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"in-progress","base_sha":"'"$BASE"'","workers":[{"phase":"implement","workspace_id":"w1"}]}'
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf '%s' '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"stopped","reason":"connect-failed","ts":1}}' > "$RD/workspaces/w1.wake.json"
+before=$(shasum "$RD/workspaces/w1.wake.json")
+$CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=connect-failed'
+[ "$before" = "$(shasum "$RD/workspaces/w1.wake.json")" ]
+rm "$RD/workspaces/w1.wake.json"
+$CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=none'
+SH
+
+check "checkin: unverifiable review findings are reported, then clear on byte-identical restore" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+WT=$(mktemp -d)
+git -C "$WT" init -q
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+HEAD=$(git -C "$WT" rev-parse HEAD)
+FINDINGS="$root/herdr-orch/findings.md"
+printf 'No blocking findings. Inspected: fixture.\n' > "$FINDINGS"
+DIGEST=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$FINDINGS")
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"review-dispatched","base_sha":"'"$HEAD"'","review_head_sha":"'"$HEAD"'","worktree":"'"$WT"'","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"pane2","source_head_sha":"'"$HEAD"'"}]}'
+cat > "$RD/tasks/PROJ-1.review.json" <<JSON
+{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"pane2","source_head_sha":"$HEAD","task_id":"PROJ-1","outcome":"approved","reviewed_head_sha":"$HEAD","blocking_count":0,"findings_ref":"$FINDINGS","findings_sha256":"$DIGEST"}
+JSON
+printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"idle"}]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+mv "$FINDINGS" "$FINDINGS.bak"
+$CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -qx 'unverifiable-evidence PROJ-1 review'
+mv "$FINDINGS.bak" "$FINDINGS"
+! $CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'unverifiable-evidence'
+SH
+
+check "plan_record_matches: identity only, independent of artifacts" <<PY
+$LOAD
+task = {"task_id": "PROJ-1", "base_sha": "b" * 40, "workers": []}
+done = {"task_id": "PROJ-1", "phase": "plan", "outcome": "completed",
+        "head_sha": "h" * 40, "base_sha": "b" * 40}
+c.attempt_matches = lambda *a, **k: True
+assert c.plan_record_matches(task, done, "h" * 40, "w1")
+assert not c.plan_record_matches(task, dict(done, outcome="failed"), "h" * 40, "w1")
+PY
+
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
 $LOAD
 s = open("claude/skills/herdr-orchestration/SKILL.md").read()
