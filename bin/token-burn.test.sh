@@ -62,6 +62,15 @@ section() {
     '
 }
 
+# Extracts a "label:   VALUE" field's value from a line, independent of
+# column-width padding, so numeric assertions do not depend on hardcoded
+# whitespace counts.
+field_value() {
+    line="$1"
+    label="$2"
+    printf '%s\n' "$line" | grep -oE "${label}:[[:space:]]*[A-Za-z0-9,]+" | head -1 | sed -E "s/^${label}:[[:space:]]*//"
+}
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -98,12 +107,13 @@ cat > "$WORK/claude_home/projects/proj2/session2.jsonl" <<EOF
 EOF
 
 # Claude project 2, session with duplicated content-block lines: same
-# message id/requestId repeated three times with the same usage, as Claude
-# Code writes one line per content block. Must be counted once, not 3x.
+# message id/requestId repeated, as Claude Code writes one line per content
+# block. The first line carries a provisional in-progress output_tokens
+# count; the last line carries the true final count. Must keep the LAST
+# line's value (341), not the first (3) and not the sum.
 cat > "$WORK/claude_home/projects/proj2/session_dup.jsonl" <<EOF
-{"type":"message","sessionId":"sess-dup","requestId":"req-dup","timestamp":"${TODAY}T14:00:00Z","message":{"id":"msg-dup","model":"claude-fable-5-1","usage":{"input_tokens":9,"output_tokens":9000,"cache_creation_input_tokens":9,"cache_read_input_tokens":9}}}
-{"type":"message","sessionId":"sess-dup","requestId":"req-dup","timestamp":"${TODAY}T14:00:00Z","message":{"id":"msg-dup","model":"claude-fable-5-1","usage":{"input_tokens":9,"output_tokens":9000,"cache_creation_input_tokens":9,"cache_read_input_tokens":9}}}
-{"type":"message","sessionId":"sess-dup","requestId":"req-dup","timestamp":"${TODAY}T14:00:00Z","message":{"id":"msg-dup","model":"claude-fable-5-1","usage":{"input_tokens":9,"output_tokens":9000,"cache_creation_input_tokens":9,"cache_read_input_tokens":9}}}
+{"type":"message","sessionId":"sess-dup","requestId":"req-dup","timestamp":"${TODAY}T14:00:00Z","message":{"id":"msg-dup","model":"claude-fable-5-1","usage":{"input_tokens":9,"output_tokens":3,"cache_creation_input_tokens":9,"cache_read_input_tokens":9}}}
+{"type":"message","sessionId":"sess-dup","requestId":"req-dup","timestamp":"${TODAY}T14:00:00Z","message":{"id":"msg-dup","model":"claude-fable-5-1","usage":{"input_tokens":9,"output_tokens":341,"cache_creation_input_tokens":9,"cache_read_input_tokens":9}}}
 EOF
 
 # Malformed lines (should be skipped with a warning, not crash): plain
@@ -150,8 +160,58 @@ cat > "$CODEX_ZEROWRITE_FILE" <<EOF
 {"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":50,"cache_write_input_tokens":0,"output_tokens":75,"reasoning_output_tokens":10,"total_tokens":275},"last_token_usage":{"input_tokens":200,"cached_input_tokens":50,"cache_write_input_tokens":0,"output_tokens":75,"reasoning_output_tokens":10,"total_tokens":275}}}}
 EOF
 
+# Codex session with a re-emitted token_count event: a second event whose
+# cumulative total_token_usage (and last_token_usage) exactly repeats the
+# previous event's, as Codex does for a rate-limit-only update. Must be
+# counted once (output 200), not twice (400).
+mkdir -p "$WORK/codex_home/sessions/2026/09/19"
+CODEX_REEMIT_FILE="$WORK/codex_home/sessions/2026/09/19/rollout-2026-09-19T08-00-00-01a0R-codex-reemit.jsonl"
+cat > "$CODEX_REEMIT_FILE" <<EOF
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0R-codex-reemit","cwd":"/repo"}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"reasoning_output_tokens":30,"total_tokens":700},"last_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"reasoning_output_tokens":30,"total_tokens":700}}}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":5,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"reasoning_output_tokens":30,"total_tokens":700},"last_token_usage":{"input_tokens":500,"cached_input_tokens":100,"cache_write_input_tokens":20,"output_tokens":200,"reasoning_output_tokens":30,"total_tokens":700}}}}
+EOF
+
+# Codex session with a legitimate rate-limit-only event: info:null alongside
+# a populated rate_limits payload. Must be skipped silently (no "malformed
+# line" warning), unlike a genuinely malformed info:null with no rate_limits.
+mkdir -p "$WORK/codex_home/archived_sessions"
+CODEX_RATELIMIT_FILE="$WORK/codex_home/archived_sessions/rollout-2026-09-15T07-00-00-01a0L-codex-ratelimit.jsonl"
+cat > "$CODEX_RATELIMIT_FILE" <<EOF
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0L-codex-ratelimit","cwd":"/repo"}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":1,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":50.0}}}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":40,"cached_input_tokens":5,"cache_write_input_tokens":3,"output_tokens":15,"total_tokens":60},"last_token_usage":{"input_tokens":40,"cached_input_tokens":5,"cache_write_input_tokens":3,"output_tokens":15,"total_tokens":60}}}}
+EOF
+
+# Claude leaf-shape malformed values (still-open V-4-residual): a null or
+# string token count, a null sessionId, and a non-string model each used to
+# abort the whole run with an uncaught TypeError outside the per-line
+# try/except. Each must now warn and be skipped instead. A shared, otherwise
+# unused model name isolates the surviving rows' totals from every other
+# fixture.
+cat > "$WORK/claude_home/projects/proj1/leaf_malformed.jsonl" <<EOF
+{"type":"message","sessionId":"sess-leaf-null-input","requestId":"req-leaf-a","timestamp":"${TODAY}T16:00:00Z","message":{"id":"msg-leaf-a","model":"claude-leaftest-1","usage":{"input_tokens":null,"output_tokens":10,"cache_creation_input_tokens":10,"cache_read_input_tokens":10}}}
+{"type":"message","sessionId":"sess-leaf-string-input","requestId":"req-leaf-b","timestamp":"${TODAY}T16:05:00Z","message":{"id":"msg-leaf-b","model":"claude-leaftest-1","usage":{"input_tokens":"10","output_tokens":10,"cache_creation_input_tokens":10,"cache_read_input_tokens":10}}}
+{"type":"message","sessionId":null,"requestId":"req-leaf-c","timestamp":"${TODAY}T16:10:00Z","message":{"id":"msg-leaf-c","model":"claude-leaftest-1","usage":{"input_tokens":5,"output_tokens":5,"cache_creation_input_tokens":5,"cache_read_input_tokens":5}}}
+{"type":"message","sessionId":"sess-leaf-list-model","requestId":"req-leaf-d","timestamp":"${TODAY}T16:15:00Z","message":{"id":"msg-leaf-d","model":[],"usage":{"input_tokens":5,"output_tokens":5,"cache_creation_input_tokens":5,"cache_read_input_tokens":5}}}
+{"type":"message","sessionId":"sess-leaf-ok","requestId":"req-leaf-ok","timestamp":"${TODAY}T16:20:00Z","message":{"id":"msg-leaf-ok","model":"claude-leaftest-1","usage":{"input_tokens":5,"output_tokens":5,"cache_creation_input_tokens":5,"cache_read_input_tokens":5}}}
+EOF
+
+# Codex leaf-shape malformed value: output_tokens as a string instead of a
+# number.
+mkdir -p "$WORK/codex_home/sessions/2026/09/20"
+CODEX_LEAF_FILE="$WORK/codex_home/sessions/2026/09/20/rollout-2026-09-20T06-00-00-01a0X-codex-leaf.jsonl"
+cat > "$CODEX_LEAF_FILE" <<EOF
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0X-codex-leaf","cwd":"/repo"}}
+{"timestamp":"${CODEX_TODAY_TS}","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":1,"output_tokens":"2","total_tokens":13},"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":1,"output_tokens":"2","total_tokens":13}}}}
+EOF
+
+set +e
 output=$(env CLAUDE_CONFIG_DIR="$WORK/claude_home" CODEX_HOME="$WORK/codex_home" \
     "$REPO/bin/token-burn" --since 7d 2>&1)
+main_status=$?
+set -e
+assert_eq "main run exits 0 despite leaf-malformed input" "$main_status" "0"
 
 # Check that models are present in output
 assert_contains "haiku in grand total" "$output" "Grand Total by Model"
@@ -192,11 +252,35 @@ assert_not_contains "codex present-but-zero session absent from ranked section" 
 codex_file_malformed_count=$(printf '%s\n' "$output" | grep "malformed line" | grep -c "codex-unknown.jsonl" || true)
 assert_eq "codex-unknown file has exactly 2 malformed-line warnings" "$codex_file_malformed_count" "2"
 
-# V-2: the duplicated content-block lines must be counted once, not three
-# times, for both the model total and the session total.
-assert_contains "fable model total counts dup message once" "$output" "output:       9,300"
+# V-2/R-1: the duplicated content-block lines must be counted once, keeping
+# the LAST line's value (341, the true final count), not the first
+# (provisional, 3) and not the sum of both.
 dup_session_line=$(printf '%s\n' "$output" | grep "sess-dup" | head -1)
-assert_contains "dup session output counted once" "$dup_session_line" "output:     9,000"
+assert_eq "dup session output keeps last line, not first or sum" "$(field_value "$dup_session_line" "output")" "341"
+
+# R-2: a Codex event that re-emits the previous event's cumulative total
+# (a rate-limit-only update) must be counted once, not twice.
+reemit_line=$(printf '%s\n' "$output" | grep "01a0R-co" | head -1)
+assert_eq "codex re-emitted event counted once, not twice" "$(field_value "$reemit_line" "output")" "200"
+
+# R-3: a legitimate rate-limit-only event (info:null with a populated
+# rate_limits payload) must not be reported as a malformed line, unlike a
+# genuinely malformed info:null.
+assert_not_contains "no false-positive warning on rate-limit-only event" "$output" "codex-ratelimit.jsonl"
+ratelimit_line=$(printf '%s\n' "$output" | grep "01a0L-co" | head -1)
+assert_eq "codex rate-limit-only session still counts its real event" "$(field_value "$ratelimit_line" "output")" "15"
+
+# V-4-residual: leaf-level malformed values (null/string token counts, a
+# null sessionId, a non-string model) must warn and be skipped, never crash
+# aggregation or rendering outside the per-line try/except. Only the one
+# well-formed leaf_malformed.jsonl line should survive, under the shared
+# isolating model name.
+leaftest_section=$(section "$output" "Grand Total by Model")
+leaftest_line=$(printf '%s\n' "$leaftest_section" | grep "claude-leaftest-1" | head -1)
+assert_eq "leaf-malformed lines excluded, only the valid row counted" "$(field_value "$leaftest_line" "output")" "5"
+leaf_malformed_count=$(printf '%s\n' "$output" | grep "malformed line" | grep -c "leaf_malformed.jsonl" || true)
+assert_eq "leaf_malformed.jsonl has exactly 4 malformed-line warnings" "$leaf_malformed_count" "4"
+assert_contains "stderr warning on codex leaf-malformed output_tokens" "$output" "codex-leaf.jsonl"
 
 # V-4: malformed input (JSON null, message:null, invalid UTF-8, a Codex JSON
 # array line, Codex info:null) must warn and continue, never raise.

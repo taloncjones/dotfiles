@@ -94,9 +94,29 @@ def _iter_regular_jsonl_files(root):
         yield jsonl_file
 
 
+def _require_leaf_number(container, field):
+    """Raise if field is present in container but not a real number (catches
+    null/string leaf values that would otherwise crash arithmetic or
+    formatting downstream, outside any per-line try/except)."""
+    if field in container:
+        value = container[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{field} is not a number: {value!r}")
+
+
+def _require_leaf_string(container, field):
+    """Raise if field is present in container but not a string (catches a
+    null or wrong-type value that would otherwise crash slicing/formatting
+    downstream, outside any per-line try/except)."""
+    if field in container:
+        value = container[field]
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{field} is not a string: {value!r}")
+
+
 def read_claude_jsonl(config_dir):
     results = []
-    seen_message_keys = set()
+    seen_message_keys = {}
     projects_path = Path(config_dir) / "projects"
     if not projects_path.exists():
         return results
@@ -120,6 +140,21 @@ def read_claude_jsonl(config_dir):
                         usage = message["usage"]
                         if not isinstance(usage, dict):
                             raise ValueError("usage field is not an object")
+                        for field in (
+                            "input_tokens",
+                            "output_tokens",
+                            "cache_creation_input_tokens",
+                            "cache_read_input_tokens",
+                        ):
+                            _require_leaf_number(usage, field)
+                        # A present-but-null sessionId is malformed, not a
+                        # legitimate "no session" case -- skip the record
+                        # rather than defaulting it, so a garbled session id
+                        # is never silently folded into the "unknown" bucket.
+                        if "sessionId" in obj and obj["sessionId"] is None:
+                            raise ValueError("sessionId is null")
+                        _require_leaf_string(obj, "sessionId")
+                        _require_leaf_string(message, "model")
 
                         ts = obj.get("timestamp")
                         day = parse_timestamp(ts)
@@ -132,19 +167,8 @@ def read_claude_jsonl(config_dir):
                                 )
                             continue
 
-                        # Claude Code writes one transcript line per content
-                        # block, repeating the same message.usage value on
-                        # each line -- dedupe by (message id, request id) so
-                        # a message's usage is counted exactly once.
-                        dedup_key = (message.get("id"), obj.get("requestId"))
-                        if dedup_key == (None, None):
-                            dedup_key = ("line", str(jsonl_file), line_no)
-                        if dedup_key in seen_message_keys:
-                            continue
-                        seen_message_keys.add(dedup_key)
-
-                        model = message.get("model", "unknown")
-                        session_id = obj.get("sessionId", "unknown")
+                        model = message.get("model") or "unknown"
+                        session_id = obj.get("sessionId") or "unknown"
                         project_name = jsonl_file.parent.name
 
                         tokens = TokenCount(
@@ -158,9 +182,21 @@ def read_claude_jsonl(config_dir):
                             ),
                         )
 
-                        results.append(
-                            SessionStat(model, session_id, project_name, str(day), tokens)
-                        )
+                        # Claude Code writes one transcript line per content
+                        # block, repeating the same message.usage value on
+                        # each line, with the true final usage landing on the
+                        # last line for a given key -- an earlier line's
+                        # output_tokens is only a provisional in-progress
+                        # count. Keep the last line seen per key.
+                        dedup_key = (message.get("id"), obj.get("requestId"))
+                        if dedup_key == (None, None):
+                            dedup_key = ("line", str(jsonl_file), line_no)
+                        stat = SessionStat(model, session_id, project_name, str(day), tokens)
+                        if dedup_key in seen_message_keys:
+                            results[seen_message_keys[dedup_key]] = stat
+                        else:
+                            seen_message_keys[dedup_key] = len(results)
+                            results.append(stat)
                     except (json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as e:
                         print(
                             f"token-burn: warning: malformed line {line_no} in {jsonl_file}: {e}",
@@ -187,6 +223,11 @@ def read_codex_jsonl(codex_home):
 
         for jsonl_file in _iter_regular_jsonl_files(root):
             session_id = _codex_session_id(jsonl_file)
+            # Tracks the previous event's cumulative total_token_usage for
+            # this session so a re-emitted event (e.g. a rate-limit-only
+            # update) that repeats it can be skipped instead of double
+            # counted via last_token_usage.
+            prev_total_usage = None
             try:
                 with open(jsonl_file, "r", errors="replace") as f:
                     for line_no, line in enumerate(f, 1):
@@ -203,6 +244,12 @@ def read_codex_jsonl(codex_home):
 
                             info = payload.get("info")
                             if not isinstance(info, dict):
+                                # A legitimate rate-limit-only event carries
+                                # info:null alongside a populated rate_limits
+                                # payload -- not malformed, just nothing to
+                                # count.
+                                if info is None and isinstance(payload.get("rate_limits"), dict):
+                                    continue
                                 raise ValueError("token_count event has no usable info")
 
                             # last_token_usage is the delta since the previous
@@ -213,6 +260,23 @@ def read_codex_jsonl(codex_home):
                             last = info.get("last_token_usage")
                             if not isinstance(last, dict):
                                 raise ValueError("token_count event has no usable last_token_usage")
+                            for field in (
+                                "input_tokens",
+                                "output_tokens",
+                                "cached_input_tokens",
+                                "cache_write_input_tokens",
+                            ):
+                                _require_leaf_number(last, field)
+
+                            # Codex sometimes re-emits a token_count event
+                            # whose cumulative total is unchanged from the
+                            # previous one; summing last_token_usage for it
+                            # would double count that delta.
+                            total_usage = info.get("total_token_usage")
+                            if isinstance(total_usage, dict):
+                                if total_usage == prev_total_usage:
+                                    continue
+                                prev_total_usage = total_usage
 
                             ts_str = obj.get("timestamp")
                             day = parse_timestamp(ts_str)
