@@ -52,5 +52,12 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertNotIn("first-three", policy)
 
 
+class ShipSkillText(unittest.TestCase):
+    def test_ship_has_the_audit_comment_step(self):
+        for needle in ("audit-comment", "co-review-audit head=", "--paginate",
+                       "gh pr comment", "self-classifies", "--full"):
+            self.assertIn(needle, SHIP)
+
+
 if __name__ == "__main__":
     unittest.main()
