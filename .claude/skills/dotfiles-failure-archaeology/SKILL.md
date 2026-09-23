@@ -5,6 +5,8 @@ description: Chronicle of every settled investigation, dead end, and revert in t
 
 # Dotfiles Failure Archaeology
 
+ECC was retired on 2026-09-22; entries below are history.
+
 Append-only memory of settled battles in github.com/taloncjones/dotfiles.
 Each saga records symptom -> root cause -> evidence -> resolution -> status, so
 a zero-context engineer or model never re-fights a fight that already has a

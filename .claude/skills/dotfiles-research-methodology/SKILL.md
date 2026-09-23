@@ -49,17 +49,17 @@ candidate, not a finding.
 
 Observations, all from real cloud sessions:
 
-| #   | Observation                                          | Polarity                   |
-| --- | ---------------------------------------------------- | -------------------------- |
-| 1   | Superpowers plugin missing after first cloud session | failure                    |
-| 2   | ECC plugin installed fine in the same run            | negative (did NOT fail)    |
-| 3   | `claude plugins install` exited 0                    | negative (no error signal) |
-| 4   | Resumed sessions installed superpowers successfully  | negative (worked later)    |
+| #   | Observation                                                 | Polarity                   |
+| --- | ----------------------------------------------------------- | -------------------------- |
+| 1   | Superpowers plugin missing after first cloud session        | failure                    |
+| 2   | ECC plugin (retired 2026-09) installed fine in the same run | negative (did NOT fail)    |
+| 3   | `claude plugins install` exited 0                           | negative (no error signal) |
+| 4   | Resumed sessions installed superpowers successfully         | negative (worked later)    |
 
 Rejected candidates and why:
 
-- "Flaky network" -- explains 1, not 2 (same network installed ECC) and not 4's
-  consistency.
+- "Flaky network" -- explains 1, not 2 (same network installed the retired ECC)
+  and not 4's consistency.
 - "Bad plugin id / typo" -- explains 1, contradicts 4 (same id worked on resume).
 - "Installer bug" -- explains nothing about 2 or 4.
 
@@ -67,8 +67,8 @@ Winning mechanism: **async marketplace fetch race**. The github-backed official
 marketplace is registered at launch but its first manifest fetch is
 asynchronous; on a cold container `plugins install` resolves against an empty
 manifest and no-ops with exit 0. This explains all four rows: (1) superpowers
-lives in the async marketplace; (2) ECC's plain-git marketplace clones
-synchronously, so it won the race; (3) "plugin not listed" resolves to
+lives in the async marketplace; (2) the retired ECC's plain-git marketplace
+clones synchronously, so it won the race; (3) "plugin not listed" resolves to
 "nothing to do", which is exit 0; (4) by resume time the cache had warmed.
 The mechanism and each observation are written into the `ensure_plugin`
 comment block in bootstrap-cloud.sh -- read it as the house-style reference

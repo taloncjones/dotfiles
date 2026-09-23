@@ -1,7 +1,4 @@
-# ECC rules vendoring is RETIRED (2026-07-02): the full upstream rules tree
-# ships inside the ECC marketplace clone
-# (~/.claude/plugins/marketplaces/ecc/rules/) wherever the plugin is installed,
-# so local copies bought sync code and churn for nothing.
+# ECC rules vendoring is RETIRED (2026-07-02) and ECC itself is retired (2026-09).
 #
 # Claude Code natively auto-loads every .md under ~/.claude/rules at launch
 # (verified live in a cloud session, 2026-07-02): a `paths:` frontmatter scopes

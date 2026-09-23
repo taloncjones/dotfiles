@@ -15,8 +15,8 @@ Rule one: always edit the REPO file, never the live symlinked copy under
 ## Warnings first
 
 - [WARNING] `codex/AGENTS.md` is repo-owned policy. Native plugins own
-  upstream guidance. The copied ECC instruction block and global sync wrapper
-  are retired; never regenerate them.
+  upstream guidance. The copied ECC (retired) instruction block and global
+  sync wrapper are retired; never regenerate them.
 - [WARNING] `claude/CLAUDE.md` is symlinked to `~/.claude/CLAUDE.md` and
   `~/.claude-work/CLAUDE.md` and loads in EVERY session in EVERY repo. A bad
   edit propagates globally on the next session start. The
@@ -53,12 +53,11 @@ updated when it changes.
 | `CLAUDE.md` (repo root)          | Claude-session guidance for THIS repo: architecture, symlink targets, cloud restore mechanics, plugin model, commit format                     | The doc Claude reads first; keep terse, keep the symlink-targets list authoritative             |
 | `claude/CLAUDE.md`               | Global cross-repo rules: strict rules, response style, commit/branch/Jira conventions, skill routing, plan-mode rules                          | Symlinked to `~/.claude*/CLAUDE.md`; edit the repo file only                                    |
 | `claude/operating-principles.md` | Model-agnostic engineering discipline (verify-before-claim, scope/safety, judgment, comms)                                                     | `@import`ed by the last line of `claude/CLAUDE.md`; also symlinked into both config dirs        |
-| `codex/AGENTS.md`                | Codex global policy and runtime skill routing                                                                 | Edit owned policy; native plugins supply upstream guidance               |
-| `NOTICE`                         | Third-party attribution: ECC rules + pre-commit/pre-push hooks, GSD-redux-derived statusline; MIT notices                                      | Add an entry (paths, upstream URL, license, copyright) whenever anything is vendored or adapted |
+| `codex/AGENTS.md`                | Codex global policy and runtime skill routing                                                                                                  | Edit owned policy; native plugins supply upstream guidance                                      |
+| `NOTICE`                         | Third-party attribution: retired ECC rules + pre-commit/pre-push hooks, GSD-redux-derived statusline; MIT notices                              | Add an entry (paths, upstream URL, license, copyright) whenever anything is vendored or adapted |
 
-Jargon, defined once: "ECC" = Everything Claude Code, a third-party Claude Code
-plugin (github.com/affaan-m/ECC). "GSD" = Get Shit Done, a retired third-party
-tool whose statusline this repo ported (see NOTICE).
+Jargon, defined once: "ECC" = Everything Claude Code, a retired (2026-09) third-party Claude Code plugin (github.com/affaan-m/ECC).
+"GSD" = Get Shit Done, a retired third-party tool whose statusline this repo ported (see NOTICE).
 
 ## House writing style (hook-enforced)
 
@@ -132,17 +131,17 @@ editing them, not in bulk.
 
 Run this after ANY surface change. Each row is a required same-PR update.
 
-| You changed                                                | You must also update                                                                                                                                                                                                                             |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Added/renamed/removed a command in `claude/commands/`      | README Commands list (under "Claude Code Configuration")                                                                                                                                                                                         |
-| Added a skill under `claude/skills/`                       | README Skills catalog; `!/<skill-dir>/` line in `claude/skills/.gitignore` (dir is otherwise gitignored -- verify with `git ls-files claude/skills/<name>`)                                                                                      |
-| Added/changed a Claude hook                                | README Hooks list; registration in `claude/settings.json.tmpl`; expectations in `claude/hooks/claude-hooks.test.sh`; the registration table in claude-code-platform-reference (single home -- change-control and debugging-playbook point to it) |
-| Added a test suite (`*.test.sh` or a skill test)           | `SUITES` list in `bin/dotfiles-tests` -- CI runs only the runner, so an unlisted suite NEVER runs in CI (`.github/workflows/tests.yml`)                                                                                                          |
-| Added a symlink target                                     | Repo `CLAUDE.md` "Symlink targets" list; README Directory Structure; the relevant link script                                                                                                                                                    |
-| Changed `claude/settings.json.tmpl`                        | Announce the manual-merge need in the PR body -- machines seed once and never re-read the template; only cloud reconciles automatically (`bootstrap-cloud.sh` `reconcile_claude_settings`)                                                       |
-| Vendored or adapted third-party content                    | `NOTICE` entry: paths, upstream URL, license, copyright                                                                                                                                                                                          |
-| Changed cloud restore mechanics                            | Repo `CLAUDE.md` "Cloud sessions" section (the doc of record for that flow)                                                                                                                                                                      |
-| Changed a global behavior rule                             | `claude/CLAUDE.md` (repo file) -- and expect it to reach every session in every repo                                                                                                                                                             |
+| You changed                                           | You must also update                                                                                                                                                                                                                             |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Added/renamed/removed a command in `claude/commands/` | README Commands list (under "Claude Code Configuration")                                                                                                                                                                                         |
+| Added a skill under `claude/skills/`                  | README Skills catalog; `!/<skill-dir>/` line in `claude/skills/.gitignore` (dir is otherwise gitignored -- verify with `git ls-files claude/skills/<name>`)                                                                                      |
+| Added/changed a Claude hook                           | README Hooks list; registration in `claude/settings.json.tmpl`; expectations in `claude/hooks/claude-hooks.test.sh`; the registration table in claude-code-platform-reference (single home -- change-control and debugging-playbook point to it) |
+| Added a test suite (`*.test.sh` or a skill test)      | `SUITES` list in `bin/dotfiles-tests` -- CI runs only the runner, so an unlisted suite NEVER runs in CI (`.github/workflows/tests.yml`)                                                                                                          |
+| Added a symlink target                                | Repo `CLAUDE.md` "Symlink targets" list; README Directory Structure; the relevant link script                                                                                                                                                    |
+| Changed `claude/settings.json.tmpl`                   | Announce the manual-merge need in the PR body -- machines seed once and never re-read the template; only cloud reconciles automatically (`bootstrap-cloud.sh` `reconcile_claude_settings`)                                                       |
+| Vendored or adapted third-party content               | `NOTICE` entry: paths, upstream URL, license, copyright                                                                                                                                                                                          |
+| Changed cloud restore mechanics                       | Repo `CLAUDE.md` "Cloud sessions" section (the doc of record for that flow)                                                                                                                                                                      |
+| Changed a global behavior rule                        | `claude/CLAUDE.md` (repo file) -- and expect it to reach every session in every repo                                                                                                                                                             |
 
 Quick audit commands:
 
@@ -164,8 +163,9 @@ grep -rl 'passed, .* failed' "$HOME/dotfiles" --include='*.sh'   #   (runner's o
    supply-chain history: the ORIGINAL `get-shit-done-cc` npm package is
    compromised (token rug-pull, publish access retained) and must never be
    reinstalled; the redux fork is retired as well.
-2. ECC copied instruction block -- CLOSED. Native plugins now own upstream
-   guidance; repo-owned global policy remains concise and independently managed.
+2. ECC (retired 2026-09) copied instruction block -- CLOSED. Native plugins
+   now own upstream guidance; repo-owned global policy remains concise and
+   independently managed.
 3. `templates/` (added 8ae7009; contains `templates/python/pyproject.toml`)
    is missing from the README Directory Structure tree.
 4. README.md:13 claims a "CLAUDE.md template system" -- CANDIDATE stale:

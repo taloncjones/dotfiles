@@ -74,10 +74,8 @@ assert "Codex AGENTS defaults implementation work to worktrees" \
     rg -q '## Worktree Default' codex/AGENTS.md
 assert "Codex AGENTS defines default skill routing" \
     rg -q '## Default Skill Routing' codex/AGENTS.md
-assert "Codex AGENTS routes security and deployment skills by default" \
-    sh -c "rg -q 'ecc:security-review' codex/AGENTS.md && rg -q 'ecc:deployment-patterns' codex/AGENTS.md"
-assert "Codex AGENTS uses plugin-qualified ECC skills" \
-    sh -c "rg -q 'ecc:tdd-workflow' codex/AGENTS.md && rg -q 'ecc:workspace-surface-audit' codex/AGENTS.md"
+assert "Codex AGENTS no longer routes to retired ECC skills" \
+    sh -c "! rg -q 'ecc:' codex/AGENTS.md"
 assert "Codex AGENTS keeps project-specific product names out of global defaults" \
     sh -c "! rg -q 'Peru BESS|TimescaleDB|edge/cloud/simulator|dashboard/UI' codex/AGENTS.md claude/CLAUDE.md"
 
