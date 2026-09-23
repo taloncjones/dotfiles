@@ -42,13 +42,21 @@ _SEVERITIES = {"critical", "high", "major", "minor", "low", "nit", "advisory"}
 _MATERIAL = {"critical", "high", "major"}
 
 
-def _load_preconditions():
+def _load_sibling(name: str):
     spec = importlib.util.spec_from_file_location(
-        "co_review_preconditions", Path(__file__).with_name("preconditions.py")
+        f"co_review_{name}", Path(__file__).with_name(f"{name}.py")
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_preconditions():
+    return _load_sibling("preconditions")
+
+
+def _load_change_class():
+    return _load_sibling("change_class")
 
 
 def _nonempty(value: object) -> bool:
@@ -334,9 +342,21 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("schema")
     policy_parser = sub.add_parser("policy")
     policy_parser.add_argument("--section", required=True)
+    classify_parser = sub.add_parser("classify")
+    classify_parser.add_argument("--diff", required=True)
     args = parser.parse_args(argv)
     if args.command == "schema":
         print(json.dumps(schema(), sort_keys=True))
+        return 0
+    if args.command == "classify":
+        try:
+            text = Path(args.diff).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            print(json.dumps({"error": str(error)}))
+            return 1
+        change_class = _load_change_class()
+        paths = change_class.paths_from_diff(text)
+        print(change_class.classify(paths or []))
         return 0
     if args.command == "policy":
         try:
