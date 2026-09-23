@@ -29,14 +29,30 @@ Protected prefixes are relative to `git rev-parse --show-toplevel`:
 docs/specs/, docs/plans/, docs/superpowers/, .planning/, claude/contracts/.
 
 Allowed: a repository whose top level is under $TMPDIR or /tmp and not
-under HOME (test fixtures); `DOTFILES_ALLOW_PLAN_ARTIFACTS=1` as a leading
-env assignment on the segment; every other git subcommand.
+under HOME, AND whose resolved `--git-common-dir` is also under a temp
+root (test fixtures; a linked worktree of a real HOME repository checked
+out under /tmp is not exempt, matching git_remote_guard's fixture_dir);
+`DOTFILES_ALLOW_PLAN_ARTIFACTS=1` as a leading env assignment on the
+segment; every other git subcommand.
+
+Protected-prefix matching folds case, since a case-insensitive filesystem
+(the macOS/Windows default) resolves `Docs/Specs/x.md` to the same file as
+`docs/specs/x.md` regardless of the casing a command spells out. A
+pathspec containing `$` or backtick (a shell variable or command
+substitution) cannot be resolved to a real path or trusted as a literal
+prefix string, so it forces a whole-tree status scan instead of the
+normal pathspec-scoped one. `pushd <dir>` moves the shell like `cd`; a
+bare `pushd`, `pushd +N/-N`, or `popd` swaps within a directory stack this
+guard does not model, so those fall back the same way a non-literal `cd`
+does (the scan runs against the payload cwd).
 
 Git calls share one 10-second budget; a failed or timed-out call yields no
 decision for that scan. Accepted holes: aliases, scripts, eval, xargs git,
 a non-literal cd before a scan (the scan runs against the payload cwd),
 `--git-dir`/`--work-tree` forms (no decision), --amend hiding a path
-introduced before HEAD, and commits made outside a Claude or Codex session.
+introduced before HEAD, non-add/commit staging verbs (`git mv`,
+`git update-index --add`, `git checkout --`), and commits made outside a
+Claude or Codex session.
 Reuses rm_guard's tokenizer and git_remote_guard's cwd-set primitives;
 fails open on any exception.
 """
@@ -124,9 +140,14 @@ def toplevel(d, ctx):
 
 
 def protected_hit(rel):
-    """The protected prefix a top-level-relative path sits under, or None."""
+    """The protected prefix a top-level-relative path sits under, or None.
+
+    Folds case: a case-insensitive filesystem (the macOS/Windows default)
+    resolves `Docs/Specs/x.md` to the same file as `docs/specs/x.md`, and
+    `os.path.realpath` never fixes up the casing a command spelled out."""
+    low = rel.lower()
     for prefix in PROTECTED:
-        if rel == prefix.rstrip("/") or rel.startswith(prefix):
+        if low == prefix.rstrip("/").lower() or low.startswith(prefix.lower()):
             return prefix
     return None
 
@@ -142,18 +163,25 @@ def needs_scan(rel):
             break
     if head in ("", "."):
         return True
-    return any(p.startswith(head + "/") for p in PROTECTED)
+    head_low = (head + "/").lower()
+    return any(p.lower().startswith(head_low) for p in PROTECTED)
 
 
 def classify(pathspec, d, top, home):
-    """('deny', prefix, rel) | ('scan', rel) | ('skip',).
+    """('deny', prefix, rel) | ('scan', rel-or-None) | ('skip',). A `rel` of
+    None on a 'scan' verdict means the pathspec cannot be turned into a git
+    pathspec filter at all; the caller must scan the whole tree.
 
     With a known top level and a literal pathspec the path is resolved from
     `d` with filesystem semantics (`top` is a real path, so the join must be
     too, or a symlinked /tmp or checkout would hide every hit); when the
     path cannot be placed under `top`, the pathspec string itself is read as
     top-level-relative, so a `cd "$var"` or a failed git call cannot hide
-    `docs/specs/x.md` either."""
+    `docs/specs/x.md` either. An unresolvable pathspec (one holding a shell
+    variable or command substitution, with a known cwd) is the one case
+    that string is neither a filesystem path nor a trustworthy prefix
+    string, so the ancestor-string match is skipped in favor of a full
+    scan."""
     spec = pathspec[2:] if pathspec.startswith("./") and len(pathspec) > 2 else pathspec
     if spec.startswith(":"):
         # Git pathspec magic (":/...", ":(top)...", ":^...") resolves under
@@ -162,13 +190,16 @@ def classify(pathspec, d, top, home):
         # the magic instead of risking a silent false "skip".
         return ("scan", spec)
     rel = None
-    if top is not None and d is not None and grg.literal(spec):
+    literal_spec = grg.literal(spec)
+    if top is not None and d is not None and literal_spec:
         abs_path = grg.resolve_filesystem(spec, d, home)
         if abs_path == top:
             rel = "."
         elif abs_path.startswith(top + "/"):
             rel = abs_path[len(top) + 1 :]
     if rel is None:
+        if top is not None and d is not None and not literal_spec and ("$" in spec or "`" in spec):
+            return ("scan", None)
         rel = os.path.normpath(spec) if spec else "."
         if rel.startswith("/") or rel == ".." or rel.startswith("../"):
             return ("skip",)
@@ -297,7 +328,11 @@ def diff_hits(args, d, ctx):
 
 
 def exempt(top, ctx):
-    return top is not None and grg.under_root(top, ctx["roots"], ctx["home_real"]) is not None
+    """True when `top` is a fixture repository: under a temp root, not under
+    HOME, AND its resolved --git-common-dir is also under a temp root. A
+    linked worktree of a real HOME repository checked out under /tmp fails
+    the last check, matching git_remote_guard's fixture_dir."""
+    return top is not None and grg.fixture_dir(top, ctx["roots"], ctx["home_real"]) is None
 
 
 def check_add(args, dirs, ctx):
@@ -307,17 +342,26 @@ def check_add(args, dirs, ctx):
         if exempt(top, ctx):
             continue
         to_scan = []
+        unresolved = False
         for spec in specs:
             verdict = classify(spec, d, top, ctx["home"])
             if verdict[0] == "deny":
                 return f"git add of {verdict[2]} stages a private planning artifact ({verdict[1]})"
             if verdict[0] == "scan":
-                to_scan.append(spec)
-        if top is None or not (scan_all or update or to_scan):
+                if verdict[1] is None:
+                    unresolved = True
+                else:
+                    to_scan.append(spec)
+        if top is None or not (scan_all or update or to_scan or unresolved):
             continue
         # Keep git's own pathspec limiter: `git add -A README.md` scans
-        # README.md only, never the whole tree.
-        hits = status_hits(d, to_scan or specs, ctx, untracked=not update, ignored=force)
+        # README.md only, never the whole tree. An unresolved pathspec (a
+        # shell variable or command substitution) cannot narrow the scan at
+        # all, so it forces the unscoped whole-tree form.
+        hits = status_hits(
+            d, [] if unresolved else (to_scan or specs), ctx,
+            untracked=not update, ignored=force,
+        )
         if hits:
             return f"git add would stage a private planning artifact ({hits[0]})"
     return None
@@ -348,14 +392,18 @@ def check_commit(args, dirs, ctx):
             if hits:
                 return f"git commit would record a private planning artifact ({hits[0]})"
         to_scan = []
+        unresolved = False
         for spec in specs:
             verdict = classify(spec, d, top, ctx["home"])
             if verdict[0] == "deny":
                 return f"git commit of {verdict[2]} records a private planning artifact ({verdict[1]})"
             if verdict[0] == "scan":
-                to_scan.append(spec)
-        if to_scan:
-            hits = status_hits(d, to_scan, ctx, untracked=False, ignored=False)
+                if verdict[1] is None:
+                    unresolved = True
+                else:
+                    to_scan.append(spec)
+        if to_scan or unresolved:
+            hits = status_hits(d, [] if unresolved else to_scan, ctx, untracked=False, ignored=False)
             if hits:
                 return f"git commit would record a private planning artifact ({hits[0]})"
     return None
@@ -393,14 +441,25 @@ def check_command(command, ctx, start=None):
         stripped = rm_guard.strip_prefixes(raw)
         overridden = OVERRIDE in raw[: len(raw) - len(stripped)]
         head = rm_guard.basename(stripped[0]) if stripped else ""
-        if head == "cd" and term not in ("|", "&"):
+        # `pushd <dir>` moves the shell exactly like `cd`; a bare `pushd`,
+        # `pushd +N`/`-N` rotation, or `popd` swaps within a directory stack
+        # this guard does not model, so those fall back the same way a
+        # non-literal cd does (grg.UNTRUSTED -> the payload cwd).
+        pushd_dir = (
+            head == "pushd"
+            and len(stripped) >= 2
+            and not stripped[1].lstrip("+-").isdigit()
+        )
+        if (head == "cd" or pushd_dir) and term not in ("|", "&"):
             targets = {
                 grg.cd_target(stripped, cwd, home) if grg.literal(cwd) else grg.UNTRUSTED
                 for cwd in possible
             }
             chain.record_cd(next(iter(targets)) if len(targets) == 1 else grg.UNTRUSTED)
+        elif head in ("pushd", "popd") and term not in ("|", "&"):
+            chain.record_cd(grg.UNTRUSTED)
         reason = None
-        if overridden or not stripped or head == "cd":
+        if overridden or not stripped or head in ("cd", "pushd", "popd"):
             pass
         elif head in rm_guard.SHELL_WRAPPERS:
             inner = rm_guard.extract_shell_c_arg(stripped)

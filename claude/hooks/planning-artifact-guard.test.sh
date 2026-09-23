@@ -78,6 +78,11 @@ seed "$X"
 mkdir -p "$X/docs/specs"
 printf 'spec\n' > "$X/docs/specs/x.md"
 
+LINKED="$T/linked"    # linked worktree of the guarded repo R, checked out under the temp root: NOT exempt (its .git lives in R, under HOME)
+g -C "$R" worktree add -q "$LINKED" -b brk1-linked main
+mkdir -p "$LINKED/docs/specs"
+printf 'spec\n' > "$LINKED/docs/specs/y.md"
+
 run_hook() {  # run_hook <payload>; stdout/stderr to $FIX/out $FIX/err; returns hook rc
     printf '%s' "$1" | env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
         HOME="$H" TMPDIR="$T" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
@@ -117,6 +122,8 @@ case_deny  "relative pathspec from a subdirectory" "$(payload "$R/docs" 'git add
 case_deny  "add of a spec path via :/ pathspec magic" "$(payload "$R" 'git add :/docs/specs/x.md')"
 case_deny  "add of a spec path via :(top) pathspec magic" "$(payload "$R" 'git add :(top)docs/specs/x.md')"
 case_deny  "git -C into the guarded repo" "$(payload "$X" "git -C $R add docs/specs/x.md")"
+case_deny  "linked worktree of a HOME repo under /tmp is not exempt" "$(payload "$LINKED" 'git add -f docs/specs/y.md')"
+case_deny  "case variant of a protected prefix" "$(payload "$R" 'git add -f Docs/Specs/y.md')"
 case_deny  "sh -c wrapper" "$(payload "$R" "sh -c \\\"git add docs/specs/x.md\\\"")"
 case_deny  "literal pathspec under a non-literal cd" "$(payload "$R" 'cd \"$wt\" && git add docs/specs/x.md')"
 case_deny  "leading env assignment other than the override" "$(payload "$R" 'GIT_TRACE=1 git add docs/specs/x.md')"
@@ -157,6 +164,10 @@ case_deny  "add -A while the untracked legacy copy is still on disk" "$(payload 
 rm -f "$LEGACY/claude/contracts/old.json"
 case_allow "add -A after the legacy contract is gone from index and disk" "$(payload "$LEGACY" 'git add -A')"
 case_allow "commit in the fixture repo" "$(payload "$X" 'git add docs/specs/x.md && git commit -m x')"
+
+# --- non-literal pathspecs and pushd tracking --------------------------------
+case_deny  "non-literal pathspec via a shell variable forces a full scan" "$(payload "$R" 'f=claude/contracts/c.json; git add -f \"$f\" && git commit -q -m leak')"
+case_deny  "pushd into a protected dir is tracked like cd" "$(payload "$R" 'pushd docs/specs && git add -f y.md')"
 
 # --- payload shapes ----------------------------------------------------------
 case_deny  "codex exec_command cmd" "{\"tool_name\":\"exec_command\",\"cwd\":\"$R\",\"tool_input\":{\"cmd\":\"git add docs/specs/x.md\"}}"
