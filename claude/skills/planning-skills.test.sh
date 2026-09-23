@@ -75,5 +75,23 @@ check "writing-specs keeps a SHA-256 revision history" \
 check "writing-specs names the spec review for both runtimes" \
     sh -c "grep -qF '\`codex-spec-review\`' '$D/writing-specs/SKILL.md' && grep -qF '\`claude-spec-review\`' '$D/writing-specs/SKILL.md'"
 
+# brainstorming
+check "brainstorming classifies spike, bounded and architectural" \
+    sh -c "grep -qF '**Spike**' '$D/brainstorming/SKILL.md' && grep -qF '**Bounded**' '$D/brainstorming/SKILL.md' && grep -qF '**Architectural**' '$D/brainstorming/SKILL.md'"
+check "brainstorming keeps the hard gate" \
+    has brainstorming '<HARD-GATE>'
+check "brainstorming states each path's approval prerequisite" \
+    sh -c "grep -qF 'Spike: the human approves the question and the probe.' '$D/brainstorming/SKILL.md' && grep -qF 'Bounded: the human approves the short in-chat design.' '$D/brainstorming/SKILL.md' && grep -qF 'Architectural: the human approves the written spec' '$D/brainstorming/SKILL.md'"
+check "brainstorming hands the design to writing-specs" \
+    has brainstorming 'invoke the `writing-specs` skill'
+check "brainstorming defines autonomous mode" \
+    has brainstorming '## Autonomous mode'
+check "brainstorming references the anchor rule" \
+    has brainstorming "$ANCHOR_REF"
+
+# The anchor rule is stated once and referenced elsewhere.
+check "anchor rule is stated once and referenced by the other two skills" \
+    sh -c "[ \"\$(cat '$D/brainstorming/SKILL.md' '$D/writing-specs/SKILL.md' '$D/writing-plans/SKILL.md' | grep -cF '$ANCHOR')\" = 1 ] && grep -qF '$ANCHOR_REF' '$D/writing-specs/SKILL.md' && grep -qF '$ANCHOR_REF' '$D/brainstorming/SKILL.md'"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
