@@ -1645,7 +1645,7 @@ def run_mech(rd, a, brief, timeout_secs) -> int:
     argv = ["claude", "--model", a.model]
     if getattr(a, "effort", None):
         argv += ["--effort", a.effort]
-    argv += ["--permission-mode", "auto", "--name", a.agent, "-p", "--output-format", "json",
+    argv += ["--permission-mode", "auto", "--strict-mcp-config", "--name", a.agent, "-p", "--output-format", "json",
              "--max-turns", str(a.max_turns), "--max-budget-usd", str(a.max_budget_usd)]
     subtype, result, exit_code = run_headless(argv, a.worktree, brief, timeout_secs)
     used = models_used(result)

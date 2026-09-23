@@ -1210,11 +1210,18 @@ python3 claude/hooks/herdr_legacy_fixture.py watch --repo-slug "$S" \
 [ "$(cat "$out")" = "signal" ]
 SH
 
-check "SKILL.md pins the non-available probe-sample capture bullet" <<'SH'
+check "SKILL.md pins the every-probe sample capture and the safe-mode probe line" <<'SH'
 SKILL="claude/skills/herdr-orchestration/SKILL.md"
 rg -q -F 'probe-samples.jsonl' "$SKILL"
-rg -q -F 'If `CLS` is not `available`' "$SKILL"
+rg -q -F 'diagnostic sample for every probe, whatever `CLS` is' "$SKILL"
+ind=$(grep -n -F -- '- `indeterminate` (no `claude`' "$SKILL" | head -1 | cut -d: -f1)
+app=$(grep -n -F -- '- After the map is written or the launches are aborted, append a' "$SKILL" | head -1 | cut -d: -f1)
+[ -n "$ind" ] && [ -n "$app" ] && [ "$app" -gt "$ind" ]
+! rg -q -F 'If `CLS` is not `available`' "$SKILL"
 rg -q -F '|| true`' "$SKILL"
+rg -q -F -- "PROBE_JSON=\"\$(claude --model fable --safe-mode --max-turns 1 -p 'Reply with the single word: ok' --output-format json </dev/null)\"" "$SKILL"
+! rg -q -F 'claude --model fable -p' "$SKILL"
+! rg -q 'PROBE_JSON=.*(mktemp|cd )' "$SKILL"
 SH
 
 check "validate_messaging_socket: canonical dirs, pid basename, /private alias, rejects" <<PY
@@ -1964,7 +1971,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"num_turns":5,"tot
 export FAKE_CLAUDE_HOOK="git -C $WT -c user.name=t -c user.email=t@x commit -q --allow-empty -m work; $CLI emit-done --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --phase implement --outcome completed --head-sha \$(git -C $WT rev-parse HEAD) --base-sha $BASE --launch-id mech-td-r-20260901T000000Z"
 $CLI run-mech --repo-slug slug-r --task-id td-r --workspace w1 --agent mech-td-r --launch-id mech-td-r-20260901T000000Z \
   --model haiku --worktree "$WT" --base-sha "$BASE" --brief-file "$RD/tasks/td-r.brief.md" --max-turns 7 --max-budget-usd 0.5 --timeout-secs 60
-[ "$(tr '\n' ' ' < $FAKE_CLAUDE_LOG.argv)" = "--model haiku --permission-mode auto --name mech-td-r -p --output-format json --max-turns 7 --max-budget-usd 0.5 " ]
+[ "$(tr '\n' ' ' < $FAKE_CLAUDE_LOG.argv)" = "--model haiku --permission-mode auto --strict-mcp-config --name mech-td-r -p --output-format json --max-turns 7 --max-budget-usd 0.5 " ]
 [ "$(cat $FAKE_CLAUDE_LOG.stdin)" = "do the thing" ]
 [ "$(cd "$WT" && pwd -P)" = "$(cd "$(cat $FAKE_CLAUDE_LOG.cwd)" && pwd -P)" ]
 python3 - <<PY

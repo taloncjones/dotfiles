@@ -203,16 +203,11 @@ for the provider's `launch_env` mapping.
    when stale: if `resolve-model` exits 3 (map absent, or its `session_id` !=
    this session -- i.e. a restart or `/clear`) for a role this turn, re-probe
    the strong model headlessly and record the result:
-   - `PROBE_JSON="$(claude --model fable -p 'Reply with the single word: ok' --output-format json </dev/null)"`
+   - `PROBE_JSON="$(claude --model fable --safe-mode --max-turns 1 -p 'Reply with the single word: ok' --output-format json </dev/null)"`
+     `--safe-mode` skips CLAUDE.md, skills, plugins, hooks and MCP, so the
+     probe costs about a third of a full boot; keep the repository cwd,
+     because the `claude()` wrapper selects the account from it.
    - `CLS="$(python3 "$CORE" classify-probe --repo-slug <slug> --model fable --json "$PROBE_JSON")"`
-   - If `CLS` is not `available`, first append a diagnostic sample
-     (best-effort -- a persistence failure never blocks classification
-     handling) so the next real 429 exhaustion response lands on disk for
-     `_usage_exhausted` field-coverage validation:
-     `jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cls "$CLS" --argjson probe "$PROBE_JSON" '{ts:$ts,cls:$cls,probe:$probe}' >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch/<slug>/probe-samples.jsonl" 2>/dev/null || jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cls "$CLS" --arg raw "$PROBE_JSON" '{ts:$ts,cls:$cls,raw:$raw}' >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch/<slug>/probe-samples.jsonl" 2>/dev/null || true`
-     The file is diagnostic-only (never read by director logic; the
-     probe step is already owner-only), machine-local, and deletable once
-     a real exhaustion sample has validated the regex.
    - `available`/`unavailable` -> write the map (opus/sonnet/haiku default true):
      `python3 "$CORE" write-capabilities --repo-slug <slug> --session <id> --fence <fence> --json '{"v":1,"session_id":"<id>","available":{"fable":<true|false>,"opus":true,"sonnet":true,"haiku":true}}'`
    - `indeterminate` (no `claude`, network error, transient 429 rate limit,
@@ -223,6 +218,16 @@ for the provider's `launch_env` mapping.
      A non-owner (claim returned `BUSY`) never probes or writes -- it is
      read-only. The map is machine-local (`references/state-layout.md`), never
      committed.
+   - After the map is written or the launches are aborted, append a
+     diagnostic sample for every probe, whatever `CLS` is (best-effort -- a
+     persistence failure never changes that outcome), so each probe's
+     `usage` and `total_cost_usd` stay visible and the next real 429
+     exhaustion response lands on disk for
+     `_usage_exhausted` field-coverage validation:
+     `jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cls "$CLS" --argjson probe "$PROBE_JSON" '{ts:$ts,cls:$cls,probe:$probe}' >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch/<slug>/probe-samples.jsonl" 2>/dev/null || jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg cls "$CLS" --arg raw "$PROBE_JSON" '{ts:$ts,cls:$cls,raw:$raw}' >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/herdr-orch/<slug>/probe-samples.jsonl" 2>/dev/null || true`
+     The file is diagnostic-only (never read by director logic; the
+     probe step is already owner-only), machine-local, and deletable once
+     a real exhaustion sample has validated the regex.
    - This map is the input, not the launch itself: each legacy wrapper launch
      resolves its model AND effort through one `routing-table --repo-slug`
      snapshot (section 8, Legacy Claude wrapper routing) built from this map plus

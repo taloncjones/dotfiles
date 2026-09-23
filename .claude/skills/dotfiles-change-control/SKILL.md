@@ -191,7 +191,7 @@ When you change the template:
   harness loader is real).
 - `codex/AGENTS.md` is repo-owned global policy. Native plugins own upstream
   guidance; do not reintroduce a copied instruction block or upstream global
-  sync. See repo CLAUDE.md, "Codex plugin integration".
+  sync. See `.claude/skills/dotfiles-architecture-contract/references/install-layout.md`, "Codex plugin integration".
 - The git hooks `git/hooks/pre-commit` and `pre-push` are copies that are
   TRACKED in git (adapted from the retired ECC, listed in `NOTICE`): do not
   patch them against an upstream that no longer exists -- fix them here

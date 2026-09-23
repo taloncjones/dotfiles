@@ -10,7 +10,9 @@ strictly under a throwaway root: the session scratchpad (payload
 directly under `/tmp`. Anything else, and every error, is "no decision":
 exit 0 with empty output, so the normal prompt flow continues. Never
 denies. See docs/specs/2026-09-07-scratch-policy-hook.md (branch-only)
-for the full rule set; the CLAUDE.md bullet is the durable summary.
+for the full rule set; the scratch_policy.py bullet in
+.claude/skills/dotfiles-architecture-contract/references/install-layout.md
+is the durable summary.
 
 When HERDR_ENV=1 and HERDR_WORKSPACE_ID resolves to a validated index in
 the selected repository/account, each allow is audited to
