@@ -117,6 +117,21 @@ if _UNKNOWN_FALLBACK_ROLES:
         f"unknown fallback role in defaults: {min(_UNKNOWN_FALLBACK_ROLES)}"
     )
 
+# Bounded roles boot without MCP servers. The claude.ai connectors and plugin
+# MCP listings cost ~2.6k prompt tokens per launch and none of these roles
+# uses them (measured 2026-09-23).
+SLIM_BOOT_ROLES = (
+    "mechanical",
+    "read_only",
+    "reviewer",
+    "development_reviewer",
+    "skeptic",
+    "plan_reviewer",
+)
+_UNKNOWN_SLIM_ROLES = set(SLIM_BOOT_ROLES) - set(CLAUDE_ROUTES)
+if _UNKNOWN_SLIM_ROLES:
+    raise RouteError(f"unknown slim boot role: {min(_UNKNOWN_SLIM_ROLES)}")
+
 CRITICAL_ROLES = ("reviewer", "development_reviewer", "skeptic", "think")
 # Difficulty escalates effort within the role's model. The gateway is excluded on
 # purpose: it runs at medium so routing judgment stays cheap and the budget lands
@@ -687,6 +702,8 @@ def launch_argv(
         "--permission-mode",
         permission_modes[sandbox],
     ]
+    if route.get("role") in SLIM_BOOT_ROLES:
+        argv.append("--strict-mcp-config")
     if mode == "headless":
         argv.extend(["-p", "--output-format", "json"])
     return argv
