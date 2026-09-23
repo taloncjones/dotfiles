@@ -131,3 +131,17 @@ function claude() {    # claude() will launch Claude Code with the work account 
         CLAUDE_CONFIG_DIR="$cfg" command claude "${forwarded[@]}"
     fi
 }
+
+function director() {    # director() launches the herdr director with inbound messaging and manual permissions through claude(). ex: $ director
+    emulate -L zsh
+    if [[ "${HERDR_ENV:-}" != 1 ]]; then
+        echo "[X] director: run inside a herdr pane (HERDR_ENV is not 1)." >&2
+        return 2
+    fi
+    local arg
+    local -a mode=(--permission-mode manual)
+    for arg in "$@"; do
+        [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
+    done
+    claude --agent director --settings '{"crossSessionInbound":"accept"}' "${mode[@]}" "$@"
+}
