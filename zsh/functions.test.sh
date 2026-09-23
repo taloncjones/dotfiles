@@ -31,16 +31,12 @@ assert_grep() {
     if "$@" >/dev/null 2>&1; then pass "$label"; else fail "$label"; fi
 }
 
-assert_grep "superpowers-install goes through _claude_ensure_plugin" \
-    grep -q '_claude_ensure_plugin "\$cfg_dir" "superpowers@claude-plugins-official"' "$FUNCS"
-assert_grep "superpowers-install installs the native Codex plugin" \
-    grep -q '_codex_install_superpowers_plugin' "$FUNCS"
-assert_grep "Superpowers Codex install uses the dotfiles marketplace" \
-    grep -q '_codex_ensure_plugin "superpowers@dotfiles-workflows"' "$FUNCS"
 assert_grep "ECC uninstall removes the native Codex plugin" \
     grep -q '_codex_remove_plugin "ecc@dotfiles-workflows"' "$FUNCS"
 assert_grep "no ECC install or update entry point remains" \
     sh -c "! grep -qE '^function (ecc-install|ecc-update|_codex_(stage|install|update)_ecc_plugin|_ecc_legacy_rules_notice|_claude_plugin_check_update|_claude_plugin_epoch_write)\\(' '$FUNCS'"
+assert_grep "no Superpowers install or update entry point remains" \
+    sh -c "! grep -qE '^function (superpowers-install|superpowers-update|_codex_(stage|install|update)_superpowers_plugin)\\(' '$FUNCS'"
 assert_grep "Superpowers uninstall removes the native Codex plugin" \
     grep -q '_codex_remove_plugin "superpowers@dotfiles-workflows"' "$FUNCS"
 assert_grep "install verification never greps CLI plugin listings" \
@@ -123,6 +119,41 @@ printf '%s\n' "${CLAUDE_CONFIG_DIR-unset}" >>"$CLAUDE_ENV_TRACE"
 exit 0
 EOF
 chmod +x "$TMP/stubs/env-capture/claude"
+
+# spu: records cwd and args, and on `plugin uninstall --scope S` drops that
+# scope's superpowers record. SPU_MODE=fail makes every call fail;
+# SPU_MODE=corrupt exits 0 but leaves an unreadable registry.
+mkdir -p "$TMP/stubs/spu"
+cat >"$TMP/stubs/spu/claude" <<'EOF'
+#!/bin/sh
+cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+printf '%s|%s\n' "$(pwd -P)" "$*" >>"$SPU_TRACE"
+[ "${SPU_MODE:-ok}" = fail ] && exit 1
+case "$*" in
+    "plugin uninstall --scope "*)
+        if [ "${SPU_MODE:-ok}" = corrupt ]; then
+            printf 'not json\n' >"$cfg/plugins/installed_plugins.json"
+            exit 0
+        fi
+        python3 - "$cfg/plugins/installed_plugins.json" "$4" <<'PY'
+import json, sys
+path, scope = sys.argv[1:]
+with open(path) as fh:
+    data = json.load(fh)
+key = "superpowers@claude-plugins-official"
+kept = [r for r in data["plugins"].get(key, []) if r.get("scope") != scope]
+if kept:
+    data["plugins"][key] = kept
+else:
+    data["plugins"].pop(key, None)
+with open(path, "w") as fh:
+    json.dump(data, fh)
+PY
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$TMP/stubs/spu/claude"
 
 # Codex stub: records marketplace and plugin operations in HOME so the real
 # helpers can verify state through `codex plugin list --json`.
@@ -215,6 +246,23 @@ run_codex_case() {
     " >"$TMP/out" 2>&1
 }
 
+# run_spu_case <home> <snippet> [mode]: superpowers-uninstall against the spu
+# stub (mode ok|fail|corrupt), with Codex removal stubbed out and every
+# managed path inside <home>.
+run_spu_case() {
+    home="$1"; snippet="$2"; spu_mode="${3:-ok}"
+    HOME="$home" SPU_TRACE="$TMP/spu-trace" SPU_MODE="$spu_mode" zsh -f -c "
+        path=(/usr/bin /bin)
+        source '$REPO/$FUNCS'
+        path=('$TMP/stubs/spu' /usr/bin /bin)
+        CLAUDE_WORK_CONFIG_DIR='$home/.claude-work'
+        CODEX_WORKFLOW_MARKETPLACE_DIR='$home/codex-workflows'
+        SUPERPOWERS_REPO_DIR='$home/sources/superpowers'
+        _codex_remove_plugin() { return 0; }
+        $snippet
+    " >"$TMP/out" 2>&1
+}
+
 : >"$TMP/claude-env-trace"
 if CLAUDE_ENV_TRACE="$TMP/claude-env-trace" run_case env-capture '
     export CLAUDE_ENV_TRACE="'$TMP'/claude-env-trace"
@@ -226,56 +274,6 @@ if CLAUDE_ENV_TRACE="$TMP/claude-env-trace" run_case env-capture '
     pass "plugin lifecycle unsets native personal config and preserves work config"
 else
     fail "plugin lifecycle unsets native personal config and preserves work config"
-fi
-
-# 1. Pre-recorded install short-circuits without ever invoking the CLI.
-CFG="$TMP/cfg1"
-mkdir -p "$CFG/plugins"
-printf '{"plugins": {"sample@fixture": [{"scope": "user"}]}}\n' >"$CFG/plugins/installed_plugins.json"
-if run_case broken "_claude_ensure_plugin '$CFG' sample@fixture fixture https://example.invalid/fixture.git"; then
-    pass "already-installed short-circuits on installed_plugins.json"
-else
-    fail "already-installed short-circuits on installed_plugins.json"
-fi
-
-# 2. The exit-code lie: every CLI verb exits 0 but nothing lands on disk.
-#    The helper must fail closed and say so.
-CFG="$TMP/cfg2"; mkdir -p "$CFG"
-if run_case silent "_claude_ensure_plugin '$CFG' sample@fixture fixture https://example.invalid/fixture.git"; then
-    fail "silent no-op install fails closed"
-else
-    pass "silent no-op install fails closed"
-fi
-if grep -q "not installed after" "$TMP/out"; then
-    pass "silent no-op failure names the cause"
-else
-    fail "silent no-op failure names the cause"
-fi
-
-# 3. Unreachable marketplace: registration fails, helper returns non-zero.
-CFG="$TMP/cfg3"; mkdir -p "$CFG"
-if run_case unreachable "_claude_ensure_plugin '$CFG' sample@fixture fixture https://example.invalid/fixture.git"; then
-    fail "unreachable marketplace returns non-zero"
-else
-    pass "unreachable marketplace returns non-zero"
-fi
-if grep -q "marketplace add failed" "$TMP/out"; then
-    pass "unreachable marketplace says so"
-else
-    fail "unreachable marketplace says so"
-fi
-
-# 4. Healthy path: install writes the record, helper verifies and succeeds.
-CFG="$TMP/cfg4"; mkdir -p "$CFG"
-if run_case good "_claude_ensure_plugin '$CFG' sample@fixture fixture https://example.invalid/fixture.git"; then
-    pass "verified install succeeds"
-else
-    fail "verified install succeeds"
-fi
-if grep -q "Installed sample@fixture" "$TMP/out"; then
-    pass "verified install reports [OK]"
-else
-    fail "verified install reports [OK]"
 fi
 
 # 5. _claude_plugin_installed ground truth: false without the record, true with it.
@@ -291,21 +289,6 @@ if run_case broken "_claude_plugin_installed '$CFG' sample@fixture"; then
     pass "plugin_installed true when record present"
 else
     fail "plugin_installed true when record present"
-fi
-
-# 6. Codex install registers a local marketplace, installs the requested
-#    plugin, and verifies the enabled state from JSON readback.
-rm -rf "$TMP/home-codex"
-if run_codex_case "_codex_ensure_plugin superpowers@dotfiles-workflows '$TMP/marketplace'"; then
-    pass "Codex plugin install is verified"
-else
-    fail "Codex plugin install is verified"
-fi
-if grep -q "plugin marketplace add $TMP/marketplace" "$TMP/home-codex/codex-calls" &&
-   grep -q "plugin add superpowers@dotfiles-workflows" "$TMP/home-codex/codex-calls"; then
-    pass "Codex plugin install registers its marketplace"
-else
-    fail "Codex plugin install registers its marketplace"
 fi
 
 # 6a. Retired entry points survive `reload` in a long-running shell unless
@@ -454,245 +437,130 @@ else
     fail "ecc-uninstall without a checkout lists candidates and moves nothing"
 fi
 
-# 7. A self-contained Superpowers staging tree carries the marketplace, plugin
-#    manifest, skills and assets into a Codex-only directory.
-SUPERPOWERS_FIXTURE="$TMP/superpowers"
-STAGED="$TMP/staged-marketplace"
-mkdir -p "$SUPERPOWERS_FIXTURE/.codex-plugin" "$SUPERPOWERS_FIXTURE/skills/sample" \
-    "$SUPERPOWERS_FIXTURE/skills/quoted" "$SUPERPOWERS_FIXTURE/assets"
-printf '%s\n' '{"name":"superpowers","version":"1.0.0","description":"test","author":{"name":"test"},"skills":"./skills/","hooks":{},"interface":{"displayName":"Superpowers","shortDescription":"test","longDescription":"test","developerName":"test","category":"Coding","capabilities":[],"defaultPrompt":[]}}' >"$SUPERPOWERS_FIXTURE/.codex-plugin/plugin.json"
-printf '%s\n' '---' 'name: sample' 'description: sample: workflow' '---' >"$SUPERPOWERS_FIXTURE/skills/sample/SKILL.md"
-printf '%s\n' '---' 'name: quoted' 'description: "Quoted: description"' '---' >"$SUPERPOWERS_FIXTURE/skills/quoted/SKILL.md"
-printf '%s\n' 'asset' >"$SUPERPOWERS_FIXTURE/assets/icon.svg"
-if run_codex_case "SUPERPOWERS_REPO_DIR='$SUPERPOWERS_FIXTURE'; CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_stage_superpowers_plugin"; then
-    pass "Superpowers Codex plugin staging succeeds"
+# 7. Superpowers retirement.
+if run_case broken '
+    for f in superpowers-install superpowers-update _codex_stage_superpowers_plugin _codex_install_superpowers_plugin _codex_update_superpowers_plugin; do
+        eval "function $f { : }"
+    done
+    source "'$REPO/$FUNCS'" >/dev/null 2>&1
+    for f in superpowers-install superpowers-update _codex_stage_superpowers_plugin _codex_install_superpowers_plugin _codex_update_superpowers_plugin; do
+        (( ${+functions[$f]} )) && exit 1
+    done
+    (( ${+functions[superpowers-uninstall]} ))'; then
+    pass "retired Superpowers entry points are undefined after reload"
 else
-    fail "Superpowers Codex plugin staging succeeds"
-fi
-if [ -f "$STAGED/.agents/plugins/marketplace.json" ] &&
-   [ -f "$STAGED/plugins/superpowers/.codex-plugin/plugin.json" ] &&
-   [ -f "$STAGED/plugins/superpowers/skills/sample/SKILL.md" ] &&
-   [ -f "$STAGED/plugins/superpowers/assets/icon.svg" ]; then
-    pass "Superpowers Codex plugin staging is self-contained"
-else
-    fail "Superpowers Codex plugin staging is self-contained"
-fi
-if grep -q '^description: >-$' "$STAGED/plugins/superpowers/skills/sample/SKILL.md"; then
-    pass "Superpowers staging normalizes Codex skill frontmatter"
-else
-    fail "Superpowers staging normalizes Codex skill frontmatter"
-fi
-if grep -q '^description: "Quoted: description"$' "$STAGED/plugins/superpowers/skills/quoted/SKILL.md"; then
-    pass "Superpowers staging preserves quoted frontmatter"
-else
-    fail "Superpowers staging preserves quoted frontmatter"
-fi
-if [ -f "$STAGED/plugins/superpowers/.dotfiles-provenance.json" ] &&
-   grep -q '"wrapperVersion"' "$STAGED/plugins/superpowers/.dotfiles-provenance.json" &&
-   grep -q '"upstreamCommit"' "$STAGED/plugins/superpowers/.dotfiles-provenance.json" &&
-   grep -q '"upstreamVersion"' "$STAGED/plugins/superpowers/.dotfiles-provenance.json" &&
-   grep -q '"payloadDigest"' "$STAGED/plugins/superpowers/.dotfiles-provenance.json"; then
-    pass "Superpowers staging records wrapper upstream and payload provenance"
-else
-    fail "Superpowers staging records wrapper upstream and payload provenance"
-fi
-rm -rf "$TMP/home-codex"
-if run_codex_case "CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_ensure_plugin superpowers@dotfiles-workflows '$STAGED' && _codex_staged_plugin_is_effective superpowers@dotfiles-workflows '$STAGED/plugins/superpowers'"; then
-    pass "Superpowers native install verifies its effective staged payload"
-else
-    fail "Superpowers native install verifies its effective staged payload"
+    fail "retired Superpowers entry points are undefined after reload"
 fi
 
-# 7a. A caller-selected CODEX_HOME must never receive the fixture cache.
-CALLER_CODEX_HOME="$TMP/caller-codex-home"
-CALLER_CACHE="$CALLER_CODEX_HOME/plugins/cache/dotfiles-workflows/superpowers/1.0.0"
-mkdir -p "$CALLER_CACHE"
-printf '%s\n' 'caller cache sentinel' >"$CALLER_CACHE/sentinel-payload"
-printf '%s\n' 'caller config sentinel' >"$CALLER_CODEX_HOME/config.toml"
-cp "$CALLER_CACHE/sentinel-payload" "$TMP/caller-cache-before"
-cp "$CALLER_CODEX_HOME/config.toml" "$TMP/caller-config-before"
-rm -rf "$TMP/home-codex"
-if (
-    CODEX_HOME="$CALLER_CODEX_HOME"
-    export CODEX_HOME
-    run_codex_case "CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_ensure_plugin superpowers@dotfiles-workflows '$STAGED'"
-) &&
-   cmp -s "$TMP/caller-cache-before" "$CALLER_CACHE/sentinel-payload" &&
-   cmp -s "$TMP/caller-config-before" "$CALLER_CODEX_HOME/config.toml" &&
-   [ ! -e "$CALLER_CACHE/skills/sample/SKILL.md" ] &&
-   [ ! -e "$CALLER_CACHE/skills/quoted/SKILL.md" ]; then
-    pass "Codex test cases preserve inherited CODEX_HOME"
+if run_case broken '
+    function superpowers-uninstall { echo old; }
+    source "'$REPO/$FUNCS'" >/dev/null 2>&1
+    [[ "${functions[superpowers-uninstall]}" == *_claude_plugin_records* ]]'; then
+    pass "reload replaces an old superpowers-uninstall definition"
 else
-    fail "Codex test cases preserve inherited CODEX_HOME"
+    fail "reload replaces an old superpowers-uninstall definition"
 fi
 
-# Keep the remaining cache-validation cases independent from this sentinel.
-mkdir -p "$TMP/home-codex/.codex/plugins/cache/dotfiles-workflows/superpowers/1.0.0"
-cp -R "$STAGED/plugins/superpowers/." \
-    "$TMP/home-codex/.codex/plugins/cache/dotfiles-workflows/superpowers/1.0.0/"
-
-CACHE_PAYLOAD="$TMP/home-codex/.codex/plugins/cache/dotfiles-workflows/superpowers/1.0.0"
-printf '%s\n' '{}' >"$CACHE_PAYLOAD/.dotfiles-provenance.json"
-if run_codex_case "_codex_staged_plugin_is_effective superpowers@dotfiles-workflows '$STAGED/plugins/superpowers'"; then
-    fail "invalid cache provenance never verifies from staged source alone"
+SPU_HOME="$TMP/spu-home"
+SPU_PROJ="$TMP/spu-project"
+mkdir -p "$SPU_HOME/.claude/plugins" "$SPU_PROJ" \
+    "$SPU_HOME/codex-workflows/plugins/superpowers" "$SPU_HOME/sources/superpowers"
+SPU_PROJ_REAL="$(cd "$SPU_PROJ" && pwd -P)"
+printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}, {"scope": "local", "projectPath": "%s"}]}}\n' \
+    "$SPU_PROJ" >"$SPU_HOME/.claude/plugins/installed_plugins.json"
+: >"$TMP/spu-trace"
+if run_spu_case "$SPU_HOME" superpowers-uninstall &&
+   grep -qF "|plugin uninstall --scope user superpowers@claude-plugins-official" "$TMP/spu-trace" &&
+   grep -qF "$SPU_PROJ_REAL|plugin uninstall --scope local superpowers@claude-plugins-official" "$TMP/spu-trace" &&
+   ! grep -q superpowers "$SPU_HOME/.claude/plugins/installed_plugins.json" &&
+   grep -qF "[OK] Superpowers uninstalled ($SPU_HOME/.claude)" "$TMP/out"; then
+    pass "superpowers-uninstall removes user and local records with matching scope and cwd"
 else
-    pass "invalid cache provenance never verifies from staged source alone"
+    fail "superpowers-uninstall removes user and local records with matching scope and cwd"
 fi
-cp -R "$STAGED/plugins/superpowers/." "$CACHE_PAYLOAD/"
-python3 - "$CACHE_PAYLOAD/.dotfiles-provenance.json" <<'PY'
-import json
-from pathlib import Path
-
-path = Path(__import__("sys").argv[1])
-record = json.loads(path.read_text())
-record["schemaVersion"] = "1"
-path.write_text(json.dumps(record) + "\n")
-PY
-if run_codex_case "_codex_staged_plugin_is_effective superpowers@dotfiles-workflows '$STAGED/plugins/superpowers'"; then
-    fail "wrong-type cache provenance never verifies"
+if [ ! -e "$SPU_HOME/codex-workflows/plugins/superpowers" ] && [ ! -e "$SPU_HOME/sources/superpowers" ]; then
+    pass "superpowers-uninstall removes the staged Codex copy and the source checkout"
 else
-    pass "wrong-type cache provenance never verifies"
-fi
-cp -R "$STAGED/plugins/superpowers/." "$CACHE_PAYLOAD/"
-python3 - "$CACHE_PAYLOAD/.dotfiles-provenance.json" <<'PY'
-import json
-from pathlib import Path
-
-path = Path(__import__("sys").argv[1])
-record = json.loads(path.read_text())
-record["schemaVersion"] = 2
-path.write_text(json.dumps(record) + "\n")
-PY
-if run_codex_case "_codex_staged_plugin_is_effective superpowers@dotfiles-workflows '$STAGED/plugins/superpowers'"; then
-    fail "unsupported cache provenance schema never verifies"
-else
-    pass "unsupported cache provenance schema never verifies"
-fi
-cp -R "$STAGED/plugins/superpowers/." "$CACHE_PAYLOAD/"
-printf '%s\n' 'stale cache payload' >>"$CACHE_PAYLOAD/skills/sample/SKILL.md"
-if run_codex_case "_codex_staged_plugin_is_effective superpowers@dotfiles-workflows '$STAGED/plugins/superpowers'"; then
-    fail "stale cache bytes never verify from copied provenance alone"
-else
-    pass "stale cache bytes never verify from copied provenance alone"
-fi
-if run_codex_case "_codex_verify_or_refresh_managed_plugin superpowers@dotfiles-workflows '$STAGED/plugins/superpowers' '$STAGED'" &&
-   cmp -s "$STAGED/plugins/superpowers/skills/sample/SKILL.md" "$CACHE_PAYLOAD/skills/sample/SKILL.md"; then
-    pass "stale managed cache refreshes through the native lifecycle"
-else
-    fail "stale managed cache refreshes through the native lifecycle"
-fi
-FIRST_DIGEST=$(awk -F '"' '/payloadDigest/ { print $4 }' "$STAGED/plugins/superpowers/.dotfiles-provenance.json")
-printf '%s\n' 'updated source payload' >>"$SUPERPOWERS_FIXTURE/skills/sample/SKILL.md"
-if run_codex_case "SUPERPOWERS_REPO_DIR='$SUPERPOWERS_FIXTURE'; CODEX_WORKFLOW_MARKETPLACE_DIR='$STAGED'; _codex_stage_superpowers_plugin"; then
-    SECOND_DIGEST=$(awk -F '"' '/payloadDigest/ { print $4 }' "$STAGED/plugins/superpowers/.dotfiles-provenance.json")
-    if [ "$FIRST_DIGEST" != "$SECOND_DIGEST" ] &&
-       grep -q '"wrapperVersion": "1.0.0"' "$STAGED/plugins/superpowers/.dotfiles-provenance.json"; then
-        pass "Superpowers provenance detects new payload under unchanged wrapper version"
-    else
-        fail "Superpowers provenance detects new payload under unchanged wrapper version"
-    fi
-else
-    fail "Superpowers provenance detects new payload under unchanged wrapper version"
-fi
-if run_codex_case "_codex_staged_plugin_is_effective superpowers@dotfiles-workflows '$STAGED/plugins/superpowers'"; then
-    fail "new staged payload fails against old cache under unchanged wrapper version"
-else
-    pass "new staged payload fails against old cache under unchanged wrapper version"
-fi
-if run_codex_case "_codex_verify_or_refresh_managed_plugin superpowers@dotfiles-workflows '$STAGED/plugins/superpowers' '$STAGED'" &&
-   cmp -s "$STAGED/plugins/superpowers/skills/sample/SKILL.md" "$CACHE_PAYLOAD/skills/sample/SKILL.md"; then
-    pass "new staged payload refreshes its old cache through Codex"
-else
-    fail "new staged payload refreshes its old cache through Codex"
+    fail "superpowers-uninstall removes the staged Codex copy and the source checkout"
 fi
 
-# 8. The workflow marketplace stages Superpowers only; ECC's marketplace entry
-#    is retired.
-if [ -f "$STAGED/.agents/plugins/marketplace.json" ] &&
-   ! grep -q '"name": "ecc"' "$STAGED/.agents/plugins/marketplace.json" &&
-   [ -f "$STAGED/plugins/superpowers/assets/icon.svg" ]; then
-    pass "workflow marketplace stages Superpowers only"
+SPU_FAILHOME="$TMP/spu-failhome"
+mkdir -p "$SPU_FAILHOME/.claude/plugins"
+printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}]}}\n' \
+    >"$SPU_FAILHOME/.claude/plugins/installed_plugins.json"
+if ! run_spu_case "$SPU_FAILHOME" superpowers-uninstall fail &&
+   ! grep -qF "[OK] Superpowers uninstalled" "$TMP/out"; then
+    pass "superpowers-uninstall fails without [OK] when the uninstall command fails"
 else
-    fail "workflow marketplace stages Superpowers only"
+    fail "superpowers-uninstall fails without [OK] when the uninstall command fails"
 fi
-if grep -q '"hooks"' "$STAGED/plugins/superpowers/.codex-plugin/plugin.json"; then
-    fail "Superpowers staging removes unsupported manifest hooks"
+
+SPU_CORRUPTHOME="$TMP/spu-corrupthome"
+mkdir -p "$SPU_CORRUPTHOME/.claude/plugins"
+printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}]}}\n' \
+    >"$SPU_CORRUPTHOME/.claude/plugins/installed_plugins.json"
+if ! run_spu_case "$SPU_CORRUPTHOME" superpowers-uninstall corrupt &&
+   ! grep -qF "[OK] Superpowers uninstalled" "$TMP/out"; then
+    pass "superpowers-uninstall fails when the registry is unreadable after uninstall"
 else
-    pass "Superpowers staging removes unsupported manifest hooks"
+    fail "superpowers-uninstall fails when the registry is unreadable after uninstall"
+fi
+
+SPU_SHAPEHOME="$TMP/spu-shapehome"
+mkdir -p "$SPU_SHAPEHOME/.claude/plugins"
+printf '{"plugins": {"superpowers@claude-plugins-official": {"scope": "user"}}}\n' \
+    >"$SPU_SHAPEHOME/.claude/plugins/installed_plugins.json"
+if ! run_spu_case "$SPU_SHAPEHOME" superpowers-uninstall &&
+   grep -qF "unreadable plugin registry" "$TMP/out"; then
+    pass "superpowers-uninstall treats a malformed record shape as unreadable"
+else
+    fail "superpowers-uninstall treats a malformed record shape as unreadable"
+fi
+
+SPU_EMPTYHOME="$TMP/spu-emptyhome"
+mkdir -p "$SPU_EMPTYHOME/.claude"
+: >"$TMP/spu-trace"
+if run_spu_case "$SPU_EMPTYHOME" superpowers-uninstall &&
+   [ ! -s "$TMP/spu-trace" ] &&
+   grep -qF "Superpowers not installed ($SPU_EMPTYHOME/.claude)" "$TMP/out"; then
+    pass "superpowers-uninstall with no registry file reports not installed and calls no CLI"
+else
+    fail "superpowers-uninstall with no registry file reports not installed and calls no CLI"
+fi
+
+SPU_GONEHOME="$TMP/spu-gonehome"
+mkdir -p "$SPU_GONEHOME/.claude/plugins"
+printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "local", "projectPath": "%s"}]}}\n' \
+    "$TMP/spu-deleted-project" >"$SPU_GONEHOME/.claude/plugins/installed_plugins.json"
+if ! run_spu_case "$SPU_GONEHOME" superpowers-uninstall &&
+   grep -qF "missing project" "$TMP/out" &&
+   ! grep -qF "[OK] Superpowers uninstalled" "$TMP/out"; then
+    pass "superpowers-uninstall fails when a local record's projectPath is missing"
+else
+    fail "superpowers-uninstall fails when a local record's projectPath is missing"
+fi
+
+SPU_BADHOME="$TMP/spu-badhome"
+mkdir -p "$SPU_BADHOME/.claude/plugins"
+printf 'not json\n' >"$SPU_BADHOME/.claude/plugins/installed_plugins.json"
+: >"$TMP/spu-trace"
+if ! run_spu_case "$SPU_BADHOME" superpowers-uninstall &&
+   grep -qF "|plugin uninstall --scope user superpowers@claude-plugins-official" "$TMP/spu-trace" &&
+   grep -qF "unreadable plugin registry" "$TMP/out"; then
+    pass "superpowers-uninstall with an unreadable registry tries user scope and fails"
+else
+    fail "superpowers-uninstall with an unreadable registry tries user scope and fails"
 fi
 
 # 9. Uninstall must remove a present-but-disabled plugin instead of treating it
 #    as absent and leaving stale config/cache state behind.
+mkdir -p "$TMP/home-codex"
 printf '%s\n' 'disabled:superpowers@dotfiles-workflows' >"$TMP/home-codex/codex-plugin-state"
 if run_codex_case "_codex_remove_plugin superpowers@dotfiles-workflows" &&
    [ ! -f "$TMP/home-codex/codex-plugin-state" ]; then
     pass "Codex uninstall removes disabled plugins"
 else
     fail "Codex uninstall removes disabled plugins"
-fi
-
-# 10. Direct native lifecycle entry points must reconcile the same selected
-# Codex home after successful installs, without invoking live plugin CLIs.
-LIFECYCLE_REPO="$TMP/lifecycle-repo"
-mkdir -p "$LIFECYCLE_REPO/install/common"
-cat >"$LIFECYCLE_REPO/install/common/codex-plugin-dedupe.sh" <<'EOF'
-dedupe_codex_workflow_plugins() {
-    printf 'reconcile %s\n' "${CODEX_HOME:-$HOME/.codex}" >>"$LIFECYCLE_TRACE"
-    return "${RECONCILE_RESULT:-0}"
-}
-EOF
-
-LIFECYCLE_SETUP="
-    DOTFILEDIR='$LIFECYCLE_REPO'
-    CODEX_HOME='$TMP/alternate-codex'
-    LIFECYCLE_TRACE='$TMP/lifecycle-trace'
-    : >\"\$LIFECYCLE_TRACE\"
-    _codex_stage_superpowers_plugin() { return 0; }
-    _codex_staged_plugin_is_effective() { return 0; }
-    _codex_remove_plugin() { return 0; }
-    _codex_ensure_plugin() {
-        [[ \"\$2\" == \"\$CODEX_WORKFLOW_MARKETPLACE_DIR\" ]] || return 1
-        printf 'install %s\\n' \"\$1\" >>\"\$LIFECYCLE_TRACE\"
-        return \"\${INSTALL_RESULT:-0}\"
-    }
-    _codex_reinstall_plugin() { _codex_ensure_plugin \"\$@\"; }
-"
-LIFECYCLE_CALLS='_codex_install_superpowers_plugin _codex_update_superpowers_plugin'
-
-if run_codex_case "$LIFECYCLE_SETUP
-    for lifecycle_call in $LIFECYCLE_CALLS; do
-        \$lifecycle_call || exit 1
-    done
-" && awk -v selected="$TMP/alternate-codex" '
-    NR % 2 == 1 && $1 != "install" { exit 1 }
-    NR % 2 == 0 && $0 != "reconcile " selected { exit 1 }
-    END { if (NR != 4) exit 1 }
-' "$TMP/lifecycle-trace"; then
-    pass "direct Codex installs and updates reconcile the selected home afterward"
-else
-    fail "direct Codex installs and updates reconcile the selected home afterward"
-fi
-
-if run_codex_case "$LIFECYCLE_SETUP
-    INSTALL_RESULT=1
-    for lifecycle_call in $LIFECYCLE_CALLS; do
-        if \$lifecycle_call; then exit 1; fi
-    done
-" && ! grep -q '^reconcile ' "$TMP/lifecycle-trace"; then
-    pass "failed native plugin installation skips reconciliation"
-else
-    fail "failed native plugin installation skips reconciliation"
-fi
-
-if run_codex_case "$LIFECYCLE_SETUP
-    RECONCILE_RESULT=1
-    for lifecycle_call in $LIFECYCLE_CALLS; do
-        if \$lifecycle_call; then exit 1; fi
-    done
-"; then
-    pass "direct native plugin lifecycles propagate reconciliation failures"
-else
-    fail "direct native plugin lifecycles propagate reconciliation failures"
 fi
 
 # --- update() wiring: guarded sync + exit contract ------------------------
