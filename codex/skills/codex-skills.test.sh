@@ -265,7 +265,7 @@ links_shared_workflow_surfaces() (
     trap 'rm -rf "$tmp_home"' EXIT
     HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
     HOME="$tmp_home" CODEX_HOME="$tmp_home/.codex" DOTFILEDIR="$PWD" bash install/common/link.sh >/dev/null
-    for skill in repo-recall post-merge todos handoff kickoff voice; do
+    for skill in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do
         [ "$(readlink "$tmp_home/.codex/skills/$skill")" = "$PWD/claude/skills/$skill" ] || return 1
         [ -f "$tmp_home/.codex/skills/$skill/SKILL.md" ] || return 1
     done

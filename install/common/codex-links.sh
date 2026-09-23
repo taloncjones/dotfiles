@@ -141,7 +141,7 @@ link_codex_surfaces() {
   link_codex_path "$DOTFILEDIR/codex/hooks/orch_edit_guard.py" "$HOME/.codex/hooks/orch_edit_guard.py"
   link_codex_path "$DOTFILEDIR/claude/hooks/git_remote_guard.py" "$HOME/.codex/hooks/git_remote_guard.py"
 
-  for shared_skill in repo-recall post-merge todos handoff kickoff voice; do
+  for shared_skill in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do
     link_codex_path "$DOTFILEDIR/claude/skills/$shared_skill" "$HOME/.codex/skills/$shared_skill"
   done
   mkdir -p "$HOME/.codex/rules"
