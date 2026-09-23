@@ -1,0 +1,101 @@
+{
+  "v": 1,
+  "task_id": "2026-09-15-decide-ecc-s-future-and-retire-the-isolation-tax",
+  "commands": [
+    {
+      "name": "template-and-project-settings-drop-ecc",
+      "run": "python3 -c \"import json; t=json.load(open('claude/settings.json.tmpl')); p=json.load(open('.claude/settings.json'))\nfor d in (t, p):\n    assert 'ecc@ecc' not in d.get('enabledPlugins', {}), 'plugin declared'\n    assert 'ecc' not in d.get('extraKnownMarketplaces', {}), 'marketplace declared'\n    assert d['enabledPlugins'].get('superpowers@claude-plugins-official') is True, 'superpowers missing'\nassert not [k for k in t.get('env', {}) if k.startswith(('ECC_', 'GATEGUARD_'))], 'ecc env left'\nassert '{{CLAUDE_CONFIG_DIR}}' not in open('claude/settings.json.tmpl').read(), 'token left'\"",
+      "timeout_secs": 30
+    },
+    {
+      "name": "reconcile-retires-ecc-hermetically",
+      "run": "d=\"$(mktemp -d \"${TMPDIR:-/tmp}/ecc-reconcile.XXXXXX\")\"; mkdir -p \"$d/.claude-work\"; printf '%s\\n' '{\"enabledPlugins\":{\"ecc@ecc\":true,\"other@m\":true},\"extraKnownMarketplaces\":{\"ecc\":{\"source\":{\"source\":\"git\",\"url\":\"https://example.invalid/e.git\"}},\"other\":{\"source\":{\"source\":\"git\",\"url\":\"https://example.invalid/o.git\"}}},\"env\":{\"ECC_DISABLED_HOOKS\":\"a\",\"ECC_AGENT_DATA_HOME\":\"/x\",\"ECC_PLAN_CANVAS_STATE_DIR\":\"/x/p\",\"ECC_CONTEXT_MONITOR_COST_WARNINGS\":\"0\",\"GATEGUARD_BASH_ROUTINE_DISABLED\":\"1\",\"GATEGUARD_EXEMPT_GLOBS\":\"/**\",\"MACHINE_LOCAL\":\"keep\"}}' > \"$d/.claude-work/settings.json\"; ok=1; if HOME=\"$d\" DOTFILEDIR=\"$PWD\" sh -c '. install/common/claude-links.sh && reconcile_claude_settings_file claude/settings.json.tmpl \"$1\" >/dev/null && cp \"$1\" \"$1.first\" && reconcile_claude_settings_file claude/settings.json.tmpl \"$1\" >/dev/null && cmp -s \"$1\" \"$1.first\"' _ \"$d/.claude-work/settings.json\" && python3 -c \"import json,sys; s=json.load(open(sys.argv[1])); assert s['enabledPlugins']['ecc@ecc'] is False; assert s['enabledPlugins']['other@m'] is True; assert s['enabledPlugins']['superpowers@claude-plugins-official'] is True; assert 'ecc' not in s['extraKnownMarketplaces'] and 'other' in s['extraKnownMarketplaces']; assert not [k for k in s['env'] if k.startswith(('ECC_', 'GATEGUARD_'))]; assert s['env']['MACHINE_LOCAL'] == 'keep'; assert 'plan-canvas' not in json.dumps(s)\" \"$d/.claude-work/settings.json\"; then ok=0; fi; rm -rf \"$d\"; exit $ok",
+      "timeout_secs": 60
+    },
+    {
+      "name": "reconcile-drops-isolation-machinery",
+      "run": "! grep -nE 'ECC_DISABLED_HOOKS|ECC_PLAN_CANVAS_STATE_DIR|CONFIG_DIR_TOKEN|plan-canvas|required_hooks' install/common/claude-links.sh && grep -qF 'RETIRED_PLUGINS = (\"ecc@ecc\",)' install/common/claude-links.sh && grep -qF 'RETIRED_MARKETPLACES = (\"ecc\",)' install/common/claude-links.sh && grep -qF 'RETIRED_ENV_PREFIXES = (\"ECC_\", \"GATEGUARD_\")' install/common/claude-links.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "isolation-suites-deleted",
+      "run": "test ! -e claude/hooks/ecc-hook-isolation.test.sh && test ! -e claude/hooks/plan-canvas-isolation.test.sh && test ! -e claude/hooks/gateguard-tuning.test.sh && ! grep -qE 'ecc-hook-isolation|plan-canvas-isolation|gateguard-tuning' bin/dotfiles-tests && ! grep -nE 'ECC_|GATEGUARD|ecc@ecc|CLAUDE_CONFIG_DIR\\}\\}|plan-canvas' claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "retired-zsh-functions-undefined-after-reload",
+      "run": "h=\"$(mktemp -d \"${TMPDIR:-/tmp}/ecc-zsh.XXXXXX\")\"; env -i HOME=\"$h\" PATH=/usr/bin:/bin DOTFILEDIR=\"$PWD\" zsh -c 'for f in ecc-install ecc-update _ecc_legacy_rules_notice _codex_stage_ecc_plugin _codex_install_ecc_plugin _codex_update_ecc_plugin _claude_plugin_check_update _claude_plugin_epoch_write; do eval \"function $f { : }\"; done; source zsh/functions.zsh >/dev/null 2>&1; for f in ecc-install ecc-update _ecc_legacy_rules_notice _codex_stage_ecc_plugin _codex_install_ecc_plugin _codex_update_ecc_plugin _claude_plugin_check_update _claude_plugin_epoch_write; do (( ${+functions[$f]} )) && exit 1; done; (( ${+functions[ecc-uninstall]} )) && (( ${+functions[_ecc_sweep_legacy_vendored]} )) && (( ${+functions[superpowers-install]} ))'; rc=$?; rm -rf \"$h\"; [ \"$rc\" -eq 0 ] && ! grep -nE '^ECC_REPO_URL=|^_claude_plugin_check_update$' zsh/functions.zsh && grep -qF '_ecc_sweep_legacy_vendored \"$ecc_dir\"' zsh/functions.zsh",
+      "timeout_secs": 60
+    },
+    {
+      "name": "functions-suite-green-with-sweep-cases",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh zsh/functions.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && grep -qF \"PASS  no ECC install or update entry point remains\" \"$f\" && grep -qF \"PASS  retired ECC entry points are undefined after reload\" \"$f\" && grep -qF \"PASS  ecc-uninstall sweeps untracked ECC-named vendored files\" \"$f\" && grep -qF \"PASS  ecc-uninstall keeps tracked, symlinked and non-matching files\" \"$f\" && grep -qF \"PASS  ecc-uninstall without a checkout lists candidates and removes nothing\" \"$f\" && grep -qF \"PASS  Superpowers staging normalizes Codex skill frontmatter\" \"$f\" && grep -qF \"PASS  Superpowers provenance detects new payload under unchanged wrapper version\" \"$f\" && grep -qF \"PASS  new staged payload refreshes its old cache through Codex\" \"$f\" && grep -qF \"PASS  workflow marketplace stages Superpowers only\" \"$f\" && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 600
+    },
+    {
+      "name": "installers-and-cloud-superpowers-only",
+      "run": "! grep -inE '(^|[^a-z])ecc([^a-z]|$)' install/common/claude-plugins.sh install/install.sh bootstrap-cloud.sh .claude/hooks/session-start.sh .claude/skills/dotfiles-diagnostics-and-tooling/scripts/cloud-doctor.sh && grep -qF 'superpowers-install || superpowers_status=' install/common/claude-plugins.sh && grep -qF 'ensure_plugin \"superpowers@claude-plugins-official\"' bootstrap-cloud.sh && bash -n bootstrap-cloud.sh && bash -n install/common/claude-plugins.sh && bash -n .claude/skills/dotfiles-diagnostics-and-tooling/scripts/cloud-doctor.sh && zsh -n zsh/functions.zsh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "install-suite-green",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh install/install.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && grep -qF \"PASS  workflow bootstrap no longer installs ECC\" \"$f\" && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 300
+    },
+    {
+      "name": "codex-ecc-payload-deleted",
+      "run": "test ! -e codex/plugins/ecc && test ! -e codex/ecc-skills.txt && python3 -c \"import json; m=json.load(open('codex/.agents/plugins/marketplace.json')); n=[p['name'] for p in m['plugins']]; assert n == ['superpowers'], n\" && grep -qF 'disable_codex_plugin \"$config\" \"ecc@dotfiles-workflows\"' install/common/codex-plugin-dedupe.sh && grep -qF 'disable_codex_plugin \"$config\" \"ecc@ecc\"' install/common/codex-plugin-dedupe.sh && ! grep -qF 'codex_plugin_enabled \"$config\" \"ecc@dotfiles-workflows\"' install/common/codex-plugin-dedupe.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "codex-surfaces-has-no-ecc-flags",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-help.XXXXXX\")\"; python3 install/common/codex-surfaces.py --help > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && ! grep -qiE 'ecc|focus|catalog' \"$f\" && ! grep -nE 'ECC_PLUGIN|def (legacy_duplicates|imported_commands|focused_skills)\\(' install/common/codex-surfaces.py && grep -qF 'legacy-copy|legacy-command|ecc-focus' install/common/codex-surfaces.py && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 60
+    },
+    {
+      "name": "codex-surfaces-suite-green-with-retirement-cases",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh install/codex-surfaces.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && grep -qE '^OK' \"$f\" && grep -qE '^test_stale_ecc_managed_blocks_are_cleared .* [.][.][.] ok$' \"$f\" && grep -qE '^test_lifecycle_disables_retired_ecc_plugins .* [.][.][.] ok$' \"$f\" && grep -qE '^test_lifecycle_leaves_config_without_ecc_unchanged .* [.][.][.] ok$' \"$f\" && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 600
+    },
+    {
+      "name": "codex-skills-suite-green-with-retirement-case",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh codex/skills/codex-skills.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && grep -qF \"PASS  installer disables retired ECC Codex plugins and dedupes Superpowers\" \"$f\" && grep -qF \"PASS  Codex AGENTS no longer routes to retired ECC skills\" \"$f\" && grep -qF \"PASS  installer preserves an inherited caller Codex home\" \"$f\" && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 600
+    },
+    {
+      "name": "claude-links-suite-green",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh install/claude-links.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && grep -qF \"PASS  reconcile forces retired plugin ecc@ecc to false\" \"$f\" && grep -qF \"PASS  reconcile drops the retired ecc marketplace\" \"$f\" && grep -qF \"PASS  reconcile prunes retired ECC_ and GATEGUARD_ env keys\" \"$f\" && grep -qF \"PASS  retirement keeps other plugins, marketplaces and env keys\" \"$f\" && grep -qF \"PASS  retirement is idempotent\" \"$f\" && grep -qF \"PASS  retirement removes an emptied marketplace map\" \"$f\" && grep -qF \"PASS  link path delivers no ECC env and disables ecc@ecc\" \"$f\" && grep -qF \"PASS  reconcile sweeps a model pin the template dropped\" \"$f\" && grep -qF \"PASS  personal Claude config disables Atlassian and preserves other plugins\" \"$f\" && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 600
+    },
+    {
+      "name": "claude-md-drops-isolation-and-gateguard-bullets",
+      "run": "! grep -qF '**ECC account isolation.**' CLAUDE.md && ! grep -qF '**GateGuard tuning.**' CLAUDE.md && grep -qF 'ecc-uninstall' CLAUDE.md && grep -qF 'RETIRED_PLUGINS' CLAUDE.md && ! grep -qF 'sync-ecc-to-codex' CLAUDE.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "no-live-ecc-references-outside-allowlist",
+      "run": "! git grep -nIiP '(?<![a-z])ecc(?![a-z])|gateguard|plan.canvas|\\{\\{CLAUDE_CONFIG_DIR\\}\\}' -- . ':!NOTICE' ':!git/hooks/pre-commit' ':!git/hooks/pre-push' ':!git/hooks/pre-commit.test.sh' ':!git/hooks/pre-push.test.sh' ':!install/common/codex-roles.py' ':!install/codex-roles.test.sh' ':!claude/contracts/td-2026-09-05-isolate-ecc-plan-canvas-state-across-accounts-contract.json' ':!claude/contracts/td-2026-09-06-scope-every-ecc-hook-that-reads-the-home-config-di-contract.json' ':!claude/contracts/2026-09-15-decide-ecc-s-future-and-retire-the-isolation-tax-contract.json' ':!.claude/skills/dotfiles-failure-archaeology/SKILL.md' ':!zsh/functions.zsh' ':!zsh/functions.test.sh' ':!install/common/claude-links.sh' ':!install/claude-links.test.sh' ':!install/common/codex-plugin-dedupe.sh' ':!install/common/codex-links.sh' ':!install/common/codex-surfaces.py' ':!install/codex-surfaces.test.sh' ':!codex/skills/codex-skills.test.sh' ':!install/install.test.sh' | grep -viE 'retire|ecc-uninstall'",
+      "timeout_secs": 60
+    },
+    {
+      "name": "claude-hooks-suite-green",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh claude/hooks/claude-hooks.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 1200
+    },
+    {
+      "name": "settings-drift-suite-green",
+      "run": "f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh claude/hooks/settings-drift-check.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && ok=0; rm -f \"$f\"; exit $ok",
+      "timeout_secs": 300
+    },
+    {
+      "name": "git-hook-suites-green",
+      "run": "(f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh git/hooks/pre-commit.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && ok=0; rm -f \"$f\"; exit $ok) && (f=\"$(mktemp \"${TMPDIR:-/tmp}/ecc-contract.XXXXXX\")\"; env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_BIN_PATH -u HERDR_SOCKET_PATH -u HERDR_PERSONAL -u HERDR_ACCOUNT_ID -u WORKFLOW_PERSONAL_ACCOUNT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_PID sh git/hooks/pre-push.test.sh > \"$f\" 2>&1; rc=$?; ok=1; [ \"$rc\" -eq 0 ] && tail -1 \"$f\" | grep -qE '^[0-9]+ passed, 0 failed$' && ok=0; rm -f \"$f\"; exit $ok)",
+      "timeout_secs": 600
+    },
+    {
+      "name": "public-safety-scan",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 300
+    }
+  ]
+}
