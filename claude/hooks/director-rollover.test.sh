@@ -360,5 +360,82 @@ grep -q 'do not re-run rollover' "$FX/e"
 test "$(grep -c 'send-text' "$FX/herdr.log")" = 1
 SH
 
+check "hook: silent on every gate failure" <<'SH'
+H="python3 $REPO_ROOT/claude/hooks/director_rollover.py"
+SID=22222222-2222-4222-8222-222222222222
+SOCK=/tmp/cc-socks/$$.sock
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
+p() { printf '{"hook_event_name":"SessionStart","source":"%s","agent_type":"%s","session_id":"%s","cwd":"%s"}' "$1" "$2" "$3" "$FX_REPO"; }
+test -z "$(p startup director $SID | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(p clear director $SID | CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(p clear worker $SID | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(p clear director not-a-uuid | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(p clear director $SID | HERDR_ENV=1 $H)"
+test -z "$(printf 'not json' | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(p clear director $SID | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/1.sock $H)"
+test -z "$(printf '{"hook_event_name":"Stop","source":"clear","agent_type":"director","session_id":"%s","cwd":"%s"}' $SID "$FX_REPO" | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(printf '{"hook_event_name":"SessionStart","source":"clear","agent_type":"director","session_id":"%s"}' $SID | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+test -z "$(p resume director $SID | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET=$SOCK $H)"
+# no gate case above may have re-claimed the fixture lease
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+SH
+
+check "hook: clear in the owning director wraps the INFO block and re-claims" <<'SH'
+SOCK=/tmp/cc-socks/$$.sock
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
+printf '{"hook_event_name":"SessionStart","source":"clear","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h" && rc=0 || rc=$?
+test "$rc" = 0
+python3 -c '
+import json, re, sys
+d = json.load(open(sys.argv[1]))["hookSpecificOutput"]
+assert d["hookEventName"] == "SessionStart"
+assert d["additionalContext"].startswith("[INFO] herdr director rollover"), d
+assert re.search(r"fence=%d$" % (int(sys.argv[2]) + 1), d["additionalContext"], re.M), d
+' "$FX/h" "$F1"
+SH
+
+check "hook: silent when the lease pid is not an ancestor" <<'SH'
+sleep 60 & SIB=$!
+SOCK=/tmp/cc-socks/$SIB.sock
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $SIB --messaging-socket "$SOCK" >/dev/null
+printf '{"hook_event_name":"SessionStart","source":"compact","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h" && rc=0 || rc=$?
+kill $SIB
+test "$rc" = 0
+test ! -s "$FX/h"
+SH
+
+check "hook: a failing claim wraps the WARNING block and still exits 0" <<'SH'
+SOCK=/tmp/cc-socks/$$.sock
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+: > "$FX/not-a-dir"
+printf '{"hook_event_name":"SessionStart","source":"clear","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | HERDR_COORDINATION_ROOT="$FX/not-a-dir" HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" \
+    python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h" && rc=0 || rc=$?
+test "$rc" = 0
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"]
+assert d.startswith("[WARNING] herdr director rollover: lease NOT re-established ("), d
+' "$FX/h"
+SH
+
+check "hook: executable, python3 shebang, registered on clear|compact" <<'SH'
+test -x "$REPO_ROOT/claude/hooks/director_rollover.py"
+head -n 1 "$REPO_ROOT/claude/hooks/director_rollover.py" | grep -qxF '#!/usr/bin/env python3'
+python3 - <<'PY'
+import json, os
+t = json.load(open(os.environ["REPO_ROOT"] + "/claude/settings.json.tmpl"))
+hits = [e for e in t["hooks"]["SessionStart"]
+        if any(h.get("command") == "~/.claude/hooks/director_rollover.py" for h in e["hooks"])]
+assert len(hits) == 1 and hits[0]["matcher"] == "clear|compact", hits
+PY
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
