@@ -31,7 +31,8 @@ sibling runbooks make sense.
   (settings, plugins, credentials). Default `~/.claude`; overridden by the
   `CLAUDE_CONFIG_DIR` env var.
 - **Plugin**: an installable bundle of skills/commands/agents/hooks, identified
-  as `name@marketplace` (e.g. `ecc@ecc`).
+  as `name@marketplace` (e.g. `superpowers@claude-plugins-official`; the
+  retired ECC used `ecc@ecc`).
 - **Marketplace**: a git repo that catalogs plugins via a
   `.claude-plugin/marketplace.json` manifest; registered per config dir.
 - **Hook**: an external command Claude Code runs on lifecycle events
@@ -81,19 +82,19 @@ Live-verified layout of `~/.claude` in a cloud container, 2026-07-02
 (`ls -la ~/.claude`). "Managed" = symlinked by `link_claude_config_dir`
 (install/common/claude-links.sh); "local" = machine-local real file/dir.
 
-| Entry                                                  | Kind            | Points to / holds                                                                                                |
-| ------------------------------------------------------ | --------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `CLAUDE.md`                                            | managed symlink | `claude/CLAUDE.md` -- global instructions, loaded every session                                                  |
-| `operating-principles.md`                              | managed symlink | `claude/operating-principles.md` -- pulled in via `@import` (see below)                                          |
-| `commands/`                                            | managed symlink | `claude/commands/` -- slash commands                                                                             |
-| `agents/`                                              | managed symlink | `claude/agents/` -- subagent definitions                                                                         |
-| `hooks/`                                               | managed symlink | `claude/hooks/` -- guard hook scripts                                                                            |
-| `skills/`                                              | managed symlink | `claude/skills/` -- personal skills tracked, ECC/generated skills untracked (claude/skills/.gitignore whitelist) |
-| `rules/`                                               | managed symlink | `claude/rules/` -- only `personal/` tracked; ECC language dirs vendored, untracked (claude/rules/.gitignore)     |
-| `statusline.js`                                        | managed symlink | `claude/statusline.js`                                                                                           |
-| `settings.json`                                        | LOCAL file      | seeded once from `claude/settings.json.tmpl`; plugin installers write into it                                    |
-| `plugins/`                                             | LOCAL dir       | plugin state -- see next section                                                                                 |
-| `projects/`, `sessions/`, `shell-snapshots/`, `tasks/` | LOCAL           | session/runtime state (platform-managed)                                                                         |
+| Entry                                                  | Kind            | Points to / holds                                                                                                                                                   |
+| ------------------------------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE.md`                                            | managed symlink | `claude/CLAUDE.md` -- global instructions, loaded every session                                                                                                     |
+| `operating-principles.md`                              | managed symlink | `claude/operating-principles.md` -- pulled in via `@import` (see below)                                                                                             |
+| `commands/`                                            | managed symlink | `claude/commands/` -- slash commands                                                                                                                                |
+| `agents/`                                              | managed symlink | `claude/agents/` -- subagent definitions                                                                                                                            |
+| `hooks/`                                               | managed symlink | `claude/hooks/` -- guard hook scripts                                                                                                                               |
+| `skills/`                                              | managed symlink | `claude/skills/` -- personal skills tracked, installer-managed/generated skills untracked, including any retired-ECC leftovers (claude/skills/.gitignore whitelist) |
+| `rules/`                                               | managed symlink | `claude/rules/` -- only `personal/` tracked; retired-ECC-vendored language dirs untracked (claude/rules/.gitignore)                                                 |
+| `statusline.js`                                        | managed symlink | `claude/statusline.js`                                                                                                                                              |
+| `settings.json`                                        | LOCAL file      | seeded once from `claude/settings.json.tmpl`; plugin installers write into it                                                                                       |
+| `plugins/`                                             | LOCAL dir       | plugin state -- see next section                                                                                                                                    |
+| `projects/`, `sessions/`, `shell-snapshots/`, `tasks/` | LOCAL           | session/runtime state (platform-managed)                                                                                                                            |
 
 Note the defensive behavior in `link_claude_config_dir`: real (non-symlink)
 `commands/agents/hooks/rules/skills` dirs are backed up as
@@ -116,7 +117,7 @@ What this repo puts in each layer (all repo-verified):
 | ----------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude/settings.json.tmpl`         | yes                             | `env`, `permissions` (allow/deny/ask, `defaultMode`), `hooks` (PreToolUse, PostToolUse, SessionStart), `statusLine`, `enabledPlugins`, `extraKnownMarketplaces`, `mcpServers` | template for the USER settings.json in both config dirs                                                                                                                                                               |
 | `<config-dir>/settings.json`        | no (machine-local)              | same as template plus whatever plugin installers write                                                                                                                        | seeded ONCE by `seed_machine_local_file`; template changes need manual merge on machines. Cloud reconciles automatically via `reconcile_claude_settings` (bootstrap-cloud.sh) -- open weak point that machines do not |
-| `.claude/settings.json` (repo root) | yes                             | `enabledPlugins`, `extraKnownMarketplaces`, `hooks.SessionStart`                                                                                                              | PROJECT settings: declares ECC + Superpowers for native pre-launch install in cloud, plus the session-start.sh self-heal hook                                                                                         |
+| `.claude/settings.json` (repo root) | yes                             | `enabledPlugins`, `extraKnownMarketplaces`, `hooks.SessionStart`                                                                                                              | PROJECT settings: declares Superpowers for native pre-launch install in cloud (ECC retired 2026-09), plus the session-start.sh self-heal hook                                                                         |
 | `.claude/settings.local.json`       | gitignored (.gitignore:159-160) | none committed                                                                                                                                                                | per-machine personal overrides only                                                                                                                                                                                   |
 
 `enabledPlugins` semantics: `true` per `name@marketplace` id enables the
@@ -134,12 +135,13 @@ Skill-level controls (checked against upstream docs and the 2.1.278 binary,
 plainly that plugin skills are NOT affected by `skillOverrides`; the only
 control for a plugin's skills is the whole plugin (`enabledPlugins`,
 `/plugin`). `claude plugin details <name@marketplace>` prints a plugin's
-component inventory and projected always-on token cost (ECC 2.2.1: 380
-skills, ~40.6k tokens per session); `/skill-doctor` (interactive) shows
+component inventory and projected always-on token cost (the retired ECC
+2.2.1 carried 380 skills, ~40.6k tokens per session -- the isolation-tax
+decision that led to its retirement); `/skill-doctor` (interactive) shows
 per-skill cost and usage. A same-named plugin loaded via `--plugin-dir` or
 as a `~/.claude/skills/<name>` skills-dir plugin shadows the installed
 marketplace copy for that session, which is the only route to a curated
-subset of a third-party plugin (see the ECC-future todo).
+subset of a third-party plugin.
 
 ## Plugin system mechanics
 
@@ -173,17 +175,15 @@ claude plugins update <name@marketplace>
 claude plugins uninstall <name@marketplace>
 ```
 
-(Sources: bootstrap-cloud.sh `ensure_plugin`; `ecc-install` /
-`superpowers-install` in zsh/functions.zsh. Both paths verify against
-installed_plugins.json: the machine path adopted the `ensure_plugin`
-semantics as `_claude_ensure_plugin` on 2026-07-02.)
+(Sources: bootstrap-cloud.sh `ensure_plugin`; `superpowers-install` in
+zsh/functions.zsh (the retired `ecc-install` used the same path). Both paths
+verify against installed_plugins.json: the machine path adopted the
+`ensure_plugin` semantics as `_claude_ensure_plugin` on 2026-07-02.)
 
-The two plugins this repo declares: `ecc@ecc` (marketplace
-https://github.com/affaan-m/ECC.git) and
-`superpowers@claude-plugins-official`
-(https://github.com/anthropics/claude-plugins-official.git). Both registered
-BY URL so the clone is synchronous -- the official marketplace's platform
-default registration is async and absent during a pre-launch Setup script
+The plugin this repo declares: `superpowers@claude-plugins-official`
+(https://github.com/anthropics/claude-plugins-official.git; the retired ECC declared `ecc@ecc` at https://github.com/affaan-m/ECC.git). Registered BY URL
+so the clone is synchronous -- the official marketplace's platform default
+registration is async and absent during a pre-launch Setup script
 (bootstrap-cloud.sh:49-55; machine path fixed the same way in
 `superpowers-install`, commit 5b799dd, 2026-07-02).
 
@@ -240,8 +240,9 @@ dotfiles-change-control.
 Plugins contribute their own skills/commands/agents/hooks from their cache
 dir; those load only if the plugin is in installed_plugins.json AND enabled at
 launch. The `claude/skills/.gitignore` whitelist means the skills dir on disk
-mixes tracked personal skills with untracked ECC/generated ones -- check
-`git ls-files claude/skills` before assuming a skill is version-controlled.
+mixes tracked personal skills with untracked installer-managed/generated
+ones (including any retired-ECC leftovers) -- check `git ls-files
+claude/skills` before assuming a skill is version-controlled.
 
 ## CLAUDE.md and @import
 
@@ -256,8 +257,7 @@ of the global one. Claude Code ALSO natively auto-loads every `.md` under
 an earlier "nothing auto-loads" finding here came from fresh clones where the
 untracked vendored dirs did not exist): a `paths:` frontmatter scopes a rule
 to sessions with matching files in context, no frontmatter loads every
-session. Our tracked always-on layer is `claude/rules/personal/`; ECC rules
-vendoring is retired (see dotfiles-architecture-contract).
+session. Our tracked always-on layer is `claude/rules/personal/`; ECC rules vendoring and ECC itself are both retired (see dotfiles-architecture-contract).
 
 ## Cloud containers (claude.ai/code)
 
@@ -296,8 +296,9 @@ compaction). The self-heal runs on `startup|resume`; account_guard on
 `startup|clear|compact`.
 
 Cloud containers are personal-account only; `installed_plugins.json` in this
-container shows `ecc@ecc` v2.0.0 and `superpowers@claude-plugins-official`
-v6.1.0 installed at session start (versions are volatile -- see Provenance).
+container shows `superpowers@claude-plugins-official` v6.1.0 installed at
+session start (an earlier snapshot also showed the now-retired `ecc@ecc`
+v2.0.0; versions are volatile -- see Provenance).
 
 ## Statusline
 
@@ -315,26 +316,26 @@ tool (claude/CLAUDE.md "Worktree Default").
 Written 2026-07-02 from repo state at commit 26eae6d and live inspection of
 the authoring cloud container. Volatile facts and how to re-verify:
 
-| Fact                                    | Re-verify with                                                                                                 |
-| --------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Config-dir routing logic                | `grep -n "_claude_config_dir" zsh/claude-account.zsh`                                                          |
-| Symlink set per config dir              | `grep -n "ln -sf" install/common/claude-links.sh`                                                              |
-| User-layer hook registrations           | `python3 -c "import json; print(json.dumps(json.load(open('claude/settings.json.tmpl'))['hooks'], indent=2))"` |
-| Project-layer plugin declaration + hook | `cat .claude/settings.json`                                                                                    |
-| Installed plugins + versions (live)     | `cat ~/.claude/plugins/installed_plugins.json`                                                                 |
-| Registered marketplaces (live)          | `cat ~/.claude/plugins/known_marketplaces.json`                                                                |
-| Marketplace manifest lists a plugin     | `grep '"name"' ~/.claude/plugins/marketplaces/<name>/.claude-plugin/marketplace.json`                          |
-| Marketplace URLs (ECC, official)        | `grep -n "REPO_URL" bootstrap-cloud.sh`                                                                        |
-| Retry budget / backoff cap              | `grep -n "PLUGIN_RETR" bootstrap-cloud.sh`                                                                     |
-| Hook exit-code behavior                 | `grep -n "sys.exit" claude/hooks/<hook>.py`                                                                    |
-| Hook script inventory                   | `ls claude/hooks/*.py`                                                                                         |
-| Tracked vs untracked skills             | `git ls-files claude/skills` vs `ls claude/skills`                                                             |
-| @import still present                   | `tail -1 claude/CLAUDE.md`                                                                                     |
-| CLAUDE_CODE_REMOTE gate                 | `grep -n "CLAUDE_CODE_REMOTE" .claude/hooks/session-start.sh`                                                  |
-| Statusline command                      | `grep -n "statusline" claude/settings.json.tmpl install/common/claude-links.sh`                                |
-| Cited commits still exist               | `git show --stat -s c1c4500 8d4507f 7cb28b7 722c653 910f2bc 5b799dd 52f807d`                                   |
+| Fact                                         | Re-verify with                                                                                                 |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Config-dir routing logic                     | `grep -n "_claude_config_dir" zsh/claude-account.zsh`                                                          |
+| Symlink set per config dir                   | `grep -n "ln -sf" install/common/claude-links.sh`                                                              |
+| User-layer hook registrations                | `python3 -c "import json; print(json.dumps(json.load(open('claude/settings.json.tmpl'))['hooks'], indent=2))"` |
+| Project-layer plugin declaration + hook      | `cat .claude/settings.json`                                                                                    |
+| Installed plugins + versions (live)          | `cat ~/.claude/plugins/installed_plugins.json`                                                                 |
+| Registered marketplaces (live)               | `cat ~/.claude/plugins/known_marketplaces.json`                                                                |
+| Marketplace manifest lists a plugin          | `grep '"name"' ~/.claude/plugins/marketplaces/<name>/.claude-plugin/marketplace.json`                          |
+| Marketplace URL (official; ECC's is retired) | `grep -n "REPO_URL" bootstrap-cloud.sh`                                                                        |
+| Retry budget / backoff cap                   | `grep -n "PLUGIN_RETR" bootstrap-cloud.sh`                                                                     |
+| Hook exit-code behavior                      | `grep -n "sys.exit" claude/hooks/<hook>.py`                                                                    |
+| Hook script inventory                        | `ls claude/hooks/*.py`                                                                                         |
+| Tracked vs untracked skills                  | `git ls-files claude/skills` vs `ls claude/skills`                                                             |
+| @import still present                        | `tail -1 claude/CLAUDE.md`                                                                                     |
+| CLAUDE_CODE_REMOTE gate                      | `grep -n "CLAUDE_CODE_REMOTE" .claude/hooks/session-start.sh`                                                  |
+| Statusline command                           | `grep -n "statusline" claude/settings.json.tmpl install/common/claude-links.sh`                                |
+| Cited commits still exist                    | `git show --stat -s c1c4500 8d4507f 7cb28b7 722c653 910f2bc 5b799dd 52f807d`                                   |
 
-Dated/volatile: plugin versions (ecc 2.0.0, superpowers 6.1.0 on 2026-07-02);
+Dated/volatile: plugin version (superpowers 6.1.0 on 2026-07-02; the retired ecc was 2.0.0);
 the settings-precedence chain and enabledPlugins merge rules are
 inferred-from-docs, not repo-proven -- re-check against current Claude Code
 docs before relying on the exact ordering; the CLI verb spelling

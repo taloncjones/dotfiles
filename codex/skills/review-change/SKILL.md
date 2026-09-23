@@ -83,7 +83,7 @@ classifies each new blocker as repair-introduced, previously missed, or changed
 requirements with a concrete consequence. Require blocking findings, useful
 advisory findings, safe reproduction evidence, and coverage gaps. Its prompt
 permits relevant reference skills for language, security, framework and
-architecture guidance, including installed ECC references. This review scope,
+architecture guidance. This review scope,
 material-impact threshold and read-only authority take precedence over that
 guidance. Require the reviewer to perform the review itself; do not launch
 another review workflow, delegate reviewers, modify code or publish findings.

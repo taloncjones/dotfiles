@@ -7,12 +7,7 @@
   },
   "promptSuggestionEnabled": false,
   "env": {
-    "CLAUDE_CODE_DISABLE_TELEMETRY": "1",
-    "ECC_CONTEXT_MONITOR_COST_WARNINGS": "0",
-    "ECC_DISABLED_HOOKS": "session-start:plan-canvas-sessions,stop:plan-canvas-pending,post:bash:command-log-audit,post:bash:command-log-cost,post:skill:track,pre:mcp-health-check,post:mcp-health-check",
-    "ECC_AGENT_DATA_HOME": "{{CLAUDE_CONFIG_DIR}}",
-    "GATEGUARD_BASH_ROUTINE_DISABLED": "1",
-    "GATEGUARD_EXEMPT_GLOBS": "/**"
+    "CLAUDE_CODE_DISABLE_TELEMETRY": "1"
   },
   "permissions": {
     "allow": [
@@ -323,19 +318,10 @@
     "atlassian@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true,
     "code-review@claude-plugins-official": true,
-    "ecc@ecc": true,
     "superpowers@claude-plugins-official": true,
     "telegram@claude-plugins-official": false,
     "code-simplifier@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true
-  },
-  "extraKnownMarketplaces": {
-    "ecc": {
-      "source": {
-        "source": "git",
-        "url": "https://github.com/affaan-m/ECC.git"
-      }
-    }
   },
   "mcpServers": {}
 }

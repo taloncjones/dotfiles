@@ -271,14 +271,6 @@ function vscode-ext-sync() {    # vscode-ext-sync() will rewrite vscode/extensio
 ###### Claude Code Plugins
 ##############################
 
-# helper: record update epoch for a plugin
-function _claude_plugin_epoch_write() {
-    local name="$1"
-    zmodload zsh/datetime
-    mkdir -p "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}"
-    echo "LAST_${name:u}_EPOCH=$(( EPOCHSECONDS / 60 / 60 / 24 ))" > "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.${name}-update"
-}
-
 # helper: resolve install scope from args. Echoes "global" (the default) or "local".
 function _claude_plugin_scope() {
     local scope="global" arg
@@ -403,7 +395,7 @@ function _claude_ensure_plugin() {
 }
 
 # --- Codex plugin lifecycle ---
-# Codex plugins are global to CODEX_HOME. ECC and Superpowers are staged into a
+# Codex plugins are global to CODEX_HOME. Superpowers is staged into a
 # dedicated local marketplace so every manifest reference is copied into the
 # plugin cache without depending on account-provisioned marketplaces.
 CODEX_WORKFLOW_MARKETPLACE_DIR="${CODEX_WORKFLOW_MARKETPLACE_DIR:-$HOME/.local/share/dotfiles/codex-workflows}"
@@ -712,58 +704,6 @@ for path in sorted(staged.rglob("*")):
 PY
 }
 
-function _codex_stage_ecc_plugin() {
-    local source_dir="$ECC_REPO_DIR"
-    local destination="$CODEX_WORKFLOW_MARKETPLACE_DIR"
-    local template_dir="$DOTFILEDIR/codex/plugins/ecc"
-    local marketplace_template="$DOTFILEDIR/codex/.agents/plugins/marketplace.json"
-    local plugins_dir="$destination/plugins"
-    local staging="$plugins_dir/.ecc.tmp.$$"
-    local plugin_dir="$staging"
-
-    [[ -n "$destination" && "$destination" != "/" ]] \
-        || { echo "[X] invalid Codex workflow marketplace path"; return 1; }
-    [[ -d "$source_dir/skills" && -f "$source_dir/.mcp.json" ]] \
-        || { echo "[X] ECC checkout lacks Codex skills or MCP config: $source_dir"; return 1; }
-    [[ -f "$template_dir/.codex-plugin/plugin.json" && -f "$marketplace_template" ]] \
-        || { echo "[X] dotfiles ECC Codex plugin templates are incomplete"; return 1; }
-
-    rm -rf "$staging"
-    mkdir -p "$destination/.agents/plugins" "$plugin_dir/.codex-plugin" || return 1
-    cp "$marketplace_template" "$destination/.agents/plugins/marketplace.json" || return 1
-    cp "$template_dir/.codex-plugin/plugin.json" "$plugin_dir/.codex-plugin/plugin.json" || return 1
-    cp "$source_dir/.mcp.json" "$plugin_dir/.mcp.json" || return 1
-    cp -R "$source_dir/skills" "$plugin_dir/skills" || return 1
-    # Codex validates skill frontmatter as strict YAML. Convert upstream's
-    # single-line descriptions to folded scalars so embedded colons remain
-    # valid without changing the rendered description.
-    _codex_normalize_skill_frontmatter "$plugin_dir/skills" || return 1
-    if [[ -d "$source_dir/assets" ]]; then
-        cp -R "$source_dir/assets" "$plugin_dir/assets" || return 1
-    fi
-    _codex_write_stage_provenance "$source_dir" "$template_dir/.codex-plugin/plugin.json" "$plugin_dir" || return 1
-
-    rm -rf "$plugins_dir/ecc"
-    mv "$staging" "$plugins_dir/ecc" || return 1
-    echo "[OK] Staged self-contained ECC Codex plugin at $plugins_dir/ecc"
-}
-
-function _codex_install_ecc_plugin() {
-    command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
-    _codex_stage_ecc_plugin || return 1
-    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_verify_or_refresh_managed_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_reconcile_workflow_surfaces
-}
-
-function _codex_update_ecc_plugin() {
-    command -v codex &>/dev/null || { echo "[INFO] Codex CLI not installed; skipping ECC Codex plugin."; return 0; }
-    _codex_stage_ecc_plugin || return 1
-    _codex_ensure_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_verify_or_refresh_managed_plugin "ecc@dotfiles-workflows" "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" "$CODEX_WORKFLOW_MARKETPLACE_DIR" || return 1
-    _codex_reconcile_workflow_surfaces
-}
-
 function _codex_stage_superpowers_plugin() {
     local source_dir="$SUPERPOWERS_REPO_DIR"
     local destination="$CODEX_WORKFLOW_MARKETPLACE_DIR"
@@ -820,137 +760,70 @@ function _codex_update_superpowers_plugin() {
     _codex_reconcile_workflow_surfaces
 }
 
-# --- ECC (Everything Claude Code) ---
-# Plugin provides: skills, agents, commands, hooks (auto-updated by Claude Code).
-# Rules: NOT vendored (retired 2026-07-02). Claude Code natively auto-loads
-#   every .md under ~/.claude/rules at launch: a `paths:` frontmatter scopes a
-#   rule to sessions with matching files in context; none = every session.
-#   (Verified live in a cloud session 2026-07-02; the earlier "nothing
-#   auto-loads" finding came from fresh clones where the untracked vendored
-#   dirs did not exist.) The full upstream rules tree ships inside the
-#   marketplace clone at ~/.claude/plugins/marketplaces/ecc/rules/ on every
-#   machine and container with the plugin installed -- point on-demand
-#   consumers (e.g. rules-distill's scan-rules.sh) there. Only our own
-#   always-on rules (claude/rules/personal/, tracked) live at ~/.claude/rules
-#   now; leftover vendored language dirs from older installs still AUTO-LOAD
-#   (common/ and web/ have no `paths:`, so they load every session) and should
-#   be deleted (_ecc_legacy_rules_notice flags them). The ECC repo clone also
-#   provides source content for an independent, self-contained Codex plugin.
-# Upstream is the v2 repo (affaan-m/ECC, plugin id ecc@ecc); the older
-#   everything-claude-code v1 repo/marketplace is retired.
-ECC_REPO_URL="https://github.com/affaan-m/ECC.git"
+# --- ECC (Everything Claude Code) -- RETIRED; uninstall tooling only ---
+# ECC cost ~10.6k context tokens per session boot for skills nothing here
+# called, plus an account-isolation layer re-audited on every upgrade. The
+# settings reconcile forces ecc@ecc off and the Codex dedupe disables its
+# Codex copies; ecc-uninstall removes what is still on disk.
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
 SUPERPOWERS_REPO_URL="https://github.com/obra/superpowers.git"
 SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.local/share/dotfiles/sources/superpowers}"
 
-# helper: flag vendored rules left behind by pre-retirement installs. Not
-# inert: Claude Code auto-loads them (common/web every session, language dirs
-# on matching files), so leftovers inject stale upstream guidance until removed.
-function _ecc_legacy_rules_notice() {
-    local l
-    local -a leftovers=()
-    for l in common cpp python rust typescript web; do
-        [[ -d "$DOTFILEDIR/claude/rules/$l" ]] && leftovers+=("$l")
+# Retired entry points survive `reload` in a long-running shell -- drop them.
+for _ecc_fn in ecc-install ecc-update _ecc_legacy_rules_notice _codex_stage_ecc_plugin \
+        _codex_install_ecc_plugin _codex_update_ecc_plugin \
+        _claude_plugin_check_update _claude_plugin_epoch_write; do
+    (( ${+functions[$_ecc_fn]} )) && unfunction "$_ecc_fn"
+done
+unset _ecc_fn
+
+# helper: move the untracked copies an old full ECC install vendored into the
+# symlinked asset dirs to a backup. A candidate is untracked (ls-files exit 1,
+# never a git error) and shares a basename with the checkout; upstream edited
+# most files since, so content matching would miss them. Tracked files and
+# symlinks are never touched. Returns 1 on any git or move failure.
+function _ecc_sweep_legacy_vendored() {
+    emulate -L zsh
+    local ecc_dir="$1" pair target origin f rel rc backup
+    local -aU candidates
+    git -C "$DOTFILEDIR" rev-parse --is-inside-work-tree &>/dev/null \
+        || { echo "[X] Cannot read the dotfiles git index at $DOTFILEDIR; not sweeping."; return 1; }
+    if [[ ! -d "$ecc_dir" ]]; then
+        echo "[INFO] ECC checkout absent; nothing to match. Untracked candidates to review by hand:"
+        for target in claude/agents claude/commands; do
+            for f in "$DOTFILEDIR/$target"/*.md(N.); do
+                git -C "$DOTFILEDIR" ls-files --error-unmatch -- "$target/${f:t}" &>/dev/null \
+                    || echo "[INFO]   $f"
+            done
+        done
+        return 0
+    fi
+    for pair in claude/agents:agents claude/commands:commands \
+            claude/commands:legacy-command-shims/commands claude/hooks:hooks; do
+        target="${pair%%:*}" origin="${pair#*:}"
+        # (N.) = plain files only: symlinks and dirs are skipped.
+        for f in "$DOTFILEDIR/$target"/*(N.); do
+            [[ -f "$ecc_dir/$origin/${f:t}" ]] || continue
+            rel="$target/${f:t}"
+            git -C "$DOTFILEDIR" ls-files --error-unmatch -- "$rel" &>/dev/null
+            rc=$?
+            (( rc == 0 )) && continue
+            (( rc == 1 )) || { echo "[X] git ls-files failed ($rc) on $rel; not sweeping."; return 1; }
+            candidates+=("$rel")
+        done
     done
-    if (( ${#leftovers} > 0 )); then
-        echo "[WARNING] Legacy vendored ECC rules present (${leftovers[*]}); vendoring is retired."
-        echo "[WARNING] They are untracked but still auto-load into sessions. Remove with:"
-        # No brace form here: a single-element {web} does not brace-expand when
-        # pasted, so rm -rf would hit a literal '{web}' path and silently no-op.
-        echo "[WARNING]   rm -rf" "${leftovers[@]/#/$DOTFILEDIR/claude/rules/}"
-        echo "[INFO] The full upstream tree lives at ~/.claude/plugins/marketplaces/ecc/rules/"
-    fi
-}
-
-function ecc-install() {    # ecc-install([--local]) installs ECC independently for Claude and Codex. ex: $ ecc-install
-    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local."
-    local ecc_dir="$ECC_REPO_DIR"
-
-    # clone repo if not present
-    if [[ ! -d "$ecc_dir" ]]; then
-        echo "[INFO] Cloning ECC repo..."
-        git clone "$ECC_REPO_URL" "$ecc_dir" || { echo "[X] clone failed"; return 1; }
-    else
-        echo "[INFO] ECC repo already exists, pulling latest..."
-        (cd "$ecc_dir" && git pull origin main) || { echo "[X] git pull failed"; return 1; }
-    fi
-
-    # clean previous full install to avoid duplicates with plugin
-    if [[ -f "$HOME/.claude/ecc/install-state.json" ]]; then
-        echo "[INFO] Cleaning previous ECC install..."
-        (cd "$ecc_dir" && node scripts/uninstall.js 2>/dev/null)
-    fi
-
-    # rules vendoring retired (2026-07-02): the marketplace clone carries the
-    # upstream rules tree; flag active leftovers from older installs.
-    _ecc_legacy_rules_notice
-
-    # ensure the ecc marketplace + plugin exist in EVERY account config dir
-    # (~/.claude personal, ~/.claude-work work), verified against each dir's
-    # installed_plugins.json rather than CLI output (_claude_ensure_plugin uses
-    # explicit CLAUDE_CONFIG_DIR + `command claude`, so the result does not
-    # depend on $PWD via the claude() wrapper). A dir that does not exist yet
-    # (e.g. work not set up) is skipped.
-    local cfg_dir install_status=0
-    if command -v claude &>/dev/null; then
-        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-            [[ -d "$cfg_dir" ]] || continue
-            _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || install_status=1
-        done
-    else
-        echo "[INFO] Claude CLI not installed; skipping ECC Claude plugins."
-    fi
-
-    _codex_install_ecc_plugin || install_status=1
-
-    if (( install_status == 0 )); then
-        _claude_plugin_epoch_write ecc
-        echo "[OK] ECC installed for available Claude and Codex runtimes"
-    else
-        echo "[X] ECC installation was incomplete; review the runtime-specific errors above"
-        return 1
-    fi
-}
-
-function ecc-update() {    # ecc-update([--local]) will pull latest ECC repo and update rules. ex: $ ecc-update
-    [[ "$(_claude_plugin_scope "$@")" == "local" ]] && echo "[WARNING] ECC's Claude rules/plugin are global-only; ignoring --local."
-    local ecc_dir="$ECC_REPO_DIR"
-
-    if [[ ! -d "$ecc_dir" ]]; then
-        echo "[X] ECC repo not found. Run 'ecc-install' first."
-        return 1
-    fi
-
-    echo "[INFO] Syncing ECC to upstream main..."
-    # ECC is a read-only source mirror: fetch + hard-reset guarantees the staged
-    # Codex plugin and Claude marketplace both derive from upstream main.
-    (cd "$ecc_dir" && git fetch origin main && git reset --hard origin/main) \
-        || { echo "[X] ECC sync failed"; return 1; }
-
-    # rules vendoring retired (2026-07-02); flag active leftovers only.
-    _ecc_legacy_rules_notice
-
-    local cfg_dir update_status=0
-    if command -v claude &>/dev/null; then
-        for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
-            [[ -d "$cfg_dir" ]] || continue
-            _claude_ensure_plugin "$cfg_dir" "ecc@ecc" "ecc" "$ECC_REPO_URL" || { update_status=1; continue; }
-            _claude_plugin_run "$cfg_dir" plugin marketplace update ecc >/dev/null 2>&1 \
-                || { echo "[X] ECC marketplace refresh failed ($cfg_dir)"; update_status=1; continue; }
-            _claude_plugin_run "$cfg_dir" plugins update ecc@ecc \
-                || { echo "[X] ECC update failed ($cfg_dir)"; update_status=1; }
-        done
-    fi
-
-    _codex_update_ecc_plugin || update_status=1
-
-    if (( update_status == 0 )); then
-        _claude_plugin_epoch_write ecc
-        echo "[OK] ECC updated for available Claude and Codex runtimes"
-    else
-        echo "[X] ECC update was incomplete; review the runtime-specific errors above"
-        return 1
-    fi
+    (( ${#candidates} )) || return 0
+    backup="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/ecc-retired-$(date +%Y%m%d%H%M%S)"
+    for rel in "${candidates[@]}"; do
+        # Copy, verify, then remove: a plain mv across filesystems is
+        # copy-and-unlink, and an interruption there could lose the only copy.
+        mkdir -p "$backup/${rel:h}" \
+            && cp -p "$DOTFILEDIR/$rel" "$backup/$rel" \
+            && cmp -s "$DOTFILEDIR/$rel" "$backup/$rel" \
+            && rm -f "$DOTFILEDIR/$rel" \
+            || { echo "[X] Could not back up $rel to $backup; rerun ecc-uninstall."; return 1; }
+    done
+    echo "[OK] Moved ${#candidates} legacy ECC copies to $backup"
 }
 
 function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Codex plus its source checkout. ex: $ ecc-uninstall
@@ -977,10 +850,20 @@ function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Code
 
     _codex_remove_plugin "ecc@dotfiles-workflows" || uninstall_status=1
 
-    # remove repo
+    _ecc_sweep_legacy_vendored "$ecc_dir" || uninstall_status=1
+    if [[ -n "$CODEX_WORKFLOW_MARKETPLACE_DIR" && -d "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" ]]; then
+        rm -rf "$CODEX_WORKFLOW_MARKETPLACE_DIR/plugins/ecc" || uninstall_status=1
+    fi
+
+    # The checkout is the sweep's evidence: delete it last, and only when every
+    # step above succeeded, so a rerun can still match what is left.
     if [[ -d "$ecc_dir" ]]; then
-        echo "[INFO] Removing ECC repo..."
-        rm -rf "$ecc_dir"
+        if (( uninstall_status == 0 )); then
+            echo "[INFO] Removing ECC repo..."
+            rm -rf "$ecc_dir"
+        else
+            echo "[INFO] Keeping $ecc_dir so a rerun can finish the cleanup."
+        fi
     fi
 
     rm -f "${ZSH_CACHE_DIR:-$HOME/.cache/zsh}/.ecc-update"
@@ -1164,10 +1047,6 @@ function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) full
 }
 
 # Codex integration:
-#   - ECC: staged as a self-contained plugin under
-#     ~/.local/share/dotfiles/codex-workflows and installed from the
-#     dotfiles-workflows marketplace. Claude and Codex installations do not
-#     share runtime files.
 #   - Superpowers: staged from its upstream repository into the same native
 #     marketplace without sharing Claude's installed plugin files.
 # install/common/link.sh still sweeps leftover mirror-style skill/agent links.
@@ -1269,37 +1148,6 @@ function superpowers-uninstall() {    # superpowers-uninstall() will remove the 
     fi
     (( uninstall_status == 0 )) || return 1
 }
-
-# --- Startup update check (OMZ-style) ---
-
-function _claude_plugin_check_update() {
-    [[ ! -t 1 ]] && return
-    zmodload zsh/datetime
-    local current_epoch=$(( EPOCHSECONDS / 60 / 60 / 24 ))
-    local update_days=14
-    local cache_dir="${ZSH_CACHE_DIR:-$HOME/.cache/zsh}"
-    local stale=()
-
-    # gsd is deliberately absent: GSD is retired, and a leftover cache stamp
-    # would nag 'gsd-update' on machines where the right move is gsd-uninstall.
-    for plugin in ecc; do
-        local update_file="$cache_dir/.${plugin}-update"
-        # Only remind for plugins actually managed here: the cache is written by
-        # {plugin}-install/update and removed by {plugin}-uninstall, so an
-        # uninstalled plugin has no cache file and is silently skipped (no nag).
-        [[ -f "$update_file" ]] || continue
-        source "$update_file"
-        local epoch_var="LAST_${plugin:u}_EPOCH"
-        local last=${(P)epoch_var:-0}
-        local days_since=$(( current_epoch - last ))
-        (( days_since >= update_days )) && stale+=("$plugin (${days_since}d)")
-    done
-
-    if (( ${#stale} > 0 )); then
-        echo "[INFO] Stale: ${(j:, :)stale}. Run '${stale[1]%% *}-update' to refresh."
-    fi
-}
-_claude_plugin_check_update
 
 # Check for Claude Code CLI updates (async, cached 24h)
 _claude_code_update_check() {

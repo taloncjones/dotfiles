@@ -1,6 +1,7 @@
 # Final Co-Review Gate Policy
 
 <!-- gate-policy:start -->
+
 ## POLICY
 
 Use this policy only for a finished change before a merge decision. It returns
@@ -172,8 +173,8 @@ account route; a personal Claude route unsets `CLAUDE_CONFIG_DIR`. The first
 three seats receive the frozen diff, relevant callers, repository conventions,
 the declared threat model (default `exposed`), and this policy. The verifier additionally receives
 the first-three artifacts and prior blockers. Every prompt permits relevant
-reference skills for language, security, framework and architecture guidance,
-including installed ECC references. That guidance does not override the review
+reference skills for language, security, framework and architecture guidance.
+That guidance does not override the review
 scope, material-impact threshold or read-only authority. Reviewers perform the
 review themselves; they do not launch another review workflow, delegate
 reviewers, modify code, publish findings or merge. A skill that would perform
@@ -260,14 +261,14 @@ policy and obsolete tests together, and test the retained behavior. Do not
 claim a deleted requirement was repaired or that caller instructions enforce
 a runtime state machine.
 
-| Axis | Required review question | Blocking example |
-| --- | --- | --- |
-| `ownership_authority` | Does one stated authority own each approval, mutation, and cleanup decision? | Two services can issue the same payment after a retry because neither exclusively owns the effect. |
-| `dependency_boundaries` | Do callers cross declared adapters and validation boundaries rather than bypassing them? | A new endpoint bypasses the authorization boundary and exposes another tenant's record. |
-| `contract_coherence` | Do producer, schema, evaluator, and consumer agree on identity, fields, and failure meanings? | A producer emits a schema version or enum that an existing consumer rejects, breaking deployed clients. |
-| `state_effects` | Are partial state, interruption, retry, and changed inputs represented and revalidated? | A timeout after a successful write retries without idempotency and duplicates the external effect. |
-| `lifecycle_operations` | Are rollout, upgrade, rollback, cleanup, capacity, and failure exits ordered and bounded? | A mixed-version rollout writes data the rollback version cannot read, or an unbounded queue exhausts worker resources. |
-| `demonstrability_constraints` | Can the stated behavior be exercised under the repository's real limits and tests? | A changed protocol cannot interoperate with deployed peers and drops required messages under supported conditions. |
+| Axis                          | Required review question                                                                      | Blocking example                                                                                                       |
+| ----------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `ownership_authority`         | Does one stated authority own each approval, mutation, and cleanup decision?                  | Two services can issue the same payment after a retry because neither exclusively owns the effect.                     |
+| `dependency_boundaries`       | Do callers cross declared adapters and validation boundaries rather than bypassing them?      | A new endpoint bypasses the authorization boundary and exposes another tenant's record.                                |
+| `contract_coherence`          | Do producer, schema, evaluator, and consumer agree on identity, fields, and failure meanings? | A producer emits a schema version or enum that an existing consumer rejects, breaking deployed clients.                |
+| `state_effects`               | Are partial state, interruption, retry, and changed inputs represented and revalidated?       | A timeout after a successful write retries without idempotency and duplicates the external effect.                     |
+| `lifecycle_operations`        | Are rollout, upgrade, rollback, cleanup, capacity, and failure exits ordered and bounded?     | A mixed-version rollout writes data the rollback version cannot read, or an unbounded queue exhausts worker resources. |
+| `demonstrability_constraints` | Can the stated behavior be exercised under the repository's real limits and tests?            | A changed protocol cannot interoperate with deployed peers and drops required messages under supported conditions.     |
 
 An architecture finding blocks only when it cites the applicable required
 contract and a material consequence like these. A loud failure may block.

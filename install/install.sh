@@ -125,7 +125,7 @@ source "$DOTFILEDIR"/install/common/claude-code.sh
 # Install Codex CLI via OpenAI's official installer
 source "$DOTFILEDIR"/install/common/codex.sh
 
-# Install/refresh ECC + Superpowers independently for Claude Code and Codex.
+# Install/refresh Superpowers independently for Claude Code and Codex.
 # Claude uses both account config dirs; Codex uses native plugin marketplaces.
 source "$DOTFILEDIR"/install/common/claude-plugins.sh
 

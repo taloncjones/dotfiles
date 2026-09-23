@@ -54,11 +54,10 @@ seed_machine_local_file() {
 # every install/update:
 #   - template-owned keys (hooks, statusLine, permissions, env, model, promptSuggestionEnabled, ...) come from
 #     the template -- template drift is reconciled away;
-#   - env string values have {{CLAUDE_CONFIG_DIR}} replaced by the absolute
-#     config dir the file lands in (per-account ECC state paths);
 #   - plugin-installer-owned keys (enabledPlugins, extraKnownMarketplaces) are
 #     unioned with live state winning on conflict, so nothing an installer
 #     wrote is lost;
+#   - retired plugins (RETIRED_PLUGINS) are forced off, their marketplaces dropped, and their env keys (RETIRED_ENV_KEYS) swept;
 #   - keys the template does not define are preserved as-is.
 # A corrupt/unparseable destination is rebuilt from the template. Idempotent.
 # History: the merge logic originated in bootstrap-cloud.sh (910f2bc), which
@@ -106,35 +105,12 @@ for key in PLUGIN_KEYS:
         result[key] = merged
 
 # Keep account-local environment additions instead of dropping them whenever a
-# tracked template changes. Retain existing opt-outs and append every template
-# exclusion, including account-isolation additions introduced by later updates.
-# Manual Canvas state is stored beside the selected settings.json.
+# tracked template changes.
 env = {}
 existing_env = dest.get("env", {})
 if isinstance(existing_env, dict):
     env.update(existing_env)
 env.update(tmpl.get("env", {}))
-required_hooks = [
-    "session-start:plan-canvas-sessions",
-    "stop:plan-canvas-pending",
-]
-template_hooks = tmpl.get("env", {}).get("ECC_DISABLED_HOOKS", "")
-if isinstance(template_hooks, str):
-    required_hooks.extend(token.strip() for token in template_hooks.split(",") if token.strip())
-disabled_hooks = (
-    existing_env.get("ECC_DISABLED_HOOKS", env.get("ECC_DISABLED_HOOKS", ""))
-    if isinstance(existing_env, dict)
-    else env.get("ECC_DISABLED_HOOKS", "")
-)
-if isinstance(disabled_hooks, str):
-    hook_tokens = [token.strip() for token in disabled_hooks.split(",") if token.strip()]
-else:
-    hook_tokens = []
-for hook_id in required_hooks:
-    if hook_id not in hook_tokens:
-        hook_tokens.append(hook_id)
-env["ECC_DISABLED_HOOKS"] = ",".join(hook_tokens)
-env["ECC_PLAN_CANVAS_STATE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plan-canvas")
 
 # env is a union, so dropping a key from the template would otherwise leave it
 # set on every machine that already has it. Model aliases must stay un-pinned:
@@ -143,12 +119,94 @@ env["ECC_PLAN_CANVAS_STATE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(
 for key in [k for k in env if k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL")]:
     if key not in tmpl.get("env", {}):
         del env[key]
+
+# Retired plugins: declared here (ahead of the env sweep below, which needs
+# the name list) because enabledPlugins/extraKnownMarketplaces are unions
+# where live state wins, so dropping a plugin from the template alone would
+# leave it enabled on every machine that had it. Force it off and stop
+# refreshing its marketplace; `<name>-uninstall` removes the files.
+RETIRED_PLUGINS = ("ecc@ecc",)
+RETIRED_MARKETPLACES = ("ecc",)
+
+# Env keys of retired plugins are swept the same way, but only once the
+# plugin they isolate is actually gone from THIS config dir. Disabling
+# ecc@ecc in enabledPlugins does not uninstall it -- Claude Code leaves the
+# plugin (and any project-level override that re-enables it) in
+# plugins/installed_plugins.json until `ecc-uninstall` runs. Sweeping the
+# isolation env keys ahead of that removal would strip ECC_DISABLED_HOOKS
+# and ECC_AGENT_DATA_HOME from a machine where ECC can still load, sending
+# its state through the wrong account. An explicit key list, not a prefix:
+# the ECC-derived git hooks still read ECC_SKIP_* and ECC_PREPUSH_AUDIT, and
+# a machine-local value of those must survive.
+RETIRED_ENV_KEYS = ("ECC_CONTEXT_MONITOR_COST_WARNINGS", "ECC_DISABLED_HOOKS", "ECC_AGENT_DATA_HOME",
+                    "ECC_PLAN_CANVAS_STATE_DIR", "GATEGUARD_BASH_ROUTINE_DISABLED",
+                    "GATEGUARD_EXEMPT_GLOBS")
+installed_plugins_path = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plugins", "installed_plugins.json")
+retired_plugins_still_installed = False
+if os.path.isfile(installed_plugins_path):
+    try:
+        with open(installed_plugins_path) as fh:
+            installed = json.load(fh)
+        installed_names = set(installed.get("plugins", {}) if isinstance(installed, dict) else {})
+    except (json.JSONDecodeError, AttributeError):
+        # Unreadable installed_plugins.json: assume the plugin may still be
+        # there rather than sweep isolation keys on a guess.
+        installed_names = set(RETIRED_PLUGINS)
+    retired_plugins_still_installed = bool(installed_names & set(RETIRED_PLUGINS))
+if retired_plugins_still_installed:
+    # A corrupt or empty dest (handled above by falling back to {}) has no
+    # existing env to inherit these keys from, and the template no longer
+    # carries them either, so the union above leaves them silently absent
+    # even though the plugin can still load. Restore the last known-good
+    # values so a settings.json rebuild cannot drop isolation out from under
+    # a still-installed plugin. `{{CLAUDE_CONFIG_DIR}}` is resolved to this
+    # dest's own config dir; live values already in env are left untouched.
+    RETIRED_ENV_RESCUE_DEFAULTS = {
+        "ECC_CONTEXT_MONITOR_COST_WARNINGS": "0",
+        "ECC_DISABLED_HOOKS": "session-start:plan-canvas-sessions,stop:plan-canvas-pending,"
+                               "post:bash:command-log-audit,post:bash:command-log-cost,"
+                               "post:skill:track,pre:mcp-health-check,post:mcp-health-check",
+        "ECC_AGENT_DATA_HOME": "{{CLAUDE_CONFIG_DIR}}",
+        "ECC_PLAN_CANVAS_STATE_DIR": "{{CLAUDE_CONFIG_DIR}}/plan-canvas",
+        "GATEGUARD_BASH_ROUTINE_DISABLED": "1",
+        "GATEGUARD_EXEMPT_GLOBS": "/**",
+    }
+    config_dir = os.path.dirname(os.path.abspath(dest_path))
+    restored = []
+    for key in RETIRED_ENV_KEYS:
+        if key not in env and key in RETIRED_ENV_RESCUE_DEFAULTS:
+            env[key] = RETIRED_ENV_RESCUE_DEFAULTS[key].replace("{{CLAUDE_CONFIG_DIR}}", config_dir)
+            restored.append(key)
+    note = (label + " NOTE: a retired plugin is still installed in "
+            + os.path.dirname(installed_plugins_path)
+            + "; keeping its isolation env keys until `ecc-uninstall` removes it.")
+    if restored:
+        note += " Restored missing default(s): " + ", ".join(restored) + "."
+    print(note)
+else:
+    for key in RETIRED_ENV_KEYS:
+        if key not in tmpl.get("env", {}):
+            env.pop(key, None)
 result["env"] = env
 
 # Preserve any platform/installer keys the template does not define.
 for key, value in dest.items():
     if key not in result:
         result[key] = value
+
+result["enabledPlugins"] = {
+    **result.get("enabledPlugins", {}),
+    **{plugin: False for plugin in RETIRED_PLUGINS},
+}
+markets = {
+    name: value
+    for name, value in result.get("extraKnownMarketplaces", {}).items()
+    if name not in RETIRED_MARKETPLACES
+}
+if markets:
+    result["extraKnownMarketplaces"] = markets
+else:
+    result.pop("extraKnownMarketplaces", None)
 
 # Personal sessions do not use Jira/Confluence. Scope this policy to the
 # personal account; work and custom config directories keep their own choice.
@@ -157,20 +215,6 @@ if os.path.abspath(dest_path) == os.path.abspath(personal_settings):
     result["enabledPlugins"] = {
         **result.get("enabledPlugins", {}),
         "atlassian@claude-plugins-official": False,
-    }
-
-# Per-config-dir values: the template is shared by ~/.claude and
-# ~/.claude-work, and Claude Code does not expand variables inside env
-# values, so a value that must differ per account carries this token and
-# is resolved here to the directory settings.json is written into. env
-# only: no other template key is substituted.
-CONFIG_DIR_TOKEN = "{{CLAUDE_CONFIG_DIR}}"
-config_dir = os.path.dirname(os.path.abspath(dest_path))
-env = result.get("env")
-if isinstance(env, dict):
-    result["env"] = {
-        k: (v.replace(CONFIG_DIR_TOKEN, config_dir) if isinstance(v, str) else v)
-        for k, v in env.items()
     }
 
 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -238,12 +282,9 @@ link_claude_config_dir() {
   # Rules: claude/rules is symlinked here as the single asset source. Claude
   # Code natively auto-loads every .md under ~/.claude/rules at launch (`paths:`
   # frontmatter scopes to matching files; none = every session). Only our own
-  # always-on rules under claude/rules/personal/ are tracked; ECC rules vendoring
-  # is RETIRED (2026-07-02) -- the upstream tree lives in the ECC marketplace
-  # clone (~/.claude/plugins/marketplaces/ecc/rules/), and any language dirs
-  # still sitting in claude/rules are pre-retirement leftovers that STILL
-  # auto-load, flagged for removal by _ecc_legacy_rules_notice
-  # (claude/rules/.gitignore keeps them uncommitted).
+  # always-on rules under claude/rules/personal/ are tracked. Language dirs
+  # left by the retired ECC rules vendoring still auto-load if present; delete
+  # them (claude/rules/.gitignore keeps them uncommitted).
   # One-time migration: older machines have rules as a REAL directory (from a
   # blanket ECC install). Preserve it as a timestamped backup before replacing
   # it with the symlink, in case it holds hand-edited rules not yet saved.

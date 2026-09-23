@@ -27,10 +27,11 @@ Claude and Codex are supported daily drivers. Choose the runtime for the task;
 keep account boundaries, verification and review requirements consistent.
 
 - Dotfiles manages `~/.codex/AGENTS.md`, selected `~/.codex/hooks/*` symlinks, and native workflow plugin lifecycles
-- ECC and Superpowers are staged from separate upstream checkouts as self-contained `dotfiles-workflows` plugins
+- Superpowers is staged from its upstream checkout as a self-contained `dotfiles-workflows` plugin
 - Claude and Codex plugin installations remain independent; never mirror one runtime's installed plugin files into the other
+- ECC is retired (2026-09); `ecc-uninstall` removes leftovers.
 
-If the user asks for ECC, Superpowers, phased planning, systematic debugging, verification, TDD, or review workflows, prefer installed Codex skills/prompts/plugins when available.
+If the user asks for Superpowers, phased planning, systematic debugging, verification, TDD, or review workflows, prefer installed Codex skills/prompts/plugins when available.
 
 GSD is RETIRED on this setup -- no variant, no install path. The original
 `get-shit-done-cc` npm package is treated as compromised (token rug-pull with
@@ -57,8 +58,7 @@ of the toolchain, and do not reinstall any variant.
   Confirm the selected account; this does not authorize sending personal
   context through a work account or unrelated external actions.
 - Use the current Codex tool surface and configured model/roles. Native
-  plugins own upstream guidance; do not regenerate a copied ECC instruction
-  block or use retired upstream sync scripts.
+  plugins own upstream guidance; do not use retired upstream sync scripts.
 - Personal machines set `CLAUDE_PERSONAL_ONLY=1` in machine-local shell
   configuration; never propagate that machine choice through this repo.
   On machines using both accounts, a personal checkout or canonical owner
@@ -87,24 +87,13 @@ worktree creation would require an unsafe or destructive action.
 
 Use these skills by default when the task matches:
 
-- `ecc:workspace-surface-audit` for setup, plugin, MCP, connector, repo-surface, or
-  "what are we missing?" audits.
 - `superpowers:brainstorming`, `superpowers:writing-plans`,
   `claude-spec-review`, `claude-plan-review`, and
   `superpowers:executing-plans` for substantial implementation work.
-- `ecc:tdd-workflow` or `superpowers:test-driven-development` for new behavior,
+- `superpowers:test-driven-development` for new behavior,
   regression fixes, and risky refactors.
 - `superpowers:systematic-debugging` for startup failures, flaky tests, tool failures,
   build failures, and confusing runtime symptoms.
-- `ecc:security-review` for secrets, auth, tokens, MCP/config, deploy, certificates,
-  public-repo checks, and anything touching credentials or policy.
-- `ecc:rust-testing` for Rust crates and Cargo test strategy.
-- `ecc:frontend-patterns` and `ecc:e2e-testing` for frontend/UI changes; use
-  project-local agents when a repo provides them.
-- `ecc:database-migrations` and `ecc:postgres-patterns` for SQLx, Postgres,
-  schema, query, or migration work.
-- `ecc:deployment-patterns` for Docker, Compose, systemd, cloud deploy, CI, and
-  environment hardening.
 - `review-change` for a bounded development review; `co-review` for top-level
   finished-PR review orchestration after implementation, and
   `superpowers:verification-before-completion` before claiming work is done.
@@ -226,5 +215,5 @@ sandbox restrictions do not provide Claude dollar or turn caps.
   their outputs. Avoid duplicate reviewers and recursive partner dispatch.
 - Keep checks proportional: run the relevant checks, then the required full
   gate once integrated. Record actual results before claiming completion.
-- Preserve custom configuration. Native ECC and Superpowers updates must not
+- Preserve custom configuration. Native Superpowers updates must not
   overwrite global instructions, credentials or git-hook ownership.

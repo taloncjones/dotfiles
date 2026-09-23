@@ -1,6 +1,6 @@
 ---
 name: dotfiles-cloud-first-campaign
-description: The executable campaign runbook for making cloud/ephemeral Claude Code sessions (claude.ai/code containers) a first-class primary environment for this dotfiles setup. Load when planning or executing cloud-parity work -- "make cloud sessions first-class", "roll out plugins to another repo's cloud environment", "why aren't plugins loaded on session 1", "should the Setup script or the settings declaration carry the install", "close the machine/cloud parity gap", "is ECC rules vendoring still needed". Phased with decision gates, exact commands, expected outputs, and fenced wrong paths with incident hashes. NOT for diagnosing a single sick container (dotfiles-diagnostics-and-tooling cloud-doctor), one-time environment rebuild (dotfiles-build-and-env), the settled incident history itself (dotfiles-failure-archaeology), or Claude Code platform mechanics in general (claude-code-platform-reference).
+description: The executable campaign runbook for making cloud/ephemeral Claude Code sessions (claude.ai/code containers) a first-class primary environment for this dotfiles setup. Load when planning or executing cloud-parity work -- "make cloud sessions first-class", "roll out plugins to another repo's cloud environment", "why aren't plugins loaded on session 1", "should the Setup script or the settings declaration carry the install", "close the machine/cloud parity gap", "was ECC rules vendoring still needed before ECC's own retirement". Phased with decision gates, exact commands, expected outputs, and fenced wrong paths with incident hashes. NOT for diagnosing a single sick container (dotfiles-diagnostics-and-tooling cloud-doctor), one-time environment rebuild (dotfiles-build-and-env), the settled incident history itself (dotfiles-failure-archaeology), or Claude Code platform mechanics in general (claude-code-platform-reference).
 ---
 
 # Dotfiles cloud-first campaign
@@ -87,8 +87,8 @@ are (verbatim from `bootstrap-cloud.sh` source):
 [bootstrap-cloud] Linking Claude assets into /root/.claude...
 [claude-links] Reconciled settings.json (SessionStart: account_guard.py).
 [bootstrap-cloud] Ensuring plugin marketplaces + installs...
-[bootstrap-cloud] OK: ecc@ecc already installed.
 [bootstrap-cloud] OK: superpowers@claude-plugins-official already installed.
+[bootstrap-cloud] (ECC retired 2026-09; no ecc@ecc line anymore.)
 [bootstrap-cloud] Reconciled settings.json (SessionStart: account_guard.py).
 [bootstrap-cloud] Done. Plugins and settings load with the NEXT session;
 [bootstrap-cloud] an already-running session picks up skills/commands only.
@@ -104,8 +104,8 @@ Branch lines:
   the deterministic manifest wait engaging (7cb28b7); fine unless it exhausts.
 - `!! FAILED: <id> not installed after 8 attempts.` -> recover manually:
   `claude plugins install <id>`, then verify per 0.4. If the marketplace is
-  missing: `claude plugin marketplace add https://github.com/affaan-m/ECC.git`
-  (ECC) or `claude plugin marketplace add https://github.com/anthropics/claude-plugins-official.git`.
+  missing: `claude plugin marketplace add https://github.com/anthropics/claude-plugins-official.git`
+  (the retired ECC's marketplace was `https://github.com/affaan-m/ECC.git`, no longer registered).
 - `WARNING: python3 not on PATH` / `node not on PATH` -> hooks/statusline
   degraded; container image problem, not a dotfiles bug.
 
@@ -115,7 +115,7 @@ Branch lines:
 python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/installed_plugins.json'));print(sorted(d['plugins']))"
 ```
 
-Expected: `['ecc@ecc', 'superpowers@claude-plugins-official']`. Missing file
+Expected: `['superpowers@claude-plugins-official']` (ECC retired 2026-09; no `ecc@ecc` entry anymore). Missing file
 or missing id -> plugins are NOT installed regardless of what any install
 command printed (fence f91d7d2). Re-run bootstrap-cloud.
 
@@ -141,8 +141,7 @@ Baseline (2026-07-02, fresh session-1 dotfiles-repo container, NO Setup
 script): full Phase 0 pass. cloud-doctor exit 0 (all checks `[OK]`);
 symlink-audit `--cloud` all 9 entries OK, exit 0; `bin/dotfiles-tests` 9/9
 suites green; both required plugin ids at `"scope": "project"` in
-`installed_plugins.json` with their skills/hooks live in session 1 (ECC
-GateGuard fired on the first Bash call; superpowers injected at SessionStart;
+`installed_plugins.json` with their skills/hooks live in session 1 (the now-retired ECC's GateGuard fired on the first Bash call; superpowers injected at SessionStart;
 project skills invocable) -- the declaration path (option 1) carried the
 install with zero per-environment config. SessionStart hook printed the
 healthy-warm transcript (`already installed` for both ids). Git author
@@ -157,13 +156,13 @@ exit 0 (all `[OK]`); SessionStart transcript healthy-warm (`already
 installed` for both ids) and now includes the reconcile-refactor line
 `[claude-links] Reconciled settings.json (SessionStart: account_guard.py).`
 immediately after the "Linking Claude assets" line; both required plugin ids
-on disk with a superpowers skill invoked live in session 1 (ECC GateGuard
+on disk with a superpowers skill invoked live in session 1 (the retired ECC's GateGuard
 also fired on the first Bash call); git author reattributed,
 `commit.gpgsign` false. NEW observation: `feature-dev@claude-code-plugins`
 was ABSENT everywhere -- not in `installed_plugins.json`, not in
 `claude plugin list` -- and the pinned `claude-code-plugins` marketplace was
 NOT registered (`known_marketplaces.json` and
-`claude plugin marketplace list` hold only `ecc` and
+`claude plugin marketplace list` hold only the retired `ecc` and
 `claude-plugins-official`). A pin whose every plugin is disabled never
 registers; see the corrected Phase 1 pin entry.
 
@@ -177,7 +176,7 @@ asset/identity/settings layer was fully live SAME-session: cloud-doctor exit
 false), statusline registered and resolving, permissions block present after
 reconcile, and guard hooks active in that very session (emoji_guard.py
 blocked a PostToolUse Write probe); symlinked skills/commands also loaded
-same-session. Plugin skills did NOT: ecc@ecc and
+same-session. Plugin skills did NOT: the retired ecc@ecc and
 superpowers@claude-plugins-official landed in `installed_plugins.json` only
 post-launch at `"scope": "user"` and no plugin skill was invocable (fence
 c1c4500 reconfirmed). Account sync wrote 13 ids into `enabledPlugins` but
@@ -272,7 +271,7 @@ Of the account-enabled ids from non-official marketplaces:
   `known_marketplaces.json` or `claude plugin marketplace list`; the platform
   clones/registers a pinned marketplace only when an ENABLED plugin
   references it. The PLUGIN itself was judged redundant with the standing
-  superpowers pipeline and ECC's code-explorer/code-architect/code-reviewer
+  superpowers pipeline and the retired ECC's code-explorer/code-architect/code-reviewer
   agents (same reasoning that excluded official code-review/code-simplifier),
   so it is `false` in this repo's `enabledPlugins` and `false` in
   `claude/settings.json.tmpl` for fresh seeds. Expected shape in fresh
@@ -331,16 +330,9 @@ Goal: any OTHER repo you work on in claude.ai/code gets plugins on session 1.
 ```json
 {
   "enabledPlugins": {
-    "ecc@ecc": true,
     "superpowers@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
-    "ecc": {
-      "source": {
-        "source": "git",
-        "url": "https://github.com/affaan-m/ECC.git"
-      }
-    },
     "claude-plugins-official": {
       "source": {
         "source": "git",
@@ -378,8 +370,8 @@ open. Do not report an open one as fixed.
 `zsh/functions.zsh` as `_claude_plugin_installed` /
 `_claude_marketplace_lists_plugin` / `_claude_ensure_plugin`, parameterized by
 config dir because machines have TWO (`~/.claude` and `~/.claude-work`).
-`ecc-install` and `superpowers-install` route through `_claude_ensure_plugin`;
-the update/uninstall presence checks read `installed_plugins.json` directly.
+`superpowers-install` routes through `_claude_ensure_plugin` (the retired `ecc-install` did too); the update/uninstall presence checks read
+`installed_plugins.json` directly.
 The gate held: `zsh/functions.test.sh` (registered in `bin/dotfiles-tests`)
 proves an unreachable marketplace and a silent no-op install both return
 non-zero and say so. Machine retry budget is 3 attempts / 5s cap (no
@@ -411,23 +403,8 @@ claude.ai/code. First step: answer that question; if yes, spec
 (work values are machine-local secrets -- see dotfiles-external-positioning).
 Gate: a recorded decision; no implementation until then.
 
-**3.4 ECC rules vendoring -- CLOSED (2026-07-02): vendoring RETIRED.** The
-decision gate ran: consumer enumeration over the ECC plugin payload
-(`grep -rln "claude/rules" ~/.claude/plugins/cache/ecc/`) found NO runtime
-consumer -- no ECC hook reads `~/.claude/rules`; the only functional consumers
-are on-demand skills (`rules-distill`'s `scan-rules.sh`, overridable via
-`RULES_DISTILL_DIR`/arg; a doc example in `skill-comply`; prose elsewhere).
-Combined with the standing evidence (nothing auto-loads `~/.claude/rules`;
-cloud sessions passed every gate with zero vendored rules; the FULL upstream
-tree ships at `~/.claude/plugins/marketplaces/ecc/rules/` wherever the plugin
-is installed), the "stop vendoring" option won: it deletes sync code instead
-of adding parity code, and the marketplace clone is a superset of the
-6-language vendored subset. Implemented: `ecc-sync-rules` and
-`ECC_VENDOR_LANGS` removed from `zsh/functions.zsh`; `ecc-install`/`ecc-update`
-no longer vendor and instead flag inert pre-retirement leftovers
-(`_ecc_legacy_rules_notice`); `claude/rules/.gitignore` keeps leftovers
-uncommitted; `claude/rules/personal/` remains the only tracked rules content.
-Point any consumer that wants ECC rules at the marketplace clone path.
+**3.4 ECC rules vendoring -- CLOSED (2026-07-02): vendoring RETIRED, ahead of
+ECC's own retirement (2026-09).** The decision gate ran: consumer enumeration over the then-live, now-retired ECC plugin payload found NO runtime consumer -- no retired-ECC hook read `~/.claude/rules`; the only functional consumers were on-demand skills (`rules-distill`'s `scan-rules.sh`, overridable via `RULES_DISTILL_DIR`/arg; a doc example in `skill-comply`; prose elsewhere). Combined with the standing evidence (nothing auto-loads `~/.claude/rules`; cloud sessions passed every gate with zero vendored rules; the FULL upstream tree shipped at the retired ECC's marketplace clone wherever the plugin was installed), the "stop vendoring" option won: it deleted sync code instead of adding parity code, and the marketplace clone was a superset of the 6-language vendored subset. Implemented: `ecc-sync-rules` and `ECC_VENDOR_LANGS` removed from `zsh/functions.zsh`; `ecc-install`/`ecc-update` (themselves later removed entirely along with the rest of the retired ECC, 2026-09) no longer vendored and instead flagged inert pre-retirement leftovers (`_ecc_legacy_rules_notice`, also removed); `claude/rules/.gitignore` keeps leftovers uncommitted; `claude/rules/personal/` remains the only tracked rules content. There is no longer a marketplace clone to point a consumer at -- ECC rules are gone entirely, retired along with ECC.
 
 **Correction (2026-07-02, same day): the "nothing auto-loads" premise was
 WRONG; the retirement decision still stands.** Claude Code natively auto-loads
@@ -440,7 +417,7 @@ consumer because it ran in fresh cloud clones, where the untracked vendored
 dirs do not exist -- so nothing was there to load. Consequences: retirement
 survives on the marketplace-clone-superset argument alone; leftover vendored
 dirs on older machines are NOT inert (`common/`/`web/` have no `paths:` and
-load every session) and `_ecc_legacy_rules_notice` now says so; the tracked
+load every session) and `_ecc_legacy_rules_notice` (now removed with the retired ECC) used to say so; the tracked
 namespace remains `claude/rules/personal/`, where the always-on model-tuning
 layer (`claude-prompting.md`) now lives. Lesson: enumerate consumers in an
 environment where the artifact actually exists -- an absence-of-effect
@@ -479,10 +456,11 @@ items and their one-line re-verification commands:
 | Incident hashes (c1c4500, f91d7d2, 722c653, 7cb28b7, da54e17, 2304015, 910f2bc, 8d4507f) | `git show <hash> --stat`                                                                                                |
 | Personal identity values                                                                 | `grep -e name -e email git/personal/.gitconfig-personal`                                                                |
 | `setup-claude` excludes `.claude/`                                                       | `grep -n "info/exclude" -B3 bin/setup-claude`                                                                           |
-| ECC rules tree inside marketplace clone (cloud)                                          | `ls ~/.claude/plugins/marketplaces/ecc/rules/`                                                                          |
+| ECC rules tree (retired, no longer applicable)                                           | N/A -- ECC and its marketplace clone are gone (2026-09)                                                                 |
 | Phase 3 statuses (candidate/open)                                                        | Re-read `zsh/functions.zsh` install fns and `bootstrap-cloud.sh` -- if 3.1/3.2 landed, update this file                 |
 
-Upstream URLs pinned here (github.com/affaan-m/ECC, anthropics/
-claude-plugins-official, taloncjones/dotfiles) drift if forks/renames happen;
-the authoritative copies live in `bootstrap-cloud.sh` and
-`.claude/settings.json` -- trust those over this page.
+Upstream URLs pinned here (anthropics/claude-plugins-official,
+taloncjones/dotfiles; the retired ECC's github.com/affaan-m/ECC is no longer
+pinned anywhere) drift if forks/renames happen; the authoritative copies
+live in `bootstrap-cloud.sh` and `.claude/settings.json` -- trust those over
+this page.

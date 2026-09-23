@@ -1,4 +1,4 @@
-# ECC and other plugin installers write vendored agent files into this dir
+# Plugin installers (historically the retired ECC full install) wrote vendored agent files into this dir
 # through the ~/.claude*/agents symlink. They are machine-local and
 # reproducible; only the whitelisted personas below are version-controlled.
 # This committed whitelist outranks the machine-local .git/info/exclude

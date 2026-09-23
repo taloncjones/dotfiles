@@ -35,8 +35,6 @@ class SurfaceTests(unittest.TestCase):
         self.codex.mkdir()
         self.config = self.codex / "config.toml"
         self.skills = self.root / ".agents/skills"
-        self.source = self.root / "ECC"
-        self.canonical = self.codex / "plugins/cache/dotfiles-workflows/ecc/2.0.0"
         self.security = self.codex / "plugins/cache/claude-plugins-official/security-guidance/2.0.7"
 
     def write(self, path, content):
@@ -47,7 +45,7 @@ class SurfaceTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, os.environ["CODEX_SURFACES_SCRIPT"],
              "--codex-home", str(self.codex), "--agents-skills", str(self.skills),
-             "--ecc-repo", str(self.source), *extra, "--apply"],
+             *extra, "--apply"],
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, expect, result.stdout + result.stderr)
@@ -62,11 +60,62 @@ class SurfaceTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_ecc_focus_blocks_cleared_and_legacy_blocks_kept(self):
+        # legacy-copy/legacy-command blocks keep standalone ECC copies under
+        # ~/.agents/skills disabled; nothing regenerates them, so they must
+        # survive verbatim. ecc-focus blocks targeted the retired plugin cache.
+        legacy = str(self.skills / "old/SKILL.md")
+        command = str(self.skills / "source-command-old/SKILL.md")
+        kept_blocks = (
+            f'# dotfiles-managed: legacy-copy sha256={"a" * 64}\n[[skills.config]]\npath = "{legacy}"\nenabled = false\n\n'
+            f'# dotfiles-managed: legacy-command sha256={"b" * 64}\n[[skills.config]]\npath = "{command}"\nenabled = false\n\n'
+        )
+        self.config.write_text(
+            '# keep my note\n[skills]\nmax_context_tokens = 10000\n'
+            '[[skills.config]]\nname = "mine"\nenabled = false\n\n'
+            + kept_blocks
+            + '# dotfiles-managed: ecc-focus\n[[skills.config]]\npath = "/x/ecc/skills/a/SKILL.md"\nenabled = false\n'
+        )
+        result = self.run_repair()
+        text = self.config.read_text()
+        self.assertIn(kept_blocks, text)
+        self.assertNotIn("ecc-focus", text)
+        self.assertNotIn("/x/ecc/skills/a/SKILL.md", text)
+        self.assertIn("# keep my note", text)
+        self.assertEqual(
+            result["skills"]["config"],
+            [
+                {"name": "mine", "enabled": False},
+                {"path": legacy, "enabled": False},
+                {"path": command, "enabled": False},
+            ],
+        )
+        first = self.config.read_bytes()
+        self.run_repair()
+        self.assertEqual(first, self.config.read_bytes())
+
+    def test_lifecycle_disables_retired_ecc_plugins(self):
+        alternate = self.root / "alternate"
+        self.write(alternate / "config.toml", '[plugins."ecc@dotfiles-workflows"]\nenabled = true\n[plugins."ecc@ecc"]\nenabled = true\n[plugins."other@x"]\nenabled = true\n')
+        self.run_lifecycle(alternate)
+        result = tomllib.loads((alternate / "config.toml").read_text())
+        self.assertFalse(result["plugins"]["ecc@dotfiles-workflows"]["enabled"])
+        self.assertFalse(result["plugins"]["ecc@ecc"]["enabled"])
+        self.assertTrue(result["plugins"]["other@x"]["enabled"])
+
+    def test_lifecycle_leaves_config_without_ecc_unchanged(self):
+        alternate = self.root / "alternate"
+        original = '[plugins."other@x"]\nenabled = true\n[skills]\nmax_context_tokens = 10000\n'
+        self.write(alternate / "config.toml", original)
+        self.run_lifecycle(alternate)
+        self.assertEqual((alternate / "config.toml").read_text(), original)
+
     def test_lifecycle_repairs_alternate_only_codex_home(self):
         alternate = self.root / "codex-alt"
         self.write(alternate / "config.toml", '[plugins."ecc@dotfiles-workflows"]\nenabled = true\n[plugins."ecc@ecc"]\nenabled = true\n')
         self.run_lifecycle(alternate)
         result = tomllib.loads((alternate / "config.toml").read_text())
+        self.assertFalse(result["plugins"]["ecc@dotfiles-workflows"]["enabled"])
         self.assertFalse(result["plugins"]["ecc@ecc"]["enabled"])
         self.assertEqual(result["skills"]["max_context_tokens"], 10000)
         self.assertFalse(self.config.exists())
@@ -79,6 +128,7 @@ class SurfaceTests(unittest.TestCase):
         self.run_lifecycle(alternate)
         self.assertEqual(self.config.read_text(), original)
         result = tomllib.loads((alternate / "config.toml").read_text())
+        self.assertFalse(result["plugins"]["ecc@dotfiles-workflows"]["enabled"])
         self.assertFalse(result["plugins"]["ecc@ecc"]["enabled"])
         self.assertEqual(result["skills"]["max_context_tokens"], 10000)
 
@@ -97,6 +147,7 @@ class SurfaceTests(unittest.TestCase):
         self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n[plugins."ecc@ecc"]\nenabled = true\n')
         self.run_lifecycle(self.codex, {"PATH": str(toolbin)})
         result = tomllib.loads(self.config.read_text())
+        self.assertFalse(result["plugins"]["ecc@dotfiles-workflows"]["enabled"])
         self.assertFalse(result["plugins"]["ecc@ecc"]["enabled"])
         self.assertEqual(result["skills"]["max_context_tokens"], 10000)
 
@@ -157,14 +208,6 @@ class SurfaceTests(unittest.TestCase):
             + ('    print(json.dumps({"async": True, "asyncTimeout": 180000}), flush=True)\n' if asynchronous else '')
             + '    response = {"metrics": {}}\n    print(json.dumps(response), flush=True)\n'
         ))
-
-    def skill(self, name, content="original", custom=False):
-        body = f"---\nname: {name}\ndescription: Example\n---\n{content}\n"
-        self.write(self.skills / name / "SKILL.md", body)
-        self.write(self.source / "skills" / name / "SKILL.md", body)
-        self.write(self.canonical / "skills" / name / "SKILL.md", body)
-        if custom:
-            self.write(self.skills / name / "custom.txt", "personal customization\n")
 
     def test_repairs_only_incompatible_codex_plugin_and_adds_default(self):
         original = '# user comment\n[plugins."security-guidance@claude-plugins-official"]\nenabled = true # keep comment\n[plugins."other@market"]\nenabled = true\n'
@@ -230,115 +273,17 @@ class SurfaceTests(unittest.TestCase):
         hooks_path.write_text(json.dumps(hooks))
         self.assertTrue(self.run_repair()["plugins"]["security-guidance@claude-plugins-official"]["enabled"])
 
-    def test_exact_duplicates_disabled_custom_and_unmapped_skills_preserved(self):
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        self.skill("same")
-        self.skill("custom", custom=True)
-        self.write(self.skills / "personal/SKILL.md", "personal")
-        result = self.run_repair()
-        self.assertEqual(result["skills"]["config"], [{"path": str(self.skills / "same/SKILL.md"), "enabled": False}])
-        self.assertTrue((self.skills / "same/SKILL.md").is_file())
-        self.assertEqual((self.skills / "custom/custom.txt").read_text(), "personal customization\n")
-
     def test_explicit_skill_and_budget_preferences_preserved(self):
-        self.skill("same")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n[skills]\nmax_context_tokens = 4000\n[[skills.config]]\nname = "same"\nenabled = true\n')
+        self.config.write_text('[skills]\nmax_context_tokens = 4000\n[[skills.config]]\nname = "same"\nenabled = true\n')
         first = self.config.read_bytes()
         self.run_repair()
         self.assertEqual(first, self.config.read_bytes())
-
-    def test_disabled_canonical_plugin_never_hides_legacy_skills(self):
-        self.skill("same")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = false\n')
-        self.assertNotIn("config", self.run_repair()["skills"])
-
-    def test_recognizes_whole_historical_snapshot(self):
-        self.skill("old")
-        for args in (["init", "-q"], ["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture: Add old skill"]):
-            subprocess.run(["git", "-C", str(self.source), *args], check=True, capture_output=True)
-        self.write(self.source / "skills/old/SKILL.md", "new upstream version")
-        self.write(self.canonical / "skills/old/SKILL.md", "new upstream version")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        self.assertEqual(self.run_repair()["skills"]["config"][0]["path"], str(self.skills / "old/SKILL.md"))
-
-    def test_recognizes_exact_translated_historical_tree(self):
-        original = '---\nname: migrated\ndescription: Use Claude Code\n---\nRead CLAUDE.md through claude-code.\n'
-        migrated = '---\nname: migrated\ndescription: Use Codex\n---\nRead AGENTS.md through Codex.\n'
-        self.write(self.source / 'skills/migrated/SKILL.md', original)
-        self.write(self.source / 'skills/migrated/helper.txt', 'Use ~/.claude/\n')
-        self.write(self.canonical / 'skills/migrated/SKILL.md', original)
-        self.write(self.skills / 'migrated/SKILL.md', migrated)
-        self.write(self.skills / 'migrated/helper.txt', 'Use ~/.Codex/\n')
-        for args in (["init", "-q"], ["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture: Add untranslated tree"]):
-            subprocess.run(["git", "-C", str(self.source), *args], check=True, capture_output=True)
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        result = self.run_repair()
-        self.assertEqual(result['skills']['config'][0]['path'], str(self.skills / 'migrated/SKILL.md'))
-        self.assertEqual((self.skills / 'migrated/SKILL.md').read_text(), migrated)
-        self.assertEqual((self.source / 'skills/migrated/SKILL.md').read_text(), original)
-        self.write(self.skills / 'migrated/helper.txt', 'Use ~/.Codex/ with my custom rule\n')
-        self.assertNotIn('config', self.run_repair()['skills'])
-
-    def test_translated_skill_preserves_explicit_display_name_override(self):
-        original = '---\nname: claude-example\ndescription: Use Claude Code\n---\nRead CLAUDE.md.\n'
-        migrated = '---\nname: Codex-example\ndescription: Use Codex\n---\nRead AGENTS.md.\n'
-        self.write(self.source / 'skills/claude-example/SKILL.md', original)
-        self.write(self.canonical / 'skills/claude-example/SKILL.md', original)
-        self.write(self.skills / 'claude-example/SKILL.md', migrated)
-        for args in (["init", "-q"], ["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture: Add untranslated skill"]):
-            subprocess.run(["git", "-C", str(self.source), *args], check=True, capture_output=True)
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n[skills]\nmax_context_tokens = 4000\n[[skills.config]]\nname = "Codex-example"\nenabled = true\n')
-        first = self.config.read_bytes()
-        self.run_repair()
-        self.assertEqual(first, self.config.read_bytes())
-
-    def test_translated_command_requires_exact_wrapper_and_body(self):
-        self.write(self.source / 'commands/resume.md', '---\ndescription: Resume Claude Code with CLAUDE.md\n---\n\n# Continue\nRead ~/.claude/session-data/.\n')
-        migrated = '---\nname: "source-command-resume"\ndescription: "Resume Codex with AGENTS.md"\n---\n\n# source-command-resume\n\nUse this skill when the user asks to run the migrated source command `resume`.\n\n## Command Template\n\n# Continue\nRead ~/.Codex/session-data/.\n'
-        self.write(self.skills / 'source-command-resume/SKILL.md', migrated)
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        result = self.run_repair(extra=("--focus",))
-        self.assertEqual(result['skills']['config'][0]['path'], str(self.skills / 'source-command-resume/SKILL.md'))
-        self.write(self.skills / 'source-command-resume/SKILL.md', migrated + 'Keep this custom instruction.\n')
-        result = self.run_repair(extra=("--focus",))
-        self.assertNotIn('config', result['skills'])
 
     def test_malformed_config_untouched(self):
         self.config.write_text('[broken\n')
         first = self.config.read_bytes()
         self.run_repair(expect=1)
         self.assertEqual(first, self.config.read_bytes())
-
-    def test_explicit_path_override_preserved(self):
-        self.skill("same")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n[skills]\nmax_context_tokens = 9000\n[[skills.config]]\npath = ' + json.dumps(str(self.skills / "same/SKILL.md")) + '\nenabled = true\n')
-        first = self.config.read_bytes()
-        self.run_repair()
-        self.assertEqual(first, self.config.read_bytes())
-
-    def test_focus_preserves_explicit_preferences_and_survives_cache_updates(self):
-        self.skill("keep")
-        self.skill("specialist")
-        self.skill("chosen")
-        catalog = self.root / "catalog.txt"
-        catalog.write_text("keep\n")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n[[skills.config]]\nname = "ecc:chosen"\nenabled = true\n')
-        result = self.run_repair(extra=("--focus", "--catalog", str(catalog)))
-        disabled = {entry.get("path") for entry in result["skills"]["config"] if entry["enabled"] is False}
-        self.assertIn(str(self.canonical / "skills/specialist/SKILL.md"), disabled)
-        self.assertNotIn(str(self.canonical / "skills/chosen/SKILL.md"), disabled)
-        self.assertNotIn(str(self.canonical / "skills/keep/SKILL.md"), disabled)
-        first = self.config.read_bytes()
-        self.run_repair(extra=("--catalog", str(catalog)))
-        self.assertEqual(first, self.config.read_bytes())
-        updated = self.canonical.parent / "3.0.0"
-        for name in ("keep", "specialist", "chosen"):
-            self.write(updated / "skills" / name / "SKILL.md", "updated upstream skill")
-        result = self.run_repair(extra=("--catalog", str(catalog)))
-        disabled = {entry.get("path") for entry in result["skills"]["config"] if entry["enabled"] is False}
-        self.assertIn(str(updated / "skills/specialist/SKILL.md"), disabled)
-        self.assertNotIn(str(updated / "skills/chosen/SKILL.md"), disabled)
-        self.assertNotIn(str(updated / "skills/keep/SKILL.md"), disabled)
 
     def test_inert_plugin_disabled_but_usable_skill_plugin_preserved(self):
         self.config.write_text('[plugins."code-review@claude-plugins-official"]\nenabled = true\n[plugins."code-simplifier@claude-plugins-official"]\nenabled = true\n')
@@ -358,35 +303,6 @@ class SurfaceTests(unittest.TestCase):
         self.assertTrue(json.loads(result.stdout)["changed"])
         self.assertEqual(self.config.read_text(), "# untouched\n")
 
-    def test_customization_after_migration_restores_discovery(self):
-        self.skill("same")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        self.run_repair()
-        self.write(self.skills / "same/personal.txt", "new custom instructions")
-        result = self.run_repair()
-        self.assertNotIn("config", result["skills"])
-
-    def test_user_can_reenable_a_managed_specialist(self):
-        self.skill("specialist")
-        catalog = self.root / "catalog.txt"
-        catalog.write_text("keep\n")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        self.run_repair(extra=("--focus", "--catalog", str(catalog)))
-        self.config.write_text(self.config.read_text().replace("enabled = false", "enabled = true"))
-        first = self.config.read_bytes()
-        self.run_repair(extra=("--catalog", str(catalog)))
-        self.assertEqual(first, self.config.read_bytes())
-
-    def test_provenance_survives_unavailable_upstream_history(self):
-        self.skill("same")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        self.run_repair()
-        self.write(self.source / "skills/same/SKILL.md", "updated upstream")
-        self.write(self.canonical / "skills/same/SKILL.md", "updated upstream")
-        first = self.config.read_bytes()
-        self.run_repair()
-        self.assertEqual(first, self.config.read_bytes())
-
     def test_inline_skills_table_remains_valid(self):
         self.config.write_text('skills = { max_context_tokens = 4000 }\n')
         first = self.config.read_bytes()
@@ -403,15 +319,6 @@ class SurfaceTests(unittest.TestCase):
         self.assertEqual(first, self.config.read_bytes())
         self.assertEqual(result.stdout, "")
 
-    def test_inline_skills_layout_cannot_report_unapplied_disables(self):
-        self.skill("same")
-        self.config.write_text('skills = { max_context_tokens = 4000 }\n[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        first = self.config.read_bytes()
-        result = self.run_repair(expect=1)
-        self.assertIn("Cannot safely disable skills", result.stderr)
-        self.assertEqual(first, self.config.read_bytes())
-        self.assertEqual(result.stdout, "")
-
     def test_embedded_skills_table_example_cannot_be_edited_as_config(self):
         for delimiter in ('"""', "'''"):
             with self.subTest(delimiter=delimiter):
@@ -423,9 +330,11 @@ class SurfaceTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
 
     def test_user_comments_survive_managed_entry_refresh(self):
-        self.skill("same")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        self.run_repair()
+        self.config.write_text(
+            '[skills]\nmax_context_tokens = 10000\n\n'
+            '# dotfiles-managed: ecc-focus\n[[skills.config]]\n'
+            'path = "/x/ecc/skills/a/SKILL.md"\nenabled = false\n'
+        )
         self.config.write_text(self.config.read_text().replace("enabled = false\n", "enabled = false # temporary opt-out\n# preserve my explanation\n") + '\n# model selection rationale\n[profiles.work]\nmodel = "work-model"\n')
         self.run_repair()
         for note in ("# temporary opt-out", "# preserve my explanation", "# model selection rationale"):
@@ -434,18 +343,8 @@ class SurfaceTests(unittest.TestCase):
         self.run_repair()
         self.assertEqual(first, self.config.read_bytes())
 
-    def test_legacy_requires_counterpart_in_every_cached_version(self):
-        self.skill("new-only")
-        self.skill("old-only")
-        cache = self.codex / "plugins/cache/dotfiles-workflows/ecc"
-        self.write(cache / "1.0.0/skills/old-only/SKILL.md", "old cached skill")
-        (self.canonical / "skills/old-only/SKILL.md").unlink()
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
-        self.assertNotIn("config", self.run_repair()["skills"])
-
     def test_concurrent_cooperating_writer_preserves_user_override(self):
-        self.skill("same")
-        self.config.write_text('[plugins."ecc@dotfiles-workflows"]\nenabled = true\n')
+        self.config.write_text('')
         code = '''
 import importlib.util
 from pathlib import Path

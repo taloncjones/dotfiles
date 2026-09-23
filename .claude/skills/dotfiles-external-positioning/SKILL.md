@@ -1,6 +1,6 @@
 ---
 name: dotfiles-external-positioning
-description: Load BEFORE any action that touches the public surface of this repo -- committing new file types, vendoring or deriving from upstream code, adding a dependency or plugin, publishing/README changes, or deciding whether something belongs in this repo at all. Covers what may NEVER land in the tree (secrets, employer config, 1Password vault names, per-model audit files), the enforcement stack (block_secrets hooks, ECC pre-commit scan, public-safety.test.sh, .gitignore), MIT/NOTICE licensing duties, the upstream trust map (ECC, Superpowers, the compromised GSD original), and the public/private split. Trigger phrases -- "is this safe to commit", "can this go in the repo", "add this upstream tool", "update NOTICE", "license question", "is the repo safe to be public", "should this be private". NOT for the mechanics of committing (dotfiles-change-control), running the test suites (dotfiles-validation-and-qa), or why a hook blocked you (dotfiles-debugging-playbook).
+description: Load BEFORE any action that touches the public surface of this repo -- committing new file types, vendoring or deriving from upstream code, adding a dependency or plugin, publishing/README changes, or deciding whether something belongs in this repo at all. Covers what may NEVER land in the tree (secrets, employer config, 1Password vault names, per-model audit files), the enforcement stack (block_secrets hooks, retired-ECC-derived pre-commit scan, public-safety.test.sh, .gitignore), MIT/NOTICE licensing duties, the upstream trust map (Superpowers, the retired ECC, the compromised GSD original), and the public/private split. Trigger phrases -- "is this safe to commit", "can this go in the repo", "add this upstream tool", "update NOTICE", "license question", "is the repo safe to be public", "should this be private". NOT for the mechanics of committing (dotfiles-change-control), running the test suites (dotfiles-validation-and-qa), or why a hook blocked you (dotfiles-debugging-playbook).
 ---
 
 # Dotfiles External Positioning
@@ -58,12 +58,12 @@ pattern (`.gitconfig-work.tmpl`, `agent.toml`, `settings.json.tmpl`).
 Four layers between a secret and the public tree. Do not treat any single
 layer as sufficient; each has known gaps (listed).
 
-| Layer                                                                           | When it fires                                                                                                 | What it catches                                                                                                                                                                                                      | Gap                                                                                                                                  |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `claude/hooks/block_secrets.py` (+ Codex twin `codex/hooks/block_secrets.py`)   | PreToolUse on Read/Edit/Write in a Claude session                                                             | Access to `.env*`, key files, `credentials`/`secrets` path segments. Segment-based matching (commit 52f807d) -- exact filenames/segments, not substring, so `secrets_manager/util.py` passes. `.pub` always allowed. | Session-time only; fails open on exceptions; does not see `bash echo > file`                                                         |
-| `git/hooks/pre-commit` (ECC-vendored, via `core.hooksPath=~/.config/git/hooks`) | Every `git commit`                                                                                            | High-signal secret regexes in ADDED lines only (OpenAI/GitHub/AWS keys, private key blocks, generic `password=...` assignments)                                                                                      | Untested (no suite); bypassable via `ECC_SKIP_GIT_HOOKS=1` / `ECC_SKIP_PRECOMMIT=1` -- emergencies only, per dotfiles-change-control |
-| `git/hooks/public-safety.test.sh`                                               | `bin/dotfiles-tests` (suite 7 of 9) and CI (`.github/workflows/tests.yml`) on every push to main and every PR | Whole-tree scan: tracked `todo.md`, the owner's literal `/Users/<name>` home prefix, high-confidence secret patterns (AWS, OpenAI, GitHub, Slack, GitLab, Google, age, private key blocks)                           | Current tree only, not history; no employer-name detection                                                                           |
-| `.gitignore` security section                                                   | `git add`                                                                                                     | Keeps whole classes of files (`id_*`, `*.pem`, `.env.*`, `*credentials*`) out of the index by default                                                                                                                | `git add -f` bypasses silently                                                                                                       |
+| Layer                                                                                           | When it fires                                                                                                 | What it catches                                                                                                                                                                                                      | Gap                                                                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude/hooks/block_secrets.py` (+ Codex twin `codex/hooks/block_secrets.py`)                   | PreToolUse on Read/Edit/Write in a Claude session                                                             | Access to `.env*`, key files, `credentials`/`secrets` path segments. Segment-based matching (commit 52f807d) -- exact filenames/segments, not substring, so `secrets_manager/util.py` passes. `.pub` always allowed. | Session-time only; fails open on exceptions; does not see `bash echo > file`                                                                                                                              |
+| `git/hooks/pre-commit` (derived from the retired ECC, via `core.hooksPath=~/.config/git/hooks`) | Every `git commit`                                                                                            | High-signal secret regexes in ADDED lines only (OpenAI/GitHub/AWS keys, private key blocks, generic `password=...` assignments)                                                                                      | Behavioral suite exists (`git/hooks/pre-commit.test.sh`, see dotfiles-validation-and-qa); bypassable via `ECC_SKIP_GIT_HOOKS=1` / `ECC_SKIP_PRECOMMIT=1` -- emergencies only, per dotfiles-change-control |
+| `git/hooks/public-safety.test.sh`                                                               | `bin/dotfiles-tests` (suite 7 of 9) and CI (`.github/workflows/tests.yml`) on every push to main and every PR | Whole-tree scan: tracked `todo.md`, the owner's literal `/Users/<name>` home prefix, high-confidence secret patterns (AWS, OpenAI, GitHub, Slack, GitLab, Google, age, private key blocks)                           | Current tree only, not history; no employer-name detection                                                                                                                                                |
+| `.gitignore` security section                                                                   | `git add`                                                                                                     | Keeps whole classes of files (`id_*`, `*.pem`, `.env.*`, `*credentials*`) out of the index by default                                                                                                                | `git add -f` bypasses silently                                                                                                                                                                            |
 
 Run before anything public-facing (new file types, README claims, vendoring):
 
@@ -81,8 +81,8 @@ itself and `.pub` keys.
 
 - License: MIT, `LICENSE` (Copyright (c) 2026 Talon Jones).
 - Third-party notices: `NOTICE`. It currently lists exactly two upstreams:
-  1. ECC -- `claude/rules/` (curated vendored subset) and the adapted
-     `git/hooks/pre-commit` + `git/hooks/pre-push`.
+  1. The retired ECC -- `claude/rules/` (curated vendored subset) and the
+     adapted `git/hooks/pre-commit` + `git/hooks/pre-push`.
   2. GSD redux fork -- `claude/statusline.js` (ported statusline render).
 
 When vendoring or deriving from any upstream, in the same PR:
@@ -91,8 +91,7 @@ When vendoring or deriving from any upstream, in the same PR:
 - [ ] Add/extend the `NOTICE` entry: paths in this repo, upstream URL,
       license, copyright line.
 - [ ] No AI-attribution or "generated by" lines (house rule, hook-enforced).
-- [ ] If the vendored content is installer-reproducible (like ECC rules),
-      prefer keeping it UNTRACKED with a re-vendor command
+- [ ] If the vendored content is installer-reproducible (like the retired ECC's rules), prefer keeping it UNTRACKED with a re-vendor command
       (`claude/rules/.gitignore` model) over committing upstream bytes --
       less churn, no license text drift. Adapted-and-diverged code (like the
       git hooks) is tracked and NOTICE-listed.
@@ -101,25 +100,25 @@ When vendoring or deriving from any upstream, in the same PR:
 
 ## Upstream ecosystem map
 
-| Upstream                              | Pinned source                                                                                                                       | Trust posture                                                                                                                                                                                                           | Repo integration                                                                                                                                                                                                                      |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ECC v2 (Everything Claude Code)       | `https://github.com/affaan-m/ECC.git` (`ECC_REPO_URL` in `zsh/functions.zsh`; plugin id `ecc@ecc`)                                  | Trusted-but-verified: reproducible vendoring (`ecc-sync-rules`, `cp -R`, reviewable diff), plugin installed from the same pinned git URL. The v1 `everything-claude-code` repo/marketplace is RETIRED -- do not add it. | Plugin in both config dirs; rules vendored untracked; git hooks adapted+tracked. Never run its global Codex sync; stage self-contained native plugins through the owned lifecycle |
-| Superpowers                           | `https://github.com/anthropics/claude-plugins-official.git` (official marketplace, plugin id `superpowers@claude-plugins-official`) | Trusted (Anthropic-official). `superpowers-install` registers the marketplace by git URL before installing (commit 5b799dd) rather than assuming it is pre-registered.                                                  | Plugin only; nothing vendored into the tree                                                                                                                                                                                           |
-| GSD original (`get-shit-done-cc` npm) | none -- COMPROMISED                                                                                                                 | HOSTILE. Token rug-pull with retained npm publish access. Never reinstall. `gsd-uninstall` purges the package, its npx caches, and all leftover state (retirement completed at commit 9ad4dc8).                         | Nothing remains installed                                                                                                                                                                                                             |
-| GSD redux fork                        | npm `@opengsd/get-shit-done-redux`; repo `https://github.com/open-gsd/gsd-core` per `NOTICE` (formerly `get-shit-done-redux`)       | Retired (install path removed 2026-07-10); the package is referenced only by `gsd-uninstall`'s official-uninstaller call. Only the ported statusline survives, as tracked code.                                         | `claude/statusline.js`, NOTICE-listed                                                                                                                                                                                                 |
+| Upstream                                             | Pinned source                                                                                                                                    | Trust posture                                                                                                                                                                                   | Repo integration                                                                                                        |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| ECC v2 (Everything Claude Code) -- RETIRED (2026-09) | was `https://github.com/affaan-m/ECC.git` (plugin id `ecc@ecc`; the `ECC_REPO_URL` var and `ecc-install`/`ecc-sync-rules` functions are removed) | Was trusted-but-verified while installed: reproducible vendoring, plugin installed from a pinned git URL. Fully retired: no plugin, no vendored rules, `ecc-uninstall` sweeps leftovers.        | `git/hooks/pre-commit`/`pre-push` remain as tracked, adapted-and-diverged code (NOTICE-listed); everything else is gone |
+| Superpowers                                          | `https://github.com/anthropics/claude-plugins-official.git` (official marketplace, plugin id `superpowers@claude-plugins-official`)              | Trusted (Anthropic-official). `superpowers-install` registers the marketplace by git URL before installing (commit 5b799dd) rather than assuming it is pre-registered.                          | Plugin only; nothing vendored into the tree                                                                             |
+| GSD original (`get-shit-done-cc` npm)                | none -- COMPROMISED                                                                                                                              | HOSTILE. Token rug-pull with retained npm publish access. Never reinstall. `gsd-uninstall` purges the package, its npx caches, and all leftover state (retirement completed at commit 9ad4dc8). | Nothing remains installed                                                                                               |
+| GSD redux fork                                       | npm `@opengsd/get-shit-done-redux`; repo `https://github.com/open-gsd/gsd-core` per `NOTICE` (formerly `get-shit-done-redux`)                    | Retired (install path removed 2026-07-10); the package is referenced only by `gsd-uninstall`'s official-uninstaller call. Only the ported statusline survives, as tracked code.                 | `claude/statusline.js`, NOTICE-listed                                                                                   |
 
 ### Supply-chain rules (paid for in incidents)
 
 1. **Pin by git URL, not by name.** A marketplace/plugin name resolves through
    mutable registries; a git URL is what you audited. Both cloud
-   (`.claude/settings.json` `extraKnownMarketplaces`) and machine installers
-   (`ECC_REPO_URL`, the official-marketplace URL in `superpowers-install`)
-   already do this -- keep it that way.
+   (`.claude/settings.json` `extraKnownMarketplaces`) and the machine
+   installer (the official-marketplace URL in `superpowers-install`; the
+   retired ECC's `ECC_REPO_URL` did the same before removal) already do this
+   -- keep it that way.
 2. **Prefer reproducible, auditable artifacts over trusting installers.** A
-   pinned git clone (the ECC marketplace clone) holds bytes you can diff; an
-   installer runs code you did not read. (The old `ecc-sync-rules` vendoring
-   copy was retired 2026-07-02 once nothing consumed it -- reproducibility is
-   now provided by the pinned marketplace URL, not a second local copy.)
+   pinned git clone holds bytes you can diff; an installer runs code you did
+   not read. (The retired ECC's `ecc-sync-rules` vendoring copy was itself
+   retired 2026-07-02 once nothing consumed it, ahead of ECC's own retirement.)
 3. **Verify what an installer wrote; exit 0 is not evidence.** The cloud
    plugin saga proved installs can exit 0 without installing (commits 722c653,
    f91d7d2 -- verify `installed_plugins.json`, the gold standard in
@@ -129,9 +128,9 @@ When vendoring or deriving from any upstream, in the same PR:
    (rule source) happened AFTER the package was abandoned. A dead upstream is
    a risk, not a comfort.
 5. **Never run an upstream's own sync/install scripts against your global
-   state unaudited.** The abandoned Codex mirror (pre-public) showed ECC's
-   sync script overwriting `core.hooksPath` and writing through symlinks into
-   this repo. Use the owned native plugin staging lifecycle instead.
+   state unaudited.** The abandoned Codex mirror (pre-public) showed the
+   retired ECC's sync script overwriting `core.hooksPath` and writing through
+   symlinks into this repo. Use the owned native plugin staging lifecycle instead.
 
 ## The public/private split
 
@@ -169,7 +168,7 @@ cloud container (ephemeral, clean clone every session).
 ```bash
 # In a fresh cloud container the platform clones the repo and the committed
 # .claude/settings.json declares the plugins; verify the claim chain held:
-claude plugins list                          # expect ecc@ecc and superpowers@claude-plugins-official
+claude plugins list                          # expect superpowers@claude-plugins-official (ECC retired 2026-09)
 cat ~/.claude/plugins/installed_plugins.json # ground truth, not CLI output
 bin/dotfiles-tests                           # all suites green on a clean clone
 ```
@@ -196,22 +195,21 @@ not executed somewhere.
 Facts verified against the working tree on 2026-07-02 (HEAD = 26eae6d).
 Volatile items and their one-line re-verification commands:
 
-| Fact (as of 2026-07-02)                                                                      | Re-verify with                                               |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Tracked key files = exactly `ssh/keys/id_ed25519_personal.pub`                               | `git ls-files ssh/keys`                                      |
-| public-safety suite is 3 assertions (todo.md, owner home prefix, secret regexes)             | `cat git/hooks/public-safety.test.sh`                        |
-| dotfiles-tests runs all suites incl. public-safety                                           | `bin/dotfiles-tests --list`                                  |
-| NOTICE lists ECC (pre-commit/pre-push; rules entry historical) and GSD redux (statusline.js) | `cat NOTICE`                                                 |
-| Fable5.md/Opus4.md gitignored                                                                | `cat claude/.gitignore`                                      |
-| ECC pinned URL                                                                               | `grep -n 'ECC_REPO_URL' zsh/functions.zsh`                   |
-| Cloud plugin/marketplace pins                                                                | `cat .claude/settings.json`                                  |
-| GSD redux repo name (NOTICE says gsd-core)                                                   | `grep -n 'open-gsd' NOTICE`                                  |
-| pre-commit bypass vars (`ECC_SKIP_GIT_HOOKS`, `ECC_SKIP_PRECOMMIT`)                          | `grep -n 'ECC_SKIP' git/hooks/pre-commit git/hooks/pre-push` |
-| Cloud disables commit signing                                                                | `grep -n 'gpgsign' bootstrap-cloud.sh`                       |
-| CI runs suites on push to main + PRs                                                         | `head -20 .github/workflows/tests.yml`                       |
-| Commit hashes cited (52f807d, 5b799dd, 9ad4dc8, 2304015, 722c653, f91d7d2, e140ab3, c0a9072) | `git show --stat <hash>`                                     |
+| Fact (as of 2026-07-02)                                                                              | Re-verify with                                               |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Tracked key files = exactly `ssh/keys/id_ed25519_personal.pub`                                       | `git ls-files ssh/keys`                                      |
+| public-safety suite is 3 assertions (todo.md, owner home prefix, secret regexes)                     | `cat git/hooks/public-safety.test.sh`                        |
+| dotfiles-tests runs all suites incl. public-safety                                                   | `bin/dotfiles-tests --list`                                  |
+| NOTICE lists retired ECC (pre-commit/pre-push; rules entry historical) and GSD redux (statusline.js) | `cat NOTICE`                                                 |
+| Fable5.md/Opus4.md gitignored                                                                        | `cat claude/.gitignore`                                      |
+| ECC pinned URL removed (retired)                                                                     | `! grep -q 'ECC_REPO_URL' zsh/functions.zsh`                 |
+| Cloud plugin/marketplace pins                                                                        | `cat .claude/settings.json`                                  |
+| GSD redux repo name (NOTICE says gsd-core)                                                           | `grep -n 'open-gsd' NOTICE`                                  |
+| pre-commit bypass vars, named for the retired ECC (`ECC_SKIP_GIT_HOOKS`, `ECC_SKIP_PRECOMMIT`)       | `grep -n 'ECC_SKIP' git/hooks/pre-commit git/hooks/pre-push` |
+| Cloud disables commit signing                                                                        | `grep -n 'gpgsign' bootstrap-cloud.sh`                       |
+| CI runs suites on push to main + PRs                                                                 | `head -20 .github/workflows/tests.yml`                       |
+| Commit hashes cited (52f807d, 5b799dd, 9ad4dc8, 2304015, 722c653, f91d7d2, e140ab3, c0a9072)         | `git show --stat <hash>`                                     |
 
 Standing open items relevant here: private overlay repo (candidate, unbuilt);
-machine-path installers trusting CLI output instead of
-`installed_plugins.json`; no automated employer-name scan; ECC pre-commit /
-pre-push untested; cloud has no work-account story.
+machine-path installer trusting CLI output instead of
+`installed_plugins.json`; no automated employer-name scan; ECC retired 2026-09 (pre-commit/pre-push are now the only surviving ECC-derived pieces); cloud has no work-account story.

@@ -97,27 +97,28 @@ requires the install to predate launch -- in cloud, that means the pre-launch
 declaration in `.claude/settings.json` or the Setup script, never the
 SessionStart hook.
 
-**Worked example (this container, 2026-07-02):**
+**Worked example (this container, 2026-09-22; ECC retired -- the earlier snapshot also showed the now-retired `ecc@ecc` before that):**
 
 ```
 $ python3 -m json.tool ~/.claude/plugins/installed_plugins.json | head -12
 {
     "version": 2,
     "plugins": {
-        "ecc@ecc": [
+        "superpowers@claude-plugins-official": [
             {
                 "scope": "user",
-                "installPath": "/root/.claude/plugins/cache/ecc/ecc/2.0.0",
-                "version": "2.0.0",
+                "installPath": "/root/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.0",
+                "version": "6.1.0",
 ...
 ```
 
-[OK] `ecc@ecc` 2.0.0 and `superpowers@claude-plugins-official` 6.1.0 both
-recorded with install paths and git SHAs.
+[OK] `superpowers@claude-plugins-official` 6.1.0 recorded with install path
+and git SHA.
 
-[WARNING] Open weak point: the machine-path installers (`ecc-install` /
-`superpowers-install` in `zsh/functions.zsh`) still verify via CLI list
-output, not `installed_plugins.json`. Use this recipe after them anyway.
+[WARNING] Open weak point: the machine-path installer (`superpowers-install`
+in `zsh/functions.zsh`; the retired `ecc-install` had the same gap) still
+verifies via CLI list output, not `installed_plugins.json`. Use this recipe
+after it anyway.
 
 ## 3. Prove which git identity a repo resolves
 
@@ -346,8 +347,9 @@ On a real machine, first prove the wiring on the live repo (read-only):
 `readlink -f ~/.config/git/hooks` must land in `<dotfiles>/git/hooks`. In
 this container hooksPath was unset (cloud bootstrap does not install the git
 layer) -- which is exactly why the demo sets it explicitly in the clone.
-Static shape checks live in `git/hooks/post-checkout.test.sh`; the ECC-vendored
-`pre-commit`/`pre-push` in the same dir are UNTESTED (open gap).
+Static shape checks live in `git/hooks/post-checkout.test.sh`; the
+`pre-commit`/`pre-push` hooks (derived from the retired ECC) in the same dir
+have their own behavioral suites (see dotfiles-validation-and-qa).
 
 ## When NOT to use this skill
 
@@ -365,19 +367,19 @@ Static shape checks live in `git/hooks/post-checkout.test.sh`; the ECC-vendored
 Facts verified live in a cloud container on 2026-07-02, HEAD 26eae6d. Volatile
 facts and one-line re-checks:
 
-| Fact (as of 2026-07-02)                                                           | Re-verify                                                        |
-| --------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| Symlink map lives in `link_claude_config_dir`                                     | `grep -n 'ln -sf' install/common/claude-links.sh`                |
-| `installed_plugins.json` at `~/.claude/plugins/installed_plugins.json`, format v2 | `grep -n INSTALLED_PLUGINS_JSON bootstrap-cloud.sh`              |
-| Plugin versions ECC 2.0.0 / superpowers 6.1.0 (container snapshot; WILL drift)    | `python3 -m json.tool ~/.claude/plugins/installed_plugins.json`  |
-| Marketplace manifest path `.claude-plugin/marketplace.json`                       | `grep -n marketplace.json bootstrap-cloud.sh`                    |
-| identity design: useConfigOnly + includeIf, no base [user] email                  | `grep -n -A4 'useConfigOnly' git/.gitconfig`                     |
-| Hook exit-2-blocks contract and payload shape                                     | `head -80 claude/hooks/claude-hooks.test.sh`                     |
-| Template keys / seed-once behavior                                                | `grep -n seed_machine_local_file install/common/claude-links.sh` |
-| Cloud reconcile merges plugin keys, template wins elsewhere                       | `grep -n -A10 'PLUGIN_KEYS' bootstrap-cloud.sh`                  |
-| post-checkout hydrates `.todos` in maintenance mode                               | `grep -n 'hydrated .todos' git/hooks/post-checkout`              |
-| Cited commits exist (f91d7d2, 7cb28b7, c1c4500, 2304015)                          | `git show <hash> --stat`                                         |
-| ssh pin: `Git-Personal` and `github.com` -> personal key                          | `grep -n -A4 '^Host' ssh/configs/personal/config_personal`       |
+| Fact (as of 2026-07-02)                                                                | Re-verify                                                        |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Symlink map lives in `link_claude_config_dir`                                          | `grep -n 'ln -sf' install/common/claude-links.sh`                |
+| `installed_plugins.json` at `~/.claude/plugins/installed_plugins.json`, format v2      | `grep -n INSTALLED_PLUGINS_JSON bootstrap-cloud.sh`              |
+| Plugin version superpowers 6.1.0 (container snapshot; WILL drift; ECC retired 2026-09) | `python3 -m json.tool ~/.claude/plugins/installed_plugins.json`  |
+| Marketplace manifest path `.claude-plugin/marketplace.json`                            | `grep -n marketplace.json bootstrap-cloud.sh`                    |
+| identity design: useConfigOnly + includeIf, no base [user] email                       | `grep -n -A4 'useConfigOnly' git/.gitconfig`                     |
+| Hook exit-2-blocks contract and payload shape                                          | `head -80 claude/hooks/claude-hooks.test.sh`                     |
+| Template keys / seed-once behavior                                                     | `grep -n seed_machine_local_file install/common/claude-links.sh` |
+| Cloud reconcile merges plugin keys, template wins elsewhere                            | `grep -n -A10 'PLUGIN_KEYS' bootstrap-cloud.sh`                  |
+| post-checkout hydrates `.todos` in maintenance mode                                    | `grep -n 'hydrated .todos' git/hooks/post-checkout`              |
+| Cited commits exist (f91d7d2, 7cb28b7, c1c4500, 2304015)                               | `git show <hash> --stat`                                         |
+| ssh pin: `Git-Personal` and `github.com` -> personal key                               | `grep -n -A4 '^Host' ssh/configs/personal/config_personal`       |
 
 If a re-verify command returns nothing, the anchor moved -- fix this file
 before trusting it again.
