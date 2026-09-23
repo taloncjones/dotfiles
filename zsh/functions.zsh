@@ -334,7 +334,6 @@ function _codex_remove_plugin() {
 # settings reconcile forces ecc@ecc off and the Codex dedupe disables its
 # Codex copies; ecc-uninstall removes what is still on disk.
 ECC_REPO_DIR="$HOME/Git/personal/ECC"
-SUPERPOWERS_REPO_URL="https://github.com/obra/superpowers.git"
 SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.local/share/dotfiles/sources/superpowers}"
 
 # Retired entry points survive `reload` in a long-running shell -- drop them.
