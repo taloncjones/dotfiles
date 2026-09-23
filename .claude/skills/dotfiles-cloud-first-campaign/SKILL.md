@@ -6,11 +6,13 @@ description: The executable campaign runbook for making cloud/ephemeral Claude C
 # Dotfiles cloud-first campaign
 
 Executable, decision-gated runbook for advancing cloud/ephemeral sessions from
-"works with babysitting" to first-class primary environment. The dotfiles repo
-itself is already cloud-solved (plugins on session 1, settled 2026-07-02);
-this skill hardens that state, rolls it out to other repos, and closes the
-remaining machine/cloud parity gaps. Every phase ends in a measurable gate --
-success is `cloud-doctor.sh` exit 0 on session 1, never "looks fine".
+"works with babysitting" to first-class primary environment. The plugin-on-
+session-1 objective below is retired content: Superpowers (this repo's only
+declared plugin) is retired (2026-09), so no plugin loads in a cloud session
+any more and the plugin-parity gates described here no longer apply. The
+non-plugin parts of this runbook (assets, settings, git identity) remain
+current. Every phase ends in a measurable gate -- success is `cloud-doctor.sh`
+exit 0 on session 1, never "looks fine".
 
 [WARNING] Front-loaded fences -- these are settled incidents, do not re-fight them
 (full narratives: dotfiles-failure-archaeology; verify any hash with
@@ -86,13 +88,12 @@ are (verbatim from `bootstrap-cloud.sh` source):
 ```
 [bootstrap-cloud] Linking Claude assets into /root/.claude...
 [claude-links] Reconciled settings.json (SessionStart: account_guard.py).
-[bootstrap-cloud] Ensuring plugin marketplaces + installs...
-[bootstrap-cloud] OK: superpowers@claude-plugins-official already installed.
-[bootstrap-cloud] (ECC retired 2026-09; no ecc@ecc line anymore.)
-[bootstrap-cloud] Reconciled settings.json (SessionStart: account_guard.py).
 [bootstrap-cloud] Done. Plugins and settings load with the NEXT session;
 [bootstrap-cloud] an already-running session picks up skills/commands only.
 ```
+
+(No plugin lines: Superpowers and ECC are both retired, 2026-09; no plugin
+is installed in a cloud session any more.)
 
 Branch lines:
 
@@ -132,10 +133,9 @@ disables signing; fence 2304015). Platform default still present -> re-run
 bootstrap-cloud (`reattribute_git_identity` only overrides the platform
 default; a real identity is never clobbered).
 
-Gate to pass Phase 0: cloud-doctor exit 0 AND plugin skills actually invocable
-in the CURRENT session (try one, e.g. a superpowers skill). Present-on-disk
-but not invocable = post-launch install; acceptable only for the self-heal
-path.
+Gate to pass Phase 0: cloud-doctor exit 0. Historical only: this phase used
+to also require a retired Superpowers skill to be invocable; no plugin is
+installed in a cloud session any more, so that check no longer applies.
 
 Baseline (2026-07-02, fresh session-1 dotfiles-repo container, NO Setup
 script): full Phase 0 pass. cloud-doctor exit 0 (all checks `[OK]`);
@@ -176,10 +176,10 @@ asset/identity/settings layer was fully live SAME-session: cloud-doctor exit
 false), statusline registered and resolving, permissions block present after
 reconcile, and guard hooks active in that very session (emoji_guard.py
 blocked a PostToolUse Write probe); symlinked skills/commands also loaded
-same-session. Plugin skills did NOT: the retired ecc@ecc and
-superpowers@claude-plugins-official landed in `installed_plugins.json` only
-post-launch at `"scope": "user"` and no plugin skill was invocable (fence
-c1c4500 reconfirmed). Account sync wrote 13 ids into `enabledPlugins` but
+same-session. Plugin skills did NOT: the now-retired `ecc@ecc` and the
+now-retired `superpowers@claude-plugins-official` both landed in
+`installed_plugins.json` only post-launch at `"scope": "user"` and no plugin
+skill was invocable (fence c1c4500 reconfirmed). Account sync wrote 13 ids into `enabledPlugins` but
 installed ZERO account plugins, because no marketplace was registered
 pre-launch (see the Phase 1 hard constraint). The project-layer exclusion
 override was not exercisable there (non-dotfiles repo, nothing
@@ -278,7 +278,7 @@ Of the account-enabled ids from non-official marketplaces:
   dotfiles-repo containers: ABSENT from `installed_plugins.json` entirely --
   NOT disabled-but-installed, which occurs only when the marketplace is
   registered anyway (as with the official-marketplace exclusions, whose
-  marketplace superpowers keeps registered). One mechanism covers all
+  marketplace the now-retired Superpowers kept registered). One mechanism covers all
   observed states: registration requires an enabled referencing plugin;
   installation requires registration; a project-layer `false` blocks loading
   but not installation. [WARNING] Disable-propagation
@@ -323,20 +323,23 @@ Goal: any OTHER repo you work on in claude.ai/code gets plugins on session 1.
 | Commit `.claude/settings.json` | YES (declaration clones with the repo)                 | Needs repo-owner buy-in; content must be public-safe for public repos |
 | `setup-claude` (local-only)    | NO (excluded config never reaches the container clone) | Zero repo footprint; MUST pair with the Phase 1 option 2 Setup script |
 
-**2.2 What to commit (declaration snippet, verbatim from this repo's
-`.claude/settings.json`).** Commit exactly this into the target repo's
-`.claude/settings.json` (merge into an existing file rather than clobbering):
+**2.2 What to commit (declaration shape, generalized).** This repo no longer
+declares any plugin -- Superpowers is retired (2026-09) and its own
+`enabledPlugins` entry was removed. If a future plugin needs session-1
+placement in another repo, commit its `enabledPlugins`/`extraKnownMarketplaces`
+pair (merge into an existing `.claude/settings.json` rather than clobbering)
+in the same shape this repo's now-retired Superpowers declaration used:
 
 ```json
 {
   "enabledPlugins": {
-    "superpowers@claude-plugins-official": true
+    "<plugin-id>": true
   },
   "extraKnownMarketplaces": {
-    "claude-plugins-official": {
+    "<marketplace-name>": {
       "source": {
         "source": "git",
-        "url": "https://github.com/anthropics/claude-plugins-official.git"
+        "url": "<marketplace-git-url>"
       }
     }
   }
@@ -365,18 +368,20 @@ Each gap: status, first step, measurable gate. Statuses are honest -- 3.1,
 open. Do not report an open one as fixed.
 
 **3.1 Machine-path installs verify against `installed_plugins.json` -- CLOSED
-(2026-07-02).** `bootstrap-cloud.sh ensure_plugin` semantics (manifest wait +
-`installed_plugins.json` verify, never trusting exit codes) now live in
-`zsh/functions.zsh` as `_claude_plugin_installed` /
-`_claude_marketplace_lists_plugin` / `_claude_ensure_plugin`, parameterized by
-config dir because machines have TWO (`~/.claude` and `~/.claude-work`).
-`superpowers-install` routes through `_claude_ensure_plugin` (the retired `ecc-install` did too); the update/uninstall presence checks read
-`installed_plugins.json` directly.
-The gate held: `zsh/functions.test.sh` (registered in `bin/dotfiles-tests`)
-proves an unreachable marketplace and a silent no-op install both return
-non-zero and say so. Machine retry budget is 3 attempts / 5s cap (no
-cold-container warmup on machines), overridable via `CLAUDE_PLUGIN_RETRIES` /
-`CLAUDE_PLUGIN_RETRY_DELAY` / `CLAUDE_PLUGIN_RETRY_MAX_DELAY`.
+(2026-07-02), then retired (2026-09).** Historical only: `bootstrap-cloud.sh`'s
+former `ensure_plugin` semantics (manifest wait + `installed_plugins.json`
+verify, never trusting exit codes) used to live in `zsh/functions.zsh` as
+`_claude_plugin_installed` / `_claude_marketplace_lists_plugin` /
+`_claude_ensure_plugin`, parameterized by config dir because machines have TWO
+(`~/.claude` and `~/.claude-work`). The retired Superpowers install path
+routed through them (the retired ECC install path did too); all of these
+functions and `bootstrap-cloud.sh`'s `ensure_plugin` were deleted when
+Superpowers retired, since no plugin install remains to verify.
+The gate held while it existed: `zsh/functions.test.sh` (registered in
+`bin/dotfiles-tests`) proved an unreachable marketplace and a silent no-op
+install both returned non-zero and said so. None of this remains to test;
+the retired Superpowers and ECC install paths are gone along with their
+retry-budget variables.
 
 **3.2 `reconcile_claude_settings` on machines -- CLOSED (2026-07-02).** The
 merge now lives in `install/common/claude-links.sh` as

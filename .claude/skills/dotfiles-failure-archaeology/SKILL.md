@@ -22,14 +22,15 @@ recorded root cause no longer holds -- not a hunch.
 
 ## One-screen summary
 
-| #   | Saga                                     | Verdict                                                                        | Key hashes                                            | Status                                |
-| --- | ---------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------------------------------- |
-| 1   | Cloud first-session plugins              | Pre-launch placement required; SessionStart install is dark until next session | f2f13ab .. 8d4507f (root cause: c1c4500)              | Settled                               |
-| 2   | Tiered-orchestrate + per-task Codex gate | Added, debugged, removed whole subsystem as slower/costlier                    | fc88aac, e401175, 7fefcb5                             | Settled (removed)                     |
-| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                          | e140ab3                                               | Settled; vendoring retired 2026-07-02 |
-| 4   | Codex asset mirror into ~/.codex         | Overwrote hooksPath, wrote through symlink, orphaned agent files               | pre-public (no hash); sweep in install/common/link.sh | Settled (abandoned)                   |
-| 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; GSD fully retired 2026-07-10    | 9ad4dc8                                               | Settled                               |
-| 6   | todo.md audit file deleted               | Tracking moved off-file; all dropped items resolved 2026-07-02                 | 854228e, c0a9072                                      | Settled 2026-07-02                    |
+| #   | Saga                                     | Verdict                                                                                                            | Key hashes                                                                               | Status                                |
+| --- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------- |
+| 1   | Cloud first-session plugins              | Pre-launch placement required; SessionStart install is dark until next session                                     | f2f13ab .. 8d4507f (root cause: c1c4500)                                                 | Settled                               |
+| 2   | Tiered-orchestrate + per-task Codex gate | Added, debugged, removed whole subsystem as slower/costlier                                                        | fc88aac, e401175, 7fefcb5                                                                | Settled (removed)                     |
+| 3   | ECC rules tracked in git                 | 39 vendored files churned; now reproducible-untracked                                                              | e140ab3                                                                                  | Settled; vendoring retired 2026-07-02 |
+| 4   | Codex asset mirror into ~/.codex         | Overwrote hooksPath, wrote through symlink, orphaned agent files                                                   | pre-public (no hash); sweep in install/common/link.sh                                    | Settled (abandoned)                   |
+| 5   | GSD npm supply-chain compromise          | Original package hostile after token rug-pull; GSD fully retired 2026-07-10                                        | 9ad4dc8                                                                                  | Settled                               |
+| 6   | todo.md audit file deleted               | Tracking moved off-file; all dropped items resolved 2026-07-02                                                     | 854228e, c0a9072                                                                         | Settled 2026-07-02                    |
+| 7   | Superpowers plugin retired (2026-09)     | Owned brainstorming/writing-specs/writing-plans skills replaced it; boot cost and no spec-authoring skill drove it | 919f000 .. 9618b23 (task 2026-09-15-replace-brainstorming-and-writing-plans-then-drop-s) | Settled 2026-09                       |
 
 ## When NOT to use this skill
 
@@ -242,6 +243,35 @@ lines). Recover the full list with `git show c0a9072^:todo.md`.
 
 **Status: settled (2026-07-02).** All three dropped items are resolved; the
 deleted todo.md carries no remaining work.
+
+## Saga 7: Superpowers plugin retired (2026-09)
+
+**Symptom.** Superpowers cost boot-time context on every session (skills that
+were rarely used, like ECC before it) and had no spec-authoring skill of its
+own -- brainstorming handed off straight to writing-plans, skipping the step
+where a wrong safety claim is cheapest to catch.
+
+**Root cause / decision.** Not a bug: a deliberate replacement. The repo's own
+`brainstorming` -> `writing-specs` -> `writing-plans` skill chain
+(task 2026-09-15-replace-brainstorming-and-writing-plans-then-drop-s) closes
+the missing-spec-skill gap and removes the plugin's boot cost entirely, at the
+price of losing upstream Superpowers updates.
+
+**Evidence.** `claude/skills/brainstorming/`, `claude/skills/writing-specs/`,
+`claude/skills/writing-plans/` (added, commits 919f000, cb82c3f, dc8aae9);
+retirement mirrors the ECC precedent exactly: settings reconcile forces
+`superpowers@claude-plugins-official` off (162cef1), zsh install/update entry
+points deleted and `superpowers-uninstall` made scope-aware (026b1a6),
+installers/Codex/cloud stop installing it (70d56c0), routing text updated
+(9618b23).
+
+**Resolution.** Superpowers retired: no plugin installs in Claude, Codex, or
+cloud any more; `superpowers-uninstall` sweeps what remains on disk.
+
+**Status: settled (2026-09).** Lesson: a second-model review gate (here,
+`codex-spec-review`) catches design defects a plugin cannot enforce on its
+own; owning the three planning skills closes that gap permanently instead of
+depending on an upstream plugin's roadmap.
 
 ## Minor settled fixes (2026-07-02, same-day -- know the CURRENT state)
 

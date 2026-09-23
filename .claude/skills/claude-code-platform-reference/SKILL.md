@@ -31,8 +31,7 @@ sibling runbooks make sense.
   (settings, plugins, credentials). Default `~/.claude`; overridden by the
   `CLAUDE_CONFIG_DIR` env var.
 - **Plugin**: an installable bundle of skills/commands/agents/hooks, identified
-  as `name@marketplace` (e.g. `superpowers@claude-plugins-official`; the
-  retired ECC used `ecc@ecc`).
+  as `name@marketplace` (e.g. the retired Superpowers used `superpowers@claude-plugins-official`; the retired ECC used `ecc@ecc`).
 - **Marketplace**: a git repo that catalogs plugins via a
   `.claude-plugin/marketplace.json` manifest; registered per config dir.
 - **Hook**: an external command Claude Code runs on lifecycle events
@@ -117,7 +116,7 @@ What this repo puts in each layer (all repo-verified):
 | ----------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude/settings.json.tmpl`         | yes                             | `env`, `permissions` (allow/deny/ask, `defaultMode`), `hooks` (PreToolUse, PostToolUse, SessionStart), `statusLine`, `enabledPlugins`, `extraKnownMarketplaces`, `mcpServers` | template for the USER settings.json in both config dirs                                                                                                                                                               |
 | `<config-dir>/settings.json`        | no (machine-local)              | same as template plus whatever plugin installers write                                                                                                                        | seeded ONCE by `seed_machine_local_file`; template changes need manual merge on machines. Cloud reconciles automatically via `reconcile_claude_settings` (bootstrap-cloud.sh) -- open weak point that machines do not |
-| `.claude/settings.json` (repo root) | yes                             | `enabledPlugins`, `extraKnownMarketplaces`, `hooks.SessionStart`                                                                                                              | PROJECT settings: declares Superpowers for native pre-launch install in cloud (ECC retired 2026-09), plus the session-start.sh self-heal hook                                                                         |
+| `.claude/settings.json` (repo root) | yes                             | `enabledPlugins`, `extraKnownMarketplaces`, `hooks.SessionStart`                                                                                                              | PROJECT settings: `enabledPlugins` pins Superpowers off (retired 2026-09, like ECC), no plugin is declared any more, plus the session-start.sh hook that runs bootstrap-cloud.sh for assets/settings/identity         |
 | `.claude/settings.local.json`       | gitignored (.gitignore:159-160) | none committed                                                                                                                                                                | per-machine personal overrides only                                                                                                                                                                                   |
 
 `enabledPlugins` semantics: `true` per `name@marketplace` id enables the
@@ -157,11 +156,13 @@ On-disk layout under `<config-dir>/plugins/`, live-verified 2026-07-02:
 Cold-start race (settled, commit 7cb28b7): a github-backed marketplace can be
 REGISTERED but still mid-fetch, so `claude plugins install` no-ops with exit 0
 because the manifest does not list the plugin yet. Plain git marketplaces
-clone synchronously and win the race. `ensure_plugin` in bootstrap-cloud.sh
-defeats this deterministically: wait for `marketplace_lists_plugin` (manifest
-poll with `marketplace update` refreshes), then install, then verify against
-installed_plugins.json, with backoff capped at 15s so retries fit the Setup
-script budget (bootstrap-cloud.sh:59-172).
+clone synchronously and win the race. This repo's `bootstrap-cloud.sh` used to
+defeat this deterministically with `ensure_plugin` (manifest poll, then
+install, then verify against `installed_plugins.json`, backoff capped at
+15s); that helper was deleted along with the retired Superpowers install path
+(2026-09), since this repo installs no plugin any more. The race and its
+platform-level defeat pattern (poll the manifest, never trust the exit code)
+remain true for anyone installing a plugin by hand.
 
 CLI verbs used by this repo (note the mixed singular/plural -- copy exactly):
 
@@ -175,17 +176,13 @@ claude plugins update <name@marketplace>
 claude plugins uninstall <name@marketplace>
 ```
 
-(Sources: bootstrap-cloud.sh `ensure_plugin`; `superpowers-install` in
-zsh/functions.zsh (the retired `ecc-install` used the same path). Both paths
-verify against installed_plugins.json: the machine path adopted the
-`ensure_plugin` semantics as `_claude_ensure_plugin` on 2026-07-02.)
+(Historical sources, all since deleted along with the retired Superpowers install path: `bootstrap-cloud.sh`'s `ensure_plugin`, and the retired Superpowers install function in zsh/functions.zsh, which adopted the same `ensure_plugin` semantics as `_claude_ensure_plugin` on 2026-07-02 -- the retired ECC install function used the same pattern.)
 
-The plugin this repo declares: `superpowers@claude-plugins-official`
-(https://github.com/anthropics/claude-plugins-official.git; the retired ECC declared `ecc@ecc` at https://github.com/affaan-m/ECC.git). Registered BY URL
-so the clone is synchronous -- the official marketplace's platform default
-registration is async and absent during a pre-launch Setup script
-(bootstrap-cloud.sh:49-55; machine path fixed the same way in
-`superpowers-install`, commit 5b799dd, 2026-07-02).
+This repo declares no plugin any more: Superpowers (retired 2026-09, formerly `superpowers@claude-plugins-official`, https://github.com/anthropics/claude-plugins-official.git) and ECC (retired 2026-09, formerly `ecc@ecc` at https://github.com/affaan-m/ECC.git) are both gone.
+While installed, both were registered BY URL so the clone was synchronous --
+the official marketplace's platform default registration is async and absent
+during a pre-launch Setup script; that pattern remains correct for any future
+plugin this repo might declare.
 
 ## Hooks
 
@@ -295,10 +292,7 @@ Session lifecycle sources this repo matches on: `startup` (new session),
 compaction). The self-heal runs on `startup|resume`; account_guard on
 `startup|clear|compact`.
 
-Cloud containers are personal-account only; `installed_plugins.json` in this
-container shows `superpowers@claude-plugins-official` v6.1.0 installed at
-session start (an earlier snapshot also showed the now-retired `ecc@ecc`
-v2.0.0; versions are volatile -- see Provenance).
+Cloud containers are personal-account only. Historical: `installed_plugins.json` in a 2026-09-22 snapshot of this container showed the now-retired `superpowers@claude-plugins-official` v6.1.0 installed at session start (an earlier snapshot also showed the now-retired `ecc@ecc` v2.0.0); no plugin installs in a fresh container any more, since both are retired.
 
 ## Statusline
 

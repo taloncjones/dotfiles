@@ -27,11 +27,11 @@ Claude and Codex are supported daily drivers. Choose the runtime for the task;
 keep account boundaries, verification and review requirements consistent.
 
 - Dotfiles manages `~/.codex/AGENTS.md`, selected `~/.codex/hooks/*` symlinks, and native workflow plugin lifecycles
-- Superpowers is staged from its upstream checkout as a self-contained `dotfiles-workflows` plugin
 - Claude and Codex plugin installations remain independent; never mirror one runtime's installed plugin files into the other
 - ECC is retired (2026-09); `ecc-uninstall` removes leftovers.
+- Superpowers is retired (2026-09); `superpowers-uninstall` removes leftovers. The planning skills (`brainstorming`, `writing-specs`, `writing-plans`) are repo-owned and shared from `claude/skills/`.
 
-If the user asks for Superpowers, phased planning, systematic debugging, verification, TDD, or review workflows, prefer installed Codex skills/prompts/plugins when available.
+If the user asks for phased planning, systematic debugging, verification, TDD, or review workflows, prefer the repo-owned skills and the operating principles.
 
 GSD is RETIRED on this setup -- no variant, no install path. The original
 `get-shit-done-cc` npm package is treated as compromised (token rug-pull with
@@ -78,8 +78,8 @@ of the toolchain, and do not reinstall any variant.
 ## Worktree Default
 
 For implementation work, default to an isolated workspace before editing files.
-Use `superpowers:using-git-worktrees` when available; if no native worktree tool
-exists, use a project-local `.worktrees/<topic-slug>` git worktree. Do not ask
+Use the native worktree tool when available; otherwise use a project-local
+`.worktrees/<topic-slug>` git worktree. Do not ask
 for consent again unless the user says to work in the current checkout or the
 worktree creation would require an unsafe or destructive action.
 
@@ -87,16 +87,16 @@ worktree creation would require an unsafe or destructive action.
 
 Use these skills by default when the task matches:
 
-- `superpowers:brainstorming`, `superpowers:writing-plans`,
-  `claude-spec-review`, `claude-plan-review`, and
-  `superpowers:executing-plans` for substantial implementation work.
-- `superpowers:test-driven-development` for new behavior,
-  regression fixes, and risky refactors.
-- `superpowers:systematic-debugging` for startup failures, flaky tests, tool failures,
-  build failures, and confusing runtime symptoms.
+- `brainstorming`, `writing-specs`, `claude-spec-review`, `writing-plans`,
+  `claude-plan-review`, then execute the plan inline, for substantial
+  implementation work.
+- The operating principles (test first; reproduce, one variable per
+  hypothesis) for new behavior, regression fixes, risky refactors, startup
+  failures, flaky tests, tool failures, build failures, and confusing
+  runtime symptoms.
 - `review-change` for a bounded development review; `co-review` for top-level
   finished-PR review orchestration after implementation, and
-  `superpowers:verification-before-completion` before claiming work is done.
+  operating-principles "Verify before you claim" before claiming work is done.
 - `repo-recall` for prior repo decisions, findings, plans, handoffs, and todos;
   open the cited source before treating a search result as evidence.
 - `post-merge` for merged-branch cleanup and shared lessons distillation.
@@ -112,17 +112,18 @@ Use these skills by default when the task matches:
   points to `claude/skills/herdr-orchestration/SKILL.md`; Claude Workflow and
   messaging tools are not Codex launch or completion APIs.
 
-## Superpowers Flow
+## Planning Flow
 
 For substantial Codex-led work:
 
-1. `superpowers:brainstorming`
-2. `claude-spec-review` for the completed specification
-3. `superpowers:writing-plans`
-4. `claude-plan-review` for the completed implementation plan
-5. `superpowers:executing-plans`
-6. `co-review` for Claude + Codex finished-PR review
-7. `superpowers:verification-before-completion`
+1. `brainstorming`
+2. `writing-specs`
+3. `claude-spec-review` for the completed specification
+4. `writing-plans`
+5. `claude-plan-review` for the completed implementation plan
+6. execute the plan task by task
+7. `co-review` for Claude + Codex finished-PR review
+8. verify before claiming done (operating principles)
 
 Merge requires completed Claude and Codex code reviews and any required
 adversarial verification. Approval to merge preserves these gates.
@@ -215,5 +216,5 @@ sandbox restrictions do not provide Claude dollar or turn caps.
   their outputs. Avoid duplicate reviewers and recursive partner dispatch.
 - Keep checks proportional: run the relevant checks, then the required full
   gate once integrated. Record actual results before claiming completion.
-- Preserve custom configuration. Native Superpowers updates must not
+- Preserve custom configuration. Retired plugin uninstallers must not
   overwrite global instructions, credentials or git-hook ownership.

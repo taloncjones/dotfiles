@@ -1,6 +1,6 @@
 ---
 name: dotfiles-run-and-operate
-description: Day-to-day operation of an already-installed dotfiles machine. Load when asked to "update the dotfiles", "reload zsh", run/repair a plugin (superpowers-install; the retired ecc-install/ecc-update no longer exist), run dotfiles-repair, prep a repo with setup-claude, explain claude account routing (claude-account, the claude() wrapper, work vs personal), find where machine state lives (~/.claude, ~/.claude-work, cache stamps, plugin dirs), or understand .todos/.planning worktree hydration. NOT for first-time environment setup (dotfiles-build-and-env), debugging a broken symptom (dotfiles-debugging-playbook), or Claude Code platform internals (claude-code-platform-reference).
+description: Day-to-day operation of an already-installed dotfiles machine. Load when asked to "update the dotfiles", "reload zsh", clean up leftovers from a retired plugin (its uninstall function is the only surviving entry point for both Superpowers and ECC; their install/update entry points are retired and no longer exist), run dotfiles-repair, prep a repo with setup-claude, explain claude account routing (claude-account, the claude() wrapper, work vs personal), find where machine state lives (~/.claude, ~/.claude-work, cache stamps, plugin dirs), or understand .todos/.planning worktree hydration. NOT for first-time environment setup (dotfiles-build-and-env), debugging a broken symptom (dotfiles-debugging-playbook), or Claude Code platform internals (claude-code-platform-reference).
 ---
 
 # Dotfiles: Run and Operate
@@ -16,8 +16,8 @@ this file is safe to re-run.
 - `update` propagates `install.sh` failure (fixed 2026-07-02): it captures the
   install status before the final `cd`, prints `[X] update failed: install.sh
 exited N`, and returns that status. `$?` is trustworthy again.
-- `claude plugins install` can exit 0 without installing (commits 722c653, f91d7d2). The machine-path installer (`superpowers-install`; the retired `ecc-install` had the same gap) greps CLI output, not the ground truth. Verify against `~/.claude/plugins/installed_plugins.json` when it matters.
-- Never run the retired ECC's `sync-ecc-to-codex.sh` directly -- it overwrote `core.hooksPath` and wrote through the `~/.codex/AGENTS.md` symlink into the repo. Use `superpowers-install`, which stages a self-contained native Codex plugin. The old sync wrapper and ECC itself are both retired; see repo CLAUDE.md.
+- `claude plugins install` can exit 0 without installing (commits 722c653, f91d7d2); this is now historical, since the retired Superpowers install path (the retired ECC's had the same gap) is deleted and no plugin installs in this repo any more.
+- Never run the retired ECC's `sync-ecc-to-codex.sh` directly -- it overwrote `core.hooksPath` and wrote through the `~/.codex/AGENTS.md` symlink into the repo. The old sync wrapper and ECC itself are both retired, and the Superpowers install path it used to route diagnostics to is retired too; see repo CLAUDE.md.
 - The `claude` desktop app and IDE extensions bypass the `claude()` zsh
   wrapper and always land on `~/.claude` (personal), even under `~/Git/work`.
   The `account_guard.py` SessionStart hook warns inside the session.
@@ -39,29 +39,27 @@ exited N`, and returns that status. `$?` is trustworthy again.
 All shell functions live in zsh/functions.zsh; aliases in zsh/aliases.zsh;
 bin scripts are symlinked into `~/bin` by install/common/link.sh.
 
-| Command                 | What it is   | What it does                                                                                                                                               |
-| ----------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `update`                | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                                                                  |
-| `reload`                | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                                                         |
-| `ecc-uninstall`         | zsh function | Sweep ECC leftovers (plugin, repo clone, metadata, cache stamp); the only surviving ECC-named function -- `ecc-install`/`ecc-update` are retired (2026-09) |
-| `superpowers-install`   | zsh function | Register official marketplace by git URL if absent, install plugin in BOTH config dirs                                                                     |
-| `superpowers-update`    | zsh function | `claude plugins update` in each dir that has it                                                                                                            |
-| `superpowers-uninstall` | zsh function | Uninstall from both config dirs                                                                                                                            |
-| `dotfiles-repair`       | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                                              |
-| `setup-claude`          | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                                                         |
-| `claude-account`        | zsh function | Print which account a launch from `$PWD` would use                                                                                                         |
-| `claude [--personal]`   | zsh wrapper  | Launch Claude Code with directory-based account routing                                                                                                    |
-| `identity-doctor`       | bin script   | Read-only git/ssh identity chain verifier (also `git identity`)                                                                                            |
-| `dotfiles-tests`        | bin script   | Aggregate runner for all nine test suites                                                                                                                  |
+| Command                                                             | What it is   | What it does                                                                                                                                                               |
+| ------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update`                                                            | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                                                                                  |
+| `reload`                                                            | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                                                                         |
+| `ecc-uninstall`                                                     | zsh function | Sweep ECC leftovers (plugin, repo clone, metadata, cache stamp); the only surviving ECC-named function -- `ecc-install`/`ecc-update` are retired (2026-09)                 |
+| the Superpowers uninstaller (see "Post-merge operator steps" below) | zsh function | Uninstall Superpowers from both config dirs and Codex, scope-aware; the only surviving Superpowers-named function -- its install/update entry points are retired (2026-09) |
+| `dotfiles-repair`                                                   | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                                                              |
+| `setup-claude`                                                      | bin script   | Add `CLAUDE.md`, `AGENTS.md`, `.claude/` to the CURRENT repo's `.git/info/exclude`                                                                                         |
+| `claude-account`                                                    | zsh function | Print which account a launch from `$PWD` would use                                                                                                                         |
+| `claude [--personal]`                                               | zsh wrapper  | Launch Claude Code with directory-based account routing                                                                                                                    |
+| `identity-doctor`                                                   | bin script   | Read-only git/ssh identity chain verifier (also `git identity`)                                                                                                            |
+| `dotfiles-tests`                                                    | bin script   | Aggregate runner for all nine test suites                                                                                                                                  |
 
 ## Update lifecycle
 
 `update` (zsh/functions.zsh:28) is the whole story: it pulls the repo and
 re-runs `bash $DOTFILEDIR/install/install.sh`, which re-links everything
-(install/common/link.sh), reinstalls/refreshes Superpowers in both config
-dirs (install/common/claude-plugins.sh; ECC is retired and no longer part of
-this step), and re-checks the shell. Every step is idempotent; symlinks are
-`ln -sf`/`ln -sfn` re-created each run.
+(install/common/link.sh), keeps retired plugin copies disabled
+(install/common/claude-plugins.sh; Superpowers and ECC are both retired and
+no plugin installs here any more), and re-checks the shell. Every step is
+idempotent; symlinks are `ln -sf`/`ln -sfn` re-created each run.
 
 ```bash
 update          # full refresh: repo + links + plugins + CLIs
@@ -72,10 +70,10 @@ Notes:
 
 - `install.sh` runs `sudo -v` up front -- `update` prompts for a password on a
   normal machine. Expected, not a bug.
-- Plugin install failures inside `update` WARN but never abort
-  (install/common/claude-plugins.sh:41): offline or logged-out `claude` is
-  tolerated. Expected line on that path:
-  `[claude-plugins] WARNING: Superpowers install reported an error (offline, or claude not logged in?).` (ECC's copy of this line is retired)
+- No plugin install can fail inside `update` any more: the retired
+  Superpowers install path and the retired ECC install path are both gone, and
+  `install/common/claude-plugins.sh` only re-runs the Codex workflow dedupe
+  now, keeping retired plugin copies disabled.
 - [WARNING] Open item: `update` returns the `cd`'s exit status, so a failed
   `install.sh` does not fail `update`. Read the scrollback.
 - `settings.json` is seed-once per config dir (claude-links.sh
@@ -85,41 +83,42 @@ Notes:
 
 ## Plugin operations
 
-One plugin, global-only, maintained in BOTH config dirs (`~/.claude` and `~/.claude-work`; a dir that does not exist is skipped). The retired ECC (formerly `ecc@ecc`, upstream github.com/affaan-m/ECC) was the second plugin here but is fully retired (2026-09): `ecc-install`/`ecc-update` are removed, and `ecc-uninstall` is the only surviving ECC-named function, for sweeping leftovers (plugin registration, repo clone at `~/Git/personal/ECC`, cache stamp). Its language-rules vendoring was retired earlier still (2026-07-02) -- any leftover `claude/rules/` language dirs from an older
-machine are inert and should be deleted by hand; only `claude/rules/personal/`
-is tracked (our always-on model-tuning layer).
+No plugin is installed by this repo any more. Superpowers (retired 2026-09,
+formerly `superpowers@claude-plugins-official`, retired 2026-09) and ECC
+(formerly `ecc@ecc`, upstream github.com/affaan-m/ECC, retired 2026-09) are
+both fully retired: their install/update entry points are removed, and each
+one's uninstall function is the only surviving retired-plugin-named
+function, for sweeping leftovers (plugin registration, staged Codex copy or
+repo clone, cache stamp; see "Post-merge operator steps" below for the exact
+command). ECC's
+language-rules vendoring was retired earlier still (2026-07-02) -- any
+leftover `claude/rules/` language dirs from an older machine are inert and
+should be deleted by hand; only `claude/rules/personal/` is tracked (our
+always-on model-tuning layer).
 
-### Superpowers (`superpowers@claude-plugins-official`)
+### Post-merge operator steps (retiring a leftover plugin)
 
-Plugin-only: no repo, no rules, no extra files.
+After the settings/installer retirement lands, in order, on a machine that
+still has a retired plugin installed:
 
 ```bash
-superpowers-install    # registers the official marketplace by git URL first if absent
-superpowers-update     # then: "[OK] Superpowers updated (restart Claude Code to apply)"
-superpowers-uninstall
+update --ai            # 1. reconcile settings so the plugin is forced off
+reload                  # 2. new shell: `update` runs in a subprocess and
+                         #    never redefines the calling shell's functions
+superpowers-uninstall   # 3. remove Superpowers from Claude, Codex and disk
 ```
 
-The marketplace pre-registration (added 2026-07-02, commit 5b799dd) exists
-because `claude plugins install` silently no-ops (exit 0) when the official
-marketplace is absent or mid-fetch. Expected first-install lines:
-
-```
-[INFO] Adding official plugin marketplace (/Users/you/.claude)...
-[INFO] Installing Superpowers plugin (/Users/you/.claude)...
-[OK] Superpowers installed (/Users/you/.claude)
-```
+Then start a fresh session and confirm the retired `superpowers:` skill
+prefix lists nothing -- the plugin should be gone entirely.
 
 ### Staleness nag and cache stamps (retired)
 
-The per-plugin staleness nag (`_claude_plugin_check_update`, ECC-only) is retired along with ECC itself (2026-09); it is no longer defined in `zsh/functions.zsh` and no interactive shell prints `[INFO] Stale: ecc (Nd). Run 'ecc-update' to refresh.` anymore.
+The per-plugin staleness nag (`_claude_plugin_check_update`, ECC-only) is retired along with ECC itself (2026-09); it is no longer defined in `zsh/functions.zsh` and no interactive shell prints `[INFO] Stale: ecc (Nd). Run 'ecc-update' to refresh.` anymore. Superpowers never had a staleness nag of its own; both its install/update entry points and its plugin state are retired (2026-09) the same way.
 
 | Stamp file (in `${ZSH_CACHE_DIR:-$HOME/.cache/zsh}`) | Written by                   | Removed by      | Content                                                 |
 | ---------------------------------------------------- | ---------------------------- | --------------- | ------------------------------------------------------- |
 | `.ecc-update`                                        | (retired; no writer remains) | `ecc-uninstall` | leftover `LAST_ECC_EPOCH=<days>` stamp, if present      |
 | `.gsd-update`                                        | (legacy)                     | `gsd-uninstall` | retired; the nag loop that used to skip it is also gone |
-
-Superpowers writes no stamp and is never nagged; it is refreshed by `update`
-(via claude-plugins.sh) instead.
 
 A separate 24h-cached check (`_claude_code_update_check`, functions.zsh:787)
 compares the Claude Code CLI version against npm and prints:
@@ -149,8 +148,9 @@ Restart Claude Code / Codex sessions to pick up reloaded plugins and hooks.
 ```
 
 Repair does NOT touch `~/.claude-work/settings.json` (step 3 checks only
-`~/.claude`) and does not run plugin installs -- follow with `update` or
-`superpowers-install` if plugins are the problem (the retired `ecc-install` used to be part of this list too).
+`~/.claude`) and does not run any plugin install -- no plugin install path
+remains in this repo (the retired Superpowers and ECC entry points are both
+gone); follow with `update` if the reconciled settings are the problem.
 
 ## Per-repo prep: `setup-claude`
 
@@ -264,10 +264,11 @@ TODO.md` symlinked to main; `STATE.md config.json` copied per-worktree.
 ## Provenance and maintenance
 
 Facts verified against the repo on 2026-07-02 (commits that day: 5b799dd
-superpowers marketplace pre-registration, 465ee17 bin/dotfiles-tests + todos
-root-guard, 52f807d block_secrets segment matching, 26eae6d README/skills
-catalog). Line numbers cited from zsh/functions.zsh and zsh/aliases.zsh drift
-easily -- prefer the function-name anchors.
+the retired Superpowers install path's marketplace pre-registration fix,
+465ee17 bin/dotfiles-tests + todos root-guard, 52f807d block_secrets segment
+matching, 26eae6d README/skills catalog). Line numbers cited from
+zsh/functions.zsh and zsh/aliases.zsh drift easily -- prefer the
+function-name anchors.
 
 Re-verify before trusting:
 

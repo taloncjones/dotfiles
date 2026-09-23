@@ -148,18 +148,18 @@ Skills carry their own triggers; reach for them on judgement. The standing
 orders below are deliberate policy, not hints.
 
 - Full pipeline for substantial implementation (standing order of operations):
-  isolated worktree -> brainstorming -> write spec (to `docs/superpowers/specs/`, the
-  path codex-spec-review resolves first)
-  -> `codex-spec-review` -> writing-plans -> `codex-plan-review` ->
-  `subagent-driven-development` -> `co-review` at the branch gate. Do NOT improvise
+  isolated worktree -> brainstorming -> writing-specs
+  (spec to `docs/superpowers/specs/` in the MAIN checkout, the path
+  codex-spec-review resolves first) -> `codex-spec-review` ->
+  writing-plans -> `codex-plan-review` -> implement (the `Workflow` tool,
+  or a herdr implement phase) -> `co-review` at the branch gate. Do NOT improvise
   a build plan and jump to implementation; do NOT skip the brainstorm/spec steps
   even when an architecture spec already exists -- treat the existing spec as input.
 - Codex review pipeline (thorough spec/plan/implement): run `codex-spec-review`
   after brainstorming and `codex-plan-review` after writing-plans, each a HUMAN
-  gate in normal interactive work; implement via
-  `superpowers:subagent-driven-development` (or `superpowers:executing-plans`);
-  finish with `co-review` (Claude + Codex) at the branch gate -- the single
-  second-model pass.
+  gate in normal interactive work; implement via the `Workflow` tool or a herdr
+  implement phase; finish with `co-review` (Claude + Codex) at the branch gate --
+  the single second-model pass.
 - Diagram gate for reviewing changes (the interactive pipeline's plan->implement
   and branch gates): before implementation, have the plan step emit a Mermaid
   diagram matched to the open question -- an as-is/to-be comparison for a change
@@ -199,7 +199,7 @@ orders below are deliberate policy, not hints.
   Codex UI edits for task-local readiness. Final co-review remains required for
   a finished PR. Explicit user standalone runtime choices and existing review
   gates remain in force.
-- Run verification-before-completion before claiming work is done.
+- Apply operating-principles "Verify before you claim" before claiming work is done.
 
 ## Code Design
 

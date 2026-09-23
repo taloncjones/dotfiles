@@ -190,8 +190,8 @@ means something specific: `claude/` is the SOURCE of the global Claude Code
 config, symlinked out to `~/.claude/` and `~/.claude-work/` (CLAUDE.md,
 hooks, skills, commands, rules, contracts) so every repo you open picks it
 up; `.claude/` is this repo's own PROJECT-level Claude config, read only
-when the dotfiles repo itself is open (the committed `settings.json` that
-pre-declares the Superpowers plugin for cloud sessions, `hooks/session-
+when the dotfiles repo itself is open (the committed `settings.json`, which
+pins Superpowers off since its retirement, `hooks/session-
 start.sh`, and the `dotfiles-*` skills, plus untracked session state).
 Likewise `vscode/` holds the global VS Code settings, keybindings, and
 extensions that `link.sh` installs into the user profile, while `.vscode/`
@@ -427,10 +427,9 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 Codex discovers maintained handoff/kickoff and voice skills directly, alongside its own
 `review-change`, `co-review`, `claude-plan-review`, `claude-spec-review`, and the installed
 `herdr-orchestration` compatibility entrypoint. The canonical Claude-led
-workflow is `claude/skills/herdr-orchestration/SKILL.md`. Superpowers
-remains an independent native plugin. TDD, systematic debugging, and verification
-stay enabled; duplicate discovery and incompatible Claude imports are
-reconciled by the installer.
+workflow is `claude/skills/herdr-orchestration/SKILL.md`. Superpowers is retired (2026-09); the owned `brainstorming`, `writing-specs`, and
+`writing-plans` skills replace it, shared from `claude/skills/`. Duplicate
+discovery and incompatible Claude imports are reconciled by the installer.
 The shared catastrophic-delete guard also checks both runtimes' shell calls;
 ordinary removals continue through each runtime's approval policy.
 

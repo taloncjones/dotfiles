@@ -70,23 +70,25 @@ lrwxrwxrwx 1 root root 40 Jul  2 16:42 /root/.claude/statusline.js -> /home/user
 
 **Claim:** plugin `<name>@<marketplace>` is installed and its skills load.
 
+This repo declares no plugin any more (Superpowers and ECC are both retired,
+2026-09); the recipe below still applies to any plugin installed by hand.
+
 **Never trust the install command's exit code.** `claude plugins install` can
 resolve a not-yet-fetched marketplace to "nothing to do" and exit 0 without
 installing -- the silent no-op fixed in f91d7d2 and root-caused in 7cb28b7
 (github-backed marketplace registered but mid-fetch). The on-disk ground truth
-is `installed_plugins.json`; `ensure_plugin` in `bootstrap-cloud.sh` is the
-canonical verify-then-retry implementation.
+is `installed_plugins.json`.
 
 Three levels, strongest last:
 
 ```bash
-# Level 1: recorded as installed (the file `ensure_plugin` verifies against)
-grep -c 'superpowers@claude-plugins-official' ~/.claude/plugins/installed_plugins.json
+# Level 1: recorded as installed
+grep -c '"<plugin-id>"' ~/.claude/plugins/installed_plugins.json
 # Level 2: the marketplace manifest actually lists it (what the resolver checks)
-grep '"name"[[:space:]]*:[[:space:]]*"superpowers"' \
-  ~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json
+grep '"name"[[:space:]]*:[[:space:]]*"<plugin-name>"' \
+  ~/.claude/plugins/marketplaces/<marketplace>/.claude-plugin/marketplace.json
 # Level 3: the plugin payload is on disk where the loader reads it
-ls ~/.claude/plugins/cache/claude-plugins-official/superpowers/
+ls ~/.claude/plugins/cache/<marketplace>/<plugin-name>/
 ```
 
 **Proof:** level 1 nonzero + level 3 non-empty = installed. Level 2 failing
@@ -97,28 +99,29 @@ requires the install to predate launch -- in cloud, that means the pre-launch
 declaration in `.claude/settings.json` or the Setup script, never the
 SessionStart hook.
 
-**Worked example (this container, 2026-09-22; ECC retired -- the earlier snapshot also showed the now-retired `ecc@ecc` before that):**
+**Historical worked example, shape only (both plugin ids it once showed are
+now retired, 2026-09):**
 
 ```
 $ python3 -m json.tool ~/.claude/plugins/installed_plugins.json | head -12
 {
     "version": 2,
     "plugins": {
-        "superpowers@claude-plugins-official": [
+        "<plugin-id>": [
             {
                 "scope": "user",
-                "installPath": "/root/.claude/plugins/cache/claude-plugins-official/superpowers/6.1.0",
-                "version": "6.1.0",
+                "installPath": "/root/.claude/plugins/cache/<marketplace>/<plugin-name>/<version>",
+                "version": "<version>",
 ...
 ```
 
-[OK] `superpowers@claude-plugins-official` 6.1.0 recorded with install path
-and git SHA.
+[OK] shape confirmed: a recorded plugin carries its scope, install path and
+version. Historically this repo's only entry was the now-retired Superpowers
+plugin; no entry should remain after `superpowers-uninstall`.
 
-[WARNING] Open weak point: the machine-path installer (`superpowers-install`
-in `zsh/functions.zsh`; the retired `ecc-install` had the same gap) still
-verifies via CLI list output, not `installed_plugins.json`. Use this recipe
-after it anyway.
+[WARNING] Open weak point, now closed: the retired machine-path installer for
+that plugin used to verify via CLI list output, not `installed_plugins.json`.
+No install path remains to carry that weak point forward.
 
 ## 3. Prove which git identity a repo resolves
 

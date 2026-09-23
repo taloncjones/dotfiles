@@ -142,8 +142,8 @@ In order, for a change made inside a Claude Code session:
 ## Special protocol: claude/settings.json.tmpl
 
 Why it is special: `~/.claude/settings.json` and `~/.claude-work/settings.json`
-are machine-local because plugin installers (Superpowers; historically the
-retired ECC too) WRITE into them at runtime.
+are machine-local because the settings reconcile and, historically, the now
+retired Superpowers and ECC plugin installers WRITE into them at runtime.
 The installer therefore seeds the file from the template only if it is absent
 (`seed_machine_local_file` in `install/common/claude-links.sh`, called by
 `link_claude_config_dir`) -- re-copying on every `update` would clobber the

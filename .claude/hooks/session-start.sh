@@ -4,7 +4,8 @@
 # Claude Code on the web spins up a fresh, ephemeral container per environment.
 # This SessionStart hook runs the repo's own bootstrap-cloud.sh so that working
 # on the dotfiles repo from the web gets the same Claude layer a cloud setup
-# script would provide: symlinked assets plus the Superpowers plugin.
+# script would provide: symlinked assets, settings and git identity (no plugin
+# is installed; Superpowers is retired).
 #
 # Web-only: a normal machine install already manages ~/.claude via symlinks, so
 # this is a no-op off the remote container (guarded by CLAUDE_CODE_REMOTE).

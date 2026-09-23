@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # codex-plugin-dedupe.sh - Disable duplicate Codex workflow plugin providers
 #
-# The dotfiles-workflows marketplace copy of Superpowers is canonical for
-# Codex; when it is enabled, its duplicates are flipped to enabled = false.
-# Retired ECC entries are always disabled.
+# Retired plugins (ECC, Superpowers) stay disabled here across every copy: no
+# id is treated as canonical any more. `<name>-uninstall` removes what is
+# still on disk.
 # Function definitions only -- callers invoke dedupe_codex_workflow_plugins.
 #
 # Sourced twice per install/update cycle:
@@ -94,10 +94,11 @@ dedupe_codex_workflow_plugins() {
   disable_codex_plugin "$config" "ecc@dotfiles-workflows" || return 1
   disable_codex_plugin "$config" "ecc@ecc" || return 1
 
-  if codex_plugin_enabled "$config" "superpowers@dotfiles-workflows"; then
-    disable_codex_plugin "$config" "superpowers@openai-curated" || return 1
-    disable_codex_plugin "$config" "superpowers@claude-plugins-official" || return 1
-  fi
+  # Superpowers is retired too: keep every copy disabled until
+  # superpowers-uninstall removes them.
+  disable_codex_plugin "$config" "superpowers@dotfiles-workflows" || return 1
+  disable_codex_plugin "$config" "superpowers@openai-curated" || return 1
+  disable_codex_plugin "$config" "superpowers@claude-plugins-official" || return 1
 
   # Keep repo-owned compatibility repairs in the same install/update lifecycle.
   # The helper never removes skill files or rewrites Claude configuration.

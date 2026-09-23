@@ -126,8 +126,8 @@ You are `<agent-name>` planning task `<task_id>` in repo `<repo_slug>`.
 <task description / acceptance criteria, pulled from Jira or the todo body>
 
 PRODUCE (do NOT implement yet) the repo's spec + plan for this task, following
-its own pipeline: superpowers:brainstorming -> write spec to private `docs/superpowers/specs/` ->
-independent spec review -> superpowers:writing-plans (plan to private `docs/superpowers/plans/`) ->
+its own pipeline: brainstorming -> writing-specs (spec to private `docs/superpowers/specs/`) ->
+independent spec review -> writing-plans (plan to private `docs/superpowers/plans/`) ->
 independent plan review. In Claude use codex-spec-review/codex-plan-review;
 in Codex use claude-spec-review/claude-plan-review. Author the task's verification contract at
 `claude/contracts/<task_id>-contract.json` alongside the plan: 1-32 commands, each
