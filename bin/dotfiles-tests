@@ -29,6 +29,13 @@ set -u
 unset WORKFLOW_PERSONAL_ACCOUNT HERDR_PERSONAL CLAUDE_PERSONAL_ONLY
 unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
 
+# The herdr pane identity. The stop gate reads HERDR_ACCOUNT_ID as strict
+# native mode, and the gate and emit verbs compare HERDR_PANE_ID with the
+# fixture's pane, so a run from inside a herdr pane gated fixture attempts
+# against the real pane (18 gate cases red in claude-hooks.test.sh). CI
+# never sets these.
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
+
 SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
 cd "$DOTFILES"

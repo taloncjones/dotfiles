@@ -10,6 +10,9 @@ is a Stop event, HERDR_ENV=1, HERDR_WORKSPACE_ID is a safe id, a workspace
 index under STATE_ROOT resolves it, and the index role is impl or review.
 Orchestrator sessions, plain sessions, and headless mech/think runs (which
 inherit the orchestrator's workspace id, never indexed) are never gated.
+A native attempt is gated only in its own pane: when HERDR_PANE_ID is
+missing, blank, or names a pane other than the dispatched row's pane_id,
+the stop is allowed silently, with no emit command.
 
 Gate: tasks/<task_id>.done.json (impl) or .review.json (review) must carry
 this task id, workspace id, and a valid lifecycle timestamp/outcome. Native
@@ -481,6 +484,13 @@ def evaluate(payload, native=False):
         return {"action": "allow"}
     task = read_json_object(Path(rd) / "tasks" / f"{task_id}.json", root)
     entry = launch_entry(task, ws, role)
+    if isinstance(entry, dict) and "runtime" in entry:
+        if os.environ.get("HERDR_PANE_ID") != entry.get("pane_id"):
+            # Inside herdr (HERDR_ENV is 1 here) a native attempt is gated
+            # only in its dispatched pane. Another pane, or a process with no
+            # pane identity (a headless child), is not the dispatched agent:
+            # no nudge and no identity tuple.
+            return {"action": "allow"}
     selection = (
         native_scope(task, entry, scope, root, runtime, context, personal)
         if isinstance(entry, dict) and "runtime" in entry

@@ -238,6 +238,9 @@ reviewer, post externally, push, merge, or open a PR.
 
 ## Close
 When review is complete:
+0. Write your findings report to `<findings_path>`: create its directory,
+   write to a temporary name there, rename onto `findings.md`;
+   `--findings-ref` below must name exactly that file.
 1. Run (`--blocking-count` is the number of findings you classified as
    blocking; set `--outcome changes-requested` whenever it is non-zero):
    `<core-command> emit-review <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path to review-change findings> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`

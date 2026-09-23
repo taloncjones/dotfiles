@@ -456,7 +456,7 @@ phase; it never marks the task `completed` and never dispatches review.
    and current HEAD. It validates the current plan attempt and exactly one
    spec and one plan artifact (regular files, contained paths, SHA-256 hashes).
    Use the `co-review` artifact helper to freeze reviewed documents under
-   `<account_payload>/artifacts/<task>/<launch>`. Record the same artifact
+   `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/<launch>`. Record the same artifact
    references in the task and plan completion. Never commit private plans.
 2. A plan-only milestone may have HEAD equal to base. If a public verification
    contract was authored, commit only that contract and validate/pin it before
@@ -784,6 +784,24 @@ workspace close`, which would tear down the shared task worktree). There must be
 zero live review agents before you start one. Strict attempt validation rejects late writes; stopping the old reviewer
 also avoids wasting work and preserves one live reviewer per task.
 
+Known stray stops: `co-review` and other helper sessions the reviewer spawns
+inherit `HERDR_ENV` and `HERDR_WORKSPACE_ID` and appear with auto-derived
+agent names. Helpers in their own panes, and headless children started
+through the shared bounded runner (which strips the pane identity), are
+released by the stop gate by pane (`HERDR_PANE_ID` missing or different
+from the dispatched `pane_id`) and get no `emit-review` instruction. A
+helper started interactively inside the reviewer's own pane keeps that
+pane's identity, stays gated, and could emit: the reviewer must not spawn
+one there. `run_headless`-launched one-shot workers (legacy mech, think)
+are a separate case: they keep the inherited pane identity, since a `-p`
+process has no further turn to act on a stop-hook nudge, and they are
+never indexed by the stop gate regardless -- a legacy mech worker's own
+`emit-done` call needs that inherited identity to be accepted as the
+designated agent. Never read a helper's idle state as review completion,
+and never accept a verdict from a pane other than the dispatched one (the
+record's `emitter_pane_id` is the audit field; `emit-review` itself exits 3
+for a foreign or missing pane).
+
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture the
    HEAD SHA as the intended `review_head_sha`.
 2. **Reuse the task's own worktree/workspace** (`<ws_id>`, the impl phase's),
@@ -816,7 +834,22 @@ also avoids wasting work and preserves one live reviewer per task.
    consult relevant reference skills as permitted by `review-change`; it
    never applies fixes, launches another reviewer, posts externally, or runs
    final co-review. `review-change` is herdr-agnostic; the herdr-specific
-   `emit-review` call lives in this brief. Then
+   `emit-review` call lives in this brief.
+
+   Resolve `<findings_path>` =
+   `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/review-<launch_id>/findings.md`
+   (the same `<slug>` directory that holds `tasks/<task_id>.json`; a
+   review-specific launch directory that never collides with the plan-artifact
+   helper's) and put it in the brief. The reviewer creates the directory,
+   writes its report to a temporary name in that directory and renames it onto
+   `findings.md` (so a partial write is never the named file), and passes
+   exactly that path as `--findings-ref`. Content: blocking findings,
+   advisories, coverage gaps, reproduction evidence, or an explicit "no
+   findings" statement naming what was inspected. `emit-review` refuses a
+   `--findings-ref` that is not an absolute path under the orchestration state
+   root to a readable, non-blank regular file, refuses to emit without one
+   inside herdr, and pins the file's SHA-256 as `findings_sha256`. A findings
+   file inside the task worktree is refused by the verb. Then
    `python3 "$CORE" emit-review --repo-slug <slug> --task-id <task_id> --workspace <ws_id> --agent rev-<...> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path> --launch-id <launch_id> --runtime <runtime> --pane-id <pane_id> --source-head-sha <launch_source_head>`
    (`<n>` = count of actual blocking findings; incomplete or missing review
    evidence emits `changes-requested` with `<n>` possibly zero and never emits
@@ -824,6 +857,7 @@ also avoids wasting work and preserves one live reviewer per task.
    it does NOT run `/handoff`; `emit-review` is its only signal. Review agent
    and director never push or open PRs. The verdict lands in
    `tasks/<task_id>.review.json`, separate from the impl `.done.json`.
+
 6. At every coordinator check-in while `review-dispatched`, enforce the bound
    before reading a verdict. Resolve the latest `phase: review` native row and
    require its task, workspace, launch, agent, pane, source HEAD, and
@@ -842,7 +876,22 @@ deadline, <launch_id>`, and never fabricate a review record, blocker count,
    agent settled after close, report the detached-process risk and do not
    relaunch or surface readiness until reconciliation.
 
-   Otherwise read the reviewer's completion record. First confirm it covers the
+   Otherwise read the reviewer's completion record.
+
+   Then resolve its `findings_ref`, READ the file, and compare its SHA-256
+   with the record's `findings_sha256` (the same rule `confirm-review` applies
+   to every native record). A missing, empty, relative, out-of-root,
+   symlinked, unreadable, or digest-mismatched findings file is an integrity
+   halt, not a verdict: surface the record path, the findings path, and the
+   failing reason; do not set `reviewed`, do not set `changes-requested`, do
+   not re-dispatch; leave the task in `review-dispatched` for the human.
+   Recovery is a human decision: reset per the stale-verdict rule (status
+   `completed`, `review_head_sha` null) so a fresh review dispatches at the
+   same head, or restore the file byte-for-byte from the reviewer's pane if
+   it still exists. The verdict is honoured only after the file has been read
+   and its blocking list reconciled with `blocking_count`.
+
+   First confirm it covers the
    dispatched revision: the reviewer's `reviewed_head_sha` must
    equal both the dispatched `review_head_sha` and current HEAD. If any
    disagree (the branch advanced, or the reviewer logged the wrong SHA), the
@@ -868,7 +917,10 @@ A task has a completed task-local review only when `status: reviewed` AND
 `python3 "$CORE" confirm-review --repo-slug <slug> --task-id <task_id> --workspace <review_ws> --head-sha <sha>`
 exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`). That verb reads
 `tasks/<task_id>.review.json` and passes only when ALL hold: `outcome ==
-"approved"`; `blocking_count` is 0; the record's `workspace_id` equals the
+"approved"`; `blocking_count` is 0;
+for a native record, `findings_ref` resolves to a readable, non-blank
+regular file under the state root whose SHA-256 equals `findings_sha256`;
+the record's `workspace_id` equals the
 dispatched review workspace (provenance); and the task record's dispatched
 `review_head_sha`, the review record's `reviewed_head_sha`, and live HEAD all
 equal `<sha>`. So an approved-with-blocking verdict, a foreign worker's record,

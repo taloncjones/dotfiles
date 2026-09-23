@@ -1,0 +1,96 @@
+{
+  "v": 1,
+  "task_id": "2026-09-08-scope-the-herdr-stop-gate-to-the-designated-agent",
+  "commands": [
+    {
+      "name": "py-compile-gate-and-core",
+      "run": "python3 -m py_compile claude/hooks/herdr_stop_gate.py claude/hooks/herdr_orch_core.py",
+      "timeout_secs": 60
+    },
+    {
+      "name": "findings-ref-helper-hermetic",
+      "run": "python3 -c 'import importlib.util,os,sys,tempfile; s=importlib.util.spec_from_file_location(\"c\",\"claude/hooks/herdr_orch_core.py\"); c=importlib.util.module_from_spec(s); s.loader.exec_module(c); d=os.path.realpath(tempfile.mkdtemp()); ok=os.path.join(d,\"f.md\"); open(ok,\"w\").write(\"no findings\\n\"); empty=os.path.join(d,\"e.md\"); open(empty,\"w\").close(); ws=os.path.join(d,\"w.md\"); open(ws,\"w\").write(\" \\n\\t\"); ln=os.path.join(d,\"l.md\"); os.symlink(ok,ln); o=os.path.realpath(tempfile.mkdtemp()); out=os.path.join(o,\"o.md\"); open(out,\"w\").write(\"x\"); assert c.findings_ref_error(ok,d) is None; assert c.findings_bytes(ok,d)==b\"no findings\\n\"; assert c.findings_ref_error(None,d); assert c.findings_ref_error(\"\",d); assert c.findings_ref_error(\"relative/f.md\",d); assert c.findings_ref_error(os.path.join(d,\"..\",\"f.md\"),d); assert c.findings_ref_error(out,d)==\"must be under the orchestration state root\"; assert c.findings_ref_error(os.path.join(d,\"missing.md\"),d); assert c.findings_ref_error(empty,d)==\"is empty\"; assert c.findings_ref_error(ws,d)==\"is empty\"; assert c.findings_ref_error(ln,d); assert c.findings_ref_error(d,d); big=os.path.join(d,\"b.md\"); open(big,\"wb\").write(b\"x\"*(c.FINDINGS_MAX_BYTES+1)); assert c.findings_ref_error(big,d)==\"is too large\"'",
+      "timeout_secs": 60
+    },
+    {
+      "name": "stop-gate-unit-suite",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID -u HERDR_PERSONAL sh claude/hooks/herdr-stop-gate.test.sh",
+      "timeout_secs": 300
+    },
+    {
+      "name": "stop-gate-pane-tests-present",
+      "run": "for t in test_other_pane_is_released_without_instruction test_designated_pane_is_still_refused_without_record test_other_pane_review_attempt_is_released test_legacy_row_ignores_pane_environment test_missing_pane_variable_is_not_designated test_codex_wrapper_prints_empty_object_for_other_pane; do grep -q \"def $t(\" claude/hooks/herdr_stop_gate_test.py || { echo \"missing: $t\"; exit 1; }; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "orch-suite",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID -u HERDR_PERSONAL sh claude/hooks/herdr-orch.test.sh",
+      "timeout_secs": 1800
+    },
+    {
+      "name": "orch-provenance-and-findings-checks-present",
+      "run": "for l in 'findings_ref_error table' 'run_headless preserves the pane identity for its own emit-done' 'run-mech: a brief-compliant native emit-done succeeds inside a real pane' 'emit provenance: other pane exits 3' 'emit provenance: other workspace exits 3' 'emit provenance: missing pane variable exits 3' 'emit provenance: refused before any directory is created' 'emit provenance: designated pane records emitter fields' 'emit-done provenance: other pane exits 3' 'findings-ref: invalid files are refused' 'findings-ref: wrong pane wins over bad findings' 'findings-ref: required under HERDR_ENV' 'findings-ref: same-head content rewrite is refused' 'confirm-review: native record needs a readable findings file' 'pr_ready grounding: deleted findings file refuses the approval'; do grep -qF \"check \\\"$l\" claude/hooks/herdr-orch.test.sh || { echo \"missing: $l\"; exit 1; }; done",
+      "timeout_secs": 30
+    },
+    {
+      "name": "claude-hooks-suite-with-gate-cases",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID -u HERDR_PERSONAL sh claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "gate-case-pane-env-cases-present",
+      "run": "grep -q 'legacy row ignores a foreign HERDR_PANE_ID' claude/hooks/claude-hooks.test.sh && grep -q 'legacy row ignores an empty HERDR_PANE_ID' claude/hooks/claude-hooks.test.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "headless-scrub-present",
+      "run": "grep -q 'def strip_pane_identity(' claude/hooks/agent_runtime.py && grep -q 'strip_pane_identity(child_env)' claude/hooks/agent_runtime.py && ! grep -q 'strip_pane_identity(child_env)' claude/hooks/herdr_orch_core.py",
+      "timeout_secs": 30
+    },
+    {
+      "name": "agent-runtime-suite",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID -u HERDR_PERSONAL -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/agent-runtime.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "agent-runtime-scrub-case-present",
+      "run": "grep -q 'def test_run_bounded_strips_pane_identity_from_the_child' claude/hooks/agent-runtime.test.sh && grep -q 'test_run_bounded_strips_pane_identity_from_the_child)' claude/hooks/agent-runtime.test.sh",
+      "timeout_secs": 30
+    },
+    {
+      "name": "orch-contract-suite",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID -u HERDR_PERSONAL sh claude/hooks/herdr-orch-contract.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "dispatch-suite",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_ACCOUNT_ID -u HERDR_PERSONAL -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/herdr-dispatch.test.sh",
+      "timeout_secs": 900
+    },
+    {
+      "name": "suites-unset-herdr-pane-env",
+      "run": "for f in bin/dotfiles-tests claude/hooks/herdr-orch.test.sh claude/hooks/herdr-stop-gate.test.sh claude/hooks/herdr-coordination.test.sh claude/hooks/herdr-orch-contract.test.sh claude/hooks/herdr-dispatch.test.sh claude/hooks/claude-hooks.test.sh; do grep -q 'HERDR_PANE_ID' \"$f\" && grep -q 'HERDR_ACCOUNT_ID' \"$f\" || { echo \"missing unset: $f\"; exit 1; }; done; grep -q '\"HERDR_PANE_ID\": \"pane-1\"\\|HERDR_PANE_ID=\"pane-1\"' claude/hooks/herdr_stop_gate_test.py",
+      "timeout_secs": 30
+    },
+    {
+      "name": "docs-skill-reads-findings-before-verdict",
+      "run": "grep -q 'findings_sha256' claude/skills/herdr-orchestration/SKILL.md && grep -q 'findings_ref' claude/skills/herdr-orchestration/SKILL.md && grep -qi 'stray stop' claude/skills/herdr-orchestration/SKILL.md && grep -q 'emitter_pane_id' claude/skills/herdr-orchestration/SKILL.md && grep -q 'herdr-orch/<slug>/artifacts/<task_id>/<launch>' claude/skills/herdr-orchestration/SKILL.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "docs-brief-names-findings-path",
+      "run": "grep -q 'findings_path' claude/skills/herdr-orchestration/references/brief-template.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "docs-repo-claude-md-names-pane-rule",
+      "run": "grep -q 'HERDR_PANE_ID' CLAUDE.md",
+      "timeout_secs": 30
+    },
+    {
+      "name": "public-safety-scan",
+      "run": "sh git/hooks/public-safety.test.sh",
+      "timeout_secs": 120
+    }
+  ]
+}

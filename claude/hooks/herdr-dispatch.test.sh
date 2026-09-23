@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
+# herdr pane identity must not leak in from a herdr-hosted run
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 export PYTHONPATH="$ROOT/claude/hooks${PYTHONPATH:+:$PYTHONPATH}"
@@ -341,6 +343,12 @@ class Fixture:
             "FAKE_HERDR_MODE": "ok",
             "FAKE_PANE": "w1:p1",
             "FAKE_WORKSPACE": "w1",
+            # This fixture simulates a session in pane w1:p1, workspace w1
+            # (see FAKE_PANE/FAKE_WORKSPACE above); a native emit-done/
+            # emit-review call this fixture drives must present that same
+            # pane, or the provenance guard refuses it as a foreign pane.
+            "HERDR_PANE_ID": "w1:p1",
+            "HERDR_WORKSPACE_ID": "w1",
             "FAKE_CWD": str(self.repo.resolve()),
             "FAKE_WRONG_CWD": str(self.root / "other"),
             "FAKE_READ_COUNT": str(self.root / "read-count"),

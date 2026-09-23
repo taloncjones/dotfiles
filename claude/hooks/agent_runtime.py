@@ -202,6 +202,15 @@ def execution_context(
         raise RouteError(f"cannot resolve workflow context: {exc}") from exc
 
 
+def strip_pane_identity(environment: dict[str, str]) -> None:
+    """A headless child is never the dispatched pane: drop the pane identity
+    so the stop gate and the emit verbs treat it as foreign. HERDR_ENV and
+    HERDR_WORKSPACE_ID stay; the git-remote guard and the scratch policy
+    key on them."""
+    environment.pop("HERDR_PANE_ID", None)
+    environment.pop("HERDR_TAB_ID", None)
+
+
 def _apply_launch_environment(environment: dict[str, str], scope: dict) -> None:
     for key, value in scope["launch_env"].items():
         if value is None:
@@ -988,6 +997,7 @@ def run_bounded(
             argv.extend(["--max-budget-usd", str(max_budget_usd)])
 
     child_env = dict(os.environ if env is None else env)
+    strip_pane_identity(child_env)
     _apply_launch_environment(child_env, scope)
     process = subprocess.Popen(
         argv,

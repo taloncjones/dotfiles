@@ -31,7 +31,7 @@ import herdr_coordination as coordination
 import herdr_envelope as envelope
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
-from workflow_context import account_scope, atomic_json_at, repository_context
+from workflow_context import account_scope, atomic_json_at, open_state_parent, repository_context
 from workflow_context import git as context_git
 
 _PAYLOAD_SELECTION = contextvars.ContextVar("herdr_payload_selection", default=None)
@@ -106,6 +106,55 @@ TASK_RECORD_MAX_BYTES = 2_000_000
 
 def _nonempty_str(v) -> bool:
     return isinstance(v, str) and bool(v.strip())
+
+
+FINDINGS_MAX_BYTES = 4 * 1024 * 1024
+_FINDINGS_UNREADABLE = "is not a readable regular file"
+
+
+def findings_bytes(value, root):
+    """Content of a findings file usable as review evidence.
+
+    Absolute, no '..', contained under root (the orchestration state root),
+    opened no-follow as a regular file, bounded, not blank. Raises
+    ValueError with the reason otherwise. Reads through open_state_parent
+    directly rather than read_payload_bytes: the latter asserts the owner
+    transaction, and a coordination fence failure must surface as itself,
+    never as missing evidence."""
+    if not _nonempty_str(value):
+        raise ValueError("must be a non-empty string")
+    if not os.path.isabs(value) or ".." in Path(value).parts:
+        raise ValueError("must be an absolute path without '..'")
+    if not contained(value, root):
+        raise ValueError("must be under the orchestration state root")
+    try:
+        parent, name = open_state_parent(coordination.payload_path(value))
+    except (OSError, ValueError):
+        raise ValueError(_FINDINGS_UNREADABLE) from None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError(_FINDINGS_UNREADABLE)
+            content = stream.read(FINDINGS_MAX_BYTES + 1)
+    except OSError:
+        raise ValueError(_FINDINGS_UNREADABLE) from None
+    finally:
+        os.close(parent)
+    if len(content) > FINDINGS_MAX_BYTES:
+        raise ValueError("is too large")
+    if not content.strip():
+        raise ValueError("is empty")
+    return content
+
+
+def findings_ref_error(value, root):
+    """Reason a findings reference is unusable, else None."""
+    try:
+        findings_bytes(value, root)
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 
 def validate_contract(rec, task_id):
@@ -1538,10 +1587,20 @@ def _selected_headless_environment(cwd):
 def run_headless(argv, cwd, stdin_text, timeout_secs):
     """Run `claude -p` with the text on stdin in its own process group; kill
     the group on timeout. (subtype, result, exit_code) where subtype is
-    'timeout', 'unparseable', or the result's subtype."""
+    'timeout', 'unparseable', or the result's subtype.
+
+    Unlike run_bounded, the pane identity is NOT stripped here: a `-p`
+    one-shot child has no further turn in which to act on a stop-hook
+    nudge, so the co-review-helper risk strip_pane_identity defends against
+    does not apply, and its callers (run_mech's legacy Claude worker,
+    run_think) are never indexed by the stop gate regardless. A legacy
+    mech worker's OWN emit-done call (per its brief) needs the inherited
+    pane identity to be accepted as the designated agent."""
     if coordination.locks_held():
         raise RuntimeError("model subprocess cannot run under coordination locks")
     child_env = _selected_headless_environment(cwd)
+    if child_env is None:
+        child_env = dict(os.environ)
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
@@ -2732,7 +2791,8 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     review_correlates = bool(
         review and rev_ws and head
         and attempt_matches(task, review, "review", rev_ws)
-        and review.get("reviewed_head_sha") == head)
+        and review.get("reviewed_head_sha") == head
+        and _findings_evidence_ok(review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
     mech_unsettled = bool(latest.get("role") == "mech"
@@ -2818,6 +2878,27 @@ def _checkin_poll(ns):
     return (poll, "") if poll is not None else (None, "malformed")
 
 
+def _findings_evidence_ok(done) -> bool:
+    """True unless a native record's (`"runtime" in done`) findings evidence
+    is missing, altered, or outside the state root; legacy records pass
+    through untouched. Never raises: two callers wrap this in _require under
+    an owner transaction, and findings_bytes raises only its own reasons (it
+    does not go through payload_parent), so this cannot mask a coordination
+    fence failure. Shared by is_reviewed and checkin_facts' review_correlates
+    so a check-in cannot call a review "correlated" on evidence is_reviewed
+    would itself refuse."""
+    if not isinstance(done, dict) or "runtime" not in done:
+        return True
+    digest = done.get("findings_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        return False
+    try:
+        evidence = findings_bytes(done.get("findings_ref"), state_root())
+    except ValueError:
+        return False
+    return hashlib.sha256(evidence).hexdigest() == digest
+
+
 def is_reviewed(task, done, head_sha, workspace) -> bool:
     """Merge-ready only when the dispatched review SHA, the reviewed SHA, and
     live HEAD all agree, the record comes from the dispatched review workspace,
@@ -2825,7 +2906,9 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     `review_head_sha` too (not just `done.reviewed_head_sha` == HEAD) stops a
     branch advance after dispatch from slipping an unreviewed revision through;
     the `blocking_count` guard stops an `approved` verdict that still carries
-    blocking findings from clearing the gate."""
+    blocking findings from clearing the gate; the findings check stops a
+    native verdict whose evidence is missing, altered, or outside the state
+    root."""
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
     if not attempt_matches(task, done, "review", workspace):
@@ -2838,6 +2921,8 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     if done.get("phase") != "review" or done.get("outcome") != "approved":
         return False
     if type(done.get("blocking_count")) is not int or done["blocking_count"] != 0:
+        return False
+    if not _findings_evidence_ok(done):
         return False
     return task.get("review_head_sha") == head_sha and (
         done.get("reviewed_head_sha") == head_sha
@@ -3770,6 +3855,18 @@ def _main(argv=None) -> int:
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
         _require(valid_workspace_id(ns.workspace), "invalid workspace")
+        if ns.runtime is not None and os.environ.get("HERDR_ENV") == "1":
+            # Inside herdr the emitting pane must be the dispatched pane. The
+            # caller-supplied --pane-id is matched against the task record
+            # later; this ties it to the process that is running. Runs before
+            # any directory is created, including when --pane-id is omitted
+            # entirely: a native call with no pane id is never the dispatched
+            # agent either, and must not reach create_payload_dir below.
+            # Exit 3 is distinct from _require (2).
+            if (os.environ.get("HERDR_PANE_ID") != ns.pane_id
+                    or os.environ.get("HERDR_WORKSPACE_ID") != ns.workspace):
+                sys.stderr.write("[X] not the designated agent\n")
+                return 3
         rd = repo_dir(ns.repo_slug)
         base = rd
         if getattr(ns, "binding", None) is not None:
@@ -3816,6 +3913,22 @@ def _main(argv=None) -> int:
                 "blocking_count": int(ns.blocking_count),
                 "ts": now_iso(),
             }
+            if ns.runtime is not None:
+                # Review evidence must exist under the state root before a
+                # native verdict lands. Inside herdr the file is mandatory;
+                # outside (tests, operator repair) it stays optional, and
+                # is_reviewed still refuses a native record without it.
+                _require(
+                    ns.findings_ref is not None or os.environ.get("HERDR_ENV") != "1",
+                    "emit-review requires --findings-ref (absolute path under the "
+                    "orchestration state root to a readable non-empty findings file)",
+                )
+                if ns.findings_ref is not None:
+                    try:
+                        evidence = findings_bytes(ns.findings_ref, state_root())
+                    except ValueError as exc:
+                        _require(False, f"findings-ref {exc}")
+                    done["findings_sha256"] = hashlib.sha256(evidence).hexdigest()
             if ns.findings_ref:
                 done["findings_ref"] = ns.findings_ref
             if getattr(ns, "binding", None) is not None:
@@ -3835,6 +3948,10 @@ def _main(argv=None) -> int:
                      "runtime attempt requires launch-id, pane-id, and source-head-sha")
             _require(SHA40_RE.fullmatch(ns.source_head_sha), "source-head-sha must be 40 hex")
             done.update(runtime=ns.runtime, pane_id=ns.pane_id, source_head_sha=ns.source_head_sha)
+            done.update(
+                emitter_pane_id=os.environ.get("HERDR_PANE_ID") or None,
+                emitter_session_id=os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
+            )
         _require(contained(out, state_root()), "escapes state root")
         if ns.runtime is not None:
             with owner_transaction(rd) as tx:
@@ -3921,6 +4038,7 @@ def _main(argv=None) -> int:
                         or prior.get("reviewer_session_id") != done.get("reviewer_session_id")
                         or prior.get("blocking_count") != done.get("blocking_count")
                         or prior.get("findings_ref") != done.get("findings_ref")
+                        or prior.get("findings_sha256") != done.get("findings_sha256")
                     ):
                         _require(False,
                                  "a same-revision review verdict cannot be replaced; "
