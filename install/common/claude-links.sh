@@ -154,9 +154,34 @@ if os.path.isfile(installed_plugins_path):
         installed_names = set(RETIRED_PLUGINS)
     retired_plugins_still_installed = bool(installed_names & set(RETIRED_PLUGINS))
 if retired_plugins_still_installed:
-    print(label + " NOTE: a retired plugin is still installed in "
-          + os.path.dirname(installed_plugins_path)
-          + "; keeping its isolation env keys until `ecc-uninstall` removes it.")
+    # A corrupt or empty dest (handled above by falling back to {}) has no
+    # existing env to inherit these keys from, and the template no longer
+    # carries them either, so the union above leaves them silently absent
+    # even though the plugin can still load. Restore the last known-good
+    # values so a settings.json rebuild cannot drop isolation out from under
+    # a still-installed plugin. `{{CLAUDE_CONFIG_DIR}}` is resolved to this
+    # dest's own config dir; live values already in env are left untouched.
+    RETIRED_ENV_RESCUE_DEFAULTS = {
+        "ECC_CONTEXT_MONITOR_COST_WARNINGS": "0",
+        "ECC_DISABLED_HOOKS": "session-start:plan-canvas-sessions,stop:plan-canvas-pending,"
+                               "post:bash:command-log-audit,post:bash:command-log-cost,"
+                               "post:skill:track,pre:mcp-health-check,post:mcp-health-check",
+        "ECC_AGENT_DATA_HOME": "{{CLAUDE_CONFIG_DIR}}",
+        "GATEGUARD_BASH_ROUTINE_DISABLED": "1",
+        "GATEGUARD_EXEMPT_GLOBS": "/**",
+    }
+    config_dir = os.path.dirname(os.path.abspath(dest_path))
+    restored = []
+    for key in RETIRED_ENV_KEYS:
+        if key not in env and key in RETIRED_ENV_RESCUE_DEFAULTS:
+            env[key] = RETIRED_ENV_RESCUE_DEFAULTS[key].replace("{{CLAUDE_CONFIG_DIR}}", config_dir)
+            restored.append(key)
+    note = (label + " NOTE: a retired plugin is still installed in "
+            + os.path.dirname(installed_plugins_path)
+            + "; keeping its isolation env keys until `ecc-uninstall` removes it.")
+    if restored:
+        note += " Restored missing default(s): " + ", ".join(restored) + "."
+    print(note)
 else:
     for key in RETIRED_ENV_KEYS:
         if key not in tmpl.get("env", {}):

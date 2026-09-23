@@ -254,6 +254,37 @@ else
     fail "reconcile sweeps isolation env keys once the plugin is actually gone"
 fi
 
+# A dest that is corrupt or empty is rebuilt from {} (case 3 above). If the
+# plugin is still installed at that point, the union of an empty dest env
+# and a template that no longer declares these keys would otherwise leave
+# isolation silently absent from the rebuilt file. The rescue defaults must
+# fill the gap instead of leaving it open.
+cat >"$STILLDIR/plugins/installed_plugins.json" <<'EOF'
+{"plugins": {"ecc@ecc": [{"scope": "user"}]}}
+EOF
+CORRUPTDEST="$STILLDIR/settings.json"
+printf '' >"$CORRUPTDEST"
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$CORRUPTDEST" "[test]" >/dev/null 2>&1
+if jget "$CORRUPTDEST" "d['env'].get('ECC_DISABLED_HOOKS') and d['env'].get('ECC_AGENT_DATA_HOME') == os.path.dirname(os.path.abspath(sys.argv[1]))"; then
+    pass "reconcile restores isolation env defaults when rebuilding a corrupt dest with the plugin still installed"
+else
+    fail "reconcile restores isolation env defaults when rebuilding a corrupt dest with the plugin still installed"
+fi
+
+# Same rescue, but the dest file is entirely absent (a config dir that was
+# never seeded) rather than present-but-corrupt.
+cat >"$STILLDIR/plugins/installed_plugins.json" <<'EOF'
+{"plugins": {"ecc@ecc": [{"scope": "user"}]}}
+EOF
+MISSINGDEST="$STILLDIR/newsettings.json"
+reconcile_claude_settings_file "$TMP/still-tmpl.json" "$MISSINGDEST" "[test]" >/dev/null 2>&1
+if jget "$MISSINGDEST" "d['env'].get('ECC_DISABLED_HOOKS') and d['env'].get('ECC_AGENT_DATA_HOME') == os.path.dirname(os.path.abspath(sys.argv[1]))"; then
+    pass "reconcile restores isolation env defaults for a never-seeded dest with the plugin still installed"
+else
+    fail "reconcile restores isolation env defaults for a never-seeded dest with the plugin still installed"
+fi
+rm -f "$STILLDIR/plugins/installed_plugins.json"
+
 # A dest whose only marketplace is the retired one must not keep an empty map.
 ONLYDEST="$TMP/only-ecc-dest.json"
 printf '{"extraKnownMarketplaces": {"ecc": {"source": {"source": "git", "url": "https://example.invalid/ecc.git"}}}}\n' >"$ONLYDEST"
