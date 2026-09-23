@@ -1775,18 +1775,21 @@ def fold_spend(lines, task_id):
     return out
 
 
-# The watch and the worker-status hook share one wake predicate: a completion
-# record changed. workspaces/*.events.jsonl is deliberately absent -- watching
+# The default watch and the worker-status hook share one completion-record
+# predicate; the default watch also covers think answers and the legacy
+# mech ledger. workspaces/*.events.jsonl is deliberately absent -- watching
 # it would re-admit a signal per worker turn end through the fallback.
 WATCH_DIRS = {
     "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
               (".spend.jsonl", valid_task_id)),
-    "think": ((".launch.json", valid_think_id), (".answer.json", valid_think_id)),
+    "think": ((".answer.json", valid_think_id),),
 }
+BACKSTOP_DIRS = {"tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id))}
+BACKSTOP_GRACE_SECS = 120
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
 
-def watch_scan(rd, prev):
+def watch_scan(rd, prev, dirs=WATCH_DIRS):
     """Snapshot {path: (mtime_ns, size)} of the watched completion/hint files.
 
     Read-only. A missing subdir is an empty set. A subdir whose listing
@@ -1796,7 +1799,7 @@ def watch_scan(rd, prev):
     signal-storm.
     """
     snap, failed = {}, set()
-    for sub, suffixes in WATCH_DIRS.items():
+    for sub, suffixes in dirs.items():
         d = Path(rd) / sub
         try:
             names = sorted(payload_names(d))
@@ -1903,6 +1906,69 @@ def _watch_loop(rd, interval, heartbeat_secs, debounce_secs, exit_on_signal,
             print(line, flush=True)
             if exit_on_signal:
                 return 0
+
+
+def delivered_records(rd) -> dict:
+    """{file name: {(mtime_ns, size), ...}} from every v2 wake marker. Read-only.
+
+    Keyed by file name because the hook and the watch resolve the repo
+    directory differently; a v1 marker was written before sending, so it
+    never counts as delivery."""
+    out: dict = {}
+    d = Path(rd) / "workspaces"
+    try:
+        names = payload_names(d)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".wake.json") or not valid_workspace_id(name[: -len(".wake.json")]):
+            continue
+        try:
+            data = json.loads(read_payload_text(d / name))
+        except (OSError, ValueError):
+            continue
+        records = data.get("records") if isinstance(data, dict) and data.get("v") == 2 else None
+        if not isinstance(records, dict):
+            continue
+        for path, value in records.items():
+            if (isinstance(value, list) and len(value) == 2
+                    and all(type(item) is int for item in value)):
+                out.setdefault(Path(path).name, set()).add(tuple(value))
+    return out
+
+
+def backstop_tick(st, prev, snap, delivered, now, grace_secs) -> bool:
+    """One backstop pass (pure; clock injected). st: {"pending": {path: first_seen}}.
+
+    True once any new or changed record has stayed undelivered for grace_secs."""
+    pending = st["pending"]
+    for key, value in snap.items():
+        if prev.get(key) != value and key not in pending:
+            pending[key] = now
+    for key in list(pending):
+        value = snap.get(key)
+        if value is None or tuple(value) in delivered.get(Path(key).name, ()):
+            del pending[key]
+    return any(now - first >= grace_secs for first in pending.values())
+
+
+def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch):
+    """Silent backstop: print `signal` only for an undelivered completion record."""
+    prev, _failed = watch_scan(rd, {}, BACKSTOP_DIRS)
+    st = {"pending": {}}
+    if since_epoch is not None:
+        since_ns = int(since_epoch * 1e9)
+        start = time.monotonic()
+        st["pending"] = {k: start for k, (m, _s) in prev.items() if m > since_ns}
+    while True:
+        time.sleep(interval)
+        snap, _failed = watch_scan(rd, prev, BACKSTOP_DIRS)
+        if backstop_tick(st, prev, snap, delivered_records(rd), time.monotonic(), grace_secs):
+            print("signal", flush=True)
+            if exit_on_signal:
+                return 0
+            st["pending"].clear()
+        prev = snap
 
 
 def _owner_path(rd) -> Path:
@@ -3313,6 +3379,8 @@ def _main(argv=None) -> int:
     w.add_argument("--exit-on-signal", action="store_true")
     w.add_argument("--once", action="store_true")
     w.add_argument("--since-epoch", type=float, default=None)
+    w.add_argument("--undelivered-only", action="store_true")
+    w.add_argument("--grace-secs", type=int, default=None)
     vc = add("verify-contract", "--task-id", "--worktree")
     vc.add_argument("--contract", default=None)
     vc.add_argument("--allow-unpinned", action="store_true")
@@ -5404,7 +5472,14 @@ def _main(argv=None) -> int:
                 math.isfinite(ns.since_epoch) and ns.since_epoch >= 0,
                 "since-epoch must be a finite float >= 0",
             )
+        _require(ns.grace_secs is None or ns.undelivered_only,
+                 "grace-secs requires undelivered-only")
+        _require(not (ns.undelivered_only and ns.once), "undelivered-only excludes once")
+        grace = BACKSTOP_GRACE_SECS if ns.grace_secs is None else ns.grace_secs
+        _require(grace >= 30, "grace-secs must be >= 30")
         rd = repo_dir(ns.repo_slug)
+        if ns.undelivered_only:
+            return _backstop_loop(rd, ns.interval, grace, ns.exit_on_signal, ns.since_epoch)
         if ns.once:
             snap, _failed = watch_scan(rd, {})
             since_ns = int(ns.since_epoch * 1e9)

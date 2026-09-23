@@ -1083,6 +1083,64 @@ assert not c.watch_changed(snap,snap2)
 sys.exit(0)
 PY
 
+check "watch: a think launch record and a write-task never signal; answers and done do" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+for d in ("tasks", "think"): os.makedirs(os.path.join(rd, d))
+prev, _ = c.watch_scan(rd, {})
+open(os.path.join(rd, "think", "think-triage-20260923000000.launch.json"), "w").write("{}")
+open(os.path.join(rd, "tasks", "PROJ-1.json"), "w").write('{"status":"in-progress"}')
+snap, _ = c.watch_scan(rd, prev)
+assert not c.watch_changed(prev, snap), snap
+open(os.path.join(rd, "think", "think-triage-20260923000000.answer.json"), "w").write("{}")
+snap2, _ = c.watch_scan(rd, snap)
+assert c.watch_changed(snap, snap2)
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+snap3, _ = c.watch_scan(rd, snap2)
+assert c.watch_changed(snap2, snap3)
+PY
+
+check "backstop_tick: undelivered signals at the grace; delivered never; stale marker values do not count" <<PY
+$LOAD
+k = "/state/slug/tasks/PROJ-1.done.json"
+st = {"pending": {}}
+assert c.backstop_tick(st, {}, {k: (5, 9)}, {}, 1000.0, 120) is False
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, {}, 1119.0, 120) is False
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, {}, 1120.0, 120) is True
+st = {"pending": {}}
+delivered = {"PROJ-1.done.json": {(5, 9)}}
+assert c.backstop_tick(st, {}, {k: (5, 9)}, delivered, 1000.0, 120) is False
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, delivered, 5000.0, 120) is False
+st = {"pending": {}}
+older = {"PROJ-1.done.json": {(4, 9)}}
+c.backstop_tick(st, {}, {k: (5, 9)}, older, 1000.0, 120)
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, older, 1200.0, 120) is True
+PY
+
+check "delivered_records: v2 only, keyed by file name, unreadable markers ignored" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+os.makedirs(os.path.join(rd, "workspaces"))
+json.dump({"v": 2, "records": {"/elsewhere/slug/tasks/PROJ-1.done.json": [5, 9]}},
+          open(os.path.join(rd, "workspaces", "w1.wake.json"), "w"))
+json.dump({"v": 1, "records": {"/x/tasks/PROJ-2.done.json": [1, 1]}},
+          open(os.path.join(rd, "workspaces", "w2.wake.json"), "w"))
+open(os.path.join(rd, "workspaces", "w3.wake.json"), "w").write("{not json")
+json.dump({"v": 2, "records": {"/x/tasks/PROJ-3.done.json": [{}, 9],
+                               "/x/tasks/PROJ-4.done.json": [True, 1]}},
+          open(os.path.join(rd, "workspaces", "w4.wake.json"), "w"))
+got = c.delivered_records(rd)
+assert got == {"PROJ-1.done.json": {(5, 9)}}, got
+PY
+
+check "watch CLI: backstop flags validated" <<'SH'
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+if $CLI watch --repo-slug github-com-org-watch-cafe0001 --undelivered-only --once --since-epoch 0 2>/dev/null; then exit 1; fi
+if $CLI watch --repo-slug github-com-org-watch-cafe0001 --grace-secs 60 --once --since-epoch 0 2>/dev/null; then exit 1; fi
+if $CLI watch --repo-slug github-com-org-watch-cafe0001 --undelivered-only --grace-secs 10 --exit-on-signal 2>/dev/null; then exit 1; fi
+SH
+
 check "heartbeat_active gates on validated primary record status" <<PY
 $LOAD
 root=tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"]=root
@@ -2729,7 +2787,7 @@ open(os.path.join(rd,"think","think-triage-20260904150000.question.md"),"w").wri
 snap0b,_=c.watch_scan(rd,snap0)
 assert not c.watch_changed(snap0, snap0b)
 open(os.path.join(rd,"think","think-triage-20260904150000.launch.json"),"w").write("{}")
-snap1,_=c.watch_scan(rd,snap0); assert c.watch_changed(snap0,snap1)
+snap1,_=c.watch_scan(rd,snap0); assert not c.watch_changed(snap0,snap1), "a launch record must not signal (R8)"
 open(os.path.join(rd,"think","think-triage-20260904150000.answer.json"),"w").write("{}")
 snap2,_=c.watch_scan(rd,snap1)
 assert c.watch_changed(snap1, snap2)
