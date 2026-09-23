@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -372,6 +373,39 @@ class GateReportTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 1)
+
+    def _cli_audit(self, home: Path):
+        report_path = self.root / "report.json"
+        expected_path = self.root / "expected.json"
+        report_path.write_text(json.dumps(self.report), encoding="utf-8")
+        expected_path.write_text(json.dumps(self.expected), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SPEC), "audit-comment",
+             "--report", str(report_path), "--expected", str(expected_path)],
+            capture_output=True, text=True, check=False,
+            env={**os.environ, "HOME": str(home)},
+        )
+
+    def test_audit_comment_renders_every_field_once(self):
+        result = self._cli_audit(self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = result.stdout
+        self.assertEqual(body.count(f"<!-- co-review-audit head={SHA_A} run=run-1 -->"), 1)
+        self.assertTrue(body.startswith("<!-- co-review-audit"))
+        for text in ("Co-review gate: APPROVE", "- Run: run-1", f"- Head: {SHA_A}",
+                     "- Tier: full (4 seats)", "- CI: 1/1 checks passed",
+                     "- Report: ~/report.json"):
+            self.assertIn(text, body)
+
+    def test_audit_comment_refuses_non_approval(self):
+        self.report["findings"] = [{"id": "f1", "severity": "high", "disposition": "confirmed",
+                                    "scenario": "s", "evidence": "e", "impact": "i"}]
+        changes = self._cli_audit(self.root)
+        self.assertEqual((changes.returncode, changes.stdout), (1, ""))
+        self.report["findings"] = []
+        self.report["run_id"] = "other"
+        incomplete = self._cli_audit(self.root)
+        self.assertEqual((incomplete.returncode, incomplete.stdout), (1, ""))
 
     def test_policy_requires_exact_one_anchor_pair(self):
         with self.assertRaises(ValueError):

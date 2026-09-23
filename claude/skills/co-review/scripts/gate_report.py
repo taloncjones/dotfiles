@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
 
@@ -287,6 +288,34 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     return {"verdict": "APPROVE", "approve_allowed": True, "reasons": visible}
 
 
+def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None:
+    """The PR audit comment for an APPROVE report, or None."""
+    root = report_path.resolve().parent
+    if evaluate(report, expected, root)["verdict"] != "APPROVE":
+        return None
+    preconditions = report["preconditions"]
+    ci = json.loads((root / preconditions["ci"]["artifact"]).read_text(encoding="utf-8"))
+    count = len(ci["check_runs"]) + len(ci["status_contexts"])
+    ci_line = (f"{count}/{count} checks passed" if count
+               else f"no CI: {preconditions['no_ci']['evidence']}")
+    shown = str(report_path.resolve())
+    home = str(Path.home().resolve())
+    if shown == home or shown.startswith(home + os.sep):
+        shown = "~" + shown[len(home):]
+    tier = report["class"]
+    lines = (
+        f"<!-- co-review-audit head={report['head']} run={report['run_id']} -->",
+        "Co-review gate: APPROVE",
+        "",
+        f"- Run: {report['run_id']}",
+        f"- Head: {report['head']}",
+        f"- Tier: {tier} ({len(_TIER_SEATS[tier])} seats)",
+        f"- CI: {ci_line}",
+        f"- Report: {shown}",
+    )
+    return "\n".join(lines) + "\n"
+
+
 def schema() -> dict:
     preconditions = {
         "head": "40-char SHA",
@@ -382,6 +411,9 @@ def main(argv: list[str] | None = None) -> int:
     policy_parser.add_argument("--section", required=True)
     classify_parser = sub.add_parser("classify")
     classify_parser.add_argument("--diff", required=True)
+    audit_parser = sub.add_parser("audit-comment")
+    audit_parser.add_argument("--report", required=True)
+    audit_parser.add_argument("--expected", required=True)
     args = parser.parse_args(argv)
     if args.command == "schema":
         print(json.dumps(schema(), sort_keys=True))
@@ -411,6 +443,17 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as error:
             print(json.dumps({"error": str(error)}))
             return 1
+        return 0
+    if args.command == "audit-comment":
+        try:
+            report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+            expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
+            body = audit_comment(report, expected, Path(args.report))
+        except (OSError, ValueError, TypeError, KeyError):
+            body = None
+        if body is None:
+            return 1
+        print(body, end="")
         return 0
     try:
         report = json.loads(Path(args.report).read_text(encoding="utf-8"))
