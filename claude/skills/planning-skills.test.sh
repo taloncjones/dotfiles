@@ -55,5 +55,25 @@ check "writing-plans resolves the MAIN checkout" \
 check "writing-plans freezes against the MAIN checkout" \
     has writing-plans 'review.py artifact --repo'
 
+# writing-specs
+check "writing-specs saves to the review-gate specs path" \
+    has writing-specs 'docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md'
+check "writing-specs resolves the MAIN checkout" \
+    has writing-specs 'git rev-parse --path-format=absolute --git-common-dir'
+check "writing-specs freezes against the MAIN checkout" \
+    has writing-specs 'review.py artifact --repo'
+check "writing-specs asks for evidence models" \
+    has writing-specs '**Evidence models.**'
+check "writing-specs asks for re-enable paths" \
+    has writing-specs '**Re-enable paths.**'
+check "writing-specs cross-checks shapes against requirements" \
+    has writing-specs '**Shape cross-check.**'
+check "writing-specs separates confirmed from proposed" \
+    has writing-specs '**Confirmed vs proposed.**'
+check "writing-specs keeps a SHA-256 revision history" \
+    has writing-specs 'Reviewed artifact SHA-256'
+check "writing-specs names the spec review for both runtimes" \
+    sh -c "grep -qF '\`codex-spec-review\`' '$D/writing-specs/SKILL.md' && grep -qF '\`claude-spec-review\`' '$D/writing-specs/SKILL.md'"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
