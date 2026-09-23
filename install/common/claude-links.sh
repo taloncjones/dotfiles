@@ -167,6 +167,7 @@ if retired_plugins_still_installed:
                                "post:bash:command-log-audit,post:bash:command-log-cost,"
                                "post:skill:track,pre:mcp-health-check,post:mcp-health-check",
         "ECC_AGENT_DATA_HOME": "{{CLAUDE_CONFIG_DIR}}",
+        "ECC_PLAN_CANVAS_STATE_DIR": "{{CLAUDE_CONFIG_DIR}}/plan-canvas",
         "GATEGUARD_BASH_ROUTINE_DISABLED": "1",
         "GATEGUARD_EXEMPT_GLOBS": "/**",
     }

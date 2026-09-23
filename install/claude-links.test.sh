@@ -283,6 +283,11 @@ if jget "$MISSINGDEST" "d['env'].get('ECC_DISABLED_HOOKS') and d['env'].get('ECC
 else
     fail "reconcile restores isolation env defaults for a never-seeded dest with the plugin still installed"
 fi
+if jget "$MISSINGDEST" "d['env'].get('ECC_PLAN_CANVAS_STATE_DIR') == os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), 'plan-canvas')"; then
+    pass "reconcile restores the plan-canvas state dir alongside the other rescue defaults"
+else
+    fail "reconcile restores the plan-canvas state dir alongside the other rescue defaults"
+fi
 rm -f "$STILLDIR/plugins/installed_plugins.json"
 
 # A dest whose only marketplace is the retired one must not keep an empty map.

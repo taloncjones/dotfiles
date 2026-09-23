@@ -13,8 +13,8 @@
       "timeout_secs": 60
     },
     {
-      "name": "reconcile-drops-isolation-machinery",
-      "run": "! grep -nE 'required_hooks|template_hooks|CONFIG_DIR_TOKEN|env\\[\"ECC_|plan-canvas' install/common/claude-links.sh && grep -qF 'RETIRED_PLUGINS = (\"ecc@ecc\",)' install/common/claude-links.sh && grep -qF 'RETIRED_MARKETPLACES = (\"ecc\",)' install/common/claude-links.sh && grep -qF 'RETIRED_ENV_KEYS = (' install/common/claude-links.sh && ! grep -qF 'RETIRED_ENV_PREFIXES' install/common/claude-links.sh",
+      "name": "reconcile-drops-unconditional-isolation-machinery",
+      "run": "! grep -nE 'required_hooks|template_hooks|CONFIG_DIR_TOKEN|env\\[\"ECC_' install/common/claude-links.sh && grep -qF 'RETIRED_PLUGINS = (\"ecc@ecc\",)' install/common/claude-links.sh && grep -qF 'RETIRED_MARKETPLACES = (\"ecc\",)' install/common/claude-links.sh && grep -qF 'RETIRED_ENV_KEYS = (' install/common/claude-links.sh && ! grep -qF 'RETIRED_ENV_PREFIXES' install/common/claude-links.sh && grep -qF 'RETIRED_ENV_RESCUE_DEFAULTS' install/common/claude-links.sh && grep -qF 'retired_plugins_still_installed' install/common/claude-links.sh && grep -qF 'installed_plugins.json' install/common/claude-links.sh",
       "timeout_secs": 30
     },
     {
