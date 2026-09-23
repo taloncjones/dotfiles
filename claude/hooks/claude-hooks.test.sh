@@ -1,5 +1,9 @@
 #!/bin/sh
 set -e
+# herdr pane identity must not leak in from a herdr-hosted run. HERDR_PERSONAL
+# also flips herdr_stop_gate.py into strict account-verification mode, so it
+# is unset here too (the sibling suites already carry it).
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID HERDR_PERSONAL
 
 PASS=0
 FAIL=0
@@ -1036,6 +1040,8 @@ else
     printf 'FAIL  gate: placeholders stand in for missing task record fields (got: %s)\n' "$(sed -n 2p "$GATE_LAST/err")" >&2; FAIL=$((FAIL + 1))
 fi
 gate_case "no HERDR_ENV is allowed" allow w1 impl none nofile "$GATE_P_F" HERDR_ENV=
+gate_case "legacy row ignores a foreign HERDR_PANE_ID" block-1 w1 impl none nofile "$GATE_P_F" HERDR_PANE_ID=w9:p9
+gate_case "legacy row ignores an empty HERDR_PANE_ID" block-1 w1 impl none nofile "$GATE_P_F" HERDR_PANE_ID=
 gate_case "no index for the workspace is allowed" allow w1 noindex none nofile "$GATE_P_F"
 gate_case "invalid workspace id is allowed" allow ..x impl none nofile "$GATE_P_F"
 gate_case "mech role is allowed" allow w1 mech none nofile "$GATE_P_F"

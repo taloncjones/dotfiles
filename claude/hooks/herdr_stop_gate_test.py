@@ -32,12 +32,17 @@ class StopGateTests(unittest.TestCase):
             "CLAUDE_WORK_CONFIG_DIR",
             "HERDR_PERSONAL",
             "HERDR_ACCOUNT_ID",
+            "HERDR_ENV",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_PANE_ID",
+            "HERDR_TAB_ID",
         ):
             environment.pop(key, None)
         environment.update(
             HOME=str(self.root),
             HERDR_ENV="1",
             HERDR_WORKSPACE_ID="w1",
+            HERDR_PANE_ID="pane-1",
             GIT_CONFIG_GLOBAL="/dev/null",
             GIT_CONFIG_NOSYSTEM="1",
             PYTHONDONTWRITEBYTECODE="1",
@@ -411,6 +416,81 @@ class StopGateTests(unittest.TestCase):
                 )
                 self.assertEqual(process.returncode, 0, process.stderr)
                 self.assertIn("released", json.loads(process.stdout)["systemMessage"])
+
+    def test_other_pane_is_released_without_instruction(self):
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-9"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result, {"action": "allow"})
+
+    def test_designated_pane_is_still_refused_without_record(self):
+        result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result["action"], "refuse")
+        self.assertIn("--pane-id pane-1", result["command"])
+
+    def test_other_pane_review_attempt_is_released(self):
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+            "pane_id": "pane-2",
+        }
+        self._write_index("review")
+        self._write_task([self.entry, review])
+
+        released = gate.evaluate(self._payload(), native=True)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-2"}):
+            refused = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(released, {"action": "allow"})
+        self.assertEqual(refused["action"], "refuse")
+        self.assertIn("emit-review", refused["command"])
+        self.assertIn("--pane-id pane-2", refused["command"])
+
+    def test_legacy_row_ignores_pane_environment(self):
+        legacy = {
+            "role": "implementation",
+            "phase": "implement",
+            "workspace_id": self.workspace,
+            "agent": "impl-proj-1",
+            "ts": "2026-09-07T12:00:00Z",
+        }
+        self._write_task([legacy])
+
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-9"}):
+            result = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(result["action"], "refuse")
+
+    def test_missing_pane_variable_is_not_designated(self):
+        environment = dict(os.environ)
+        environment.pop("HERDR_PANE_ID", None)
+        with mock.patch.dict(os.environ, environment, clear=True):
+            unset = gate.evaluate(self._payload(), native=True)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": ""}):
+            blank = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(unset, {"action": "allow"})
+        self.assertEqual(blank, {"action": "allow"})
+
+    def test_codex_wrapper_prints_empty_object_for_other_pane(self):
+        wrapper = HOOKS.parent.parent / "codex" / "hooks" / "herdr_stop_gate.py"
+        payload = json.dumps(self._payload())
+        other = subprocess.run(
+            [sys.executable, str(wrapper)], input=payload, capture_output=True,
+            text=True, env={**os.environ, "HERDR_PANE_ID": "pane-9"},
+        )
+        own = subprocess.run(
+            [sys.executable, str(wrapper)], input=payload, capture_output=True,
+            text=True, env=dict(os.environ),
+        )
+
+        self.assertEqual((other.returncode, other.stdout.strip()), (0, "{}"))
+        self.assertEqual(own.returncode, 0)
+        self.assertEqual(json.loads(own.stdout)["decision"], "block")
 
 
 if __name__ == "__main__":

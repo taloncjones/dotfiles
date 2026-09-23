@@ -1,6 +1,6 @@
 ---
 name: dotfiles-architecture-contract
-description: Load BEFORE proposing any structural or design change to the dotfiles repo, and whenever you catch yourself asking "why is it built this way", "can I just track this file", "why is settings.json not symlinked", "why two config dirs", "why is this untracked", or "can the SessionStart hook install the plugin". Documents the eight load-bearing design decisions with rationale, the invariants that must hold, and the known weak points, plus the Codex plugin integration reference (codex-surfaces.py / codex-roles.py reconciliation, staging provenance). NOT for making/committing a change (dotfiles-change-control), diagnosing a breakage (dotfiles-debugging-playbook), or the blow-by-blow incident history (dotfiles-failure-archaeology).
+description: Load BEFORE proposing any structural or design change to the dotfiles repo, and whenever you catch yourself asking "why is it built this way", "can I just track this file", "why is settings.json not symlinked", "why two config dirs", "why is this untracked", or "can the SessionStart hook install the plugin". Documents the eight load-bearing design decisions with rationale, the invariants that must hold, and the known weak points, plus the install-layout reference (install flow, symlink and seed targets, hook catalogue) and the Codex plugin integration reference (codex-surfaces.py / codex-roles.py reconciliation, staging provenance). NOT for making/committing a change (dotfiles-change-control), diagnosing a breakage (dotfiles-debugging-playbook), or the blow-by-blow incident history (dotfiles-failure-archaeology).
 ---
 
 # Dotfiles Architecture Contract
@@ -263,6 +263,13 @@ before trusting them:
 - update() re-run contract: `grep -n -A8 "function update()" zsh/functions.zsh`
 - Incident hashes: `git show <hash> --stat` for c1c4500, 8d4507f, 722c653, 7cb28b7, da54e17, 2304015, e140ab3
 - Weak-point status may have improved since 2026-07-02 -- check `git log --oneline -20` and the failure-archaeology skill before repeating an "open" claim.
+
+## Install layout reference
+
+`references/install-layout.md` holds the install flow, every symlink and
+seed target, the hook catalogue, and the Codex plugin and Herdr notes that
+used to live in the repo CLAUDE.md. Read it before adding a symlink target,
+a hook, or an installer step, and update it in the same change.
 
 ## Codex plugin integration (reference; ECC retired 2026-09, Superpowers retired 2026-09)
 

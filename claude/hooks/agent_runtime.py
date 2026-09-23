@@ -117,6 +117,21 @@ if _UNKNOWN_FALLBACK_ROLES:
         f"unknown fallback role in defaults: {min(_UNKNOWN_FALLBACK_ROLES)}"
     )
 
+# Bounded roles boot without MCP servers. The claude.ai connectors and plugin
+# MCP listings cost ~2.6k prompt tokens per launch and none of these roles
+# uses them (measured 2026-09-23).
+SLIM_BOOT_ROLES = (
+    "mechanical",
+    "read_only",
+    "reviewer",
+    "development_reviewer",
+    "skeptic",
+    "plan_reviewer",
+)
+_UNKNOWN_SLIM_ROLES = set(SLIM_BOOT_ROLES) - set(CLAUDE_ROUTES)
+if _UNKNOWN_SLIM_ROLES:
+    raise RouteError(f"unknown slim boot role: {min(_UNKNOWN_SLIM_ROLES)}")
+
 CRITICAL_ROLES = ("reviewer", "development_reviewer", "skeptic", "think")
 # Difficulty escalates effort within the role's model. The gateway is excluded on
 # purpose: it runs at medium so routing judgment stays cheap and the budget lands
@@ -200,6 +215,15 @@ def execution_context(
         return repository, scope
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise RouteError(f"cannot resolve workflow context: {exc}") from exc
+
+
+def strip_pane_identity(environment: dict[str, str]) -> None:
+    """A headless child is never the dispatched pane: drop the pane identity
+    so the stop gate and the emit verbs treat it as foreign. HERDR_ENV and
+    HERDR_WORKSPACE_ID stay; the git-remote guard and the scratch policy
+    key on them."""
+    environment.pop("HERDR_PANE_ID", None)
+    environment.pop("HERDR_TAB_ID", None)
 
 
 def _apply_launch_environment(environment: dict[str, str], scope: dict) -> None:
@@ -678,6 +702,8 @@ def launch_argv(
         "--permission-mode",
         permission_modes[sandbox],
     ]
+    if route.get("role") in SLIM_BOOT_ROLES:
+        argv.append("--strict-mcp-config")
     if mode == "headless":
         argv.extend(["-p", "--output-format", "json"])
     return argv
@@ -988,6 +1014,7 @@ def run_bounded(
             argv.extend(["--max-budget-usd", str(max_budget_usd)])
 
     child_env = dict(os.environ if env is None else env)
+    strip_pane_identity(child_env)
     _apply_launch_environment(child_env, scope)
     process = subprocess.Popen(
         argv,

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
+# herdr pane identity must not leak in from a herdr-hosted run
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 export PYTHONPATH="$ROOT/claude/hooks${PYTHONPATH:+:$PYTHONPATH}"
@@ -341,6 +343,12 @@ class Fixture:
             "FAKE_HERDR_MODE": "ok",
             "FAKE_PANE": "w1:p1",
             "FAKE_WORKSPACE": "w1",
+            # This fixture simulates a session in pane w1:p1, workspace w1
+            # (see FAKE_PANE/FAKE_WORKSPACE above); a native emit-done/
+            # emit-review call this fixture drives must present that same
+            # pane, or the provenance guard refuses it as a foreign pane.
+            "HERDR_PANE_ID": "w1:p1",
+            "HERDR_WORKSPACE_ID": "w1",
             "FAKE_CWD": str(self.repo.resolve()),
             "FAKE_WRONG_CWD": str(self.root / "other"),
             "FAKE_READ_COUNT": str(self.root / "read-count"),
@@ -814,6 +822,39 @@ def test_claude_prompt_receives_reserved_attempt_context_without_approval_wordin
             assert value in prompt, (value, prompt)
         assert "Keep the source tree read-only" not in prompt, prompt
         assert "approval is rejected" not in prompt, prompt
+    finally:
+        fixture.close()
+
+
+def test_claude_reviewer_pane_launch_passes_strict_mcp_config():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        route = agent_runtime.resolve_route(
+            "claude",
+            "development_reviewer",
+            capabilities={
+                "models": {
+                    "sonnet": {
+                        "status": "available",
+                        "efforts": ["medium", "high"],
+                    }
+                }
+            },
+        )
+        fixture.launch(sandbox="read-only", route=route)
+        start = next(
+            call for call in fixture.calls() if call[:2] == ["agent", "start"]
+        )
+        assert start[start.index("--") + 1 :] == [
+            "--model",
+            "sonnet",
+            "--effort",
+            "high",
+            "--permission-mode",
+            "plan",
+            "--strict-mcp-config",
+        ], start
     finally:
         fixture.close()
 
@@ -2221,6 +2262,7 @@ for name, test in (
     ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_attempt_and_start),
     ("real shells bypass stale runtime wrappers and hashes", test_runtime_binding_bypasses_aliases_functions_and_stale_hashes),
     ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
+    ("Claude reviewer pane launch passes strict MCP config", test_claude_reviewer_pane_launch_passes_strict_mcp_config),
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),

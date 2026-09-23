@@ -637,6 +637,162 @@ def test_native_argv_mappings_are_exact():
     ]
 
 
+def test_slim_boot_roles_launch_without_mcp_servers():
+    assert set(runtime.SLIM_BOOT_ROLES) <= set(runtime.CLAUDE_ROUTES)
+    assert runtime.SLIM_BOOT_ROLES == (
+        "mechanical",
+        "read_only",
+        "reviewer",
+        "development_reviewer",
+        "skeptic",
+        "plan_reviewer",
+    )
+    for role in runtime.SLIM_BOOT_ROLES:
+        config = {"provisional": True}
+        if role == "mechanical":
+            config["mechanical"] = {"designated": True, "review_gate": True}
+        route = runtime.resolve_route("claude", role, config=config)
+        model, effort = runtime.CLAUDE_ROUTES[role]
+        interactive = runtime.launch_argv(
+            route,
+            "/tmp/work tree",
+            "read-only",
+            mode="interactive",
+            scope={"personal_repository": False},
+        )
+        assert interactive == [
+            "claude",
+            "--model",
+            model,
+            "--effort",
+            effort,
+            "--permission-mode",
+            "plan",
+            "--strict-mcp-config",
+        ], (role, interactive)
+        headless = runtime.launch_argv(
+            route,
+            "/tmp/work tree",
+            "read-only",
+            mode="headless",
+            scope={"personal_repository": False},
+        )
+        assert headless == [
+            "claude",
+            "--model",
+            model,
+            "--effort",
+            effort,
+            "--permission-mode",
+            "plan",
+            "--strict-mcp-config",
+            "-p",
+            "--output-format",
+            "json",
+        ], (role, headless)
+
+
+def test_full_boot_roles_and_codex_keep_mcp_servers():
+    planner = runtime.resolve_route("claude", "planner", config={"provisional": True})
+    interactive = runtime.launch_argv(
+        planner,
+        "/tmp/work tree",
+        "workspace-write",
+        mode="interactive",
+        scope={"personal_repository": False},
+    )
+    assert interactive == [
+        "claude",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--permission-mode",
+        "auto",
+    ], interactive
+    headless = runtime.launch_argv(
+        planner,
+        "/tmp/work tree",
+        "workspace-write",
+        mode="headless",
+        scope={"personal_repository": False},
+    )
+    assert headless == [
+        "claude",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+        "--permission-mode",
+        "auto",
+        "-p",
+        "--output-format",
+        "json",
+    ], headless
+    for role in ("controller", "implementation", "think"):
+        route = runtime.resolve_route("claude", role, config={"provisional": True})
+        for mode in ("interactive", "headless"):
+            argv = runtime.launch_argv(
+                route,
+                "/tmp/work tree",
+                "workspace-write",
+                mode=mode,
+                scope={"personal_repository": False},
+            )
+            assert "--strict-mcp-config" not in argv, (role, mode, argv)
+    codex_route = runtime.resolve_route(
+        "codex", "reviewer", capabilities=codex_capabilities()
+    )
+    argv = runtime.launch_argv(
+        codex_route,
+        "/tmp/work tree",
+        "read-only",
+        mode="headless",
+        scope={"personal_repository": False},
+    )
+    assert "--strict-mcp-config" not in argv, argv
+
+
+def test_bounded_run_passes_strict_mcp_config_for_reviewer():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os,sys\n"
+            "json.dump({'argv':sys.argv[1:]},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-opus-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = dict(os.environ)
+        env.update({"PATH": f"{bindir}:{env['PATH']}", "RUN_LOG": str(log)})
+        route = runtime.resolve_route(
+            "claude", "reviewer", capabilities={"models": {"opus": model()}}
+        )
+        runtime.run_bounded(
+            route, "review this", repo, "read-only", timeout_secs=5, env=env
+        )
+        call = json.loads(log.read_text())
+        assert call["argv"] == [
+            "--model",
+            "opus",
+            "--effort",
+            "high",
+            "--permission-mode",
+            "plan",
+            "--strict-mcp-config",
+            "-p",
+            "--output-format",
+            "json",
+        ], call
+
+
 def test_personal_repository_codex_argv_disables_atlassian_plugin():
     route = runtime.resolve_route(
         "codex", "implementation", capabilities=codex_capabilities()
@@ -902,6 +1058,47 @@ def test_run_uses_argv_and_unsets_default_claude_config():
             scope={"personal_repository": False},
         )[1:], call
         assert result["status"] == "success", result
+
+
+def test_run_bounded_strips_pane_identity_from_the_child():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os,sys\n"
+            "json.dump({k:os.environ.get(k,'UNSET') for k in ('HERDR_PANE_ID','HERDR_TAB_ID','HERDR_ENV','HERDR_WORKSPACE_ID')},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-fable-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = dict(os.environ)
+        env.update(
+            {
+                "PATH": f"{bindir}:{env['PATH']}",
+                "RUN_LOG": str(log),
+                "HERDR_ENV": "1",
+                "HERDR_WORKSPACE_ID": "w1",
+                "HERDR_PANE_ID": "w1:p1",
+                "HERDR_TAB_ID": "w1:t1",
+            }
+        )
+        # "planner"'s default claude model is opus (agent_runtime.py's route
+        # table), not fable; the capabilities dict must cover whichever model
+        # the bare default actually resolves to, or the route comes back
+        # indeterminate rather than ready.
+        route = runtime.resolve_route(
+            "claude", "planner", capabilities={"models": {"opus": model()}}
+        )
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        call = json.loads(log.read_text())
+        assert call["HERDR_PANE_ID"] == "UNSET" and call["HERDR_TAB_ID"] == "UNSET", call
+        assert call["HERDR_ENV"] == "1" and call["HERDR_WORKSPACE_ID"] == "w1", call
 
 
 def test_run_consumes_shared_work_account_scope():
@@ -1874,12 +2071,16 @@ for name, test in (
     ("unsupported effort is never silently lowered", test_unsupported_effort_is_never_lowered),
     ("explicit provisional launch preserves unknown capability", test_explicit_provisional_launch_preserves_unknown_capability),
     ("native Claude and Codex argv are exact", test_native_argv_mappings_are_exact),
+    ("slim boot roles launch without MCP servers", test_slim_boot_roles_launch_without_mcp_servers),
+    ("full boot roles and Codex keep MCP servers", test_full_boot_roles_and_codex_keep_mcp_servers),
+    ("bounded reviewer run passes strict MCP config", test_bounded_run_passes_strict_mcp_config_for_reviewer),
     ("personal Codex argv requires valid scope", test_personal_repository_codex_argv_disables_atlassian_plugin),
     ("Codex lifecycle roots require workspace-write", test_codex_lifecycle_roots_require_workspace_write),
     ("Codex JSONL reports tokens and unknown observations", test_codex_result_reports_tokens_and_unknown_observations),
     ("Codex JSONL joins multiple agent messages", test_codex_result_joins_multiple_agent_messages),
     ("error and malformed runtime output fail closed", test_result_errors_and_malformed_output_fail_closed),
     ("bounded run uses argv and native personal Claude env", test_run_uses_argv_and_unsets_default_claude_config),
+    ("run_bounded strips the pane identity from the child", test_run_bounded_strips_pane_identity_from_the_child),
     ("bounded run consumes the shared work account scope", test_run_consumes_shared_work_account_scope),
     ("bounded Codex launch applies repository plugin policy", test_bounded_codex_plugin_policy_uses_resolved_repository_scope),
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
