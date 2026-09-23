@@ -54,11 +54,10 @@ seed_machine_local_file() {
 # every install/update:
 #   - template-owned keys (hooks, statusLine, permissions, env, model, promptSuggestionEnabled, ...) come from
 #     the template -- template drift is reconciled away;
-#   - env string values have {{CLAUDE_CONFIG_DIR}} replaced by the absolute
-#     config dir the file lands in (per-account ECC state paths);
 #   - plugin-installer-owned keys (enabledPlugins, extraKnownMarketplaces) are
 #     unioned with live state winning on conflict, so nothing an installer
 #     wrote is lost;
+#   - retired plugins (RETIRED_PLUGINS) are forced off, their marketplaces dropped, and their env keys (RETIRED_ENV_KEYS) swept;
 #   - keys the template does not define are preserved as-is.
 # A corrupt/unparseable destination is rebuilt from the template. Idempotent.
 # History: the merge logic originated in bootstrap-cloud.sh (910f2bc), which
@@ -106,35 +105,12 @@ for key in PLUGIN_KEYS:
         result[key] = merged
 
 # Keep account-local environment additions instead of dropping them whenever a
-# tracked template changes. Retain existing opt-outs and append every template
-# exclusion, including account-isolation additions introduced by later updates.
-# Manual Canvas state is stored beside the selected settings.json.
+# tracked template changes.
 env = {}
 existing_env = dest.get("env", {})
 if isinstance(existing_env, dict):
     env.update(existing_env)
 env.update(tmpl.get("env", {}))
-required_hooks = [
-    "session-start:plan-canvas-sessions",
-    "stop:plan-canvas-pending",
-]
-template_hooks = tmpl.get("env", {}).get("ECC_DISABLED_HOOKS", "")
-if isinstance(template_hooks, str):
-    required_hooks.extend(token.strip() for token in template_hooks.split(",") if token.strip())
-disabled_hooks = (
-    existing_env.get("ECC_DISABLED_HOOKS", env.get("ECC_DISABLED_HOOKS", ""))
-    if isinstance(existing_env, dict)
-    else env.get("ECC_DISABLED_HOOKS", "")
-)
-if isinstance(disabled_hooks, str):
-    hook_tokens = [token.strip() for token in disabled_hooks.split(",") if token.strip()]
-else:
-    hook_tokens = []
-for hook_id in required_hooks:
-    if hook_id not in hook_tokens:
-        hook_tokens.append(hook_id)
-env["ECC_DISABLED_HOOKS"] = ",".join(hook_tokens)
-env["ECC_PLAN_CANVAS_STATE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plan-canvas")
 
 # env is a union, so dropping a key from the template would otherwise leave it
 # set on every machine that already has it. Model aliases must stay un-pinned:
@@ -143,12 +119,42 @@ env["ECC_PLAN_CANVAS_STATE_DIR"] = os.path.join(os.path.dirname(os.path.abspath(
 for key in [k for k in env if k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL")]:
     if key not in tmpl.get("env", {}):
         del env[key]
+
+# Env keys of retired plugins are swept the same way. An explicit list, not
+# a prefix: the ECC-derived git hooks still read ECC_SKIP_* and
+# ECC_PREPUSH_AUDIT, and a machine-local value of those must survive.
+RETIRED_ENV_KEYS = ("ECC_CONTEXT_MONITOR_COST_WARNINGS", "ECC_DISABLED_HOOKS", "ECC_AGENT_DATA_HOME",
+                    "ECC_PLAN_CANVAS_STATE_DIR", "GATEGUARD_BASH_ROUTINE_DISABLED",
+                    "GATEGUARD_EXEMPT_GLOBS")
+for key in RETIRED_ENV_KEYS:
+    if key not in tmpl.get("env", {}):
+        env.pop(key, None)
 result["env"] = env
 
 # Preserve any platform/installer keys the template does not define.
 for key, value in dest.items():
     if key not in result:
         result[key] = value
+
+# Retired plugins: enabledPlugins and extraKnownMarketplaces are unions where
+# live state wins, so dropping a plugin from the template alone would leave it
+# enabled on every machine that had it. Force it off and stop refreshing its
+# marketplace; `<name>-uninstall` removes the files.
+RETIRED_PLUGINS = ("ecc@ecc",)
+RETIRED_MARKETPLACES = ("ecc",)
+result["enabledPlugins"] = {
+    **result.get("enabledPlugins", {}),
+    **{plugin: False for plugin in RETIRED_PLUGINS},
+}
+markets = {
+    name: value
+    for name, value in result.get("extraKnownMarketplaces", {}).items()
+    if name not in RETIRED_MARKETPLACES
+}
+if markets:
+    result["extraKnownMarketplaces"] = markets
+else:
+    result.pop("extraKnownMarketplaces", None)
 
 # Personal sessions do not use Jira/Confluence. Scope this policy to the
 # personal account; work and custom config directories keep their own choice.
@@ -157,20 +163,6 @@ if os.path.abspath(dest_path) == os.path.abspath(personal_settings):
     result["enabledPlugins"] = {
         **result.get("enabledPlugins", {}),
         "atlassian@claude-plugins-official": False,
-    }
-
-# Per-config-dir values: the template is shared by ~/.claude and
-# ~/.claude-work, and Claude Code does not expand variables inside env
-# values, so a value that must differ per account carries this token and
-# is resolved here to the directory settings.json is written into. env
-# only: no other template key is substituted.
-CONFIG_DIR_TOKEN = "{{CLAUDE_CONFIG_DIR}}"
-config_dir = os.path.dirname(os.path.abspath(dest_path))
-env = result.get("env")
-if isinstance(env, dict):
-    result["env"] = {
-        k: (v.replace(CONFIG_DIR_TOKEN, config_dir) if isinstance(v, str) else v)
-        for k, v in env.items()
     }
 
 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -238,12 +230,9 @@ link_claude_config_dir() {
   # Rules: claude/rules is symlinked here as the single asset source. Claude
   # Code natively auto-loads every .md under ~/.claude/rules at launch (`paths:`
   # frontmatter scopes to matching files; none = every session). Only our own
-  # always-on rules under claude/rules/personal/ are tracked; ECC rules vendoring
-  # is RETIRED (2026-07-02) -- the upstream tree lives in the ECC marketplace
-  # clone (~/.claude/plugins/marketplaces/ecc/rules/), and any language dirs
-  # still sitting in claude/rules are pre-retirement leftovers that STILL
-  # auto-load, flagged for removal by _ecc_legacy_rules_notice
-  # (claude/rules/.gitignore keeps them uncommitted).
+  # always-on rules under claude/rules/personal/ are tracked. Language dirs
+  # left by the retired ECC rules vendoring still auto-load if present; delete
+  # them (claude/rules/.gitignore keeps them uncommitted).
   # One-time migration: older machines have rules as a REAL directory (from a
   # blanket ECC install). Preserve it as a timestamped backup before replacing
   # it with the symlink, in case it holds hand-edited rules not yet saved.
