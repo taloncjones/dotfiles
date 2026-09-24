@@ -54,13 +54,13 @@ external dependencies.
 Set `ARTIFACT_CLASS` to `advisory` when the caller says the artifacts are
 workflow prose with no durable write or authority transition of their own;
 otherwise it stays `behavior`. Set `SPEC_MAX_ROUNDS` from this table unless
-the kickoff instruction or the invoking user names a higher cap; nothing
-else raises it. The plan review uses its own `PLAN_MAX_ROUNDS`, so one shell
-running both reviews never carries the spec cap into the plan review.
+the kickoff instruction names a higher cap; nothing else raises it. The plan
+review uses its own `PLAN_MAX_ROUNDS`, so one shell running both reviews
+never carries the spec cap into the plan review.
 
-| Skill             | Default max Codex rounds | Raised by                                    |
-| ----------------- | ------------------------ | -------------------------------------------- |
-| codex-spec-review | 4                        | the kickoff instruction or the invoking user |
+| Skill             | Default max Codex rounds | Raised by                    |
+| ----------------- | ------------------------ | ---------------------------- |
+| codex-spec-review | 4                        | the kickoff instruction only |
 
 A round is one runner call, whatever its outcome; the skeptic verification
 round counts. Record every call, failed or empty ones included, as its own

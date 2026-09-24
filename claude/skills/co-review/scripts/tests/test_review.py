@@ -641,7 +641,7 @@ class ReviewHelperTests(unittest.TestCase):
         content = " ".join((DOTFILES_ROOT / "claude/skills/codex-spec-review/SKILL.md").read_text().split())
         self.assertRegex(
             content,
-            r"\|\s*codex-spec-review\s*\|\s*4\s*\|\s*the kickoff instruction or the invoking user\s*\|",
+            r"\|\s*codex-spec-review\s*\|\s*4\s*\|\s*the kickoff instruction only\s*\|",
         )
         self.assertIn('ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"', content)
         self.assertIn('SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"', content)
@@ -659,7 +659,7 @@ class ReviewHelperTests(unittest.TestCase):
         content = " ".join((DOTFILES_ROOT / "claude/skills/codex-plan-review/SKILL.md").read_text().split())
         self.assertRegex(
             content,
-            r"\|\s*codex-plan-review\s*\|\s*2\s*\|\s*the kickoff instruction or the invoking user\s*\|",
+            r"\|\s*codex-plan-review\s*\|\s*2\s*\|\s*the kickoff instruction only\s*\|",
         )
         self.assertIn('ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"', content)
         self.assertIn('PLAN_MAX_ROUNDS="${PLAN_MAX_ROUNDS:-2}"', content)
