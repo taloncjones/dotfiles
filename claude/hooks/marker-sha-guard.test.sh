@@ -351,6 +351,10 @@ deny "unquoted nested gh substitution before body-file" "$R" "gh pr comment \$(g
 deny "unquoted arithmetic substitution before body" "$R" "gh pr comment \$((4+1)) --body '$AUDIT_BAD'"
 deny "control: backtick substitution before body still denied" "$R" "gh pr comment \`echo 5\` --body '$AUDIT_BAD'"
 
+# --- repair round 1: ANSI-C quoted bodies are not decoded (A-1) ---
+deny "ansi-c body spreads the marker to line two" "$R" "gh pr comment 5 --body \$'Review done\n$AUDIT_BAD'"
+deny "ansi-c body wraps a bad marker directly" "$R" "gh pr comment 5 --body \$'$AUDIT_BAD'"
+
 # --- installed layouts: the shared modules resolve through symlinks ---
 mkdir -p "$FIX/home/.claude" "$FIX/codex/hooks"
 ln -s "$PWD/claude/hooks" "$FIX/home/.claude/hooks"
