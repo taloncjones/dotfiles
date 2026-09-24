@@ -31,6 +31,8 @@ TASK_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 RECORD_PATTERN = re.compile(r"[0-9]{16,20}-[0-9a-f]{32}\Z")
 SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 ROLES = ("director", "lead", "worker", "reviewer")
+ARCHIVE_DIR = ".archived"
+ARCHIVE_LOCK = ".archive.lock"
 OPTIONAL_KEYS = {"role", "parent"}
 SUMMARY_CHARS = 80
 MAX_BRIEF_BYTES = 1 << 20
@@ -316,30 +318,73 @@ def load_at(
 
 
 @contextmanager
-def task_lock(parent: int):
+def held_lock(parent: int, name: str, operation: int, busy: str, create: bool = True):
     flags = os.O_RDWR | os.O_NOFOLLOW
-    try:
-        # Concurrent non-exclusive creation can return ENOENT on macOS.
-        descriptor = os.open(
-            ".lock", flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent
-        )
-    except FileExistsError:
-        descriptor = os.open(".lock", flags, dir_fd=parent)
+    if create:
+        try:
+            # Concurrent non-exclusive creation can return ENOENT on macOS.
+            descriptor = os.open(
+                name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent
+            )
+        except FileExistsError:
+            descriptor = os.open(name, flags, dir_fd=parent)
+    else:
+        descriptor = os.open(name, flags, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError("Handoff task lock must be a regular file")
+            raise ValueError("Handoff lock must be a regular file")
         deadline = time.monotonic() + 10
         while True:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("Handoff task is busy") from None
+                    raise TimeoutError(busy) from None
                 time.sleep(0.01)
         yield
     finally:
         os.close(descriptor)
+
+
+def task_lock(parent: int, create: bool = True):
+    return held_lock(parent, ".lock", fcntl.LOCK_EX, "Handoff task is busy", create)
+
+
+def archive_lock(partition: int, operation: int):
+    """Serialize archive moves (exclusive) against saves (shared)."""
+    return held_lock(partition, ARCHIVE_LOCK, operation, "Handoff repository is busy")
+
+
+@contextmanager
+def directory_at(parent: int, name: str, create: bool = False):
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+    descriptor = os.open(
+        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+    )
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def exists_at(parent: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def is_retired(partition: int, task: str) -> bool:
+    if not exists_at(partition, ARCHIVE_DIR):
+        return False
+    with directory_at(partition, ARCHIVE_DIR) as archive:
+        return exists_at(archive, task)
 
 
 def working_state(repo: Path) -> dict:
@@ -411,34 +456,41 @@ def make_record(args, context: dict, scope: dict) -> dict:
 
 def save(args, context: dict, scope: dict, directory: Path) -> dict:
     record = make_record(args, context, scope)
-    parent, _ = open_state_parent(directory / args.task / "current.json", create=True)
+    partition, _ = open_state_parent(directory / ARCHIVE_LOCK, create=True)
     try:
-        with task_lock(parent):
-            try:
-                os.stat("current.json", dir_fd=parent, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                previous, _ = load_at(parent, context, scope, args.task)
-                for key in OPTIONAL_KEYS:
-                    if key not in record and key in previous:
-                        record[key] = previous[key]
-            record_id = record["record_id"]
-            atomic_json_at(parent, f"{record_id}.json", record, exclusive=True)
-            atomic_json_at(
-                parent,
-                "current.json",
-                {
-                    "schema_version": 1,
-                    "task_id": args.task,
-                    "repo_id": context["repo_id"],
-                    "account_id": scope["account_id"],
-                    "record_id": record_id,
-                    "record_sha256": hashlib.sha256(encoded(record)).hexdigest(),
-                },
-            )
+        with archive_lock(partition, fcntl.LOCK_SH):
+            if is_retired(partition, args.task):
+                raise ValueError(
+                    f"Handoff task {args.task} is retired; "
+                    "run restore to reopen it before saving"
+                )
+            with directory_at(partition, args.task, create=True) as parent:
+                with task_lock(parent):
+                    try:
+                        os.stat("current.json", dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        previous, _ = load_at(parent, context, scope, args.task)
+                        for key in OPTIONAL_KEYS:
+                            if key not in record and key in previous:
+                                record[key] = previous[key]
+                    record_id = record["record_id"]
+                    atomic_json_at(parent, f"{record_id}.json", record, exclusive=True)
+                    atomic_json_at(
+                        parent,
+                        "current.json",
+                        {
+                            "schema_version": 1,
+                            "task_id": args.task,
+                            "repo_id": context["repo_id"],
+                            "account_id": scope["account_id"],
+                            "record_id": record_id,
+                            "record_sha256": hashlib.sha256(encoded(record)).hexdigest(),
+                        },
+                    )
     finally:
-        os.close(parent)
+        os.close(partition)
     return {
         "record": record,
         "record_path": str(directory / args.task / f"{record_id}.json"),

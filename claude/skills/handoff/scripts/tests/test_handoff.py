@@ -1,12 +1,15 @@
 """Hermetic handoff tests: subprocess CLI, private fixtures, no model calls."""
 
+import fcntl
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +18,15 @@ from unittest.mock import patch
 SCRIPT = Path(__file__).resolve().parents[1] / "handoff.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import handoff
+
+
+def tree(root: Path) -> dict:
+    """Map each path under root to its bytes (None for directories), skipping the archive lock."""
+    return {
+        str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.name != ".archive.lock"
+    }
 
 
 class HandoffTests(unittest.TestCase):
@@ -760,6 +772,49 @@ class HandoffTests(unittest.TestCase):
         for extra, pattern in cases:
             with self.assertRaisesRegex(ValueError, pattern):
                 handoff.validate_record({**record, **extra}, context, scope, "task-one", record_id)
+
+    def test_archive_names_are_never_task_ids(self):
+        for name in (handoff.ARCHIVE_DIR, handoff.ARCHIVE_LOCK):
+            self.assertIsNone(handoff.TASK_PATTERN.fullmatch(name))
+
+    def test_save_on_retired_task_is_refused_and_creates_nothing(self):
+        saved = self.save()
+        partition = Path(saved["record_path"]).parent.parent
+        archive = partition / ".archived"
+        archive.mkdir(mode=0o700)
+        (partition / "task-one").rename(archive / "task-one")
+        before = tree(archive)
+        refused = self.save(expect=1)
+        self.assertIn("retired", refused["error"])
+        self.assertIn("restore", refused["error"])
+        self.assertFalse((partition / "task-one").exists())
+        self.assertEqual(tree(archive), before)
+
+    def test_save_waits_for_the_archive_lock_then_sees_the_retirement(self):
+        saved = self.save()
+        partition = Path(saved["record_path"]).parent.parent
+        lock = os.open(partition / ".archive.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [
+                sys.executable, str(SCRIPT), "save", "--repo", str(self.repo),
+                "--runtime", "codex", "--task", "task-one",
+                "--brief-file", str(self.brief),
+            ],
+            env=self.env, stdout=subprocess.PIPE, text=True,
+        )
+        time.sleep(2)
+        archive = partition / ".archived"
+        archive.mkdir(mode=0o700)
+        before = sorted(os.listdir(partition / "task-one"))
+        (partition / "task-one").rename(archive / "task-one")
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        output, _ = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 1, output)
+        self.assertIn("retired", json.loads(output)["error"])
+        self.assertEqual(sorted(os.listdir(archive / "task-one")), before)
+        self.assertFalse((partition / "task-one").exists())
 
     def test_summary_is_first_non_blank_line_truncated(self):
         self.brief.write_text("\n\n" + ("x" * 100) + "\nsecond line\n")
