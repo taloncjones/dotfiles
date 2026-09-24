@@ -228,7 +228,12 @@ STATE_ROOT/
     "max_budget_usd": 3.0,
     "timeout_secs": 900,
     "daily_budget_usd": 10.0
-  }
+  },
+  "review": {
+    "deadline_floor_secs": 900,
+    "deadline_ceiling_secs": 3600
+  },
+  "rollover_pct": 45
 }
 ```
 
@@ -299,7 +304,13 @@ it must be a JSON object with only the keys `max_turns` (int, 1-500),
 `max_budget_usd` (number, 0-50, and never above `daily_budget_usd`),
 `timeout_secs` (int, 60-14400), and `daily_budget_usd` (number, 0 < x <= 200);
 an unknown key or an out-of-bounds value makes `think-caps` exit 5. Missing/
-invalid config -> mutating actions refuse with a concrete message. This file
+invalid config -> mutating actions refuse with a concrete message. `review`
+optional: `deadline_floor_secs` and `deadline_ceiling_secs`, each a non-bool
+int in [60, 14400] (defaults 900 and 3600; a bad value takes its default; a
+ceiling below the floor is raised to it). `review-deadlines` sizes each
+review as floor + the pinned contract's summed `timeout_secs` + 20 s per
+changed file, capped at the ceiling, or the ceiling when an input is
+unknown; the hard bound adds 600 s. This file
 holds the only employer/user identifiers; the shipped skill and fixtures
 never contain them.
 
