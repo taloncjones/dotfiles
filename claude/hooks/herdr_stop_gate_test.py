@@ -36,6 +36,7 @@ class StopGateTests(unittest.TestCase):
             "HERDR_WORKSPACE_ID",
             "HERDR_PANE_ID",
             "HERDR_TAB_ID",
+            "HERDR_BOUNDED_CHILD",
         ):
             environment.pop(key, None)
         environment.update(
@@ -491,6 +492,102 @@ class StopGateTests(unittest.TestCase):
         self.assertEqual((other.returncode, other.stdout.strip()), (0, "{}"))
         self.assertEqual(own.returncode, 0)
         self.assertEqual(json.loads(own.stdout)["decision"], "block")
+
+    def test_bounded_child_marker_releases_an_otherwise_refused_stop(self):
+        refused_codex = gate.evaluate(self._payload(), native=True)
+        refused_claude = gate.evaluate(self._payload())
+        with mock.patch.dict(os.environ, {"HERDR_BOUNDED_CHILD": "1"}):
+            codex = gate.evaluate(self._payload(), native=True)
+            claude = gate.evaluate(self._payload())
+
+        self.assertEqual(refused_codex["action"], "refuse")
+        self.assertEqual(refused_claude["action"], "refuse")
+        self.assertEqual(codex, {"action": "allow"})
+        self.assertEqual(claude, {"action": "allow"})
+
+    def test_bounded_child_marker_requires_exact_value(self):
+        for value in ("0", "", "true"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"HERDR_BOUNDED_CHILD": value}):
+                    result = gate.evaluate(self._payload(), native=True)
+                self.assertEqual(result["action"], "refuse")
+
+    def test_bounded_child_hook_processes_print_nothing(self):
+        claude_hook = HOOKS / "herdr_stop_gate.py"
+        codex_hook = HOOKS.parent.parent / "codex" / "hooks" / "herdr_stop_gate.py"
+        payload = json.dumps(self._payload())
+        environment = {**os.environ, "HERDR_BOUNDED_CHILD": "1"}
+        claude = subprocess.run(
+            [sys.executable, str(claude_hook)], input=payload, capture_output=True,
+            text=True, env=environment,
+        )
+        codex = subprocess.run(
+            [sys.executable, str(codex_hook)], input=payload, capture_output=True,
+            text=True, env=environment,
+        )
+
+        self.assertEqual((claude.returncode, claude.stdout, claude.stderr), (0, "", ""))
+        self.assertEqual((codex.returncode, codex.stdout.strip()), (0, "{}"))
+
+    def test_pane_release_uses_latest_native_row_when_no_entry(self):
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+            "pane_id": "pane-2",
+        }
+        ship = {**self.entry, "agent": "ship-proj-1", "launch_id": "ship-1"}
+        self._write_index("review")
+        self._write_task([self.entry, review, ship])
+        environment = dict(os.environ)
+        environment.pop("HERDR_PANE_ID", None)
+
+        with mock.patch.dict(os.environ, environment, clear=True):
+            no_pane = gate.evaluate(self._payload(), native=True)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": ""}):
+            blank = gate.evaluate(self._payload(), native=True)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-2"}):
+            reviewer_pane = gate.evaluate(self._payload(), native=True)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-9"}):
+            other_pane = gate.evaluate(self._payload(), native=True)
+        latest_pane = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(no_pane, {"action": "allow"})
+        self.assertEqual(blank, {"action": "allow"})
+        self.assertEqual(reviewer_pane, {"action": "allow"})
+        self.assertEqual(other_pane, {"action": "allow"})
+        self.assertEqual(latest_pane["action"], "refuse")
+
+    def test_legacy_entry_after_native_row_keeps_ignoring_the_pane(self):
+        review = {
+            **self.entry,
+            "role": "development_reviewer",
+            "phase": "review",
+            "agent": "rev-proj-1",
+            "launch_id": "review-1",
+            "pane_id": "pane-2",
+        }
+        legacy = {
+            "role": "implementation",
+            "phase": "implement",
+            "workspace_id": self.workspace,
+            "agent": "impl-proj-1",
+            "ts": "2026-09-07T12:00:00Z",
+        }
+        self._write_index("impl")
+        self._write_task([review, legacy])
+        environment = dict(os.environ)
+        environment.pop("HERDR_PANE_ID", None)
+
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "pane-9"}):
+            other_pane = gate.evaluate(self._payload(), native=True)
+        with mock.patch.dict(os.environ, environment, clear=True):
+            no_pane = gate.evaluate(self._payload(), native=True)
+
+        self.assertEqual(other_pane["action"], "refuse")
+        self.assertEqual(no_pane["action"], "refuse")
 
 
 if __name__ == "__main__":

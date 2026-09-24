@@ -34,7 +34,8 @@ unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
 # fixture's pane, so a run from inside a herdr pane gated fixture attempts
 # against the real pane (18 gate cases red in claude-hooks.test.sh). CI
 # never sets these.
-unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
+# HERDR_BOUNDED_CHILD would make every gate refusal case fail open in a reviewer seat.
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID HERDR_BOUNDED_CHILD
 
 SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
