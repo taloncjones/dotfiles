@@ -821,11 +821,10 @@ replays. Run `check-fence` before the first harvest write; on
 3. Route each kept line to exactly one place, writing it only where that exact
    line is absent. A line that names a fixable defect in a skill, hook, CLI or
    tool goes into the todo that owns the area (todos skill), or a new todo,
-   verbatim. Every other line, and any note, goes into the ledger
-   `STATE_ROOT/<slug>/tasks/<task_id>.lessons.md` with one shell append (`>>`)
-   of a `## <UTC timestamp> <source>` header plus the lines; the ledger is
-   append-only and never rewritten (references/state-layout.md, Lesson
-   ledger). Rule-shaped lines wait there for the `/post-merge` admission filter.
+   verbatim. Every other line, and any note, goes into the append-only ledger
+   `STATE_ROOT/<slug>/tasks/<task_id>.lessons.md`; see references/state-layout.md,
+   Lesson ledger, for the append grammar. Rule-shaped lines wait there for the
+   `/post-merge` admission filter.
 
 A replay therefore adds only what is missing. The director records its own
 friction the same way, in the turn it happens, as a line tagged

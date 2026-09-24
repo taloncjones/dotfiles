@@ -2371,6 +2371,7 @@ grep -Fq 'skip the Lesson harvest' "$S"
 grep -Fq 'through every following indented' "$S"
 if grep -Fq 'to the end of the line' "$S"; then exit 1; fi
 grep -Fq 'before the verdict or stale-reset' "$S"
+grep -Fq 'see references/state-layout.md,' "$S"
 grep -Fq 'does not guarantee one physical row' "$R/brief-template.md"
 grep -Fq 'tasks/<task_id>.lessons.md' "$P"
 grep -Fq 'artifacts/<task_id>/review-*/findings.md' "$P"
