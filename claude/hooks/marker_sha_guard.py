@@ -60,9 +60,10 @@ REPO_FLAGS = ("-R", "--repo")
 # Commands that cannot rewrite a body file (when they carry no redirection).
 HARMLESS = ("cd", "true", ":", "test", "[", "exit", "return")
 # Leading shell keywords a gh segment can sit behind (`if COND; then gh ...`,
-# `{ gh ...; }`, `! gh ...`, `for ...; do gh ...; done`, `else gh ...`);
-# stripped before head detection so the segment underneath is still inspected.
-RESERVED_WORDS = ("if", "then", "elif", "else", "do", "while", "until", "!", "{")
+# `{ gh ...; }`, `! gh ...`, `for ...; do gh ...; done`, `else gh ...`,
+# `function NAME { gh ...; }`, `coproc gh ...`); stripped before head
+# detection so the segment underneath is still inspected.
+RESERVED_WORDS = ("if", "then", "elif", "else", "do", "while", "until", "!", "{", "function", "coproc")
 MARKER_HINTS = ("<!-- co-review", "co-review-audit", "audit-comment")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 KEY_VALUE = re.compile(r"(?<![\w-])([a-z_]+)=(\S*)")
@@ -575,7 +576,10 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
     branched = False
     while words and words[0] in RESERVED_WORDS:
         branched = True
-        words = rm_guard.strip_prefixes(words[1:])
+        keyword, words = words[0], words[1:]
+        if keyword == "function" and words and words[0] not in RESERVED_WORDS:
+            words = words[1:]  # the function's name, before its `{`
+        words = rm_guard.strip_prefixes(words)
     prefix = segment[: len(segment) - len(words)]
     seg_env = dict(t.split("=", 1) for t in prefix if rm_guard.is_env_assignment(t))
     skipped = before in ("||", "|") or after in ("|", "&")

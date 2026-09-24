@@ -367,6 +367,10 @@ deny "else does not inherit an untaken assignment" "$R" "F=bad.md; if [ 1 = 2 ];
 deny "control: plain body-file still denied" "$R" "gh pr comment 5 --body-file x.md"
 allow "control: a straight-line cd still resolves" "$R" "cd sub && gh pr comment 5 --body-file x.md"
 
+# --- repair round 2: RESERVED_WORDS misses function and coproc (A-8) ---
+deny "function definition wraps the gh segment" "$R" "function f { gh pr comment 5 --body '$AUDIT_BAD'; }; f"
+deny "coproc wraps the gh segment" "$R" "coproc gh pr comment 5 --body '$AUDIT_BAD'"
+
 # --- installed layouts: the shared modules resolve through symlinks ---
 mkdir -p "$FIX/home/.claude" "$FIX/codex/hooks"
 ln -s "$PWD/claude/hooks" "$FIX/home/.claude/hooks"
