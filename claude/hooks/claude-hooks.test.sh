@@ -140,6 +140,11 @@ assert_allows "attribution bash: allows a human surname containing a token" \
     "$ATTR_HOOK" \
     "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit -m x -m 'Co-Authored-By: Jane Raider <jane@example.com>'\"}}"
 
+ATTR_PREFIXED_NAME="Auto""GPT"
+assert_blocks "attribution bash: blocks a co-author with a prefix glued in front of a token" \
+    "$ATTR_HOOK" \
+    "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit -m x -m 'Co-Authored-By: ${ATTR_PREFIXED_NAME} <agent@example.com>'\"}}"
+
 # The hook resolves agent-tokens from its own path, so a copy in a temp tree
 # sees only that tree's token file.
 for case in missing empty invalid crlf; do
