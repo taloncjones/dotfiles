@@ -7,6 +7,8 @@ import math
 import os
 import signal
 import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -868,21 +870,147 @@ def parse_runtime_result(runtime: str, output: str) -> dict[str, Any]:
     }
 
 
-def _timeout_result(runtime: str, stderr: str = "") -> dict[str, Any]:
+def _as_text(value: Any) -> str:
+    # TimeoutExpired.stdout is raw bytes even for a text-mode Popen.
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+def _timestamp_seconds(value: Any) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _claude_progress(records: list[dict[str, Any]], stopped_at: float) -> dict[str, Any]:
+    started: dict[Any, Any] = {}
+    assistant_turns = tool_calls = 0
+    last_tool = last_event_at = rate_limit_status = None
+    last_seconds = None
+    for record in records:
+        kind, subtype = record.get("type"), record.get("subtype")
+        if kind == "system" and subtype == "hook_started":
+            started[record.get("hook_id")] = record.get("hook_name")
+        elif kind == "system" and subtype == "hook_response":
+            started.pop(record.get("hook_id"), None)
+        elif kind == "assistant":
+            assistant_turns += 1
+            message = record.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_calls += 1
+                    name = block.get("name")
+                    last_tool = name if isinstance(name, str) else None
+        elif kind == "rate_limit_event":
+            info = record.get("rate_limit_info")
+            if isinstance(info, dict) and isinstance(info.get("status"), str):
+                rate_limit_status = info["status"]
+        seconds = _timestamp_seconds(record.get("timestamp"))
+        if seconds is not None and (last_seconds is None or seconds > last_seconds):
+            last_seconds, last_event_at = seconds, record["timestamp"]
     return {
+        "init_seen": any(
+            r.get("type") == "system" and r.get("subtype") == "init" for r in records
+        ),
+        "pending_hooks": [name for name in started.values() if isinstance(name, str)],
+        "assistant_turns": assistant_turns,
+        "tool_calls": tool_calls,
+        "last_tool": last_tool,
+        "last_event_at": last_event_at,
+        "idle_secs_before_kill": None
+        if last_seconds is None
+        else max(0, round(stopped_at - last_seconds)),
+        "rate_limit_status": rate_limit_status,
+    }
+
+
+def _codex_progress(records: list[dict[str, Any]]) -> dict[str, Any]:
+    items = [
+        record["item"]
+        for record in records
+        if record.get("type") == "item.completed" and isinstance(record.get("item"), dict)
+    ]
+    tools = [
+        item.get("type")
+        for item in items
+        if item.get("type") not in ("agent_message", "reasoning")
+    ]
+    return {
+        "init_seen": any(record.get("type") == "thread.started" for record in records),
+        "pending_hooks": None,
+        "assistant_turns": sum(1 for item in items if item.get("type") == "agent_message"),
+        "tool_calls": len(tools),
+        "last_tool": tools[-1] if tools and isinstance(tools[-1], str) else None,
+        "last_event_at": None,
+        "idle_secs_before_kill": None,
+        "rate_limit_status": None,
+    }
+
+
+def _stopped_session_id(runtime: str, records: list[dict[str, Any]]) -> str | None:
+    key = "session_id" if runtime == "claude" else "thread_id"
+    for record in records:
+        if isinstance(record.get(key), str):
+            return record[key]
+    return None
+
+
+def _stopped_result(
+    runtime: str,
+    status: str,
+    stdout: str,
+    stderr: str,
+    stopped_at: float,
+    pipe_held: bool,
+    signum: int | None = None,
+) -> dict[str, Any]:
+    """Result for a seat the runner stopped: a timeout or a stop signal."""
+    records = _json_objects(stdout)
+    progress = (
+        _claude_progress(records, stopped_at)
+        if runtime == "claude"
+        else _codex_progress(records)
+    )
+    if status == "interrupted":
+        observation = "runner-interrupted"
+    elif pipe_held:
+        observation = "timeout-pipe-held"
+    elif not progress["init_seen"]:
+        observation = "timeout-before-init"
+    elif not progress["assistant_turns"]:
+        observation = "timeout-before-first-turn"
+    else:
+        observation = "timeout-while-working"
+    result = {
         "runtime": runtime,
-        "status": "timeout",
+        "status": status,
         "result": None,
         "errors": [stderr] if stderr else [],
         "token_usage": None,
         "total_cost_usd": None,
         "num_turns": None,
-        "session_id": None,
+        "session_id": _stopped_session_id(runtime, records),
         "observed_model": None,
         "observed_effort": None,
-        "observation": "missing-runtime-metadata",
-        "timed_out": True,
+        "observation": observation,
+        "timed_out": status == "timeout",
+        "progress": progress,
     }
+    if signum is not None:
+        result["signal"] = signal.Signals(signum).name
+    return result
+
+
+def _with_scope(result: dict[str, Any], scope: dict) -> dict[str, Any]:
+    result["account_kind"] = scope["kind"]
+    result["account_id"] = scope["account_id"]
+    result["scope_id"] = scope["scope_id"]
+    return result
 
 
 def _descendants(root_pid: int) -> list[int]:
@@ -922,7 +1050,9 @@ def _descendants(root_pid: int) -> list[int]:
     return found
 
 
-def _kill_after_timeout(process: subprocess.Popen, drain_secs: float = 5.0) -> str:
+def _kill_after_timeout(
+    process: subprocess.Popen, drain_secs: float = 5.0
+) -> tuple[str, str, bool]:
     """Terminate a timed-out child AND its escaped workers, then drain its
     output WITHOUT hanging.
 
@@ -935,8 +1065,8 @@ def _kill_after_timeout(process: subprocess.Popen, drain_secs: float = 5.0) -> s
     pipe that never reaches EOF (the observed 34-minute "timeout that never
     returned"). So: snapshot the descendant tree by ppid FIRST, SIGKILL the
     group, then SIGKILL each snapshotted descendant individually (catching
-    the setsid worker), then drain with a bound. Returns captured stderr
-    (possibly empty).
+    the setsid worker), then drain with a bound. Returns (stdout, stderr,
+    pipe_held); stdout keeps what the child wrote before the kill.
 
     Best effort by construction: a worker whose intermediate parent already
     exited before the snapshot has been reparented to init, so its ppid no
@@ -957,17 +1087,19 @@ def _kill_after_timeout(process: subprocess.Popen, drain_secs: float = 5.0) -> s
         except (ProcessLookupError, PermissionError, OSError):
             pass
     try:
-        _stdout, stderr = process.communicate(timeout=drain_secs)
-        return stderr or ""
-    except subprocess.TimeoutExpired:
+        stdout, stderr = process.communicate(timeout=drain_secs)
+        return _as_text(stdout), _as_text(stderr), False
+    except subprocess.TimeoutExpired as drain:
         # A detached (setsid) descendant still holds the pipe; stop waiting.
+        # The exception still carries everything read so far.
+        partial = _as_text(drain.stdout)
         for stream in (process.stdout, process.stderr, process.stdin):
             try:
                 if stream is not None:
                     stream.close()
             except OSError:
                 pass
-        return ""
+        return partial, "", True
 
 
 def run_bounded(
@@ -1034,17 +1166,13 @@ def run_bounded(
     try:
         stdout, stderr = process.communicate(prompt, timeout=timeout_secs)
     except subprocess.TimeoutExpired:
-        stderr = _kill_after_timeout(process)
-        result = _timeout_result(runtime, stderr.strip())
-        result["account_kind"] = scope["kind"]
-        result["account_id"] = scope["account_id"]
-        result["scope_id"] = scope["scope_id"]
-        return result
+        stdout, stderr, pipe_held = _kill_after_timeout(process)
+        return _with_scope(
+            _stopped_result(runtime, "timeout", stdout, stderr.strip(), time.time(), pipe_held),
+            scope,
+        )
 
-    result = parse_runtime_result(runtime, stdout)
-    result["account_kind"] = scope["kind"]
-    result["account_id"] = scope["account_id"]
-    result["scope_id"] = scope["scope_id"]
+    result = _with_scope(parse_runtime_result(runtime, stdout), scope)
     result["exit_code"] = process.returncode
     result["timed_out"] = False
     if process.returncode != 0 and result["status"] == "success":

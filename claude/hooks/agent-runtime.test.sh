@@ -1072,6 +1072,202 @@ def test_stream_json_result_parses_like_single_object():
     assert result["observed_model"] == "claude-opus-5-5", result
 
 
+def fake_claude_rows(bindir, rows, pidfile=None, sleep=30):
+    """A fake `claude` that prints JSONL rows (raw strings allowed), then sleeps."""
+    lines = "".join(
+        f"print({row!r}, flush=True)\n" if isinstance(row, str)
+        else f"print({json.dumps(row)!r}, flush=True)\n"
+        for row in rows
+    )
+    record = f"open({str(pidfile)!r},'w').write(str(os.getpid()))\n" if pidfile else ""
+    executable(
+        bindir / "claude",
+        "exec python3 - <<'STUB'\nimport os,time\n" + record + lines
+        + f"time.sleep({sleep})\nSTUB\n",
+    )
+
+
+def claude_route():
+    return runtime.resolve_route(
+        "claude", "planner", capabilities={"models": {"opus": model()}}
+    )
+
+
+def test_timeout_while_working_keeps_partial_progress():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [json.loads(line) for line in STREAM_JSON_FIXTURE.splitlines()][:6]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["status"] == "timeout" and result["timed_out"] is True, result
+        assert result["observation"] == "timeout-while-working", result
+        assert result["session_id"] == "sess-fixture", result
+        progress = result["progress"]
+        assert progress["init_seen"] is True, progress
+        assert progress["pending_hooks"] == [], progress
+        assert progress["assistant_turns"] == 1, progress
+        assert progress["tool_calls"] == 1, progress
+        assert progress["last_tool"] == "Bash", progress
+        assert progress["last_event_at"] == "2026-09-24T18:13:01.242Z", progress
+        assert isinstance(progress["idle_secs_before_kill"], int), progress
+        assert progress["rate_limit_status"] == "allowed_warning", progress
+
+
+def test_timeout_skips_a_truncated_final_line():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-trunc"},
+            {"type": "assistant", "message": {"content": []}},
+            {"type": "assistant", "message": {"content": []}},
+            '{"type": "assistant", "message": {"cont',
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-while-working", result
+        assert result["progress"]["assistant_turns"] == 2, result
+        assert result["session_id"] == "s-trunc", result
+
+
+def test_timeout_before_init_names_the_pending_hook():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [{"type": "system", "subtype": "hook_started", "hook_id": "h-9",
+                 "hook_name": "SessionStart:startup", "session_id": "s-hook"}]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-before-init", result
+        assert result["progress"]["init_seen"] is False, result
+        assert result["progress"]["pending_hooks"] == ["SessionStart:startup"], result
+
+
+def test_timeout_before_first_turn():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-idle"},
+            {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected"}},
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-before-first-turn", result
+        assert result["progress"]["assistant_turns"] == 0, result
+        assert result["progress"]["rate_limit_status"] == "rejected", result
+
+
+def test_timeout_without_timestamps_reports_null_timing():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-nots"},
+            {"type": "assistant", "message": {"content": []}},
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["progress"]["last_event_at"] is None, result
+        assert result["progress"]["idle_secs_before_kill"] is None, result
+
+
+def test_timeout_never_leaks_tool_input():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        marker = "LEAK-MARKER-7f3a"
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-leak"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t", "name": "Bash",
+                 "input": {"command": f"echo {marker}"}}]}},
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["progress"]["last_tool"] == "Bash", result
+        assert marker not in json.dumps(result), result
+
+
+def test_codex_timeout_progress_counts_by_item_type():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "thread.started", "thread_id": "th-1"},
+            {"type": "item.completed", "item": {"type": "reasoning"}},
+            {"type": "item.completed", "item": {"type": "command_execution"}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "x"}},
+            {"type": "item.completed", "item": {"type": "file_change"}},
+        ]
+        lines = "".join(f"print({json.dumps(row)!r}, flush=True)\n" for row in rows)
+        executable(
+            bindir / "codex",
+            "exec python3 - <<'STUB'\nimport time\n" + lines + "time.sleep(30)\nSTUB\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        result = runtime.run_bounded(
+            route, "prompt", repo, "workspace-write", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-while-working", result
+        assert result["session_id"] == "th-1", result
+        assert result["progress"] == {
+            "init_seen": True, "pending_hooks": None, "assistant_turns": 1,
+            "tool_calls": 2, "last_tool": "file_change", "last_event_at": None,
+            "idle_secs_before_kill": None, "rate_limit_status": None,
+        }, result
+
+
 def test_run_uses_argv_and_unsets_default_claude_config():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -1488,6 +1684,7 @@ def test_timeout_kills_the_process_group():
         assert result["status"] == "timeout", result
         assert result["timed_out"] is True, result
         assert result["total_cost_usd"] is None, result
+        assert result["observation"] == "timeout-before-init", result
 
 
 def test_timeout_returns_when_a_detached_child_holds_the_pipe():
@@ -1539,6 +1736,10 @@ def test_timeout_returns_when_a_detached_child_holds_the_pipe():
         assert elapsed < 10, elapsed
         assert result["status"] == "timeout", result
         assert result["timed_out"] is True, result
+        # The unchanged _descendants()/kill loop still catches and reaps this
+        # setsid grandchild by ppid snapshot before the drain runs, so the
+        # pipe closes normally and this stays a before-init timeout.
+        assert result["observation"] == "timeout-before-init", result
         # The detached (setsid) worker must be dead too, not left running
         # after the runner reported a timeout.
         deadline = time.monotonic() + 5
@@ -1558,6 +1759,50 @@ def test_timeout_returns_when_a_detached_child_holds_the_pipe():
         if alive:
             os.kill(worker, 9)
         assert not alive, f"detached worker {worker} survived timeout cleanup"
+
+
+def test_timeout_reports_pipe_held_when_descendants_miss_the_worker():
+    # If _descendants() fails to find a detached worker (for example a
+    # ps-parsing gap), the kill loop cannot reap it and the pipe stays open;
+    # this is the timeout-pipe-held path the pipe-held drain sets.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        pidfile = root / "worker.pid"
+        executable(
+            bindir / "codex",
+            "exec python3 -c '"
+            "import os,sys,time\n"
+            "if os.fork()==0:\n"
+            "    os.setsid()\n"
+            f'    open("{pidfile}","w").write(str(os.getpid()))\n'
+            "    time.sleep(120); sys.exit(0)\n"
+            "time.sleep(120)'\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        real_descendants = runtime._descendants
+        runtime._descendants = lambda root_pid: []
+        try:
+            result = runtime.run_bounded(
+                route, "prompt", repo, "workspace-write", timeout_secs=1.0, env=env
+            )
+        finally:
+            runtime._descendants = real_descendants
+        assert result["status"] == "timeout", result
+        assert result["observation"] == "timeout-pipe-held", result
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "worker never recorded its pid"
+        worker = int(pidfile.read_text())
+        os.kill(worker, 9)
 
 
 def test_route_and_launch_plan_cli_emit_json_contracts():
@@ -2301,7 +2546,15 @@ for name, test in (
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
     ("bounded run kills the process group on timeout", test_timeout_kills_the_process_group),
     ("bounded run returns when a detached child holds the pipe", test_timeout_returns_when_a_detached_child_holds_the_pipe),
+    ("timeout reports pipe-held when descendants miss the worker", test_timeout_reports_pipe_held_when_descendants_miss_the_worker),
     ("stream-json result parses like the single object", test_stream_json_result_parses_like_single_object),
+    ("timeout while working keeps partial progress", test_timeout_while_working_keeps_partial_progress),
+    ("timeout skips a truncated final line", test_timeout_skips_a_truncated_final_line),
+    ("timeout before init names the pending hook", test_timeout_before_init_names_the_pending_hook),
+    ("timeout before the first turn", test_timeout_before_first_turn),
+    ("timeout without timestamps reports null timing", test_timeout_without_timestamps_reports_null_timing),
+    ("timeout never leaks tool input", test_timeout_never_leaks_tool_input),
+    ("Codex timeout progress counts by item type", test_codex_timeout_progress_counts_by_item_type),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
     ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
     ("difficulty requires confirmation", test_difficulty_requires_confirmation),
