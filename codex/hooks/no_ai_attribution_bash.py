@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: block attribution phrases in shell command payloads."""
+"""PreToolUse hook: block attribution phrases in shell command payloads.
+
+Agent names come from git/hooks/agent-tokens, shared with the commit-msg hook.
+"""
 
 import json
 import re
 import sys
+from pathlib import Path
 
 SHELL_TOOL_NAMES = {
     "bash",
@@ -13,16 +17,26 @@ SHELL_TOOL_NAMES = {
     "unified_exec",
 }
 
-ATTRIBUTION_PATTERNS = [
-    r"generated\s+(?:by|with)\s+\[?\s*(?:claude(?:\s+code)?|anthropic|copilot|chatgpt|gpt|codex|ai)",
-    r"written\s+by\s+(?:claude|anthropic|copilot|chatgpt|gpt|codex|ai)",
-    r"created\s+by\s+(?:claude|anthropic|copilot|chatgpt|gpt|codex|ai)",
-    r"ai[\- ]generated",
-    r"co[\-_ ]?authored[\-_ ]?by\s*:?\s*[^\r\n]*?(?:claude|anthropic|copilot|chatgpt|gpt|codex)",
-    r"\U0001F916\s*generated",
-]
+TOKENS_FILE = Path(__file__).resolve().parents[2] / "git" / "hooks" / "agent-tokens"
 
-COMBINED_PATTERN = re.compile("|".join(ATTRIBUTION_PATTERNS), re.IGNORECASE)
+
+def load_pattern():
+    """Compile the attribution patterns around the shared agent token list."""
+    tokens = TOKENS_FILE.read_bytes().decode("ascii").split("\n")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
+    if not tokens or not all(re.fullmatch(r"[a-z0-9]+", t) for t in tokens):
+        raise ValueError(f"{TOKENS_FILE} is empty or invalid")
+    agents = "|".join(tokens)
+    patterns = [
+        rf"generated\s+(?:by|with)\s+\[?\s*(?:{agents}|ai)",
+        rf"written\s+by\s+(?:{agents}|ai)",
+        rf"created\s+by\s+(?:{agents}|ai)",
+        r"ai[\- ]generated",
+        rf"co[\-_ ]?authored[\-_ ]?by\s*:?\s*[^\r\n]*?\b(?:{agents})",
+        "\U0001f916\\s*generated",
+    ]
+    return re.compile("|".join(patterns), re.IGNORECASE)
 
 
 def shell_command(tool_input: dict) -> str:
@@ -58,7 +72,16 @@ def main() -> None:
     if not command:
         return
 
-    match = COMBINED_PATTERN.search(command)
+    try:
+        pattern = load_pattern()
+    except (OSError, ValueError) as exc:
+        print(
+            f"no_ai_attribution_bash: {exc}; attribution check skipped.",
+            file=sys.stderr,
+        )
+        return
+
+    match = pattern.search(command)
     if not match:
         return
 
