@@ -361,13 +361,13 @@ against a cheap model making design decisions.
 Fast-path maturity check -- every row must hold; read the todo file and
 `config.json`:
 
-| Row      | Condition                                                                                  | Source           |
-| -------- | ------------------------------------------------------------------------------------------ | ---------------- |
-| files    | `files:` names 1..N paths (YAML list or comma string; a `:line` suffix counts as the path) | todo frontmatter |
-| cap      | N <= `config.fast_path.max_files`, default 3                                               | `config.json`    |
-| core     | no listed path is `claude/hooks/herdr_orch_core.py`                                        | todo frontmatter |
-| solution | `## Solution` is non-empty and not `TBD`                                                   | todo body        |
-| contract | the fast-path contract source below yields a contract                                      | todo body        |
+| Row      | Condition                                                                                                                                                                                                                                                                                                             | Source           |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| files    | `files:` names 1..N paths (YAML list or comma string; a `:line` suffix counts as the path); after stripping any `:line` suffix, every entry is an existing regular file at the base commit (`git cat-file -e <base_sha>:<path>` and the object is not a tree) -- a directory, a glob, or a missing path fails the row | todo frontmatter |
+| cap      | N <= `config.fast_path.max_files`, default 3                                                                                                                                                                                                                                                                          | `config.json`    |
+| core     | no listed path equals `claude/hooks/herdr_orch_core.py`, and no listed path is a directory prefix of it                                                                                                                                                                                                               | todo frontmatter |
+| solution | `## Solution` is non-empty and not `TBD`                                                                                                                                                                                                                                                                              | todo body        |
+| contract | the fast-path contract source below yields a contract                                                                                                                                                                                                                                                                 | todo body        |
 
 A failing row, unparseable frontmatter, a malformed `fast_path` block, or the
 kickoff instruction `kick off <item> as raw` makes the item raw. When unsure,
@@ -383,10 +383,15 @@ that list exists. When no contract is on disk, a todo with no
 `## Verification` section is raw: the config suites alone cannot meet the
 rules below. Before writing (2), apply
 the plan-phase contract rules (references/brief-template.md): every command
-falsifiable, repo-local, deterministic, and worktree-safe (no STATE_ROOT
-writes, no machine-state mutation, no network, no secret echo), at least one
-`verify-*` command expected to fail until the todo's fix lands, and at most
-32 commands. A command that misses a rule, or any doubt, makes the item raw.
+repo-local, deterministic, and worktree-safe (no STATE_ROOT
+writes, no machine-state mutation, no network, no secret echo), and at most
+32 commands. Falsifiability is observed, not judged, not just claimed: at
+least one `verify-*` command expected to fail until the todo's fix lands
+must actually fail -- run every `verify-*` command once in the fresh
+worktree at `base_sha` before pinning; at least one must exit non-zero. A
+todo whose Verification section is vacuous (every `verify-*` command
+already passes at base) falls to raw mechanically. A command that misses a
+rule, or any doubt, makes the item raw.
 `verify-contract --validate-only` is a schema check only (it accepts
 `run: "true"`); a schema rejection also makes the item raw. Never `git add`
 or commit the contract. Then run the Contract pinning steps below unchanged,
