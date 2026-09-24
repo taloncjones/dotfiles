@@ -344,8 +344,27 @@ incomplete() {
   SCAN_ERRORS=$((SCAN_ERRORS + 1))
 }
 
+# For a path [ -e ] cannot reach: print nothing when its absence is proven,
+# else the path that blocks the proof. Pass the uncollapsed path: the kernel
+# must search "locked" in "locked/../x" even though lexnorm drops it. [ -e ] is also false on a permission
+# error or a broken symlink along the way, so the deepest entry that does exist
+# decides: a searchable dir or a non-directory proves absence; an unsearchable
+# dir or an unresolvable symlink does not.
+absence_blocker() {
+  local p="$1"
+  while [ "$p" != / ] && [ ! -e "$p" ] && [ ! -L "$p" ]; do
+    p="${p%/*}"
+    [ -n "$p" ] || p=/
+  done
+  if [ -d "$p" ]; then
+    [ -x "$p" ] || printf '%s\n' "$p"
+  elif [ -L "$p" ]; then
+    printf '%s\n' "$p"
+  fi
+}
+
 classify() {
-  local link="$1" literal parent raw abs root
+  local link="$1" literal parent raw abs root blocker
   case "$EXPECTED" in *"$NL$link$NL"*) return ;; esac
   if ! literal="$(readlink "$link")"; then
     incomplete "$link" "readlink failed"
@@ -368,6 +387,8 @@ classify() {
   [ -n "$root" ] || root="$(root_of "$(phys_prefix "${abs%/*}")/${abs##*/}")"
   if [ -z "$root" ]; then
     FOREIGN=$((FOREIGN + 1))
+  elif [ ! -e "$link" ] && blocker="$(absence_blocker "$raw")" && [ -n "$blocker" ]; then
+    incomplete "$link" "cannot confirm the target is missing: $blocker"
   elif [ ! -e "$link" ]; then
     printf '[X]  ORPHAN-DANGLING %s -> %s (missing inside checkout %s)\n' "$link" "$literal" "$root"
     ORPHANS=$((ORPHANS + 1))
@@ -387,19 +408,42 @@ classify() {
 }
 
 # The enumeration subshell ends its NUL stream with one FINDRC=<status> record.
+# bash 3.2 exposes no process-substitution status, so a stream without exactly
+# one numeric record means find failed or the subshell died mid-scan.
 scan_dir() {
-  local dir="$1" depth="$2" rec
+  local dir="$1" depth="$2" rec rc="" blocker
   if [ -L "$dir" ]; then
     echo "[INFO] scan dir is a symlink, not followed: $dir"
     return
   fi
-  [ -d "$dir" ] || return
+  if [ ! -d "$dir" ]; then
+    blocker="$(absence_blocker "$dir")"
+    [ -z "$blocker" ] || incomplete "$dir" "cannot confirm the scan dir is absent: $blocker"
+    return
+  fi
   while IFS= read -r -d '' rec; do
     case "$rec" in
-      FINDRC=*) ;;
-      *) classify "$rec" ;;
+      FINDRC=*)
+        if [ -n "$rc" ]; then
+          rc=dup
+        else
+          rc="${rec#FINDRC=}"
+          [ -n "$rc" ] || rc=bad
+        fi
+        ;;
+      *)
+        [ -z "$rc" ] || rc=dup
+        classify "$rec"
+        ;;
     esac
   done < <(find -P "$dir" -mindepth 1 -maxdepth "$depth" -type l -print0 2>/dev/null; printf 'FINDRC=%s\0' "$?")
+  case "$rc" in
+    0) ;;
+    '') incomplete "$dir" "enumeration ended without a completion record" ;;
+    dup) incomplete "$dir" "records after the completion record" ;;
+    *[!0-9]*) incomplete "$dir" "malformed completion record" ;;
+    *) incomplete "$dir" "find exited $rc" ;;
+  esac
 }
 
 echo

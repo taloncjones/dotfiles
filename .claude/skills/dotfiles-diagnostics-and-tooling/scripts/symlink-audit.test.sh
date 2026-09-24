@@ -353,6 +353,74 @@ else
     pass "audit script runs no writing command"
 fi
 
+if [ "$(id -u)" -eq 0 ]; then
+    echo "SKIP  permission cases (root ignores mode bits)"
+else
+    mkdir -p "$H/.config/locked/inner"
+    chmod 000 "$H/.config/locked"
+    audit_ro "$EVI/locked.out" "$H"
+    expect_same "unreadable scan subdir: audit exits 1" 1 "$RC"
+    has_line "unreadable scan subdir: INCOMPLETE" "$EVI/locked.out" \
+        "[X]  INCOMPLETE      $H/.config (find exited 1)"
+    if grep -q 'no orphan links\.$' "$EVI/locked.out"; then
+        fail "unreadable scan subdir: no clean summary"
+    else
+        pass "unreadable scan subdir: no clean summary"
+    fi
+    chmod 755 "$H/.config/locked"
+    rm -rf "$H/.config/locked"
+
+    chmod 000 "$H/.local"
+    audit_ro "$EVI/local.out" "$H"
+    expect_same "unreachable scan dir: audit exits 1" 1 "$RC"
+    has_line "unreachable scan dir: INCOMPLETE" "$EVI/local.out" \
+        "[X]  INCOMPLETE      $H/.local/bin (cannot confirm the scan dir is absent: $H/.local)"
+    chmod 755 "$H/.local"
+
+    mkdir -p "$CO/dotfiles-b/locked/sub"
+    touch "$CO/dotfiles-b/locked/sub/tool"
+    ln -s "$CO/dotfiles-b/locked/sub/tool" "$H/bin/hidden"
+    ln -s "$CO/dotfiles-b/locked/sub/tool" "$CO/dotfiles-b/bin/chain"
+    ln -s "$CO/dotfiles-b/bin/chain" "$H/bin/chain"
+    ln -s locked/sub "$CO/dotfiles-b/linkdir"
+    ln -s "$CO/dotfiles-b/linkdir/tool" "$H/bin/via-locked"
+    ln -s "$CO/dotfiles-b/locked/../bin/present" "$H/bin/dotdot"
+    chmod 000 "$CO/dotfiles-b/locked"
+    audit_ro "$EVI/hidden.out" "$H" --root "$CO/dotfiles-b"
+    expect_same "unreachable targets: audit exits 1" 1 "$RC"
+    has_line "unsearchable target dir: INCOMPLETE" "$EVI/hidden.out" \
+        "[X]  INCOMPLETE      $H/bin/hidden (cannot confirm the target is missing: $CO/dotfiles-b/locked)"
+    has_line "leaf symlink into an unsearchable dir: INCOMPLETE" "$EVI/hidden.out" \
+        "[X]  INCOMPLETE      $H/bin/chain (cannot confirm the target is missing: $CO/dotfiles-b/bin/chain)"
+    has_line "dir symlink into an unsearchable dir: INCOMPLETE" "$EVI/hidden.out" \
+        "[X]  INCOMPLETE      $H/bin/via-locked (cannot confirm the target is missing: $CO/dotfiles-b/linkdir)"
+    has_line "'..' after an unsearchable dir: INCOMPLETE" "$EVI/hidden.out" \
+        "[X]  INCOMPLETE      $H/bin/dotdot (cannot confirm the target is missing: $CO/dotfiles-b/locked)"
+    if grep -qE -- "ORPHAN-DANGLING $H/bin/(hidden|chain|via-locked|dotdot) " "$EVI/hidden.out"; then
+        fail "unreachable targets: none called missing"
+    else
+        pass "unreachable targets: none called missing"
+    fi
+    chmod 755 "$CO/dotfiles-b/locked"
+    rm -f "$H/bin/hidden" "$H/bin/chain" "$H/bin/via-locked" "$H/bin/dotdot"
+fi
+
+KILL="$TMP/kill-bin"
+mkdir -p "$KILL"
+cat >"$KILL/find" <<'EOF'
+#!/bin/sh
+# Emits one candidate, then kills the enumeration subshell before its record.
+printf '%s\0' "$HOME/.zshrc"
+kill -9 "$PPID"
+EOF
+chmod +x "$KILL/find"
+AUDIT_PATH="$KILL:$PATH"
+audit_ro "$EVI/killed.out" "$H"
+unset AUDIT_PATH
+expect_same "killed enumeration: audit exits 1" 1 "$RC"
+has_line "killed enumeration: INCOMPLETE" "$EVI/killed.out" \
+    "[X]  INCOMPLETE      $H/bin (enumeration ended without a completion record)"
+
 if [ "$RO_RUNS" -gt 0 ] && [ "$RO_BAD" -eq 0 ]; then
     pass "every audit run left fixtures/ unchanged ($RO_RUNS runs)"
 else
