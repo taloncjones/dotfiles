@@ -2377,6 +2377,8 @@ grep -Fq 'tasks/<task_id>.lessons.md' "$P"
 grep -Fq 'artifacts/<task_id>/review-*/findings.md' "$P"
 grep -Fq '.todos/completed/' "$P"
 grep -Fq 'task id from the PR' "$P"
+grep -Fq "on every run" "$P"
+grep -Fq "grep -E '^(- )?LESSON:'" "$P"
 if grep -Fq 'only when the record' "$P"; then exit 1; fi
 if grep -Fq '.todos/done/' "$P"; then exit 1; fi
 grep -Fq '<task_id>.lessons.md' "$R/state-layout.md"
