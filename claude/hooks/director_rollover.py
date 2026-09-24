@@ -38,7 +38,6 @@ WARNING = (
     "Run the herdr-orchestration section-1 preflight; if it reports BUSY, stop\n"
     "and ask the human (takeover is a human decision)."
 )
-INFO_MARKER = "[INFO] herdr director rollover"
 AUTO_RESUME = 'auto-resume: a "resume director" line will arrive in this pane when it is idle.'
 RESUME_LINE = "resume director"
 RESUME_POLL_SECS = 1
@@ -156,8 +155,6 @@ def resume_helper(argv) -> int:
             return False, None, "poll-error"
         if not idle:
             return False, text, "agent-not-idle"
-        if INFO_MARKER not in text:
-            return False, text, "no-info-block"
         if core.current_input(text) != "":
             return False, text, "input-not-empty"
         return True, text, "ready"

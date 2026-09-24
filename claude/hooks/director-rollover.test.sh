@@ -591,7 +591,36 @@ PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resu
     --poll-secs 0.05 --settle-secs 0 --max-wait-secs 3
 ! grep -q '^pane run' "$FX/herdr.log"
 LOG=$(find "$FX" -name rollover.jsonl)
-python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "no-info-block"), r' "$LOG"
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "input-not-empty"), r' "$LOG"
+SH
+
+check "resume-helper: idle empty prompt with no INFO block still sends (additionalContext never renders)" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo idle > "$FX/agent_status"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write(rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5
+test "$(grep -c '^pane run w9:p1 resume director$' "$FX/herdr.log")" = 1
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="sent", r' "$LOG"
 SH
 
 check "resume-helper: agent still working -> timeout, nothing sent" <<'SH'
