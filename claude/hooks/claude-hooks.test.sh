@@ -367,6 +367,7 @@ want = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
@@ -1165,6 +1166,7 @@ want_bash = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
 ]
 ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
