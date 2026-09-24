@@ -190,6 +190,36 @@ def split_heredocs(command: str) -> tuple[str, list[str], bool]:
     return "".join(out), bodies, expands
 
 
+def scan_subst(command: str, start: int) -> int:
+    """Index just past the '(' at `start`'s matching close, tracking nested
+    parens and quotes the way split_heredocs tracks `$(` -- so an unquoted
+    `$(...)` / `$((...))` is consumed whole instead of stopping at its first
+    ')'."""
+    depth, i, n = 0, start, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            i = command.index("'", i + 1) + 1
+            continue
+        if c == '"':
+            i += 1
+            while command[i] != '"':
+                i += 2 if command[i] == "\\" else 1
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
 def lex(command: str) -> list[tuple[str, bool]]:
     """(text, is_operator) tokens, quotes removed from words.
 
@@ -238,6 +268,11 @@ def lex(command: str) -> list[tuple[str, bool]]:
             word.append(c)
             started = True
             i += 1
+        elif c == "(" and word and word[-1] == "$":
+            end = scan_subst(command, i)
+            word.append(command[i:end])
+            started = True
+            i = end
         elif c in OPERATORS:
             flush()
             op = command[i : i + 2] if command[i : i + 2] in ("&&", "||") else c

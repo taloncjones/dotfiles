@@ -345,6 +345,12 @@ deny "else wraps the gh segment" "$R" "if false; then :; else gh pr comment 5 --
 deny "ship-style duplicate check wraps the gh segment" "$R" "if ! gh pr view 5 --comments | grep -q 'co-review-audit head=$H'; then gh pr comment 5 --body '$AUDIT_BAD'; fi"
 deny "control: plain gh segment still denied" "$R" "gh pr comment 5 --body '$AUDIT_BAD'"
 
+# --- repair round 1: unquoted command/arithmetic substitution before the body flag (B2) ---
+deny "unquoted command substitution before body" "$R" "gh pr comment \$(echo 5) --body '$AUDIT_BAD'"
+deny "unquoted nested gh substitution before body-file" "$R" "gh pr comment \$(gh pr view --json number -q .number) --body-file keyword-bad.md"
+deny "unquoted arithmetic substitution before body" "$R" "gh pr comment \$((4+1)) --body '$AUDIT_BAD'"
+deny "control: backtick substitution before body still denied" "$R" "gh pr comment \`echo 5\` --body '$AUDIT_BAD'"
+
 # --- installed layouts: the shared modules resolve through symlinks ---
 mkdir -p "$FIX/home/.claude" "$FIX/codex/hooks"
 ln -s "$PWD/claude/hooks" "$FIX/home/.claude/hooks"
