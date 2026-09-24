@@ -334,6 +334,17 @@ after=$(find "$C/.git/objects" -type f | wc -l)
 if [ "$before" -eq "$after" ]; then ok "verification fetched nothing"; else no "verification fetched nothing"; fi
 if g -C "$C" cat-file -t "$NEW" >/dev/null 2>&1; then ok "control: a plain lookup would fetch"; else no "control: a plain lookup would fetch"; fi
 
+# --- repair round 1: gh behind a shell keyword (B1) ---
+AUDIT_BAD="<!-- co-review-audit head=$FAKE run=r -->"
+printf '%s\n' "$AUDIT_BAD" >"$R/keyword-bad.md"
+deny "if-then wraps the gh segment" "$R" "if true; then gh pr comment 5 --body '$AUDIT_BAD'; fi"
+deny "brace group wraps the gh segment" "$R" "{ gh pr comment 5 --body '$AUDIT_BAD'; }"
+deny "bang wraps the gh segment" "$R" "! gh pr comment 5 --body '$AUDIT_BAD'"
+deny "for-do wraps the gh segment" "$R" "for n in 5; do gh pr comment \"\$n\" --body '$AUDIT_BAD'; done"
+deny "else wraps the gh segment" "$R" "if false; then :; else gh pr comment 5 --body-file keyword-bad.md; fi"
+deny "ship-style duplicate check wraps the gh segment" "$R" "if ! gh pr view 5 --comments | grep -q 'co-review-audit head=$H'; then gh pr comment 5 --body '$AUDIT_BAD'; fi"
+deny "control: plain gh segment still denied" "$R" "gh pr comment 5 --body '$AUDIT_BAD'"
+
 # --- installed layouts: the shared modules resolve through symlinks ---
 mkdir -p "$FIX/home/.claude" "$FIX/codex/hooks"
 ln -s "$PWD/claude/hooks" "$FIX/home/.claude/hooks"
