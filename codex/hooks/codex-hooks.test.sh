@@ -155,6 +155,23 @@ assert_allows "rm guard ignores malformed shell input" \
     claude/hooks/rm_guard.py \
     '{"tool_name":"exec_command","tool_input":{"args":[]}}'
 
+# Planning-artifact guard through the Codex payload shapes. A literal
+# protected pathspec denies without a resolvable repository (the cwd must
+# never be a real checkout, or the temp-root exemption could flip the deny);
+# an unrelated path allows.
+assert_denies_2 "planning guard blocks Codex exec_command spec add" \
+    claude/hooks/planning_artifact_guard.py \
+    '{"tool_name":"exec_command","cwd":"/nonexistent-planning-guard/project","tool_input":{"cmd":"git add docs/specs/x.md"}}'
+assert_denies_2 "planning guard blocks nested unified_exec contract add" \
+    claude/hooks/planning_artifact_guard.py \
+    '{"tool_name":"unified_exec","tool_input":{"args":{"cmd":"git add -f claude/contracts/x.json","workdir":"/nonexistent-planning-guard/project"}}}'
+assert_allows "planning guard allows an unrelated Codex add" \
+    claude/hooks/planning_artifact_guard.py \
+    '{"tool_name":"shell_command","cwd":"/nonexistent-planning-guard/project","tool_input":{"command":"git add README.md"}}'
+assert_allows "planning guard ignores a non-shell tool" \
+    claude/hooks/planning_artifact_guard.py \
+    '{"tool_name":"Write","tool_input":{"command":"git add docs/specs/x.md"}}'
+
 if python3 - <<'PY'
 import importlib.util
 

@@ -1647,15 +1647,15 @@ import json, sys
 pre = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
 def cmds(matcher):
     return [h["command"] for e in pre if e.get("matcher") == matcher for h in e["hooks"]]
-ok = cmds("Bash")[-1] == "~/.claude/hooks/orch_edit_guard.py" \
+ok = cmds("Bash")[-2:] == ["~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py"] \
     and cmds("Edit|Write") == ["~/.claude/hooks/protect_claude_md.py", "~/.claude/hooks/orch_edit_guard.py"] \
     and sum(c == "~/.claude/hooks/orch_edit_guard.py" for m in ("Bash", "Edit|Write") for c in cmds(m)) == 2
 sys.exit(0 if ok else 1)
 PY
     then
-        printf 'PASS  static: template registers the guard last in the Bash and Edit|Write groups\n'; PASS=$((PASS + 1))
+        printf 'PASS  static: template registers the guard last in Edit|Write and before the planning guard in Bash\n'; PASS=$((PASS + 1))
     else
-        printf 'FAIL  static: template registers the guard last in the Bash and Edit|Write groups\n' >&2; FAIL=$((FAIL + 1))
+        printf 'FAIL  static: template registers the guard last in Edit|Write and before the planning guard in Bash\n' >&2; FAIL=$((FAIL + 1))
     fi
     if grep -qx 'sh claude/hooks/orch-edit-guard.test.sh' bin/dotfiles-tests; then
         printf 'PASS  static: suite is registered in bin/dotfiles-tests\n'; PASS=$((PASS + 1))

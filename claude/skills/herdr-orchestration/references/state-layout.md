@@ -542,7 +542,7 @@ observed model/effort are separate fields or unknown when not exposed.
 
 `contract_path` (worktree-relative) and `contract_sha256` are the
 verification-contract pin, written by the director at implement dispatch
-(the sha256 of the committed contract blob; see the contract section below).
+(the sha256 of the untracked contract file on disk; see the contract section below).
 Records predating the feature lack both fields -- `verify-contract` then
 exits 5 and the skill's grandfather rule applies. `merge_check` records the
 latest post-rebase speculative merge check:
@@ -787,13 +787,17 @@ Append-only, **per-workspace**, written only by that workspace's hook
 director merges across files on read (`$CORE status`). See
 `event-schema.md` for the event vocabulary and fold rule.
 
-### `claude/contracts/<task_id>-contract.json` -- verification contract (branch-committed)
+### `claude/contracts/<task_id>-contract.json` -- verification contract (worktree-local, untracked and ignored)
 
-The only per-task artifact NOT under `STATE_ROOT`: committed normally on the
-task branch (no `git add -f` needed -- `claude/` is tracked), authored by the
-plan worker, pinned by hash into the task record at implement dispatch, and
-executed by the `verify-contract` verb (worker gate, pre-review gate,
-post-rebase merge gate -- SKILL.md sections 2, 4, and 6).
+The only per-task artifact that lives in the task worktree rather than under
+`STATE_ROOT`: written by the plan worker (or `mech-contract`), never
+committed (ignored machine-wide by `git/.gitignore_global` and refused by
+`planning_artifact_guard.py`), pinned by hash into the task record at
+implement dispatch, executed by the `verify-contract` verb (worker gate,
+pre-review gate, post-rebase merge gate -- SKILL.md sections 2, 4, and 6),
+and frozen by the plan worker as `contract-<hex>.json` beside the frozen
+spec and plan under `artifacts/<task_id>/<launch_id>/` (the director's
+recovery source when the worktree copy is missing; a mech contract has none).
 
 ```json
 {
@@ -814,5 +818,5 @@ commands, each `{name, run[, timeout_secs 1-3600]}` with unique non-blank
 names and no unknown keys. Commands run via `sh -c` from the worktree root
 and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
 writes, no machine-state mutation, no network, no secret echo. Full
-requirements: `docs/specs/2026-09-01-verification-contracts.md` (branch-only)
-and the authoring rules echoed in `brief-template.md`.
+requirements: the task's private spec under `docs/superpowers/specs/` and the
+authoring rules echoed in `brief-template.md`.
