@@ -3018,8 +3018,11 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     plan_completed = bool(head and plan_ws
                           and is_plan_completed(task, done, head, plan_ws, payload_root))
     reviewed = bool(head and rev_ws and is_reviewed(task, review, head, rev_ws))
+    # Clearing review_head_sha (the stale-verdict reset) retires every
+    # earlier verdict, as it already does for is_reviewed.
     review_correlates = bool(
         review and rev_ws and head
+        and task.get("review_head_sha") == head
         and attempt_matches(task, review, "review", rev_ws)
         and review.get("reviewed_head_sha") == head
         and _findings_evidence_ok(review))
@@ -5412,6 +5415,7 @@ def _main(argv=None) -> int:
             print(f"poll: failed ({reason})")
         payload_root = state_root().parent
         changed = poll is None
+        now_ns = time.time_ns()
         for tf in task_record_files(rd / "tasks"):
             try:
                 task = json.loads(read_payload_text(tf))
@@ -5438,6 +5442,12 @@ def _main(argv=None) -> int:
                   f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
                   f"dirty={f['dirty']} done={f['done']} review={f['review']} "
                   f"hint={f['hint']} action={f['action']} wake={f['wake']}")
+            if task.get("status") == "review-dispatched":
+                d = review_deadline(rd, task, now_ns)
+                if d["state"] in ("overdue", "expired"):
+                    print(f"review-overdue {f['task_id']} state={d['state']} "
+                          f"launch={d['launch']} remaining={d['remaining']}")
+                    changed = True
         print(f"changed: {'yes' if changed else 'no'}")
         return 0
     if ns.cmd == "review-deadlines":

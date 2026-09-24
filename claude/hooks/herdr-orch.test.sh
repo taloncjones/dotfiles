@@ -10038,6 +10038,60 @@ assert "review-deadline task=PROJ-4 launch=unknown remaining=unknown state=unkno
 assert "review-deadline task=PROJ-5 launch=rev-1 remaining=0 state=expired" + tail in out, out
 PY
 
+check "checkin: review-overdue line for an expired review, silent while running" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+BASE=$(printf 'b%.0s' $(seq 1 40))
+NOW=$(python3 -c 'import time; print(time.time_ns())')
+OLD=$(python3 -c 'import time; print(time.time_ns() - 5000 * 10**9)')
+for pair in "PROJ-1 $NOW" "PROJ-2 $OLD"; do
+  set -- $pair
+  $CLI write-task --repo-slug slug-x --task-id "$1" --session S --fence "$F" \
+    --json '{"task_id":"'"$1"'","status":"review-dispatched","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"rev-'"$1"'","pane_id":"w3:p2","source_head_sha":"'"$BASE"'","started_ns":'"$2"'}]}'
+done
+printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"working"}]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w3"}]}}' > "$root/w.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'review-overdue PROJ-2 state=expired launch=rev-PROJ-2 remaining=0'
+! printf '%s\n' "$out" | grep -q '^review-overdue PROJ-1 '
+printf '%s\n' "$out" | grep -qx 'changed: yes'
+SH
+
+check "checkin: a late verdict after a stale-verdict reset does not correlate" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "x"); base = g("rev-parse", "HEAD")
+g("commit", "--allow-empty", "-q", "-m", "y"); head = g("rev-parse", "HEAD")
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("One blocker. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L2", "pane_id": "pane2", "source_head_sha": head}
+task = {"v": 1, "task_id": "PROJ-1", "status": "completed", "base_sha": base,
+        "review_head_sha": None, "worktree": wt, "workers": [row]}
+late = dict(row, task_id="PROJ-1", outcome="changes-requested", reviewed_head_sha=head,
+            blocking_count=1, findings_ref=findings, findings_sha256=digest)
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(late))
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["review_correlates"] is False and facts["action"] == "dispatch-review", facts
+facts = c.checkin_facts(rd, dict(task, status="review-dispatched", review_head_sha=head),
+                        poll, c.state_root().parent)
+assert facts["review_correlates"] is True and facts["action"] == "changes-requested", facts
+PY
+
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
 $LOAD
 s = open("claude/skills/herdr-orchestration/SKILL.md").read()
