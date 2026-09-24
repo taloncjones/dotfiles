@@ -500,5 +500,38 @@ else
     fail ".zshenv sources ~/.zshenv.local (got '$val')"
 fi
 
+# run_case expects one "arg=<value>" line per argv element; restore that
+# stub shape (the two rewrites above left the boundary-losing "argv=$*" one).
+cat >"$TMP/bin/claude" <<'EOF'
+#!/bin/sh
+{
+    printf 'cfg=%s\n' "${CLAUDE_CONFIG_DIR-UNSET}"
+    for a in "$@"; do printf 'arg=%s\n' "$a"; done
+} > "$RECORD"
+exit 0
+EOF
+chmod +x "$TMP/bin/claude"
+
+PREFIX='--agent director --settings {"crossSessionInbound":"accept"}'
+rec="$TMP/rec"; : >"$rec"
+RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
+    zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && unset HERDR_ENV && director" >/dev/null 2>"$TMP/err"
+rc=$?
+if [ "$rc" = 2 ] && [ ! -s "$rec" ] && grep -q 'HERDR_ENV is not 1' "$TMP/err"; then
+    pass "director refuses outside a herdr pane"
+else
+    fail "director refuses outside a herdr pane (rc=$rc)"
+fi
+run_case "director adds manual permission mode by default" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director" "UNSET" "$PREFIX --permission-mode manual"
+run_case "director passes a caller permission mode through" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode bypassPermissions" \
+    "UNSET" "$PREFIX --permission-mode bypassPermissions"
+run_case "director passes --permission-mode=value through" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode=auto" \
+    "UNSET" "$PREFIX --permission-mode=auto"
+run_case "director keeps work-account routing" \
+    "$SBHOME/Git/work/proj" "HERDR_ENV=1 director" "$SBHOME/.claude-work"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

@@ -1,6 +1,6 @@
 ---
 name: director
-description: Standing per-repo director. Launch with `claude --agent director`. Inside a herdr pane (HERDR_ENV=1) it runs the herdr-orchestration preflight without a trigger phrase - claim the repo lease, label the workspace, arm the wake watch, and report the queue - then dispatches and supervises delegated workers. In a plain session it is the team-roles director - reads handoff records, assigns leads, resolves cross-task conflicts - and owns no lease. Never edits repo files itself.
+description: Standing per-repo director. Launch with the `director` shell function. Inside a herdr pane (HERDR_ENV=1) it runs the herdr-orchestration preflight without a trigger phrase - claim the repo lease, label the workspace, arm the silent backstop (or, without messaging, the wake watch), and report the queue - then dispatches and supervises delegated workers. In a plain session it is the team-roles director - reads handoff records, assigns leads, resolves cross-task conflicts - and owns no lease. Never edits repo files itself.
 ---
 
 You are the standing per-repo director.
@@ -10,7 +10,9 @@ On launch:
 1. Check `HERDR_ENV`.
    - If it is `1`, invoke the `herdr-orchestration` skill and execute its
      section-1 preflight exactly as written: claim ownership, label the
-     workspace, arm the wake watch, load config. Then continue with step 2.
+     workspace, arm the backstop (or, without messaging, the wake watch),
+     load config. Then continue with step 2. Launch it with the `director`
+     shell function.
    - Otherwise, act as the `team-roles.md` director for plain sessions
      and skip steps 2 and 3. Run `handoff list` (the session-start notice
      already prints it), read status from the records, and assign work by

@@ -198,8 +198,18 @@ ok "skill: native launch checks route readiness and availability" \
   "grep -Fq -- 'returned readiness, availability reason, model, and effort' $SKILL"
 ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
   "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $SKILL"
-ok "skill: watch armed at relaxed cadence when messaging is live, default otherwise" \
-  "grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
+ok "skill: messaging-live director arms only the undelivered backstop" \
+  "grep -Fq -- '--undelivered-only --exit-on-signal' $SKILL && ! grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
+ok "skill: retry and deadline timers replace the heartbeat" \
+  "grep -Fq 'sleep 300' $SKILL && grep -Fq 'review-deadlines' $SKILL && grep -Fq 'sleep <remaining + 30>' $SKILL && ! grep -Fq 'let the watch (or the next push)' $SKILL && ! grep -Fq 'at the next heartbeat' $SKILL"
+ok "skill: unverifiable evidence is the integrity halt, never retried" \
+  "grep -Fq 'unverifiable-evidence' $SKILL && grep -Fq 'not retried' $SKILL"
+ok "skill: dirty worktree after a Claude review is reported" \
+  "grep -Fq 'dirty=yes' $SKILL"
+ok "skill: run-think always runs in the background" \
+  "grep -Fq 'run-think\` always runs under \`Bash run_in_background\`' $SKILL && ! grep -Fq 'both are watch wakes' $SKILL"
+ok "agent: director describes the backstop and the launch function" \
+  "grep -Fq 'backstop' claude/agents/director.md && grep -Fq '\`director\`' claude/agents/director.md"
 ok "skill: idle-subscription re-wake mechanism is retired" \
   "! grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
 ok "skill: no-lost-wake rule, capped at three passes" \

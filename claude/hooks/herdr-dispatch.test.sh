@@ -846,13 +846,17 @@ def test_claude_reviewer_pane_launch_passes_strict_mcp_config():
         start = next(
             call for call in fixture.calls() if call[:2] == ["agent", "start"]
         )
+        settings = json.dumps({"permissions": {"deny": [
+            f"Edit(/{fixture.repo}/**)", f"Write(/{fixture.repo}/**)"]}})
         assert start[start.index("--") + 1 :] == [
             "--model",
             "sonnet",
             "--effort",
             "high",
             "--permission-mode",
-            "plan",
+            "auto",
+            "--settings",
+            settings,
             "--strict-mcp-config",
         ], start
     finally:
