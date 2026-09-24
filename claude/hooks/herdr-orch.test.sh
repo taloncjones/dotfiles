@@ -2368,6 +2368,12 @@ grep -q '^### Lesson harvest$' "$S"
 grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$S"
 grep -Fq 'tasks/<task_id>.lessons.md' "$S"
 grep -Fq 'skip the Lesson harvest' "$S"
+grep -Fq 'tasks/<task_id>.lessons.md' "$P"
+grep -Fq 'artifacts/<task_id>/review-*/findings.md' "$P"
+grep -Fq '.todos/completed/' "$P"
+grep -Fq 'task id from the PR' "$P"
+if grep -Fq 'only when the record' "$P"; then exit 1; fi
+if grep -Fq '.todos/done/' "$P"; then exit 1; fi
 SH
 
 check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
