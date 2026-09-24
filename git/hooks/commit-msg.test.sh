@@ -369,6 +369,11 @@ assert_blocks "C3 refuses a co-author with a token glued to another word" "${BOD
 
 Co-Authored-By: ${CLAUDE_NAME}Bot <bot@example.com>"
 
+GPT_PREFIXED_NAME="Auto""GPT"
+assert_blocks "C4 refuses a co-author with a prefix glued in front of a token" "${BODY_MSG}
+
+Co-Authored-By: ${GPT_PREFIXED_NAME} <agent@example.com>"
+
 # --- Environment cases ------------------------------------------------------
 # Failure paths are forced with PATH shims (a tool that always exits 1), not
 # filesystem permissions, so they behave identically as root and as a user.

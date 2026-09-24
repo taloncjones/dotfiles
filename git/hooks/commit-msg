@@ -53,8 +53,24 @@ if ! agent_alt="$(LC_ALL=C awk '
   exit 1
 fi
 
+# The block rule below needs "aider" (collides with surnames like Raider) to
+# require a leading boundary while every other token stays a plain substring
+# match, so split the list once here.
+agent_alt_bounded=""
+agent_alt_substring=""
+IFS='|' read -r -a agent_token_list <<<"$agent_alt"
+for agent_token in "${agent_token_list[@]}"; do
+  if [[ "$agent_token" == "aider" ]]; then
+    agent_alt_bounded="$agent_token"
+  else
+    agent_alt_substring="${agent_alt_substring:+${agent_alt_substring}|}${agent_token}"
+  fi
+done
+
 # Lowercase POSIX ERE, matched against tolower($0) so BSD and GNU awk agree on
 # case-insensitivity. Bracket classes only: no \b, no \s, no backslash escapes.
+# Whole-word only: a token glued to another word (ClaudeBot, AutoGPT) is left
+# for the block rule below, which refuses it instead of silently stripping it.
 re_coauthor="^[[:space:]]*co-authored-by:(.*[^[:alnum:]])?(${agent_alt})([^[:alnum:]]|$)"
 re_bot_coauthor='^[[:space:]]*co-authored-by:.*<(no-?reply@|[^>]*[[]bot[]]@)'
 re_session="^[[:space:]]*((${agent_alt})-session:|session:|[a-z-]*session[a-z-]*:[[:space:]]*https?://)"
@@ -141,9 +157,14 @@ if printf '%s\n' "$body" | rg -qi "generated[[:space:]]+(by|with)[[:space:]]+(${
   exit 1
 fi
 
-# Leading boundary only: surnames that contain a token (Raider) pass, while
-# prefixed agent names (<token>Bot) stay blocked.
-if printf '%s\n' "$message" | rg -qi "co-authored-by:.*(\\b(${agent_alt})|ai\\b)"; then
+# Substring match for most tokens, so a glued prefix (AutoGPT) or a glued
+# suffix (ClaudeBot) still blocks; only "aider" gets a leading boundary so a
+# surname (Raider) passes.
+block_tokens="$agent_alt_substring"
+if [[ -n "$agent_alt_bounded" ]]; then
+  block_tokens="${block_tokens}|\\b(${agent_alt_bounded})"
+fi
+if printf '%s\n' "$message" | rg -qi "co-authored-by:.*(${block_tokens}|ai\\b)"; then
   printf 'Blocked: commit message contains an AI/tool co-author line.\n' >&2
   exit 1
 fi
