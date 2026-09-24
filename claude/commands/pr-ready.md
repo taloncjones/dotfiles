@@ -118,7 +118,7 @@ Unless `--skip-tests` specified:
 - Check off items that correspond to passing tests
 - Add test results as checkbox items with pass/skip counts and relevant metrics (e.g., timing)
 - Format: `- [x] \`test_file.py\` - X passed, Y skipped (notes)`
-- Update PR body with `gh pr edit`
+- Update PR body with `gh pr edit` (in a herdr session the owner first types `edit the pr body`)
 
 **Step 7: Post Jira comment (if tests pass)**
 

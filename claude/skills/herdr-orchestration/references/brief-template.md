@@ -73,6 +73,8 @@ native child agents under the user's delegation policy, not Claude Workflow.
 - Workflow/subagent helpers never call `herdr_orch_core.py`; only you emit
   the completion record.
 - Never merge, push directly to the default branch, or open a PR yourself.
+- Post nothing on GitHub: no PR comments, reviews, replies to reviewers, or
+  PR body edits. Put drafts in your report.
 - Nobody is watching this pane to reply, so a message with no tool call
   stalls the task. Do not end a turn with a summary that
   announces the next step instead of taking it, an offer to carry on, a
@@ -184,6 +186,8 @@ You are a Claude budget-capped mechanical worker: at most <max_turns> turns and
 $<max_budget_usd>. Do only the mechanical task described. Do not brainstorm,
 spec, or plan. If the task turns out to need design, commit what is safe and
 emit `paused --reason needs_design`. Commit as you go.
+Post nothing on GitHub: no PR comments, reviews, replies to reviewers, or PR
+body edits. Put drafts in your report.
 
 ## Workspace
 - Branch: <branch>
@@ -234,7 +238,7 @@ Run the native `review-change` skill over this revision's relevant diff,
 intended behavior, and affected callers. You are a fresh agent in the task's
 own worktree. Report blocking findings, useful advisories, coverage gaps, and
 safe reproduction evidence. Do not edit the branch, invoke co-review or another
-reviewer, post externally, push, merge, or open a PR.
+reviewer, post anything (drafts go in the findings report), push, merge, or open a PR.
 
 ## Close
 When review is complete:

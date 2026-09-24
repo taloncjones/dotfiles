@@ -614,6 +614,10 @@ prose is not a substitute; the prompt is what raises the notification on the
 user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
 
+An outward-posting action (PR comment, review, reply, body edit, Jira
+comment) is never an `AskUserQuestion` option, recommended or not: ask in
+prose for the typed go and end the turn.
+
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
 run preflight (refresh the claim), then this section, unchanged. Never treat
@@ -1409,6 +1413,11 @@ Rules (these are outward-facing writes, so treat them carefully):
   refusal, is recorded in `tasks/orch-edits.jsonl`.
 - The director never merges, pushes, or opens a PR. Merge/`/ship`/
   `/post-merge` remain explicit human actions.
+- The only agent post on a PR is the newest co-review marker, posted by the
+  director only after the owner types `post it` as the whole message
+  (co-review Publish). No replies to reviewers -- draft them. PR body edits
+  need `edit the pr body`. Enforced in herdr sessions by
+  `claude/hooks/pr_post_guard.py`.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
   nothing under it is ever git-tracked, and no marker is written into any
   worktree.
