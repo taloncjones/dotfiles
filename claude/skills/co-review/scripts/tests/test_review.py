@@ -749,9 +749,16 @@ class ReviewHelperTests(unittest.TestCase):
                         DOTFILES_ROOT
                         / f"{host}/skills/{partner}-{kind}-review/SKILL.md"
                     )
-                    snippet = (
-                        skill.read_text().rsplit("```bash\n", 1)[1].split("```", 1)[0]
-                    )
+                    content = skill.read_text()
+                    round_1_marker = "## Round 1:"
+                    if round_1_marker in content:
+                        snippet = (
+                            content.split(round_1_marker, 1)[1]
+                            .split("```bash\n", 1)[1]
+                            .split("```", 1)[0]
+                        )
+                    else:
+                        snippet = content.rsplit("```bash\n", 1)[1].split("```", 1)[0]
                     snippet = snippet.replace(
                         "uv run --no-project python", shlex.quote(sys.executable)
                     )
