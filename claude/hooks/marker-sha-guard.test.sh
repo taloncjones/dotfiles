@@ -355,6 +355,18 @@ deny "control: backtick substitution before body still denied" "$R" "gh pr comme
 deny "ansi-c body spreads the marker to line two" "$R" "gh pr comment 5 --body \$'Review done\n$AUDIT_BAD'"
 deny "ansi-c body wraps a bad marker directly" "$R" "gh pr comment 5 --body \$'$AUDIT_BAD'"
 
+# --- repair round 2: an untaken branch's state leaks into a later gh segment (B3) ---
+mkdir -p "$R/sub"
+printf '%s\n' "$BAD" >"$R/x.md"
+printf '%s\n' "$BAD" >"$R/bad.md"
+printf '%s\n' "$GOOD" >"$R/sub/x.md"
+deny "else does not inherit an untaken cd" "$R" "if [ 1 = 2 ]; then cd sub; else gh pr comment 5 --body-file x.md; fi"
+deny "else does not inherit an untaken cd, target missing" "$R" "if [ 1 = 2 ]; then cd sub; else gh pr comment 5 --body-file bad.md; fi"
+deny "elif does not inherit an untaken cd" "$R" "if [ 1 = 2 ]; then cd sub; elif true; then gh pr comment 5 --body-file x.md; fi"
+deny "else does not inherit an untaken assignment" "$R" "F=bad.md; if [ 1 = 2 ]; then F=good.md; else gh pr comment 5 --body-file \"\$F\"; fi"
+deny "control: plain body-file still denied" "$R" "gh pr comment 5 --body-file x.md"
+allow "control: a straight-line cd still resolves" "$R" "cd sub && gh pr comment 5 --body-file x.md"
+
 # --- installed layouts: the shared modules resolve through symlinks ---
 mkdir -p "$FIX/home/.claude" "$FIX/codex/hooks"
 ln -s "$PWD/claude/hooks" "$FIX/home/.claude/hooks"

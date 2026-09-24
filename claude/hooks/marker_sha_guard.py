@@ -117,6 +117,10 @@ class Walk:
     assigned: dict = field(default_factory=dict)
     rewrites: bool = False
     conditional: bool = False
+    # Names last assigned behind a branch that may never have run: unlike an
+    # ordinarily-ambiguous value (skipped or after `&&`), these deny even
+    # without a marker hint, since the guard once tracked them for certain.
+    uncertain_vars: set = field(default_factory=set)
 
 
 def split_heredocs(command: str) -> tuple[str, list[str], bool]:
@@ -311,6 +315,13 @@ def expand_path(word: str, walk: Walk) -> str | None:
     return literal(path)
 
 
+def references_uncertain(word: str, walk: Walk) -> bool:
+    """True when `word` expands a variable last assigned behind a branch
+    that may never have run."""
+    names = (m.group(1) or m.group(2) for m in VARIABLE.finditer(word))
+    return any(name in walk.uncertain_vars for name in names)
+
+
 def absolute(path: str, walk: Walk) -> str | None:
     if os.path.isabs(path):
         return os.path.normpath(path)
@@ -448,6 +459,8 @@ def gh_sources(words: list[str], walk: Walk):
             full = absolute(path, walk) if path is not None else None
             if path is not None and full is None:
                 problem = problem or UNKNOWN_DIRECTORY
+            elif path is None and references_uncertain(value, walk):
+                problem = problem or UNKNOWN_DIRECTORY
             text = read_body(full) if full else None
             # The hook runs before the command: after an unsafe prefix the
             # file gh reads may differ from the one read here.
@@ -554,9 +567,14 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
     """Apply one segment to the walk state; return a denial reason or None.
 
     A cd or assignment is certain only at the start of a list and not piped
-    or backgrounded; after `&&` a cd holds while the `&&` chain continues."""
+    or backgrounded; after `&&` a cd holds while the `&&` chain continues.
+    A segment behind a stripped reserved word (`then`, `else`, ...) may
+    never run, so its cd/assignment is uncertain the same way, whether or
+    not it also follows `&&`."""
     words = rm_guard.strip_prefixes(segment)
+    branched = False
     while words and words[0] in RESERVED_WORDS:
+        branched = True
         words = rm_guard.strip_prefixes(words[1:])
     prefix = segment[: len(segment) - len(words)]
     seg_env = dict(t.split("=", 1) for t in prefix if rm_guard.is_env_assignment(t))
@@ -584,14 +602,22 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
         )
         for name, value in pairs:
             plain = "$" not in value and "`" not in value
-            certain = before != "&&" and not skipped
+            certain = before != "&&" and not skipped and not branched
             walk.assigned[name] = value if plain and certain else None
+            if certain:
+                walk.uncertain_vars.discard(name)
+            elif branched:
+                walk.uncertain_vars.add(name)
     elif head == "unset":
         for name in words[1:]:
-            walk.assigned[name] = None if before == "&&" or skipped else ""
+            walk.assigned[name] = None if before == "&&" or skipped or branched else ""
+            if branched:
+                walk.uncertain_vars.add(name)
+            elif not (before == "&&" or skipped):
+                walk.uncertain_vars.discard(name)
     elif head == "cd":
-        walk.cwd = None if skipped else cd_target(words, walk)
-        walk.conditional = before == "&&" and not skipped
+        walk.cwd = None if skipped or branched else cd_target(words, walk)
+        walk.conditional = before == "&&" and not skipped and not branched
     return None
 
 
