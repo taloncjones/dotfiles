@@ -37,7 +37,8 @@ role.
   same task ID whose first line starts with `working:`, `blocked:`, or
   `done:`; a `done:` line names the commit and the test command. The lead
   reads it with `handoff load` and accepts it by saving its own next record
-  naming the worker's record ID and the commit it verified.
+  naming the worker's record ID and the commit it verified, then retires
+  the worker's task with `handoff retire`.
 - A record says nothing about whether a session is running the task. Check
   for a live pane before kicking one off; when unsure, ask instead of
   launching.
