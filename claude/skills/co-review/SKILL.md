@@ -120,6 +120,56 @@ The full tier runs `claude`, `codex`, and `breaker`, then `verifier`. The
 light tier runs `codex` and `verifier`: the `codex` reviewer command below,
 then the verifier with that one finder artifact; skip `claude` and `breaker`.
 
+Probe every runner route the tier uses before spending seats. Each probe is a
+60-second `Reply ok` run on that seat's route and snapshot root, written under
+`RUN_DIR` (never the manifest output dir, which `cleanup` checks). The probes
+run concurrently. Any non-success probe stops co-review with the existing
+incomplete report, quoting the probe's `status`, `observation` and `errors`.
+A failed probe never switches runtime on its own; a substitute seat is an
+explicit, truthfully recorded operator decision. A probe is never a seat
+artifact.
+
+```bash
+printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
+uv run --no-project python "$RUNNER" run \
+  --runtime codex --role reviewer --risk normal --provisional \
+  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
+  --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json" &
+uv run --no-project python "$RUNNER" run \
+  --runtime claude --role skeptic --risk normal --provisional \
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+  --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-skeptic.json" &
+if [ "$CLASS" != "light" ]; then
+  uv run --no-project python "$RUNNER" run \
+    --runtime claude --role reviewer --risk normal --provisional \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-reviewer.json" &
+  uv run --no-project python "$RUNNER" run \
+    --runtime codex --role skeptic --risk normal --provisional \
+    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-skeptic.json" &
+fi
+wait
+uv run --no-project python - "$RUN_DIR"/probe-*.json <<'PY' || exit 2
+import json
+import sys
+
+failed = []
+for path in sys.argv[1:]:
+    try:
+        with open(path) as handle:
+            result = json.load(handle)
+    except (OSError, ValueError):
+        failed.append(f"{path}: no runner JSON")
+        continue
+    if result.get("status") != "success":
+        failed.append(f"{path}: {result.get('status')} {result.get('observation')} {result.get('errors')}")
+if failed:
+    print("\n".join(failed))
+    sys.exit(1)
+PY
+```
+
 Save the exact `POLICY`, frozen diff, and the complete `## Classes` section of
 `$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md`, manifest
 identity, expected identity, and declared threat model in each prompt. The
@@ -139,22 +189,29 @@ for seat in $SEATS; do
 done
 ```
 
+Seats run concurrently for up to 1200 seconds each, beyond a foreground
+command limit: a Claude coordinator runs each seat block with the Bash
+tool's `run_in_background` and waits for its completion notification (or a
+Monitor until-loop on the runtime JSON files) before continuing. Worst case is
+about 41 minutes: probes, finders, then the verifier.
+
 ```bash
 # Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
 uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
-  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"
+  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
 if [ "$CLASS" != "light" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
-    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" &
   uv run --no-project python "$RUNNER" run \
     --runtime codex --role skeptic --risk normal --provisional \
-    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
-    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json"
+    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" &
 fi
+wait
 ```
 
 The Claude invocation preserves the original repository's selected account;
@@ -178,8 +235,9 @@ only for follow-up verification.
 ```bash
 uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json"
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" &
+wait
 ```
 
 The selected reviewer/skeptic runtime for each seat is resolved by the shared
@@ -188,6 +246,12 @@ An unknown observed model or effort stays unknown; no completion, empty output,
 failed runner result, bad digest, or missing seat is an incomplete report.
 
 ## Assemble, evaluate, and clean up
+
+The Claude snapshot root is the base commit plus the frozen patch applied
+with `git apply --index`, so its staged diff is by design. Cleanup refuses a
+root holding any other untracked, ignored or staged path and names up to five
+of them; remove what a seat left (for example a stray cache) or re-run from a
+fresh `prepare`.
 
 Run `gate_report.py schema` now and start `RUN_DIR/report.json` from its exact
 example.

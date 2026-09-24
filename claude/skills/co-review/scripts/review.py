@@ -243,13 +243,22 @@ def tree_contains(repo: Path, tree: str, path: str) -> bool:
     raise ReviewError("cannot inspect selected snapshot tree")
 
 
+def named_paths(paths: set[str] | list[str]) -> str:
+    ordered = sorted(paths)
+    shown = ", ".join(ordered[:5])
+    return shown + (f" (+{len(ordered) - 5} more)" if len(ordered) > 5 else "")
+
+
 def no_untracked_or_unstaged(
     repo: Path, *, expected_tree: str, expected_head: str
 ) -> None:
     if full_commit(repo, "HEAD") != expected_head:
         raise ReviewError("snapshot head changed")
     if text_git(repo, "write-tree") != expected_tree:
-        raise ReviewError("snapshot index tree changed")
+        changed = text_git(
+            repo, "diff-index", "--cached", "--name-only", expected_tree
+        ).splitlines()
+        raise ReviewError(f"snapshot index tree changed: {named_paths(changed)}")
     changed = subprocess.run(
         ["git", "-C", str(repo), "diff", "--quiet"],
         capture_output=True,
@@ -260,8 +269,11 @@ def no_untracked_or_unstaged(
         raise ReviewError("cannot inspect snapshot worktree")
     if changed.returncode == 1:
         raise ReviewError("snapshot has unexpected unstaged changes")
-    if untracked_paths(repo, include_ignored=True):
-        raise ReviewError("snapshot has unexpected untracked paths")
+    leftover = untracked_paths(repo, include_ignored=True)
+    if leftover:
+        raise ReviewError(
+            f"snapshot has unexpected untracked paths: {named_paths(leftover)}"
+        )
 
 
 def binding(manifest: dict[str, Any]) -> dict[str, Any]:

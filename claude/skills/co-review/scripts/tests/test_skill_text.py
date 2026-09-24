@@ -13,6 +13,25 @@ MIRROR = (REPO / "codex/skills/co-review/SKILL.md").read_text(encoding="utf-8")
 SHIP = (REPO / "claude/skills/ship/SKILL.md").read_text(encoding="utf-8")
 
 
+def _extract_block(text, contains_needle):
+    """Return the fenced bash block that contains contains_needle."""
+    anchor = text.index(contains_needle)
+    block_start = text.rindex("```bash", 0, anchor)
+    block_end = text.index("```", block_start + len("```bash"))
+    return text[block_start:block_end]
+
+
+def _assert_launches_all_precede_one_trailing_wait(testcase, block):
+    """Every `&` seat launch in the block precedes a single trailing `wait`."""
+    lines = [line.strip() for line in block.splitlines()]
+    launch_positions = [i for i, line in enumerate(lines) if line.endswith("&")]
+    wait_positions = [i for i, line in enumerate(lines) if line == "wait"]
+    testcase.assertTrue(launch_positions, "block has no seat launches")
+    testcase.assertEqual(len(wait_positions), 1, "block must wait exactly once")
+    testcase.assertGreater(wait_positions[0], max(launch_positions),
+                            "wait must follow every launch, not sit between them")
+
+
 class CoReviewSkillText(unittest.TestCase):
     def test_both_entrypoints_pin_the_frozen_diff_and_class(self):
         for text in (CO_REVIEW, MIRROR):
@@ -56,6 +75,47 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertNotIn("All four seats", policy)
         self.assertNotIn("first three", policy)
         self.assertNotIn("first-three", policy)
+
+    def test_co_review_probes_every_runner_route_before_seats(self):
+        probe = CO_REVIEW.index('"$RUN_DIR/probe-')
+        first_seat = CO_REVIEW.index('--prompt-file "$RUN_DIR/codex.prompt"')
+        self.assertLess(probe, first_seat)
+        for needle in ("--timeout-secs 60", '"$RUN_DIR"/probe-*.json',
+                       "probe-claude-reviewer.json", "probe-codex-reviewer.json",
+                       "probe-codex-skeptic.json", "probe-claude-skeptic.json",
+                       'status") != "success"', "json.load(handle)",
+                       "Reply ok"):
+            self.assertIn(needle, CO_REVIEW)
+
+    def test_co_review_seats_run_in_background_at_1200_seconds(self):
+        self.assertEqual(CO_REVIEW.count("--timeout-secs 1200"), 4)
+        self.assertNotIn("--timeout-secs 600", CO_REVIEW)
+        for needle in ("run_in_background", "git apply --index", "wait"):
+            self.assertIn(needle, CO_REVIEW)
+
+    def test_co_review_probe_seats_launch_together_before_one_wait(self):
+        block = _extract_block(CO_REVIEW, '"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"')
+        _assert_launches_all_precede_one_trailing_wait(self, block)
+
+    def test_co_review_finder_seats_launch_together_before_one_wait(self):
+        block = _extract_block(CO_REVIEW, '"$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"')
+        _assert_launches_all_precede_one_trailing_wait(self, block)
+
+    def test_mirror_probe_seats_launch_together_before_one_wait(self):
+        block = _extract_block(MIRROR, '"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-skeptic.json"')
+        _assert_launches_all_precede_one_trailing_wait(self, block)
+
+    def test_mirror_probes_claude_routes_and_launches_nohup_seats(self):
+        probe = MIRROR.index('"$RUN_DIR/probe-claude-')
+        self.assertLess(probe, MIRROR.index('--prompt-file "$RUN_DIR/verifier.prompt"'))
+        self.assertLess(probe, MIRROR.index('--prompt-file "$RUN_DIR/claude.prompt"'))
+        for needle in ("probe-claude-reviewer.json", "probe-claude-skeptic.json",
+                       "--timeout-secs 60", "nohup uv run", '.pid"',
+                       "kill -0", "1200-second deadline"):
+            self.assertIn(needle, MIRROR)
+        self.assertEqual(MIRROR.count("--timeout-secs 1200"), 2)
+        self.assertNotIn("--timeout-secs 600", MIRROR)
+        self.assertNotIn("600-second", MIRROR)
 
 
 class ShipSkillText(unittest.TestCase):
