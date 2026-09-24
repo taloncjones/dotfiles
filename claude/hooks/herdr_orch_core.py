@@ -1989,7 +1989,8 @@ def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
             if exit_on_signal:
                 return 0
             st["pending"].clear()
-        elif backstop_heartbeat_due(last_emit, now, heartbeat_secs, heartbeat_active(rd)):
+        elif (now - last_emit >= heartbeat_secs
+              and backstop_heartbeat_due(last_emit, now, heartbeat_secs, heartbeat_active(rd))):
             print("heartbeat", flush=True)
             last_emit = now
             if exit_on_signal:
