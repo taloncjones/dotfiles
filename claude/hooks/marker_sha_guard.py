@@ -99,11 +99,6 @@ OWN_COMMAND = (
     "export, unset, true, :, test, [, exit, or return may run before gh, since "
     "anything else may change the body or the repository before gh reads them"
 )
-HIDDEN_GH = (
-    "cannot tell whether this segment runs gh; it mentions a co-review "
-    "marker and contains a `gh` word that a wrapper's own options or a "
-    "leading redirection keep this guard from recognizing as the command"
-)
 RULE = (
     "Marker SHAs must be the full 40-hex id of a commit in the target "
     "repository: copy it from `git rev-parse`, never from memory. Fence or "
@@ -634,8 +629,16 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
         walk.rewrites = True
     if head == "gh":
         return check_gh(words, seg_env, walk)
-    if walk.hinted and any(rm_guard.basename(w) == "gh" for w in words[1:]):
-        return HIDDEN_GH
+    # A wrapper's own option (env -u NAME, sudo -u x, nice -n 5, a leading
+    # redirection) can sit before gh without strip_prefixes recognizing it,
+    # leaving gh out of head position. Re-check from gh's real position
+    # instead of guessing from the hidden shape: the marker may live in a
+    # --body-file this segment reads, not in the command text itself, so a
+    # blanket "hidden" denial is neither necessary (most such words are
+    # unrelated arguments) nor sufficient (it cannot see a file's content).
+    for index, word in enumerate(words[1:], start=1):
+        if rm_guard.basename(word) == "gh":
+            return check_gh(words[index:], seg_env, walk)
     if head in rm_guard.SHELL_WRAPPERS:
         inner = rm_guard.extract_shell_c_arg(words)
         env = {**walk.assigned, **seg_env}
