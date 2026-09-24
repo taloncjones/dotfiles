@@ -629,16 +629,6 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
         walk.rewrites = True
     if head == "gh":
         return check_gh(words, seg_env, walk)
-    # A wrapper's own option (env -u NAME, sudo -u x, nice -n 5, a leading
-    # redirection) can sit before gh without strip_prefixes recognizing it,
-    # leaving gh out of head position. Re-check from gh's real position
-    # instead of guessing from the hidden shape: the marker may live in a
-    # --body-file this segment reads, not in the command text itself, so a
-    # blanket "hidden" denial is neither necessary (most such words are
-    # unrelated arguments) nor sufficient (it cannot see a file's content).
-    for index, word in enumerate(words[1:], start=1):
-        if rm_guard.basename(word) == "gh":
-            return check_gh(words[index:], seg_env, walk)
     if head in rm_guard.SHELL_WRAPPERS:
         inner = rm_guard.extract_shell_c_arg(words)
         env = {**walk.assigned, **seg_env}
@@ -647,6 +637,33 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
         problem = check_command(script, walk.cwd, walk.home, walk.rewrites, env) if script is not None else None
         walk.rewrites = True  # the script may change files that later segments read
         return problem
+    # A wrapper's own option (env -u NAME, sudo -u x, nice -n 5, a leading
+    # redirection) can sit before gh -- or before an inner shell that itself
+    # runs gh -- without strip_prefixes recognizing it, leaving the real
+    # command out of head position. Re-check from that position instead of
+    # guessing from the hidden shape: the marker may live in a --body-file
+    # this segment reads or an inner shell's script, not in the command text
+    # itself, so a blanket "hidden" denial is neither necessary (most such
+    # words are unrelated arguments) nor sufficient (it cannot see a file's
+    # content). Only look once strip_prefixes actually consumed a wrapper
+    # name, or `words[0]` is itself a redirection strip_prefixes does not
+    # understand, or an ordinary command whose own arguments happen to
+    # include the word "gh" would be misread as invoking it.
+    hidden_head = any(rm_guard.basename(token) in rm_guard.PREFIX_WRAPPERS for token in prefix) or (
+        words and re.match(r"^[0-9&]*[<>]", words[0])
+    )
+    if hidden_head:
+        for index, word in enumerate(words[1:], start=1):
+            base = rm_guard.basename(word)
+            if base == "gh":
+                return check_gh(words[index:], seg_env, walk)
+            if base in rm_guard.SHELL_WRAPPERS:
+                inner = rm_guard.extract_shell_c_arg(words[index:])
+                env = {**walk.assigned, **seg_env}
+                script = literal(inner) if inner is not None else None
+                problem = check_command(script, walk.cwd, walk.home, walk.rewrites, env) if script is not None else None
+                walk.rewrites = True
+                return problem
     if words and head not in HARMLESS + ("export", "unset"):
         walk.rewrites = True
     if not words or head == "export":

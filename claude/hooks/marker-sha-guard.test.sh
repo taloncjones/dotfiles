@@ -307,7 +307,12 @@ deny "env -u option hides gh reading a bad body file" "$R" "env -u GH_TOKEN gh p
 deny "sudo option hides gh reading a bad body file" "$R" "sudo -u nobody gh pr comment 5 --body-file $FIX/bad.md"
 allow "env -u option before a valid body file" "$R" "env -u GH_TOKEN gh pr comment 5 --body-file $R/good.md"
 allow "a bare gh word past the wrapper is not a posting verb" "$R" "env -u GH_TOKEN which gh"
-allow "an unrelated later gh word is not the command" "$R" "which gh && gh pr comment 5 --body '$GOOD'"
+deny "which gh is a normal command before the real gh segment" "$R" "which gh && gh pr comment 5 --body '$GOOD'"
+allow "an unrelated gh word in an unwrapped command is not the command" "$R" "printf %s gh pr comment 5 --body '$BAD'"
+deny "env -u option hides an inner sh -c that runs gh" "$R" "env -u GH_TOKEN sh -c \"gh pr comment 5 --body '$BAD'\""
+deny "nice option hides an inner sh -c that runs gh" "$R" "nice -n5 sh -c \"gh pr comment 5 --body '$BAD'\""
+deny "sudo option hides an inner sh -c that runs gh" "$R" "sudo -u nobody sh -c \"gh pr comment 5 --body '$BAD'\""
+allow "env -u option before an inner sh -c with a valid marker" "$R" "env -u GH_TOKEN sh -c \"gh pr comment 5 --body '$GOOD'\""
 
 # --- R8: non-marker traffic ---
 printf 'plain\n' >"$FIX/plain.md"
