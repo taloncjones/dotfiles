@@ -59,7 +59,7 @@
     },
     {
       "name": "herdr-skill-text",
-      "run": "S=claude/skills/herdr-orchestration/SKILL.md; grep -Fq -- '--undelivered-only --exit-on-signal' $S && ! grep -Fq -- '--interval 60 --debounce-secs 300' $S && grep -Fq 'sleep 300' $S && grep -Fq 'review-deadlines' $S && grep -Fq 'sleep <remaining + 30>' $S && grep -Fq 'unverifiable-evidence' $S && grep -Fq 'dirty=yes' $S && grep -Fq 'Bash(gh pr merge:*)' $S && grep -Fq \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $S && grep -Fq 'director` shell function' $S && ! grep -Fq 'both are watch wakes' $S && ! grep -Fq 'at the next heartbeat' $S && grep -Fq 'backstop' claude/agents/director.md && grep -Fq '`director`' claude/agents/director.md",
+      "run": "S=claude/skills/herdr-orchestration/SKILL.md; grep -Fq -- '--undelivered-only --exit-on-signal' $S && ! grep -Fq -- '--interval 60 --debounce-secs 300' $S && grep -Fq 'sleep 300' $S && grep -Fq 'review-deadlines' $S && grep -Fq 'sleep <remaining + 30>' $S && grep -Fq 'unverifiable-evidence' $S && grep -Fq 'dirty=yes' $S && grep -Fq 'Bash(gh pr merge:*)' $S && grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $S && grep -Fq 'director` shell function' $S && ! grep -Fq 'both are watch wakes' $S && ! grep -Fq 'at the next heartbeat' $S && grep -Fq 'backstop' claude/agents/director.md && grep -Fq '`director`' claude/agents/director.md",
       "timeout_secs": 30
     },
     {
