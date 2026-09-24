@@ -255,6 +255,21 @@ trailing_comment='cd /repo  # go to repo
 gh pr comment 5 --body-file m.md'
 expect_rc "FN14 gh pr comment on the line after a trailing # comment is denied with no go" 2 "$(payload_b s1 "$trailing_comment")"
 
+case_gate fn15
+apostrophe_comment="# don't post yet
+gh pr comment 5 --body-file m.md"
+expect_rc "FN15 an apostrophe inside a # comment does not desync the tokenizer" 2 "$(payload_b s1 "$apostrophe_comment")"
+
+case_gate fn16
+paren_line='(cd /repo)
+gh pr comment 5 --body-file m.md'
+expect_rc "FN16 gh pr comment on the line after a lone ) is denied with no go" 2 "$(payload_b s1 "$paren_line")"
+
+case_gate fn17
+subst_line='PR=$(gh pr view --json number -q .number)
+gh pr comment "$PR" --body-file m.md'
+expect_rc "FN17 gh pr comment on the line after a command substitution is denied with no go" 2 "$(payload_b s1 "$subst_line")"
+
 # --- M: gate mechanics ------------------------------------------------------
 
 case_gate m1
