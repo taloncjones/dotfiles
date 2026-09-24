@@ -204,3 +204,50 @@ Only `APPROVE` permits a merge-ready result. `CHANGES` returns concrete
 blockers to development. `INCOMPLETE` reports missing evidence. Human approval
 and explicit merge permission remain separate; cleanup refusal preserves the
 snapshot.
+
+## Publish (optional)
+
+Default is post nothing: the report stays in `RUN_DIR`. The only publishable
+item is one marker comment on the reviewed PR, and only for a PR gate whose
+evaluator verdict is `APPROVE` or `CHANGES` -- never for `INCOMPLETE` or a
+local no-PR review. A `--fix` coordinator publishes at most once, after its
+final gate.
+
+Marker comment shape: first line is the marker, then one verdict line, then
+one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
+expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
+`verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
+own valid markers already on the PR (1 when none). No `target_tip`.
+
+Before asking for the go, read the PR's comments once (the `gh api
+--paginate --slurp` call below, run before `gh pr comment`) and compute
+`round` from it.
+
+The go: ask in prose, "Type `post it` to post the marker." End the turn.
+Posting is never an `AskUserQuestion` option, recommended or not. The go is
+a user message whose whole text is `post it`, ignoring case, surrounding
+space, and one trailing `.` or `!`. Anything else, including any
+`AskUserQuestion` answer, is no.
+
+On the go:
+
+```bash
+gh pr comment "$PR" --body-file "$RUN_DIR/marker.md" || exit 2
+gh api --paginate --slurp "repos/$OWNER/$REPO_NAME/issues/$PR/comments" >"$RUN_DIR/comments.json"
+ME=$(gh api user --jq .login)
+uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/pr_ready_gate.py" supersede \
+  --comments "$RUN_DIR/comments.json" --author "$ME" --expect-marker "$MARKER_LINE"
+# Delete each printed id with its own call; no loop, no $(...):
+# gh api -X DELETE "repos/$OWNER/$REPO_NAME/issues/comments/<id>"
+```
+
+Only on the comment's exit 0 does the supersede step run. If a post landed
+but supersede did not finish, the owner types `post it` again and only the
+supersede step reruns.
+
+Never reply to, resolve, or react to a reviewer thread. Draft any reply in
+chat for the owner to post themselves.
+
+Never edit the PR title or body unless the owner types the whole message
+`edit the pr body` (same normalization as the posting go); that go covers
+one edit.
