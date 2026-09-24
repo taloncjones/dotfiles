@@ -27,6 +27,12 @@ class CoReviewSkillText(unittest.TestCase):
             self.assertIn("finder", text)
             self.assertNotIn("first three", text)
 
+    def test_co_review_gates_the_finder_dispatch_on_class(self):
+        for needle in ('if [ "$CLASS" != "light" ]; then',
+                       "Light tier: only the codex reviewer seat. Full tier: also claude and breaker."):
+            self.assertIn(needle, CO_REVIEW)
+        self.assertNotIn("Repeat once for claude, codex, and breaker", CO_REVIEW)
+
     def test_mirror_launches_light_verifier_through_claude_runner(self):
         self.assertIn("--runtime claude --role skeptic", MIRROR)
 

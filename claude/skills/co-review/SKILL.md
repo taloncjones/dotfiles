@@ -140,19 +140,21 @@ done
 ```
 
 ```bash
-# Repeat once for claude, codex, and breaker with their named artifact path.
-uv run --no-project python "$RUNNER" run \
-  --runtime claude --role reviewer --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
+# Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
 uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
   --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"
-uv run --no-project python "$RUNNER" run \
-  --runtime codex --role skeptic --risk normal --provisional \
-  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json"
+if [ "$CLASS" != "light" ]; then
+  uv run --no-project python "$RUNNER" run \
+    --runtime claude --role reviewer --risk normal --provisional \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
+    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
+  uv run --no-project python "$RUNNER" run \
+    --runtime codex --role skeptic --risk normal --provisional \
+    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
+    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json"
+fi
 ```
 
 The Claude invocation preserves the original repository's selected account;
