@@ -245,10 +245,14 @@ for the provider's `launch_env` mapping.
    inherited across `/clear`, with the `watch-pids` kill below), then start
    `python3 "$CORE" watch --repo-slug <slug> --undelivered-only --exit-on-signal --since-epoch $EPOCH`
    with `Bash run_in_background` and note its task id. It prints nothing
-   while pushes are delivered, never prints a heartbeat, and exits with one
-   `signal` line when a completion record stays undelivered for 120 s; that
-   exit is the wake. Re-arm it on that wake turn and on any preflight where
-   this context has no live backstop task. If the socket is unset, arm the
+   while pushes are delivered and a task is idle, exits with one `signal`
+   line when a completion record stays undelivered for 120 s, and exits with
+   one `heartbeat` line every `BACKSTOP_HEARTBEAT_SECS` (600 s) while a task
+   is active and nothing is undelivered -- both exits are a wake, and the
+   heartbeat one exists only so this session's next preflight refreshes its
+   own ownership heartbeat before `WAKE_HEARTBEAT_STALE_SECS` (900 s) makes
+   wake delivery start failing. Re-arm it on that wake turn and on any
+   preflight where this context has no live backstop task. If the socket is unset, arm the
    watch at the default cadence via the `Monitor` tool instead: if this
    session has no live watch for this repo, capture `EPOCH=$(date +%s)`
    FIRST, then start one via the `Monitor` tool --

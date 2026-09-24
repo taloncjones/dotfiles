@@ -1786,6 +1786,11 @@ WATCH_DIRS = {
 }
 BACKSTOP_DIRS = {"tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id))}
 BACKSTOP_GRACE_SECS = 120
+# Kept well under WAKE_HEARTBEAT_STALE_SECS (900) so a director idle for the
+# whole backstop window still wakes in time to refresh its own heartbeat --
+# otherwise a stalled worker with no completion record (a block, or an exit
+# with nothing written) has no path back to the director at all.
+BACKSTOP_HEARTBEAT_SECS = 600
 REVIEW_BOUND_NS = 600_000_000_000
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
@@ -1953,10 +1958,23 @@ def backstop_tick(st, prev, snap, delivered, now, grace_secs) -> bool:
     return any(now - first >= grace_secs for first in pending.values())
 
 
-def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch):
-    """Silent backstop: print `signal` only for an undelivered completion record."""
+def backstop_heartbeat_due(last_emit, now, heartbeat_secs, active) -> bool:
+    """True iff the backstop's liveness heartbeat should fire: a task is
+    active and heartbeat_secs have elapsed since the last emitted line
+    (signal or heartbeat alike)."""
+    return active and (now - last_emit) >= heartbeat_secs
+
+
+def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
+                    heartbeat_secs=BACKSTOP_HEARTBEAT_SECS):
+    """Silent backstop: print `signal` for an undelivered completion record,
+    or `heartbeat` when nothing is undelivered but a task is still active --
+    the director has no other path to refresh its own ownership heartbeat
+    while idle, and wake delivery starts failing once that heartbeat is
+    stale."""
     prev, _failed = watch_scan(rd, {}, BACKSTOP_DIRS)
     st = {"pending": {}}
+    last_emit = time.monotonic()
     if since_epoch is not None:
         since_ns = int(since_epoch * 1e9)
         start = time.monotonic()
@@ -1964,11 +1982,18 @@ def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch):
     while True:
         time.sleep(interval)
         snap, _failed = watch_scan(rd, prev, BACKSTOP_DIRS)
-        if backstop_tick(st, prev, snap, delivered_records(rd), time.monotonic(), grace_secs):
+        now = time.monotonic()
+        if backstop_tick(st, prev, snap, delivered_records(rd), now, grace_secs):
             print("signal", flush=True)
+            last_emit = now
             if exit_on_signal:
                 return 0
             st["pending"].clear()
+        elif backstop_heartbeat_due(last_emit, now, heartbeat_secs, heartbeat_active(rd)):
+            print("heartbeat", flush=True)
+            last_emit = now
+            if exit_on_signal:
+                return 0
         prev = snap
 
 

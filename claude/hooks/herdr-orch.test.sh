@@ -1117,6 +1117,20 @@ c.backstop_tick(st, {}, {k: (5, 9)}, older, 1000.0, 120)
 assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, older, 1200.0, 120) is True
 PY
 
+check "backstop_heartbeat_due: fires only for an active task past the interval, resets on emit" <<PY
+$LOAD
+assert c.backstop_heartbeat_due(0.0, 599.0, 600, True) is False
+assert c.backstop_heartbeat_due(0.0, 600.0, 600, True) is True
+assert c.backstop_heartbeat_due(0.0, 10000.0, 600, False) is False
+assert c.backstop_heartbeat_due(600.0, 1199.0, 600, True) is False
+assert c.backstop_heartbeat_due(600.0, 1200.0, 600, True) is True
+PY
+
+check "BACKSTOP_HEARTBEAT_SECS stays under WAKE_HEARTBEAT_STALE_SECS: a director idle for one backstop cycle still refreshes before wake delivery goes stale" <<PY
+$LOAD
+assert c.BACKSTOP_HEARTBEAT_SECS < c.WAKE_HEARTBEAT_STALE_SECS
+PY
+
 check "delivered_records: v2 only, keyed by file name, unreadable markers ignored" <<PY
 $LOAD
 root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
