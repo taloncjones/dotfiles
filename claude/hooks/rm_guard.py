@@ -102,6 +102,11 @@ def tokenize(command: str) -> list[str]:
         # multi-line script); punctuation_chars alone does not take effect
         # for it because shlex's default whitespace set consumes it first.
         lexer.whitespace = lexer.whitespace.replace("\n", "")
+        # shlex's default `#` comment handling calls readline() to skip to
+        # end of line, which swallows the newline before punctuation_chars
+        # ever sees it -- merging a commented line into the next one. This
+        # guard has no use for shell comment semantics, so disable them.
+        lexer.commenters = ""
         return list(lexer)
     except ValueError:
         return command.split()

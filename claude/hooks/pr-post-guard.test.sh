@@ -245,6 +245,16 @@ expect_rc "FN12d env -i gh api DELETE comment denied with no go" 2 "$(payload_b 
 expect_rc "FN12e mint post" 0 "$(payload_u s1 'post it')"
 expect_rc "FN12f env -i gh pr comment allowed once after typed go" 0 "$(payload_b s1 'env -i gh pr comment 5 --body x')"
 
+case_gate fn13
+expect_rc "FN13a if-wrapped gh pr comment denied with no go" 2 "$(payload_b s1 'if gh pr comment 5 --body-file m.md; then echo ok; fi')"
+expect_rc "FN13b while-wrapped gh pr comment denied with no go" 2 "$(payload_b s1 'while ! gh pr comment 5 -b x; do :; done')"
+expect_rc "FN13c until-wrapped gh pr comment denied with no go" 2 "$(payload_b s1 'until gh pr comment 5 -b x; do :; done')"
+
+case_gate fn14
+trailing_comment='cd /repo  # go to repo
+gh pr comment 5 --body-file m.md'
+expect_rc "FN14 gh pr comment on the line after a trailing # comment is denied with no go" 2 "$(payload_b s1 "$trailing_comment")"
+
 # --- M: gate mechanics ------------------------------------------------------
 
 case_gate m1
