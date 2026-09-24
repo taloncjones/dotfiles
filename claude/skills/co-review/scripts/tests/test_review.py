@@ -499,6 +499,36 @@ class ReviewHelperTests(unittest.TestCase):
             expect=2,
         )
 
+    def test_artifact_kind_contract_freezes_json_under_claude_contracts(self) -> None:
+        contract = self.repo / "claude/contracts/TASK_1-contract.json"
+        contract.parent.mkdir(parents=True)
+        contract.write_text('{"v": 1, "task_id": "TASK_1", "commands": [{"name": "t", "run": "true"}]}\n')
+        result = self.command(
+            "artifact", "--repo", str(self.repo), "--kind", "contract",
+            "--path", "claude/contracts/TASK_1-contract.json",
+            "--task-id", "TASK_1", "--runtime", "claude",
+        )
+        artifact = json.loads(result.stdout)
+        frozen = Path(artifact["path"])
+        self.assertEqual(artifact["kind"], "contract")
+        self.assertRegex(frozen.name, r"^contract-[0-9a-f]{32}\.json$")
+        self.assertEqual(frozen.read_bytes(), contract.read_bytes())
+        self.assertRegex(artifact["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(frozen.parent.parent.name, "TASK_1")
+        for kind, path in (
+            ("contract", "docs/superpowers/specs/x.json"),
+            ("contract", "claude/contracts/notes.md"),
+            ("spec", "claude/contracts/TASK_1-contract.json"),
+        ):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text("x\n")
+            rejected = self.command(
+                "artifact", "--repo", str(self.repo), "--kind", kind,
+                "--path", path, "--task-id", "TASK_1", "--runtime", "claude",
+                expect=2,
+            )
+            self.assertIn("must be an existing", rejected.stderr)
+
     def test_personal_artifacts_reject_account_root_symlink_to_work(self) -> None:
         plan = self.repo / "docs/superpowers/plans/account-boundary.md"
         plan.parent.mkdir(parents=True)
@@ -607,6 +637,42 @@ class ReviewHelperTests(unittest.TestCase):
         for skill in codex_skills:
             self.assertIn("--runtime claude", skill.read_text())
 
+    def test_codex_spec_review_caps_rounds_and_sends_diffs(self) -> None:
+        content = " ".join((DOTFILES_ROOT / "claude/skills/codex-spec-review/SKILL.md").read_text().split())
+        self.assertRegex(
+            content,
+            r"\|\s*codex-spec-review\s*\|\s*4\s*\|\s*the kickoff instruction only\s*\|",
+        )
+        self.assertIn('ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"', content)
+        self.assertIn('SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"', content)
+        self.assertIn('ROUND_DIFF="$OUTPUT_DIR/spec-round-$ROUND.diff"', content)
+        self.assertIn('OPEN_FINDINGS="$OUTPUT_DIR/spec-open-findings-$ROUND.md"', content)
+        self.assertIn('diff -u "$PREVIOUS_FROZEN_SPEC" "$FROZEN_SPEC" >"$ROUND_DIFF" || DIFF_STATUS=$?', content)
+        self.assertIn('[ "$DIFF_STATUS" -le 1 ] || exit 2', content)
+        self.assertEqual(content.count("for task $TASK_ID"), 2)
+        self.assertEqual(content.count("Review only frozen specification"), 2)
+        self.assertIn("own row in the spec's revision history", content)
+        self.assertIn("incomplete last call", content)
+        self.assertIn("critical or high", content)
+
+    def test_codex_plan_review_caps_rounds_and_sends_diffs(self) -> None:
+        content = " ".join((DOTFILES_ROOT / "claude/skills/codex-plan-review/SKILL.md").read_text().split())
+        self.assertRegex(
+            content,
+            r"\|\s*codex-plan-review\s*\|\s*2\s*\|\s*the kickoff instruction only\s*\|",
+        )
+        self.assertIn('ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"', content)
+        self.assertIn('PLAN_MAX_ROUNDS="${PLAN_MAX_ROUNDS:-2}"', content)
+        self.assertIn('ROUND_DIFF="$OUTPUT_DIR/plan-round-$ROUND.diff"', content)
+        self.assertIn('OPEN_FINDINGS="$OUTPUT_DIR/plan-open-findings-$ROUND.md"', content)
+        self.assertIn('diff -u "$PREVIOUS_FROZEN_PLAN" "$FROZEN_PLAN" >"$ROUND_DIFF" || DIFF_STATUS=$?', content)
+        self.assertIn('[ "$DIFF_STATUS" -le 1 ] || exit 2', content)
+        self.assertEqual(content.count("for task $TASK_ID"), 2)
+        self.assertEqual(content.count("Review only frozen plan"), 2)
+        self.assertIn("own row in the plan's revision notes", content)
+        self.assertIn("incomplete last call", content)
+        self.assertIn("critical or high", content)
+
     def test_review_skills_resolve_installed_symlinks_without_shell_profile(
         self,
     ) -> None:
@@ -683,9 +749,16 @@ class ReviewHelperTests(unittest.TestCase):
                         DOTFILES_ROOT
                         / f"{host}/skills/{partner}-{kind}-review/SKILL.md"
                     )
-                    snippet = (
-                        skill.read_text().rsplit("```bash\n", 1)[1].split("```", 1)[0]
-                    )
+                    content = skill.read_text()
+                    round_1_marker = "## Round 1:"
+                    if round_1_marker in content:
+                        snippet = (
+                            content.split(round_1_marker, 1)[1]
+                            .split("```bash\n", 1)[1]
+                            .split("```", 1)[0]
+                        )
+                    else:
+                        snippet = content.rsplit("```bash\n", 1)[1].split("```", 1)[0]
                     snippet = snippet.replace(
                         "uv run --no-project python", shlex.quote(sys.executable)
                     )

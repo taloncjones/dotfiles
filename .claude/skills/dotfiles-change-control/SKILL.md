@@ -19,8 +19,9 @@ your first blocked commit.
   scan). The public-safety suite (`git/hooks/public-safety.test.sh`)
   fails the build on violations; do not rely on it as your only check.
 - [WARNING] Plans and specs are private working artifacts. Keep
-  `docs/superpowers/`, `docs/plans/`, and `docs/specs/` ignored and untracked;
-  approval to create one is not approval to publish it.
+  `docs/superpowers/`, `docs/plans/`, `docs/specs/`, `claude/contracts/`, and
+  `.planning/` ignored and untracked; approval to create one is not approval
+  to publish it.
 - [WARNING] Never hand-edit vendored content: the retired-ECC language dirs
   under `claude/rules/` (everything except `personal/`) and native plugin payloads.
   Change their lifecycle or owned adapters. `codex/AGENTS.md` is now fully
@@ -45,7 +46,7 @@ your change needs.
 | Tracked asset (symlinked live) | `zsh/*.zsh`, `claude/CLAUDE.md`, `claude/skills/`, `claude/hooks/*.py`, `git/hooks/commit-msg`, `bin/*` | Normal commit + tests. Takes effect on machines at next symlink resolution (usually immediately -- symlinks point into the repo checkout). Hook changes: update `claude/hooks/claude-hooks.test.sh` drift checks. |
 | Installer logic                | `bootstrap.sh`, `bootstrap-cloud.sh`, `install/**`, `zsh/functions.zsh` install helpers                 | Must stay idempotent (`update` re-runs `install.sh`). Update `install/install.test.sh` if flow shape changes. Platform-gate macOS/Linux paths.                                                                    |
 | Machine-local template         | `claude/settings.json.tmpl`, `git/work/.gitconfig-work.tmpl`, `ssh/configs/agent.toml`                  | Seed-once: template edits reach only FRESH machines automatically. Follow the settings.json.tmpl protocol below.                                                                                                  |
-| Private planning artifact      | `docs/superpowers/`, `docs/plans/`, `docs/specs/`                                                       | Keep local-only and ignored. Never force-add or publish these files in this public repository.                                                                                                                    |
+| Private planning artifact      | `docs/superpowers/`, `docs/plans/`, `docs/specs/`, `claude/contracts/`, `.planning/`                    | Keep local-only and ignored. Never force-add or publish these files in this public repository; `planning_artifact_guard.py` refuses the add or commit.                                                            |
 | Vendored-untracked             | `claude/rules/{common,cpp,python,rust,typescript,web}/` (retired-ECC leftovers)                         | NEVER edit by hand; delete leftovers (`ecc-update`/`ecc-sync-rules` are retired). Untracked by design (`claude/rules/.gitignore` whitelists only `personal/`).                                                    |
 | Project `.claude/` config      | `.claude/settings.json`, `.claude/hooks/session-start.sh`, `.claude/skills/`                            | Tracked, load-bearing for CLOUD sessions (plugin declaration is the pre-launch install path -- see claude-code-platform-reference). Changes here alter what every fresh cloud container gets on session 1.        |
 
@@ -70,15 +71,16 @@ In order, for a change made inside a Claude Code session:
 1. **Claude guard hooks** (session-time, registered in
    `claude/settings.json.tmpl`, active via each machine's `settings.json`):
 
-   | Hook (`claude/hooks/`)      | Event / matcher              | Blocks                                                                                                                                                                               |
-   | --------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-   | `commit_guard.py`           | PreToolUse Bash              | `git commit` commands whose message mentions Claude/Anthropic/Copilot/ChatGPT, AI co-author lines, "Generated with" footers, emojis                                                  |
-   | `no_ai_attribution_bash.py` | PreToolUse Bash              | AI attribution in ANY outbound command payload (`gh pr comment`, `curl --data`) -- closes the non-commit gap                                                                         |
-   | `block_secrets.py`          | PreToolUse Read\|Edit\|Write | Access to `.env`, key files (`.pem`, `id_ed25519`, ...), credential dirs. Segment/basename matching, not substring (substring matching blocked the hook's own file -- fixed 52f807d) |
-   | `protect_claude_md.py`      | PreToolUse Edit\|Write       | Nothing -- WARNS on global CLAUDE.md edits                                                                                                                                           |
-   | `emoji_guard.py`            | PostToolUse Edit\|Write      | Emojis written into files (exit 2 = block)                                                                                                                                           |
-   | `no_ai_comments.py`         | PostToolUse Edit\|Write      | "Generated by ..." comments in code (markdown exempt)                                                                                                                                |
-   | `format_files.py`           | PostToolUse Edit\|Write      | Nothing -- runs prettier                                                                                                                                                             |
+   | Hook (`claude/hooks/`)       | Event / matcher              | Blocks                                                                                                                                                                               |
+   | ---------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+   | `commit_guard.py`            | PreToolUse Bash              | `git commit` commands whose message mentions Claude/Anthropic/Copilot/ChatGPT, AI co-author lines, AI-tool attribution footers, emojis                                               |
+   | `no_ai_attribution_bash.py`  | PreToolUse Bash              | AI attribution in ANY outbound command payload (`gh pr comment`, `curl --data`) -- closes the non-commit gap                                                                         |
+   | `planning_artifact_guard.py` | PreToolUse Bash              | `git add`/`git commit` that would record `docs/specs/`, `docs/plans/`, `docs/superpowers/`, `.planning/`, or `claude/contracts/`; override `DOTFILES_ALLOW_PLAN_ARTIFACTS=1`         |
+   | `block_secrets.py`           | PreToolUse Read\|Edit\|Write | Access to `.env`, key files (`.pem`, `id_ed25519`, ...), credential dirs. Segment/basename matching, not substring (substring matching blocked the hook's own file -- fixed 52f807d) |
+   | `protect_claude_md.py`       | PreToolUse Edit\|Write       | Nothing -- WARNS on global CLAUDE.md edits                                                                                                                                           |
+   | `emoji_guard.py`             | PostToolUse Edit\|Write      | Emojis written into files (exit 2 = block)                                                                                                                                           |
+   | `no_ai_comments.py`          | PostToolUse Edit\|Write      | AI-tool-attribution comments in code (markdown exempt)                                                                                                                               |
+   | `format_files.py`            | PostToolUse Edit\|Write      | Nothing -- runs prettier                                                                                                                                                             |
 
    Hooks exit 2 to block and fail OPEN on internal exceptions (a crashed hook
    never blocks work -- it also never protects it, so do not assume silence
@@ -215,8 +217,8 @@ When you change the template:
 - [ ] `bash bin/dotfiles-tests` green locally (all suites)?
 - [ ] Installer edits idempotent and platform-gated?
 - [ ] No secrets, no employer strings, no `/Users/<name>` paths in the diff?
-- [ ] No files under `docs/superpowers/`, `docs/plans/`, or `docs/specs/`
-      tracked or staged?
+- [ ] No files under `docs/superpowers/`, `docs/plans/`, `docs/specs/`,
+      `claude/contracts/`, or `.planning/` tracked or staged?
 - [ ] Commit message `<scope>: <summary>`, <75 chars, imperative, no attribution, no emojis?
 - [ ] Template edits: manual-merge plan for existing machines stated in the PR?
 - [ ] Vendored files untouched (or re-vendored, not hand-edited)?

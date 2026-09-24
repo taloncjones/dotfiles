@@ -6,12 +6,15 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_SEATS = ("claude", "codex", "breaker", "verifier")
+LIGHT_SEATS = ("codex", "verifier")
+FULL_SEATS = ("claude", "codex", "breaker", "verifier")
+_TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS}
 _AXES = (
     "ownership_authority",
     "dependency_boundaries",
@@ -42,13 +45,21 @@ _SEVERITIES = {"critical", "high", "major", "minor", "low", "nit", "advisory"}
 _MATERIAL = {"critical", "high", "major"}
 
 
-def _load_preconditions():
+def _load_sibling(name: str):
     spec = importlib.util.spec_from_file_location(
-        "co_review_preconditions", Path(__file__).with_name("preconditions.py")
+        f"co_review_{name}", Path(__file__).with_name(f"{name}.py")
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_preconditions():
+    return _load_sibling("preconditions")
+
+
+def _load_change_class():
+    return _load_sibling("change_class")
 
 
 def _nonempty(value: object) -> bool:
@@ -82,6 +93,24 @@ def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> No
         reasons.append(f"seat {name} artifact is empty")
     if hashlib.sha256(content).hexdigest() != expected:
         reasons.append(f"seat {name} artifact digest does not match")
+
+
+def _light_diff_ok(preconditions: object, root: Path) -> bool:
+    """True when the digest-bound frozen diff still classifies as light."""
+    entry = preconditions.get("diff") if isinstance(preconditions, dict) else None
+    if not isinstance(entry, dict):
+        return False
+    try:
+        path = (root / entry["artifact"]).resolve()
+        path.relative_to(root.resolve())
+        content = path.read_bytes()
+    except (KeyError, TypeError, OSError, ValueError):
+        return False
+    if hashlib.sha256(content).hexdigest() != entry.get("sha256"):
+        return False
+    change_class = _load_change_class()
+    paths = change_class.paths_from_diff(content.decode("utf-8", "replace"))
+    return paths is not None and change_class.classify(paths) == "light"
 
 
 def _coverage(report: dict, reasons: list[str], visible: list[str]) -> None:
@@ -216,12 +245,26 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
             reasons.append(f"report {field} is invalid")
     if report.get("reviewed_tree") != report.get("tree"):
         reasons.append("reviewed tree is dirty")
+    tier = report.get("class")
+    if "class" not in expected or tier != expected.get("class"):
+        reasons.append("identity mismatch: class")
+    required = _TIER_SEATS.get(tier) if isinstance(tier, str) else None
+    if required is None:
+        reasons.append("report class is invalid")
     seats = report.get("seats")
-    if not isinstance(seats, dict) or set(seats) != set(_SEATS):
+    if required is None or not isinstance(seats, dict) or set(seats) != set(required):
         reasons.append("required seats are missing")
     else:
-        for name in _SEATS:
+        for name in required:
             _artifact_ok(seats[name], artifact_root, name, reasons)
+        if tier == "light":
+            runtimes = {seats[name].get("runtime") for name in required
+                        if isinstance(seats[name], dict)
+                        and isinstance(seats[name].get("runtime"), str)}
+            if runtimes != {"claude", "codex"}:
+                reasons.append("light seats must be one claude and one codex runtime")
+    if tier == "light" and not _light_diff_ok(report.get("preconditions"), artifact_root):
+        reasons.append("class light does not match the frozen diff")
     _coverage(report, reasons, visible)
     changes = _findings(report, expected, reasons)
     source = report.get("preconditions")
@@ -245,6 +288,34 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     return {"verdict": "APPROVE", "approve_allowed": True, "reasons": visible}
 
 
+def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None:
+    """The PR audit comment for an APPROVE report, or None."""
+    root = report_path.resolve().parent
+    if evaluate(report, expected, root)["verdict"] != "APPROVE":
+        return None
+    preconditions = report["preconditions"]
+    ci = json.loads((root / preconditions["ci"]["artifact"]).read_text(encoding="utf-8"))
+    count = len(ci["check_runs"]) + len(ci["status_contexts"])
+    ci_line = (f"{count}/{count} checks passed" if count
+               else f"no CI: {preconditions['no_ci']['evidence']}")
+    shown = str(report_path.resolve())
+    home = str(Path.home().resolve())
+    if shown == home or shown.startswith(home + os.sep):
+        shown = "~" + shown[len(home):]
+    tier = report["class"]
+    lines = (
+        f"<!-- co-review-audit head={report['head']} run={report['run_id']} -->",
+        "Co-review gate: APPROVE",
+        "",
+        f"- Run: {report['run_id']}",
+        f"- Head: {report['head']}",
+        f"- Tier: {tier} ({len(_TIER_SEATS[tier])} seats)",
+        f"- CI: {ci_line}",
+        f"- Report: {shown}",
+    )
+    return "\n".join(lines) + "\n"
+
+
 def schema() -> dict:
     preconditions = {
         "head": "40-char SHA",
@@ -255,7 +326,9 @@ def schema() -> dict:
     }
     return {
         "schema_version": 1,
-        "required_seats": list(_SEATS),
+        "light_seats": list(LIGHT_SEATS),
+        "full_seats": list(FULL_SEATS),
+        "class": "light or full; the evaluator recomputes light from the frozen diff",
         "finding_fields": {
             "id": "nonempty unique identifier",
             "severity": "critical, high, major, minor, low, nit, or advisory",
@@ -275,6 +348,7 @@ def schema() -> dict:
             "base_ref": "main",
             "tree": "40-char SHA",
             "reviewed_tree": "40-char SHA",
+            "class": "full",
             "seats": {
                 seat: {
                     "status": "complete",
@@ -284,7 +358,7 @@ def schema() -> dict:
                     "model": "observed or unknown",
                     "effort": "observed or unknown",
                 }
-                for seat in _SEATS
+                for seat in FULL_SEATS
             },
             "findings": [],
             "prior_blockers": [],
@@ -304,6 +378,7 @@ def schema() -> dict:
             "base_ref": "main",
             "tree": "40-char SHA",
             "known_blockers": [],
+            "class": "full",
         },
         "bindings": {
             "manifest.source.source_tree": "expected.tree",
@@ -334,9 +409,24 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("schema")
     policy_parser = sub.add_parser("policy")
     policy_parser.add_argument("--section", required=True)
+    classify_parser = sub.add_parser("classify")
+    classify_parser.add_argument("--diff", required=True)
+    audit_parser = sub.add_parser("audit-comment")
+    audit_parser.add_argument("--report", required=True)
+    audit_parser.add_argument("--expected", required=True)
     args = parser.parse_args(argv)
     if args.command == "schema":
         print(json.dumps(schema(), sort_keys=True))
+        return 0
+    if args.command == "classify":
+        try:
+            text = Path(args.diff).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            print(json.dumps({"error": str(error)}))
+            return 1
+        change_class = _load_change_class()
+        paths = change_class.paths_from_diff(text)
+        print(change_class.classify(paths or []))
         return 0
     if args.command == "policy":
         try:
@@ -353,6 +443,17 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as error:
             print(json.dumps({"error": str(error)}))
             return 1
+        return 0
+    if args.command == "audit-comment":
+        try:
+            report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+            expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
+            body = audit_comment(report, expected, Path(args.report))
+        except (OSError, ValueError, TypeError, KeyError):
+            body = None
+        if body is None:
+            return 1
+        print(body, end="")
         return 0
     try:
         report = json.loads(Path(args.report).read_text(encoding="utf-8"))

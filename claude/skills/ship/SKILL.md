@@ -45,6 +45,9 @@ target base. Stop if either identity is unavailable or mismatched.
    session cannot renew the allowance; only new explicit user direction after
    the stop can. Changed identity or interruption invalidates approval and is
    a stop, not permission to automatically launch another gate.
+   `co-review` self-classifies the frozen diff (light for prose-only changes,
+   full otherwise); pass `--full` when a prose change alters a machine-read
+   contract, such as a SKILL.md block a test greps.
 
 4. **Recheck gate evidence.** Immediately before presenting a merge-ready
    result, fetch live PR head, base branch, target base, and CI. The active
@@ -62,14 +65,32 @@ target base. Stop if either identity is unavailable or mismatched.
    caller authorization described above; historical PR comments never resume
    this step.
 
-5. **Merge gate (human).** Present the findings disposition, test results, CI
+5. **Audit comment.** Only in this same uninterrupted workflow, right after
+   step 4 passes (an interrupted workflow stops under the existing step 3/4
+   rules and never posts from its report):
+   1. `uv run --no-project python "$GATE_REPORT" audit-comment --report REPORT
+--expected EXPECTED >"$RUN_DIR/audit-comment.md"`; a nonzero exit means
+      no post.
+   2. `gh api --paginate "repos/{owner}/{repo}/issues/<n>/comments" --jq
+'.[].body' >"$RUN_DIR/pr-comments.txt"`. If that fails, do not post and
+      report "audit comment not posted". If any body contains
+      `co-review-audit head=<head>`, do not post.
+   3. Otherwise `gh pr comment <n> --body-file "$RUN_DIR/audit-comment.md"`.
+      On an error, list once more; a present marker counts as posted,
+      otherwise report the failure. Never retry blindly.
+
+   The marker is read only to avoid a duplicate, never as review authority. A
+   missing audit comment does not block the merge step; report it. This is
+   the standing authorization for the post (roadmap, 2026-09-23).
+
+6. **Merge gate (human).** Present the findings disposition, test results, CI
    state, version change, and active evaluator result. Ask for explicit merge
    confirmation. Required human approvals remain separate from evaluator
    approval. On confirmation, squash merge with
    `gh pr merge --squash --match-head-commit <expected-head>` so the server
    refuses a moved head.
 
-6. **Cleanup.** Invoke `post-merge`, then report remaining cleanup state.
+7. **Cleanup.** Invoke `post-merge`, then report remaining cleanup state.
 
 ## Notes
 

@@ -34,7 +34,8 @@ unset CLAUDE_WORK_TREE CLAUDE_WORK_CONFIG_DIR CODEX_HOME XDG_STATE_HOME
 # fixture's pane, so a run from inside a herdr pane gated fixture attempts
 # against the real pane (18 gate cases red in claude-hooks.test.sh). CI
 # never sets these.
-unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID
+# HERDR_BOUNDED_CHILD would make every gate refusal case fail open in a reviewer seat.
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID HERDR_BOUNDED_CHILD
 
 SCRIPT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 DOTFILES="$( cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
@@ -44,6 +45,21 @@ cd "$DOTFILES"
 # uncommitted work in progress is the baseline rather than a false positive.
 before_status=$(git status --porcelain 2>/dev/null || true)
 
+# Snapshot the real herdr state roots too: a suite that forgets its mktemp
+# root writes fixture repos there (140 were found on 2026-09-23). Read-only.
+state_roots=("$HOME/.claude/herdr-orch")
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$CLAUDE_CONFIG_DIR/herdr-orch" != "${state_roots[0]}" ]; then
+    state_roots+=("$CLAUDE_CONFIG_DIR/herdr-orch")
+fi
+list_state_roots() {
+    local root
+    for root in "${state_roots[@]}"; do
+        [ -d "$root" ] && ls -1 "$root" | sed "s|^|$root/|"
+    done
+    return 0
+}
+before_state=$(list_state_roots)
+
 # interpreter<space>path, relative to repo root. Keep in sync when adding a
 # *.test.sh or a skill test; grep -rl 'passed, .* failed' is a quick audit.
 SUITES="
@@ -51,6 +67,7 @@ sh install/install.test.sh
 sh bin/remote-access-doctor.test.sh
 sh bin/zed-claude-agent.test.sh
 sh bin/token-burn.test.sh
+sh bin/dotfiles-tests.test.sh
 sh bin/herdr-zed-attach.test.sh
 sh install/zshenv-migrate.test.sh
 sh zsh/functions.test.sh
@@ -68,6 +85,7 @@ sh claude/hooks/scratch-policy.test.sh
 sh claude/hooks/orch-edit-guard.test.sh
 sh claude/hooks/git-remote-guard.test.sh
 sh claude/hooks/pr-post-guard.test.sh
+sh claude/hooks/planning-artifact-guard.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
 sh claude/skills/planning-skills.test.sh
@@ -92,6 +110,7 @@ sh install/codex-surfaces.test.sh
 sh install/codex-roles.test.sh
 sh install/codex-stop-hook.test.sh
 sh install/ai-update.test.sh
+sh .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.test.sh
 sh install/repo-sync.test.sh
 sh claude/hooks/settings-drift-check.test.sh
 "
@@ -143,6 +162,18 @@ if [ "$after_status" != "$before_status" ]; then
     done
     fail=$((fail + 1))
     failed_suites="$failed_suites working-tree-litter"
+fi
+
+after_state=$(list_state_roots)
+new_state=$(printf '%s\n' "$after_state" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$before_state" | grep -qxF "$line" || printf '    %s\n' "$line"
+done)
+if [ -n "$new_state" ]; then
+    echo "[X] a suite created state-root entries:"
+    printf '%s\n' "$new_state"
+    fail=$((fail + 1))
+    failed_suites="$failed_suites state-root-litter"
 fi
 
 echo "=== dotfiles-tests: $pass suites passed, $fail failed"

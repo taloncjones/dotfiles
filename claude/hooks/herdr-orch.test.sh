@@ -681,58 +681,66 @@ SH
 
 check "wake_decision: three consecutive Stops with no record change push zero wakes" <<PY
 $LOAD
-m = {"v": 1, "records": {"/t/d.json": [5, 9]}, "last_push": {"stopped": 100.0}}
+m = {"v": 2, "records": {"/t/d.json": [5, 9]}, "last_push": {"stopped": 100.0}}
 fp = {"/t/d.json": [5, 9]}
 pushes = []
 for t in (200.0, 300.0, 400.0):
-    p, m = c.wake_decision(m, "stopped", fp, "stopped", t)
+    p, m = c.wake_decision(m, "stopped", fp, t)
     pushes.append(p)
 assert pushes == [False, False, False], pushes
 PY
 
 check "wake_decision: a Stop after a done.json write pushes exactly one wake" <<PY
 $LOAD
-m = {"v": 1, "records": {}, "last_push": {}}
+m = {"v": 2, "records": {}, "last_push": {}}
 fp = {"/t/d.json": [5, 9]}
-p1, m = c.wake_decision(m, "stopped", fp, "stopped", 1000.0)
-p2, m = c.wake_decision(m, "stopped", fp, "stopped", 2000.0)
+p1, m = c.wake_decision(m, "stopped", fp, 1000.0)
+p2, m = c.wake_decision(m, "stopped", fp, 2000.0)
 assert (p1, p2) == (True, False), (p1, p2)
 assert m["last_push"]["stopped"] == 1000.0, m
 PY
 
-check "wake_decision: a blocking Notification pushes once per transition into blocked" <<PY
+check "wake_decision: every blocking Notification pushes" <<PY
 $LOAD
-m = {"v": 1, "records": {}, "last_push": {}}
-p1, m = c.wake_decision(m, "blocked", {}, "stopped", 1000.0)
-p2, m = c.wake_decision(m, "blocked", {}, "blocked", 1001.0)
-p3, m = c.wake_decision(m, "blocked", {}, "blocked", 99000.0)
-assert (p1, p2, p3) == (True, False, False), (p1, p2, p3)
+m = {"v": 2, "records": {}, "last_push": {}}
+p1, m = c.wake_decision(m, "blocked", {}, 1000.0)
+p2, m = c.wake_decision(m, "blocked", {}, 1001.0)
+assert (p1, p2) == (True, True), (p1, p2)
 PY
 
-check "wake_decision: a debounced record change fires on the next Stop" <<PY
+check "wake_decision: a record change 10 s after a push pushes" <<PY
 $LOAD
-m = {"v": 1, "records": {"/t/d.json": [1, 1]}, "last_push": {"stopped": 1000.0}}
-fp = {"/t/d.json": [2, 2]}
-p1, m = c.wake_decision(m, "stopped", fp, "stopped", 1010.0)
-assert p1 is False, "inside the debounce window"
-assert m["records"] == {"/t/d.json": [1, 1]}, "suppression must not advance the fingerprint"
-p2, m = c.wake_decision(m, "stopped", fp, "stopped", 1100.0)
-assert p2 is True and m["records"] == fp, (p2, m)
+m = {"v": 2, "records": {"/t/d.json": [1, 1]}, "last_push": {"stopped": 1000.0}}
+p, m = c.wake_decision(m, "stopped", {"/t/d.json": [2, 2]}, 1010.0)
+assert p is True and m["records"] == {"/t/d.json": [2, 2]} and m["v"] == 2, (p, m)
+PY
+
+check "read_wake_marker: a v1 marker reads as empty; v2 keeps last_delivery" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+os.makedirs(os.path.join(rd, "workspaces"))
+p = os.path.join(rd, "workspaces", "w1.wake.json")
+json.dump({"v": 1, "records": {"/t/d.json": [1, 1]}, "last_push": {}}, open(p, "w"))
+assert c.read_wake_marker(rd, "w1")["records"] == {}
+json.dump({"v": 2, "records": {"/t/d.json": [1, 1]}, "last_push": {},
+           "last_delivery": {"event": "stopped", "reason": "sent", "ts": 5}}, open(p, "w"))
+m = c.read_wake_marker(rd, "w1")
+assert m["records"] == {"/t/d.json": [1, 1]} and m["last_delivery"]["reason"] == "sent", m
 PY
 
 check "wake_decision: a deleted completion record pushes no wake" <<PY
 $LOAD
-m = {"v": 1, "records": {"/t/d.json": [5, 9]}, "last_push": {}}
-p, m2 = c.wake_decision(m, "stopped", {}, "stopped", 9000.0)
+m = {"v": 2, "records": {"/t/d.json": [5, 9]}, "last_push": {}}
+p, m2 = c.wake_decision(m, "stopped", {}, 9000.0)
 assert p is False, "a vanished record must never signal"
 assert m2["records"] == {"/t/d.json": [5, 9]}, m2
 PY
 
 check "wake_decision: a corrupt marker reads as empty and biases toward pushing" <<PY
 $LOAD
-p, m = c.wake_decision({"garbage": 1}, "stopped", {"/t/d.json": [5, 9]}, "stopped", 9000.0)
+p, m = c.wake_decision({"garbage": 1}, "stopped", {"/t/d.json": [5, 9]}, 9000.0)
 assert p is True and m["records"] == {"/t/d.json": [5, 9]}, (p, m)
-p2, m2 = c.wake_decision("not-a-dict", "stopped", {"/t/d.json": [5, 9]}, None, 9000.0)
+p2, m2 = c.wake_decision("not-a-dict", "stopped", {"/t/d.json": [5, 9]}, 9000.0)
 assert p2 is True, p2
 PY
 
@@ -746,19 +754,6 @@ fp = c.record_fingerprint(rd, "PROJ-1")
 assert list(fp) == [os.path.join(rd, "tasks", "PROJ-1.done.json")], fp
 assert all(isinstance(v, list) and len(v) == 2 for v in fp.values()), fp
 assert c.record_fingerprint(rd, "../escape") == {}, "unsafe task id must yield nothing"
-PY
-
-check "prior_hint: the last event, and None when the tail names another task" <<PY
-$LOAD
-rd = tempfile.mkdtemp()
-os.makedirs(os.path.join(rd, "workspaces"))
-p = os.path.join(rd, "workspaces", "w1.events.jsonl")
-with open(p, "w") as fh:
-    fh.write(json.dumps({"v": 1, "ts": "t", "workspace_id": "w1", "event": "stopped", "task_id": "PROJ-1"}) + "\n")
-    fh.write(json.dumps({"v": 1, "ts": "t", "workspace_id": "w1", "event": "blocked", "task_id": "PROJ-1"}) + "\n")
-assert c.prior_hint(rd, "w1", "PROJ-1") == "blocked"
-assert c.prior_hint(rd, "w1", "PROJ-2") is None, "a rebound workspace must reset the transition"
-assert c.prior_hint(rd, "w9", "PROJ-1") is None, "no log means no prior hint"
 PY
 
 # args: label  ws-or-REGISTER  HERDR_ENV  payload  expect(event|none)
@@ -804,7 +799,7 @@ hook_case "idle_prompt Notification -> no-op" REGISTER "1" '{"hook_event_name":"
 hook_case "hook: three consecutive Stops with no record change push zero wakes" REGISTER "1" '{"hook_event_name":"Stop"}' stopped nopush
 hook_case "hook: an unsafe task_id in the index is a no-op" REGISTER_BAD_TASK "1" '{"hook_event_name":"Stop"}' none
 
-check "hook: a Stop after a done.json write pushes exactly one wake" <<PY
+check "hook: a done.json change with no owner records last_delivery and stays unadvanced" <<PY
 $LOAD
 import subprocess
 outdir = tempfile.mkdtemp()
@@ -816,13 +811,68 @@ env = dict(os.environ, CLAUDE_CONFIG_DIR=outdir, HERDR_ENV="1", HERDR_WORKSPACE_
 def run():
     return subprocess.run(["claude/hooks/herdr_worker_status.py"],
                           input=b'{"hook_event_name":"Stop"}', env=env, capture_output=True)
-run(); run(); run()
-marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
-assert "stopped" not in marker["last_push"], "bare Stops must post nothing: %r" % (marker,)
+run()
+assert not os.path.exists(os.path.join(rd, "workspaces", "w1.wake.json")), "no push, no write"
 open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write('{"outcome":"completed"}')
 run()
 marker = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
-assert "stopped" in marker["last_push"], "a done.json write must post exactly one wake"
+assert marker["v"] == 2 and marker["records"] == {}, marker
+assert marker["last_delivery"]["reason"] == "no-owner", marker
+run()
+again = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert again["last_delivery"]["reason"] == "no-owner" and again["records"] == {}, again
+PY
+
+check "deliver_wake: retries transient failures twice, never raises" <<PY
+$LOAD
+calls = []; sleeps = []
+c._sleep = sleeps.append
+def fake(results):
+    it = iter(results)
+    def post(rd, ws, event, own_socket=""):
+        calls.append(event); return next(it)
+    return post
+c.post_wake = fake(["connect-failed", "connect-failed", "sent"])
+assert c.deliver_wake("/r", "w1", "stopped") == "sent" and len(calls) == 3 and sleeps == [0.25, 0.75]
+calls.clear(); sleeps.clear()
+c.post_wake = fake(["connect-failed"] * 3)
+assert c.deliver_wake("/r", "w1", "stopped") == "connect-failed" and len(calls) == 3
+calls.clear()
+c.post_wake = fake(["stale-heartbeat"])
+assert c.deliver_wake("/r", "w1", "stopped") == "stale-heartbeat" and len(calls) == 1
+def boom(*a, **k): raise RuntimeError("x")
+c.post_wake = boom
+assert c.deliver_wake("/r", "w1", "stopped") == "send-failed"
+PY
+
+check "wake_for_event: sent advances v2 records; failure keeps them and retries next call" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+c._sleep = lambda s: None
+c.post_wake = lambda *a, **k: "connect-failed"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=10.0) == "connect-failed"
+m = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert m["v"] == 2 and m["records"] == {} and m["last_delivery"]["reason"] == "connect-failed", m
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=20.0) == "sent"
+m = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert m["records"] and m["last_delivery"]["reason"] == "sent", m
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=30.0) is None, "same fingerprint"
+PY
+
+check "wake_for_event: a v1 marker whose records match is ignored and rewritten as v2" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+fp = c.record_fingerprint(rd, "PROJ-1")
+json.dump({"v": 1, "records": fp, "last_push": {}},
+          open(os.path.join(rd, "workspaces", "w1.wake.json"), "w"))
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=1.0) == "sent"
+assert json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))["v"] == 2
 PY
 
 # --- model discovery: write-capabilities / resolve-model / disable-model / classify-probe ---
@@ -1032,6 +1082,78 @@ assert str(p) in snap2 and snap2[str(p)]==snap[str(p)]
 assert not c.watch_changed(snap,snap2)
 sys.exit(0)
 PY
+
+check "watch: a think launch record and a write-task never signal; answers and done do" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+for d in ("tasks", "think"): os.makedirs(os.path.join(rd, d))
+prev, _ = c.watch_scan(rd, {})
+open(os.path.join(rd, "think", "think-triage-20260923000000.launch.json"), "w").write("{}")
+open(os.path.join(rd, "tasks", "PROJ-1.json"), "w").write('{"status":"in-progress"}')
+snap, _ = c.watch_scan(rd, prev)
+assert not c.watch_changed(prev, snap), snap
+open(os.path.join(rd, "think", "think-triage-20260923000000.answer.json"), "w").write("{}")
+snap2, _ = c.watch_scan(rd, snap)
+assert c.watch_changed(snap, snap2)
+open(os.path.join(rd, "tasks", "PROJ-1.done.json"), "w").write("{}")
+snap3, _ = c.watch_scan(rd, snap2)
+assert c.watch_changed(snap2, snap3)
+PY
+
+check "backstop_tick: undelivered signals at the grace; delivered never; stale marker values do not count" <<PY
+$LOAD
+k = "/state/slug/tasks/PROJ-1.done.json"
+st = {"pending": {}}
+assert c.backstop_tick(st, {}, {k: (5, 9)}, {}, 1000.0, 120) is False
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, {}, 1119.0, 120) is False
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, {}, 1120.0, 120) is True
+st = {"pending": {}}
+delivered = {"PROJ-1.done.json": {(5, 9)}}
+assert c.backstop_tick(st, {}, {k: (5, 9)}, delivered, 1000.0, 120) is False
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, delivered, 5000.0, 120) is False
+st = {"pending": {}}
+older = {"PROJ-1.done.json": {(4, 9)}}
+c.backstop_tick(st, {}, {k: (5, 9)}, older, 1000.0, 120)
+assert c.backstop_tick(st, {k: (5, 9)}, {k: (5, 9)}, older, 1200.0, 120) is True
+PY
+
+check "backstop_heartbeat_due: fires only for an active task past the interval, resets on emit" <<PY
+$LOAD
+assert c.backstop_heartbeat_due(0.0, 599.0, 600, True) is False
+assert c.backstop_heartbeat_due(0.0, 600.0, 600, True) is True
+assert c.backstop_heartbeat_due(0.0, 10000.0, 600, False) is False
+assert c.backstop_heartbeat_due(600.0, 1199.0, 600, True) is False
+assert c.backstop_heartbeat_due(600.0, 1200.0, 600, True) is True
+PY
+
+check "BACKSTOP_HEARTBEAT_SECS stays under WAKE_HEARTBEAT_STALE_SECS: a director idle for one backstop cycle still refreshes before wake delivery goes stale" <<PY
+$LOAD
+assert c.BACKSTOP_HEARTBEAT_SECS < c.WAKE_HEARTBEAT_STALE_SECS
+PY
+
+check "delivered_records: v2 only, keyed by file name, unreadable markers ignored" <<PY
+$LOAD
+root = tempfile.mkdtemp(); rd = os.path.join(root, "slug")
+os.makedirs(os.path.join(rd, "workspaces"))
+json.dump({"v": 2, "records": {"/elsewhere/slug/tasks/PROJ-1.done.json": [5, 9]}},
+          open(os.path.join(rd, "workspaces", "w1.wake.json"), "w"))
+json.dump({"v": 1, "records": {"/x/tasks/PROJ-2.done.json": [1, 1]}},
+          open(os.path.join(rd, "workspaces", "w2.wake.json"), "w"))
+open(os.path.join(rd, "workspaces", "w3.wake.json"), "w").write("{not json")
+json.dump({"v": 2, "records": {"/x/tasks/PROJ-3.done.json": [{}, 9],
+                               "/x/tasks/PROJ-4.done.json": [True, 1]}},
+          open(os.path.join(rd, "workspaces", "w4.wake.json"), "w"))
+got = c.delivered_records(rd)
+assert got == {"PROJ-1.done.json": {(5, 9)}}, got
+PY
+
+check "watch CLI: backstop flags validated" <<'SH'
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+if $CLI watch --repo-slug github-com-org-watch-cafe0001 --undelivered-only --once --since-epoch 0 2>/dev/null; then exit 1; fi
+if $CLI watch --repo-slug github-com-org-watch-cafe0001 --grace-secs 60 --once --since-epoch 0 2>/dev/null; then exit 1; fi
+if $CLI watch --repo-slug github-com-org-watch-cafe0001 --undelivered-only --grace-secs 10 --exit-on-signal 2>/dev/null; then exit 1; fi
+SH
 
 check "heartbeat_active gates on validated primary record status" <<PY
 $LOAD
@@ -2233,6 +2355,37 @@ grep -q 'think/' "$R/event-schema.md"
 grep -q 'models.think\|"think": \["fable", "opus"\]' "$R/state-layout.md"
 SH
 
+check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state layout" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+P="claude/skills/post-merge/SKILL.md"
+grep -q '^## Lessons step (<lessons-step>)$' "$R/brief-template.md"
+grep -q '^## Director-authored repair and ship briefs$' "$R/brief-template.md"
+[ "$(grep -c '<lessons-step>' "$R/brief-template.md")" -ge 6 ]
+grep -Fq 'at most 160 characters' "$R/brief-template.md"
+if grep -Fq 'LESSON: [' "$R/brief-template.md"; then exit 1; fi
+if grep -Eq '^[[:space:]]*LESSON:' "$R/brief-template.md"; then exit 1; fi
+grep -q '^### Lesson harvest$' "$S"
+grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$S"
+grep -Fq 'tasks/<task_id>.lessons.md' "$S"
+grep -Fq 'skip the Lesson harvest' "$S"
+grep -Fq 'through every following indented' "$S"
+if grep -Fq 'to the end of the line' "$S"; then exit 1; fi
+grep -Fq 'before the verdict or stale-reset' "$S"
+grep -Fq 'see references/state-layout.md,' "$S"
+grep -Fq 'does not guarantee one physical row' "$R/brief-template.md"
+grep -Fq 'tasks/<task_id>.lessons.md' "$P"
+grep -Fq 'artifacts/<task_id>/review-*/findings.md' "$P"
+grep -Fq '.todos/completed/' "$P"
+grep -Fq 'task id from the PR' "$P"
+grep -Fq "on every run" "$P"
+grep -Fq "grep -E '^(- )?LESSON:'" "$P"
+if grep -Fq 'only when the record' "$P"; then exit 1; fi
+if grep -Fq '.todos/done/' "$P"; then exit 1; fi
+grep -Fq '<task_id>.lessons.md' "$R/state-layout.md"
+grep -q '^## Lesson ledger$' "$R/state-layout.md"
+grep -Fq 'append-only' "$R/state-layout.md"
+SH
+
 check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
 $LOAD
 avail={"fable":True,"opus":True,"sonnet":True,"haiku":True}
@@ -2679,7 +2832,7 @@ open(os.path.join(rd,"think","think-triage-20260904150000.question.md"),"w").wri
 snap0b,_=c.watch_scan(rd,snap0)
 assert not c.watch_changed(snap0, snap0b)
 open(os.path.join(rd,"think","think-triage-20260904150000.launch.json"),"w").write("{}")
-snap1,_=c.watch_scan(rd,snap0); assert c.watch_changed(snap0,snap1)
+snap1,_=c.watch_scan(rd,snap0); assert not c.watch_changed(snap0,snap1), "a launch record must not signal (R8)"
 open(os.path.join(rd,"think","think-triage-20260904150000.answer.json"),"w").write("{}")
 snap2,_=c.watch_scan(rd,snap1)
 assert c.watch_changed(snap1, snap2)
@@ -9653,6 +9806,110 @@ if stale=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S
     --agents-json "$root/a.json" --workspaces-json "$root/w.json"); then exit 1; fi
 printf '%s\n' "$stale" | grep -q 'owner: stale-fence' || exit 1
 SH
+
+check "checkin: unreadable task and sidecar lines force changed: yes; missing sidecar is silent" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"in-progress","base_sha":"'"$BASE"'","workers":[]}'
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf '{not json' > "$RD/tasks/PROJ-9.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'unreadable-task PROJ-9.json'
+printf '%s\n' "$out" | grep -qx 'changed: yes'
+! printf '%s\n' "$out" | grep -q 'unreadable-record'
+printf '{not json' > "$RD/tasks/PROJ-1.done.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'unreadable-record PROJ-1.done.json'
+SH
+
+check "checkin: wake= column from the marker, read-only" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/workspaces"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"in-progress","base_sha":"'"$BASE"'","workers":[{"phase":"implement","workspace_id":"w1"}]}'
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf '%s' '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"stopped","reason":"connect-failed","ts":1}}' > "$RD/workspaces/w1.wake.json"
+before=$(shasum "$RD/workspaces/w1.wake.json")
+$CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=connect-failed'
+[ "$before" = "$(shasum "$RD/workspaces/w1.wake.json")" ]
+rm "$RD/workspaces/w1.wake.json"
+$CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'wake=none'
+SH
+
+check "checkin: unverifiable review findings are reported, then clear on byte-identical restore" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+WT=$(mktemp -d)
+git -C "$WT" init -q
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+HEAD=$(git -C "$WT" rev-parse HEAD)
+FINDINGS="$root/herdr-orch/findings.md"
+printf 'No blocking findings. Inspected: fixture.\n' > "$FINDINGS"
+DIGEST=$(python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$FINDINGS")
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"review-dispatched","base_sha":"'"$HEAD"'","review_head_sha":"'"$HEAD"'","worktree":"'"$WT"'","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"pane2","source_head_sha":"'"$HEAD"'"}]}'
+cat > "$RD/tasks/PROJ-1.review.json" <<JSON
+{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"pane2","source_head_sha":"$HEAD","task_id":"PROJ-1","outcome":"approved","reviewed_head_sha":"$HEAD","blocking_count":0,"findings_ref":"$FINDINGS","findings_sha256":"$DIGEST"}
+JSON
+printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"idle"}]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+mv "$FINDINGS" "$FINDINGS.bak"
+$CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -qx 'unverifiable-evidence PROJ-1 review'
+mv "$FINDINGS.bak" "$FINDINGS"
+! $CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'unverifiable-evidence'
+SH
+
+check "plan_record_matches: identity only, independent of artifacts" <<PY
+$LOAD
+task = {"task_id": "PROJ-1", "base_sha": "b" * 40, "workers": []}
+done = {"task_id": "PROJ-1", "phase": "plan", "outcome": "completed",
+        "head_sha": "h" * 40, "base_sha": "b" * 40}
+c.attempt_matches = lambda *a, **k: True
+assert c.plan_record_matches(task, done, "h" * 40, "w1")
+assert not c.plan_record_matches(task, dict(done, outcome="failed"), "h" * 40, "w1")
+PY
+
+check "review-deadlines: ceil remaining from the review row; unknown without one" <<PY
+$LOAD
+import subprocess, time
+root = tempfile.mkdtemp(); slug = "github-com-org-deadline-cafe0002"
+rd = os.path.join(root, "herdr-orch", slug); os.makedirs(os.path.join(rd, "tasks"))
+row = {"phase": "review", "runtime": "claude", "launch_id": "rev-1", "workspace_id": "w2",
+       "pane_id": "w2:p1", "source_head_sha": "a" * 40}
+def task(tid, status, started):
+    rows = [dict(row, started_ns=started)] if started is not None else []
+    json.dump({"task_id": tid, "status": status, "workers": rows},
+              open(os.path.join(rd, "tasks", f"{tid}.json"), "w"))
+now = time.time_ns()
+task("PROJ-1", "review-dispatched", now - 100 * 10**9)
+task("PROJ-2", "review-dispatched", now - 700 * 10**9)
+task("PROJ-3", "completed", now)
+task("PROJ-4", "review-dispatched", None)
+out = subprocess.run([sys.executable, "claude/hooks/herdr_legacy_fixture.py", "review-deadlines",
+                      "--repo-slug", slug], env=dict(os.environ, CLAUDE_CONFIG_DIR=root),
+                     capture_output=True, text=True, check=True).stdout.splitlines()
+assert "review-deadline task=PROJ-1 launch=rev-1 remaining=500" in out, out
+assert "review-deadline task=PROJ-2 launch=rev-1 remaining=0" in out, out
+assert not any("PROJ-3" in l for l in out), out
+assert "review-deadline task=PROJ-4 launch=unknown remaining=unknown" in out, out
+PY
 
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
 $LOAD

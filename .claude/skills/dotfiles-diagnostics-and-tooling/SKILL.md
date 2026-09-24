@@ -29,14 +29,14 @@ inspection below; incident history in dotfiles-failure-archaeology).
 
 ## Tool inventory
 
-| Tool                                         | Scope                              | Mutates? | Exit semantics                    |
-| -------------------------------------------- | ---------------------------------- | -------- | --------------------------------- |
-| `bin/identity-doctor` (alias `git identity`) | git/SSH/Claude identity chain      | No       | 1 if any `[X]`                    |
-| `bin/dotfiles-tests`                         | all nine test suites               | No       | 1 if any suite fails              |
-| `bin/dotfiles-repair`                        | symlinks, settings size, GSD check | YES      | non-zero on hard error (`set -e`) |
-| `scripts/cloud-doctor.sh` (this skill)       | cloud/ephemeral session health     | No       | 1 if any `[X]`                    |
-| `scripts/symlink-audit.sh` (this skill)      | full expected symlink map          | No       | 1 if any non-OK entry             |
-| `claude plugin list` / state JSONs           | plugin install truth               | No       | n/a                               |
+| Tool                                         | Scope                              | Mutates? | Exit semantics                                   |
+| -------------------------------------------- | ---------------------------------- | -------- | ------------------------------------------------ |
+| `bin/identity-doctor` (alias `git identity`) | git/SSH/Claude identity chain      | No       | 1 if any `[X]`                                   |
+| `bin/dotfiles-tests`                         | all nine test suites               | No       | 1 if any suite fails                             |
+| `bin/dotfiles-repair`                        | symlinks, settings size, GSD check | YES      | non-zero on hard error (`set -e`)                |
+| `scripts/cloud-doctor.sh` (this skill)       | cloud/ephemeral session health     | No       | 1 if any `[X]`                                   |
+| `scripts/symlink-audit.sh` (this skill)      | expected symlink map + orphan scan | No       | 1 if any non-OK entry, orphan link or scan error |
+| `claude plugin list` / state JSONs           | plugin install truth               | No       | n/a                                              |
 
 ## identity-doctor interpretation
 
@@ -217,65 +217,92 @@ never ran -- commits would be misattributed to the platform seed identity
 
 ### scripts/symlink-audit.sh
 
-Walks the expected symlink map transcribed from `install/common/link.sh` and
-`link_claude_config_dir` in `install/common/claude-links.sh`. Per entry:
-`OK | WRONG-TARGET | DANGLING | NOT-A-LINK | MISSING`; machine-local files
-(`settings.json`, `~/.gitconfig-work`) are checked inversely (`IS-A-LINK` is
-the failure). `--cloud` restricts to the partial layout bootstrap-cloud.sh
-creates (only `~/.claude`).
+Two passes, both read-only.
+
+Pass 1 walks the expected symlink map: a transcription of what the platform
+`install/<platform>/link.sh` writes (`install/common/link.sh`,
+`link_claude_config_dir`, `link_codex_surfaces`, and the macOS VSCode/Zed links
+on Darwin). Per entry: `OK | WRONG-TARGET | DANGLING | NOT-A-LINK | MISSING`;
+machine-local files (`settings.json` in each Claude dir, `~/.gitconfig-work`,
+`~/.ssh/config_cloudflared`, `~/.config/1Password/ssh/agent.toml`) are checked
+inversely (`IS-A-LINK` is the failure).
+
+Pass 2 scans fixed dirs for symlinks outside that map whose literal target lies
+inside a dotfiles checkout (`$DOTFILES` plus each `--root PATH`):
+
+| State             | Meaning                                                              | Fails the run? |
+| ----------------- | -------------------------------------------------------------------- | -------------- |
+| `ORPHAN-DANGLING` | target is gone from a checkout (any scanned dir)                     | Yes            |
+| `ORPHAN-LIVE`     | target exists; link sits in an installer-owned dir                   | Yes            |
+| `UNOWNED-LIVE`    | target exists; link sits in a shared dir (`[INFO]`, not judged)      | No             |
+| `INCOMPLETE`      | a scan or a proof of absence could not finish (permissions, a crash) | Yes            |
+
+Scanned dirs (depth): `~` 1, `~/bin` 1, `~/.ssh` 1, `~/.local/bin` 1,
+`~/.config` 3, `~/.codex` 2, `~/.claude` 2, `~/.claude-work` 2, and on macOS
+`~/Library/Application Support/Code/User` 1. Installer-owned dirs, where an
+unmapped live link is stale by the architecture contract: `~/.claude`,
+`~/.claude-work`, `~/.codex/hooks`, `~/.codex/skills`, `~/.codex/rules`.
+`--cloud` restricts both passes to `~/.claude` (what bootstrap-cloud.sh
+creates). Links to other checkouts count only when named with `--root`,
+including a deleted checkout; audit from the installed checkout (or set
+`DOTFILES=`), otherwise pass 1 reports WRONG-TARGET for every entry.
 
 ```bash
-.claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh          # full machine
-.claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --cloud  # container
+.claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh                  # full machine
+.claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --cloud          # container
+.claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --root ~/dotfiles-old
+.claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --list-expected  # the map as TSV
 ```
 
-Captured in this cloud container, 2026-07-02:
+Output format (cloud mode on a healthy container; format example, not a
+captured run):
 
 ```
 symlink-audit: dotfiles root = /home/user/dotfiles  (mode: cloud)
 
 --- claude config dir: /root/.claude ---
 [OK] OK            /root/.claude/CLAUDE.md
-[OK] OK            /root/.claude/operating-principles.md
-[OK] OK            /root/.claude/commands
-[OK] OK            /root/.claude/agents
-[OK] OK            /root/.claude/hooks
-[OK] OK            /root/.claude/skills
-[OK] OK            /root/.claude/rules
-[OK] OK            /root/.claude/statusline.js
+...
 [OK] OK            /root/.claude/settings.json (machine-local file)
 
-symlink-audit: all 9 entries OK.
+--- orphan scan ---
+[INFO] checkout root: /home/user/dotfiles
+[INFO] 0 symlink(s) outside dotfiles checkouts ignored
+
+symlink-audit: all 9 entries OK, no orphan links.
 ```
 
-Full mode on the same container correctly reports the zsh/git/ssh/codex and
-`~/.claude-work` entries MISSING/NOT-A-LINK -- expected, since
-bootstrap-cloud.sh deliberately installs only the Claude layer. On a real
-machine, any non-OK line in full mode is actionable: `WRONG-TARGET`/`DANGLING`
-usually means a deleted or moved sibling dotfiles checkout was the old target
-(the exact rot `dotfiles-repair` step 2/5 fixes).
+A failing run ends with
+`symlink-audit: <B> of <N> entries NOT OK, <O> orphan link(s), <I> scan error(s).`
+and exits 1. Full mode on a container reports the zsh/git/ssh/codex and
+`~/.claude-work` entries MISSING/NOT-A-LINK, which is expected there. On a real
+machine, `WRONG-TARGET`/`DANGLING` usually means a deleted or moved sibling
+checkout (the rot `dotfiles-repair` step 2/5 fixes), and an `ORPHAN-*` line
+names a leftover from a retired tool or file. The audit never deletes; remove
+a confirmed orphan by hand.
 
-If the symlink map in `link.sh`/`claude-links.sh` changes, update this
-script's entry list -- it is a transcription, not a parser.
+`symlink-audit.test.sh` runs the real installer from a disposable copy of the
+checkout into a scratch HOME and fails when the map drifts from `link.sh`, so
+update the map in the same change as any installer link.
 
 ## Provenance and maintenance
 
 All facts verified against the working tree and live container on 2026-07-02.
 Volatile facts and how to re-verify:
 
-| Fact (as of 2026-07-02)                                                | Re-verify                                                                                                                                                             |
-| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Nine test suites in the runner                                         | `bin/dotfiles-tests --list`                                                                                                                                           |
-| CI runs the runner                                                     | `grep dotfiles-tests .github/workflows/tests.yml`                                                                                                                     |
-| identity-doctor sections/labels                                        | `grep -n 'section ' bin/identity-doctor`                                                                                                                              |
-| repair's five steps                                                    | `grep -n 'step "' bin/dotfiles-repair`                                                                                                                                |
-| plugin CLI verbs                                                       | `claude plugin --help; claude plugin marketplace --help`                                                                                                              |
-| plugin state paths                                                     | `ls ~/.claude/plugins/`                                                                                                                                               |
-| no plugin is required (ECC and Superpowers both retired 2026-09)       | `grep -q ensure_plugin bootstrap-cloud.sh; echo $?` (expect 1)                                                                                                        |
-| template-vs-live drift checker coverage                                | `sed -n '80,110p' claude/hooks/claude-hooks.test.sh`                                                                                                                  |
-| symlink map (script transcription)                                     | `diff <(grep 'ln -sf' install/common/link.sh) <(grep check_link .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh)` -- eyeball, formats differ |
-| baseline (all suites pass; any public-safety failure is stop-the-line) | `bin/dotfiles-tests`                                                                                                                                                  |
-| platform default author email `noreply@anthropic.com`                  | `grep PLATFORM_DEFAULT_EMAIL bootstrap-cloud.sh`                                                                                                                      |
+| Fact (as of 2026-07-02)                                                | Re-verify                                                                                                                                    |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nine test suites in the runner                                         | `bin/dotfiles-tests --list`                                                                                                                  |
+| CI runs the runner                                                     | `grep dotfiles-tests .github/workflows/tests.yml`                                                                                            |
+| identity-doctor sections/labels                                        | `grep -n 'section ' bin/identity-doctor`                                                                                                     |
+| repair's five steps                                                    | `grep -n 'step "' bin/dotfiles-repair`                                                                                                       |
+| plugin CLI verbs                                                       | `claude plugin --help; claude plugin marketplace --help`                                                                                     |
+| plugin state paths                                                     | `ls ~/.claude/plugins/`                                                                                                                      |
+| no plugin is required (ECC and Superpowers both retired 2026-09)       | `grep -q ensure_plugin bootstrap-cloud.sh; echo $?` (expect 1)                                                                               |
+| template-vs-live drift checker coverage                                | `sed -n '80,110p' claude/hooks/claude-hooks.test.sh`                                                                                         |
+| symlink map (script transcription)                                     | `sh .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.test.sh` (parity cases run the real installer into a scratch HOME) |
+| baseline (all suites pass; any public-safety failure is stop-the-line) | `bin/dotfiles-tests`                                                                                                                         |
+| platform default author email `noreply@anthropic.com`                  | `grep PLATFORM_DEFAULT_EMAIL bootstrap-cloud.sh`                                                                                             |
 
 Update triggers: adding/removing a test suite, renaming a doctor, changing the
 symlink map, template key changes, or a new plugin becoming dotfiles-required.

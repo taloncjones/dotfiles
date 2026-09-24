@@ -211,3 +211,14 @@ dmypy.json
 .ruff_cache/
 
 **/.claude/settings.local.json
+
+# =============================================================================
+# Private planning and orchestration artifacts (never committed)
+# =============================================================================
+# Top-level anchored: a mid-slash pattern matches only at the worktree root.
+
+docs/superpowers/
+docs/specs/
+docs/plans/
+.planning/
+claude/contracts/

@@ -3,7 +3,7 @@ set -e
 # herdr pane identity must not leak in from a herdr-hosted run. HERDR_PERSONAL
 # also flips herdr_stop_gate.py into strict account-verification mode, so it
 # is unset here too (the sibling suites already carry it).
-unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID HERDR_PERSONAL
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_PANE_ID HERDR_TAB_ID HERDR_ACCOUNT_ID HERDR_PERSONAL HERDR_BOUNDED_CHILD
 
 PASS=0
 FAIL=0
@@ -369,14 +369,15 @@ want = [
     "~/.claude/hooks/rm_guard.py",
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
+    "~/.claude/hooks/planning_artifact_guard.py",
 ]
 sys.exit(0 if cmds == want else 1)
 PY
 then
-    printf 'PASS  hwg: template lists the Bash guards in order, orch_edit_guard last\n'
+    printf 'PASS  hwg: template lists the Bash guards in order, planning_artifact_guard last\n'
     PASS=$((PASS + 1))
 else
-    printf 'FAIL  hwg: template lists the Bash guards in order, orch_edit_guard last\n' >&2
+    printf 'FAIL  hwg: template lists the Bash guards in order, planning_artifact_guard last\n' >&2
     FAIL=$((FAIL + 1))
 fi
 
@@ -1042,6 +1043,8 @@ fi
 gate_case "no HERDR_ENV is allowed" allow w1 impl none nofile "$GATE_P_F" HERDR_ENV=
 gate_case "legacy row ignores a foreign HERDR_PANE_ID" block-1 w1 impl none nofile "$GATE_P_F" HERDR_PANE_ID=w9:p9
 gate_case "legacy row ignores an empty HERDR_PANE_ID" block-1 w1 impl none nofile "$GATE_P_F" HERDR_PANE_ID=
+gate_case "bounded-runner child marker allows a refused stop" allow w1 impl none nofile "$GATE_P_F" HERDR_BOUNDED_CHILD=1
+gate_case "bounded-runner child marker 0 still refuses" block-1 w1 impl none nofile "$GATE_P_F" HERDR_BOUNDED_CHILD=0
 gate_case "no index for the workspace is allowed" allow w1 noindex none nofile "$GATE_P_F"
 gate_case "invalid workspace id is allowed" allow ..x impl none nofile "$GATE_P_F"
 gate_case "mech role is allowed" allow w1 mech none nofile "$GATE_P_F"
@@ -1149,8 +1152,9 @@ fi
 
 # git_remote_guard.py registration: the template carries exactly one
 # PreToolUse entry with matcher Bash|Edit|Write, listing only the git
-# metadata guard, appended last, and the Bash guard group retains the
-# orchestrator edit guard registered by its dedicated suite.
+# metadata guard, appended last, and the Bash guard group ends with the
+# orchestrator edit guard followed by the planning-artifact guard,
+# both registered by their dedicated suites.
 # Independent of live machine state; the live drift check above is
 # derived from the template and covers reconciled machines.
 if python3 - <<'PY'
@@ -1168,6 +1172,7 @@ want_bash = [
     "~/.claude/hooks/rm_guard.py",
     "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
+    "~/.claude/hooks/planning_artifact_guard.py",
 ]
 ok = (len(ours) == 1 and pre[-1] is ours[0] and bash == want_bash
       and ours[0]["hooks"] == [{"type": "command",

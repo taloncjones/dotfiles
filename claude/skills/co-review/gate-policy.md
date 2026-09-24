@@ -67,7 +67,7 @@ is not that instruction.
 
 Only a complete, clean repair review permits one follow-up verification on the
 new head, with a fresh expected identity and every known blocker supplied for
-disposition. The same four fresh seats inspect the repair delta and affected
+disposition. The seats of the follow-up report's own class inspect the repair delta and affected
 contracts; they do not repeat the initial unrestricted search. Follow-up
 coverage is assembled as described below. New material evidence may invalidate
 carried coverage, but fewer findings never change severity. Classify a new
@@ -83,7 +83,7 @@ result. It never recursively invokes --fix.
 Retain the successfully finalized initial report and its actual seat artifacts
 as hashed, report-relative evidence in the active workflow. They supply prior
 coverage, never authority to approve the new head. Freeze and verify the new
-head normally; obtain fresh CI, four current seat reports, and a current
+head normally; obtain fresh CI, current seat reports for its class, and a current
 expected identity. An interrupted workflow cannot reconstruct its authority
 from an old report.
 
@@ -104,7 +104,7 @@ invalidates prior evidence, recheck the affected contract. Opaque diff output
 is not evidence that a file is unchanged: inspect the frozen file/tree and
 record missing inspection as a coverage gap. No token scanner decides this.
 
-The first three seats receive the same prior baseline independently and report
+The finder seats receive the same prior baseline independently and report
 fresh evidence for their affected scope, plus any invalidated carried entry.
 The verifier checks material claims, prior blocker dispositions, and the
 combined coverage ledger. It reconciles those claims instead of starting an
@@ -154,8 +154,13 @@ evidence, not an empty success.
 
 ### Required independent seats
 
-All four seats are fresh, read-only, independently completed runtime calls with
-a 600-second bound. Record requested and observed runtime/model/effort; an
+The seat set follows the change class (`scripts/change_class.py`; `co-review
+--full` forces full). The full tier runs four seats: `claude`, `codex`,
+`breaker`, `verifier`. The light tier runs `codex` and `verifier`, one Codex
+and one Claude runtime, for a diff whose every path is Markdown or `.todos/`
+outside the gate skills. Every seat is fresh, read-only, independently
+completed runtime calls with a 600-second bound. Record requested and
+observed runtime/model/effort; an
 unknown observation remains `unknown`. Each seat artifact is nonempty,
 SHA-256-bound, and records an actual completion. A narrated dispatch, a
 controller opinion, or a current-session implementer does not fill a seat.
@@ -164,15 +169,16 @@ controller opinion, or a current-session implementer does not fill a seat.
 2. `codex`: fresh native Codex reviewer route. A Codex-led controller creates a
    native child; it never shells into a generic Codex CLI review path.
 3. `breaker`: fresh skeptic route, independent of both finder reports.
-4. `verifier`: fresh skeptic route after the first three reports exist. It
-   receives those reports and every known blocker, but performs its own frozen
-   evidence check.
+4. `verifier`: fresh skeptic route after every finder report exists (three in
+   the full tier, the `codex` report in the light tier). It receives those
+   reports and every known blocker, but performs its own frozen evidence
+   check.
 
 Use the shared resolver for every seat. Preserve the original repository's
-account route; a personal Claude route unsets `CLAUDE_CONFIG_DIR`. The first
-three seats receive the frozen diff, relevant callers, repository conventions,
+account route; a personal Claude route unsets `CLAUDE_CONFIG_DIR`. The finder
+seats receive the frozen diff, relevant callers, repository conventions,
 the declared threat model (default `exposed`), and this policy. The verifier additionally receives
-the first-three artifacts and prior blockers. Every prompt permits relevant
+the finder artifacts and prior blockers. Every prompt permits relevant
 reference skills for language, security, framework and architecture guidance.
 That guidance does not override the review
 scope, material-impact threshold or read-only authority. Reviewers perform the

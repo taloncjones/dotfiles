@@ -693,15 +693,17 @@ def launch_argv(
         raise RouteError(
             "Claude cannot enforce danger-full-access as a sandbox setting"
         )
-    argv = [
-        "claude",
-        "--model",
-        model,
-        "--effort",
-        effort,
-        "--permission-mode",
-        permission_modes[sandbox],
-    ]
+    argv = ["claude", "--model", model, "--effort", effort]
+    if sandbox == "read-only" and mode == "interactive":
+        # Plan mode's two approval menus strand an interactive reviewer; deny
+        # file-tool writes under the cwd instead ("//" marks an absolute path).
+        if not os.path.isabs(selected_cwd) or any(ch in selected_cwd for ch in "*?[]()\\"):
+            raise RouteError("read-only Claude cwd cannot be expressed as a deny rule")
+        deny = [f"Edit(/{selected_cwd}/**)", f"Write(/{selected_cwd}/**)"]
+        argv.extend(["--permission-mode", "auto",
+                     "--settings", json.dumps({"permissions": {"deny": deny}})])
+    else:
+        argv.extend(["--permission-mode", permission_modes[sandbox]])
     if route.get("role") in SLIM_BOOT_ROLES:
         argv.append("--strict-mcp-config")
     if mode == "headless":
@@ -1016,6 +1018,9 @@ def run_bounded(
     child_env = dict(os.environ if env is None else env)
     strip_pane_identity(child_env)
     _apply_launch_environment(child_env, scope)
+    # herdr_stop_gate allows any stop carrying this: a bounded child is a
+    # helper, and a `-p` child does act on a stop-hook nudge.
+    child_env["HERDR_BOUNDED_CHILD"] = "1"
     process = subprocess.Popen(
         argv,
         cwd=_checked_cwd(cwd),

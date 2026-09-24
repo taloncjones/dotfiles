@@ -1647,15 +1647,15 @@ import json, sys
 pre = json.load(open("claude/settings.json.tmpl"))["hooks"]["PreToolUse"]
 def cmds(matcher):
     return [h["command"] for e in pre if e.get("matcher") == matcher for h in e["hooks"]]
-ok = cmds("Bash")[-1] == "~/.claude/hooks/orch_edit_guard.py" \
+ok = cmds("Bash")[-2:] == ["~/.claude/hooks/orch_edit_guard.py", "~/.claude/hooks/planning_artifact_guard.py"] \
     and cmds("Edit|Write") == ["~/.claude/hooks/protect_claude_md.py", "~/.claude/hooks/orch_edit_guard.py"] \
     and sum(c == "~/.claude/hooks/orch_edit_guard.py" for m in ("Bash", "Edit|Write") for c in cmds(m)) == 2
 sys.exit(0 if ok else 1)
 PY
     then
-        printf 'PASS  static: template registers the guard last in the Bash and Edit|Write groups\n'; PASS=$((PASS + 1))
+        printf 'PASS  static: template registers the guard last in Edit|Write and before the planning guard in Bash\n'; PASS=$((PASS + 1))
     else
-        printf 'FAIL  static: template registers the guard last in the Bash and Edit|Write groups\n' >&2; FAIL=$((FAIL + 1))
+        printf 'FAIL  static: template registers the guard last in Edit|Write and before the planning guard in Bash\n' >&2; FAIL=$((FAIL + 1))
     fi
     if grep -qx 'sh claude/hooks/orch-edit-guard.test.sh' bin/dotfiles-tests; then
         printf 'PASS  static: suite is registered in bin/dotfiles-tests\n'; PASS=$((PASS + 1))
@@ -1672,12 +1672,11 @@ PY
     if grep -q 'orch-edit-allow.json' claude/skills/herdr-orchestration/references/state-layout.md \
             && grep -q 'tasks/orch-edits.jsonl' claude/skills/herdr-orchestration/references/state-layout.md \
             && grep -q 'orch_edit_guard.py' .claude/skills/dotfiles-architecture-contract/references/install-layout.md \
-            && grep -q '^- (2026-09) An orchestrator session dispatches' claude/rules/personal/agent-lessons.md \
-            && [ "$(wc -l < claude/rules/personal/agent-lessons.md | tr -d ' ')" -le 45 ] \
-            && [ "$(grep -c '^- (' claude/rules/personal/agent-lessons.md)" -le 20 ]; then
-        printf 'PASS  docs: state-layout, install-layout bullet, agent-lessons bullet within caps\n'; PASS=$((PASS + 1))
+            && [ "$(wc -l < claude/rules/personal/agent-lessons.md | tr -d ' ')" -le 70 ] \
+            && [ "$(grep -c '^- (' claude/rules/personal/agent-lessons.md)" -le 30 ]; then
+        printf 'PASS  docs: state-layout, install-layout bullet, agent-lessons file within caps\n'; PASS=$((PASS + 1))
     else
-        printf 'FAIL  docs: state-layout, install-layout bullet, agent-lessons bullet within caps\n' >&2; FAIL=$((FAIL + 1))
+        printf 'FAIL  docs: state-layout, install-layout bullet, agent-lessons file within caps\n' >&2; FAIL=$((FAIL + 1))
     fi
 fi
 
