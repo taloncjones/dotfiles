@@ -38,7 +38,7 @@
     },
     {
       "name": "audit-bash32-static",
-      "run": "! grep -nE 'declare -A|mapfile|readarray|[$][{][A-Za-z_]+,,[}]|lastpipe|readlink -f' .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh && grep -qF 'FINDRC=' .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh"
+      "run": "! grep -nE 'declare -A|mapfile|readarray|[$][{][A-Za-z_]+,,[}]|lastpipe|readlink -f' .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh && grep -qF 'FINDRC=' .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh && ! grep -v '^[[:space:]]*#' .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh | grep -qF '<<'"
     },
     {
       "name": "docs-document-orphans",
