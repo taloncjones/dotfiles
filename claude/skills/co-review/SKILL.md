@@ -201,19 +201,17 @@ uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
   --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 1200 \
   --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
-wait
 if [ "$CLASS" != "light" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
     --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" &
-  wait
   uv run --no-project python "$RUNNER" run \
     --runtime codex --role skeptic --risk normal --provisional \
     --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 1200 \
     --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" &
-  wait
 fi
+wait
 ```
 
 The Claude invocation preserves the original repository's selected account;
