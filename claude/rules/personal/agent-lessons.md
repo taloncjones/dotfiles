@@ -39,7 +39,7 @@ is the staging tier, not an archive.
   into a skill: unverified gh fields and flag combinations shipped broken.
 - (2026-09) Run suites to a file, then grep it: pipes hide failures and stderr.
 - (2026-09) Settle a factual review dispute by executing the case, not by rank.
-- (2026-09) Bound a reviewer by its diff, not a fixed clock: a live reviewer past a
-  static deadline is re-sized or waited on, never interrupted and re-run.
-- (2026-09) After a review round, re-dispatch a fresh implement attempt before the
-  repair worker emits: a superseded attempt row refuses its emit-done.
+- (2026-09) Bound a reviewer by its diff, not a fixed clock: a live reviewer past
+  a static deadline is re-sized or waited on, never interrupted and re-run.
+- (2026-09) After a review round, re-dispatch a fresh implement attempt before
+  the repair worker emits: a superseded attempt row refuses its emit-done.
