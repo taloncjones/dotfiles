@@ -421,6 +421,22 @@ expect_same "killed enumeration: audit exits 1" 1 "$RC"
 has_line "killed enumeration: INCOMPLETE" "$EVI/killed.out" \
     "[X]  INCOMPLETE      $H/bin (enumeration ended without a completion record)"
 
+# A scan root itself relocated behind a symlink (e.g. ~/.ssh moved aside) must
+# withhold the clean verdict, not silently skip with only an [INFO] line.
+mv "$H/.ssh" "$H/.ssh.real"
+ln -s .ssh.real "$H/.ssh"
+audit_ro "$EVI/symlinked-scandir.out" "$H"
+expect_same "symlinked scan dir: audit exits 1" 1 "$RC"
+has_line "symlinked scan dir: INCOMPLETE" "$EVI/symlinked-scandir.out" \
+    "[X]  INCOMPLETE      $H/.ssh (scan dir is a symlink, not followed)"
+if grep -q 'no orphan links\.$' "$EVI/symlinked-scandir.out"; then
+    fail "symlinked scan dir: no clean summary"
+else
+    pass "symlinked scan dir: no clean summary"
+fi
+rm -f "$H/.ssh"
+mv "$H/.ssh.real" "$H/.ssh"
+
 if [ "$RO_RUNS" -gt 0 ] && [ "$RO_BAD" -eq 0 ]; then
     pass "every audit run left fixtures/ unchanged ($RO_RUNS runs)"
 else

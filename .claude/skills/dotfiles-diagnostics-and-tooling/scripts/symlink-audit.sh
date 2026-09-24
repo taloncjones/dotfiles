@@ -413,7 +413,7 @@ classify() {
 scan_dir() {
   local dir="$1" depth="$2" rec rc="" blocker
   if [ -L "$dir" ]; then
-    echo "[INFO] scan dir is a symlink, not followed: $dir"
+    incomplete "$dir" "scan dir is a symlink, not followed"
     return
   fi
   if [ ! -d "$dir" ]; then
