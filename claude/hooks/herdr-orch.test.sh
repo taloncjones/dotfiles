@@ -2374,6 +2374,9 @@ grep -Fq '.todos/completed/' "$P"
 grep -Fq 'task id from the PR' "$P"
 if grep -Fq 'only when the record' "$P"; then exit 1; fi
 if grep -Fq '.todos/done/' "$P"; then exit 1; fi
+grep -Fq '<task_id>.lessons.md' "$R/state-layout.md"
+grep -q '^## Lesson ledger$' "$R/state-layout.md"
+grep -Fq 'append-only' "$R/state-layout.md"
 SH
 
 check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
