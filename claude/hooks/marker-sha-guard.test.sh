@@ -375,6 +375,18 @@ deny "coproc wraps the gh segment" "$R" "coproc gh pr comment 5 --body '$AUDIT_B
 deny "locale-quoted body wraps a bad marker directly" "$R" "gh pr comment 5 --body \$\"$AUDIT_BAD\""
 allow "locale quoting without a hint stays allowed" "$R" "gh pr comment 5 --body \$\"no marker here\""
 
+# --- repair round 3: a later segment of the same branch body still leaks (B4) ---
+deny "else does not inherit an untaken cd behind a harmless first command" "$R" "if [ 1 = 2 ]; then true; cd sub; else gh pr comment 5 --body-file x.md; fi"
+deny "elif does not inherit an untaken cd behind a harmless first command" "$R" "if [ 1 = 2 ]; then :; cd sub; elif true; then gh pr comment 5 --body-file x.md; fi"
+deny "else does not inherit an untaken assignment behind a harmless first command" "$R" "F=bad.md; if [ 1 = 2 ]; then true; F=good.md; else gh pr comment 5 --body-file \"\$F\"; fi"
+deny "else does not inherit an untaken export behind a harmless first command" "$R" "F=bad.md; if [ 1 = 2 ]; then true; export F=good.md; else gh pr comment 5 --body-file \"\$F\"; fi"
+deny "else does not inherit an untaken unset behind a harmless first command" "$R" "F=bad.md; if [ 1 = 2 ]; then true; unset F; else gh pr comment 5 --body-file \"\$F\"; fi"
+allow "control: straight-line cd still resolves after a round-3 harmless prefix" "$R" "true; cd sub && gh pr comment 5 --body-file x.md"
+
+# --- repair round 3: coproc with a name and a brace body (A-12) ---
+deny "named coproc with a brace body wraps the gh segment" "$R" "coproc c { gh pr comment 5 --body '$AUDIT_BAD'; }"
+allow "named coproc with a valid marker" "$R" "coproc c { gh pr comment 5 --body '$GOOD'; }"
+
 # --- installed layouts: the shared modules resolve through symlinks ---
 mkdir -p "$FIX/home/.claude" "$FIX/codex/hooks"
 ln -s "$PWD/claude/hooks" "$FIX/home/.claude/hooks"

@@ -122,6 +122,11 @@ class Walk:
     # ordinarily-ambiguous value (skipped or after `&&`), these deny even
     # without a marker hint, since the guard once tracked them for certain.
     uncertain_vars: set = field(default_factory=set)
+    # Sticky for the rest of the command once any segment strips a reserved
+    # word: a sibling segment further into the same then/else/do body has no
+    # leading keyword of its own, but its cd/assignment/export/unset is still
+    # behind the same branch that may never run.
+    branched: bool = False
 
 
 def split_heredocs(command: str) -> tuple[str, list[str], bool]:
@@ -571,15 +576,19 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
     or backgrounded; after `&&` a cd holds while the `&&` chain continues.
     A segment behind a stripped reserved word (`then`, `else`, ...) may
     never run, so its cd/assignment is uncertain the same way, whether or
-    not it also follows `&&`."""
+    not it also follows `&&`. Once any segment in the command strips a
+    reserved word, every later segment stays uncertain too -- a sibling
+    segment further into the same then/else/do body has no leading keyword
+    of its own, but sits behind the same branch that may never run."""
     words = rm_guard.strip_prefixes(segment)
-    branched = False
     while words and words[0] in RESERVED_WORDS:
-        branched = True
+        walk.branched = True
         keyword, words = words[0], words[1:]
-        if keyword == "function" and words and words[0] not in RESERVED_WORDS:
-            words = words[1:]  # the function's name, before its `{`
+        if keyword in ("function", "coproc") and words and words[0] not in RESERVED_WORDS:
+            if keyword == "function" or (len(words) > 1 and words[1] == "{"):
+                words = words[1:]  # the function/coproc name, before its `{`
         words = rm_guard.strip_prefixes(words)
+    branched = walk.branched
     prefix = segment[: len(segment) - len(words)]
     seg_env = dict(t.split("=", 1) for t in prefix if rm_guard.is_env_assignment(t))
     skipped = before in ("||", "|") or after in ("|", "&")
