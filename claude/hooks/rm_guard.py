@@ -309,47 +309,52 @@ def check_command(command: str, real_cwd: str, home: str, cwd: str | None = None
     return None
 
 
+def shell_invocation(data) -> tuple[str, str] | None:
+    """(command, cwd) for a Claude or Codex shell-tool payload, else None."""
+    if not isinstance(data, dict):
+        return None
+    tool_name = data.get("tool_name") or data.get("toolName") or ""
+    if not isinstance(tool_name, str) or tool_name.lower() not in SHELL_TOOLS:
+        return None
+    tool_input = data.get("tool_input") or data.get("toolInput") or {}
+    if not isinstance(tool_input, dict):
+        return None
+    nested = tool_input.get("args")
+    inputs = [tool_input] + ([nested] if isinstance(nested, dict) else [])
+    command = next(
+        (
+            value
+            for item in inputs
+            for key in ("command", "cmd")
+            if isinstance(value := item.get(key), str)
+        ),
+        "",
+    )
+    if not command:
+        return None
+    payload_cwd = data.get("cwd")
+    cwd = payload_cwd if isinstance(payload_cwd, str) and payload_cwd else os.getcwd()
+    tool_workdir = next(
+        (
+            value
+            for item in inputs
+            for key in ("workdir", "cwd")
+            if isinstance(value := item.get(key), str) and value
+        ),
+        None,
+    )
+    if tool_workdir is not None:
+        cwd = resolve(tool_workdir, cwd)
+    return command, cwd
+
+
 def main():
     try:
         data = json.load(sys.stdin)
-        tool_name = data.get("tool_name") or data.get("toolName") or ""
-        if not isinstance(tool_name, str) or tool_name.lower() not in SHELL_TOOLS:
+        invocation = shell_invocation(data)
+        if invocation is None or "rm" not in invocation[0]:
             sys.exit(0)
-
-        tool_input = data.get("tool_input") or data.get("toolInput") or {}
-        if not isinstance(tool_input, dict):
-            sys.exit(0)
-        nested = tool_input.get("args")
-        inputs = [tool_input] + ([nested] if isinstance(nested, dict) else [])
-        command = next(
-            (
-                value
-                for item in inputs
-                for key in ("command", "cmd")
-                if isinstance(value := item.get(key), str)
-            ),
-            "",
-        )
-        if not isinstance(command, str) or "rm" not in command:
-            sys.exit(0)
-
-        payload_cwd = data.get("cwd")
-        real_cwd = (
-            payload_cwd
-            if isinstance(payload_cwd, str) and payload_cwd
-            else os.getcwd()
-        )
-        tool_workdir = next(
-            (
-                value
-                for item in inputs
-                for key in ("workdir", "cwd")
-                if isinstance(value := item.get(key), str) and value
-            ),
-            None,
-        )
-        if tool_workdir is not None:
-            real_cwd = resolve(tool_workdir, real_cwd)
+        command, real_cwd = invocation
         home = os.environ.get("HOME", os.path.expanduser("~"))
 
         reason = check_command(command, real_cwd, home)
