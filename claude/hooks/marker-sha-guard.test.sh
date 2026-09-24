@@ -371,6 +371,10 @@ allow "control: a straight-line cd still resolves" "$R" "cd sub && gh pr comment
 deny "function definition wraps the gh segment" "$R" "function f { gh pr comment 5 --body '$AUDIT_BAD'; }; f"
 deny "coproc wraps the gh segment" "$R" "coproc gh pr comment 5 --body '$AUDIT_BAD'"
 
+# --- repair round 2: locale ($"...") quoting is not decoded (A-9) ---
+deny "locale-quoted body wraps a bad marker directly" "$R" "gh pr comment 5 --body \$\"$AUDIT_BAD\""
+allow "locale quoting without a hint stays allowed" "$R" "gh pr comment 5 --body \$\"no marker here\""
+
 # --- installed layouts: the shared modules resolve through symlinks ---
 mkdir -p "$FIX/home/.claude" "$FIX/codex/hooks"
 ln -s "$PWD/claude/hooks" "$FIX/home/.claude/hooks"

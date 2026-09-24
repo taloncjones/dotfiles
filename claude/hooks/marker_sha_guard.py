@@ -91,8 +91,8 @@ UNREADABLE = (
     "write the body to a file first and pass its literal path"
 )
 ANSI_C_QUOTED = (
-    "cannot read a command that mentions a co-review marker inside $'...' "
-    "(ANSI-C) quoting; write the body to a file first and pass its literal path"
+    "cannot read a command that mentions a co-review marker inside $'...' or "
+    '$"..." quoting; write the body to a file first and pass its literal path'
 )
 OWN_COMMAND = (
     "post a co-review marker in its own command: only cd, assignments, "
@@ -633,7 +633,7 @@ def check_command(
     rewrites and assigned carry an outer shell's state into `sh -c` scripts."""
     stripped, heredocs, expands = split_heredocs(command)
     hinted = any(hint in command for hint in MARKER_HINTS)
-    if hinted and "$'" in stripped:
+    if hinted and ("$'" in stripped or '$"' in stripped):
         return ANSI_C_QUOTED
     walk = Walk(cwd, home, heredocs, hinted, dict(assigned or {}), rewrites or expands)
     try:
