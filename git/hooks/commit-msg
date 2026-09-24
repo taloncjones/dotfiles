@@ -3,14 +3,16 @@ set -euo pipefail
 
 # Global commit-msg guard for portable commit message policy.
 #
-# Two layers, in order:
+# Three layers, in order:
 #   1. Strip pass (no rg needed): removes agent attribution lines that tools
 #      inject -- agent co-author trailers (by name, noreply mailbox, or [bot]
 #      address), session and generated-with/by trailer keys, and
 #      "Generated with|by <agent>" footers -- from line 2 onward. Other line
 #      content is preserved; rewriting adds LF to an unterminated retained
 #      final line. A message with nothing to strip is not rewritten at all.
-#   2. Block checks (rg): reject what cannot be safely edited -- inline
+#   2. Subject length (no rg needed): rejects a first line of 75 or more
+#      characters unless git generated it (merge, revert, autosquash).
+#   3. Block checks (rg): reject what cannot be safely edited -- inline
 #      attribution in the subject or body, and emojis.
 # Agent names come from agent-tokens next to this hook, which the Bash
 # attribution hooks under claude/ and codex/ read too.
@@ -106,6 +108,19 @@ if [[ "$agent_lines" -gt 0 ]]; then
   fi
   strip_tmp=""
   printf 'commit-msg: stripped %s agent attribution line(s).\n' "$agent_lines" >&2
+fi
+
+# --- Subject length -----------------------------------------------------------
+
+# Bytes, not characters: equal for the ASCII subjects the repo rules require,
+# and stricter otherwise. Git-generated subjects are exempt.
+subject="$(LC_ALL=C awk 'NR == 1 { sub(/[[:space:]]+$/, ""); print; exit }' "$message_file")"
+subject_len="$(printf '%s' "$subject" | LC_ALL=C awk '{ n += length($0) } END { print n + 0 }')"
+# The [^ ]*[/:] branch covers "Merge <url>" and "Merge <path>".
+re_generated_subject='^(Merge ((branch|branches|remote-tracking branch|remote-tracking branches|tag|tags|commit|commits|pull request) |[^ ]*[/:])|Revert "|Reapply "|(fixup|squash|amend)! )'
+if [[ "$subject_len" -ge 75 && ! "$subject" =~ $re_generated_subject ]]; then
+  printf 'commit-msg: subject is %s characters; keep it under 75.\n' "$subject_len" >&2
+  exit 1
 fi
 
 # --- Block checks ------------------------------------------------------------
