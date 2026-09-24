@@ -105,7 +105,7 @@ else
   FOCUS="Probe recovery semantics: independently enumerate the interruption windows the design's durable writes and authority transitions imply, including windows the specification never mentions, and for each require the spec to name the durable evidence that survives it, every actor that can destroy or rewrite that evidence, and the recovery behavior; missing coverage is a finding, whether or not the spec claims crash survival."
 fi
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-spec-review.XXXXXX")
-printf '%s\n' "Round 1 of $SPEC_MAX_ROUNDS. $FOCUS Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Flag an oversized scope as a finding: a specification that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; specifications with no durable-write behavior are exempt. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+printf '%s\n' "Round ${ROUND:-1} of $SPEC_MAX_ROUNDS. $FOCUS Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Flag an oversized scope as a finding: a specification that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; specifications with no durable-write behavior are exempt. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
@@ -128,6 +128,8 @@ OPEN_FINDINGS="$OUTPUT_DIR/spec-open-findings-$ROUND.md"
 DIFF_STATUS=0
 diff -u "$PREVIOUS_FROZEN_SPEC" "$FROZEN_SPEC" >"$ROUND_DIFF" || DIFF_STATUS=$?
 [ "$DIFF_STATUS" -le 1 ] || exit 2
+ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"
+SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"
 if [ "$ARTIFACT_CLASS" = advisory ]; then
   FOCUS="These are advisory workflow-prose artifacts; return style, rigor, and hardening suggestions as severity low."
 else
@@ -140,6 +142,12 @@ uv run --no-project python "$RUNNER" run \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
+
+When the previous frozen copy is unavailable, `diff -u` exits 2 and the
+block above stops before reaching Codex. In that case, rerun the round 1
+full-document prompt above with `ROUND` set to this call's number (it
+renders as `Round $ROUND of $SPEC_MAX_ROUNDS` via the `${ROUND:-1}`
+substitution); that call still counts toward the cap.
 
 Use `--risk critical` only for explicit critical risk. For a Codex-led review,
 use the current session or a supported native child; never invoke another Codex

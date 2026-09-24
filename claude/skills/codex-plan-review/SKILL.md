@@ -94,7 +94,7 @@ if [ "$ARTIFACT_CLASS" = advisory ]; then
   FOCUS="These are advisory workflow-prose artifacts with no durable write or authority transition of their own. Report defects that would make an implementer do the wrong thing; return style, rigor, and hardening suggestions as severity low."
 fi
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-plan-review.XXXXXX")
-printf '%s\n' "Round 1 of $PLAN_MAX_ROUNDS. $FOCUS Review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Flag an oversized scope as a finding: a plan that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; plans with no durable-write behavior are exempt. Return severity, location, failure scenario, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+printf '%s\n' "Round ${ROUND:-1} of $PLAN_MAX_ROUNDS. $FOCUS Review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID. Flag an oversized scope as a finding: a plan that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; plans with no durable-write behavior are exempt. Return severity, location, failure scenario, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime codex --step plan-review --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
@@ -117,6 +117,12 @@ OPEN_FINDINGS="$OUTPUT_DIR/plan-open-findings-$ROUND.md"
 DIFF_STATUS=0
 diff -u "$PREVIOUS_FROZEN_PLAN" "$FROZEN_PLAN" >"$ROUND_DIFF" || DIFF_STATUS=$?
 [ "$DIFF_STATUS" -le 1 ] || exit 2
+ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"
+PLAN_MAX_ROUNDS="${PLAN_MAX_ROUNDS:-2}"
+FOCUS=""
+if [ "$ARTIFACT_CLASS" = advisory ]; then
+  FOCUS="These are advisory workflow-prose artifacts with no durable write or authority transition of their own. Report defects that would make an implementer do the wrong thing; return style, rigor, and hardening suggestions as severity low."
+fi
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-plan-review.XXXXXX")
 printf '%s\n' "Round $ROUND of $PLAN_MAX_ROUNDS. $FOCUS Review only frozen plan $FROZEN_PLAN with SHA-256 $FROZEN_PLAN_SHA256 for task $TASK_ID, and within it only the changes in unified diff $ROUND_DIFF since the previous round. For each open finding in $OPEN_FINDINGS return CLOSED or STILL-OPEN with a reason. Read the full plan only for sections the diff or a finding cites. Raise a new finding only on changed text or on a defect that blocks an open finding's fix. Return severity, location, failure scenario, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
@@ -124,6 +130,12 @@ uv run --no-project python "$RUNNER" run \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$PROMPT_FILE"
 ```
+
+When the previous frozen copy is unavailable, `diff -u` exits 2 and the
+block above stops before reaching Codex. In that case, rerun the round 1
+full-document prompt above with `ROUND` set to this call's number (it
+renders as `Round $ROUND of $PLAN_MAX_ROUNDS` via the `${ROUND:-1}`
+substitution); that call still counts toward the cap.
 
 The plan-review seat refuses `--risk critical` and `difficulty`; escalate a
 plan that needs a heavier review with a recorded `--config-json` `routes`
