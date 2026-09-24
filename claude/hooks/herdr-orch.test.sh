@@ -2364,6 +2364,10 @@ grep -q '^## Director-authored repair and ship briefs$' "$R/brief-template.md"
 grep -Fq 'at most 160 characters' "$R/brief-template.md"
 if grep -Fq 'LESSON: [' "$R/brief-template.md"; then exit 1; fi
 if grep -Eq '^[[:space:]]*LESSON:' "$R/brief-template.md"; then exit 1; fi
+grep -q '^### Lesson harvest$' "$S"
+grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$S"
+grep -Fq 'tasks/<task_id>.lessons.md' "$S"
+grep -Fq 'skip the Lesson harvest' "$S"
 SH
 
 check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
