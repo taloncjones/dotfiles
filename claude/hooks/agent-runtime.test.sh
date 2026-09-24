@@ -1118,6 +1118,155 @@ def test_run_bounded_strips_pane_identity_from_the_child():
         assert call["HERDR_ENV"] == "1" and call["HERDR_WORKSPACE_ID"] == "w1", call
 
 
+def test_run_bounded_marks_the_child_as_bounded():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os,sys\n"
+            "json.dump({k:os.environ.get(k,'UNSET') for k in ('HERDR_BOUNDED_CHILD','HERDR_PANE_ID','HERDR_ENV','HERDR_WORKSPACE_ID')},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-fable-5':{}}}))\n"
+            "STUB\n",
+        )
+        route = runtime.resolve_route(
+            "claude", "planner", capabilities={"models": {"opus": model()}}
+        )
+        env = dict(os.environ)
+        env.pop("HERDR_BOUNDED_CHILD", None)
+        env.update(
+            {
+                "PATH": f"{bindir}:{env['PATH']}",
+                "RUN_LOG": str(log),
+                "HERDR_ENV": "1",
+                "HERDR_WORKSPACE_ID": "w1",
+                "HERDR_PANE_ID": "w1:p1",
+            }
+        )
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        absent = json.loads(log.read_text())
+        env["HERDR_BOUNDED_CHILD"] = "0"
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        zero = json.loads(log.read_text())
+        original = runtime.execution_context
+
+        def conflicting_launch_env(cwd, runtime_name, personal=False):
+            repository, scope = original(cwd, runtime_name, personal)
+            launch_env = {**scope["launch_env"], "HERDR_BOUNDED_CHILD": None}
+            return repository, {**scope, "launch_env": launch_env}
+
+        runtime.execution_context = conflicting_launch_env
+        try:
+            runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        finally:
+            runtime.execution_context = original
+        conflicting = json.loads(log.read_text())
+
+        assert absent["HERDR_BOUNDED_CHILD"] == "1", absent
+        assert zero["HERDR_BOUNDED_CHILD"] == "1", zero
+        assert conflicting["HERDR_BOUNDED_CHILD"] == "1", conflicting
+        assert absent["HERDR_PANE_ID"] == "UNSET", absent
+        assert absent["HERDR_ENV"] == "1" and absent["HERDR_WORKSPACE_ID"] == "w1", absent
+
+
+def test_bounded_child_runs_the_stop_gate_silently():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        config = root / "gate-config"
+        state = config / "herdr-orch" / "slug-x"
+        (state / "workspaces").mkdir(parents=True)
+        (state / "tasks").mkdir()
+        (state / "workspaces" / "w1.json").write_text(
+            json.dumps({"task_id": "PROJ-1", "repo_slug": "slug-x", "role": "impl"})
+        )
+        (state / "tasks" / "PROJ-1.json").write_text(
+            json.dumps(
+                {
+                    "v": 1,
+                    "task_id": "PROJ-1",
+                    "base_sha": "b" * 40,
+                    "workers": [
+                        {
+                            "role": "impl",
+                            "phase": "implement",
+                            "workspace_id": "w1",
+                            "agent": "impl-proj-1",
+                            "ts": "2026-09-06T12:00:00Z",
+                        }
+                    ],
+                }
+            )
+        )
+        hook = Path(os.environ["DOTFILES_TEST_ROOT"]) / "claude" / "hooks" / "herdr_stop_gate.py"
+        payload = json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "11111111-1111-1111-1111-111111111111",
+                "stop_hook_active": False,
+            }
+        )
+        log = root / "gate.json"
+        executable(
+            bindir / "claude",
+            "python3 - <<'STUB'\n"
+            "import json,os,subprocess,sys\n"
+            "env={k:v for k,v in os.environ.items() if k not in "
+            "('WORKFLOW_PERSONAL_ACCOUNT','CLAUDE_PERSONAL_ONLY','HERDR_PERSONAL','HERDR_ACCOUNT_ID')}\n"
+            "env['CLAUDE_CONFIG_DIR']=os.environ['GATE_CONFIG']\n"
+            "p=subprocess.run([sys.executable,os.environ['GATE_HOOK']],input=os.environ['GATE_PAYLOAD'],"
+            "capture_output=True,text=True,env=env)\n"
+            "json.dump({'rc':p.returncode,'out':p.stdout,'err':p.stderr},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-fable-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("HERDR_BOUNDED_CHILD", "HERDR_PERSONAL", "HERDR_ACCOUNT_ID")
+        }
+        env.update(
+            {
+                "PATH": f"{bindir}:{env['PATH']}",
+                "RUN_LOG": str(log),
+                "HERDR_ENV": "1",
+                "HERDR_WORKSPACE_ID": "w1",
+                "HERDR_PANE_ID": "w1:p1",
+                "GATE_CONFIG": str(config),
+                "GATE_HOOK": str(hook),
+                "GATE_PAYLOAD": payload,
+            }
+        )
+        control_env = {
+            k: v
+            for k, v in env.items()
+            if k not in ("WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_PERSONAL_ONLY")
+        }
+        control_env["CLAUDE_CONFIG_DIR"] = str(config)
+        control = subprocess.run(
+            [sys.executable, str(hook)], input=payload, capture_output=True,
+            text=True, env=control_env,
+        )
+        route = runtime.resolve_route(
+            "claude", "planner", capabilities={"models": {"opus": model()}}
+        )
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=20, env=env)
+        bounded = json.loads(log.read_text())
+
+        assert control.returncode == 2 and "herdr-stop-gate" in control.stderr, control
+        assert bounded == {"rc": 0, "out": "", "err": ""}, bounded
+
+
 def test_run_consumes_shared_work_account_scope():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -2100,6 +2249,8 @@ for name, test in (
     ("error and malformed runtime output fail closed", test_result_errors_and_malformed_output_fail_closed),
     ("bounded run uses argv and native personal Claude env", test_run_uses_argv_and_unsets_default_claude_config),
     ("run_bounded strips the pane identity from the child", test_run_bounded_strips_pane_identity_from_the_child),
+    ("run_bounded marks the child as bounded", test_run_bounded_marks_the_child_as_bounded),
+    ("bounded child runs the stop gate silently", test_bounded_child_runs_the_stop_gate_silently),
     ("bounded run consumes the shared work account scope", test_run_consumes_shared_work_account_scope),
     ("bounded Codex launch applies repository plugin policy", test_bounded_codex_plugin_policy_uses_resolved_repository_scope),
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
