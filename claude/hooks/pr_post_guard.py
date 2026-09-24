@@ -145,15 +145,33 @@ def text_kind(text: str) -> str | None:
     return None
 
 
+def wrapper_flag_kind(wrapper: str, stripped: list[str]) -> str | None:
+    """`stripped` is what's left after `strip_prefixes` gave up on a wrapper
+    flag it can't unwrap (e.g. `sudo -u me gh ...` stops at `-u`). Find `gh`
+    in the remainder and classify by its own args; if `gh` isn't there this
+    wasn't a wrapped gh call, and if its kind can't be pinned down, fail
+    closed instead of letting an unclassified write through."""
+    for i, tok in enumerate(stripped):
+        if rm_guard.basename(tok) == "gh":
+            return gh_kind(stripped[i + 1:]) or f"wrapper:{wrapper}"
+    return None
+
+
 def classify(command: str, depth: int = 0) -> list[str]:
     kinds: list[str] = []
     tokens = rm_guard.tokenize(drop_heredoc_bodies(command))
     for seg in rm_guard.split_segments(tokens):
         while seg and seg[0] in KEYWORDS:
             seg = seg[1:]
-        seg = rm_guard.strip_prefixes(seg)
-        if not seg:
+        stripped = rm_guard.strip_prefixes(seg)
+        if not stripped:
             continue
+        if stripped[0].startswith("-") and rm_guard.basename(seg[0]) in rm_guard.PREFIX_WRAPPERS:
+            kind = wrapper_flag_kind(rm_guard.basename(seg[0]), stripped)
+            if kind:
+                kinds.append(kind)
+            continue
+        seg = stripped
         name = rm_guard.basename(seg[0])
         if name == "gh":
             kind = gh_kind(seg[1:])
@@ -246,6 +264,13 @@ def decide(kinds: list[str], sid: str, directory: Path, now: float) -> str | Non
 
 
 def _denial(kind: str) -> str:
+    if kind.startswith("wrapper:"):
+        wrapper = kind.split(":", 1)[1]
+        return (
+            f"Blocked: `{wrapper}` wraps a gh call this cannot classify "
+            "safely, so it's denied outright -- no go covers it.\n"
+            "Run gh directly, without the wrapper."
+        )
     return (
         f"Blocked: this looks like a PR/issue {kind} without a typed go.\n"
         "Ask the owner to type `post it` (or `edit the pr body`) as the "

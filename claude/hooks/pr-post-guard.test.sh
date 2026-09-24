@@ -237,6 +237,14 @@ case_gate fn11
 expect_rc "FN11a pr review" 2 "$(payload_b s1 'gh pr review 5 --approve')"
 expect_rc "FN11b issue comment" 2 "$(payload_b s1 'gh issue comment 5 -b x')"
 
+case_gate fn12
+expect_rc "FN12a env -i gh pr comment denied with no go" 2 "$(payload_b s1 'env -i gh pr comment 5 --body x')"
+expect_rc "FN12b sudo -u me gh pr comment denied with no go" 2 "$(payload_b s1 'sudo -u me gh pr comment 5 --body x')"
+expect_rc "FN12c nice -n 5 gh pr edit denied with no go" 2 "$(payload_b s1 'nice -n 5 gh pr edit 5 --body-file b.md')"
+expect_rc "FN12d env -i gh api DELETE comment denied with no go" 2 "$(payload_b s1 'env -i gh api -X DELETE repos/o/r/issues/comments/1')"
+expect_rc "FN12e mint post" 0 "$(payload_u s1 'post it')"
+expect_rc "FN12f env -i gh pr comment allowed once after typed go" 0 "$(payload_b s1 'env -i gh pr comment 5 --body x')"
+
 # --- M: gate mechanics ------------------------------------------------------
 
 case_gate m1
