@@ -303,6 +303,14 @@ invalid config -> mutating actions refuse with a concrete message. This file
 holds the only employer/user identifiers; the shipped skill and fixtures
 never contain them.
 
+`fast_path` is optional and read only by the director's kickoff maturity
+check (SKILL.md section 2), never by core or `agent_runtime.py`.
+`fast_path.max_files` is a positive int, default 3: the most files a todo
+may name and still skip the plan phase. An absent block means the default. A
+malformed block (non-object, unknown key, or a `max_files` that is not a
+positive int) makes the director treat every todo as raw and report the
+config error.
+
 ### `task-lead-gate.json`
 
 The task-lead activation gate record. The intended writer is

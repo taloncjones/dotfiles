@@ -484,6 +484,30 @@ ok "no-workflow kickoff renders the withheld line" "printf '%s' \"\$B2\" | grep 
 ok "skill documents the brief Routing block and both opt-in lines" \
   "grep -q '## Routing' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'withheld for this task' claude/skills/herdr-orchestration/references/brief-template.md"
 
+fastpath_kickoff_ok() {
+python3 - <<'PY'
+import re, sys
+t = " ".join(open("claude/skills/herdr-orchestration/SKILL.md").read().split())
+s = t[t.index("## 2. Kickoff"):t.index("## 2a. Phase advancement")]
+need = ["**Fast-path item**", "never a Jira key", "--role implementation",
+        "Fast-path maturity check", "fast_path.max_files", "default 3",
+        "claude/hooks/herdr_orch_core.py", "kick off <item> as raw",
+        "Fast-path contract source", "## Verification",
+        "config.mech.contract_commands", "schema check",
+        "at least one `verify-*` command expected to fail",
+        "Fast-path implement brief variant",
+        "is a fast-path item; anything else is raw",
+        "the fallback: any other todo or handoff"]
+rows = ["files", "cap", "core", "solution", "contract"]
+order = s.index("**Plan-ready item**") < s.index("**Fast-path item**") < s.index("**Raw item**")
+ok = order and all(n in s for n in need) and all(re.search(r"\|\s*" + r + r"\s*\|", s) for r in rows)
+sys.exit(0 if ok else 1)
+PY
+}
+ok "kickoff section documents the fast-path branch, table, and contract source" fastpath_kickoff_ok
+ok "state layout documents fast_path.max_files" \
+  "sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'fast_path.max_files' && sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'default 3'"
+
 # 13. teardown-binding / reconcile-leads / emit-artifacts: required-flag
 # presence, fenced refusal, and teardown's claimed-requires---abandon
 # contract. A binding record is written directly (schema per
