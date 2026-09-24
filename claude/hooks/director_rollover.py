@@ -191,11 +191,16 @@ def resume_helper(argv) -> int:
             return "sent", "ready"
 
     def watch():
-        stable_since, settled, reason = None, None, "not-ready"
+        # reason starts as lock-wait: a timeout before any poll ever
+        # completes means the stall was in canonical()'s lock acquisition
+        # itself. Once a poll completes, its diagnosis replaces it, so a
+        # slow canonical() call on a LATER iteration reports the last real
+        # observation instead of relabeling it lock-wait.
+        stable_since, settled, reason = None, None, "lock-wait"
         while not expired():
             current = canonical()
             if expired():
-                return "timeout", "lock-wait"
+                return "timeout", reason
             if current != snapshot:
                 return "superseded", "lease"
             ready, text, reason = poll()
