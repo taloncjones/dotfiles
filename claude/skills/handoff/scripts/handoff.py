@@ -499,14 +499,24 @@ def save(args, context: dict, scope: dict, directory: Path) -> dict:
 
 
 def load(args, context: dict, scope: dict, directory: Path) -> dict:
-    parent, _ = open_state_parent(directory / args.task / "current.json", create=False)
+    archived = getattr(args, "archived", False)
+    base = directory / ARCHIVE_DIR if archived else directory
+    try:
+        parent, _ = open_state_parent(base / args.task / "current.json", create=False)
+    except FileNotFoundError:
+        if not archived and os.path.lexists(directory / ARCHIVE_DIR / args.task):
+            raise ValueError(
+                f"Handoff task {args.task} is retired; use load --archived to "
+                "inspect it or restore to reopen it"
+            ) from None
+        raise
     try:
         record, record_id = load_at(parent, context, scope, args.task, args.record)
     finally:
         os.close(parent)
     return {
         "record": record,
-        "record_path": str(directory / args.task / f"{record_id}.json"),
+        "record_path": str(base / args.task / f"{record_id}.json"),
         "scope": scope,
     }
 
@@ -535,6 +545,76 @@ def verify(args, context: dict, scope: dict, directory: Path) -> dict:
     }
 
 
+@contextmanager
+def partition_at(directory: Path, missing: str):
+    try:
+        descriptor, _ = open_state_parent(directory / ARCHIVE_LOCK, create=False)
+    except FileNotFoundError:
+        raise ValueError(missing) from None
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def live_conflict(partition: int, task: str, directory: Path) -> str:
+    live = directory / task
+    with directory_at(partition, task) as existing:
+        if exists_at(existing, "current.json"):
+            return f"Handoff task {task} is already live at {live}; restore refused"
+    return (
+        f"Handoff task {task} has a partial live directory at {live}; "
+        "inspect and remove it by hand, then restore"
+    )
+
+
+def retire(args, context: dict, scope: dict, directory: Path) -> dict:
+    task = args.task
+    with partition_at(directory, f"Handoff task {task} is not saved") as partition:
+        with archive_lock(partition, fcntl.LOCK_EX):
+            if not exists_at(partition, task):
+                state = "already retired" if is_retired(partition, task) else "not saved"
+                raise ValueError(f"Handoff task {task} is {state}")
+            with directory_at(partition, task) as source, task_lock(source, create=False):
+                _, record_id = load_at(source, context, scope, task)
+                with directory_at(partition, ARCHIVE_DIR, create=True) as archive:
+                    if exists_at(archive, task):
+                        raise ValueError(
+                            f"Handoff task {task} already has a retired copy; "
+                            "resolve the collision by hand"
+                        )
+                    os.rename(task, task, src_dir_fd=partition, dst_dir_fd=archive)
+    return {
+        "task_id": task,
+        "record_id": record_id,
+        "status": "retired",
+        "task_path": str(directory / ARCHIVE_DIR / task),
+        "scope": scope,
+    }
+
+
+def restore(args, context: dict, scope: dict, directory: Path) -> dict:
+    task = args.task
+    missing = f"Handoff task {task} is not retired"
+    with partition_at(directory, missing) as partition:
+        with archive_lock(partition, fcntl.LOCK_EX):
+            if not is_retired(partition, task):
+                raise ValueError(missing)
+            with directory_at(partition, ARCHIVE_DIR) as archive:
+                with directory_at(archive, task) as source, task_lock(source, create=False):
+                    _, record_id = load_at(source, context, scope, task)
+                    if exists_at(partition, task):
+                        raise ValueError(live_conflict(partition, task, directory))
+                    os.rename(task, task, src_dir_fd=archive, dst_dir_fd=partition)
+    return {
+        "task_id": task,
+        "record_id": record_id,
+        "status": "ready",
+        "task_path": str(directory / task),
+        "scope": scope,
+    }
+
+
 def summary_of(brief: str) -> str:
     for line in brief.splitlines():
         if line.strip():
@@ -542,9 +622,11 @@ def summary_of(brief: str) -> str:
     return ""
 
 
-def list_tasks(context: dict, scope: dict, directory: Path) -> dict:
+def list_tasks(context: dict, scope: dict, directory: Path, archived: bool = False) -> dict:
+    base = directory / ARCHIVE_DIR if archived else directory
+    status = "retired" if archived else "ready"
     try:
-        parent, _ = open_state_parent(directory / "unused", create=False)
+        parent, _ = open_state_parent(base / "unused", create=False)
     except FileNotFoundError:
         return {"tasks": [], "scope": scope}
     tasks = []
@@ -563,7 +645,7 @@ def list_tasks(context: dict, scope: dict, directory: Path) -> dict:
                         "task_id": task,
                         "record_id": record_id,
                         "created_at": record["created_at"],
-                        "status": "ready",
+                        "status": status,
                         "role": record.get("role"),
                         "parent": record.get("parent"),
                         "summary": summary_of(record["brief"]),
@@ -582,7 +664,7 @@ def list_tasks(context: dict, scope: dict, directory: Path) -> dict:
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("save", "load", "list", "verify"):
+    for name in ("save", "load", "list", "verify", "retire", "restore"):
         command = commands.add_parser(name)
         command.add_argument("--repo", type=Path, required=True)
         command.add_argument("--runtime", choices=("claude", "codex"), required=True)
@@ -591,6 +673,8 @@ def arguments():
             command.add_argument("--task", required=True)
         if name in {"load", "verify"}:
             command.add_argument("--record")
+        if name in {"load", "list"}:
+            command.add_argument("--archived", action="store_true")
         if name in {"save", "verify"}:
             command.add_argument("--owner-id")
         if name == "save":
@@ -611,11 +695,15 @@ def main() -> int:
         validate_lexical_account_root(scope)
         directory = state_directory(context, scope)
         if args.command == "list":
-            result = list_tasks(context, scope, directory)
+            result = list_tasks(context, scope, directory, archived=args.archived)
         else:
-            result = {"save": save, "load": load, "verify": verify}[args.command](
-                args, context, scope, directory
-            )
+            result = {
+                "save": save,
+                "load": load,
+                "verify": verify,
+                "retire": retire,
+                "restore": restore,
+            }[args.command](args, context, scope, directory)
     except (OSError, TypeError, ValueError, subprocess.SubprocessError) as exc:
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         return 1
