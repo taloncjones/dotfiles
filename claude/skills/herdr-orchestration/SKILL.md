@@ -839,16 +839,17 @@ also avoids wasting work and preserves one live reviewer per task.
 
 Known stray stops: `co-review` and other helper sessions the reviewer spawns
 inherit `HERDR_ENV` and `HERDR_WORKSPACE_ID` and appear with auto-derived
-agent names. Helpers in their own panes, and headless children started
-through the shared bounded runner (which strips the pane identity), are
-released by the stop gate by pane (`HERDR_PANE_ID` missing or different
-from the dispatched `pane_id`) and get no `emit-review` instruction. A
+agent names. Headless children started through the shared bounded runner
+carry `HERDR_BOUNDED_CHILD=1` and no pane identity; the stop gate allows
+them before reading any state. Helpers in their own panes are released by
+pane (`HERDR_PANE_ID` missing or different from the dispatched `pane_id`,
+or, when a newer native row of another role follows the index role's row,
+from that newest row's pane) and get no `emit-review` instruction. A
 helper started interactively inside the reviewer's own pane keeps that
 pane's identity, stays gated, and could emit: the reviewer must not spawn
 one there. `run_headless`-launched one-shot workers (legacy mech, think)
-are a separate case: they keep the inherited pane identity, since a `-p`
-process has no further turn to act on a stop-hook nudge, and they are
-never indexed by the stop gate regardless -- a legacy mech worker's own
+are a separate case: they keep the inherited pane identity and are never
+indexed by the stop gate regardless -- a legacy mech worker's own
 `emit-done` call needs that inherited identity to be accepted as the
 designated agent. Never read a helper's idle state as review completion,
 and never accept a verdict from a pane other than the dispatched one (the

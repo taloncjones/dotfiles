@@ -1018,6 +1018,9 @@ def run_bounded(
     child_env = dict(os.environ if env is None else env)
     strip_pane_identity(child_env)
     _apply_launch_environment(child_env, scope)
+    # herdr_stop_gate allows any stop carrying this: a bounded child is a
+    # helper, and a `-p` child does act on a stop-hook nudge.
+    child_env["HERDR_BOUNDED_CHILD"] = "1"
     process = subprocess.Popen(
         argv,
         cwd=_checked_cwd(cwd),
