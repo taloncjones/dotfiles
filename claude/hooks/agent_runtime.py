@@ -7,6 +7,7 @@ import math
 import os
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -1102,6 +1103,59 @@ def _kill_after_timeout(
         return partial, "", True
 
 
+_STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+class _RunnerInterrupted(Exception):
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+class _StopSignals:
+    """Turn a stop signal into _RunnerInterrupted once the seat child exists.
+
+    A signal before the child exists is held and raised by arm(), so a signal
+    landing inside Popen still reaps the child. A disposition inherited as
+    SIG_IGN (nohup) is left alone."""
+
+    def __init__(self) -> None:
+        self.previous: dict[int, Any] = {}
+        self.pending: int | None = None
+        self.armed = False
+
+    def install(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for sig in _STOP_SIGNALS:
+            if signal.getsignal(sig) is signal.SIG_IGN:
+                continue
+            self.previous[sig] = signal.signal(sig, self._handle)
+
+    def _handle(self, signum: int, _frame: Any) -> None:
+        if not self.armed:
+            if self.pending is None:
+                self.pending = signum
+            return
+        self.ignore()
+        raise _RunnerInterrupted(signum)
+
+    def arm(self) -> None:
+        self.armed = True
+        if self.pending is not None:
+            self.ignore()
+            raise _RunnerInterrupted(self.pending)
+
+    def ignore(self) -> None:
+        for sig in self.previous:
+            signal.signal(sig, signal.SIG_IGN)
+
+    def restore(self) -> None:
+        for sig, handler in self.previous.items():
+            # getsignal() returns None for a handler not installed from Python.
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+
+
 def run_bounded(
     route: dict[str, Any],
     prompt: str,
@@ -1153,24 +1207,44 @@ def run_bounded(
     # herdr_stop_gate allows any stop carrying this: a bounded child is a
     # helper, and a `-p` child does act on a stop-hook nudge.
     child_env["HERDR_BOUNDED_CHILD"] = "1"
-    process = subprocess.Popen(
-        argv,
-        cwd=_checked_cwd(cwd),
-        env=child_env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
+    stops = _StopSignals()
+    stops.install()
+    process = None
     try:
+        process = subprocess.Popen(
+            argv,
+            cwd=_checked_cwd(cwd),
+            env=child_env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        stops.arm()
         stdout, stderr = process.communicate(prompt, timeout=timeout_secs)
     except subprocess.TimeoutExpired:
+        stops.ignore()
         stdout, stderr, pipe_held = _kill_after_timeout(process)
         return _with_scope(
             _stopped_result(runtime, "timeout", stdout, stderr.strip(), time.time(), pipe_held),
             scope,
         )
+    except _RunnerInterrupted as interrupted:
+        stdout, stderr = "", ""
+        if process is not None:
+            stdout, stderr, _pipe_held = _kill_after_timeout(process)
+        return _with_scope(
+            _stopped_result(
+                runtime, "interrupted", stdout, stderr.strip(), time.time(),
+                False, interrupted.signum,
+            ),
+            scope,
+        )
+    finally:
+        # A late signal only records from here on; it must not raise past the result.
+        stops.armed = False
+        stops.restore()
 
     result = _with_scope(parse_runtime_result(runtime, stdout), scope)
     result["exit_code"] = process.returncode

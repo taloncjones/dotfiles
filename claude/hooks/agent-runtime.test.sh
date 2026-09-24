@@ -15,6 +15,8 @@ fi
 import json
 import os
 import re
+import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -1266,6 +1268,150 @@ def test_codex_timeout_progress_counts_by_item_type():
             "tool_calls": 2, "last_tool": "file_change", "last_event_at": None,
             "idle_secs_before_kill": None, "rate_limit_status": None,
         }, result
+
+
+def test_sigterm_to_the_uv_wrapper_reaps_the_seat_once():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        pidfile = root / "child.pid"
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-sig"},
+            {"type": "assistant", "message": {"content": []}},
+            {"type": "assistant", "message": {"content": []}},
+        ]
+        fake_claude_rows(bindir, rows, pidfile=pidfile, sleep=60)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        prompt = root / "prompt.txt"
+        prompt.write_text("Reply ok\n")
+        launcher = (
+            ["uv", "run", "--offline", "--no-project", "python"]
+            if shutil.which("uv")
+            else [sys.executable]
+        )
+        wrapper = subprocess.Popen(
+            [*launcher, runtime.__file__, "run", "--runtime", "claude",
+             "--role", "reviewer", "--risk", "normal", "--provisional",
+             "--cwd", str(repo), "--sandbox", "read-only",
+             "--timeout-secs", "60", "--prompt-file", str(prompt)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (
+            pidfile.exists() and pidfile.read_text()
+        ):
+            time.sleep(0.05)
+        assert pidfile.exists(), "fake claude never started"
+        time.sleep(0.5)
+        started = time.monotonic()
+        wrapper.send_signal(signal.SIGTERM)
+        time.sleep(0.2)
+        if wrapper.poll() is None:
+            wrapper.send_signal(signal.SIGTERM)
+        out, _err = wrapper.communicate(timeout=10)
+        assert time.monotonic() - started < 10
+        result = json.loads(out)
+        assert result["observation"] == "runner-interrupted", result
+        assert result["status"] == "interrupted" and result["timed_out"] is False, result
+        assert result["signal"] == "SIGTERM", result
+        assert result["progress"]["assistant_turns"] == 2, result
+        assert wrapper.returncode == 1, wrapper.returncode
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(child, 9)
+        assert not alive, f"seat {child} survived the runner interrupt"
+
+
+def test_inherited_ignored_sighup_stays_ignored():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        executable(
+            bindir / "claude",
+            "exec python3 - <<'STUB'\n"
+            "import json,os,signal\n"
+            "os.kill(os.getppid(), signal.SIGHUP)\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+            "'result':'ok','num_turns':1,'modelUsage':{'claude-opus-5-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            result = runtime.run_bounded(
+                claude_route(), "prompt", repo, "read-only", timeout_secs=10, env=env
+            )
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+        assert result["status"] == "success", result
+
+
+def test_signal_during_popen_still_reaps_the_child():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        pidfile = root / "child.pid"
+        fake_claude_rows(bindir, [], pidfile=pidfile, sleep=60)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        real_popen = subprocess.Popen
+
+        def popen_then_signal(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            # The patch also catches _descendants()' `ps` call; signal only
+            # for the seat launch itself.
+            if not str(args[0][0]).endswith("claude"):
+                return process
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not (
+                pidfile.exists() and pidfile.read_text()
+            ):
+                time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        runtime.subprocess.Popen = popen_then_signal
+        try:
+            result = runtime.run_bounded(
+                claude_route(), "prompt", repo, "read-only", timeout_secs=30, env=env
+            )
+        finally:
+            runtime.subprocess.Popen = real_popen
+        assert result["observation"] == "runner-interrupted", result
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(child, 9)
+        assert not alive, f"seat {child} survived a signal during Popen"
 
 
 def test_run_uses_argv_and_unsets_default_claude_config():
@@ -2555,6 +2701,9 @@ for name, test in (
     ("timeout without timestamps reports null timing", test_timeout_without_timestamps_reports_null_timing),
     ("timeout never leaks tool input", test_timeout_never_leaks_tool_input),
     ("Codex timeout progress counts by item type", test_codex_timeout_progress_counts_by_item_type),
+    ("SIGTERM to the uv wrapper reaps the seat once", test_sigterm_to_the_uv_wrapper_reaps_the_seat_once),
+    ("inherited ignored SIGHUP stays ignored", test_inherited_ignored_sighup_stays_ignored),
+    ("signal during Popen still reaps the child", test_signal_during_popen_still_reaps_the_child),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
     ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
     ("difficulty requires confirmation", test_difficulty_requires_confirmation),
