@@ -1207,6 +1207,10 @@ def run_bounded(
     # herdr_stop_gate allows any stop carrying this: a bounded child is a
     # helper, and a `-p` child does act on a stop-hook nudge.
     child_env["HERDR_BOUNDED_CHILD"] = "1"
+    if sandbox == "read-only":
+        # Review seats run repository code in co-review snapshots; bytecode
+        # caches there make snapshot cleanup refuse.
+        child_env["PYTHONDONTWRITEBYTECODE"] = "1"
     stops = _StopSignals()
     stops.install()
     process = None

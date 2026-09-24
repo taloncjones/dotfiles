@@ -1414,6 +1414,34 @@ def test_signal_during_popen_still_reaps_the_child():
         assert not alive, f"seat {child} survived a signal during Popen"
 
 
+def test_read_only_child_writes_no_bytecode():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os\n"
+            "json.dump({'value': os.environ.get('PYTHONDONTWRITEBYTECODE','UNSET')},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'modelUsage':{'claude-opus-5-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = dict(os.environ)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        env.update({"PATH": f"{bindir}:{env['PATH']}", "RUN_LOG": str(log)})
+        runtime.run_bounded(claude_route(), "prompt", repo, "read-only", timeout_secs=10, env=env)
+        read_only = json.loads(log.read_text())["value"]
+        runtime.run_bounded(claude_route(), "prompt", repo, "workspace-write", timeout_secs=10, env=env)
+        writable = json.loads(log.read_text())["value"]
+        assert read_only == "1", read_only
+        assert writable == "UNSET", writable
+
+
 def test_run_uses_argv_and_unsets_default_claude_config():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -2704,6 +2732,7 @@ for name, test in (
     ("SIGTERM to the uv wrapper reaps the seat once", test_sigterm_to_the_uv_wrapper_reaps_the_seat_once),
     ("inherited ignored SIGHUP stays ignored", test_inherited_ignored_sighup_stays_ignored),
     ("signal during Popen still reaps the child", test_signal_during_popen_still_reaps_the_child),
+    ("read-only child writes no bytecode", test_read_only_child_writes_no_bytecode),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
     ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
     ("difficulty requires confirmation", test_difficulty_requires_confirmation),
