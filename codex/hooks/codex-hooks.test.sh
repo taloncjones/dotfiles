@@ -172,6 +172,20 @@ assert_allows "planning guard ignores a non-shell tool" \
     claude/hooks/planning_artifact_guard.py \
     '{"tool_name":"Write","tool_input":{"command":"git add docs/specs/x.md"}}'
 
+# Short SHAs fail the format check before any git call, so no repository is needed.
+assert_denies_2 "marker guard blocks a short sha from exec_command" \
+    claude/hooks/marker_sha_guard.py \
+    '{"tool_name":"exec_command","cwd":"/tmp","tool_input":{"cmd":"gh pr comment 5 --body \"<!-- co-review-audit head=abc1234 run=r -->\""}}'
+assert_denies_2 "marker guard blocks a short sha from nested unified exec" \
+    claude/hooks/marker_sha_guard.py \
+    '{"toolName":"unified_exec","toolInput":{"args":{"command":"gh pr comment 5 --body \"<!-- co-review-audit head=abc1234 run=r -->\""}}}'
+assert_denies_2 "marker guard blocks a short sha from lowercase shell" \
+    claude/hooks/marker_sha_guard.py \
+    '{"tool_name":"shell","cwd":"/tmp","tool_input":{"command":"gh pr comment 5 --body \"<!-- co-review-audit head=abc1234 run=r -->\""}}'
+assert_allows "marker guard ignores an ordinary comment" \
+    claude/hooks/marker_sha_guard.py \
+    '{"tool_name":"exec_command","cwd":"/tmp","tool_input":{"cmd":"gh pr comment 5 --body LGTM"}}'
+
 if python3 - <<'PY'
 import importlib.util
 

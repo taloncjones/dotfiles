@@ -140,6 +140,7 @@ link_codex_surfaces() {
 
   link_codex_path "$DOTFILEDIR/codex/hooks/orch_edit_guard.py" "$HOME/.codex/hooks/orch_edit_guard.py"
   link_codex_path "$DOTFILEDIR/claude/hooks/git_remote_guard.py" "$HOME/.codex/hooks/git_remote_guard.py"
+  link_codex_path "$DOTFILEDIR/claude/hooks/marker_sha_guard.py" "$HOME/.codex/hooks/marker_sha_guard.py"
   link_codex_path "$DOTFILEDIR/claude/hooks/planning_artifact_guard.py" "$HOME/.codex/hooks/planning_artifact_guard.py"
 
   for shared_skill in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do
@@ -214,6 +215,11 @@ link_codex_surfaces() {
     'git_remote_guard.py' \
     'Bash|Shell|shell|exec_command|shell_command|unified_exec|Edit|Write|MultiEdit|apply_patch' \
     "$HOME/.codex/hooks/git_remote_guard.py"
+
+  add_codex_hook \
+    'marker_sha_guard.py' \
+    'Bash|Shell|shell|exec_command|shell_command|unified_exec' \
+    "$HOME/.codex/hooks/marker_sha_guard.py"
 
   # Stop has its own native event/output contract, separate from PreToolUse.
   # Preserve any existing custom registration of this adapter.
