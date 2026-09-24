@@ -17,21 +17,31 @@ Gate: decides only when HERDR_ENV=1; every other session exits 0 untouched
   never from a multiple-choice option string. The go expires in 600s and
   is spent by one PreToolUse Bash call (post/body) or freely by any number
   of delete calls while unexpired.
-- PreToolUse Bash classifies the command as post/delete/body/none and
-  denies (exit 2) a classified command without its go.
+- PreToolUse Bash deny-by-default, not enumerate-the-bad-shapes: three
+  rounds of co-review each found a new way to hide a `gh` write from the
+  classifier (an `if`/`while` prefix, a trailing comment, a punctuation-
+  glued token, a backslash line continuation), each a gap in a shell
+  tokenizer that can only ever be as complete as its list of known-bad
+  shapes. This hook flips the default instead. Any command whose raw text
+  mentions `gh` as a word is classified: it is allowed only if it parses
+  cleanly and every `gh` invocation in it is a known read, a known
+  non-comment write, or a gated kind (post/body/delete) covered by its
+  typed go; anything else -- an unparseable command, an unclassifiable
+  `gh` call, a wrapper this cannot see through -- is denied outright, and
+  no go can cover it. A command that never mentions `gh` is untouched.
 
 Override: none. Fixing a false positive means narrowing the classifier,
 not bypassing it.
 
 Accepted holes (see spec "Risks and accepted residuals"): aliases,
-functions, script files, `eval` of a script this cannot extract, `gh` via
-a variable or command substitution, graphql query files, backtick
-substitution, `xargs -I{} gh ...`, wrappers nested two levels deep, other
-HTTP clients, and a subagent sharing the parent's session_id during the
-go turn. `push_guard.py` accepts the same class of hole for git push.
+functions, script files, and a subagent sharing the parent's session_id
+during the go turn. `push_guard.py` accepts the same class of hole for
+git push.
 
-Reuses rm_guard's tokenizer and wrapper-unwrapping the way
-git_remote_guard.py does; fails open on any exception.
+Reuses rm_guard's tokenizer, comment-stripping, and wrapper-unwrapping the
+way git_remote_guard.py does; a command that never mentions `gh` fails
+open on any exception, same as before. A command that does mention `gh`
+now fails CLOSED on any exception, in herdr sessions only.
 """
 
 from __future__ import annotations
@@ -39,6 +49,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from collections import Counter
@@ -53,6 +64,8 @@ PRUNE_AGE = 86400
 SID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+GH_WORD_RE = re.compile(r"\bgh\b")
+ANSI_C_QUOTE_RE = re.compile(r"\$'")
 DELETE_PATH = re.compile(r"(issues|pulls)/comments/[^/\s]+$")
 POST_PATH = re.compile(r"(issues|pulls)/(\d+/)?comments|pulls/\d+/reviews|/reactions$|/replies$")
 BODY_PATH = re.compile(r"(issues|pulls)/\d+$")
@@ -62,6 +75,24 @@ VALUE_FLAGS = FIELD_FLAGS + (
     "-H", "--header", "-q", "--jq", "-t", "--template",
     "--hostname", "--cache", "-p", "--preview",
 )
+
+# `gh` subcommands that only ever read. `search` and `api` are handled by
+# their own rules below (any `search` subcommand; `api` by method/path).
+READ_SUBCOMMANDS = {
+    ("pr", "view"), ("pr", "list"), ("pr", "checks"), ("pr", "diff"), ("pr", "status"),
+    ("run", "view"), ("run", "list"), ("run", "watch"),
+    ("issue", "view"), ("issue", "list"),
+    ("repo", "view"),
+    ("auth", "status"),
+}
+
+# Non-comment `gh` writes this repo's own skills already invoke (grepped
+# from claude/, codex/, bin/, install/); anything else classifies unknown
+# and is denied outright, go or no go.
+KNOWN_WRITES = {
+    ("pr", "create"),  # claude/commands/pr.md, claude/skills/voice
+    ("pr", "merge"),   # claude/skills/ship/SKILL.md
+}
 
 
 def normalize(prompt: str) -> str:
@@ -83,7 +114,90 @@ def drop_heredoc_bodies(command: str) -> str:
     return "\n".join(out)
 
 
-def api_kind(args: list[str]) -> str | None:
+def join_continuations(command: str) -> str:
+    """Drop an unquoted backslash-newline pair the way bash does before any
+    tokenizing, so a `gh` call split across lines (round-3 blocker V-1:
+    `gh api -X POST \\` then the rest on the next line) cannot dodge
+    classification. Quote-aware like rm_guard.strip_line_comments, so a
+    literal backslash-newline inside a quoted string is left alone."""
+    out = []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 1
+                out.append(command[i])
+            elif ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+        elif ch == "\\" and i + 1 < n and command[i + 1] == "\n":
+            i += 1  # drop both the backslash and the newline
+        elif ch == "\\" and i + 1 < n:
+            out.append(ch)
+            i += 1
+            out.append(command[i])
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def strict_tokenize(command: str) -> list[str] | None:
+    """A local copy of rm_guard.tokenize's shlex setup that returns None on
+    a ValueError instead of rm_guard's naive whitespace-split fallback: a
+    corrupted split is exactly the class of bug this gate exists to catch
+    (round-3 minor: the ValueError path is reachable and fail-open via
+    ANSI-C `$'...'` quoting). Duplicated rather than changing rm_guard.py,
+    whose fallback is still correct for its own, more forgiving callers."""
+    try:
+        lexer = shlex.shlex(
+            rm_guard.strip_line_comments(command),
+            posix=True,
+            punctuation_chars=rm_guard.SEGMENT_OPERATORS,
+        )
+        lexer.whitespace_split = True
+        lexer.whitespace = lexer.whitespace.replace("\n", "")
+        lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def mentions_gh(text: str) -> bool:
+    return GH_WORD_RE.search(text) is not None
+
+
+def find_gh_index(tokens: list[str]) -> int | None:
+    for i, tok in enumerate(tokens):
+        if rm_guard.basename(tok) == "gh":
+            return i
+    return None
+
+
+def last_wrapper_name(tokens: list[str]) -> str | None:
+    """Walk `tokens` from the start the way rm_guard.strip_prefixes does,
+    but return the last PREFIX_WRAPPERS name it passed through instead of
+    the remaining tokens -- so an env assignment ahead of the wrapper
+    (`FOO=1 sudo -u me gh ...`, round-3 minor) still names the wrapper that
+    stopped the unwrap, instead of hiding it behind the assignment."""
+    name = None
+    for tok in tokens:
+        if rm_guard.is_env_assignment(tok):
+            continue
+        base = rm_guard.basename(tok)
+        if base in rm_guard.PREFIX_WRAPPERS:
+            name = base
+            continue
+        break
+    return name
+
+
+def classify_api(args: list[str]) -> str:
     method, path, has_field, i = None, None, False, 0
     while i < len(args):
         tok = args[i]
@@ -103,91 +217,116 @@ def api_kind(args: list[str]) -> str | None:
         elif not tok.startswith("-") and path is None:
             path = tok.lstrip("/")
         i += 1
-    method = method or ("POST" if has_field else "GET")
-    if method == "GET" or path is None:
-        return None
     if path == "graphql":
-        return "post" if any("mutation" in a for a in args) else None
-    if method == "DELETE" and DELETE_PATH.search(path):
-        return "delete"
+        return "post" if any("mutation" in a for a in args) else "read"
+    method = method or ("POST" if has_field else "GET")
+    if method == "GET":
+        return "read"
+    if path is None:
+        return "unknown"
+    if method == "DELETE":
+        return "delete" if DELETE_PATH.search(path) else "unknown"
     if POST_PATH.search(path):
         return "post"
     if BODY_PATH.search(path):
         return "body"
-    return None
+    return "unknown"
 
 
-def gh_kind(args: list[str]) -> str | None:
+def classify_gh(args: list[str]) -> str:
+    """Classify one `gh` invocation's own argv (after the `gh` token) as
+    "read", "write" (a known non-comment write), "post"/"body"/"delete"
+    (gated, needs its typed go), or "unknown" (denied outright)."""
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in ("-R", "--repo", "--hostname") else 1
-    sub = args[i:i + 2]
+    sub = tuple(args[i:i + 2])
     rest = args[i + 2:]
-    if sub[:1] == ["api"]:
-        return api_kind(args[i + 1:])
-    if sub in (["pr", "comment"], ["pr", "review"], ["issue", "comment"]):
+    if sub[:1] == ("api",):
+        return classify_api(args[i + 1:])
+    if sub[:1] == ("search",):
+        return "read"
+    if sub in READ_SUBCOMMANDS:
+        return "read"
+    if sub in KNOWN_WRITES:
+        return "write"
+    if sub in (("pr", "close"), ("issue", "close")):
+        if any(t in ("-c", "--comment") or t.startswith("--comment=") for t in rest):
+            return "post"
+        return "unknown"
+    if sub in (("pr", "comment"), ("pr", "review"), ("issue", "comment")):
         return "post"
-    if sub in (["pr", "close"], ["issue", "close"]) and any(
-            t in ("-c", "--comment") or t.startswith("--comment=") for t in rest):
-        return "post"
-    if sub == ["pr", "edit"]:
+    if sub == ("pr", "edit"):
         return "body"
-    return None
+    return "unknown"
 
 
-def text_kind(text: str) -> str | None:
-    if not re.search(r"\bgh\b", text):
-        return None
-    if re.search(r"\bDELETE\b", text) and re.search(r"(issues|pulls)/comments/", text):
-        return "delete"
-    if re.search(r"\bcomment\b|\breview\b|pr\s+edit", text):
-        return "post"
-    return None
+def resolved_kind(sub: str) -> tuple[str | None, str | None]:
+    """Map a classify_gh()/classify_api() verdict to (gated_kind, denial):
+    a read or known write passes through with neither; post/body/delete
+    need a go; an unrecognized call denies outright -- no go covers it."""
+    if sub in ("read", "write"):
+        return None, None
+    if sub == "unknown":
+        return None, "this `gh` call does not match a known read, write, or gated action"
+    return sub, None
 
 
-def wrapper_flag_kind(wrapper: str, stripped: list[str]) -> str | None:
-    """`stripped` is what's left after `strip_prefixes` gave up on a wrapper
-    flag it can't unwrap (e.g. `sudo -u me gh ...` stops at `-u`). Find `gh`
-    in the remainder and classify by its own args; if `gh` isn't there this
-    wasn't a wrapped gh call, and if its kind can't be pinned down, fail
-    closed instead of letting an unclassified write through."""
-    for i, tok in enumerate(stripped):
-        if rm_guard.basename(tok) == "gh":
-            return gh_kind(stripped[i + 1:]) or f"wrapper:{wrapper}"
-    return None
-
-
-def classify(command: str, depth: int = 0) -> list[str]:
+def classify(command: str, depth: int = 0) -> tuple[list[str], list[str]]:
+    """Return (gated_kinds, denials) for `command`. `gated_kinds` need a
+    typed go (existing post/body/delete behavior); a non-empty `denials`
+    means outright deny, which no go can cover. A command that never
+    mentions `gh` (after joining continuations and dropping heredoc
+    bodies) returns ([], []) untouched."""
+    working = drop_heredoc_bodies(join_continuations(command))
+    if not mentions_gh(working):
+        return [], []
+    if ANSI_C_QUOTE_RE.search(working):
+        return [], ["this command uses $'...' ANSI-C quoting, which this gate's tokenizer does not support"]
+    tokens = strict_tokenize(working)
+    if tokens is None:
+        return [], ["this command could not be parsed cleanly by the shell tokenizer"]
     kinds: list[str] = []
-    tokens = rm_guard.tokenize(drop_heredoc_bodies(command))
+    denials: list[str] = []
     for seg in rm_guard.split_segments(tokens):
         while seg and seg[0] in KEYWORDS:
             seg = seg[1:]
+        if not seg:
+            continue
         stripped = rm_guard.strip_prefixes(seg)
-        if not stripped:
-            continue
-        if stripped[0].startswith("-") and rm_guard.basename(seg[0]) in rm_guard.PREFIX_WRAPPERS:
-            kind = wrapper_flag_kind(rm_guard.basename(seg[0]), stripped)
-            if kind:
-                kinds.append(kind)
-            continue
-        seg = stripped
-        name = rm_guard.basename(seg[0])
-        if name == "gh":
-            kind = gh_kind(seg[1:])
-        elif name in rm_guard.SHELL_WRAPPERS and depth == 0:
-            script = rm_guard.extract_shell_c_arg(seg)
-            if script is not None:
-                kinds.extend(classify(script, depth + 1))
+        head = rm_guard.basename(stripped[0]) if stripped else None
+        kind = denial = None
+        if head == "gh":
+            kind, denial = resolved_kind(classify_gh(stripped[1:]))
+        elif stripped and stripped[0].startswith("-"):
+            idx = find_gh_index(stripped)
+            if idx is not None:
+                wrapper = last_wrapper_name(seg) or rm_guard.basename(seg[0])
+                kind, denial = resolved_kind(classify_gh(stripped[idx + 1:]))
+                if denial:
+                    denial = f"`{wrapper}` wraps a `gh` call this cannot classify safely"
+        elif (head in rm_guard.SHELL_WRAPPERS or head == "eval") and depth == 0:
+            script = (
+                rm_guard.extract_shell_c_arg(stripped) if head in rm_guard.SHELL_WRAPPERS
+                else " ".join(stripped[1:])
+            )
+            if script:
+                sub_kinds, sub_denials = classify(script, depth + 1)
+                kinds.extend(sub_kinds)
+                denials.extend(sub_denials)
                 continue
-            kind = text_kind(" ".join(seg))
-        elif name == "eval":
-            kind = text_kind(" ".join(seg[1:]))
-        else:
-            kind = None
+            if find_gh_index(seg) is not None:
+                denial = f"cannot statically extract the script `{head}` runs"
+        elif head in rm_guard.SHELL_WRAPPERS or head == "eval":
+            if find_gh_index(seg) is not None:
+                denial = "a shell wrapper nested more than one level deep reaches a `gh` call"
+        elif find_gh_index(seg) is not None:
+            denial = "`gh` is reached through an unrecognized command or wrapper"
         if kind:
             kinds.append(kind)
-    return kinds
+        if denial:
+            denials.append(denial)
+    return kinds, denials
 
 
 def gate_dir() -> Path:
@@ -264,17 +403,18 @@ def decide(kinds: list[str], sid: str, directory: Path, now: float) -> str | Non
 
 
 def _denial(kind: str) -> str:
-    if kind.startswith("wrapper:"):
-        wrapper = kind.split(":", 1)[1]
-        return (
-            f"Blocked: `{wrapper}` wraps a gh call this cannot classify "
-            "safely, so it's denied outright -- no go covers it.\n"
-            "Run gh directly, without the wrapper."
-        )
     return (
         f"Blocked: this looks like a PR/issue {kind} without a typed go.\n"
         "Ask the owner to type `post it` (or `edit the pr body`) as the "
         "whole message; a multiple-choice answer is not a go."
+    )
+
+
+def _unclassified_denial(reason: str) -> str:
+    return (
+        f"Blocked: {reason}.\n"
+        "Run a single plain `gh` command on one line, with no wrapper, "
+        "or type the go."
     )
 
 
@@ -324,8 +464,18 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
     sid = payload.get("session_id")
     if not isinstance(sid, str):
         return None
-    kinds = classify(command)
-    return decide(kinds, sid, directory, now)
+    try:
+        kinds, denials = classify(command)
+        if denials:
+            return _unclassified_denial(denials[0])
+        return decide(kinds, sid, directory, now)
+    except Exception:
+        # A command that never mentions `gh` keeps failing open (a crashed
+        # guard must never block ordinary work); one that does mention `gh`
+        # fails closed here instead, per the redesign's default-deny.
+        if mentions_gh(command):
+            return _unclassified_denial("an internal error occurred while classifying this command")
+        return None
 
 
 def main() -> int:

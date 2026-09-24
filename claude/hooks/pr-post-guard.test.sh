@@ -270,6 +270,132 @@ subst_line='PR=$(gh pr view --json number -q .number)
 gh pr comment "$PR" --body-file m.md'
 expect_rc "FN17 gh pr comment on the line after a command substitution is denied with no go" 2 "$(payload_b s1 "$subst_line")"
 
+# --- V: round-3 blocker and minors, and the redesign's default-deny -------
+
+case_gate v1
+cont_line=$(printf 'gh api -X POST \\\nrepos/o/r/pulls/5/comments/9/replies -f body=x')
+expect_rc "V1 backslash line continuation is denied with no go" 2 "$(payload_b s1 "$cont_line")"
+case_gate v1b
+expect_rc "V1b mint post" 0 "$(payload_u s1 'post it')"
+expect_rc "V1b same continuation allowed after typed go" 0 "$(payload_b s1 "$cont_line")"
+
+case_gate v2
+expect_rc "V2 env assignment ahead of a flagged wrapper is still denied with no go" 2 "$(payload_b s1 'FOO=1 sudo -u me gh pr comment 5 --body x')"
+
+case_gate v3
+expect_rc "V3 a mid-word # in an argument does not defeat the post gate" 2 "$(payload_b s1 'gh pr comment 5 --body abc#hidden')"
+
+case_gate v4
+expect_rc "V4a timeout-wrapped gh pr comment is denied outright, no go" 2 "$(payload_b s1 'timeout 5 gh pr comment 5 --body x')"
+expect_rc "V4a mint post" 0 "$(payload_u s1 'post it')"
+expect_rc "V4a still denied after a typed go (unknown wrapper, not gated)" 2 "$(payload_b s1 'timeout 5 gh pr comment 5 --body x')"
+case_gate v4b
+expect_rc "V4b stdbuf-wrapped gh pr comment is denied outright, no go" 2 "$(payload_b s1 'stdbuf -oL gh pr comment 5 --body x')"
+
+case_gate v5
+expect_rc "V5 ANSI-C \$'...' quoting is denied outright, no go" 2 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
+expect_rc "V5 mint post" 0 "$(payload_u s1 'post it')"
+expect_rc "V5 still denied after a typed go" 2 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
+
+# --- U: an unclassifiable gh call is denied outright, no go covers it ------
+
+case_gate u1
+expect_rc "U1 unknown gh subcommand denied with no go" 2 "$(payload_b s1 'gh foo bar')"
+case_gate u1b
+expect_rc "U1b mint post" 0 "$(payload_u s1 'post it')"
+expect_rc "U1b unknown gh subcommand still denied after a typed go" 2 "$(payload_b s1 'gh foo bar')"
+
+case_gate u2
+expect_rc "U2 api POST to an ungated path denied with no go" 2 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
+case_gate u2b
+expect_rc "U2b mint post" 0 "$(payload_u s1 'post it')"
+expect_rc "U2b api POST to an ungated path still denied after a typed go" 2 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
+
+# --- W: every allowed read and known write form -----------------------------
+
+case_gate w1
+expect_rc "W1 pr checks" 0 "$(payload_b s1 'gh pr checks 5')"
+expect_rc "W1 pr diff" 0 "$(payload_b s1 'gh pr diff 5')"
+expect_rc "W1 pr status" 0 "$(payload_b s1 'gh pr status')"
+expect_rc "W1 pr list" 0 "$(payload_b s1 'gh pr list')"
+expect_rc "W1 run view" 0 "$(payload_b s1 'gh run view 123')"
+expect_rc "W1 run list" 0 "$(payload_b s1 'gh run list')"
+expect_rc "W1 run watch" 0 "$(payload_b s1 'gh run watch 123')"
+expect_rc "W1 issue view" 0 "$(payload_b s1 'gh issue view 5')"
+expect_rc "W1 issue list" 0 "$(payload_b s1 'gh issue list')"
+expect_rc "W1 repo view" 0 "$(payload_b s1 'gh repo view')"
+expect_rc "W1 search prs" 0 "$(payload_b s1 'gh search prs --author=@me --state=open')"
+expect_rc "W1 auth status" 0 "$(payload_b s1 'gh auth status')"
+
+case_gate w2
+expect_rc "W2 pr merge is a known non-comment write" 0 "$(payload_b s1 'gh pr merge --squash --match-head-commit abc123')"
+
+# --- X: an internal error on a gh-mentioning command fails closed ----------
+
+case_gate x1
+X1_RC=$(HOOK="$HOOK" GATE="$GATE" python3 - <<'PY'
+import importlib.util, io, json, os, sys
+sys.path.insert(0, "claude/hooks")
+os.environ["HERDR_ENV"] = "1"
+os.environ["DOTFILES_POST_GATE_DIR"] = os.environ["GATE"]
+spec = importlib.util.spec_from_file_location("g_forced", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(g)
+
+
+def boom(command, depth=0):
+    raise RuntimeError("forced")
+
+
+g.classify = boom
+payload = {
+    "hook_event_name": "PreToolUse",
+    "session_id": "s1",
+    "tool_name": "Bash",
+    "tool_input": {"command": "gh pr comment 5 --body x"},
+}
+sys.stdin = io.StringIO(json.dumps(payload))
+print(g.main())
+PY
+)
+if [ "$X1_RC" = 2 ]; then
+    printf 'PASS  X1 forced classify() exception on a gh command denies (herdr session)\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  X1 forced classify() exception on a gh command denies (herdr session) (got %s)\n' "$X1_RC" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate x2
+X2_RC=$(HOOK="$HOOK" GATE="$GATE" python3 - <<'PY'
+import importlib.util, io, json, os, sys
+sys.path.insert(0, "claude/hooks")
+os.environ.pop("HERDR_ENV", None)
+os.environ["DOTFILES_POST_GATE_DIR"] = os.environ["GATE"]
+spec = importlib.util.spec_from_file_location("g_forced2", os.environ["HOOK"])
+g = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(g)
+
+
+def boom(command, depth=0):
+    raise RuntimeError("forced")
+
+
+g.classify = boom
+payload = {
+    "hook_event_name": "PreToolUse",
+    "session_id": "s1",
+    "tool_name": "Bash",
+    "tool_input": {"command": "gh pr comment 5 --body x"},
+}
+sys.stdin = io.StringIO(json.dumps(payload))
+print(g.main())
+PY
+)
+if [ "$X2_RC" = 0 ]; then
+    printf 'PASS  X2 forced classify() exception outside herdr still exits 0\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  X2 forced classify() exception outside herdr still exits 0 (got %s)\n' "$X2_RC" >&2; FAIL=$((FAIL + 1))
+fi
+
 # --- M: gate mechanics ------------------------------------------------------
 
 case_gate m1
