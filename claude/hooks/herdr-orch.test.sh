@@ -9882,6 +9882,35 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "null" not i
 [ -z "$($CLI review-deadlines --repo-slug slug-x)" ]
 SH
 
+check "emit-done: an implement attempt stays current across a trailing review row; a superseded one is refused" <<'SH'
+unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 $PWD/claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" remote add origin https://example.com/repo-rw.git
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m repair; HEAD=$(git -C "$WT" rev-parse HEAD)
+SLUG=$(python3 -c "import importlib.util; s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=importlib.util.module_from_spec(s); s.loader.exec_module(c); print(c.repo_slug('https://example.com/repo-rw.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"
+F=$($CLI claim-owner --repo-slug $SLUG --repo-path $WT --session S1 --host h --pid 1)
+I='{"role":"impl","launch_id":"impl-1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$BASE"'"}'
+R='{"role":"review","launch_id":"rev-1","phase":"review","runtime":"claude","workspace_id":"w1","pane_id":"w1:p2","source_head_sha":"'"$BASE"'"}'
+I2='{"role":"impl","launch_id":"impl-2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$BASE"'"}'
+$CLI write-task --repo-slug $SLUG --task-id td-rw --session S1 --fence "$F" \
+  --json '{"task_id":"td-rw","status":"changes-requested","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","workers":['"$I"','"$R"']}'
+$CLI emit-done --repo-slug $SLUG --repo-path $WT --task-id td-rw --workspace w1 --agent impl-td-rw \
+  --phase implement --outcome completed --head-sha "$HEAD" --base-sha "$BASE" --runtime claude \
+  --launch-id impl-1 --pane-id w1:p1 --source-head-sha "$BASE"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["launch_id"]=="impl-1" and d["head_sha"]==sys.argv[2], d' "$RD/tasks/td-rw.done.json" "$HEAD"
+$CLI write-task --repo-slug $SLUG --task-id td-rw --session S1 --fence "$F" \
+  --json '{"task_id":"td-rw","status":"in-progress","base_sha":"'"$BASE"'","workers":['"$I"','"$R"','"$I2"']}'
+rc=0
+$CLI emit-done --repo-slug $SLUG --repo-path $WT --task-id td-rw --workspace w1 --agent impl-td-rw \
+  --phase implement --outcome completed --head-sha "$HEAD" --base-sha "$BASE" --runtime claude \
+  --launch-id impl-1 --pane-id w1:p1 --source-head-sha "$BASE" 2>"$ERRFILE" || rc=$?
+[ "$rc" -eq 2 ]
+grep -q 'result does not match the current dispatched attempt' "$ERRFILE"
+SH
+
 check "plan_record_matches: identity only, independent of artifacts" <<PY
 $LOAD
 task = {"task_id": "PROJ-1", "base_sha": "b" * 40, "workers": []}
