@@ -508,6 +508,25 @@ ok "kickoff section documents the fast-path branch, table, and contract source" 
 ok "state layout documents fast_path.max_files" \
   "sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'fast_path.max_files' && sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'default 3'"
 
+fastpath_brief_ok() {
+python3 - <<'PY'
+import sys
+t = " ".join(open("claude/skills/herdr-orchestration/references/brief-template.md").read().split())
+fp = t[t.index("## Fast-path implement brief variant"):t.index("## Mech brief variant")]
+plan = t[t.index("## Plan-phase brief variant"):t.index("## Fast-path implement brief variant")]
+rev = t[t.index("## Reviewer brief variant"):t.index("## Deep-think brief variant")]
+ok = (all(n in fp for n in ["no spec or plan exists", "Solution is the plan",
+                           "--reason needs_design", "--phase implement",
+                           "--launch-id <launch_id>", "verify-contract"])
+      and all(n in plan for n in ["ARTIFACT_CLASS", "4 spec rounds", "2 plan rounds"])
+      and "<fast-path-line>" in rev and "took the fast path" in rev)
+sys.exit(0 if ok else 1)
+PY
+}
+ok "brief template carries the fast-path variant, review caps, and reviewer line" fastpath_brief_ok
+ok "brief template keeps the pinned mech, routing, and opt-in strings" \
+  "grep -q 'Mech brief variant' claude/skills/herdr-orchestration/references/brief-template.md && grep -q -- '--launch-id <launch_id>' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'Workflow opt-in: granted by the user' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'Workflow opt-in: withheld for this task' claude/skills/herdr-orchestration/references/brief-template.md"
+
 # 13. teardown-binding / reconcile-leads / emit-artifacts: required-flag
 # presence, fenced refusal, and teardown's claimed-requires---abandon
 # contract. A binding record is written directly (schema per
