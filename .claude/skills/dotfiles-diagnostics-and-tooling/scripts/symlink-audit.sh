@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
-# symlink-audit.sh - Walk the expected dotfiles symlink map and report state.
+# symlink-audit.sh - Audit the dotfiles symlink map, then scan for orphaned links.
 #
-# The expected map is transcribed from install/common/link.sh and
-# install/common/claude-links.sh (link_claude_config_dir). Per entry, reports:
+# Walks the expected map, a transcription of what install/<platform>/link.sh
+# writes (install/common/link.sh, link_claude_config_dir, link_codex_surfaces).
+# symlink-audit.test.sh runs the real installer into a scratch HOME and fails when
+# this transcription drifts. Per entry:
 #   OK            symlink present, resolves, points at the expected target
 #   WRONG-TARGET  symlink resolves but points somewhere else
 #   DANGLING      symlink whose target does not exist
 #   NOT-A-LINK    a real file/dir sits where a symlink belongs
 #   MISSING       nothing at the path
-# Machine-local files (settings.json, ~/.gitconfig-work) are checked inversely:
+# Machine-local files (settings.json, ~/.gitconfig-work, ...) are checked inversely:
 # they must be REAL files, never symlinks (installers write through symlinks
 # into the repo -- the corruption claude-links.sh guards against).
 #
-# Read-only: never modifies anything. Exit 1 on any non-OK entry.
+# Read-only: never modifies anything. Exit 1 on any non-OK entry; exit 2 on
+# usage errors.
 #
-# Usage: symlink-audit.sh            full machine layout (link.sh scope)
-#        symlink-audit.sh --cloud    partial cloud layout: only ~/.claude
-#                                    (what bootstrap-cloud.sh creates)
+# Usage: symlink-audit.sh [--cloud] [--list-expected]
+#   --cloud          partial cloud layout: only ~/.claude (what bootstrap-cloud.sh creates)
+#   --list-expected  print the map as tab-separated rows and exit
 # Env:   DOTFILES=/path/to/checkout  override repo-root autodetection
 
 set -u
 
+TAB=$'\t'
+
 CLOUD=0
+LIST=0
 for arg in "$@"; do
   case "$arg" in
     --cloud) CLOUD=1 ;;
-    *) echo "Unknown argument: $arg (supported: --cloud)" >&2; exit 2 ;;
+    --list-expected) LIST=1 ;;
+    *) echo "Unknown argument: $arg (supported: --cloud, --list-expected)" >&2; exit 2 ;;
   esac
 done
 
@@ -35,6 +42,110 @@ DOTFILES="${DOTFILES:-$(cd -P "$SCRIPT_DIR/../../../.." >/dev/null 2>&1 && pwd)}
 if [ ! -f "$DOTFILES/install/common/link.sh" ]; then
   echo "[X] Cannot locate dotfiles root (tried $DOTFILES). Set DOTFILES=/path/to/checkout." >&2
   exit 2
+fi
+
+IS_DARWIN=0
+[ "$(uname)" = Darwin ] && IS_DARWIN=1
+
+# Map rows: section<TAB>title | link<TAB>path<TAB>target | machine-local<TAB>path
+row_section() { printf 'section\t%s\n' "$1"; }
+row_link() { printf 'link\t%s\t%s\n' "$1" "$2"; }
+row_local() { printf 'machine-local\t%s\n' "$1"; }
+
+# One Claude config dir (link_claude_config_dir in install/common/claude-links.sh).
+emit_claude_dir() {
+  local cdir="$1" name
+  row_section "claude config dir: $cdir"
+  for name in CLAUDE.md operating-principles.md commands agents hooks skills rules statusline.js; do
+    row_link "$cdir/$name" "$DOTFILES/claude/$name"
+  done
+  # Local-only audit files: the installer links them only when present.
+  for name in Fable5.md Opus4.md; do
+    if [ -f "$DOTFILES/claude/$name" ]; then
+      row_link "$cdir/$name" "$DOTFILES/claude/$name"
+    fi
+  done
+  row_local "$cdir/settings.json"
+}
+
+emit_map() {
+  local name skill_dir
+  if [ "$CLOUD" -eq 1 ]; then
+    # Cloud containers get only the personal Claude layer (bootstrap-cloud.sh).
+    emit_claude_dir "$HOME/.claude"
+    return
+  fi
+
+  row_section "zsh"
+  row_link "$HOME/.zprofile" "$DOTFILES/zsh/.zprofile"
+  row_link "$HOME/.zshrc" "$DOTFILES/zsh/.zshrc"
+  row_link "$HOME/.zshenv" "$DOTFILES/zsh/.zshenv"
+  row_link "$HOME/.config/.aliases.zsh" "$DOTFILES/zsh/aliases.zsh"
+  row_link "$HOME/.config/.functions.zsh" "$DOTFILES/zsh/functions.zsh"
+  row_link "$HOME/.config/.trippy.toml" "$DOTFILES/zsh/.trippy.toml"
+
+  row_section "git"
+  row_link "$HOME/.gitconfig" "$DOTFILES/git/.gitconfig"
+  row_link "$HOME/.stCommitMsg" "$DOTFILES/git/.stCommitMsg"
+  row_link "$HOME/.gitignore_global" "$DOTFILES/git/.gitignore_global"
+  row_link "$HOME/.gitconfig-personal" "$DOTFILES/git/personal/.gitconfig-personal"
+  row_link "$HOME/.config/git/hooks" "$DOTFILES/git/hooks"
+  row_local "$HOME/.gitconfig-work"
+
+  row_section "ssh"
+  row_link "$HOME/.ssh/config" "$DOTFILES/ssh/configs/config"
+  row_link "$HOME/.ssh/config_personal" "$DOTFILES/ssh/configs/personal/config_personal"
+  row_link "$HOME/.ssh/config_work" "$DOTFILES/ssh/configs/work/config_work"
+  row_link "$HOME/.ssh/id_ed25519_personal.pub" "$DOTFILES/ssh/keys/id_ed25519_personal.pub"
+  row_local "$HOME/.ssh/config_cloudflared"
+  row_local "$HOME/.config/1Password/ssh/agent.toml"
+
+  emit_claude_dir "$HOME/.claude"
+  emit_claude_dir "$HOME/.claude-work"
+
+  row_section "bin"
+  for name in dotfiles-repair setup-claude identity-setup identity-doctor \
+    remote-access-doctor zed-claude-agent herdr-zed-attach dotfiles-tests; do
+    row_link "$HOME/bin/$name" "$DOTFILES/bin/$name"
+  done
+
+  row_section "ghostty"
+  row_link "$HOME/.config/ghostty/config" "$DOTFILES/ghostty/config"
+
+  # link_codex_surfaces in install/common/codex-links.sh.
+  row_section "codex"
+  row_link "$HOME/.codex/AGENTS.md" "$DOTFILES/codex/AGENTS.md"
+  for name in no_ai_attribution_bash.py block_secrets.py emoji_guard.py no_ai_comments.py \
+    herdr_stop_gate.py orch_edit_guard.py; do
+    row_link "$HOME/.codex/hooks/$name" "$DOTFILES/codex/hooks/$name"
+  done
+  for name in herdr_worktree_guard.py rm_guard.py git_remote_guard.py planning_artifact_guard.py; do
+    row_link "$HOME/.codex/hooks/$name" "$DOTFILES/claude/hooks/$name"
+  done
+  for name in repo-recall post-merge todos handoff kickoff voice brainstorming writing-specs writing-plans; do
+    row_link "$HOME/.codex/skills/$name" "$DOTFILES/claude/skills/$name"
+  done
+  if [ -d "$DOTFILES/codex/skills" ]; then
+    for skill_dir in "$DOTFILES"/codex/skills/*/; do
+      [ -d "$skill_dir" ] || continue
+      row_link "$HOME/.codex/skills/$(basename "$skill_dir")" "${skill_dir%/}"
+    done
+  fi
+  row_link "$HOME/.codex/rules/agent-lessons.md" "$DOTFILES/claude/rules/personal/agent-lessons.md"
+
+  if [ "$IS_DARWIN" -eq 1 ]; then
+    # install/macos/link.sh.
+    row_section "macos apps"
+    for name in settings.json keybindings.json welcomePage.js; do
+      row_link "$HOME/Library/Application Support/Code/User/$name" "$DOTFILES/vscode/$name"
+    done
+    row_link "$HOME/.config/zed/settings.json" "$DOTFILES/zed/settings.json"
+  fi
+}
+
+if [ "$LIST" -eq 1 ]; then
+  emit_map | grep -v "^section$TAB"
+  exit 0
 fi
 
 BAD=0
@@ -91,75 +202,15 @@ check_machine_local() {
   fi
 }
 
-# One Claude config dir (claude-links.sh link_claude_config_dir).
-audit_claude_dir() {
-  local cdir="$1" name
-  echo
-  echo "--- claude config dir: $cdir ---"
-  for name in CLAUDE.md operating-principles.md commands agents hooks skills rules statusline.js; do
-    check_link "$cdir/$name" "$DOTFILES/claude/$name"
-  done
-  check_machine_local "$cdir/settings.json"
-}
-
 echo "symlink-audit: dotfiles root = $DOTFILES  (mode: $([ "$CLOUD" -eq 1 ] && echo cloud || echo full))"
 
-if [ "$CLOUD" -eq 1 ]; then
-  # Cloud containers get only the personal Claude layer (bootstrap-cloud.sh).
-  audit_claude_dir "$HOME/.claude"
-else
-  echo
-  echo "--- zsh ---"
-  check_link "$HOME/.zprofile"                "$DOTFILES/zsh/.zprofile"
-  check_link "$HOME/.zshrc"                   "$DOTFILES/zsh/.zshrc"
-  check_link "$HOME/.zshenv"                  "$DOTFILES/zsh/.zshenv"
-  check_link "$HOME/.config/.aliases.zsh"     "$DOTFILES/zsh/aliases.zsh"
-  check_link "$HOME/.config/.functions.zsh"   "$DOTFILES/zsh/functions.zsh"
-  check_link "$HOME/.config/.trippy.toml"     "$DOTFILES/zsh/.trippy.toml"
-
-  echo
-  echo "--- git ---"
-  check_link "$HOME/.gitconfig"               "$DOTFILES/git/.gitconfig"
-  check_link "$HOME/.stCommitMsg"             "$DOTFILES/git/.stCommitMsg"
-  check_link "$HOME/.gitignore_global"        "$DOTFILES/git/.gitignore_global"
-  check_link "$HOME/.gitconfig-personal"      "$DOTFILES/git/personal/.gitconfig-personal"
-  check_link "$HOME/.config/git/hooks"        "$DOTFILES/git/hooks"
-  check_machine_local "$HOME/.gitconfig-work"
-
-  echo
-  echo "--- ssh ---"
-  check_link "$HOME/.ssh/config"                    "$DOTFILES/ssh/configs/config"
-  check_link "$HOME/.ssh/config_personal"           "$DOTFILES/ssh/configs/personal/config_personal"
-  check_link "$HOME/.ssh/config_work"               "$DOTFILES/ssh/configs/work/config_work"
-  check_link "$HOME/.ssh/id_ed25519_personal.pub"   "$DOTFILES/ssh/keys/id_ed25519_personal.pub"
-
-  audit_claude_dir "$HOME/.claude"
-  audit_claude_dir "$HOME/.claude-work"
-
-  echo
-  echo "--- bin ---"
-  for name in dotfiles-repair setup-claude identity-setup identity-doctor dotfiles-tests; do
-    check_link "$HOME/bin/$name" "$DOTFILES/bin/$name"
-  done
-
-  echo
-  echo "--- ghostty ---"
-  check_link "$HOME/.config/ghostty/config" "$DOTFILES/ghostty/config"
-
-  echo
-  echo "--- codex ---"
-  check_link "$HOME/.codex/AGENTS.md" "$DOTFILES/codex/AGENTS.md"
-  for name in no_ai_attribution_bash.py block_secrets.py emoji_guard.py no_ai_comments.py; do
-    check_link "$HOME/.codex/hooks/$name" "$DOTFILES/codex/hooks/$name"
-  done
-  # Repo-managed Codex bridge skills (link.sh loops over codex/skills/*/).
-  if [ -d "$DOTFILES/codex/skills" ]; then
-    for skill_dir in "$DOTFILES"/codex/skills/*/; do
-      [ -d "$skill_dir" ] || continue
-      check_link "$HOME/.codex/skills/$(basename "$skill_dir")" "${skill_dir%/}"
-    done
-  fi
-fi
+while IFS="$TAB" read -r kind path target; do
+  case "$kind" in
+    section) echo; echo "--- $path ---" ;;
+    link) check_link "$path" "$target" ;;
+    machine-local) check_machine_local "$path" ;;
+  esac
+done < <(emit_map)
 
 echo
 if [ "$BAD" -ne 0 ]; then
