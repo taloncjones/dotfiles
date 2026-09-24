@@ -2355,6 +2355,17 @@ grep -q 'think/' "$R/event-schema.md"
 grep -q 'models.think\|"think": \["fable", "opus"\]' "$R/state-layout.md"
 SH
 
+check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state layout" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+P="claude/skills/post-merge/SKILL.md"
+grep -q '^## Lessons step (<lessons-step>)$' "$R/brief-template.md"
+grep -q '^## Director-authored repair and ship briefs$' "$R/brief-template.md"
+[ "$(grep -c '<lessons-step>' "$R/brief-template.md")" -ge 6 ]
+grep -Fq 'at most 160 characters' "$R/brief-template.md"
+if grep -Fq 'LESSON: [' "$R/brief-template.md"; then exit 1; fi
+if grep -Eq '^[[:space:]]*LESSON:' "$R/brief-template.md"; then exit 1; fi
+SH
+
 check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
 $LOAD
 avail={"fable":True,"opus":True,"sonnet":True,"haiku":True}
