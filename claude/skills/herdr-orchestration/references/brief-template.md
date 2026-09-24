@@ -130,7 +130,12 @@ PRODUCE (do NOT implement yet) the repo's spec + plan for this task, following
 its own pipeline: brainstorming -> writing-specs (spec to private `docs/superpowers/specs/`) ->
 independent spec review -> writing-plans (plan to private `docs/superpowers/plans/`) ->
 independent plan review. In Claude use codex-spec-review/codex-plan-review;
-in Codex use claude-spec-review/claude-plan-review. Author the task's verification contract at
+in Codex use claude-spec-review/claude-plan-review. Codex review caps: at most
+<spec-cap> spec rounds and <plan-cap> plan rounds (defaults 4 spec rounds and
+2 plan rounds; only this brief raises them), with
+`ARTIFACT_CLASS=<advisory|behavior>` (advisory when the change is workflow
+prose with no durable write of its own; non-defect findings then go to the
+spec's accepted residuals). Author the task's verification contract at
 `claude/contracts/<task_id>-contract.json` alongside the plan. It is a private
 orchestration artifact: it stays untracked and git-ignored on disk, and the
 planning-artifact guard refuses `git add` of it. 1-32 commands, each
@@ -165,6 +170,39 @@ When the private spec + plan are frozen and reviewed:
 Do not report completion any other way. The director advances to the
 implement phase only on this `phase: plan` record.
 ```
+
+## Fast-path implement brief variant (`impl-<t>`, fast-path items only)
+
+Sent instead of the implement brief when kickoff takes the fast path
+(SKILL.md section 2). Same workspace, `## Routing`, ground-rules, and Close
+framing as the implement brief above; only the task section changes:
+
+```
+You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
+
+## Task
+<task_id>: <todo title>
+
+<full todo body, frontmatter included>
+
+This task took the fast path: no spec or plan exists; the todo's Solution is
+the plan. Edit only the files the todo names -- each already verified as a
+normalized, canonical repo-relative path to a regular file, not a directory,
+glob, or symlink, by the fast-path maturity check: <file list>.
+<contract-provenance> Run
+`<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`
+before closing. If the work needs a design decision the todo does not settle,
+or a file outside that list, commit what is safe and close with
+`<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome paused --reason needs_design --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`;
+the director re-kicks the item as raw.
+```
+
+`<contract-provenance>` renders one of two sentences, matching the fast-path
+contract source that actually produced the pinned contract (SKILL.md section
+2): "The pinned verification contract was written by the director from the
+todo's Verification section, plus config regression suites." for source (2),
+or "The pinned verification contract was found on disk at kickoff." for
+source (1).
 
 ## Mech brief variant (`mech-<t>`)
 
@@ -242,6 +280,7 @@ intended behavior, and affected callers. You are a fresh agent in the task's
 own worktree. Report blocking findings, useful advisories, coverage gaps, and
 safe reproduction evidence. Do not edit the branch, invoke co-review or another
 reviewer, post externally, push, merge, or open a PR.
+<fast-path-line>
 
 ## Close
 When review is complete:
@@ -265,6 +304,11 @@ When review is complete:
 
 Never push, merge, or open a PR.
 ```
+
+Render `<fast-path-line>` only for a fast-path task, as: "This task took the
+fast path: no spec or plan exists. Review against todo `<todo_id>` and its
+named files; flag any design decision the todo does not settle." Omit the
+line otherwise.
 
 ## Deep-think brief variant (`<think_id>`)
 

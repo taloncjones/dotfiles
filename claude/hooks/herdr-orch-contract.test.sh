@@ -484,6 +484,64 @@ ok "no-workflow kickoff renders the withheld line" "printf '%s' \"\$B2\" | grep 
 ok "skill documents the brief Routing block and both opt-in lines" \
   "grep -q '## Routing' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'withheld for this task' claude/skills/herdr-orchestration/references/brief-template.md"
 
+fastpath_kickoff_ok() {
+python3 - <<'PY'
+import re, sys
+t = " ".join(open("claude/skills/herdr-orchestration/SKILL.md").read().split())
+s = t[t.index("## 2. Kickoff"):t.index("## 2a. Phase advancement")]
+need = ["**Fast-path item**", "never a Jira key", "--role implementation",
+        "Fast-path maturity check", "fast_path.max_files", "default 3",
+        "claude/hooks/herdr_orch_core.py", "kick off <item> as raw",
+        "Fast-path contract source", "## Verification",
+        "config.mech.contract_commands", "schema check",
+        "reject an absolute path, a leading `./`, or any `.` or `..` path component",
+        "git ls-tree <base_sha> -- <normalized-path>",
+        "mode is `100644` or `100755`",
+        "path column equals the normalized entry verbatim",
+        "symlink (mode `120000`)",
+        "after the same normalization",
+        "a directory prefix of it",
+        "Every `verify-*` command must also be falsifiable",
+        "Falsifiability is observed, not judged",
+        "at least one `verify-*` command expected to fail",
+        "run every `verify-*` command once in the fresh worktree",
+        "at least one must exit non-zero",
+        "Fast-path implement brief variant",
+        "is a fast-path item; anything else is raw",
+        "the fallback: any other todo or handoff",
+        "./claude/hooks/herdr_orch_core.py",
+        "claude/hooks/../hooks/herdr_orch_core.py",
+        ".agents/skills",
+        "all three fall to raw"]
+rows = ["files", "cap", "core", "solution", "contract"]
+order = s.index("**Plan-ready item**") < s.index("**Fast-path item**") < s.index("**Raw item**")
+ok = order and all(n in s for n in need) and all(re.search(r"\|\s*" + r + r"\s*\|", s) for r in rows)
+sys.exit(0 if ok else 1)
+PY
+}
+ok "kickoff section documents the fast-path branch, table, and contract source" fastpath_kickoff_ok
+ok "state layout documents fast_path.max_files" \
+  "sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'fast_path.max_files' && sed -n '/^### \`config.json\`/,/^### \`task-lead-gate.json\`/p' claude/skills/herdr-orchestration/references/state-layout.md | grep -q 'default 3'"
+
+fastpath_brief_ok() {
+python3 - <<'PY'
+import sys
+t = " ".join(open("claude/skills/herdr-orchestration/references/brief-template.md").read().split())
+fp = t[t.index("## Fast-path implement brief variant"):t.index("## Mech brief variant")]
+plan = t[t.index("## Plan-phase brief variant"):t.index("## Fast-path implement brief variant")]
+rev = t[t.index("## Reviewer brief variant"):t.index("## Deep-think brief variant")]
+ok = (all(n in fp for n in ["no spec or plan exists", "Solution is the plan",
+                           "--reason needs_design", "--phase implement",
+                           "--launch-id <launch_id>", "verify-contract"])
+      and all(n in plan for n in ["ARTIFACT_CLASS", "4 spec rounds", "2 plan rounds"])
+      and "<fast-path-line>" in rev and "took the fast path" in rev)
+sys.exit(0 if ok else 1)
+PY
+}
+ok "brief template carries the fast-path variant, review caps, and reviewer line" fastpath_brief_ok
+ok "brief template keeps the pinned mech, routing, and opt-in strings" \
+  "grep -q 'Mech brief variant' claude/skills/herdr-orchestration/references/brief-template.md && grep -q -- '--launch-id <launch_id>' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'Workflow opt-in: granted by the user' claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'Workflow opt-in: withheld for this task' claude/skills/herdr-orchestration/references/brief-template.md"
+
 # 13. teardown-binding / reconcile-leads / emit-artifacts: required-flag
 # presence, fenced refusal, and teardown's claimed-requires---abandon
 # contract. A binding record is written directly (schema per
