@@ -67,6 +67,32 @@ Record unexpected drift in the brief and save another immutable record when
 needed. Remove only a temporary input file created by this invocation after
 verification; preserve user-supplied files and legacy histories.
 
+## Retire and restore
+
+Retire a finished task so `list` and the session-start notice stop showing
+it. Retiring moves the task's directory, history included, under a
+`.archived/` sibling in the same account and repository partition; nothing
+is deleted.
+
+```bash
+uv run --no-project --python '>=3.11' --offline --no-cache python "$HELPER" retire \
+  --repo "$REPO" --runtime "$RUNTIME" --task "$TASK"
+uv run --no-project --python '>=3.11' --offline --no-cache python "$HELPER" list \
+  --repo "$REPO" --runtime "$RUNTIME" --archived
+uv run --no-project --python '>=3.11' --offline --no-cache python "$HELPER" load \
+  --repo "$REPO" --runtime "$RUNTIME" --task "$TASK" --archived
+uv run --no-project --python '>=3.11' --offline --no-cache python "$HELPER" restore \
+  --repo "$REPO" --runtime "$RUNTIME" --task "$TASK"
+```
+
+A lead that accepts a worker's `done:` record saves its acceptance first,
+then retires the worker's task. A session that records its own task as
+`done:` retires it once whoever it reports to has read that record, or
+leaves it: the notice hides a `done:` record after 72 hours. `retire` and
+`restore` refuse a missing or invalid task and a name already present at
+the destination. `save`, `load` and `verify` refuse a retired task; inspect
+it with `load --archived` and reopen it only with `restore`.
+
 ## Storage and restart
 
 Records live outside Git under

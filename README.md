@@ -416,7 +416,7 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
     for Codex and retain `--personal` for a personal account in a work repo
 - `review-change` - bounded single-seat development review
 - `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) final/spec/plan review gates
-- `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection
+- `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection; `handoff retire` archives a finished task
 - `voice` - shared prose lint and independent rewrite with protected facts
 - `herdr-orchestration` - Claude-led shared lifecycle; Codex supplies bounded UI/prose/review work
 - `lib/workflow_context.py` - canonical repository identity and account scope
@@ -443,9 +443,10 @@ Requested settings and observed runtime evidence are reported separately.
 
 Handoff history lives under
 `${XDG_STATE_HOME:-~/.local/state}/dotfiles/workflows/handoffs`, partitioned by
-account, canonical repository, and task. `handoff list` presents candidates;
-`kickoff` requires a selected task. Personal Claude use remains supported in
-work repositories through `claude --personal`. Default personal subprocesses
+account, canonical repository, and task. `handoff list` presents candidates
+and `handoff retire` moves a finished task out of it; `kickoff` requires a
+selected task. Personal Claude use remains supported in work repositories
+through `claude --personal`. Default personal subprocesses
 unset `CLAUDE_CONFIG_DIR`; Codex preserves the user's actual `CODEX_HOME`.
 Ambiguous external worktrees require an explicit personal choice instead of
 inheriting an unverified work account.
