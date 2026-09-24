@@ -361,17 +361,21 @@ against a cheap model making design decisions.
 Fast-path maturity check -- every row must hold; read the todo file and
 `config.json`:
 
-| Row      | Condition                                                                                                                                                                                                                                                                                                             | Source           |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| files    | `files:` names 1..N paths (YAML list or comma string; a `:line` suffix counts as the path); after stripping any `:line` suffix, every entry is an existing regular file at the base commit (`git cat-file -e <base_sha>:<path>` and the object is not a tree) -- a directory, a glob, or a missing path fails the row | todo frontmatter |
-| cap      | N <= `config.fast_path.max_files`, default 3                                                                                                                                                                                                                                                                          | `config.json`    |
-| core     | no listed path equals `claude/hooks/herdr_orch_core.py`, and no listed path is a directory prefix of it                                                                                                                                                                                                               | todo frontmatter |
-| solution | `## Solution` is non-empty and not `TBD`                                                                                                                                                                                                                                                                              | todo body        |
-| contract | the fast-path contract source below yields a contract                                                                                                                                                                                                                                                                 | todo body        |
+| Row      | Condition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Source           |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
+| files    | `files:` names 1..N paths (YAML list or comma string; a `:line` suffix counts as the path); after stripping any `:line` suffix, normalize each entry (reject an absolute path, a leading `./`, or any `.` or `..` path component) and require `git ls-tree <base_sha> -- <normalized-path>` to print exactly one line whose mode is `100644` or `100755` and whose path column equals the normalized entry verbatim -- a directory, a glob, a missing path, or a symlink (mode `120000`) fails the row | todo frontmatter |
+| cap      | N <= `config.fast_path.max_files`, default 3                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `config.json`    |
+| core     | after the same normalization, no listed path equals `claude/hooks/herdr_orch_core.py`, and no listed path is a directory prefix of it                                                                                                                                                                                                                                                                                                                                                                  | todo frontmatter |
+| solution | `## Solution` is non-empty and not `TBD`                                                                                                                                                                                                                                                                                                                                                                                                                                                               | todo body        |
+| contract | the fast-path contract source below yields a contract                                                                                                                                                                                                                                                                                                                                                                                                                                                  | todo body        |
 
 A failing row, unparseable frontmatter, a malformed `fast_path` block, or the
 kickoff instruction `kick off <item> as raw` makes the item raw. When unsure,
-raw.
+raw. The normalized-path rule rejects every re-spelling of the core path,
+for example `./claude/hooks/herdr_orch_core.py` or
+`claude/hooks/../hooks/herdr_orch_core.py`, and rejects a tracked symlink
+such as `.agents/skills` (mode `120000`) even though `git cat-file -t`
+alone would call it a blob; all three fall to raw.
 
 Fast-path contract source, in order: (1) a contract already on disk at
 `claude/contracts/<task_id>-contract.json` -> use it; (2) the todo's
@@ -385,13 +389,15 @@ rules below. Before writing (2), apply
 the plan-phase contract rules (references/brief-template.md): every command
 repo-local, deterministic, and worktree-safe (no STATE_ROOT
 writes, no machine-state mutation, no network, no secret echo), and at most
-32 commands. Falsifiability is observed, not judged, not just claimed: at
-least one `verify-*` command expected to fail until the todo's fix lands
-must actually fail -- run every `verify-*` command once in the fresh
-worktree at `base_sha` before pinning; at least one must exit non-zero. A
-todo whose Verification section is vacuous (every `verify-*` command
-already passes at base) falls to raw mechanically. A command that misses a
-rule, or any doubt, makes the item raw.
+32 commands. Every `verify-*` command must also be falsifiable (it passes
+once the stated fix lands); the appended `config.mech.contract_commands`
+regression commands are exempt. Falsifiability is observed, not judged, not
+just claimed: at least one `verify-*` command expected to fail until the
+todo's fix lands must actually fail -- run every `verify-*` command once in
+the fresh worktree at `base_sha` before pinning; at least one must exit
+non-zero. A todo whose Verification section is vacuous (every `verify-*`
+command already passes at base) falls to raw mechanically. A command that
+misses a rule, or any doubt, makes the item raw.
 `verify-contract --validate-only` is a schema check only (it accepts
 `run: "true"`); a schema rejection also makes the item raw. Never `git add`
 or commit the contract. Then run the Contract pinning steps below unchanged,
@@ -503,9 +509,10 @@ phase-appropriate brief (references/brief-template.md) and model.
    resources proven to belong to this launch, after checking no worker remains
    active. Never delete a task/worktree because a prompt wait timed out.
 
-**Contract pinning (implement dispatch, both paths).** Before launching any
-`implement` worker (plan-ready kickoff here, or phase advancement in section
-2a), compute the pin: require the task worktree clean (`git status
+**Contract pinning (implement dispatch, all paths).** Before launching any
+`implement` worker (plan-ready kickoff here, fast-path or mech kickoff here,
+or phase advancement in section 2a), compute the pin: require the task
+worktree clean (`git status
 --porcelain` empty) and the contract on disk, checked in this order:
 (1) `git ls-files --error-unmatch -- claude/contracts/<task_id>-contract.json`
 succeeds -> a legacy tracked contract; accept it with `[WARNING] legacy

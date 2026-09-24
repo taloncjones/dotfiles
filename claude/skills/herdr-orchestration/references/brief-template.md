@@ -184,9 +184,10 @@ You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
 <full todo body, frontmatter included>
 
 This task took the fast path: no spec or plan exists; the todo's Solution is
-the plan. Edit only the files the todo names -- each already verified as an
-existing regular file, not a directory or glob, by the fast-path maturity
-check: <file list>. <contract-provenance> Run
+the plan. Edit only the files the todo names -- each already verified as a
+normalized, canonical repo-relative path to a regular file, not a directory,
+glob, or symlink, by the fast-path maturity check: <file list>.
+<contract-provenance> Run
 `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`
 before closing. If the work needs a design decision the todo does not settle,
 or a file outside that list, commit what is safe and close with

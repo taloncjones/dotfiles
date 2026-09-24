@@ -494,15 +494,25 @@ need = ["**Fast-path item**", "never a Jira key", "--role implementation",
         "claude/hooks/herdr_orch_core.py", "kick off <item> as raw",
         "Fast-path contract source", "## Verification",
         "config.mech.contract_commands", "schema check",
-        "existing regular file at the base commit",
+        "reject an absolute path, a leading `./`, or any `.` or `..` path component",
+        "git ls-tree <base_sha> -- <normalized-path>",
+        "mode is `100644` or `100755`",
+        "path column equals the normalized entry verbatim",
+        "symlink (mode `120000`)",
+        "after the same normalization",
         "a directory prefix of it",
+        "Every `verify-*` command must also be falsifiable",
         "Falsifiability is observed, not judged",
         "at least one `verify-*` command expected to fail",
         "run every `verify-*` command once in the fresh worktree",
         "at least one must exit non-zero",
         "Fast-path implement brief variant",
         "is a fast-path item; anything else is raw",
-        "the fallback: any other todo or handoff"]
+        "the fallback: any other todo or handoff",
+        "./claude/hooks/herdr_orch_core.py",
+        "claude/hooks/../hooks/herdr_orch_core.py",
+        ".agents/skills",
+        "all three fall to raw"]
 rows = ["files", "cap", "core", "solution", "contract"]
 order = s.index("**Plan-ready item**") < s.index("**Fast-path item**") < s.index("**Raw item**")
 ok = order and all(n in s for n in need) and all(re.search(r"\|\s*" + r + r"\s*\|", s) for r in rows)
