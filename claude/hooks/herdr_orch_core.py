@@ -2807,7 +2807,10 @@ def checkin_action(f) -> str:
         ("changes-requested", f.get("review_correlates") and not f.get("reviewed")
                               and status != "changes-requested"),
         ("dispatch-review", f.get("dispatch_review")),
-        ("confirm-completion", f.get("completed") and status != "completed"),
+        # A completion at the head already under review is not new work.
+        ("confirm-completion", f.get("completed") and status != "completed"
+                               and not (status in _REVIEW_STATES
+                                        and f.get("review_at_head"))),
         ("confirm-plan", f.get("plan_completed") and not f.get("plan_advanced")),
         ("mech-ledger", f.get("mech_unsettled")),
         # done_outcome is already gated on correlating to the CURRENT attempt
@@ -2933,6 +2936,9 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         and _findings_evidence_ok(review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
+    review_at_head = bool(task.get("review_head_sha") and head
+                          and task["review_head_sha"] == head)
+    done_phase = done.get("phase") if done else None
     mech_unsettled = bool(latest.get("role") == "mech"
                           and status not in CHECKIN_TERMINAL
                           and not _attempt_settled(latest, done))
@@ -2968,7 +2974,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         "poll_ok": poll is not None, "worktree_exists": worktree_exists,
         "completed": completed, "plan_completed": plan_completed,
         "reviewed": reviewed, "review_correlates": review_correlates,
-        "review_stale": review_stale,
+        "review_stale": review_stale, "review_at_head": review_at_head,
         "dispatch_review": bool(head and should_dispatch_review(task, head)),
         "mech_unsettled": mech_unsettled,
         "plan_advanced": any(isinstance(w, dict) and w.get("phase") == "implement"
@@ -2979,9 +2985,9 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # in the core deletes done.json on relaunch.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "done_outcome": (done.get("outcome")
-                         if done and latest
-                         and attempt_matches(task, done, latest.get("phase"),
-                                             latest.get("workspace_id"))
+                         if done and latest and done_phase in DESCENDANT_PHASES
+                         and attempt_matches(task, done, done_phase,
+                                             phase_workspace(task, done_phase))
                          else None),
     }
     facts["action"] = checkin_action(facts)

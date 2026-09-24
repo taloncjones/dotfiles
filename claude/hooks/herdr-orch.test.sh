@@ -9614,6 +9614,43 @@ for terminal in ("merged", "failed", "abandoned"):
     assert got == "none", "%s -> %s" % (terminal, got)
 PY
 
+check "checkin_action: confirm-completion is suppressed only at the recorded review head" <<PY
+$LOAD
+base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
+            head="a" * 40, completed=True, plan_completed=False, reviewed=False,
+            review_correlates=False, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None,
+            review_at_head=False)
+assert c.checkin_action(base) == "confirm-completion"
+assert c.checkin_action({**base, "status": "blocked", "live": "blocked"}) == "confirm-completion"
+for st in ("review-dispatched", "reviewed", "changes-requested"):
+    got = c.checkin_action({**base, "status": st, "review_at_head": True})
+    assert got == "none", (st, got)
+assert c.checkin_action({**base, "status": "changes-requested"}) == "confirm-completion"
+PY
+
+check "checkin_facts: a repair worker's paused record after a review row reaches the director" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+def row(l, p):
+    return {"phase": p, "runtime": "claude", "workspace_id": "w1", "pane_id": "w1:p1",
+            "launch_id": l, "source_head_sha": "a" * 40}
+i0, i1, r = row("i0", "implement"), row("i1", "implement"), row("r1", "review")
+done = os.path.join(rd, "tasks", "PROJ-1.done.json")
+task = {"v": 1, "task_id": "PROJ-1", "status": "changes-requested", "base_sha": "b" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [i1, r]}
+open(done, "w").write(json.dumps(dict(i1, task_id="PROJ-1", outcome="paused")))
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["done_outcome"] == "paused" and facts["action"] == "paused", facts
+assert facts["review_at_head"] is False, facts
+task["workers"] = [i0, r, i1]
+open(done, "w").write(json.dumps(dict(i0, task_id="PROJ-1", outcome="paused")))
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["done_outcome"] is None and facts["action"] != "paused", facts
+PY
+
 check "checkin passes each correlation helper its own phase workspace" <<PY
 $LOAD
 task = {"task_id": "PROJ-1", "workers": [
