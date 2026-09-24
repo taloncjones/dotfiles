@@ -52,12 +52,14 @@ by immutable path/hash pairs.
 
 ```
 STATE_ROOT/
+  context/<session_id>.json         # statusline-written host context fill ({v, session_id, used_pct, ts}); read by checkin
   <repo_slug>/
     owner.json                        # compatibility mirror of shared owner
     config.json                       # machine-local config
     task-lead-gate.json               # task-lead activation gate record; absence,
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
+    rollover.jsonl                    # resume-helper outcomes ({ts, session, pane, outcome, reason, waited_secs}); diagnostic only
     tasks/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record
@@ -310,7 +312,9 @@ int in [60, 14400] (defaults 900 and 3600; a bad value takes its default; a
 ceiling below the floor is raised to it). `review-deadlines` sizes each
 review as floor + the pinned contract's summed `timeout_secs` + 20 s per
 changed file, capped at the ceiling, or the ceiling when an input is
-unknown; the hard bound adds 600 s. This file
+unknown; the hard bound adds 600 s. `rollover_pct` optional, a non-bool
+int in [10, 95] (default 45): `checkin` prints `rollover-due` when the
+session's fresh context record (at most 600 s old) reaches it. This file
 holds the only employer/user identifiers; the shipped skill and fixtures
 never contain them.
 

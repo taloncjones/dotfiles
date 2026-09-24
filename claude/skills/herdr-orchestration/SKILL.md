@@ -293,9 +293,12 @@ for the provider's `launch_env` mapping.
 
 ## 1a. Rollover in place
 
-Roll over when the human asks, or when this session's context is heavy
-enough that the next few check-ins would crowd it. (The automatic
-context-fill threshold is tracked separately and is not implemented here.)
+Roll over when the human asks, or when a check-in prints
+`rollover-due used_pct=<n> threshold=<t>`. That line comes from the host's
+own context reading (the statusline records it per session; `config.json`
+`rollover_pct`, default 45, sets the threshold); never estimate the fill
+yourself and never write the record. On `rollover-due`, write that pass's
+transitions, start no kickoff or dispatch in the same turn, then roll over.
 
 1. Finish or park the current action. Never roll over mid-kickoff or
    mid-dispatch.
@@ -305,18 +308,23 @@ context-fill threshold is tracked separately and is not implemented here.)
    restate them. Task state is already on disk; do not restate it.
 3. Run, as the LAST tool call of the turn:
    `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence>`
-4. End the turn. The verb typed `/clear` into this pane; it runs when the
-   turn ends. If the verb reports that `/clear` was typed but Enter failed,
-   say so; the human presses Enter or clears the input.
-5. In the fresh context, the `director_rollover` SessionStart hook has
-   already re-claimed the lease under the new session id and printed an
-   `[INFO] herdr director rollover` block with the fence and the watch
-   state. Follow its `Next:` line: load this skill, use the printed fence,
-   skip the initial-claim-only steps (workspace label, `dashboard --open`),
-   and run a section-4 check-in before any dispatch.
+4. End the turn. The verb typed `/clear` into this pane and read the input line back; it runs when the
+   turn ends. If the verb exits 1, say what it printed; the human presses
+   Enter or clears the input.
+5. In the fresh context, the `director_rollover` SessionStart hook has already
+   re-claimed the lease under the new session id, printed an `[INFO] herdr
+director rollover` block with the fence and the watch state, and started
+   a helper that sends one `resume director` line into this pane once it is
+   idle (the block's `auto-resume:` line says so). That line is your first
+   turn: follow the block's `Next:` line. Follow its `Next:` line: load this
+   skill, use the printed fence, skip the initial-claim-only steps
+   (workspace label, `dashboard --open`), and run a section-4 check-in
+   before any dispatch.
 6. If the block is a `[WARNING]`, or no block appears, run section 1
    preflight. Its `claim-owner` adopts the lease the same way; on `BUSY`,
-   stop and ask the human.
+   stop and ask the human. If no `resume director` line arrives within two minutes, the
+   human types it after checking the pane shows no earlier one; the helper's
+   outcome is in `<slug>/rollover.jsonl`.
 
 No handoff record, second pane, `/exit`, or `--stale-secs` wait is part of
 a director rollover.
@@ -630,7 +638,9 @@ Each `action` names the transition still to be written: `confirm-completion`,
 `stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
 `mech-ledger`, `paused`, `failed`. An action fires only while that transition
 is unrecorded, so a settled task reports `none` instead of re-reporting its
-evidence forever.
+evidence forever. Two non-task lines
+also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
+and `rollover-due ...` (section 1a).
 
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
