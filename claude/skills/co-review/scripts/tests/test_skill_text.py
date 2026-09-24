@@ -74,6 +74,18 @@ class CoReviewSkillText(unittest.TestCase):
         for needle in ("run_in_background", "git apply --index", "wait"):
             self.assertIn(needle, CO_REVIEW)
 
+    def test_mirror_probes_claude_routes_and_launches_nohup_seats(self):
+        probe = MIRROR.index('"$RUN_DIR/probe-claude-')
+        self.assertLess(probe, MIRROR.index('--prompt-file "$RUN_DIR/verifier.prompt"'))
+        self.assertLess(probe, MIRROR.index('--prompt-file "$RUN_DIR/claude.prompt"'))
+        for needle in ("probe-claude-reviewer.json", "probe-claude-skeptic.json",
+                       "--timeout-secs 60", "nohup uv run", '.pid"',
+                       "kill -0", "1200-second deadline"):
+            self.assertIn(needle, MIRROR)
+        self.assertEqual(MIRROR.count("--timeout-secs 1200"), 2)
+        self.assertNotIn("--timeout-secs 600", MIRROR)
+        self.assertNotIn("600-second", MIRROR)
+
 
 class ShipSkillText(unittest.TestCase):
     def test_ship_has_the_audit_comment_step(self):

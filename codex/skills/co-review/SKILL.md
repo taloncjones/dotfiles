@@ -112,7 +112,7 @@ Run `gate_report.py schema` before report assembly. Resolve each fresh seat
 with the shared runner and `--provisional`; this records unknown availability
 honestly and stops if the route is actually unavailable or unsupported.
 
-Full tier only: Run four fresh, independent read-only 600-second seats:
+Full tier only: Run four fresh, independent read-only 1200-second seats:
 `claude` reviewer, `codex` reviewer, `breaker` skeptic, then `verifier`
 skeptic after every finder artifact is complete.
 
@@ -120,12 +120,65 @@ The light tier runs `codex` and `verifier`: first the native `codex` reviewer
 seat, then, after its artifact is complete, the verifier through the Claude
 runner, so the light gate keeps one seat per model:
 
+Probe the Claude runner route before spending a seat on it; the Codex runtime
+needs no probe, because the controller running this skill is that runtime.
+The probe is a 60-second `Reply ok` run on `$CLAUDE_ROOT`, written under
+`RUN_DIR`. The light tier probes the `skeptic` role (the verifier it will
+launch); the full tier also probes the `reviewer` role (the `claude` seat). A
+non-success probe stops co-review with the existing incomplete report,
+quoting the probe's `status`, `observation` and `errors`. This is one
+60-second shell call, within a Codex shell call's limit.
+
 ```bash
-uv run --no-project python "$RUNNER" run \
+printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
+nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json"
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+  --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-skeptic.json" &
+if [ "$CLASS" != "light" ]; then
+  nohup uv run --no-project python "$RUNNER" run \
+    --runtime claude --role reviewer --risk normal --provisional \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-reviewer.json" &
+fi
+wait
+uv run --no-project python - "$RUN_DIR"/probe-*.json <<'PY' || exit 2
+import json
+import sys
+
+failed = []
+for path in sys.argv[1:]:
+    try:
+        with open(path) as handle:
+            result = json.load(handle)
+    except (OSError, ValueError):
+        failed.append(f"{path}: no runner JSON")
+        continue
+    if result.get("status") != "success":
+        failed.append(f"{path}: {result.get('status')} {result.get('observation')} {result.get('errors')}")
+if failed:
+    print("\n".join(failed))
+    sys.exit(1)
+PY
 ```
+
+```bash
+nohup uv run --no-project python "$RUNNER" run \
+  --runtime claude --role skeptic --risk normal --provisional \
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" 2>"$RUN_DIR/verifier.runtime.err" &
+echo $! >"$RUN_DIR/verifier.pid"
+```
+
+Launch the Claude runner seat first (full tier: before spawning the native
+seats), then check `$RUN_DIR/<seat>.runtime.json` in short shell calls
+until it is non-empty or the 1200-second deadline passes; never hold one
+shell call open in a blocking `wait`. `nohup` keeps the seat alive after the
+launching call ends, and the runner leaves an inherited ignored SIGHUP alone.
+At the deadline, only when the JSON is still empty and
+`kill -0 "$(cat "$RUN_DIR/<seat>.pid")"` succeeds, send it SIGTERM; the
+runner reaps the seat and writes a `runner-interrupted` result. Remove the
+pid file once the seat is collected. An empty JSON is an incomplete seat.
 
 The light verifier receives the one `codex` artifact path and digest and
 every known blocker.
@@ -143,18 +196,22 @@ through the bounded runner and preserves its raw response as the `claude`
 artifact:
 
 ```bash
-uv run --no-project python "$RUNNER" run \
+nohup uv run --no-project python "$RUNNER" run \
   --runtime claude --role reviewer --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" 2>"$RUN_DIR/claude.runtime.err" &
+echo $! >"$RUN_DIR/claude.pid"
 ```
+
+Launch this seat first, before spawning the native seats, then check
+`$RUN_DIR/claude.runtime.json` the same way as the light verifier.
 
 From Codex, the full tier's `codex`, `breaker`, and `verifier` seats and the
 light tier's `codex` seat are fresh native children after route resolution;
 the light `verifier` is the Claude runner call above. The native spawn API has
 no timeout or sandbox
 arguments: give each an explicit read-only, disposable-fixture task and use the
-coordinator's 600-second deadline to interrupt an unfinished child. Record its
+coordinator's 1200-second deadline to interrupt an unfinished child. Record its
 actual completion artifact. Do not invoke `codex exec`, a generic `/code-review`
 plugin, or a nested partner route. The Claude seat preserves the
 original repository's account scope through the runner. Every seat is
@@ -184,7 +241,7 @@ with the same packet rules.
 
 Full tier: wait for Claude, Codex, and breaker to complete and collect their
 actual native or runner results before continuing. The coordinator uses
-`wait_agent` for each native handle and a 600-second deadline; it uses
+`wait_agent` for each native handle and a 1200-second deadline; it uses
 `interrupt_agent` only after a deadline. A failed, timed-out, empty, or
 malformed completion stops as incomplete. Store each successful completion as
 its named report-relative artifact and record its digest.
