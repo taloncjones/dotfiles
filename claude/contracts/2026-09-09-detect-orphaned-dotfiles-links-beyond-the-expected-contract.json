@@ -13,7 +13,7 @@
     },
     {
       "name": "suite-registered",
-      "run": "bash bin/dotfiles-tests --list | grep -qxF 'sh .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.test.sh'"
+      "run": "GIT_OPTIONAL_LOCKS=0 bash bin/dotfiles-tests --list | grep -qxF 'sh .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.test.sh'"
     },
     {
       "name": "map-rows-cover-installer",
