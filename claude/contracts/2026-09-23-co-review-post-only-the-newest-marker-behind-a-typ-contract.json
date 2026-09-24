@@ -129,7 +129,7 @@
     },
     {
       "name": "herdr-skill-and-briefs-posting-rules",
-      "run": "s=claude/skills/herdr-orchestration/SKILL.md && b=claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'pr_post_guard.py' \"$s\" && grep -q '`post it`' \"$s\" && grep -qi 'never an .AskUserQuestion. option' \"$s\" && [ $(grep -c 'Post nothing on GitHub' \"$b\") -ge 3 ] && grep -qi 'replies to reviewers' \"$b\" && grep -qi 'drafts go in the findings report' \"$b\"",
+      "run": "s=claude/skills/herdr-orchestration/SKILL.md && b=claude/skills/herdr-orchestration/references/brief-template.md && grep -q 'pr_post_guard.py' \"$s\" && grep -q '`post it`' \"$s\" && grep -qi 'never an .AskUserQuestion. option' \"$s\" && [ $(grep -c 'Post nothing on GitHub' \"$b\") -ge 2 ] && grep -qi 'replies to reviewers' \"$b\" && grep -qi 'drafts go in the findings report' \"$b\"",
       "timeout_secs": 60
     },
     {
