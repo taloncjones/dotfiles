@@ -9846,6 +9846,42 @@ mv "$FINDINGS.bak" "$FINDINGS"
     --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'unverifiable-evidence'
 SH
 
+check "task_record_files: dotted stems are sidecars; teardown scan ignores them" <<PY
+$LOAD
+from pathlib import Path
+d = Path(tempfile.mkdtemp())
+for n in ("PROJ-1.json", "PROJ-1.done.json", "PROJ-1.review.json", "PROJ-1.route.json",
+          "PROJ-1.repair2.route.json", "td-a_b.json", "PROJ-1.spend.jsonl"):
+    (d / n).write_text("{}")
+names = [p.name for p in c.task_record_files(d)]
+assert names == ["PROJ-1.json", "td-a_b.json"], names
+rd = Path(tempfile.mkdtemp())
+lead = rd / "leads" / "ldb-x" / "tasks"; lead.mkdir(parents=True)
+(lead / "td-x.route.json").write_text('{"route": "x"}')
+assert c.outstanding_descendants(rd, "ldb-x") == [], c.outstanding_descendants(rd, "ldb-x")
+PY
+
+check "sidecars never read as task records in checkin, status, review-deadlines" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"reviewed","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude"}]}'
+printf '{"route":"x"}' > "$RD/tasks/PROJ-1.route.json"
+printf '{"status":"review-dispatched","workers":[{"phase":"review","runtime":"claude","launch_id":"L","workspace_id":"w3","pane_id":"p","source_head_sha":"'"$BASE"'","started_ns":1}]}' > "$RD/tasks/PROJ-1.repair2.route.json"
+printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"idle"}]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w3"}]}}' > "$root/w.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^None '
+printf '%s\n' "$out" | grep -qx 'changed: no'
+$CLI status --repo-slug slug-x > "$root/status.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "null" not in d and "PROJ-1" in d, sorted(d)' "$root/status.json"
+[ -z "$($CLI review-deadlines --repo-slug slug-x)" ]
+SH
+
 check "plan_record_matches: identity only, independent of artifacts" <<PY
 $LOAD
 task = {"task_id": "PROJ-1", "base_sha": "b" * 40, "workers": []}

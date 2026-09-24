@@ -818,6 +818,13 @@ def payload_files(path, pattern):
         return []
 
 
+def task_record_files(tasks_dir):
+    """Primary task records in tasks_dir, sorted. TASK_ID_RE admits no dot,
+    so any dotted stem is a sidecar (.done, .review, .route, .repair2.route)."""
+    return sorted(f for f in payload_files(tasks_dir, "*.json")
+                  if "." not in f.name[: -len(".json")])
+
+
 def create_payload_dir(path):
     with coordination.payload_parent(Path(path) / ".directory", create=True):
         pass
@@ -3100,9 +3107,7 @@ def outstanding_descendants(rd, binding_id):
     as terminated. The sentinel is reserved at the writer by _native_worker_row."""
     base = rd / "leads" / binding_id
     panes = set()
-    for tf in payload_files(base / "tasks", "*.json"):
-        if tf.name.endswith((".done.json", ".review.json")):
-            continue
+    for tf in task_record_files(base / "tasks"):
         try:
             task = json.loads(read_payload_text(tf))
         except (OSError, ValueError, RecursionError):
@@ -5299,9 +5304,7 @@ def _main(argv=None) -> int:
             print(f"poll: failed ({reason})")
         payload_root = state_root().parent
         changed = poll is None
-        for tf in sorted(payload_files(rd / "tasks", "*.json")):
-            if tf.name.endswith((".done.json", ".review.json")):
-                continue
+        for tf in task_record_files(rd / "tasks"):
             try:
                 task = json.loads(read_payload_text(tf))
             except (OSError, ValueError):
@@ -5333,9 +5336,7 @@ def _main(argv=None) -> int:
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         rd = repo_dir(ns.repo_slug)
         now_ns = time.time_ns()
-        for tf in sorted(payload_files(rd / "tasks", "*.json")):
-            if tf.name.endswith((".done.json", ".review.json")):
-                continue
+        for tf in task_record_files(rd / "tasks"):
             try:
                 task = json.loads(read_payload_text(tf))
             except (OSError, ValueError):
@@ -5374,9 +5375,7 @@ def _main(argv=None) -> int:
         totals["usd"] = 0.0
         untracked = 0
         primary = set()
-        for tf in sorted(payload_files(rd / "tasks", "*.json")):
-            if tf.name.endswith((".done.json", ".review.json")):
-                continue
+        for tf in task_record_files(rd / "tasks"):
             try:
                 task = json.loads(read_payload_text(tf))
             except ValueError:
