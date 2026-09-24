@@ -5,12 +5,15 @@ set -euo pipefail
 #
 # Two layers, in order:
 #   1. Strip pass (no rg needed): removes agent attribution lines that tools
-#      inject -- agent Co-Authored-By trailers, session-URL trailers, and
+#      inject -- agent co-author trailers (by name, noreply mailbox, or [bot]
+#      address), session and generated-with/by trailer keys, and
 #      "Generated with|by <agent>" footers -- from line 2 onward. Other line
 #      content is preserved; rewriting adds LF to an unterminated retained
 #      final line. A message with nothing to strip is not rewritten at all.
 #   2. Block checks (rg): reject what cannot be safely edited -- inline
 #      attribution in the subject or body, and emojis.
+# Agent names come from agent-tokens next to this hook, which the Bash
+# attribution hooks under claude/ and codex/ read too.
 # Squash-merge messages come from the PR body, which no git hook sees; the
 # PR-side opt-out lives in claude/settings.json.tmpl (attribution.pr).
 
@@ -32,29 +35,45 @@ for tool in awk grep sed cat mktemp mv rm; do
   fi
 done
 
+# git runs the hook through the linked hooks directory, so the token file is
+# reachable as a sibling without resolving symlinks.
+hook_dir="${BASH_SOURCE[0]%/*}"
+if [[ "$hook_dir" == "${BASH_SOURCE[0]}" ]]; then
+  hook_dir="."
+fi
+tokens_file="$hook_dir/agent-tokens"
+if ! agent_alt="$(LC_ALL=C awk '
+    !/^[a-z0-9]+$/ { bad = 1; exit }
+    { alt = alt (NR > 1 ? "|" : "") $0 }
+    END { if (bad || NR == 0) exit 1; print alt }
+  ' "$tokens_file" 2>/dev/null)"; then
+  printf 'commit-msg: %s is missing, empty, or invalid; refusing to commit unchecked.\n' "$tokens_file" >&2
+  exit 1
+fi
+
 # Lowercase POSIX ERE, matched against tolower($0) so BSD and GNU awk agree on
-# case-insensitivity. Bracket classes only: no \b, no \s.
-agent_tokens='(claude|anthropic|copilot|chatgpt|gpt|codex)'
-re_coauthor="^[[:space:]]*co-authored-by:.*${agent_tokens}"
-re_session='^[[:space:]]*(claude-session:|[a-z-]*session[a-z-]*:[[:space:]]*https?://)'
-re_footer='^[^[:alnum:]]*generated[[:space:]]+(with|by)[^[:alnum:]]*(claude|anthropic|copilot|chatgpt|gpt|codex|ai)([^[:alnum:]]|$)'
+# case-insensitivity. Bracket classes only: no \b, no \s, no backslash escapes.
+re_coauthor="^[[:space:]]*co-authored-by:(.*[^[:alnum:]])?(${agent_alt})([^[:alnum:]]|$)"
+re_bot_coauthor='^[[:space:]]*co-authored-by:.*<(no-?reply@|[^>]*[[]bot[]]@)'
+re_session="^[[:space:]]*((${agent_alt})-session:|session:|[a-z-]*session[a-z-]*:[[:space:]]*https?://)"
+re_generated_key='^[[:space:]]*generated-(with|by):'
+re_footer="^[^[:alnum:]]*generated[[:space:]]+(with|by)[^[:alnum:]]*(${agent_alt}|ai)([^[:alnum:]]|$)"
+re_strip="${re_coauthor}|${re_bot_coauthor}|${re_session}|${re_generated_key}|${re_footer}"
 
 # Line 1 (the subject) is never stripped. LC_ALL=C makes emoji bytes count as
 # non-alphanumeric for the footer prefix.
 count_agent_lines() {
-  LC_ALL=C awk -v re_co="$re_coauthor" -v re_se="$re_session" -v re_fo="$re_footer" '
+  LC_ALL=C awk -v re="$re_strip" '
     NR == 1 { next }
-    { line = tolower($0) }
-    line ~ re_co || line ~ re_se || line ~ re_fo { n++ }
+    tolower($0) ~ re { n++ }
     END { print n + 0 }
   ' "$1"
 }
 
 write_without_agent_lines() {
-  LC_ALL=C awk -v re_co="$re_coauthor" -v re_se="$re_session" -v re_fo="$re_footer" '
+  LC_ALL=C awk -v re="$re_strip" '
     NR == 1 { print; next }
-    { line = tolower($0) }
-    line ~ re_co || line ~ re_se || line ~ re_fo { next }
+    tolower($0) ~ re { next }
     { print }
   ' "$1" > "$2"
 }
@@ -89,7 +108,7 @@ if [[ "$agent_lines" -gt 0 ]]; then
   printf 'commit-msg: stripped %s agent attribution line(s).\n' "$agent_lines" >&2
 fi
 
-# --- Block checks (unchanged) ------------------------------------------------
+# --- Block checks ------------------------------------------------------------
 
 if ! command -v rg >/dev/null 2>&1; then
   printf 'commit-msg: rg not found; skipping attribution and emoji checks.\n' >&2
@@ -101,13 +120,15 @@ message="$(cat "$message_file")"
 # Permit directory/tool scopes like "claude:" while checking the summary/body.
 body="$(printf '%s\n' "$message" | sed -E '1s/^[A-Za-z0-9_-]+:[[:space:]]*//')"
 
-if printf '%s\n' "$body" | rg -qi 'generated[[:space:]]+(by|with)[[:space:]]+(claude|anthropic|copilot|chatgpt|gpt|codex|ai)|written[[:space:]]+by[[:space:]]+(claude|anthropic|copilot|chatgpt|gpt|codex|ai)|created[[:space:]]+by[[:space:]]+(claude|anthropic|copilot|chatgpt|gpt|codex|ai)|ai[- ]generated|generated[- ]by[- ]ai'; then
+if printf '%s\n' "$body" | rg -qi "generated[[:space:]]+(by|with)[[:space:]]+(${agent_alt}|ai)|written[[:space:]]+by[[:space:]]+(${agent_alt}|ai)|created[[:space:]]+by[[:space:]]+(${agent_alt}|ai)|ai[- ]generated|generated[- ]by[- ]ai"; then
   printf 'Blocked: commit message contains tool-attribution terms.\n' >&2
   printf 'Remove attribution from the commit message.\n' >&2
   exit 1
 fi
 
-if printf '%s\n' "$message" | rg -qi 'co-authored-by:.*(claude|anthropic|copilot|chatgpt|gpt|codex|ai\b)'; then
+# Leading boundary only: surnames that contain a token (Raider) pass, while
+# prefixed agent names (<token>Bot) stay blocked.
+if printf '%s\n' "$message" | rg -qi "co-authored-by:.*(\\b(${agent_alt})|ai\\b)"; then
   printf 'Blocked: commit message contains an AI/tool co-author line.\n' >&2
   exit 1
 fi

@@ -242,6 +242,77 @@ assert_blocks_leaving "T19 mixed offense: trailer stripped, subject still blocke
 Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" "codex: Generated with ${CODEX_NAME}
 "
 
+# --- Wider trailer net ------------------------------------------------------
+
+# Na: a co-author naming each token in agent-tokens, capitalized as tools
+# write them. Reading the file keeps agent names out of this script.
+while read -r token; do
+    name="$(printf '%s' "$token" | awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }')"
+    assert_strips "Na strips a co-author naming token $token" "${BODY_MSG}
+
+Co-Authored-By: ${name} Agent <agent@example.com>" "${BODY_MSG}
+" 1
+done <git/hooks/agent-tokens
+
+assert_strips "Nb strips a co-author with a no-reply mailbox" "${BODY_MSG}
+
+Co-Authored-By: Build Helper <no-reply@example.com>" "${BODY_MSG}
+" 1
+
+assert_strips "Nc strips a co-author with a bot address" "${BODY_MSG}
+
+Co-Authored-By: helper <12345+helper[bot]@users.noreply.github.com>" "${BODY_MSG}
+" 1
+
+assert_strips "Nd1 strips a generated-with trailer key with any value" "${BODY_MSG}
+
+Generated-with: some tool 1.2" "${BODY_MSG}
+" 1
+
+assert_strips "Nd2 strips a generated-by trailer key, mixed case" "${BODY_MSG}
+
+Generated-By: anything at all" "${BODY_MSG}
+" 1
+
+assert_strips "Ne strips a bare session trailer key" "${BODY_MSG}
+
+Session: 01ABC" "${BODY_MSG}
+" 1
+
+CURSOR_NAME="Cur""sor"
+assert_strips "Nf strips an agent session key for a new token" "${BODY_MSG}
+
+${CURSOR_NAME}-Session: local run" "${BODY_MSG}
+" 1
+
+GEMINI_NAME="Gem""ini"
+assert_strips "Ng strips a generated-with footer naming a new token" "${BODY_MSG}
+
+Generated with ${GEMINI_NAME}" "${BODY_MSG}
+" 1
+
+assert_passthrough "P1 keeps a human co-author with a GitHub noreply address" "${BODY_MSG}
+
+Co-Authored-By: Jane Doe <12345+jane@users.noreply.github.com>"
+
+assert_passthrough "P2 keeps a human co-author whose surname contains a token" "${BODY_MSG}
+
+Co-Authored-By: Jane Raider <jane@example.com>"
+
+DEVIN_NAME="Dev""in"
+assert_strips "C1 accepted collision: human co-author named like a token" "${BODY_MSG}
+
+Co-Authored-By: ${DEVIN_NAME} Smith <ds@example.com>" "${BODY_MSG}
+" 1
+
+assert_blocks "C2 accepted collision: surname starting with a token is refused" "${BODY_MSG}
+
+Co-Authored-By: Jane ${DEVIN_NAME}e <jd@example.com>"
+
+assert_blocks "C3 refuses a co-author with a token glued to another word" "${BODY_MSG}
+
+Co-Authored-By: ${CLAUDE_NAME}Bot <bot@example.com>"
+
 # --- Environment cases ------------------------------------------------------
 # Failure paths are forced with PATH shims (a tool that always exits 1), not
 # filesystem permissions, so they behave identically as root and as a user.
@@ -333,6 +404,30 @@ elif cmp -s "$DIR23/msg" "$EXPECTED" && grep -q 'commit-msg: failed to replace' 
 else
     fail "T23 fails closed when mv fails and leaves no temp file"
 fi
+
+# K1/K2: the token file is missing or holds an invalid line. The hook is
+# copied so the fixture never touches the real agent-tokens.
+for case in missing empty invalid crlf; do
+    dir="$WORK/tokens-$case"
+    mkdir "$dir"
+    cp "$HOOK" "$dir/commit-msg"
+    if [ "$case" = empty ]; then
+        : >"$dir/agent-tokens"
+    elif [ "$case" = invalid ]; then
+        printf 'valid\nNot A Token\n' >"$dir/agent-tokens"
+    elif [ "$case" = crlf ]; then
+        printf 'valid\r\n' >"$dir/agent-tokens"
+    fi
+    printf '%s\n' "$AGENT_MSG" >"$MSG"
+    cp "$MSG" "$EXPECTED"
+    if "$dir/commit-msg" "$MSG" >"$OUT" 2>"$ERR"; then
+        fail "K refuses when agent-tokens is $case"
+    elif cmp -s "$MSG" "$EXPECTED" && grep -q 'agent-tokens is missing, empty, or invalid' "$ERR"; then
+        pass "K refuses when agent-tokens is $case"
+    else
+        fail "K refuses when agent-tokens is $case"
+    fi
+done
 
 # --- Summary ---------------------------------------------------------------
 
