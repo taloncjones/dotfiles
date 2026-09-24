@@ -715,8 +715,11 @@ def launch_argv(
 
 
 def _json_objects(output: str) -> list[dict[str, Any]]:
+    # str.splitlines() also splits on U+2028/U+2029/U+0085 and other
+    # non-newline separators, which a model can emit unescaped inside a
+    # JSON string value and fracture that line's JSON.
     records = []
-    for line in output.splitlines():
+    for line in output.split("\n"):
         try:
             value = json.loads(line)
         except (json.JSONDecodeError, TypeError):

@@ -1074,6 +1074,20 @@ def test_stream_json_result_parses_like_single_object():
     assert result["observed_model"] == "claude-opus-5-5", result
 
 
+def test_stream_json_result_survives_unicode_line_separators():
+    for separator in (" ", " ", "\u0085"):
+        row = {"type": "result", "subtype": "success", "is_error": False,
+               "result": f"before{separator}after", "num_turns": 1,
+               "session_id": "sess-fixture", "total_cost_usd": 0.01,
+               "modelUsage": {"claude-opus-5-5": {}}}
+        init = json.dumps({"type": "system", "subtype": "init",
+                            "session_id": "sess-fixture", "mcp_servers": []})
+        output = init + "\n" + json.dumps(row, ensure_ascii=False) + "\n"
+        result = runtime.parse_runtime_result("claude", output)
+        assert result["status"] == "success", (separator, result)
+        assert result["result"] == f"before{separator}after", (separator, result)
+
+
 def fake_claude_rows(bindir, rows, pidfile=None, sleep=30):
     """A fake `claude` that prints JSONL rows (raw strings allowed), then sleeps."""
     lines = "".join(
@@ -2722,6 +2736,7 @@ for name, test in (
     ("bounded run returns when a detached child holds the pipe", test_timeout_returns_when_a_detached_child_holds_the_pipe),
     ("timeout reports pipe-held when descendants miss the worker", test_timeout_reports_pipe_held_when_descendants_miss_the_worker),
     ("stream-json result parses like the single object", test_stream_json_result_parses_like_single_object),
+    ("stream-json result survives unicode line separators", test_stream_json_result_survives_unicode_line_separators),
     ("timeout while working keeps partial progress", test_timeout_while_working_keeps_partial_progress),
     ("timeout skips a truncated final line", test_timeout_skips_a_truncated_final_line),
     ("timeout before init names the pending hook", test_timeout_before_init_names_the_pending_hook),
