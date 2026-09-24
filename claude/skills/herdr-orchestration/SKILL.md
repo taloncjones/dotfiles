@@ -1007,8 +1007,8 @@ deadline, <launch_id>`, and never fabricate a review record, blocker count,
    it still exists. The verdict is honoured only after the file has been read
    and its blocking list reconciled with `blocking_count`.
    Once the digest matches, run the Lesson harvest (section 4) on the
-   findings file before the verdict `write-task`; on an integrity halt,
-   skip the Lesson harvest.
+   findings file before the verdict or stale-reset `write-task`; on an
+   integrity halt, skip the Lesson harvest.
 
    First confirm it covers the
    dispatched revision: the reviewer's `reviewed_head_sha` must
