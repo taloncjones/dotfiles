@@ -147,6 +147,14 @@ class SelectMarkerTests(unittest.TestCase):
         with self.assertRaises(gate.GateInputError):
             gate.select_marker([bad], ME)
 
+    def test_graphql_node_id_fails_closed_and_rest_id_selects(self):
+        # gh api graphql returns string node ids; the REST comments endpoint
+        # returns the integer ids selection needs to order same-second rounds.
+        body = "| x |\n" + marker(sha=SHA_A)
+        with self.assertRaisesRegex(gate.GateInputError, "invalid created_at/id"):
+            gate.select_marker([comment(body, cid="IC_kwDOABCDEF")], ME)
+        self.assertEqual(gate.select_marker([comment(body, cid=42)], ME)["sha"], SHA_A)
+
     def test_tie_break_by_id(self):
         a = comment(
             "| x |\n" + marker(sha=SHA_A), created_at="2026-09-11T10:00:00Z", cid=1
