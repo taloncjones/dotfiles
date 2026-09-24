@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # symlink-audit.sh - Audit the dotfiles symlink map, then scan for orphaned links.
 #
-# Walks the expected map, a transcription of what install/<platform>/link.sh
+# Pass 1 walks the expected map, a transcription of what install/<platform>/link.sh
 # writes (install/common/link.sh, link_claude_config_dir, link_codex_surfaces).
 # symlink-audit.test.sh runs the real installer into a scratch HOME and fails when
 # this transcription drifts. Per entry:
@@ -14,26 +14,48 @@
 # they must be REAL files, never symlinks (installers write through symlinks
 # into the repo -- the corruption claude-links.sh guards against).
 #
-# Read-only: never modifies anything. Exit 1 on any non-OK entry; exit 2 on
-# usage errors.
+# Pass 2 scans fixed dirs for symlinks outside the map whose literal target lies
+# inside a dotfiles checkout ($DOTFILES plus each --root):
+#   ORPHAN-DANGLING  target missing, in any scanned dir
+#   ORPHAN-LIVE      target exists and the link sits in an installer-owned dir
+#   UNOWNED-LIVE     target exists in a shared dir; [INFO] only, never a failure
+#   INCOMPLETE       a scan could not finish, so the clean verdict is withheld
 #
-# Usage: symlink-audit.sh [--cloud] [--list-expected]
+# Read-only: never modifies anything. Exit 1 on any non-OK entry, orphan link or
+# scan error; exit 2 on usage errors.
+#
+# Usage: symlink-audit.sh [--cloud] [--root PATH]... [--list-expected]
 #   --cloud          partial cloud layout: only ~/.claude (what bootstrap-cloud.sh creates)
+#   --root PATH      also treat PATH as a dotfiles checkout (repeatable; may no longer exist)
 #   --list-expected  print the map as tab-separated rows and exit
 # Env:   DOTFILES=/path/to/checkout  override repo-root autodetection
 
 set -u
 
 TAB=$'\t'
+NL=$'\n'
 
 CLOUD=0
 LIST=0
-for arg in "$@"; do
-  case "$arg" in
+EXTRA_ROOTS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
     --cloud) CLOUD=1 ;;
     --list-expected) LIST=1 ;;
-    *) echo "Unknown argument: $arg (supported: --cloud, --list-expected)" >&2; exit 2 ;;
+    --root)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "--root needs a path" >&2
+        exit 2
+      fi
+      case "$2" in
+        /*) EXTRA_ROOTS+=("$2") ;;
+        *) EXTRA_ROOTS+=("$PWD/$2") ;;
+      esac
+      shift
+      ;;
+    *) echo "Unknown argument: $1 (supported: --cloud, --root PATH, --list-expected)" >&2; exit 2 ;;
   esac
+  shift
 done
 
 # Repo root: this script lives at <root>/.claude/skills/<skill>/scripts/.
@@ -204,17 +226,200 @@ check_machine_local() {
 
 echo "symlink-audit: dotfiles root = $DOTFILES  (mode: $([ "$CLOUD" -eq 1 ] && echo cloud || echo full))"
 
+# Newline-delimited map paths; the orphan scan skips them.
+EXPECTED="$NL"
 while IFS="$TAB" read -r kind path target; do
   case "$kind" in
     section) echo; echo "--- $path ---" ;;
-    link) check_link "$path" "$target" ;;
-    machine-local) check_machine_local "$path" ;;
+    link) EXPECTED="$EXPECTED$path$NL"; check_link "$path" "$target" ;;
+    machine-local) EXPECTED="$EXPECTED$path$NL"; check_machine_local "$path" ;;
   esac
 done < <(emit_map)
 
-echo
-if [ "$BAD" -ne 0 ]; then
-  printf 'symlink-audit: %d of %d entries NOT OK.\n' "$BAD" "$TOTAL"
-  exit 1
+ORPHANS=0
+SCAN_ERRORS=0
+FOREIGN=0
+
+# Installer-owned dirs: the architecture contract makes the installer the only
+# sanctioned writer of dotfiles links here, so an unmapped live link is stale.
+# Every other scanned dir is shared with other tools and the user.
+if [ "$CLOUD" -eq 1 ]; then
+  OWNED="$NL$HOME/.claude$NL"
+else
+  OWNED="$NL$HOME/.claude$NL$HOME/.claude-work$NL$HOME/.codex/hooks$NL$HOME/.codex/skills$NL$HOME/.codex/rules$NL"
 fi
-printf 'symlink-audit: all %d entries OK.\n' "$TOTAL"
+
+# Scan table: dir<TAB>depth. No dir lies within another's depth.
+emit_scan_table() {
+  if [ "$CLOUD" -eq 1 ]; then
+    printf '%s\t2\n' "$HOME/.claude"
+    return
+  fi
+  printf '%s\t1\n' "$HOME" "$HOME/bin" "$HOME/.ssh" "$HOME/.local/bin"
+  printf '%s\t3\n' "$HOME/.config"
+  printf '%s\t2\n' "$HOME/.codex" "$HOME/.claude" "$HOME/.claude-work"
+  if [ "$IS_DARWIN" -eq 1 ]; then
+    printf '%s\t1\n' "$HOME/Library/Application Support/Code/User"
+  fi
+}
+
+# Lexically normalize an absolute path: drop "." and empty parts, apply "..".
+lexnorm() {
+  local part out="" IFS=/
+  set -f
+  for part in $1; do
+    case "$part" in
+      '' | .) ;;
+      ..) out="${out%/*}" ;;
+      *) out="$out/$part" ;;
+    esac
+  done
+  set +f
+  printf '%s\n' "${out:-/}"
+}
+
+# Deepest existing directory on an absolute path. A dir that cannot be searched
+# hides everything below it, so the walk stops there.
+existing_dir() {
+  local head="$1"
+  while [ "$head" != / ] && [ ! -d "$head" ]; do
+    head="${head%/*}"
+    [ -n "$head" ] || head=/
+  done
+  printf '%s\n' "$head"
+}
+
+# Replace the deepest existing ancestor dir of an absolute path with its
+# physical path (/var vs /private/var, a symlinked ~/Git). Works for paths
+# that no longer exist, such as a deleted checkout.
+phys_prefix() {
+  local head real
+  head="$(existing_dir "$1")"
+  if [ "$head" = / ] || ! real="$(cd -P "$head" 2>/dev/null && pwd)"; then
+    printf '%s\n' "$1"
+    return
+  fi
+  printf '%s%s\n' "$real" "${1#"$head"}"
+}
+
+# Root forms: the given path and its physical form, each paired with the root
+# as reported. Arrays, not here-documents: bash 3.2 backs a here-document with a
+# temp file, and a failed one would silently empty the loop.
+ROOT_FORM=()
+ROOT_SHOWN=()
+add_root() {
+  local given phys
+  given="$(lexnorm "$1")"
+  echo "[INFO] checkout root: $given"
+  ROOT_FORM+=("$given")
+  ROOT_SHOWN+=("$given")
+  phys="$(phys_prefix "$given")"
+  if [ "$phys" != "$given" ]; then
+    ROOT_FORM+=("$phys")
+    ROOT_SHOWN+=("$given")
+  fi
+}
+
+# Print the root strictly containing $1 on a path-component boundary; a target
+# equal to a root is a checkout alias, not inside it. Longest form wins.
+root_of() {
+  local path="$1" form best="" best_len=0 i=0
+  while [ "$i" -lt "${#ROOT_FORM[@]}" ]; do
+    form="${ROOT_FORM[$i]}"
+    case "$path" in
+      "$form"/?*)
+        if [ "${#form}" -gt "$best_len" ]; then
+          best="${ROOT_SHOWN[$i]}"
+          best_len="${#form}"
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s' "$best"
+}
+
+incomplete() {
+  printf '[X]  INCOMPLETE      %s (%s)\n' "$1" "$2"
+  SCAN_ERRORS=$((SCAN_ERRORS + 1))
+}
+
+classify() {
+  local link="$1" literal parent raw abs root
+  case "$EXPECTED" in *"$NL$link$NL"*) return ;; esac
+  if ! literal="$(readlink "$link")"; then
+    incomplete "$link" "readlink failed"
+    return
+  fi
+  case "$literal" in
+    /*) raw="$literal" ;;
+    *)
+      if ! parent="$(cd -P "${link%/*}" 2>/dev/null && pwd)"; then
+        incomplete "$link" "cannot resolve its parent dir"
+        return
+      fi
+      raw="$parent/$literal"
+      ;;
+  esac
+  abs="$(lexnorm "$raw")"
+  root="$(root_of "$abs")"
+  # Resolve the parent only: following the leaf would adopt a foreign link that
+  # itself points into a checkout.
+  [ -n "$root" ] || root="$(root_of "$(phys_prefix "${abs%/*}")/${abs##*/}")"
+  if [ -z "$root" ]; then
+    FOREIGN=$((FOREIGN + 1))
+  elif [ ! -e "$link" ]; then
+    printf '[X]  ORPHAN-DANGLING %s -> %s (missing inside checkout %s)\n' "$link" "$literal" "$root"
+    ORPHANS=$((ORPHANS + 1))
+  else
+    case "$OWNED" in
+      *"$NL${link%/*}$NL"*)
+        printf '[X]  ORPHAN-LIVE     %s -> %s (inside checkout %s; not in the installer map)\n' \
+          "$link" "$literal" "$root"
+        ORPHANS=$((ORPHANS + 1))
+        ;;
+      *)
+        printf '[INFO] UNOWNED-LIVE  %s -> %s (inside checkout %s; shared dir, not judged)\n' \
+          "$link" "$literal" "$root"
+        ;;
+    esac
+  fi
+}
+
+# The enumeration subshell ends its NUL stream with one FINDRC=<status> record.
+scan_dir() {
+  local dir="$1" depth="$2" rec
+  if [ -L "$dir" ]; then
+    echo "[INFO] scan dir is a symlink, not followed: $dir"
+    return
+  fi
+  [ -d "$dir" ] || return
+  while IFS= read -r -d '' rec; do
+    case "$rec" in
+      FINDRC=*) ;;
+      *) classify "$rec" ;;
+    esac
+  done < <(find -P "$dir" -mindepth 1 -maxdepth "$depth" -type l -print0 2>/dev/null; printf 'FINDRC=%s\0' "$?")
+}
+
+echo
+echo "--- orphan scan ---"
+add_root "$DOTFILES"
+i=0
+while [ "$i" -lt "${#EXTRA_ROOTS[@]}" ]; do
+  add_root "${EXTRA_ROOTS[$i]}"
+  i=$((i + 1))
+done
+while IFS="$TAB" read -r dir depth; do
+  scan_dir "$dir" "$depth"
+done < <(emit_scan_table)
+echo "[INFO] $FOREIGN symlink(s) outside dotfiles checkouts ignored"
+
+echo
+if [ "$BAD" -eq 0 ] && [ "$ORPHANS" -eq 0 ] && [ "$SCAN_ERRORS" -eq 0 ]; then
+  printf 'symlink-audit: all %d entries OK, no orphan links.\n' "$TOTAL"
+  exit 0
+fi
+printf 'symlink-audit: %d of %d entries NOT OK, %d orphan link(s), %d scan error(s).\n' \
+  "$BAD" "$TOTAL" "$ORPHANS" "$SCAN_ERRORS"
+exit 1

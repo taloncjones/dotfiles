@@ -231,6 +231,128 @@ expect_same "--list-expected with a nonexistent HOME exits 0" 0 "$RC"
 audit_ro "$EVI/bogus.out" "$H" --bogus
 expect_same "unknown argument exits 2" 2 "$RC"
 
+has_line "pristine install: clean summary" "$EVI/pristine.out" \
+    "symlink-audit: all $N_ROWS entries OK, no orphan links."
+has_line "cloud pristine: clean summary" "$EVI/cloud.out" \
+    "symlink-audit: all $N_CLOUD entries OK, no orphan links."
+
+# Scan coverage: a dangling probe beside every map link is found.
+awk -F '\t' '$1 == "link" {sub(/\/[^\/]*$/, "", $2); print $2}' "$EVI/rows.tsv" |
+    LC_ALL=C sort -u >"$EVI/parents.txt"
+EXPECT_PROBES=""
+while IFS= read -r d; do
+    ln -s "$SRC/zz-missing-probe" "$d/zz-probe"
+    EXPECT_PROBES="$EXPECT_PROBES[X]  ORPHAN-DANGLING $d/zz-probe -> $SRC/zz-missing-probe (missing inside checkout $SRC)
+"
+done <"$EVI/parents.txt"
+audit_ro "$EVI/probes.out" "$H"
+expect_same "a probe beside every map link is reported" \
+    "$(printf '%s' "$EXPECT_PROBES" | LC_ALL=C sort)" \
+    "$(grep '^\[X\]  ORPHAN-' "$EVI/probes.out" | LC_ALL=C sort)"
+while IFS= read -r d; do rm -f "$d/zz-probe"; done <"$EVI/parents.txt"
+
+ln -s "$SRC/zsh/aliases.zsh" "$H/custom-aliases"
+audit_ro "$EVI/unowned.out" "$H"
+expect_same "UNOWNED-LIVE alone: audit exits 0" 0 "$RC"
+has_line "UNOWNED-LIVE reported as info" "$EVI/unowned.out" \
+    "[INFO] UNOWNED-LIVE  $H/custom-aliases -> $SRC/zsh/aliases.zsh (inside checkout $SRC; shared dir, not judged)"
+
+ln -s "$SRC/claude/CLAUDE.md" "$H/.claude/stale.md"
+audit_ro "$EVI/one.out" "$H"
+expect_same "one owned-dir orphan: audit exits 1" 1 "$RC"
+has_line "one owned-dir orphan: summary" "$EVI/one.out" \
+    "symlink-audit: 0 of $N_ROWS entries NOT OK, 1 orphan link(s), 0 scan error(s)."
+
+mkdir -p "$CO/dotfiles-b/bin" "$CO/dotfiles-b/claude/skills/present" \
+    "$CO/dotfiles-b-old/bin" "$H/.local/bin" "$H/.config/oldtool" \
+    "$H/.codex/skills/real-dir" "$FIX/elsewhere" "$FIX/private" "$FIX/real"
+ln -s real "$FIX/alias"
+touch "$CO/dotfiles-b/bin/present" "$CO/dotfiles-b-old/bin/tool" "$FIX/elsewhere/uv" \
+    "$FIX/private/config" "$H/bin/real-script" "$H/.ssh/id_ed25519_work.pub" "$H/.ssh/config_local"
+ln -s "$SRC/bin/retired-abs" "$H/bin/retired-abs"
+ln -s ../co/dotfiles-b/bin/gone "$H/bin/retired-rel"
+ln -s "$SRC/oldtool/conf" "$H/.config/oldtool/conf"
+ln -s "$CO/dotfiles-gone/bin/old" "$H/.local/bin/old"
+ln -s "$FIX/real/gone-a/bin/x" "$H/bin/alias-a"
+ln -s "$FIX/alias/gone-b/bin/x" "$H/bin/alias-b"
+ln -s bin "$CO/dotfiles-b/okdir"
+ln -s "$CO/dotfiles-b/okdir/gone" "$H/bin/via-ok"
+ln -s "$SRC/claude/skills/todos" "$H/.codex/skills/stale-abs"
+ln -s ../../co/dotfiles-b/claude/skills/present "$H/.codex/skills/stale-rel"
+ln -s "$SRC/bin/token-burn" "$H/bin/token-burn"
+ln -s "$CO/dotfiles-b-old/bin/gone" "$H/bin/sib-gone"
+ln -s "$CO/dotfiles-b-old/bin/tool" "$H/bin/sib-live"
+ln -s "$FIX/elsewhere/uv" "$H/bin/foreign-live"
+ln -s "$FIX/elsewhere/gone" "$H/bin/foreign-gone"
+ln -s "$SRC" "$H/dotfiles-alias"
+ln -s "$FIX/private/config" "$H/.ssh/config_private"
+ln -s "$SRC/claude/skills/todos" "$FIX/foreign-alias"
+ln -s "$FIX/foreign-alias" "$H/.codex/skills/custom"
+
+audit_ro "$EVI/fixtures.out" "$H" --root "$CO/dotfiles-b" --root "$CO/dotfiles-gone" \
+    --root "$FIX/alias/gone-a" --root "$FIX/real/gone-b"
+expect_same "fixtures: audit exits 1" 1 "$RC"
+
+EXPECT_ORPHANS="[X]  ORPHAN-DANGLING $H/.config/oldtool/conf -> $SRC/oldtool/conf (missing inside checkout $SRC)
+[X]  ORPHAN-DANGLING $H/.local/bin/old -> $CO/dotfiles-gone/bin/old (missing inside checkout $CO/dotfiles-gone)
+[X]  ORPHAN-DANGLING $H/bin/alias-a -> $FIX/real/gone-a/bin/x (missing inside checkout $FIX/alias/gone-a)
+[X]  ORPHAN-DANGLING $H/bin/alias-b -> $FIX/alias/gone-b/bin/x (missing inside checkout $FIX/real/gone-b)
+[X]  ORPHAN-DANGLING $H/bin/retired-abs -> $SRC/bin/retired-abs (missing inside checkout $SRC)
+[X]  ORPHAN-DANGLING $H/bin/via-ok -> $CO/dotfiles-b/okdir/gone (missing inside checkout $CO/dotfiles-b)
+[X]  ORPHAN-DANGLING $H/bin/retired-rel -> ../co/dotfiles-b/bin/gone (missing inside checkout $CO/dotfiles-b)
+[X]  ORPHAN-LIVE     $H/.claude/stale.md -> $SRC/claude/CLAUDE.md (inside checkout $SRC; not in the installer map)
+[X]  ORPHAN-LIVE     $H/.codex/skills/stale-abs -> $SRC/claude/skills/todos (inside checkout $SRC; not in the installer map)
+[X]  ORPHAN-LIVE     $H/.codex/skills/stale-rel -> ../../co/dotfiles-b/claude/skills/present (inside checkout $CO/dotfiles-b; not in the installer map)"
+expect_same "fixtures: exact orphan findings" \
+    "$(printf '%s\n' "$EXPECT_ORPHANS" | LC_ALL=C sort)" \
+    "$(grep '^\[X\]  ORPHAN-' "$EVI/fixtures.out" | LC_ALL=C sort)"
+EXPECT_UNOWNED="[INFO] UNOWNED-LIVE  $H/bin/token-burn -> $SRC/bin/token-burn (inside checkout $SRC; shared dir, not judged)
+[INFO] UNOWNED-LIVE  $H/custom-aliases -> $SRC/zsh/aliases.zsh (inside checkout $SRC; shared dir, not judged)"
+expect_same "fixtures: exact UNOWNED-LIVE lines" \
+    "$(printf '%s\n' "$EXPECT_UNOWNED" | LC_ALL=C sort)" \
+    "$(grep '^\[INFO\] UNOWNED-LIVE' "$EVI/fixtures.out" | LC_ALL=C sort)"
+has_line "fixtures: foreign, sibling, alias and foreign-chain links ignored" "$EVI/fixtures.out" \
+    "[INFO] 7 symlink(s) outside dotfiles checkouts ignored"
+has_line "fixtures: summary" "$EVI/fixtures.out" \
+    "symlink-audit: 0 of $N_ROWS entries NOT OK, 10 orphan link(s), 0 scan error(s)."
+for p in .gitconfig-personal .ssh/config_personal .ssh/config_work .ssh/id_ed25519_personal.pub; do
+    has_line "identity link $p stays OK" "$EVI/fixtures.out" "[OK] OK            $H/$p"
+done
+has_line "identity file .gitconfig-work stays OK" "$EVI/fixtures.out" \
+    "[OK] OK            $H/.gitconfig-work (machine-local file)"
+
+audit_ro "$EVI/noroot.out" "$H" --root "$CO/dotfiles-b"
+if grep -qF -- "$H/.local/bin/old" "$EVI/noroot.out"; then
+    fail "deleted checkout without --root is not reported"
+else
+    pass "deleted checkout without --root is not reported"
+fi
+
+mkdir -p "$HC/bin"
+ln -s "$SRC/bin/retired-abs" "$HC/bin/retired-abs"
+ln -s "$SRC/claude/CLAUDE.md" "$HC/.claude/stale.md"
+audit_ro "$EVI/cloud-orphans.out" "$HC" --cloud
+expect_same "cloud orphan: audit exits 1" 1 "$RC"
+has_line "cloud: owned-dir orphan reported" "$EVI/cloud-orphans.out" \
+    "[X]  ORPHAN-LIVE     $HC/.claude/stale.md -> $SRC/claude/CLAUDE.md (inside checkout $SRC; not in the installer map)"
+if grep -qF -- "$HC/bin/retired-abs" "$EVI/cloud-orphans.out"; then
+    fail "cloud: ~/bin is outside the cloud scan"
+else
+    pass "cloud: ~/bin is outside the cloud scan"
+fi
+
+if grep -v '^[[:space:]]*#' "$AUDIT" | grep -qF '<<'; then
+    fail "audit script uses no here-document (bash 3.2 backs them with temp files)"
+else
+    pass "audit script uses no here-document (bash 3.2 backs them with temp files)"
+fi
+if grep -v '^[[:space:]]*#' "$AUDIT" |
+    grep -qE '(^|[;&|(`[:space:]])(rm|rmdir|unlink|ln|mv|cp|mkdir|touch|chmod|git)[[:space:]]'; then
+    fail "audit script runs no writing command"
+else
+    pass "audit script runs no writing command"
+fi
+
 if [ "$RO_RUNS" -gt 0 ] && [ "$RO_BAD" -eq 0 ]; then
     pass "every audit run left fixtures/ unchanged ($RO_RUNS runs)"
 else
