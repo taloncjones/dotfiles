@@ -99,6 +99,11 @@ OWN_COMMAND = (
     "export, unset, true, :, test, [, exit, or return may run before gh, since "
     "anything else may change the body or the repository before gh reads them"
 )
+HIDDEN_GH = (
+    "cannot tell whether this segment runs gh; it mentions a co-review "
+    "marker and contains a `gh` word that a wrapper's own options or a "
+    "leading redirection keep this guard from recognizing as the command"
+)
 RULE = (
     "Marker SHAs must be the full 40-hex id of a commit in the target "
     "repository: copy it from `git rev-parse`, never from memory. Fence or "
@@ -328,6 +333,26 @@ def references_uncertain(word: str, walk: Walk) -> bool:
     return any(name in walk.uncertain_vars for name in names)
 
 
+def expand_value(word: str, walk: Walk) -> str | None:
+    """Expand $NAME/${NAME} in a literal shell word (as `expand_path` does
+    for a path), without the path-only `~` handling. None when a reference
+    is uncertain or something (a command substitution, an unset name with
+    no environment fallback) leaves an unresolved `$` or backtick."""
+    if references_uncertain(word, walk):
+        return None
+
+    def value(match):
+        name = match.group(1) or match.group(2)
+        if name in walk.assigned:
+            return walk.assigned[name] if walk.assigned[name] is not None else "$"
+        return os.environ.get(name, "$")
+
+    expanded = VARIABLE.sub(value, word)
+    if "$" in expanded or "`" in expanded:
+        return None
+    return literal(expanded)
+
+
 def absolute(path: str, walk: Walk) -> str | None:
     if os.path.isabs(path):
         return os.path.normpath(path)
@@ -454,9 +479,19 @@ def gh_sources(words: list[str], walk: Walk):
         if flag in REPO_FLAGS:
             flag_repo = value
         elif flag in BODY_FLAGS:
-            bodies.append(literal(value))
+            # A heredoc embedded in the value (`$(cat <<'EOF' ... EOF)`) is
+            # read from walk.heredocs, whose content the source already
+            # shows in full; only a plain value needs expansion to see
+            # past a $VAR or $(...) that the source does not show.
             if "<<" in value:
+                bodies.append(literal(value))
                 bodies.extend(walk.heredocs)
+            else:
+                expanded = expand_value(value, walk)
+                if expanded is None:
+                    unreadable = True
+                else:
+                    bodies.append(expanded)
         elif value == "-":
             bodies.extend(walk.heredocs)
             unreadable = unreadable or not walk.heredocs
@@ -599,6 +634,8 @@ def visit(segment: list[str], before: str, after: str, walk: Walk) -> str | None
         walk.rewrites = True
     if head == "gh":
         return check_gh(words, seg_env, walk)
+    if walk.hinted and any(rm_guard.basename(w) == "gh" for w in words[1:]):
+        return HIDDEN_GH
     if head in rm_guard.SHELL_WRAPPERS:
         inner = rm_guard.extract_shell_c_arg(words)
         env = {**walk.assigned, **seg_env}

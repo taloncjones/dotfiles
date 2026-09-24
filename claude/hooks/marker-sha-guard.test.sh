@@ -196,6 +196,10 @@ cp "$R/good.md" "$FIX/self.md"
 deny "gh output redirected onto its body file" "$R" "gh pr comment 5 --body-file $FIX/self.md >$FIX/self.md"
 allow "gh with 2>&1 and /dev/null" "$R" "gh pr comment 5 --body '$GOOD' >/dev/null 2>&1"
 deny "cat heredoc inside --body" "$R" "$(printf "gh pr comment 5 --body \"\$(cat <<'EOF'\n%s\nEOF\n)\"" "$BAD")"
+deny "fabricated sha reaches --body through a variable" "$R" "BODY='$BAD'; gh pr comment 5 --body \"\$BODY\""
+allow "assigned variable with a valid marker reaches --body" "$R" "BODY='$GOOD'; gh pr comment 5 --body \"\$BODY\""
+deny "command substitution reaches --body" "$R" "gh pr comment 5 --body \"\$(printf '%s' '$BAD')\""
+deny "unset variable in --body is unreadable" "$R" "gh pr comment 5 --body \"\$UNSET_MARKER_VAR co-review-audit head=$SHORT\""
 
 # --- R6: directory tracking ---
 printf '%s\n' "$BAD" >"$R/c.md"
@@ -290,6 +294,15 @@ printf '%s\r\n' "$GOOD" >"$FIX/crlf-good.md"
 deny "CRLF body file" "$R" "gh pr comment 5 --body-file $FIX/crlf-bad.md"
 allow "valid CRLF body file" "$R" "gh pr comment 5 --body-file $FIX/crlf-good.md"
 allow "-R wins over GH_REPO" "$R" "GH_REPO=other/repo gh pr comment 5 -R owner/repo --body '$GOOD'"
+
+# --- gh hidden behind a wrapper's own options ---
+deny "env -u option hides gh" "$R" "env -u GH_TOKEN gh pr comment 5 --body '$BAD'"
+deny "command -- hides gh" "$R" "command -- gh pr comment 5 --body '$BAD'"
+deny "nice option hides gh" "$R" "nice -n 5 gh pr comment 5 --body '$BAD'"
+deny "sudo option hides gh" "$R" "sudo -u nobody gh pr comment 5 --body '$BAD'"
+deny "leading redirection hides gh" "$R" "</dev/null gh pr comment 5 --body '$BAD'"
+deny "env -u option before a valid marker is still hidden" "$R" "env -u GH_TOKEN gh pr comment 5 --body '$GOOD'"
+allow "env -u option without a hint" "$R" "env -u GH_TOKEN gh pr comment 5 --body plain"
 
 # --- R8: non-marker traffic ---
 printf 'plain\n' >"$FIX/plain.md"
