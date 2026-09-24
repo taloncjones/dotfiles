@@ -10093,6 +10093,35 @@ facts = c.checkin_facts(rd, dict(task, status="review-dispatched", review_head_s
 assert facts["review_correlates"] is True and facts["action"] == "changes-requested", facts
 PY
 
+check "checkin: rollover-due from a fresh host context record at or above rollover_pct" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SID=11111111-1111-4111-8111-111111111111
+F=$($CLI claim-owner --repo-slug slug-x --session "$SID" --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$root/herdr-orch/context"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+NOW=$(python3 -c 'import time; print(int(time.time()))')
+printf '{"v":1,"session_id":"%s","used_pct":44,"ts":%s}' "$SID" "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^rollover-due'
+printf '%s\n' "$out" | grep -qx 'changed: no'
+printf '{"v":1,"session_id":"%s","used_pct":45,"ts":%s}' "$SID" "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'rollover-due used_pct=45 threshold=45'
+printf '%s\n' "$out" | grep -qx 'changed: yes'
+printf '{"v":1,"session_id":"%s","used_pct":90,"ts":%s}' "$SID" "$((NOW - 700))" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^rollover-due'
+printf '{"v":1,"session_id":"22222222-2222-4222-8222-222222222222","used_pct":90,"ts":%s}' "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^rollover-due'
+printf '{"v":1,"user":"u","default_base":"origin/main","rollover_pct":30}' > "$RD/config.json"
+printf '{"v":1,"session_id":"%s","used_pct":31,"ts":%s}' "$SID" "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'rollover-due used_pct=31 threshold=30'
+SH
+
 check "current_input: reads only the bordered input region, never history" <<PY
 $LOAD
 rule = "─" * 40

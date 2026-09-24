@@ -899,6 +899,46 @@ def read_config(rd):
     return cfg if isinstance(cfg, dict) else {}
 
 
+CONTEXT_FRESH_SECS = 600
+ROLLOVER_PCT_DEFAULT = 45
+_CONTEXT_SESSION_RE = re.compile(r"[A-Za-z0-9-]{1,64}\Z")
+
+
+def context_record_path(session):
+    """Where statusline.js records a session's host-reported context fill.
+    Same base as state_root() without a payload selection, which is the
+    formula the statusline uses."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home().resolve() / ".claude")
+    return coordination.payload_path(base) / "herdr-orch" / "context" / f"{session}.json"
+
+
+def rollover_due(rd, session, now=None):
+    """(used_pct, threshold) when this session's fresh context record has
+    reached config rollover_pct, else None. A stale, foreign, oversized or
+    malformed record never triggers; the model never writes the record."""
+    if not isinstance(session, str) or not _CONTEXT_SESSION_RE.fullmatch(session):
+        return None
+    try:
+        raw = read_payload_bytes(context_record_path(session))
+        rec = json.loads(raw) if len(raw) <= 4096 else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or rec.get("session_id") != session:
+        return None
+    used, ts = rec.get("used_pct"), rec.get("ts")
+    if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= 100:
+        return None
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    now = time.time() if now is None else now
+    if not now - CONTEXT_FRESH_SECS <= ts <= now + 60:
+        return None
+    pct = read_config(rd).get("rollover_pct")
+    if not isinstance(pct, int) or isinstance(pct, bool) or not 10 <= pct <= 95:
+        pct = ROLLOVER_PCT_DEFAULT
+    return (used, pct) if used >= pct else None
+
+
 def read_capabilities(rd, session_id):
     """Validated 'available' dict, or None if the map is absent, unreadable,
     malformed, or stamped with a different session (stale)."""
@@ -5510,6 +5550,10 @@ def _main(argv=None) -> int:
                     print(f"review-overdue {f['task_id']} state={d['state']} "
                           f"launch={d['launch']} remaining={d['remaining']}")
                     changed = True
+        due = rollover_due(rd, ns.session)
+        if due:
+            print(f"rollover-due used_pct={due[0]} threshold={due[1]}")
+            changed = True
         print(f"changed: {'yes' if changed else 'no'}")
         return 0
     if ns.cmd == "review-deadlines":
