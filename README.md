@@ -461,6 +461,7 @@ inheriting an unverified work account.
 - `format_files.py` - Auto-format edited files with prettier
 - `no_ai_attribution_bash.py` - Block AI attribution phrases in shell command bodies
 - `no_ai_comments.py` - Block tool-generated comments in code
+- `planning_artifact_guard.py` - Refuse staging or committing private specs, plans, and verification contracts in Claude and native Codex shell events
 - `protect_claude_md.py` - Warn before editing global CLAUDE.md
 - `rm_guard.py` - Reject catastrophic removal commands in Claude and native Codex shell events
 - `scratch_policy.py` - Answer Claude residual permission prompts for verified scratch-only cleanup; Codex retains its native approval flow

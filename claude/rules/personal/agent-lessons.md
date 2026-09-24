@@ -1,7 +1,7 @@
 # Agent Lessons
 
 Distilled from recurring agent failures at merge time (/post-merge lessons
-step). Contract: max 20 rule bullets; file stays at or under 45 physical
+step). Contract: max 30 rule bullets; file stays at or under 70 physical
 lines. At cap, adding a rule means dropping or merging one in the same
 edit. Entry format: "- (YYYY-MM) <imperative rule>", one bullet, wrapped
 at 80 columns, two physical lines max. Admission filter (all must hold):
@@ -17,12 +17,10 @@ is the staging tier, not an archive.
 
 ## Rules
 
-- (2026-09) Headless workers and reviewers: preserve the intended account
-  explicitly before entering temporary worktrees; verify launch readiness.
+- (2026-09) Bind headless workers, reviewers and probes to an explicit clean env
+  and account: inherited settings outlive the config change they predate.
 - (2026-09) Shell variables: zsh does not word-split unquoted expansions and
   uses `pipestatus`; rm/git-meta guards reject them -- pass literal paths.
-- (2026-09) An orchestrator session dispatches; it edits repo files only for
-  a small change the human approved this turn. Larger: todo + kickoff.
 - (2026-09) Before `gh pr merge`, check `isDraft`: a draft PR reports
   MERGEABLE/CLEAN yet the merge call is refused as "still a draft".
 - (2026-09) Never emit an identifier from memory, or one an earlier edit moved:
@@ -39,7 +37,9 @@ is the staging tier, not an archive.
   action, say you are blocked once, and wait instead of restating.
 - (2026-09) Verify external CLI syntax against its help/docs before writing it
   into a skill: unverified gh fields and flag combinations shipped broken.
-- (2026-09) Probe runtime behavior in a clean env: a session's inherited
-  settings outlive the config change, so its own probes read the old value.
 - (2026-09) Run suites to a file, then grep it: pipes hide failures and stderr.
 - (2026-09) Settle a factual review dispute by executing the case, not by rank.
+- (2026-09) Bound a reviewer by its diff, not a fixed clock: a live reviewer
+  past a static deadline is re-sized or waited on, never interrupted and re-run.
+- (2026-09) After a review round, re-dispatch a fresh implement attempt before
+  the repair worker emits: a superseded attempt row refuses its emit-done.

@@ -198,8 +198,18 @@ ok "skill: native launch checks route readiness and availability" \
   "grep -Fq -- 'returned readiness, availability reason, model, and effort' $SKILL"
 ok "skill: orchestrator launch sets crossSessionInbound explicitly" \
   "grep -Fq -- \"--settings '{\\\"crossSessionInbound\\\":\\\"accept\\\"}'\" $SKILL"
-ok "skill: watch armed at relaxed cadence when messaging is live, default otherwise" \
-  "grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
+ok "skill: messaging-live director arms only the undelivered backstop" \
+  "grep -Fq -- '--undelivered-only --exit-on-signal' $SKILL && ! grep -Fq -- '--interval 60 --debounce-secs 300' $SKILL && grep -Fq 'default cadence' $SKILL"
+ok "skill: retry and deadline timers replace the heartbeat" \
+  "grep -Fq 'sleep 300' $SKILL && grep -Fq 'review-deadlines' $SKILL && grep -Fq 'sleep <remaining + 30>' $SKILL && ! grep -Fq 'let the watch (or the next push)' $SKILL && ! grep -Fq 'at the next heartbeat' $SKILL"
+ok "skill: unverifiable evidence is the integrity halt, never retried" \
+  "grep -Fq 'unverifiable-evidence' $SKILL && grep -Fq 'not retried' $SKILL"
+ok "skill: dirty worktree after a Claude review is reported" \
+  "grep -Fq 'dirty=yes' $SKILL"
+ok "skill: run-think always runs in the background" \
+  "grep -Fq 'run-think\` always runs under \`Bash run_in_background\`' $SKILL && ! grep -Fq 'both are watch wakes' $SKILL"
+ok "agent: director describes the backstop and the launch function" \
+  "grep -Fq 'backstop' claude/agents/director.md && grep -Fq '\`director\`' claude/agents/director.md"
 ok "skill: idle-subscription re-wake mechanism is retired" \
   "! grep -Fq 'Re-subscribe only when the live herdr state is \`working\` or \`blocked\`' $SKILL"
 ok "skill: no-lost-wake rule, capped at three passes" \
@@ -269,8 +279,8 @@ ok "conflicting rebase reports failure for conflict result" "[ $RB -eq 1 ]"
 git -C "$TMP" rebase --abort 2>/dev/null || true
 git -C "$GR" worktree remove --force "$TMP"
 
-# 10. mech kickoff: config-generated contract committed on a fresh branch,
-# base_sha = post-contract HEAD, pin computed, shell-safety, run-mech through
+# 10. mech kickoff: config-generated contract written untracked on a fresh
+# branch, base_sha = launch HEAD, pin computed, shell-safety, run-mech through
 # pane run, ledger + record, status spend; relaunch; contract-only cannot complete.
 # Section 6 took ownership of $SLUG with session T (and section 8 reclaimed as
 # T again); claim-owner --session M --stale-secs 0 takes over again, which is
@@ -298,13 +308,15 @@ $CLI write-capabilities --repo-slug "$SLUG" --session M --fence "$F" \
 ok "mech model resolves to haiku" "[ \"\$($CLI resolve-model --repo-slug '$SLUG' --role mech --session M)\" = haiku ]"
 CAPS=$($CLI mech-caps --repo-slug "$SLUG" --max-budget-usd 1)
 ok "mech-caps merges config and override" "[ '$CAPS' = '{\"max_turns\": 9, \"max_budget_usd\": 1.0, \"timeout_secs\": 1800}' ]"
-# fresh task branch in a scratch repo standing in for the worktree
+# fresh task branch in a scratch repo standing in for the worktree; the
+# generated contract stays untracked and ignored (fixture-local exclude)
 WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
 ORIG=$(git -C "$WT" rev-parse HEAD); git -C "$WT" checkout -q -b talon/td-m/x
+printf 'claude/contracts/\n' >> "$WT/.git/info/exclude"
 REL=$($CLI mech-contract --repo-slug "$SLUG" --task-id td-m --worktree "$WT" --base-sha "$ORIG")
-git -C "$WT" add "$REL"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m "td-m: Add mech contract"
 BASE=$(git -C "$WT" rev-parse HEAD)
-ok "launch base is the post-contract HEAD, not origin" "[ '$BASE' != '$ORIG' ]"
+ok "launch base stays the origin HEAD (contract not committed)" "[ '$BASE' = '$ORIG' ]"
+ok "generated contract is ignored and the tree stays clean" "git -C '$WT' check-ignore -q -- '$REL' && [ -z \"\$(git -C '$WT' status --porcelain)\" ]"
 SHA=$($CLI verify-contract --repo-slug "$SLUG" --task-id td-m --worktree "$WT" --contract "$REL" --allow-unpinned --validate-only)
 ok "generated contract validates and pins" "printf '%s' '$SHA' | grep -qE '^[0-9a-f]{64}$'"
 BRIEF="$RD/tasks/td-m.brief.md"; mkdir -p "$RD/tasks"; printf 'lint sweep\n' > "$BRIEF"
@@ -338,7 +350,7 @@ ok "the fake saw the brief on stdin and the worktree as cwd" \
   "[ \"\$(cat $FAKE_CLAUDE_LOG.stdin)\" = 'lint sweep' ] && [ \"\$(cd '$WT' && pwd -P)\" = \"\$(cd \"\$(cat $FAKE_CLAUDE_LOG.cwd)\" && pwd -P)\" ]"
 ok "ledger has start+end and status reports spend" \
   "$CLI status --repo-slug '$SLUG' | python3 -c \"import json,sys;s=json.load(sys.stdin);assert s['td-m']['spend']['usd']==0.3 and s['td-m']['spend']['launches']==1,s\""
-ok "contract-only branch with a completed record cannot complete (HEAD == launch base)" \
+ok "branch with no worker commits cannot complete (HEAD == launch base)" \
   "! $CLI confirm-completion --repo-slug '$SLUG' --task-id td-m --workspace w1 --head-sha '$BASE'"
 # relaunch: new launch id, second workers[] entry, launches doubles
 unset FAKE_CLAUDE_HOOK

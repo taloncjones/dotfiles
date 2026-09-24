@@ -499,6 +499,36 @@ class ReviewHelperTests(unittest.TestCase):
             expect=2,
         )
 
+    def test_artifact_kind_contract_freezes_json_under_claude_contracts(self) -> None:
+        contract = self.repo / "claude/contracts/TASK_1-contract.json"
+        contract.parent.mkdir(parents=True)
+        contract.write_text('{"v": 1, "task_id": "TASK_1", "commands": [{"name": "t", "run": "true"}]}\n')
+        result = self.command(
+            "artifact", "--repo", str(self.repo), "--kind", "contract",
+            "--path", "claude/contracts/TASK_1-contract.json",
+            "--task-id", "TASK_1", "--runtime", "claude",
+        )
+        artifact = json.loads(result.stdout)
+        frozen = Path(artifact["path"])
+        self.assertEqual(artifact["kind"], "contract")
+        self.assertRegex(frozen.name, r"^contract-[0-9a-f]{32}\.json$")
+        self.assertEqual(frozen.read_bytes(), contract.read_bytes())
+        self.assertRegex(artifact["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(frozen.parent.parent.name, "TASK_1")
+        for kind, path in (
+            ("contract", "docs/superpowers/specs/x.json"),
+            ("contract", "claude/contracts/notes.md"),
+            ("spec", "claude/contracts/TASK_1-contract.json"),
+        ):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text("x\n")
+            rejected = self.command(
+                "artifact", "--repo", str(self.repo), "--kind", kind,
+                "--path", path, "--task-id", "TASK_1", "--runtime", "claude",
+                expect=2,
+            )
+            self.assertIn("must be an existing", rejected.stderr)
+
     def test_personal_artifacts_reject_account_root_symlink_to_work(self) -> None:
         plan = self.repo / "docs/superpowers/plans/account-boundary.md"
         plan.parent.mkdir(parents=True)

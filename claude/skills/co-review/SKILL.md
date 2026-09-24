@@ -1,6 +1,6 @@
 ---
 name: co-review
-description: Freeze a finished change, collect four independent review seats, and evaluate one fail-closed final-gate report.
+description: Freeze a finished change, collect two or four independent review seats by change class, and evaluate one fail-closed final-gate report.
 ---
 
 # Co-Review
@@ -90,10 +90,20 @@ Read `source.base`, `source.head`, `source.repo_id`, `source.source_tree`,
 `snapshot.codex_root`, `snapshot.claude_root`, and `snapshot.codex_tree` from
 the verified manifest. `source.source_tree` binds `expected.tree` and
 `snapshot.codex_tree` binds `report.reviewed_tree`; their mismatch is incomplete
-for approval, not an early review abort. Create `frozen.diff` from the verified snapshot/base and capture a
-CI JSON response for that exact expected head. Both live inside `RUN_DIR`, are
-hashed after capture, and are referenced by the report's
-`preconditions` fields defined by `schema`.
+for approval, not an early review abort. Capture the frozen diff and CI JSON
+response for that exact expected head:
+
+```bash
+git -C "$REPO" -c core.quotePath=true diff --no-color --no-ext-diff --no-textconv --no-renames --binary \
+  "$BASE" "$CODEX_TREE" >"$RUN_DIR/frozen.diff" || exit 2
+# A failed capture can leave a partial diff that classifies light; never use it.
+CLASS=$(uv run --no-project python "$GATE_REPORT" classify --diff "$RUN_DIR/frozen.diff") || exit 2
+# `co-review --full` sets CLASS=full here regardless of the classifier.
+```
+
+Both artifacts live inside `RUN_DIR`, are hashed after capture, and are
+referenced by the report's `preconditions` fields defined by `schema`. Write
+`CLASS` into the expected identity's `class` field before any seat runs.
 
 For a follow-up, also supply each seat the retained initial report and actual
 artifact paths/digests, prior head/base/tree, repair delta and affected callers.
@@ -104,12 +114,16 @@ to restart an unrestricted search. The current report binds the current tree
 and CI; prior evidence cannot supply current approval authority. A full review
 required by scope/coverage changes stops for a new user decision.
 
-## Dispatch and collect four seats
+## Dispatch and collect seats
+
+The full tier runs `claude`, `codex`, and `breaker`, then `verifier`. The
+light tier runs `codex` and `verifier`: the `codex` reviewer command below,
+then the verifier with that one finder artifact; skip `claude` and `breaker`.
 
 Save the exact `POLICY`, frozen diff, and the complete `## Classes` section of
 `$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md`, manifest
 identity, expected identity, and declared threat model in each prompt. The
-first three prompts are independent. Each requests structured findings with a
+finder prompts are independent. Each requests structured findings with a
 stable ID, severity, disposition, scenario, evidence, concrete material impact,
 coverage evidence or gap, and a verdict. A runtime result is an artifact only when the runner
 returns a genuine successful completion; preserve requested and observed route
@@ -118,25 +132,29 @@ metadata from that result.
 ```bash
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 grep -q '^## Classes' "$RUBRIC" || exit 2
-for seat in claude codex breaker verifier; do
+SEATS="claude codex breaker verifier"
+[ "$CLASS" = "light" ] && SEATS="codex verifier"
+for seat in $SEATS; do
   sed -n '/^## Classes/,$p' "$RUBRIC" >>"$RUN_DIR/$seat.prompt"
 done
 ```
 
 ```bash
-# Repeat once for claude, codex, and breaker with their named artifact path.
-uv run --no-project python "$RUNNER" run \
-  --runtime claude --role reviewer --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
+# Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
 uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
   --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
   --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"
-uv run --no-project python "$RUNNER" run \
-  --runtime codex --role skeptic --risk normal --provisional \
-  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json"
+if [ "$CLASS" != "light" ]; then
+  uv run --no-project python "$RUNNER" run \
+    --runtime claude --role reviewer --risk normal --provisional \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
+    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
+  uv run --no-project python "$RUNNER" run \
+    --runtime codex --role skeptic --risk normal --provisional \
+    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
+    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json"
+fi
 ```
 
 The Claude invocation preserves the original repository's selected account;
@@ -148,13 +166,14 @@ the review itself. It must not launch another review workflow, delegate
 reviewers, invoke a partner, post feedback, fix code, or act outside disposable
 fixtures.
 
-After the first three artifact files exist and their digests are recorded, run
-the verifier with role `skeptic` and the same frozen snapshot. Its prompt also
-contains the three artifact paths/digests and all known blockers; it tests their
-material claims independently, accounts for each blocker and reconciles
-the combined coverage ledger. It does not start another unrestricted search.
-Do not give current finder reports to the first three seats; the retained
-initial baseline is shared only for follow-up verification.
+After every finder artifact exists (full: `claude`, `codex`, `breaker`; light:
+`codex`) and its digest is recorded, run the verifier with role `skeptic` and
+the same frozen snapshot. Its prompt also contains the finder artifact
+paths/digests and all known blockers; it tests their material claims
+independently, accounts for each blocker and reconciles the combined coverage
+ledger. It does not start another unrestricted search. Do not give current
+finder reports to the finder seats; the retained initial baseline is shared
+only for follow-up verification.
 
 ```bash
 uv run --no-project python "$RUNNER" run \
@@ -174,9 +193,10 @@ Run `gate_report.py schema` now and start `RUN_DIR/report.json` from its exact
 example.
 Fill it from the manifest, expected identity, raw runtime artifacts, their
 SHA-256 digests, the frozen diff/CI artifact digests, and only actual findings
-and coverage. Keep every path report-relative. Populate the named `seats`
-entries `claude`, `codex`, `breaker`, and `verifier`; put their raw runtime JSON
-paths and observed metadata in the fields named by the schema. Never replace a
+and coverage. Keep every path report-relative. Populate the `seats` entries
+for `CLASS` (`schema` lists `light_seats` and `full_seats`) and set
+`report.class` to `CLASS`; put their raw runtime JSON paths and observed
+metadata in the fields named by the schema. Never replace a
 failed runtime result with coordinator prose. Token presence is advisory context;
 unfinished behavior blocks only with a concrete material consequence.
 
