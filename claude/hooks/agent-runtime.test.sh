@@ -633,7 +633,8 @@ def test_native_argv_mappings_are_exact():
         "auto",
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
     ]
 
 
@@ -685,7 +686,8 @@ def test_slim_boot_roles_launch_without_mcp_servers():
             "--strict-mcp-config",
             "-p",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
         ], (role, headless)
 
 
@@ -744,7 +746,8 @@ def test_full_boot_roles_and_codex_keep_mcp_servers():
         "auto",
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
     ], headless
     for role in ("controller", "implementation", "think"):
         route = runtime.resolve_route("claude", role, config={"provisional": True})
@@ -806,7 +809,8 @@ def test_bounded_run_passes_strict_mcp_config_for_reviewer():
             "--strict-mcp-config",
             "-p",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
         ], call
 
 
@@ -1025,6 +1029,47 @@ def init_repo(path):
             "GIT_COMMITTER_EMAIL": "test@example.invalid",
         },
     )
+
+
+STREAM_JSON_FIXTURE = "\n".join(
+    json.dumps(row)
+    for row in (
+        {"type": "system", "subtype": "hook_started", "hook_id": "h-1",
+         "hook_name": "SessionStart:startup", "hook_event": "SessionStart",
+         "session_id": "sess-fixture"},
+        {"type": "system", "subtype": "hook_response", "hook_id": "h-1",
+         "hook_name": "SessionStart:startup", "hook_event": "SessionStart",
+         "exit_code": 0, "outcome": "success", "session_id": "sess-fixture"},
+        {"type": "system", "subtype": "init", "session_id": "sess-fixture",
+         "mcp_servers": []},
+        {"type": "assistant", "session_id": "sess-fixture",
+         "timestamp": "2026-09-24T18:13:00.253Z",
+         "message": {"content": [{"type": "tool_use", "id": "t-1",
+                                  "name": "Bash",
+                                  "input": {"command": "git rev-parse --short HEAD"}}]}},
+        {"type": "rate_limit_event", "session_id": "sess-fixture",
+         "rate_limit_info": {"status": "allowed_warning"}},
+        {"type": "user", "session_id": "sess-fixture",
+         "timestamp": "2026-09-24T18:13:01.242Z",
+         "message": {"content": [{"type": "tool_result", "tool_use_id": "t-1",
+                                  "content": "8d61895"}]}},
+        {"type": "assistant", "session_id": "sess-fixture",
+         "timestamp": "2026-09-24T18:13:02.508Z",
+         "message": {"content": [{"type": "text", "text": "8d61895"}]}},
+        {"type": "result", "subtype": "success", "is_error": False,
+         "result": "8d61895", "num_turns": 2, "session_id": "sess-fixture",
+         "total_cost_usd": 0.01, "modelUsage": {"claude-opus-5-5": {}}},
+    )
+) + "\n"
+
+
+def test_stream_json_result_parses_like_single_object():
+    result = runtime.parse_runtime_result("claude", STREAM_JSON_FIXTURE)
+    assert result["status"] == "success", result
+    assert result["result"] == "8d61895", result
+    assert result["num_turns"] == 2, result
+    assert result["session_id"] == "sess-fixture", result
+    assert result["observed_model"] == "claude-opus-5-5", result
 
 
 def test_run_uses_argv_and_unsets_default_claude_config():
@@ -2256,6 +2301,7 @@ for name, test in (
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
     ("bounded run kills the process group on timeout", test_timeout_kills_the_process_group),
     ("bounded run returns when a detached child holds the pipe", test_timeout_returns_when_a_detached_child_holds_the_pipe),
+    ("stream-json result parses like the single object", test_stream_json_result_parses_like_single_object),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
     ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
     ("difficulty requires confirmation", test_difficulty_requires_confirmation),

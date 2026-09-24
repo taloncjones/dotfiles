@@ -707,7 +707,7 @@ def launch_argv(
     if route.get("role") in SLIM_BOOT_ROLES:
         argv.append("--strict-mcp-config")
     if mode == "headless":
-        argv.extend(["-p", "--output-format", "json"])
+        argv.extend(["-p", "--output-format", "stream-json", "--verbose"])
     return argv
 
 
