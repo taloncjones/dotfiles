@@ -184,14 +184,22 @@ You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
 <full todo body, frontmatter included>
 
 This task took the fast path: no spec or plan exists; the todo's Solution is
-the plan. Edit only the files the todo names: <file list>. The pinned
-verification contract was written from the todo's Verification section;
-run `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`
+the plan. Edit only the files the todo names -- each already verified as an
+existing regular file, not a directory or glob, by the fast-path maturity
+check: <file list>. <contract-provenance> Run
+`<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`
 before closing. If the work needs a design decision the todo does not settle,
 or a file outside that list, commit what is safe and close with
 `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome paused --reason needs_design --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`;
 the director re-kicks the item as raw.
 ```
+
+`<contract-provenance>` renders one of two sentences, matching the fast-path
+contract source that actually produced the pinned contract (SKILL.md section
+2): "The pinned verification contract was written by the director from the
+todo's Verification section, plus config regression suites." for source (2),
+or "The pinned verification contract was found on disk at kickoff." for
+source (1).
 
 ## Mech brief variant (`mech-<t>`)
 
