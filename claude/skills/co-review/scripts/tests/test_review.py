@@ -330,10 +330,40 @@ class ReviewHelperTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text())
             ignored = Path(manifest["snapshot"][snapshot_key]) / "ignored.tmp"
             ignored.write_text("do not delete\n")
+            cache = Path(manifest["snapshot"][snapshot_key]) / "__pycache__" / "x.cpython-313.pyc"
+            cache.parent.mkdir()
+            cache.write_bytes(b"\0")
 
-            self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+            refused = self.command("cleanup", "--manifest", str(manifest_path), expect=2)
 
+            self.assertIn("ignored.tmp", refused.stderr)
+            self.assertIn("__pycache__/x.cpython-313.pyc", refused.stderr)
             self.assertTrue(ignored.exists())
+
+    def test_cleanup_names_an_unexpected_staged_path(self) -> None:
+        manifest_path, manifest = self.prepare()
+        claude_root = Path(manifest["snapshot"]["claude_root"])
+        extra = claude_root / "extra-staged.txt"
+        extra.write_text("staged by a seat\n")
+        subprocess.run(["git", "-C", str(claude_root), "add", "extra-staged.txt"], check=True)
+
+        refused = self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertIn("snapshot index tree changed", refused.stderr)
+        self.assertIn("extra-staged.txt", refused.stderr)
+
+    def test_designed_staged_patch_passes_verification(self) -> None:
+        (self.repo / "tracked.txt").write_text("changed by the reviewed diff\n")
+        manifest_path, manifest = self.prepare()
+        claude_root = Path(manifest["snapshot"]["claude_root"])
+        staged = subprocess.run(
+            ["git", "-C", str(claude_root), "diff", "--cached", "--quiet"], check=False
+        )
+        self.assertEqual(staged.returncode, 1)
+
+        self.command("cleanup", "--manifest", str(manifest_path))
+
+        self.assertFalse(claude_root.exists())
 
     def test_artifact_requires_explicit_repo_scoped_target_and_freezes_content(
         self,
