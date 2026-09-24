@@ -364,6 +364,7 @@ cmds = [h["command"] for e in tmpl if e.get("matcher") == "Bash" for h in e["hoo
 want = [
     "~/.claude/hooks/commit_guard.py",
     "~/.claude/hooks/no_ai_attribution_bash.py",
+    "~/.claude/hooks/marker_sha_guard.py",
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
@@ -1164,6 +1165,7 @@ bash = [h["command"] for e in pre if e.get("matcher") == "Bash" for h in e["hook
 want_bash = [
     "~/.claude/hooks/commit_guard.py",
     "~/.claude/hooks/no_ai_attribution_bash.py",
+    "~/.claude/hooks/marker_sha_guard.py",
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
@@ -1179,6 +1181,24 @@ then
     printf 'PASS  grg: template registers the git metadata guard under Bash|Edit|Write\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  grg: template registers the git metadata guard under Bash|Edit|Write\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+# marker_sha_guard.py registration: exactly once across every hook event,
+# and only in the PreToolUse Bash group.
+if python3 - <<'PY'
+import json
+import sys
+
+hooks = json.load(open("claude/settings.json.tmpl"))["hooks"]
+cmd = "~/.claude/hooks/marker_sha_guard.py"
+every = [h.get("command") for entries in hooks.values() for e in entries for h in e.get("hooks", [])]
+bash = [h["command"] for e in hooks["PreToolUse"] if e.get("matcher") == "Bash" for h in e["hooks"]]
+sys.exit(0 if every.count(cmd) == 1 and cmd in bash else 1)
+PY
+then
+    printf 'PASS  msg: template registers the marker SHA guard once, in the Bash group\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  msg: template registers the marker SHA guard once, in the Bash group\n' >&2; FAIL=$((FAIL + 1))
 fi
 
 # Personal rules are always-on: none may carry a `paths:` front-matter key,
