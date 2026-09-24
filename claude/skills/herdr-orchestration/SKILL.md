@@ -133,9 +133,13 @@ for the provider's `launch_env` mapping.
      core stores it as `owner.json.messaging_socket` and takes the owner
      `pid` from the socket basename (the Claude process, not a Bash `$PPID`);
      an unusable value stores `null` with one `[WARNING]` and ownership still
-     succeeds. Director launch line (documented, not enforced --
-     preflight cannot read its own permission class or inbound policy):
-     `claude --agent director --settings '{"crossSessionInbound":"accept"}'`.
+     succeeds. Launch with the `director` shell function
+     (`zsh/claude-account.zsh`), which runs `claude --agent director
+--settings '{"crossSessionInbound":"accept"}' --permission-mode manual`
+     through the account-routing wrapper and refuses outside a herdr pane.
+     Unattended merges also need the machine-local `Bash(gh pr merge:*)`
+     allow rule in the project's `.claude/settings.local.json`; this repo
+     does not create it.
      Auto mode is no longer the documented launch: its classifier refuses
      `gh pr merge`. Nothing in the director flow assumes a permission mode;
      the rollover hook runs in every mode, and a `rollover` Bash call may
@@ -235,16 +239,27 @@ for the provider's `launch_env` mapping.
      per role at dispatch time.
 
 6. **Arm the standing wake watch (owner only; a `BUSY` non-owner never
-   arms).** If this session has no live watch for this repo: capture
-   `EPOCH=$(date +%s)` FIRST, then start one via the `Monitor` tool --
+   arms).** If `CLAUDE_CODE_MESSAGING_SOCKET` is set (the hook push is the
+   wake path), run only the silent backstop: capture `EPOCH=$(date +%s)`
+   FIRST, stop any Monitor-based watch this session still has (including one
+   inherited across `/clear`, with the `watch-pids` kill below), then start
+   `python3 "$CORE" watch --repo-slug <slug> --undelivered-only --exit-on-signal --since-epoch $EPOCH`
+   with `Bash run_in_background` and note its task id. It prints nothing
+   while pushes are delivered and a task is idle, exits with one `signal`
+   line when a completion record stays undelivered for 120 s, and exits with
+   one `heartbeat` line every `BACKSTOP_HEARTBEAT_SECS` (600 s) while a task
+   is active and nothing is undelivered -- both exits are a wake, and the
+   heartbeat one exists only so this session's next preflight refreshes its
+   own ownership heartbeat before `WAKE_HEARTBEAT_STALE_SECS` (900 s) makes
+   wake delivery start failing. Re-arm it on that wake turn and on any
+   preflight where this context has no live backstop task. If the socket is unset, arm the
+   watch at the default cadence via the `Monitor` tool instead: if this
+   session has no live watch for this repo, capture `EPOCH=$(date +%s)`
+   FIRST, then start one via the `Monitor` tool --
    `command: python3 "$CORE" watch --repo-slug <slug> --since-epoch $EPOCH`,
    `persistent: true`, description `herdr worker activity (<repo>)` -- and
    note the returned task id. The pre-captured epoch makes any event landing
    while the watch subprocess starts up count as changed on its first pass.
-   Cadence: when `CLAUDE_CODE_MESSAGING_SOCKET` is set in this session's
-   environment (messaging live; the hook push below is the fast path) add
-   `--interval 60 --debounce-secs 300`; when it is unset,
-   arm at the default cadence. Same verb, same rules either way.
    Rules:
    - **Arm BEFORE this turn's section-4 check-in.** Together with the epoch
      seed there is no gap: an event before the epoch is caught by the
@@ -272,9 +287,9 @@ for the provider's `launch_env` mapping.
      The watch reads only `STATE_ROOT` and prints a closed vocabulary
      (`signal` / `heartbeat`); worst-case wake latency is one `--interval`
      (default 15s) plus one `--debounce-secs` (default 60s) after a burst.
-     The watch fires on completion-record writes only -- the same predicate
-     the worker hook uses -- so an ordinary worker turn end produces no
-     signal.
+     The default watch fires on completion-record, think-answer, and
+     mech-ledger writes; the hook pushes on completion-record changes and
+     blocks; an ordinary worker turn end produces neither.
 
 ## 1a. Rollover in place
 
@@ -314,7 +329,7 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
 - **Plan-ready item** -- a refined Jira ticket, or a task that already has a
   reviewed, frozen private spec and plan with recorded hashes: dispatch an `implement`
   worker directly (only after the contract pinning steps at the end of this
-  section; a plan-ready item without a committed contract is treated as raw),
+  section; a plan-ready item without a validated on-disk contract is treated as raw),
   using `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
   with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
   (section 8). An unready route blocks this dispatch.
@@ -346,19 +361,21 @@ mech [max-turns <int>] [budget <number>]`, or todo frontmatter `tier: mech`
   the legacy `routing-table` mech entry and caps from
   `python3 "$CORE" mech-caps --repo-slug <slug> [--max-turns N]
 [--max-budget-usd X]` (exit 5 refuses the kickoff with its message; never
-  clamp by hand). Contract source, in order: (1) committed at HEAD -> use it;
-  (2) `config.mech.contract_commands` present, worktree clean, and the branch
-  either created by this kickoff or adopted with HEAD == `base_sha` ->
+  clamp by hand). Contract source, in order: (1) present on disk at
+  `claude/contracts/<task_id>-contract.json` (untracked and ignored; a copy
+  tracked at HEAD from before this rule is accepted with the legacy warning
+  below) -> use it; (2) `config.mech.contract_commands` present, worktree
+  clean, and the branch either created by this kickoff or adopted with HEAD
+  == `base_sha` ->
   `python3 "$CORE" mech-contract --repo-slug <slug> --task-id <task_id>
---worktree <path> --base-sha <base_sha>` writes it, then `git add` + commit it as
-  `<task_id>: Add mech contract` (the only commit the director ever
-  authors; inside the step 3-6 window so step 9 cleanup covers it);
-  (3) else refuse: "mech kickoff needs a committed contract or
-  `mech.contract_commands` in config; kick off as raw instead". **`Launch base`:**
-  after a generated-contract commit, record `base_sha` as the post-commit HEAD
-  (the launch base) so every ahead-of-base check demands real worker commits;
-  `base_ref` still names the ref. Then run the "Contract pinning" steps below
-  unchanged.
+--worktree <path> --base-sha <base_sha>` writes it; never `git add` or
+  commit it -- it stays untracked and ignored, so **`Launch base`** stays the
+  launch HEAD (no post-contract commit moves it), and `base_ref` still names
+  the ref; (3) else refuse: "mech kickoff needs a contract on disk or
+  `mech.contract_commands` in config; kick off as raw instead". A mech
+  contract has no frozen copy: if the worktree copy is lost the contract
+  gate halts and regeneration needs the user's task authorization and a
+  fresh pin. Then run the "Contract pinning" steps below unchanged.
 
 The steps below call the dispatched worker "the worker"; they apply to whichever
 phase is launched (`plan` for a raw item, else `implement`), with the
@@ -440,8 +457,18 @@ phase-appropriate brief (references/brief-template.md) and model.
 **Contract pinning (implement dispatch, both paths).** Before launching any
 `implement` worker (plan-ready kickoff here, or phase advancement in section
 2a), compute the pin: require the task worktree clean (`git status
---porcelain` empty) and the contract tracked at HEAD (`git cat-file -e
-HEAD:claude/contracts/<task_id>-contract.json`); then run
+--porcelain` empty) and the contract on disk, checked in this order:
+(1) `git ls-files --error-unmatch -- claude/contracts/<task_id>-contract.json`
+succeeds -> a legacy tracked contract; accept it with `[WARNING] legacy
+tracked contract; untrack it with git rm --cached before the branch ships
+(the planning-artifact guard refuses new adds; DOTFILES_ALLOW_PLAN_ARTIFACTS=1
+is the deliberate override)` and skip (2) -- `check-ignore` reports a
+tracked path as not ignored; (2) otherwise the file must exist and
+`git check-ignore -q -- claude/contracts/<task_id>-contract.json` must
+succeed, so every later clean-tree gate holds; a present but unignored
+contract blocks with `contract is not ignored: run update to link
+~/.gitignore_global, or add claude/contracts/ to the repository's ignore
+rules`. Then run
 `python3 "$CORE" verify-contract --repo-slug <slug> --task-id <task_id>
 --worktree <path> --contract claude/contracts/<task_id>-contract.json
 --allow-unpinned --validate-only` -- it prints the sha256. A missing or
@@ -463,10 +490,10 @@ phase; it never marks the task `completed` and never dispatches review.
    Use the `co-review` artifact helper to freeze reviewed documents under
    `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/<launch>`. Record the same artifact
    references in the task and plan completion. Never commit private plans.
-2. A plan-only milestone may have HEAD equal to base. If a public verification
-   contract was authored, commit only that contract and validate/pin it before
-   implementation. Final HEAD may differ from the launch's source HEAD; both
-   are recorded for different checks.
+2. A plan-only milestone may have HEAD equal to base. The contract the plan
+   worker authored stays untracked and ignored; validate and pin it before
+   implementation (Contract pinning, section 2). Final HEAD may differ from
+   the launch's source HEAD; both are recorded for different checks.
 3. Reuse the task's branch/workspace after the plan worker is idle or exited.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
    again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
@@ -629,10 +656,24 @@ every wake observed must be followed by authoritative reads that BEGAN after
 it. Messages land between tool calls, so if a wake appears in the transcript
 during a check-in, run another check-in pass before ending the turn, and
 repeat until a pass began after the last wake seen, capped at three passes per
-turn; past the cap, end the turn and let the watch (or the next push) wake the
-next one. A worker that exits without emitting a record is no longer
-announced; the live `herdr agent list` poll in section 4 reports it `absent`
-at the next heartbeat, which is what decides `abandoned`.
+turn; past the cap, arm the retry timer below and end the turn. A worker that
+exits without emitting a record is no longer announced; the live `herdr agent
+list` poll in section 4 reports it `absent` at the next check-in, which is
+what decides `abandoned`.
+
+**Incomplete check-ins retry on a timer, not a heartbeat.** A check-in is
+incomplete when `checkin` exits nonzero, prints no `changed:` line, or
+prints `poll: failed`, `unreadable-task`, `unreadable-record`, or a task
+line with `action=unknown`; a turn is also unfinished when it hit the
+three-pass cap with a wake seen after its last pass began. Then arm one
+retry timer (`Bash run_in_background` running `sleep 300`, at most one per
+context) whose exit re-runs the check-in. After three consecutive
+incomplete check-ins, ask the human once (AskUserQuestion) and stop
+re-arming. The count lives in this context only; a `/clear` resets it.
+`owner: stale-fence` is not retried: yield read-only as always.
+`unverifiable-evidence <task> <review|plan>` is not retried either: it is
+the section-5 integrity halt, surfaced to the human at once with no status
+change and no re-dispatch.
 
 `python3 "$CORE" status --repo-slug <slug>` folds the per-workspace event logs into
 per-task status. Reconcile that against a live `herdr agent list` /
@@ -726,9 +767,16 @@ Correlate these independent facts, all keyed to the same `task_id`/
    result; re-correlate next check-in). On exit 1 the task stays
    `in-progress`: surface the failing command output and recommend
    resuming/re-briefing the implement worker -- never dispatch review. Exit 2
-   (invalid schema/path or corrupt task record), 3 (contract file missing),
-   or 4 (hash mismatch) is an integrity halt: surface it and stop advancing
-   this task; never dispatch review, never re-pin to clear it. Exit 5 fires
+   (invalid schema/path or corrupt task record) or 4 (hash mismatch) is an
+   integrity halt: surface it and stop advancing this task; never dispatch
+   review, never re-pin to clear it. Exit 3 (contract file missing) tries
+   one recovery first: in the parent directory of the task's frozen spec
+   (`plan_artifacts` entry with `kind: spec`), find the `contract-*.json`
+   whose sha256 equals `contract_sha256`; exactly one match -> copy it
+   byte-for-byte to `<worktree>/<contract_path>` (an ignored path outside
+   the orchestrator edit guard's guarded set), re-read the sha, and re-run
+   this gate once; no `plan_artifacts` (mech task) or no match -> the same
+   integrity halt. Exit 5 fires
    only on a valid record lacking pin fields -- the grandfather path (task
    predates contracts): warn `[WARNING] no contract pinned (pre-contract
 task)` and treat this gate as passed. This gate augments facts 1-5; it
@@ -831,6 +879,15 @@ for a foreign or missing pane).
    recomputes that value after a coordinator restart rather than adding a second
    state field. This is the `600-second deadline`. Refresh both agent and
    workspace display metadata.
+
+   **Deadline timer.** Right after the dispatch, and at every preflight,
+   run `python3 "$CORE" review-deadlines --repo-slug <slug>`. For each
+   `review-deadline` line this context has no live timer for, arm one
+   `Bash run_in_background` timer running `sleep <remaining + 30>`; for
+   `remaining=0` or `remaining=unknown`, run the check-in now instead. The
+   timer's exit runs the check-in, which enforces step 6's bound. On
+   yielding ownership, TaskStop these timers.
+
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
 5. Prompt the review agent to run **`review-change`** over the pinned base,
@@ -915,6 +972,10 @@ deadline, <launch_id>`, and never fabricate a review record, blocker count,
    - only `approved` with no blocking findings and complete evidence ->
      `status: reviewed`, event `reviewed`. Advisories remain visible and do not
      create an automatic fix queue.
+
+When a Claude review record arrives and `checkin` shows the task `dirty=yes`,
+tell the human before any phase advance; acceptance itself is unchanged
+(`reviewed_head_sha`, stale-verdict rule).
 
 ## 6. Surface task-local readiness -- only on `reviewed`
 
@@ -1178,11 +1239,11 @@ then launch:
 python3 "$CORE" run-think --repo-slug <slug> --session <id> --fence <fence> --think-id <think_id> --kind <kind> [--task-id <task_id>] --model $MODEL --effort $EFFORT --cwd <repo_worktree> --max-turns <N> --max-budget-usd <X> --timeout-secs <T> [--add-dir tasks] [--add-dir think]
 ```
 
-launched with `Bash run_in_background` (or a self-managed `pane split` in
-the director's OWN workspace, section 7) so the director does not
-block. `run-think` writes `<think_id>.launch.json` (the durable live
+`run-think` always runs under `Bash run_in_background`, whose exit notifies
+the director whether or not an answer was published; do not use a pane
+split for it. `run-think` writes `<think_id>.launch.json` (the durable live
 record) before the run and `<think_id>.answer.json` (the output contract)
-after; both are watch wakes. `$MODEL`/`$EFFORT` come from the same
+after; without messaging the answer is a watch wake. `$MODEL`/`$EFFORT` come from the same
 `routing-table` snapshot as another legacy wrapper dispatch (`think` role). A
 model-attributable failure (`downgrade`, or an execution error naming the
 alias/"model"): `disable-model` on the requested alias, `routing-table`

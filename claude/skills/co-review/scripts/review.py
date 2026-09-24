@@ -79,6 +79,15 @@ def full_commit(repo: Path, reference: str) -> str:
 
 _BRANCH_BAD = ("..", "@{", "~", "^", ":", "\\", " ")
 
+# Frozen artifact kinds: repository-relative root and required suffix. The
+# contract is the herdr verification contract (untracked, git-ignored); its
+# frozen copy is the recovery source when the worktree copy is lost.
+ARTIFACT_ROOTS = {
+    "plan": ("docs/superpowers/plans", ".md"),
+    "spec": ("docs/superpowers/specs", ".md"),
+    "contract": ("claude/contracts", ".json"),
+}
+
 
 def resolve_base(
     repo: Path, base: str | None, base_ref: str | None, head: str
@@ -568,16 +577,14 @@ def artifact(args: argparse.Namespace) -> dict[str, Any]:
     if not valid_task_id(args.task_id):
         raise ReviewError("task id is invalid")
     candidate, relative = safe_relative_path(repo, args.path)
-    allowed = (
-        "docs/superpowers/plans" if args.kind == "plan" else "docs/superpowers/specs"
-    )
+    allowed, suffix = ARTIFACT_ROOTS[args.kind]
     if (
         not relative.startswith(f"{allowed}/")
-        or candidate.suffix != ".md"
+        or candidate.suffix != suffix
         or not candidate.is_file()
     ):
         raise ReviewError(
-            f"{args.kind} must be an existing Markdown file under {allowed}"
+            f"{args.kind} must be an existing {suffix} file under {allowed}"
         )
     content = candidate.read_bytes()
     context = repository_context(repo)
@@ -609,7 +616,7 @@ def artifact(args: argparse.Namespace) -> dict[str, Any]:
             raise ReviewError(
                 "artifact output directory must be one launch directory under the selected task"
             )
-        frozen_name = f"{args.kind}-{secrets.token_hex(16)}.md"
+        frozen_name = f"{args.kind}-{secrets.token_hex(16)}{suffix}"
         descriptor = os.open(
             frozen_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
@@ -677,7 +684,7 @@ def parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--manifest", required=True)
     artifact_parser = commands.add_parser("artifact")
     artifact_parser.add_argument("--repo", required=True)
-    artifact_parser.add_argument("--kind", required=True, choices=("plan", "spec"))
+    artifact_parser.add_argument("--kind", required=True, choices=tuple(ARTIFACT_ROOTS))
     artifact_parser.add_argument("--path", required=True)
     artifact_parser.add_argument("--task-id", required=True)
     artifact_parser.add_argument(

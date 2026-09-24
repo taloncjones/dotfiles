@@ -1019,7 +1019,44 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
             pass
 
 
-WAKE_DEBOUNCE_SECS = 60
+WAKE_RETRY_DELAYS = (0.25, 0.75)
+_TRANSIENT_WAKE_REASONS = frozenset({"connect-failed", "send-failed"})
+_sleep = time.sleep   # test seam
+
+
+def deliver_wake(rd, ws, event, own_socket="") -> str:
+    """post_wake with two bounded retries on transient failures. Never raises."""
+    reason = "send-failed"
+    for delay in (0.0, *WAKE_RETRY_DELAYS):
+        if delay:
+            _sleep(delay)
+        try:
+            reason = post_wake(rd, ws, event, own_socket=own_socket)
+        except Exception:  # noqa: BLE001 -- a hook must never raise
+            reason = "send-failed"
+        if reason not in _TRANSIENT_WAKE_REASONS:
+            return reason
+    return reason
+
+
+def wake_for_event(rd, ws, task_id, event, own_socket="", now=None):
+    """Decide, deliver, then write the marker once. None when no push was due.
+
+    The marker's `records` advance only on `sent`, so an undelivered record
+    change is retried by the next call and stays visible to the backstop.
+    """
+    now = time.time() if now is None else now
+    prior = read_wake_marker(rd, ws)
+    push, advanced = wake_decision(prior, event, record_fingerprint(rd, task_id), now)
+    if not push:
+        return None
+    reason = deliver_wake(rd, ws, event, own_socket)
+    base = advanced if reason == "sent" else {**prior, "v": 2}
+    write_wake_marker(rd, ws, {**base, "last_delivery": {
+        "event": event, "reason": reason, "ts": int(now)}})
+    return reason
+
+
 _RECORD_SUFFIXES = (".done.json", ".review.json")
 
 
@@ -1028,23 +1065,24 @@ def wake_marker_path(rd, ws) -> Path:
 
 
 def _empty_marker() -> dict:
-    return {"v": 1, "records": {}, "last_push": {}}
+    return {"v": 2, "records": {}, "last_push": {}}
 
 
 def read_wake_marker(rd, ws) -> dict:
-    """Never raises. A missing, unreadable, or malformed marker reads as empty,
-    which biases toward pushing -- a spurious wake costs one cheap check-in,
-    a lost one stalls a task."""
+    """Never raises. A missing, unreadable, malformed, or non-v2 marker reads
+    as empty, which biases toward pushing -- a spurious wake costs one cheap
+    check-in, a lost one stalls a task. A v1 marker was written before the
+    hook delivered, so it never counts as delivery evidence."""
     if not valid_workspace_id(ws):
         return _empty_marker()
     try:
         data = json.loads(read_payload_text(wake_marker_path(rd, ws)))
     except (OSError, ValueError):
         return _empty_marker()
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("v") != 2:
         return _empty_marker()
     out = _empty_marker()
-    for key in ("records", "last_push"):
+    for key in ("records", "last_push", "last_delivery"):
         value = data.get(key)
         if isinstance(value, dict):
             out[key] = value
@@ -1082,52 +1120,25 @@ def record_fingerprint(rd, task_id) -> dict:
     return out
 
 
-def prior_hint(rd, ws, task_id):
-    """The event of the last events.jsonl record, read BEFORE this invocation
-    appends its own. None when the tail belongs to a different task: a
-    workspace rebound to a new task must not inherit the old attempt's
-    `blocked` tail, or the new attempt's first prompt would never push."""
-    try:
-        records = parse_events(read_payload_text(events_path(rd, ws)).splitlines())
-    except (OSError, ValueError):
-        return None
-    for rec in reversed(records):
-        if rec.get("task_id") != task_id:
-            return None
-        return rec.get("event")
-    return None
-
-
-def wake_decision(marker, event, fingerprint, prior, now,
-                  debounce_secs=WAKE_DEBOUNCE_SECS):
+def wake_decision(marker, event, fingerprint, now):
     """Decide whether this hint earns a wake push. Pure; clock injected.
 
-    Returns (push, new_marker). The marker's `records` advances ONLY on a
-    push, so a change suppressed by the debounce is delayed, never dropped --
-    advancing it under suppression would swallow a completion record for good.
+    Every blocking notification and every completion-record change pushes.
+    Returns (push, new_marker); `records` advances only on a push, and the
+    caller writes the new marker only after a `sent` delivery.
     """
     if isinstance(marker, dict):
         records = marker.get("records") if isinstance(marker.get("records"), dict) else {}
         last_push = marker.get("last_push") if isinstance(marker.get("last_push"), dict) else {}
     else:
         records, last_push = {}, {}
-    new = {"v": 1, "records": dict(records), "last_push": dict(last_push)}
-
+    new = {"v": 2, "records": dict(records), "last_push": dict(last_push)}
     if event == "blocked":
-        # Transition rule only, no time debounce: a block means a worker is
-        # waiting on a human, and the appended hint becomes the next
-        # invocation's `prior`, so repeats are already self-limiting.
-        return prior != "blocked", new
+        return True, new
     if event not in ("stopped", "review-stopped"):
         return False, new
-
-    changed = any(records.get(k) != v for k, v in fingerprint.items())
-    if not changed:
+    if not any(records.get(k) != v for k, v in fingerprint.items()):
         return False, new
-    since = last_push.get(event)
-    if isinstance(since, (int, float)) and not isinstance(since, bool):
-        if now - since < debounce_secs:
-            return False, new
     # Merge, not replace: a key the fingerprint no longer carries stays, so a
     # deletion never signals and a later recreate does.
     new["records"] = {**records, **fingerprint}
@@ -1764,18 +1775,27 @@ def fold_spend(lines, task_id):
     return out
 
 
-# The watch and the worker-status hook share one wake predicate: a completion
-# record changed. workspaces/*.events.jsonl is deliberately absent -- watching
+# The default watch and the worker-status hook share one completion-record
+# predicate; the default watch also covers think answers and the legacy
+# mech ledger. workspaces/*.events.jsonl is deliberately absent -- watching
 # it would re-admit a signal per worker turn end through the fallback.
 WATCH_DIRS = {
     "tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id),
               (".spend.jsonl", valid_task_id)),
-    "think": ((".launch.json", valid_think_id), (".answer.json", valid_think_id)),
+    "think": ((".answer.json", valid_think_id),),
 }
+BACKSTOP_DIRS = {"tasks": ((".done.json", valid_task_id), (".review.json", valid_task_id))}
+BACKSTOP_GRACE_SECS = 120
+# Kept well under WAKE_HEARTBEAT_STALE_SECS (900) so a director idle for the
+# whole backstop window still wakes in time to refresh its own heartbeat --
+# otherwise a stalled worker with no completion record (a block, or an exit
+# with nothing written) has no path back to the director at all.
+BACKSTOP_HEARTBEAT_SECS = 600
+REVIEW_BOUND_NS = 600_000_000_000
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
 
-def watch_scan(rd, prev):
+def watch_scan(rd, prev, dirs=WATCH_DIRS):
     """Snapshot {path: (mtime_ns, size)} of the watched completion/hint files.
 
     Read-only. A missing subdir is an empty set. A subdir whose listing
@@ -1785,7 +1805,7 @@ def watch_scan(rd, prev):
     signal-storm.
     """
     snap, failed = {}, set()
-    for sub, suffixes in WATCH_DIRS.items():
+    for sub, suffixes in dirs.items():
         d = Path(rd) / sub
         try:
             names = sorted(payload_names(d))
@@ -1892,6 +1912,90 @@ def _watch_loop(rd, interval, heartbeat_secs, debounce_secs, exit_on_signal,
             print(line, flush=True)
             if exit_on_signal:
                 return 0
+
+
+def delivered_records(rd) -> dict:
+    """{file name: {(mtime_ns, size), ...}} from every v2 wake marker. Read-only.
+
+    Keyed by file name because the hook and the watch resolve the repo
+    directory differently; a v1 marker was written before sending, so it
+    never counts as delivery."""
+    out: dict = {}
+    d = Path(rd) / "workspaces"
+    try:
+        names = payload_names(d)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".wake.json") or not valid_workspace_id(name[: -len(".wake.json")]):
+            continue
+        try:
+            data = json.loads(read_payload_text(d / name))
+        except (OSError, ValueError):
+            continue
+        records = data.get("records") if isinstance(data, dict) and data.get("v") == 2 else None
+        if not isinstance(records, dict):
+            continue
+        for path, value in records.items():
+            if (isinstance(value, list) and len(value) == 2
+                    and all(type(item) is int for item in value)):
+                out.setdefault(Path(path).name, set()).add(tuple(value))
+    return out
+
+
+def backstop_tick(st, prev, snap, delivered, now, grace_secs) -> bool:
+    """One backstop pass (pure; clock injected). st: {"pending": {path: first_seen}}.
+
+    True once any new or changed record has stayed undelivered for grace_secs."""
+    pending = st["pending"]
+    for key, value in snap.items():
+        if prev.get(key) != value and key not in pending:
+            pending[key] = now
+    for key in list(pending):
+        value = snap.get(key)
+        if value is None or tuple(value) in delivered.get(Path(key).name, ()):
+            del pending[key]
+    return any(now - first >= grace_secs for first in pending.values())
+
+
+def backstop_heartbeat_due(last_emit, now, heartbeat_secs, active) -> bool:
+    """True iff the backstop's liveness heartbeat should fire: a task is
+    active and heartbeat_secs have elapsed since the last emitted line
+    (signal or heartbeat alike)."""
+    return active and (now - last_emit) >= heartbeat_secs
+
+
+def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
+                    heartbeat_secs=BACKSTOP_HEARTBEAT_SECS):
+    """Silent backstop: print `signal` for an undelivered completion record,
+    or `heartbeat` when nothing is undelivered but a task is still active --
+    the director has no other path to refresh its own ownership heartbeat
+    while idle, and wake delivery starts failing once that heartbeat is
+    stale."""
+    prev, _failed = watch_scan(rd, {}, BACKSTOP_DIRS)
+    st = {"pending": {}}
+    last_emit = time.monotonic()
+    if since_epoch is not None:
+        since_ns = int(since_epoch * 1e9)
+        start = time.monotonic()
+        st["pending"] = {k: start for k, (m, _s) in prev.items() if m > since_ns}
+    while True:
+        time.sleep(interval)
+        snap, _failed = watch_scan(rd, prev, BACKSTOP_DIRS)
+        now = time.monotonic()
+        if backstop_tick(st, prev, snap, delivered_records(rd), now, grace_secs):
+            print("signal", flush=True)
+            last_emit = now
+            if exit_on_signal:
+                return 0
+            st["pending"].clear()
+        elif (now - last_emit >= heartbeat_secs
+              and backstop_heartbeat_due(last_emit, now, heartbeat_secs, heartbeat_active(rd))):
+            print("heartbeat", flush=True)
+            last_emit = now
+            if exit_on_signal:
+                return 0
+        prev = snap
 
 
 def _owner_path(rd) -> Path:
@@ -2579,14 +2683,19 @@ def is_completed(task, done, live_head_sha, workspace) -> bool:
     )  # at least one commit ahead of base
 
 
+def plan_record_matches(task, done, head_sha, workspace) -> bool:
+    """The done record is this task's completed plan attempt at head_sha."""
+    return (isinstance(task, dict) and isinstance(done, dict)
+            and done.get("task_id") == task.get("task_id")
+            and done.get("phase") == "plan" and done.get("outcome") == "completed"
+            and done.get("head_sha") == head_sha
+            and done.get("base_sha") == task.get("base_sha")
+            and attempt_matches(task, done, "plan", workspace))
+
+
 def is_plan_completed(task, done, head_sha, workspace, payload_root) -> bool:
     """Confirm the current planning milestone using immutable private artifacts."""
-    if not isinstance(task, dict) or not isinstance(done, dict):
-        return False
-    if (done.get("task_id") != task.get("task_id") or done.get("phase") != "plan"
-            or done.get("outcome") != "completed" or done.get("head_sha") != head_sha
-            or done.get("base_sha") != task.get("base_sha")
-            or not attempt_matches(task, done, "plan", workspace)):
+    if not plan_record_matches(task, done, head_sha, workspace):
         return False
     artifacts = task.get("plan_artifacts")
     if not isinstance(artifacts, list) or len(artifacts) != 2 or done.get("plan_artifacts") != artifacts:
@@ -2773,12 +2882,21 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     dirty = "unknown" if porcelain is None else ("yes" if porcelain else "no")
     ahead = _git_ancestor(worktree, task.get("base_sha"), head) if worktree_exists else "unknown"
 
+    unreadable = []
+
     def _sidecar(suffix):
+        name = f"{tid}{suffix}"
         try:
-            rec = json.loads(read_payload_text(Path(rd) / "tasks" / f"{tid}{suffix}"))
-        except (OSError, ValueError):
+            rec = json.loads(read_payload_text(Path(rd) / "tasks" / name))
+        except FileNotFoundError:
             return None
-        return rec if isinstance(rec, dict) else None
+        except (OSError, ValueError):
+            unreadable.append(name)
+            return None
+        if not isinstance(rec, dict):
+            unreadable.append(name)
+            return None
+        return rec
 
     done, review = _sidecar(".done.json"), _sidecar(".review.json")
     impl_ws = phase_workspace(task, "implement")
@@ -2798,6 +2916,18 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     mech_unsettled = bool(latest.get("role") == "mech"
                           and status not in CHECKIN_TERMINAL
                           and not _attempt_settled(latest, done))
+
+    unverifiable = []
+    if (review and rev_ws and head
+            and attempt_matches(task, review, "review", rev_ws)
+            and review.get("reviewed_head_sha") == head
+            and not _findings_evidence_ok(review)):
+        unverifiable.append("review")
+    if (done and plan_ws and head and plan_record_matches(task, done, head, plan_ws)
+            and not plan_completed):
+        unverifiable.append("plan")
+    last = read_wake_marker(rd, ws).get("last_delivery") if valid_workspace_id(ws) else None
+    wake = last.get("reason") if isinstance(last, dict) and isinstance(last.get("reason"), str) else "none"
 
     events = []
     for row in workers:
@@ -2827,6 +2957,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # has no `paused` STATUS, so a status-based gate is vacuous and a
         # stale record from a superseded attempt would fire forever; nothing
         # in the core deletes done.json on relaunch.
+        "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "done_outcome": (done.get("outcome")
                          if done and latest
                          and attempt_matches(task, done, latest.get("phase"),
@@ -3288,6 +3419,7 @@ def _main(argv=None) -> int:
     ck.add_argument("--workspaces-json", default=None)
     ck.add_argument("--all", action="store_true")
     add("status")
+    add("review-deadlines")
     add("task-lead-status")
     add("deactivate-task-leads", fenced=True)
     add("should-dispatch-review", "--task-id", "--head-sha")
@@ -3302,6 +3434,8 @@ def _main(argv=None) -> int:
     w.add_argument("--exit-on-signal", action="store_true")
     w.add_argument("--once", action="store_true")
     w.add_argument("--since-epoch", type=float, default=None)
+    w.add_argument("--undelivered-only", action="store_true")
+    w.add_argument("--grace-secs", type=int, default=None)
     vc = add("verify-contract", "--task-id", "--worktree")
     vc.add_argument("--contract", default=None)
     vc.add_argument("--allow-unpinned", action="store_true")
@@ -5171,19 +5305,52 @@ def _main(argv=None) -> int:
             try:
                 task = json.loads(read_payload_text(tf))
             except (OSError, ValueError):
+                print(f"unreadable-task {tf.name}")
+                changed = True
                 continue
             if not isinstance(task, dict):
+                print(f"unreadable-task {tf.name}")
+                changed = True
                 continue
             if not ns.all and task.get("status") in CHECKIN_TERMINAL:
                 continue
             f = checkin_facts(rd, task, poll, payload_root)
             if f["action"] != "none":
                 changed = True
+            for name in f["unreadable"]:
+                print(f"unreadable-record {name}")
+                changed = True
+            for kind in f["unverifiable"]:
+                print(f"unverifiable-evidence {f['task_id']} {kind}")
+                changed = True
             print(f"{f['task_id']} status={f['status']} ws={f['ws']} live={f['live']} "
                   f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
                   f"dirty={f['dirty']} done={f['done']} review={f['review']} "
-                  f"hint={f['hint']} action={f['action']}")
+                  f"hint={f['hint']} action={f['action']} wake={f['wake']}")
         print(f"changed: {'yes' if changed else 'no'}")
+        return 0
+    if ns.cmd == "review-deadlines":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        now_ns = time.time_ns()
+        for tf in sorted(payload_files(rd / "tasks", "*.json")):
+            if tf.name.endswith((".done.json", ".review.json")):
+                continue
+            try:
+                task = json.loads(read_payload_text(tf))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(task, dict) or task.get("status") != "review-dispatched":
+                continue
+            row = latest_native_attempt(task, "review")
+            started = row.get("started_ns") if row else None
+            if isinstance(started, int) and not isinstance(started, bool):
+                left = started + REVIEW_BOUND_NS - now_ns
+                remaining = str(max(0, -(-left // 1_000_000_000)))
+            else:
+                remaining = "unknown"
+            launch = row.get("launch_id") if row else "unknown"
+            print(f"review-deadline task={task.get('task_id')} launch={launch} remaining={remaining}")
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -5393,7 +5560,14 @@ def _main(argv=None) -> int:
                 math.isfinite(ns.since_epoch) and ns.since_epoch >= 0,
                 "since-epoch must be a finite float >= 0",
             )
+        _require(ns.grace_secs is None or ns.undelivered_only,
+                 "grace-secs requires undelivered-only")
+        _require(not (ns.undelivered_only and ns.once), "undelivered-only excludes once")
+        grace = BACKSTOP_GRACE_SECS if ns.grace_secs is None else ns.grace_secs
+        _require(grace >= 30, "grace-secs must be >= 30")
         rd = repo_dir(ns.repo_slug)
+        if ns.undelivered_only:
+            return _backstop_loop(rd, ns.interval, grace, ns.exit_on_signal, ns.since_epoch)
         if ns.once:
             snap, _failed = watch_scan(rd, {})
             since_ns = int(ns.since_epoch * 1e9)
