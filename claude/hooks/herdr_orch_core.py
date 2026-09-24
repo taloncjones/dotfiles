@@ -2387,24 +2387,37 @@ def require_not_consumed(rd, binding_id):
              "binding envelope already integrated; writes are frozen")
 
 
+# Rows that may follow a phase's latest row without superseding it. A live
+# repair worker keeps its implement attempt across a review dispatched into
+# the same workspace; a later plan or implement row still supersedes it.
+TRAILING_PHASES = {"implement": frozenset({"review"})}
+
+
 def attempt_matches(task, done, phase, workspace):
-    """Native history requires the latest row; wholly legacy history stays readable."""
+    """Native history requires the latest row of `phase`, followed only by
+    native rows TRAILING_PHASES allows; wholly legacy history stays readable."""
     workers = task.get("workers", [])
     if not isinstance(workers, list):
         return False
     native = any(isinstance(w, dict) and "runtime" in w for w in workers)
     # A malformed or untyped successor cannot revive an older native attempt
     # or downgrade this task to the permissive legacy matching rules.
-    if native and (
-        not isinstance(workers[-1], dict)
-        or "runtime" not in workers[-1]
-        or workers[-1].get("phase") != phase
-    ):
+    if native and (not isinstance(workers[-1], dict) or "runtime" not in workers[-1]):
         return False
-    matching = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
-    if not matching:
+    positions = [i for i, w in enumerate(workers)
+                 if isinstance(w, dict) and w.get("phase") == phase]
+    if not positions:
         return not native
-    worker = matching[-1]
+    worker = workers[positions[-1]]
+    if native:
+        # The selected row must itself be native: an untyped row can never
+        # stand in for a native attempt's full identity.
+        if "runtime" not in worker:
+            return False
+        allowed = TRAILING_PHASES.get(phase, frozenset())
+        if not all(isinstance(w, dict) and "runtime" in w and w.get("phase") in allowed
+                   for w in workers[positions[-1] + 1:]):
+            return False
     if worker.get("workspace_id") != workspace:
         return False
     # Migration is additive: old attempts compare any recorded fields; native
@@ -3076,9 +3089,9 @@ def _attempt_settled(att, settle):
     """The settlement record covers this exact attempt row.
 
     Compares the FULL ATTEMPT_FIELDS tuple directly against the selected
-    row. Deliberately NOT attempt_matches: its native last-row-phase rule
-    reports a settled implement attempt as unmatched forever once a review
-    row follows it. No legacy field-subset rule here: an identity-less row
+    row. Deliberately NOT attempt_matches: settlement must not depend on
+    later rows, and attempt_matches reports a plan or review attempt as
+    unmatched once any later row follows it. No legacy field-subset rule here: an identity-less row
     would settle vacuously, and binding-scoped write-task only accepts
     native rows anyway -- the caller rejects non-native rows outright."""
     if not isinstance(settle, dict):
