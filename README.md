@@ -530,8 +530,9 @@ file. Three layers, in order:
   `Merge pull request ...`, `Merge <url>`, and the other `git merge` forms),
   `Revert "..."`, `Reapply "..."`, and `fixup!`/`squash!`/`amend!` subjects.
 - **Block** (needs `rg`; warns and skips without it): rejects inline attribution
-  in the subject or body, co-author lines where an agent name starts a word,
-  and emojis.
+  in the subject or body, co-author lines naming an agent anywhere in the line
+  (a leading word boundary only for `aider`, which also matches inside
+  surnames like Raider), and emojis.
 
 `DOTFILES_SKIP_COMMIT_MSG_GUARD=1` bypasses every layer. The hook cannot reach a
 squash merge: GitHub composes that message from the PR body, so the guard for PR
