@@ -1,6 +1,6 @@
 ---
 name: co-review
-description: Freeze a finished change, collect four independent review seats, and evaluate one fail-closed final-gate report.
+description: Freeze a finished change, collect two or four independent review seats by change class, and evaluate one fail-closed final-gate report.
 ---
 
 # Co-Review
@@ -64,8 +64,19 @@ that the PR target repository is the fetch target before resolving `--base-ref`.
 Prepare and verify one frozen snapshot with `review.py prepare` and
 `review.py verify`; a dirty source is still frozen for findings, but a committed
 tree mismatch makes approval incomplete. A local no-PR review cannot fabricate a
-PR number or claim `APPROVE`. Capture and hash the frozen added-line diff and
-exact-head CI payload as precondition artifacts.
+PR number or claim `APPROVE`. Capture and hash the frozen diff and exact-head
+CI payload as precondition artifacts:
+
+```bash
+git -C "$REPO" -c core.quotePath=true diff --no-color --no-ext-diff --no-textconv --no-renames --binary \
+  "$BASE" "$CODEX_TREE" >"$RUN_DIR/frozen.diff" || exit 2
+# A failed capture can leave a partial diff that classifies light; never use it.
+CLASS=$(uv run --no-project python "$GATE_REPORT" classify --diff "$RUN_DIR/frozen.diff") || exit 2
+# `co-review --full` sets CLASS=full here regardless of the classifier.
+```
+
+Write `CLASS` into the expected identity's `class` field before resolving any
+route; set `report.class` to the same value.
 
 Use an empty helper-owned `SNAPSHOT_DIR` only for `review.py prepare` output and
 parse `MANIFEST` from that command's JSON result. Keep the expected identity,
@@ -88,27 +99,48 @@ seat before launch. A route that is unavailable or unsupported stops the gate.
 ```bash
 POLICY=$(uv run --no-project python "$GATE_REPORT" policy --section POLICY) || exit 2
 uv run --no-project python "$GATE_REPORT" schema >"$RUN_DIR/gate-schema.json" || exit 2
+# Full tier:
 uv run --no-project python "$RUNNER" route --runtime claude --role reviewer --risk normal --provisional >"$RUN_DIR/claude.route.json"
 uv run --no-project python "$RUNNER" route --runtime codex --role reviewer --risk normal --provisional >"$RUN_DIR/codex.route.json"
 uv run --no-project python "$RUNNER" route --runtime codex --role skeptic --risk normal --provisional >"$RUN_DIR/breaker.route.json"
 uv run --no-project python "$RUNNER" route --runtime codex --role skeptic --risk normal --provisional >"$RUN_DIR/verifier.route.json"
+# Light tier: only the codex reviewer route and a Claude-runner verifier route.
+uv run --no-project python "$RUNNER" route --runtime claude --role skeptic --risk normal --provisional >"$RUN_DIR/verifier.route.json"
 ```
 
 Run `gate_report.py schema` before report assembly. Resolve each fresh seat
 with the shared runner and `--provisional`; this records unknown availability
-honestly and stops if the route is actually unavailable or unsupported. Run four
-fresh, independent read-only 600-second seats:
-`claude` reviewer, `codex` reviewer, `breaker` skeptic, then `verifier` skeptic
-after the first three artifacts are complete. Every prompt includes the
+honestly and stops if the route is actually unavailable or unsupported.
+
+Full tier only: Run four fresh, independent read-only 600-second seats:
+`claude` reviewer, `codex` reviewer, `breaker` skeptic, then `verifier`
+skeptic after every finder artifact is complete.
+
+The light tier runs `codex` and `verifier`: first the native `codex` reviewer
+seat, then, after its artifact is complete, the verifier through the Claude
+runner, so the light gate keeps one seat per model:
+
+```bash
+uv run --no-project python "$RUNNER" run \
+  --runtime claude --role skeptic --risk normal --provisional \
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json"
+```
+
+The light verifier receives the one `codex` artifact path and digest and
+every known blocker.
+
+Every prompt includes the
 extracted policy, frozen diff, manifest identity, the complete `## Classes`
 section of the failure-class rubric, and
-declared threat model. The verifier also receives first-seat artifact
+declared threat model. The verifier also receives finder artifact
 paths/digests and known blockers. Save each runner JSON response as that seat's
 nonempty artifact and preserve requested and observed route metadata. The
 controller never stands in for a seat.
 
-The Claude seat uses the resolved original-account route through the bounded
-runner and preserves its raw response as the `claude` artifact:
+Full tier only: the Claude seat uses the resolved original-account route
+through the bounded runner and preserves its raw response as the `claude`
+artifact:
 
 ```bash
 uv run --no-project python "$RUNNER" run \
@@ -117,8 +149,10 @@ uv run --no-project python "$RUNNER" run \
   --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
 ```
 
-From Codex, the `codex`, `breaker`, and `verifier` seats are fresh native
-children after route resolution. The native spawn API has no timeout or sandbox
+From Codex, the full tier's `codex`, `breaker`, and `verifier` seats and the
+light tier's `codex` seat are fresh native children after route resolution;
+the light `verifier` is the Claude runner call above. The native spawn API has
+no timeout or sandbox
 arguments: give each an explicit read-only, disposable-fixture task and use the
 coordinator's 600-second deadline to interrupt an unfinished child. Record its
 actual completion artifact. Do not invoke `codex exec`, a generic `/code-review`
@@ -138,36 +172,50 @@ reference skills under the canonical policy. Require the reviewer to do the
 review itself, without another review workflow, delegated reviewers, partners,
 network actions, comments, fixes or merge actions.
 
-Dispatch the `codex` reviewer and `breaker` through the native `spawn_agent`
-API with `fork_turns: "none"`, `model` and `reasoning_effort` taken from their
-exact parsed `RUNNER route` JSON. The resulting messages contain the complete
-packet above and no controller history or other seat output. Keep the returned
-handles. The existing Claude seat uses the same full packet without either
-native report.
+Full tier: dispatch the `codex` reviewer and `breaker` through the native
+`spawn_agent` API with `fork_turns: "none"`, `model` and `reasoning_effort`
+taken from their exact parsed `RUNNER route` JSON. The resulting messages
+contain the complete packet above and no controller history or other seat
+output. Keep the returned handles. The existing Claude seat uses the same
+full packet without either native report.
 
-Wait for Claude, Codex, and breaker to complete and collect their actual native
-or runner results before continuing. The coordinator uses `wait_agent` for each
-native handle and a 600-second deadline; it uses `interrupt_agent` only after a
-deadline. A failed, timed-out, empty, or malformed completion stops as
-incomplete. Store each successful completion as its named report-relative
-artifact and record its digest.
+Light tier: dispatch only the `codex` reviewer through native `spawn_agent`
+with the same packet rules.
 
-Only after those three artifacts and digests exist, render the verifier packet.
-It includes the same full frozen-value packet, the named Claude/Codex/breaker
-artifact paths and digests, and the expected known blockers. It includes no
-other controller history. Dispatch the verifier with native `spawn_agent`,
-`fork_turns: "none"`, and its parsed skeptic-route `model` and
-`reasoning_effort`; then wait, collect, validate, and hash its completion using
-the same deadline rules. The verifier independently tests material claims,
-accounts for every blocker and reconciles the combined coverage ledger. It
-does not start another unrestricted search.
+Full tier: wait for Claude, Codex, and breaker to complete and collect their
+actual native or runner results before continuing. The coordinator uses
+`wait_agent` for each native handle and a 600-second deadline; it uses
+`interrupt_agent` only after a deadline. A failed, timed-out, empty, or
+malformed completion stops as incomplete. Store each successful completion as
+its named report-relative artifact and record its digest.
+
+Light tier: wait for the `codex` seat only, under the same deadline and
+incomplete rules.
+
+Full tier: only after those three artifacts and digests exist, render the
+verifier packet. It includes the same full frozen-value packet, the named
+Claude/Codex/breaker artifact paths and digests, and the expected known
+blockers. Light tier: only after the `codex` artifact and digest exist,
+render the verifier packet with that one artifact path and digest and the
+expected known blockers, run it with the Claude runner command above, then
+collect, validate, and hash its runner JSON under the same deadline rules. It
+includes no other controller history. The full-tier verifier is dispatched
+with native `spawn_agent`, `fork_turns: "none"`, and its parsed skeptic-route
+`model` and `reasoning_effort`; then wait, collect, validate, and hash its
+completion using the same deadline rules. The verifier independently tests
+material claims, accounts for every blocker and reconciles the combined
+coverage ledger. It does not start another unrestricted search.
 
 Create `report.json` from the exact `gate_report.py schema` example. Fill all
-fields from the verified manifest, independent expected identity, actual four
-runtime artifacts and SHA-256 digests, frozen diff/CI artifact digests,
-findings, prior blocker dispositions, and required coverage. Paths are report
-relative. Do not substitute coordinator prose for a missing or unsuccessful
-runtime completion. Then verify, evaluate, and clean up:
+fields from the verified manifest, independent expected identity, SHA-256
+digests, frozen diff/CI artifact digests, findings, prior blocker
+dispositions, and required coverage.
+
+Fill the seat entries from the actual runtime artifacts for `CLASS`; the
+light `verifier` entry records runtime `claude` and the `codex` entry records
+runtime `codex`, as the evaluator requires. Paths are report relative. Do not
+substitute coordinator prose for a missing or unsuccessful runtime
+completion. Then verify, evaluate, and clean up:
 
 ```bash
 # co-review-finalize:start
