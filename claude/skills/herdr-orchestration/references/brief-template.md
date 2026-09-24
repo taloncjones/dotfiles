@@ -337,6 +337,11 @@ The prefix and the tag are named apart on purpose: a rendered brief must never
 hold the two joined, so text echoed from a brief can never be harvested as a
 lesson.
 
+The 160-character cap does not guarantee one physical row: the TUI
+hard-wraps a long line into several. The harvest step (SKILL.md section 4)
+joins wrapped continuation rows before matching, so a lesson still files
+intact.
+
 ## Director-authored repair and ship briefs
 
 Repair and ship briefs have no fixed template; the director writes them per
