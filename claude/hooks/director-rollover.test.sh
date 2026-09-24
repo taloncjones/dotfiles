@@ -844,6 +844,28 @@ i=0; until LOG=$(find "$FX" -name rollover.jsonl) && [ -n "$LOG" ] && grep -q su
 done
 SH
 
+check "statusline: records host context fill for a herdr session only; meter unchanged" <<'SH'
+unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+node - <<'JS'
+const fs = require("fs"), path = require("path");
+const sl = require(process.env.REPO_ROOT + "/claude/statusline.js");
+const dir = process.env.FX + "/cfg";
+const sid = "11111111-1111-4111-8111-111111111111";
+const data = { session_id: sid, context_window: { remaining_percentage: 60, total_tokens: 1000000 } };
+// (60 - 16.5) / 83.5 = 52.1% usable left -> 48% used, the meter's own figure.
+if (sl.usedPercent(60, 1000000) !== 48) throw new Error("used " + sl.usedPercent(60, 1000000));
+if (!sl.buildContextMeter(60, 1000000).includes(" 48%")) throw new Error("meter changed");
+sl.recordContext(data, { HERDR_ENV: "1", CLAUDE_CONFIG_DIR: dir }, 1700000000123);
+const rec = JSON.parse(fs.readFileSync(path.join(dir, "herdr-orch/context", sid + ".json"), "utf8"));
+if (rec.v !== 1 || rec.session_id !== sid || rec.used_pct !== 48 || rec.ts !== 1700000000)
+  throw new Error(JSON.stringify(rec));
+sl.recordContext(data, { CLAUDE_CONFIG_DIR: dir + "-off" }, 1);
+if (fs.existsSync(dir + "-off")) throw new Error("wrote without HERDR_ENV");
+sl.recordContext({ ...data, session_id: "../escape" }, { HERDR_ENV: "1", CLAUDE_CONFIG_DIR: dir }, 1);
+if (fs.readdirSync(path.join(dir, "herdr-orch/context")).length !== 1) throw new Error("bad id written");
+JS
+SH
+
 check "hook: executable, python3 shebang, registered on clear|compact" <<'SH'
 test -x "$REPO_ROOT/claude/hooks/director_rollover.py"
 head -n 1 "$REPO_ROOT/claude/hooks/director_rollover.py" | grep -qxF '#!/usr/bin/env python3'
