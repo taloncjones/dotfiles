@@ -48,28 +48,93 @@ Validate the returned absolute path and SHA-256 before dispatch. Review the
 frozen specification for ambiguity, contradictory requirements, missing
 acceptance criteria, boundary cases, scope, security, privacy, rollback, and
 external dependencies.
-Probe recovery semantics explicitly: independently enumerate the
-interruption windows the design's durable writes and authority
-transitions imply -- including windows the specification never mentions
--- and for each require the spec to name the durable evidence that
-survives it, every actor that can destroy or rewrite that evidence, and
-the recovery behavior; missing coverage is a finding, whether or not the
-spec claims crash survival. Flag an oversized scope as a finding: a
-specification that as a whole introduces more than one evidence model
-(one set of durable artifacts consulted for an authority decision) or
-more than three new multi-write sequences (2+ durable writes that must
-survive interruption between them) is a slice-splitting signal;
-specifications with no durable-write behavior are exempt.
+
+## Class and round cap
+
+Set `ARTIFACT_CLASS` to `advisory` when the caller says the artifacts are
+workflow prose with no durable write or authority transition of their own;
+otherwise it stays `behavior`. Set `SPEC_MAX_ROUNDS` from this table unless
+the kickoff instruction names a higher cap; nothing else raises it. The plan
+review uses its own `PLAN_MAX_ROUNDS`, so one shell running both reviews
+never carries the spec cap into the plan review.
+
+| Skill             | Default max Codex rounds | Raised by                    |
+| ----------------- | ------------------------ | ---------------------------- |
+| codex-spec-review | 4                        | the kickoff instruction only |
+
+A round is one runner call, whatever its outcome; the skeptic verification
+round counts. Record every call, failed or empty ones included, as its own
+row in the spec's revision history (round, frozen SHA-256, verdict or
+failure, input tokens), so a restart counts rows and never resets the cap.
+Stop at the cap. After a complete last call (findings plus one verdict), fold
+the fixes you accept, list every still-open finding with its disposition in
+the spec's accepted residuals, and proceed, unless a finding rated critical
+or high is still open. That, or an incomplete last call (timeout, empty,
+malformed, no verdict), blocks the caller; a herdr plan worker emits
+`--outcome paused`.
+
+For `behavior`, probe recovery semantics explicitly: independently enumerate
+the interruption windows the design's durable writes and authority
+transitions imply -- including windows the specification never mentions --
+and for each require the spec to name the durable evidence that survives it,
+every actor that can destroy or rewrite that evidence, and the recovery
+behavior; missing coverage is a finding, whether or not the spec claims
+crash survival. For `advisory`, skip that probe and ask for style, rigor,
+and hardening suggestions as non-blocking; record them as accepted
+residuals. Either class flags an oversized scope as a finding: a
+specification that as a whole introduces more than one evidence model (one
+set of durable artifacts consulted for an authority decision) or more than
+three new multi-write sequences (2+ durable writes that must survive
+interruption between them) is a slice-splitting signal; specifications with
+no durable-write behavior are exempt.
 
 Require bounded severity/location/problem/fix output and one verdict.
 Empty, malformed, or failed output is incomplete.
+
+## Round 1: the full frozen specification
 
 Resolve the independent Codex reviewer model and effort with
 the shared runtime runner:
 
 ```bash
+ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"
+SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"
+if [ "$ARTIFACT_CLASS" = advisory ]; then
+  FOCUS="These are advisory workflow-prose artifacts with no durable write or authority transition of their own. Report defects that would make an implementer do the wrong thing; return style, rigor, and hardening suggestions as severity low."
+else
+  FOCUS="Probe recovery semantics: independently enumerate the interruption windows the design's durable writes and authority transitions imply, including windows the specification never mentions, and for each require the spec to name the durable evidence that survives it, every actor that can destroy or rewrite that evidence, and the recovery behavior; missing coverage is a finding, whether or not the spec claims crash survival."
+fi
 PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-spec-review.XXXXXX")
-printf '%s\n' "Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Probe recovery semantics: independently enumerate the interruption windows the design's durable writes and authority transitions imply, including windows the specification never mentions, and for each require the spec to name the durable evidence that survives it, every actor that can destroy or rewrite that evidence, and the recovery behavior; missing coverage is a finding, whether or not the spec claims crash survival. Flag an oversized scope as a finding: a specification that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; specifications with no durable-write behavior are exempt. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+printf '%s\n' "Round 1 of $SPEC_MAX_ROUNDS. $FOCUS Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID. Flag an oversized scope as a finding: a specification that as a whole introduces more than one evidence model (one set of durable artifacts consulted for an authority decision) or more than three new multi-write sequences (2+ durable writes that must survive interruption between them) is a slice-splitting signal; specifications with no durable-write behavior are exempt. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
+uv run --no-project python "$RUNNER" run \
+  --runtime codex --role reviewer --risk normal --provisional \
+  --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$PROMPT_FILE"
+```
+
+## Round k: the diff since the previous round
+
+After folding fixes, freeze the revised spec with the same artifact command
+and the same `OUTPUT_DIR`, set `FROZEN_SPEC` and `FROZEN_SPEC_SHA256` from
+the new result, set `PREVIOUS_FROZEN_SPEC` to the frozen path the previous
+call reviewed, and set `ROUND` to the next call number from the revision
+history rows. Write `$OPEN_FINDINGS` by hand: each prior finding still open,
+with its disposition (fixed in the diff, disputed with a reason, or accepted
+residual).
+
+```bash
+ROUND_DIFF="$OUTPUT_DIR/spec-round-$ROUND.diff"
+OPEN_FINDINGS="$OUTPUT_DIR/spec-open-findings-$ROUND.md"
+DIFF_STATUS=0
+diff -u "$PREVIOUS_FROZEN_SPEC" "$FROZEN_SPEC" >"$ROUND_DIFF" || DIFF_STATUS=$?
+[ "$DIFF_STATUS" -le 1 ] || exit 2
+if [ "$ARTIFACT_CLASS" = advisory ]; then
+  FOCUS="These are advisory workflow-prose artifacts; return style, rigor, and hardening suggestions as severity low."
+else
+  FOCUS="Apply the recovery-semantics probe to durable writes and authority transitions the diff adds or changes."
+fi
+PROMPT_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-spec-review.XXXXXX")
+printf '%s\n' "Round $ROUND of $SPEC_MAX_ROUNDS. $FOCUS Review only frozen specification $FROZEN_SPEC with SHA-256 $FROZEN_SPEC_SHA256 for task $TASK_ID, and within it only the changes in unified diff $ROUND_DIFF since the previous round. For each open finding in $OPEN_FINDINGS return CLOSED or STILL-OPEN with a reason. Read the full specification only for sections the diff or a finding cites. Raise a new finding only on changed text or on a defect that blocks an open finding's fix. Return severity, location, problem, concrete fix, and one verdict. Do not invoke skills, partners, or external actions." >"$PROMPT_FILE"
 uv run --no-project python "$RUNNER" run \
   --runtime codex --role reviewer --risk normal --provisional \
   --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
