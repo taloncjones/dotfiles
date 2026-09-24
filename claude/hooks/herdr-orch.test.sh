@@ -2355,6 +2355,37 @@ grep -q 'think/' "$R/event-schema.md"
 grep -q 'models.think\|"think": \["fable", "opus"\]' "$R/state-layout.md"
 SH
 
+check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state layout" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+P="claude/skills/post-merge/SKILL.md"
+grep -q '^## Lessons step (<lessons-step>)$' "$R/brief-template.md"
+grep -q '^## Director-authored repair and ship briefs$' "$R/brief-template.md"
+[ "$(grep -c '<lessons-step>' "$R/brief-template.md")" -ge 6 ]
+grep -Fq 'at most 160 characters' "$R/brief-template.md"
+if grep -Fq 'LESSON: [' "$R/brief-template.md"; then exit 1; fi
+if grep -Eq '^[[:space:]]*LESSON:' "$R/brief-template.md"; then exit 1; fi
+grep -q '^### Lesson harvest$' "$S"
+grep -Fq 'herdr pane read <pane_id> --source recent-unwrapped --lines 200' "$S"
+grep -Fq 'tasks/<task_id>.lessons.md' "$S"
+grep -Fq 'skip the Lesson harvest' "$S"
+grep -Fq 'through every following indented' "$S"
+if grep -Fq 'to the end of the line' "$S"; then exit 1; fi
+grep -Fq 'before the verdict or stale-reset' "$S"
+grep -Fq 'see references/state-layout.md,' "$S"
+grep -Fq 'does not guarantee one physical row' "$R/brief-template.md"
+grep -Fq 'tasks/<task_id>.lessons.md' "$P"
+grep -Fq 'artifacts/<task_id>/review-*/findings.md' "$P"
+grep -Fq '.todos/completed/' "$P"
+grep -Fq 'task id from the PR' "$P"
+grep -Fq "on every run" "$P"
+grep -Fq "grep -E '^(- )?LESSON:'" "$P"
+if grep -Fq 'only when the record' "$P"; then exit 1; fi
+if grep -Fq '.todos/done/' "$P"; then exit 1; fi
+grep -Fq '<task_id>.lessons.md' "$R/state-layout.md"
+grep -q '^## Lesson ledger$' "$R/state-layout.md"
+grep -Fq 'append-only' "$R/state-layout.md"
+SH
+
 check "routing_table: all roles, null model on no survivor, global 3/5" <<PY
 $LOAD
 avail={"fable":True,"opus":True,"sonnet":True,"haiku":True}

@@ -64,6 +64,7 @@ STATE_ROOT/
       <task_id>.review.json           # review worker verdict (separate file)
       <task_id>.spend.jsonl           # mech spend ledger (start/end lines)
       <task_id>.brief.md              # mech kickoff brief file (--brief-file)
+      <task_id>.lessons.md            # lesson ledger, director-written, append-only (see Lesson ledger)
       orch-edits.jsonl                # tasks/orch-edits.jsonl bounded edit-marker audit
     bindings/
       <binding_id>.json               # launcher-issued lead dispatch binding
@@ -820,3 +821,39 @@ and must be repo-local, deterministic, and worktree-safe: no STATE_ROOT
 writes, no machine-state mutation, no network, no secret echo. Full
 requirements: the task's private spec under `docs/superpowers/specs/` and the
 authoring rules echoed in `brief-template.md`.
+
+## Lesson ledger
+
+`tasks/<task_id>.lessons.md` holds the rule lessons and harvest notes for one
+task (SKILL.md section 4, Lesson harvest); lessons that name a fixable defect
+go to todos instead. Only the director writes it, by convention and only while
+it holds the owner fence, at the check-in that reads a completion record or a
+review findings file and in the turn it handles friction itself. The file is
+append-only: each batch is one shell append (`>>`) of a
+`## <UTC timestamp> <source>` header and its lines, and it is never rewritten,
+so an interrupted append can only leave a truncated last line. Readers use
+three kinds of line: the batch header, a lesson line that starts with the
+`LESSON:` prefix and a `[<task_id> <phase>]` tag, and a note
+`no LESSON line found (<source>)`; they ignore any other line. A lesson line
+already present is not appended again. `/post-merge` step 1 reads the ledger
+before teardown, as unverified candidates; teardown does not remove it. It is
+machine-local, never committed, and invisible to the core's record and orphan
+scans, which key on `.json` and `.jsonl` suffixes.
+
+```mermaid
+flowchart LR
+  w[plan, implement, repair, mech worker] -- lines in the emit-done message --> pane[pane text]
+  r[reviewer] -- Lessons section --> f[findings.md]
+  s[ship worker] -- Lessons section --> sm[ship.md]
+  d[director friction] --> h
+  pane --> h{check-in harvest}
+  f --> h
+  h -- fixable defect --> todo[owning or new todo]
+  h -- rule or note --> led[tasks/task_id.lessons.md]
+  led --> pm[/post-merge step 1/]
+  f --> pm
+  sm --> pm
+  todo -- task's own todo file --> pm
+  pm -- admission filter, cap, confirm --> al[agent-lessons.md]
+  pm -- hookable --> ht[hook todo]
+```
