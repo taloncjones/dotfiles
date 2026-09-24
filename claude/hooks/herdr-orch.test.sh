@@ -9958,7 +9958,59 @@ assert c.plan_record_matches(task, done, "h" * 40, "w1")
 assert not c.plan_record_matches(task, dict(done, outcome="failed"), "h" * 40, "w1")
 PY
 
-check "review-deadlines: ceil remaining from the review row; unknown without one" <<PY
+check "review_deadline: sized from the pinned contract and the diff, ceiling on unknown input" <<PY
+$LOAD
+import hashlib, subprocess, time
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+rd = c.state_root() / "slug-d"; os.makedirs(rd / "tasks")
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "base"); base = g("rev-parse", "HEAD")
+for n in ("a.txt", "b.txt", "c.txt"):
+    open(os.path.join(wt, n), "w").write(n)
+g("add", "a.txt", "b.txt", "c.txt"); g("commit", "-q", "-m", "work"); head = g("rev-parse", "HEAD")
+os.makedirs(os.path.join(wt, "claude", "contracts"))
+rel = "claude/contracts/td-d-contract.json"
+body = json.dumps({"v": 1, "task_id": "td-d", "commands": [
+    {"name": "a", "run": "true", "timeout_secs": 100}, {"name": "b", "run": "true"}]}).encode()
+open(os.path.join(wt, rel), "wb").write(body)
+now = time.time_ns()
+row = {"phase": "review", "runtime": "claude", "launch_id": "rev-1", "workspace_id": "w1",
+       "pane_id": "w1:p2", "source_head_sha": head, "started_ns": now - 100 * 10**9}
+task = {"task_id": "td-d", "status": "review-dispatched", "worktree": wt, "base_sha": base,
+        "review_head_sha": head, "contract_path": rel,
+        "contract_sha256": hashlib.sha256(body).hexdigest(), "workers": [row]}
+d = c.review_deadline(rd, task, now)
+# floor 900 + contract (100 + 600) + 20 s x 3 files = 1660; hard = 1660 + 600
+assert (d["deadline_secs"], d["hard_secs"], d["contract"], d["files"]) == (1660, 2260, 700, 3), d
+assert (d["state"], d["remaining"], d["launch"]) == ("running", "1560", "rev-1"), d
+d = c.review_deadline(rd, task, now + 1700 * 10**9)
+assert (d["state"], d["remaining"]) == ("overdue", "460"), d
+d = c.review_deadline(rd, task, now + 2300 * 10**9)
+assert (d["state"], d["remaining"]) == ("expired", "0"), d
+d = c.review_deadline(rd, dict(task, contract_sha256="0" * 64), now)
+assert (d["contract"], d["deadline_secs"]) == ("unknown", 3600), d
+d = c.review_deadline(rd, dict(task, worktree=os.path.join(wt, "gone")), now)
+assert (d["files"], d["deadline_secs"]) == ("unknown", 3600), d
+d = c.review_deadline(rd, dict(task, workers=[{k: v for k, v in row.items() if k != "started_ns"}]), now)
+assert (d["state"], d["remaining"]) == ("unknown", "unknown"), d
+cfg = rd / "config.json"
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": 60, "deadline_ceiling_secs": 1000}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 820   # 60 + 700 + 60
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": 60, "deadline_ceiling_secs": 500}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 500
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": 900, "deadline_ceiling_secs": 100}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 900   # ceiling raised to the floor
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": True, "deadline_ceiling_secs": 99999}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 1660  # both invalid -> defaults
+assert not hasattr(c, "REVIEW_BOUND_NS")
+PY
+
+check "review-deadlines: sized state line per review-dispatched task; unknown without a row" <<PY
 $LOAD
 import subprocess, time
 root = tempfile.mkdtemp(); slug = "github-com-org-deadline-cafe0002"
@@ -9971,16 +10023,19 @@ def task(tid, status, started):
               open(os.path.join(rd, "tasks", f"{tid}.json"), "w"))
 now = time.time_ns()
 task("PROJ-1", "review-dispatched", now - 100 * 10**9)
-task("PROJ-2", "review-dispatched", now - 700 * 10**9)
+task("PROJ-2", "review-dispatched", now - 3700 * 10**9)
 task("PROJ-3", "completed", now)
 task("PROJ-4", "review-dispatched", None)
+task("PROJ-5", "review-dispatched", now - 4300 * 10**9)
 out = subprocess.run([sys.executable, "claude/hooks/herdr_legacy_fixture.py", "review-deadlines",
                       "--repo-slug", slug], env=dict(os.environ, CLAUDE_CONFIG_DIR=root),
                      capture_output=True, text=True, check=True).stdout.splitlines()
-assert "review-deadline task=PROJ-1 launch=rev-1 remaining=500" in out, out
-assert "review-deadline task=PROJ-2 launch=rev-1 remaining=0" in out, out
+tail = " deadline_secs=3600 hard_secs=4200 basis=contract:unknown,files:unknown"
+assert "review-deadline task=PROJ-1 launch=rev-1 remaining=3500 state=running" + tail in out, out
+assert "review-deadline task=PROJ-2 launch=rev-1 remaining=500 state=overdue" + tail in out, out
 assert not any("PROJ-3" in l for l in out), out
-assert "review-deadline task=PROJ-4 launch=unknown remaining=unknown" in out, out
+assert "review-deadline task=PROJ-4 launch=unknown remaining=unknown state=unknown" + tail in out, out
+assert "review-deadline task=PROJ-5 launch=rev-1 remaining=0 state=expired" + tail in out, out
 PY
 
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY

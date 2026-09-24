@@ -1798,7 +1798,6 @@ BACKSTOP_GRACE_SECS = 120
 # otherwise a stalled worker with no completion record (a block, or an exit
 # with nothing written) has no path back to the director at all.
 BACKSTOP_HEARTBEAT_SECS = 600
-REVIEW_BOUND_NS = 600_000_000_000
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
 
@@ -2776,6 +2775,96 @@ def should_dispatch_review(task, head_sha) -> bool:
     if not isinstance(task, dict) or task.get("status") != "completed":
         return False
     return task.get("review_head_sha") != head_sha
+
+
+REVIEW_SECS_PER_FILE = 20
+REVIEW_GRACE_SECS = 600
+REVIEW_DEADLINE_DEFAULTS = {"deadline_floor_secs": 900, "deadline_ceiling_secs": 3600}
+REVIEW_DEADLINE_BOUNDS = (60, 14400)
+
+
+def _review_deadline_config(rd):
+    """(floor, ceiling) from config.json `review`; a bad value takes its default."""
+    section = read_config(rd).get("review")
+    section = section if isinstance(section, dict) else {}
+    lo, hi = REVIEW_DEADLINE_BOUNDS
+    values = {}
+    for key, default in REVIEW_DEADLINE_DEFAULTS.items():
+        v = section.get(key)
+        ok = isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+        values[key] = v if ok else default
+    floor = values["deadline_floor_secs"]
+    return floor, max(floor, values["deadline_ceiling_secs"])
+
+
+def _pinned_contract_secs(task):
+    """Summed timeout_secs of the task's pinned contract, or None when the
+    pin, the file, its digest, or its schema cannot be established."""
+    wt, rel, pin = task.get("worktree"), task.get("contract_path"), task.get("contract_sha256")
+    if not all(isinstance(v, str) and v for v in (wt, rel, pin)):
+        return None
+    path = Path(wt) / rel
+    try:
+        if path.is_symlink() or not contained(path, wt) or not path.is_file():
+            return None
+        data = path.read_bytes()
+        rec = json.loads(data)
+    except (OSError, ValueError):
+        return None
+    if hashlib.sha256(data).hexdigest() != pin:
+        return None
+    if validate_contract(rec, task.get("task_id")) is not None:
+        return None
+    return sum(cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT) for cmd in rec["commands"])
+
+
+def _review_diff_files(task):
+    """Files changed between the base and the dispatched review head, or None."""
+    wt, base, head = task.get("worktree"), task.get("base_sha"), task.get("review_head_sha")
+    if not isinstance(wt, str) or not Path(wt).is_dir():
+        return None
+    if not all(isinstance(s, str) and SHA40_RE.fullmatch(s) for s in (base, head)):
+        return None
+    out = _git(wt, "diff", "--name-only", base, head)
+    if out is None:
+        return None
+    return len([line for line in out.splitlines() if line.strip()])
+
+
+def review_deadline(rd, task, now_ns):
+    """The sized bound for the task's latest native review row.
+
+    Recomputed on every call; an input that cannot be established makes the
+    deadline the ceiling, so a missing input never cuts a review short."""
+    floor, ceiling = _review_deadline_config(rd)
+    contract, files = _pinned_contract_secs(task), _review_diff_files(task)
+    if contract is None or files is None:
+        deadline = ceiling
+    else:
+        deadline = min(ceiling, floor + contract + REVIEW_SECS_PER_FILE * files)
+    hard = deadline + REVIEW_GRACE_SECS
+    row = latest_native_attempt(task, "review")
+    started = row.get("started_ns") if row else None
+    if isinstance(started, int) and not isinstance(started, bool):
+        elapsed = now_ns - started
+        if elapsed < deadline * 1_000_000_000:
+            state, target = "running", deadline
+        elif elapsed < hard * 1_000_000_000:
+            state, target = "overdue", hard
+        else:
+            state, target = "expired", None
+        if target is None:
+            remaining = "0"
+        else:
+            left = started + target * 1_000_000_000 - now_ns
+            remaining = str(max(0, -(-left // 1_000_000_000)))
+    else:
+        state, remaining = "unknown", "unknown"
+    return {"launch": row.get("launch_id") if row else "unknown",
+            "deadline_secs": deadline, "hard_secs": hard,
+            "state": state, "remaining": remaining,
+            "contract": "unknown" if contract is None else contract,
+            "files": "unknown" if files is None else files}
 
 
 CHECKIN_TERMINAL = frozenset({"failed", "abandoned", "merged"})
@@ -5362,15 +5451,11 @@ def _main(argv=None) -> int:
                 continue
             if not isinstance(task, dict) or task.get("status") != "review-dispatched":
                 continue
-            row = latest_native_attempt(task, "review")
-            started = row.get("started_ns") if row else None
-            if isinstance(started, int) and not isinstance(started, bool):
-                left = started + REVIEW_BOUND_NS - now_ns
-                remaining = str(max(0, -(-left // 1_000_000_000)))
-            else:
-                remaining = "unknown"
-            launch = row.get("launch_id") if row else "unknown"
-            print(f"review-deadline task={task.get('task_id')} launch={launch} remaining={remaining}")
+            d = review_deadline(rd, task, now_ns)
+            print(f"review-deadline task={task.get('task_id')} launch={d['launch']} "
+                  f"remaining={d['remaining']} state={d['state']} "
+                  f"deadline_secs={d['deadline_secs']} hard_secs={d['hard_secs']} "
+                  f"basis=contract:{d['contract']},files:{d['files']}")
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
