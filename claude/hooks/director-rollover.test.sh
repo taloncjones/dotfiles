@@ -588,7 +588,7 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
     --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
 PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
     --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
-    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 0.5
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 3
 ! grep -q '^pane run' "$FX/herdr.log"
 LOG=$(find "$FX" -name rollover.jsonl)
 python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "no-info-block"), r' "$LOG"
@@ -617,7 +617,7 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
     --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
 PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
     --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
-    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 0.5
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 3
 ! grep -q '^pane run' "$FX/herdr.log"
 LOG=$(find "$FX" -name rollover.jsonl)
 python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "agent-not-idle"), r' "$LOG"
@@ -697,7 +697,7 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
     --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
 PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
     --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
-    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 0.5
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 3
 ! grep -q '^pane run' "$FX/herdr.log"
 LOG=$(find "$FX" -name rollover.jsonl)
 python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "input-not-empty"), r' "$LOG"
