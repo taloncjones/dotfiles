@@ -2268,6 +2268,36 @@ def watch_state(root_pid, slug):
     return live, ("live" if live else "none")
 
 
+_RULE_LINE_RE = re.compile(r"─{20,}")
+_PROMPT_LINE_RE = re.compile(r"❯(?: (.*))?")
+# The live statusline meter (claude/statusline.js): ten block cells and NN%.
+_METER_LINE_RE = re.compile(r" *[█░]{10} \d{1,3}%.*")
+ROLLOVER_READ_SETTLE_SECS = 0.5
+
+
+def current_input(text):
+    """The Claude Code input region's text from a `pane read`, or None.
+
+    The region is the prompt line (U+276F) plus any continuation lines
+    between the bottom-most two full-width U+2500 rules, and the line under
+    the lower rule must be the live statusline meter: the footer is redrawn
+    in place, so the meter never appears in history. Anything else is
+    ambiguous and returns None."""
+    lines = [line.rstrip() for line in text.rstrip().splitlines()[-20:]]
+    rules = [i for i, line in enumerate(lines) if _RULE_LINE_RE.fullmatch(line)]
+    if len(rules) < 2:
+        return None
+    upper, lower = rules[-2], rules[-1]
+    if lower - upper < 2 or lower + 1 >= len(lines):
+        return None
+    if not _METER_LINE_RE.fullmatch(lines[lower + 1]):
+        return None
+    m = _PROMPT_LINE_RE.fullmatch(lines[upper + 1])
+    if not m:
+        return None
+    return "\n".join([m.group(1) or ""] + lines[upper + 2:lower]).strip()
+
+
 def rollover_warning(reason) -> str:
     return (f"[WARNING] herdr director rollover: lease NOT re-established ({reason}).\n"
             "Run the herdr-orchestration section-1 preflight; if it reports BUSY, stop\n"
@@ -3638,16 +3668,48 @@ def _main(argv=None) -> int:
             print("owner: stale-fence")
             return 1
         env = dict(os.environ)
-        try:
-            run_herdr(exe, ["pane", "send-text", pane, "/clear"], env=env)
-            run_herdr(exe, ["pane", "send-keys", pane, "enter"], env=env)
-        except Exception as exc:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
-            # Either send may have partly reached the pane; a blind retry could
-            # append a second /clear to a half-typed line.
-            print(f"rollover: delivery unknown ({exc}); do not re-run rollover. Check this "
+
+        def pane_input():
+            time.sleep(ROLLOVER_READ_SETTLE_SECS)
+            try:
+                return current_input(run_herdr(
+                    exe, ["pane", "read", pane, "--source", "detection", "--lines", "40"],
+                    env=env, json_result=False))
+            except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+                return None
+
+        def send(argv, landed, retry):
+            # herdr has returned malformed JSON for a send that landed, so a
+            # failed reply is judged by the input region: resend only when it
+            # proves the send missed, and stop on anything ambiguous.
+            for attempt in (1, 2):
+                try:
+                    run_herdr(exe, argv, env=env)
+                    return True
+                except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+                    if attempt == 2:
+                        return False
+                    seen = pane_input()
+                    if seen == landed:
+                        return True
+                    if seen != retry:
+                        return False
+            return False
+
+        if not (send(["pane", "send-text", pane, "/clear"], landed="/clear", retry="")
+                and send(["pane", "send-keys", pane, "enter"], landed="", retry="/clear")):
+            print("rollover: delivery unknown; do not re-run rollover. Check this "
                   "pane's input line: if it shows exactly /clear, press Enter; otherwise "
                   "clear it.", file=sys.stderr)
             return 1
+        seen = pane_input()
+        if seen == "/clear":
+            print(f"rollover: /clear typed but not submitted in pane {pane}; press Enter there",
+                  file=sys.stderr)
+            return 1
+        if seen is None:
+            print(f"rollover: input line not found in pane {pane}; delivery unverified",
+                  file=sys.stderr)
         print(f"rollover: queued /clear for pane {pane}; end this turn now")
         return 0
     if ns.cmd == "write-task":

@@ -294,6 +294,45 @@ $CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
 SH
 
+# Scripted herdr for the rollover delivery checks: sends log to $FX/herdr.log,
+# fail N times per verb ($FX/fail.<verb>, optional $FX/garbage.<verb> for a
+# malformed-JSON reply), and `pane read` shows $FX/screen.before until a
+# send-keys lands, then $FX/screen.after.
+ROLLOVER_STUB="$TMPDIR/rollover-herdr-stub.$$"
+cat > "$ROLLOVER_STUB" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+if [ "$1 $2" = "pane read" ]; then
+    if [ -e "$FX/entered" ]; then cat "$FX/screen.after"; else cat "$FX/screen.before"; fi
+    exit 0
+fi
+n=$(grep -c "^pane $2 " "$FX/herdr.log")
+fails=$(cat "$FX/fail.$2" 2>/dev/null || echo 0)
+if [ "$n" -le "$fails" ]; then
+    if [ -e "$FX/garbage.$2" ]; then
+        [ "$2" = send-keys ] && : > "$FX/entered"
+        printf 'not json\n'; exit 0
+    fi
+    echo boom >&2; exit 7
+fi
+[ "$2" = send-keys ] && : > "$FX/entered"
+printf '{"id":"x","result":{"type":"ok"}}\n'
+STUB
+chmod +x "$ROLLOVER_STUB"
+SCREENS="$TMPDIR/rollover-screens.$$"; mkdir -p "$SCREENS"
+python3 - "$SCREENS" <<'PY'
+import sys
+d, rule = sys.argv[1], "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+def w(name, *lines):
+    open(f"{d}/{name}", "w").write("\n".join(lines) + "\n")
+w("typed", "history", rule, "❯ /clear", rule, meter)
+w("empty", "history", rule, "❯", rule, meter)
+w("history-only", "❯ /clear", "done", rule, "❯", rule, meter)
+w("partial", "history", rule, "❯ /cl", rule, meter)
+PY
+export ROLLOVER_STUB SCREENS
+
 check "rollover: sends /clear then enter to HERDR_PANE_ID" <<'SH'
 cat > "$FX/bin/herdr" <<'STUB'
 #!/bin/sh
@@ -306,9 +345,80 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
 PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
 grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
-test "$(wc -l < "$FX/herdr.log" | tr -d ' ')" = 2
+test "$(wc -l < "$FX/herdr.log" | tr -d ' ')" = 3
 test "$(sed -n 1p "$FX/herdr.log")" = "pane send-text w9:p1 /clear"
 test "$(sed -n 2p "$FX/herdr.log")" = "pane send-keys w9:p1 enter"
+test "$(sed -n 3p "$FX/herdr.log")" = "pane read w9:p1 --source detection --lines 40"
+SH
+
+check "rollover: send-text replies malformed JSON but /clear is in the input -> no resend" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-text"; : > "$FX/garbage.send-text"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
+grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
+test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 1
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 1
+SH
+
+check "rollover: send-text failed and the input is empty (history has /clear) -> one resend" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/history-only" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-text"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
+grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
+test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 2
+SH
+
+check "rollover: send-text failed with partial input -> stop, no resend, no Enter" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/partial" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-text"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
+test "$rc" = 1
+grep -q 'delivery unknown' "$FX/e"
+test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 1
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 0
+SH
+
+check "rollover: Enter failed once with /clear still typed -> one retry" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-keys"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
+grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 2
+SH
+
+check "rollover: Enter failing twice with /clear still typed -> stop, delivery unknown" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 2 > "$FX/fail.send-keys"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
+test "$rc" = 1
+grep -q 'delivery unknown' "$FX/e"
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 2
+test "$(grep -c '^pane read ' "$FX/herdr.log")" = 1
+SH
+
+check "rollover: /clear still typed after Enter -> exit 1 with the press-Enter message" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/typed" "$FX/screen.after"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
+test "$rc" = 1
+grep -qF 'rollover: /clear typed but not submitted in pane w9:p1; press Enter there' "$FX/e"
 SH
 
 check "rollover: stale fence sends nothing" <<'SH'
@@ -436,6 +546,8 @@ hits = [e for e in t["hooks"]["SessionStart"]
 assert len(hits) == 1 and hits[0]["matcher"] == "clear|compact", hits
 PY
 SH
+
+rm -f "$ROLLOVER_STUB"; rm -rf "$SCREENS"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

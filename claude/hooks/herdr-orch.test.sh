@@ -10093,6 +10093,28 @@ facts = c.checkin_facts(rd, dict(task, status="review-dispatched", review_head_s
 assert facts["review_correlates"] is True and facts["action"] == "changes-requested", facts
 PY
 
+check "current_input: reads only the bordered input region, never history" <<PY
+$LOAD
+rule = "─" * 40
+tip = "  Tip: Use /clear to start fresh when switching topics"
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+def screen(*lines):
+    return "\n".join(lines) + "\n"
+assert c.current_input(screen("history", tip, "", rule, "❯", rule, meter, "mode")) == ""
+assert c.current_input(screen(rule, "❯ /clear", rule, meter)) == "/clear"
+assert c.current_input(screen("❯ /clear", "done", rule, "❯", rule, meter)) == ""
+assert c.current_input(screen(rule, "❯ /cl", rule, meter)) == "/cl"
+assert c.current_input(screen("❯ /clear", "Working...", meter)) is None
+assert c.current_input(screen(rule, "some output", rule, meter)) is None
+# Bordered history (no live meter under the lower rule) is never input.
+assert c.current_input(screen(rule, "❯ /clear", rule)) is None
+assert c.current_input(screen(rule, "❯ /clear", rule, "o1")) is None
+assert c.current_input(screen(rule, "❯ /clear", rule, "o1", "o2", "o3", "o4")) is None
+assert c.current_input(screen(rule, "❯", rule, "output")) is None
+assert c.current_input(screen(rule, "❯", rule, "Opus 5.5 │ dotfiles")) is None
+assert c.current_input("") is None
+PY
+
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
 $LOAD
 s = open("claude/skills/herdr-orchestration/SKILL.md").read()
