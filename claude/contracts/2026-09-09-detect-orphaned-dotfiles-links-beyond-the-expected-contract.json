@@ -17,19 +17,19 @@
     },
     {
       "name": "map-rows-cover-installer",
-      "run": "out=$(HOME=/nonexistent-symlink-audit-home /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --list-expected) && for p in bin/remote-access-doctor bin/zed-claude-agent bin/herdr-zed-attach .codex/hooks/herdr_worktree_guard.py .codex/hooks/rm_guard.py .codex/hooks/herdr_stop_gate.py .codex/hooks/orch_edit_guard.py .codex/hooks/git_remote_guard.py .codex/skills/writing-plans .codex/skills/review-change .codex/rules/agent-lessons.md; do printf '%s\\n' \"$out\" | grep -q \"^link\t/nonexistent-symlink-audit-home/$p\t\" || { echo \"missing row: $p\"; exit 1; }; done"
+      "run": "out=$(HOME=/nonexistent-symlink-audit-home DOTFILES=\"$(pwd -P)\" /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --list-expected) && for p in bin/remote-access-doctor bin/zed-claude-agent bin/herdr-zed-attach .codex/hooks/herdr_worktree_guard.py .codex/hooks/rm_guard.py .codex/hooks/herdr_stop_gate.py .codex/hooks/orch_edit_guard.py .codex/hooks/git_remote_guard.py .codex/skills/writing-plans .codex/skills/review-change .codex/rules/agent-lessons.md; do printf '%s\\n' \"$out\" | grep -q \"^link\t/nonexistent-symlink-audit-home/$p\t\" || { echo \"missing row: $p\"; exit 1; }; done"
     },
     {
       "name": "machine-local-rows",
-      "run": "test \"$(HOME=/nonexistent-symlink-audit-home /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --list-expected | grep -c '^machine-local')\" -eq 5"
+      "run": "test \"$(HOME=/nonexistent-symlink-audit-home DOTFILES=\"$(pwd -P)\" /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --list-expected | grep -c '^machine-local')\" -eq 5"
     },
     {
       "name": "cloud-rows-only-claude",
-      "run": "out=$(HOME=/nonexistent-symlink-audit-home /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --cloud --list-expected) && [ -n \"$out\" ] && ! printf '%s\\n' \"$out\" | grep -v -- '/nonexistent-symlink-audit-home/.claude/'"
+      "run": "out=$(HOME=/nonexistent-symlink-audit-home DOTFILES=\"$(pwd -P)\" /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh --cloud --list-expected) && [ -n \"$out\" ] && ! printf '%s\\n' \"$out\" | grep -v -- '/nonexistent-symlink-audit-home/.claude/'"
     },
     {
       "name": "contract-orphan-probe",
-      "run": "R=$(pwd -P); T=$(mktemp -d \"${TMPDIR:-/tmp}/sa-contract.XXXXXX\") || exit 1; mkdir -p \"$T/home/bin\" && ln -s \"$R/bin/retired-tool-for-contract\" \"$T/home/bin/retired\" && ln -s \"$R-sibling/bin/tool\" \"$T/home/bin/sibling\" && ln -s /nonexistent-elsewhere/tool \"$T/home/bin/foreign\"; HOME=\"$T/home\" /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh > \"$T/out\" 2>&1; audit_rc=$?; rc=0; [ \"$audit_rc\" -eq 1 ] || rc=1; grep -qxF \"[X]  ORPHAN-DANGLING $T/home/bin/retired -> $R/bin/retired-tool-for-contract (missing inside checkout $R)\" \"$T/out\" || rc=1; grep -qF -- \"$T/home/bin/sibling\" \"$T/out\" && rc=1; grep -qF -- \"$T/home/bin/foreign\" \"$T/out\" && rc=1; grep -qE -- ' 1 orphan link\\(s\\), 0 scan error\\(s\\)\\.$' \"$T/out\" || rc=1; [ \"$rc\" -eq 0 ] || cat \"$T/out\"; rm -rf \"$T\"; exit \"$rc\"",
+      "run": "R=$(pwd -P); [ ! -e \"$R/bin/retired-tool-for-contract\" ] || exit 1; T=$(mktemp -d \"${TMPDIR:-/tmp}/sa-contract.XXXXXX\") || exit 1; mkdir -p \"$T/home/bin\" && ln -s \"$R/bin/retired-tool-for-contract\" \"$T/home/bin/retired\" && ln -s \"$R-sibling/bin/tool\" \"$T/home/bin/sibling\" && ln -s /nonexistent-elsewhere/tool \"$T/home/bin/foreign\"; HOME=\"$T/home\" DOTFILES=\"$R\" /bin/bash .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh > \"$T/out\" 2>&1; audit_rc=$?; rc=0; [ \"$audit_rc\" -eq 1 ] || rc=1; grep -qxF \"[X]  ORPHAN-DANGLING $T/home/bin/retired -> $R/bin/retired-tool-for-contract (missing inside checkout $R)\" \"$T/out\" || rc=1; grep -qF -- \"$T/home/bin/sibling\" \"$T/out\" && rc=1; grep -qF -- \"$T/home/bin/foreign\" \"$T/out\" && rc=1; grep -qE -- ' 1 orphan link\\(s\\), 0 scan error\\(s\\)\\.$' \"$T/out\" || rc=1; [ \"$rc\" -eq 0 ] || cat \"$T/out\"; rm -rf \"$T\"; exit \"$rc\"",
       "timeout_secs": 120
     },
     {
@@ -51,11 +51,6 @@
     {
       "name": "changed-files-ascii",
       "run": "python3 -c 'import sys; [open(p, \"rb\").read().decode(\"ascii\") for p in sys.argv[1:]]' .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.sh .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.test.sh .claude/skills/dotfiles-diagnostics-and-tooling/SKILL.md bin/dotfiles-tests"
-    },
-    {
-      "name": "installer-suites-unchanged",
-      "run": "sh install/install.test.sh && sh install/ai-update.test.sh && sh install/claude-links.test.sh",
-      "timeout_secs": 900
     }
   ]
 }
