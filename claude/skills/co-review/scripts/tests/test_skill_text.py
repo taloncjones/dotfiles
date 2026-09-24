@@ -57,6 +57,23 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertNotIn("first three", policy)
         self.assertNotIn("first-three", policy)
 
+    def test_co_review_probes_every_runner_route_before_seats(self):
+        probe = CO_REVIEW.index('"$RUN_DIR/probe-')
+        first_seat = CO_REVIEW.index('--prompt-file "$RUN_DIR/codex.prompt"')
+        self.assertLess(probe, first_seat)
+        for needle in ("--timeout-secs 60", '"$RUN_DIR"/probe-*.json',
+                       "probe-claude-reviewer.json", "probe-codex-reviewer.json",
+                       "probe-codex-skeptic.json", "probe-claude-skeptic.json",
+                       'status") != "success"', "json.load(handle)",
+                       "Reply ok"):
+            self.assertIn(needle, CO_REVIEW)
+
+    def test_co_review_seats_run_in_background_at_1200_seconds(self):
+        self.assertEqual(CO_REVIEW.count("--timeout-secs 1200"), 4)
+        self.assertNotIn("--timeout-secs 600", CO_REVIEW)
+        for needle in ("run_in_background", "git apply --index", "wait"):
+            self.assertIn(needle, CO_REVIEW)
+
 
 class ShipSkillText(unittest.TestCase):
     def test_ship_has_the_audit_comment_step(self):

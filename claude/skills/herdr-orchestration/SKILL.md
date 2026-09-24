@@ -964,6 +964,10 @@ designated agent. Never read a helper's idle state as review completion,
 and never accept a verdict from a pane other than the dispatched one (the
 record's `emitter_pane_id` is the audit field; `emit-review` itself exits 3
 for a foreign or missing pane).
+A headless `--permission-mode plan` child is not write enforcement: it still
+runs allowlisted Bash (for example `python3`) when a hook or prompt tells it
+to, so only the bounded-child marker and the pane-bound emit guard keep a
+helper from publishing.
 
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture the
    HEAD SHA as the intended `review_head_sha`.
