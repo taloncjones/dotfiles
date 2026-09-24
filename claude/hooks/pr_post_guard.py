@@ -41,6 +41,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -144,8 +145,8 @@ def text_kind(text: str) -> str | None:
     return None
 
 
-def classify(command: str, depth: int = 0) -> set[str]:
-    kinds: set[str] = set()
+def classify(command: str, depth: int = 0) -> list[str]:
+    kinds: list[str] = []
     tokens = rm_guard.tokenize(drop_heredoc_bodies(command))
     for seg in rm_guard.split_segments(tokens):
         while seg and seg[0] in KEYWORDS:
@@ -159,7 +160,7 @@ def classify(command: str, depth: int = 0) -> set[str]:
         elif name in rm_guard.SHELL_WRAPPERS and depth == 0:
             script = rm_guard.extract_shell_c_arg(seg)
             if script is not None:
-                kinds |= classify(script, depth + 1)
+                kinds.extend(classify(script, depth + 1))
                 continue
             kind = text_kind(" ".join(seg))
         elif name == "eval":
@@ -167,7 +168,7 @@ def classify(command: str, depth: int = 0) -> set[str]:
         else:
             kind = None
         if kind:
-            kinds.add(kind)
+            kinds.append(kind)
     return kinds
 
 
@@ -216,20 +217,27 @@ def claim(path: Path) -> bool:
     return True
 
 
-def decide(kinds: set[str], sid: str, directory: Path, now: float) -> str | None:
+def decide(kinds: list[str], sid: str, directory: Path, now: float) -> str | None:
     """Denial text for the first ungranted kind in `kinds`, or None."""
     if not kinds:
         return None
+    counts = Counter(kinds)
+    # One go covers exactly one post and one body write; a command chaining
+    # two of the same kind (`&&`, `;`, multi-line) can't be covered by one go
+    # even if it were otherwise present, so reject it outright.
+    for kind in ("post", "body"):
+        if counts[kind] > 1:
+            return _denial(kind)
     if not SID_RE.match(sid):
-        return _denial(next(iter(kinds)))
+        return _denial(kinds[0])
     marker = marker_kind(directory, sid, now)
-    for kind in kinds:
+    for kind in counts:
         if kind == "delete":
             if marker != "post":
                 return _denial(kind)
         elif marker != kind:
             return _denial(kind)
-    for kind in kinds:
+    for kind in counts:
         if kind == "post" and not claim(directory / f"{sid}.post-used"):
             return _denial(kind)
         if kind == "body" and not claim(directory / f"{sid}.body-used"):

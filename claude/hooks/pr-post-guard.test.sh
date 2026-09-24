@@ -125,6 +125,10 @@ mkdir -p "$GATE"
 printf '{"v":1,"kind":"post","expires_epoch":1}' >"$GATE/s1.json"
 expect_rc "P4 expired marker denies" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
 
+case_gate p5
+expect_rc "P5 mint" 0 "$(payload_u s1 'post it')"
+expect_rc "P5 chained double post in one command denied" 2 "$(payload_b s1 'gh pr comment 5 --body a && gh pr comment 5 --body b')"
+
 # --- D: supersede deletes need the post go, but not their own claim ------
 
 case_gate d1
@@ -155,6 +159,10 @@ expect_rc "B2 second edit denied" 2 "$(payload_b s1 'gh pr edit 5 --body-file b.
 case_gate b3
 expect_rc "B3 mint body" 0 "$(payload_u s1 'edit the pr body')"
 expect_rc "B3 post denied under a body go" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
+
+case_gate b4
+expect_rc "B4 mint body" 0 "$(payload_u s1 'edit the pr body')"
+expect_rc "B4 chained double body edit in one command denied" 2 "$(payload_b s1 'gh pr edit 5 --body-file a.md ; gh pr edit 5 --body-file b.md')"
 
 # --- R: reads and non-posting gh calls are always allowed -----------------
 
