@@ -14,18 +14,18 @@
     },
     {
       "name": "claude-hooks-suite",
-      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/claude-hooks.test.sh",
+      "run": "h=$(mktemp -d) && [ -d \"$h\" ] && env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT HOME=\"$h\" sh claude/hooks/claude-hooks.test.sh; rc=$?; rm -rf \"$h\"; exit $rc",
       "timeout_secs": 600
+    },
+    {
+      "name": "orch-edit-guard-and-scratch-policy-pins",
+      "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/orch-edit-guard.test.sh && env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/scratch-policy.test.sh",
+      "timeout_secs": 900
     },
     {
       "name": "git-remote-guard-suite-registration",
       "run": "env -u HERDR_ENV -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_TAB_ID -u WORKFLOW_PERSONAL_ACCOUNT sh claude/hooks/git-remote-guard.test.sh",
       "timeout_secs": 900
-    },
-    {
-      "name": "hook-py-compiles",
-      "run": "python3 -m py_compile claude/hooks/pr_post_guard.py claude/skills/co-review/scripts/pr_ready_gate.py",
-      "timeout_secs": 60
     },
     {
       "name": "hook-denies-post-without-go",
@@ -79,7 +79,17 @@
     },
     {
       "name": "hook-inert-outside-herdr",
-      "run": "sh -c '[ -f claude/hooks/pr_post_guard.py ] && d=$(mktemp -d) && [ -n \"$d\" ] && [ -d \"$d\" ] && export DOTFILES_POST_GATE_DIR=\"$d/gate\" HERDR_ENV=1 && trap '\\''rm -rf \"$d\"'\\'' EXIT && unset HERDR_ENV && printf %s '\\''{\"hook_event_name\": \"PreToolUse\", \"session_id\": \"s1\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"gh pr comment 5 --body x\"}}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1 && [ ! -e \"$d/gate\" ]'",
+      "run": "sh -c '[ -f claude/hooks/pr_post_guard.py ] && d=$(mktemp -d) && [ -n \"$d\" ] && [ -d \"$d\" ] && export DOTFILES_POST_GATE_DIR=\"$d/gate\" HERDR_ENV=1 && trap '\\''rm -rf \"$d\"'\\'' EXIT && unset HERDR_ENV && printf %s '\\''{\"hook_event_name\": \"UserPromptSubmit\", \"session_id\": \"s1\", \"prompt\": \"post it\"}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1 && printf %s '\\''{\"hook_event_name\": \"PreToolUse\", \"session_id\": \"s1\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"gh pr comment 5 --body x\"}}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1 && [ ! -e \"$d/gate\" ]'",
+      "timeout_secs": 60
+    },
+    {
+      "name": "hook-expired-corrupt-and-bad-sid-deny",
+      "run": "sh -c '[ -f claude/hooks/pr_post_guard.py ] && d=$(mktemp -d) && [ -n \"$d\" ] && [ -d \"$d\" ] && export DOTFILES_POST_GATE_DIR=\"$d/gate\" HERDR_ENV=1 && trap '\\''rm -rf \"$d\"'\\'' EXIT && mkdir -p \"$d/gate\" && printf %s '\\''{\"v\":1,\"kind\":\"post\",\"expires_epoch\":1}'\\'' > \"$d/gate/s1.json\" && { printf %s '\\''{\"hook_event_name\": \"PreToolUse\", \"session_id\": \"s1\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"gh pr comment 5 --body x\"}}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1; [ $? -eq 2 ]; } && printf %s \"{\" > \"$d/gate/s9.json\" && { printf %s '\\''{\"hook_event_name\": \"PreToolUse\", \"session_id\": \"s9\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"gh pr comment 5 --body x\"}}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1; [ $? -eq 2 ]; } && printf %s '\\''{\"hook_event_name\": \"UserPromptSubmit\", \"session_id\": \"../x\", \"prompt\": \"post it\"}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1 && [ ! -e \"$d/x.json\" ] && { printf %s '\\''{\"hook_event_name\": \"PreToolUse\", \"session_id\": \"../x\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"gh pr comment 5 --body x\"}}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1; [ $? -eq 2 ]; }'",
+      "timeout_secs": 60
+    },
+    {
+      "name": "hook-marker-file-modes",
+      "run": "sh -c '[ -f claude/hooks/pr_post_guard.py ] && d=$(mktemp -d) && [ -n \"$d\" ] && [ -d \"$d\" ] && export DOTFILES_POST_GATE_DIR=\"$d/gate\" HERDR_ENV=1 && trap '\\''rm -rf \"$d\"'\\'' EXIT && printf %s '\\''{\"hook_event_name\": \"UserPromptSubmit\", \"session_id\": \"s1\", \"prompt\": \"post it\"}'\\'' | python3 claude/hooks/pr_post_guard.py >/dev/null 2>&1 && python3 -c \"import os,stat,sys;d=sys.argv[1];m=lambda p:stat.S_IMODE(os.stat(p).st_mode);assert m(d)==0o700,oct(m(d));assert m(d+'\\''/s1.json'\\'')==0o600,oct(m(d+'\\''/s1.json'\\''))\" \"$d/gate\"'",
       "timeout_secs": 60
     },
     {
@@ -109,12 +119,12 @@
     },
     {
       "name": "supersede-cli-mode-exit-codes",
-      "run": "sh -c '[ -f claude/hooks/pr_post_guard.py ] && d=$(mktemp -d) && [ -n \"$d\" ] && [ -d \"$d\" ] && export DOTFILES_POST_GATE_DIR=\"$d/gate\" HERDR_ENV=1 && trap '\\''rm -rf \"$d\"'\\'' EXIT && printf %s '\\''[]'\\'' > \"$d/c.json\" && printf %s '\\''nope'\\'' > \"$d/bad.json\" && { python3 claude/skills/co-review/scripts/pr_ready_gate.py supersede --comments \"$d/bad.json\" --author me --expect-marker x >/dev/null 2>&1; [ $? -eq 1 ]; } && { python3 claude/skills/co-review/scripts/pr_ready_gate.py supersede --comments \"$d/c.json\" --author me --expect-marker x >/dev/null 2>&1; [ $? -eq 1 ]; }'",
+      "run": "sh -c '[ -f claude/hooks/pr_post_guard.py ] && d=$(mktemp -d) && [ -n \"$d\" ] && [ -d \"$d\" ] && export DOTFILES_POST_GATE_DIR=\"$d/gate\" HERDR_ENV=1 && trap '\\''rm -rf \"$d\"'\\'' EXIT && printf %s '\\''[]'\\'' > \"$d/c.json\" && printf %s '\\''nope'\\'' > \"$d/bad.json\" && { python3 claude/skills/co-review/scripts/pr_ready_gate.py supersede --comments \"$d/bad.json\" --author me --expect-marker x >/dev/null 2>&1; [ $? -eq 1 ]; } && { python3 claude/skills/co-review/scripts/pr_ready_gate.py supersede --comments \"$d/c.json\" --author me --expect-marker x >/dev/null 2>&1; [ $? -eq 1 ]; } && python3 -c '\\''import json,subprocess,sys;d=sys.argv[1];L1='\\''\\'\\'''\\''<!-- co-review: sha='\\''\\'\\'''\\''+'\\''\\'\\'''\\''a'\\''\\'\\'''\\''*40+'\\''\\'\\'''\\'' base='\\''\\'\\'''\\''+'\\''\\'\\'''\\''c'\\''\\'\\'''\\''*40+'\\''\\'\\'''\\'' base_ref=main verdict=CHANGES round=1 -->'\\''\\'\\'''\\'';L2=L1.replace('\\''\\'\\'''\\''a'\\''\\'\\'''\\''*40,'\\''\\'\\'''\\''b'\\''\\'\\'''\\''*40).replace('\\''\\'\\'''\\''round=1'\\''\\'\\'''\\'','\\''\\'\\'''\\''round=2'\\''\\'\\'''\\'');me=lambda i,t,b:{'\\''\\'\\'''\\''id'\\''\\'\\'''\\'':i,'\\''\\'\\'''\\''user'\\''\\'\\'''\\'':{'\\''\\'\\'''\\''login'\\''\\'\\'''\\'':'\\''\\'\\'''\\''me'\\''\\'\\'''\\''},'\\''\\'\\'''\\''created_at'\\''\\'\\'''\\'':t,'\\''\\'\\'''\\''body'\\''\\'\\'''\\'':b};json.dump([[me(1,'\\''\\'\\'''\\''2026-09-01T00:00:00Z'\\''\\'\\'''\\'',L1)],[me(2,'\\''\\'\\'''\\''2026-09-02T00:00:00Z'\\''\\'\\'''\\'',L2)]],open(d+'\\''\\'\\'''\\''/ok.json'\\''\\'\\'''\\'','\\''\\'\\'''\\''w'\\''\\'\\'''\\''));r=subprocess.run([sys.executable,'\\''\\'\\'''\\''claude/skills/co-review/scripts/pr_ready_gate.py'\\''\\'\\'''\\'','\\''\\'\\'''\\''supersede'\\''\\'\\'''\\'','\\''\\'\\'''\\''--comments'\\''\\'\\'''\\'',d+'\\''\\'\\'''\\''/ok.json'\\''\\'\\'''\\'','\\''\\'\\'''\\''--author'\\''\\'\\'''\\'','\\''\\'\\'''\\''me'\\''\\'\\'''\\'','\\''\\'\\'''\\''--expect-marker'\\''\\'\\'''\\'',L2],capture_output=True,text=True);assert r.returncode==0 and json.loads(r.stdout)==[1],(r.returncode,r.stdout,r.stderr)'\\'' \"$d\"'",
       "timeout_secs": 60
     },
     {
       "name": "template-registers-hook",
-      "run": "python3 -c 'import json;h=json.load(open('\\''claude/settings.json.tmpl'\\''))['\\''hooks'\\''];u=[x['\\''command'\\''] for e in h.get('\\''UserPromptSubmit'\\'',[]) for x in e['\\''hooks'\\'']];b=[x['\\''command'\\''] for e in h['\\''PreToolUse'\\''] if e.get('\\''matcher'\\'')=='\\''Bash'\\'' for x in e['\\''hooks'\\'']];assert '\\''~/.claude/hooks/pr_post_guard.py'\\'' in u,u;assert b[-1]=='\\''~/.claude/hooks/pr_post_guard.py'\\'',b'",
+      "run": "python3 -c 'import json;h=json.load(open('\\''claude/settings.json.tmpl'\\''))['\\''hooks'\\''];G='\\''~/.claude/hooks/pr_post_guard.py'\\'';u=[x['\\''command'\\''] for e in h.get('\\''UserPromptSubmit'\\'',[]) for x in e['\\''hooks'\\'']];b=[x['\\''command'\\''] for e in h['\\''PreToolUse'\\''] if e.get('\\''matcher'\\'')=='\\''Bash'\\'' for x in e['\\''hooks'\\'']];assert u.count(G)==1,u;assert b.count(G)==1,b;assert b[-1]=='\\''~/.claude/hooks/orch_edit_guard.py'\\'' and b[-2]==G,b'",
       "timeout_secs": 60
     },
     {
