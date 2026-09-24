@@ -437,6 +437,25 @@ fi
 rm -f "$H/.ssh"
 mv "$H/.ssh.real" "$H/.ssh"
 
+# A directory symlink standing in for an owned subdirectory (e.g. a relocated
+# ~/.codex/hooks) hides everything behind it from find -P: the boundary is
+# never crossed, so a dangling link inside it must still withhold the clean
+# verdict rather than vanish as an ignored FOREIGN entry.
+mv "$H/.codex/hooks" "$H/.codex/hooks.real"
+ln -s hooks.real "$H/.codex/hooks"
+ln -s "$SRC/claude/hooks/does-not-exist" "$H/.codex/hooks.real/hidden-orphan"
+audit_ro "$EVI/symlinked-owned-subdir.out" "$H"
+expect_same "symlinked owned subdir: audit exits 1" 1 "$RC"
+has_line "symlinked owned subdir: INCOMPLETE" "$EVI/symlinked-owned-subdir.out" \
+    "[X]  INCOMPLETE      $H/.codex/hooks (target is a directory; contents behind it were not scanned)"
+if grep -q 'no orphan links\.$' "$EVI/symlinked-owned-subdir.out"; then
+    fail "symlinked owned subdir: no clean summary"
+else
+    pass "symlinked owned subdir: no clean summary"
+fi
+rm -f "$H/.codex/hooks" "$H/.codex/hooks.real/hidden-orphan"
+mv "$H/.codex/hooks.real" "$H/.codex/hooks"
+
 if [ "$RO_RUNS" -gt 0 ] && [ "$RO_BAD" -eq 0 ]; then
     pass "every audit run left fixtures/ unchanged ($RO_RUNS runs)"
 else

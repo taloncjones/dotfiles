@@ -366,6 +366,19 @@ absence_blocker() {
 classify() {
   local link="$1" literal parent raw abs root blocker
   case "$EXPECTED" in *"$NL$link$NL"*) return ;; esac
+  # An owned directory (e.g. ~/.codex/hooks) replaced whole by a directory
+  # symlink hides everything behind it: find -P never descends it, so a
+  # dangling link inside would otherwise vanish as an ignored FOREIGN entry
+  # instead of withholding the clean verdict. A leaf skill/tool directory
+  # symlinked as an EXPECTED map row is unaffected -- it never reaches here.
+  case "$OWNED" in
+    *"$NL$link$NL"*)
+      if [ -d "$link" ]; then
+        incomplete "$link" "target is a directory; contents behind it were not scanned"
+        return
+      fi
+      ;;
+  esac
   if ! literal="$(readlink "$link")"; then
     incomplete "$link" "readlink failed"
     return
