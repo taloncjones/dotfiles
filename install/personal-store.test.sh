@@ -92,6 +92,22 @@ g clone -q "$TMP/other.git" "$H/Git/personal/exocortex"
 out=$(hx "$H" "$R" "$DF" bash "$EXO" install); rc=$?
 case "$rc|$out" in "0|[exocortex] skip:"*"origin"*) [ ! -L "$DF/.todos" ] && pass "install skip: origin mismatch" || fail "install skip: origin mismatch" ;; *) fail "install skip: origin mismatch ($rc|$out)" ;; esac
 
+# VF-1: an insteadOf rewrite (as git/personal/.gitconfig-personal applies to
+# every github.com remote under ~/Git/personal/) must not defeat the origin
+# check, since the clone step records the raw, unrewritten url.
+H=$(new_home insteadof); DF=$(dotfiles_fixture "$H")
+INSTEAD_BASE="$TMP/insteadof-remote"; mkdir -p "$INSTEAD_BASE/taloncjones"
+seeded_remote "$INSTEAD_BASE/taloncjones/exocortex.git"
+GCFG_INSTEADOF="$TMP/gitconfig-insteadof"
+cp "$GCFG" "$GCFG_INSTEADOF"
+printf '[url "%s/"]\n\tinsteadOf = git@github.com:\n' "$INSTEAD_BASE" >>"$GCFG_INSTEADOF"
+out=$(hx "$H" "" "$DF" env GIT_CONFIG_GLOBAL="$GCFG_INSTEADOF" bash "$EXO" install 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ -L "$DF/.todos" ]; then
+    pass "install: an insteadOf-rewritten origin still matches (VF-1)"
+else
+    fail "install: an insteadOf-rewritten origin still matches (VF-1) ($rc|$out)"
+fi
+
 H=$(new_home notclone); DF=$(dotfiles_fixture "$H"); R="$TMP/notclone.git"; seeded_remote "$R"
 mkdir -p "$H/Git/personal/exocortex"; : >"$H/Git/personal/exocortex/stray"
 out=$(hx "$H" "$R" "$DF" bash "$EXO" install); rc=$?

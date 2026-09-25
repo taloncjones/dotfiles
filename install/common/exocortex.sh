@@ -111,7 +111,10 @@ ensure_clone() {
     python3 "$HELPER_PY" rename "$tmp" "$EXO_DIR" || { rm -rf "$tmp"; skip "$EXO_DIR appeared during the clone"; }
     say "cloned $url"
   fi
-  [ "$(git -C "$EXO_DIR" remote get-url origin 2>/dev/null)" = "$url" ] || skip "$EXO_DIR origin is not $url"
+  # git config --get, not remote get-url: get-url expands url.<base>.insteadOf
+  # rewrites (e.g. git/personal/.gitconfig-personal's github.com alias), so it
+  # would never match the literal url clone recorded on a rewritten remote.
+  [ "$(git -C "$EXO_DIR" config --get remote.origin.url 2>/dev/null)" = "$url" ] || skip "$EXO_DIR origin is not $url"
   git -C "$EXO_DIR" config todos.store true
   git -C "$EXO_DIR" rev-parse --verify --quiet HEAD >/dev/null || refresh_empty_clone
   if ! git -C "$EXO_DIR" rev-parse --verify --quiet '@{u}' >/dev/null 2>&1; then
