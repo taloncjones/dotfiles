@@ -125,9 +125,9 @@ Probe every runner route the tier uses before spending seats. Each probe is a
 `RUN_DIR` (never the manifest output dir, which `cleanup` checks). The probes
 run concurrently. Any non-success probe stops co-review with the existing
 incomplete report, quoting the probe's `status`, `observation` and `errors`.
-A failed probe never switches runtime on its own; a substitute seat is an
-explicit, truthfully recorded operator decision. A probe is never a seat
-artifact.
+A failed probe never switches runtime on its own; see "Substitute a failed
+Codex probe" below for the explicit, truthfully recorded operator decision
+that can. A probe is never a seat artifact.
 
 ```bash
 printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
@@ -170,6 +170,68 @@ if failed:
 PY
 ```
 
+### Substitute a failed Codex probe
+
+This is an explicit operator decision, made only when every failed probe is a
+Codex probe and its errors show a quota, auth or availability failure. Any
+failed Claude probe stops co-review, as always. A Codex seat that fails
+after its own probe succeeded is not substituted: the gate is `INCOMPLETE`,
+and a fresh gate's probe records the outage. The probe runs are never
+repeated. Every gate needs its own Codex attempt, including a fresh gate
+after an interruption and a `--fix` follow-up; never copy an attempt from
+another `RUN_DIR`. `co-review --full` is not the fallback for a Codex outage;
+the substitute rule applies in both tiers. `SUBSTITUTE` stays set for the
+seat block below.
+
+Set `SUBSTITUTE` to the literal, space-separated seats whose own Codex probe
+failed on quota, auth or availability: `codex` when `probe-codex-reviewer.json`
+failed, and (full tier) `breaker` when `probe-codex-skeptic.json` failed. Then
+run the block below, which iterates a literal word list rather than
+`$SUBSTITUTE` itself, because the coordinator's zsh does not word-split an
+unquoted variable. A first pass refuses (exit 2), before anything moves, when
+any member seat's probe is missing or already succeeded. A second pass moves
+each member's probe out of the `probe-*` glob into its
+`<seat>.codex-attempt.json` evidence file, then runs a 60-second `Reply ok`
+probe on the Claude route to confirm it is available before the seat runs.
+
+```bash
+# SUBSTITUTE names exactly the seats whose own Codex probe failed on quota,
+# auth or availability: "codex" and/or (full tier) "breaker". The literal
+# word list keeps this loop the same in bash and zsh.
+for seat in codex breaker; do
+  case " $SUBSTITUTE " in *" $seat "*) ;; *) continue ;; esac
+  case $seat in codex) role=reviewer ;; breaker) role=skeptic ;; esac
+  uv run --no-project python -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("status") == "success")' \
+    "$RUN_DIR/probe-codex-$role.json" || exit 2
+done
+for seat in codex breaker; do
+  case " $SUBSTITUTE " in *" $seat "*) ;; *) continue ;; esac
+  case $seat in codex) role=reviewer ;; breaker) role=skeptic ;; esac
+  mv -- "$RUN_DIR/probe-codex-$role.json" "$RUN_DIR/$seat.codex-attempt.json" || exit 2
+  uv run --no-project python "$RUNNER" run \
+    --runtime claude --role "$role" --risk normal --provisional \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/substitute-probe-$seat.json"
+done
+uv run --no-project python - "$RUN_DIR"/probe-*.json "$RUN_DIR"/substitute-probe-*.json <<'PY' || exit 2
+import json
+import sys
+
+failed = []
+for path in sys.argv[1:]:
+    try:
+        with open(path) as handle:
+            status = json.load(handle).get("status")
+    except (OSError, ValueError):
+        status = "no runner JSON"
+    if status != "success":
+        failed.append(f"{path}: {status}")
+if failed:
+    print("\n".join(failed))
+    sys.exit(1)
+PY
+```
+
 Save the exact `POLICY`, frozen diff, and the complete `## Classes` section of
 `$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md`, manifest
 identity, expected identity, and declared threat model in each prompt. The
@@ -196,10 +258,16 @@ Monitor until-loop on the runtime JSON files) before continuing. Worst case is
 about 41 minutes: probes, finders, then the verifier.
 
 ```bash
+# A Codex-routed seat runs on Claude only when the substitute block above
+# named it in SUBSTITUTE; otherwise it takes its normal Codex route.
+CODEX_SEAT_RUNTIME=codex CODEX_SEAT_ROOT=$CODEX_ROOT
+case " ${SUBSTITUTE:-} " in *" codex "*) CODEX_SEAT_RUNTIME=claude CODEX_SEAT_ROOT=$CLAUDE_ROOT ;; esac
+BREAKER_SEAT_RUNTIME=codex BREAKER_SEAT_ROOT=$CODEX_ROOT
+case " ${SUBSTITUTE:-} " in *" breaker "*) BREAKER_SEAT_RUNTIME=claude BREAKER_SEAT_ROOT=$CLAUDE_ROOT ;; esac
 # Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
 uv run --no-project python "$RUNNER" run \
-  --runtime codex --role reviewer --risk normal --provisional \
-  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
+  --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
   --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
 if [ "$CLASS" != "light" ]; then
   uv run --no-project python "$RUNNER" run \
@@ -207,8 +275,8 @@ if [ "$CLASS" != "light" ]; then
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
     --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" &
   uv run --no-project python "$RUNNER" run \
-    --runtime codex --role skeptic --risk normal --provisional \
-    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --runtime "$BREAKER_SEAT_RUNTIME" --role skeptic --risk normal --provisional \
+    --cwd "$BREAKER_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
     --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" &
 fi
 wait
@@ -262,7 +330,11 @@ for `CLASS` (`schema` lists `light_seats` and `full_seats`) and set
 `report.class` to `CLASS`; put their raw runtime JSON paths and observed
 metadata in the fields named by the schema. Never replace a
 failed runtime result with coordinator prose. Token presence is advisory context;
-unfinished behavior blocks only with a concrete material consequence.
+unfinished behavior blocks only with a concrete material consequence. A
+seat substituted from the block above keeps its seat name, records
+`runtime: claude`, and carries `codex_substitute` with
+`{"artifact": "<SEAT>.codex-attempt.json", "sha256": ...}` as `schema`
+describes.
 
 Verify once more before evaluating. The expected file remains the independent
 current-workflow authority; it is never copied from the report.
