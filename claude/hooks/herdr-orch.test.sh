@@ -10140,7 +10140,10 @@ assert c.current_input(screen(rule, "❯ /clear", rule)) is None
 assert c.current_input(screen(rule, "❯ /clear", rule, "o1")) is None
 assert c.current_input(screen(rule, "❯ /clear", rule, "o1", "o2", "o3", "o4")) is None
 assert c.current_input(screen(rule, "❯", rule, "output")) is None
-assert c.current_input(screen(rule, "❯", rule, "Opus 5.5 │ dotfiles")) is None
+# A meterless footer (remaining_percentage null early in a session) still
+# has the "│" segment separator, so it is a valid footer, not history.
+assert c.current_input(screen(rule, "❯", rule, "Opus 5.5 │ dotfiles")) == ""
+assert c.current_input(screen(rule, "❯ /clear", rule, "Opus 5.5 │ dotfiles")) == "/clear"
 assert c.current_input("") is None
 PY
 

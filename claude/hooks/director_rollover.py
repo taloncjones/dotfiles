@@ -129,6 +129,7 @@ def resume_helper(argv) -> int:
                     help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     core = load_core()
+    from herdr_dispatch import AGENT_STATES
     from herdr_dispatch_cli import run_herdr
     core.select_payload(argparse.Namespace(repo_path=a.repo_path, runtime="claude",
                                            personal=False, repo_slug=a.repo_slug))
@@ -146,14 +147,14 @@ def resume_helper(argv) -> int:
         try:
             listed = run_herdr(exe, ["agent", "list"], env=env, timeout_secs=budget())
             rows = listed.get("agents") if isinstance(listed, dict) else None
-            idle = any(isinstance(r, dict) and r.get("pane_id") == a.pane
-                       and r.get("agent_status") == "idle" for r in rows or [])
+            agent_ready = any(isinstance(r, dict) and r.get("pane_id") == a.pane
+                              and r.get("agent_status") in AGENT_STATES for r in rows or [])
             text = run_herdr(exe, ["pane", "read", a.pane, "--source", "detection",
                                    "--lines", "60"], env=env, json_result=False,
                              timeout_secs=budget())
         except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
             return False, None, "poll-error"
-        if not idle:
+        if not agent_ready:
             return False, text, "agent-not-idle"
         if core.current_input(text) != "":
             return False, text, "input-not-empty"

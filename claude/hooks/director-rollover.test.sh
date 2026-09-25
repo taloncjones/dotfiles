@@ -623,6 +623,35 @@ LOG=$(find "$FX" -name rollover.jsonl)
 python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="sent", r' "$LOG"
 SH
 
+check "resume-helper: agent_status done (finished turn, no focus command run yet) still sends" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo done > "$FX/agent_status"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write(rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5
+test "$(grep -c '^pane run w9:p1 resume director$' "$FX/herdr.log")" = 1
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="sent", r' "$LOG"
+SH
+
 check "resume-helper: agent still working -> timeout, nothing sent" <<'SH'
 cat > "$FX/bin/herdr" <<'STUB'
 #!/bin/sh
@@ -893,6 +922,34 @@ if (fs.existsSync(dir + "-off")) throw new Error("wrote without HERDR_ENV");
 sl.recordContext({ ...data, session_id: "../escape" }, { HERDR_ENV: "1", CLAUDE_CONFIG_DIR: dir }, 1);
 if (fs.readdirSync(path.join(dir, "herdr-orch/context")).length !== 1) throw new Error("bad id written");
 JS
+SH
+
+check "current_input: tolerates a real statusline.js footer with remaining_percentage null (no meter)" <<'SH'
+node - <<'JS' > "$FX/footers.json"
+const sl = require(process.env.REPO_ROOT + "/claude/statusline.js");
+const base = { session_id: "11111111-1111-4111-8111-111111111111",
+               workspace: { current_dir: process.env.FX_REPO },
+               model: { display_name: "Opus" } };
+const nullFooter = sl.render({ ...base, context_window: { remaining_percentage: null, total_tokens: 1000000 } });
+const numFooter = sl.render({ ...base, context_window: { remaining_percentage: 83, total_tokens: 1000000 } });
+process.stdout.write(JSON.stringify({ null_footer: nullFooter, num_footer: numFooter }));
+JS
+python3 -c '
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/claude/hooks")
+import herdr_orch_core as c
+raw = json.load(open(sys.argv[2]))
+rule = "─" * 40
+null_footer = c.strip_ansi(raw["null_footer"])
+num_footer = c.strip_ansi(raw["num_footer"])
+assert "█" not in null_footer, null_footer  # remaining_percentage null -> no meter block cells
+assert "│" in null_footer, null_footer      # segments still join on the separator
+assert "█" in num_footer, num_footer        # a number still renders the meter
+def screen(footer):
+    return "\n".join([rule, "❯", rule, footer]) + "\n"
+assert c.current_input(screen(null_footer)) == "", null_footer
+assert c.current_input(screen(num_footer)) == "", num_footer
+' "$REPO_ROOT" "$FX/footers.json"
 SH
 
 check "hook: executable, python3 shebang, registered on clear|compact" <<'SH'

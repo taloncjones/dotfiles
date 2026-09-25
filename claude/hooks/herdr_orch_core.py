@@ -2310,8 +2310,11 @@ def watch_state(root_pid, slug):
 
 _RULE_LINE_RE = re.compile(r"─{20,}")
 _PROMPT_LINE_RE = re.compile(r"❯(?: (.*))?")
-# The live statusline meter (claude/statusline.js): ten block cells and NN%.
-_METER_LINE_RE = re.compile(r" *[█░]{10} \d{1,3}%.*")
+# The live statusline footer (claude/statusline.js render()): its segments
+# always join on U+2502, with or without the context-meter segment (it is
+# omitted when the host reports no remaining_percentage, e.g. early in a
+# session). That separator is the invariant, not the meter's block cells.
+_FOOTER_LINE_RE = re.compile(r".*│.*")
 ROLLOVER_READ_SETTLE_SECS = 0.5
 
 
@@ -2320,9 +2323,9 @@ def current_input(text):
 
     The region is the prompt line (U+276F) plus any continuation lines
     between the bottom-most two full-width U+2500 rules, and the line under
-    the lower rule must be the live statusline meter: the footer is redrawn
-    in place, so the meter never appears in history. Anything else is
-    ambiguous and returns None."""
+    the lower rule must be the live statusline footer: the footer is redrawn
+    in place, so it never appears in history. Anything else is ambiguous and
+    returns None."""
     lines = [line.rstrip() for line in text.rstrip().splitlines()[-20:]]
     rules = [i for i, line in enumerate(lines) if _RULE_LINE_RE.fullmatch(line)]
     if len(rules) < 2:
@@ -2330,7 +2333,7 @@ def current_input(text):
     upper, lower = rules[-2], rules[-1]
     if lower - upper < 2 or lower + 1 >= len(lines):
         return None
-    if not _METER_LINE_RE.fullmatch(lines[lower + 1]):
+    if not _FOOTER_LINE_RE.fullmatch(lines[lower + 1]):
         return None
     m = _PROMPT_LINE_RE.fullmatch(lines[upper + 1])
     if not m:
