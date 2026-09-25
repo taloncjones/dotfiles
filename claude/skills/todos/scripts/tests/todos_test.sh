@@ -1354,5 +1354,193 @@ test_store_lock_busy_and_killed() {
 }
 test_store_lock_busy_and_killed
 
+test_store_two_sides() {
+  local root f id outb outa; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a; mk_side "$root" b
+  f=$( (cd "$root/a" && st new "From A") 2>/dev/null ); id=$(basename "$f" .md)
+  assert_eq "store: push leaves remote at HEAD" \
+    "$(stg -C "$root/remote.git" rev-parse main)" "$(stg -C "$root/a-store" rev-parse HEAD)"
+  outb=$( (cd "$root/b" && st list) 2>&1 )
+  assert_contains "store: new in A reaches list in B" "$outb" "$id.md"
+  (cd "$root/b" && st done "$id") >/dev/null 2>&1
+  outa=$( (cd "$root/a" && st list --all) 2>&1 )
+  assert_eq "store: done in B reaches list --all in A" \
+    "$(printf '%s\n' "$outa" | sed -n '/^completed:/,$p' | grep -c "$id.md")" "1"
+  rm -rf "$root"
+}
+test_store_two_sides
+
+test_store_offline_then_sync() {
+  local root err rc n; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  mv "$root/remote.git" "$root/remote.away"
+  err=$( (cd "$root/a" && st new "Offline item") 2>&1 >/dev/null ); rc=$?
+  n=$(printf '%s\n' "$err" | grep -c '^todos: sync skipped:')
+  assert_eq "store: offline new commits and warns" \
+    "$rc|$(stg -C "$root/a-store" rev-list --count '@{u}..HEAD')|$([ "$n" -ge 1 ] && echo warned)" "0|1|warned"
+  mv "$root/remote.away" "$root/remote.git"
+  (cd "$root/a" && st sync) >/dev/null 2>&1
+  assert_eq "store: sync pushes after reconnect" \
+    "$(stg -C "$root/remote.git" rev-parse main)" "$(stg -C "$root/a-store" rev-parse HEAD)"
+  rm -rf "$root"
+}
+test_store_offline_then_sync
+
+# conflict_setup <root>: A and B each hold an unpushed edit of the same todo;
+# A then pushes, so B's next pull conflicts.
+conflict_setup() {
+  local root="$1" f
+  mk_remote "$root"; mk_side "$root" a; mk_side "$root" b
+  f=$( (cd "$root/a" && st new "Shared") 2>/dev/null )
+  (cd "$root/b" && st list) >/dev/null 2>&1
+  printf 'from A\n' >>"$root/a/.todos/pending/2026-09-24-shared.md"
+  printf 'from B\n' >>"$root/b/.todos/pending/2026-09-24-shared.md"
+  (cd "$root/b" && TODOS_OFFLINE=1 st sync) >/dev/null 2>&1
+  (cd "$root/a" && st sync) >/dev/null 2>&1
+}
+
+test_store_divergence() {
+  local root err rc gd; root=$(canon_helper "$(mktemp -d)")
+  conflict_setup "$root"
+  err=$( (cd "$root/b" && st new "Other") 2>&1 >/dev/null ); rc=$?
+  gd=$(stg -C "$root/b-store" rev-parse --path-format=absolute --git-dir)
+  assert_eq "store: divergence aborts rebase and warns" \
+    "$rc|$(printf '%s' "$err" | grep -c 'store diverged')|$([ -d "$gd/rebase-merge" ] && echo mid || echo clean)" "0|1|clean"
+  rm -rf "$root"
+}
+test_store_divergence
+
+test_store_orphan_rebase_aborted() {
+  local root err rc gd; root=$(canon_helper "$(mktemp -d)")
+  conflict_setup "$root"
+  stg -C "$root/b-store" fetch -q
+  stg -C "$root/b-store" rebase '@{u}' >/dev/null 2>&1
+  gd=$(stg -C "$root/b-store" rev-parse --path-format=absolute --git-dir)
+  cp "$gd/rebase-merge/orig-head" "$gd/todos-rebase"
+  err=$( (cd "$root/b" && TODOS_OFFLINE=1 st new "After orphan") 2>&1 >/dev/null ); rc=$?
+  assert_eq "store: orphaned sync rebase is aborted" \
+    "$rc|$(printf '%s' "$err" | grep -c 'aborted an interrupted sync rebase')|$([ -d "$gd/rebase-merge" ] && echo mid || echo clean)|$(ls "$root/b/.todos/pending" | grep -c after-orphan)" \
+    "0|1|clean|1"
+  rm -rf "$root"
+}
+test_store_orphan_rebase_aborted
+
+test_store_manual_rebase_survives() {
+  local root out rc gd; root=$(canon_helper "$(mktemp -d)")
+  conflict_setup "$root"
+  stg -C "$root/b-store" fetch -q
+  stg -C "$root/b-store" rebase '@{u}' >/dev/null 2>&1
+  gd=$(stg -C "$root/b-store" rev-parse --path-format=absolute --git-dir)
+  out=$( (cd "$root/b" && st list) 2>&1 ); rc=$?
+  assert_eq "store: manual rebase survives list" \
+    "$rc|$(printf '%s' "$out" | grep -c 'todos: sync skipped: unresolved conflict')|$([ -d "$gd/rebase-merge" ] && echo mid || echo clean)" \
+    "0|1|mid"
+  stg -C "$root/b-store" rebase --abort >/dev/null 2>&1; rm -rf "$root"
+}
+test_store_manual_rebase_survives
+
+test_store_stale_marker() {
+  local root out gd; root=$(canon_helper "$(mktemp -d)")
+  conflict_setup "$root"
+  stg -C "$root/b-store" fetch -q
+  stg -C "$root/b-store" rebase '@{u}' >/dev/null 2>&1
+  gd=$(stg -C "$root/b-store" rev-parse --path-format=absolute --git-dir)
+  printf '0000000000000000000000000000000000000000\n' >"$gd/todos-rebase"
+  out=$( (cd "$root/b" && st list) 2>&1 )
+  assert_eq "store: stale marker never aborts a manual rebase" \
+    "$([ -d "$gd/rebase-merge" ] && echo mid || echo clean)|$([ -e "$gd/todos-rebase" ] && echo marker || echo gone)" "mid|gone"
+  stg -C "$root/b-store" rebase --abort >/dev/null 2>&1; rm -rf "$root"
+}
+test_store_stale_marker
+
+test_store_unresolved_conflict() {
+  local root err rc before; root=$(canon_helper "$(mktemp -d)")
+  conflict_setup "$root"
+  stg -C "$root/b-store" fetch -q
+  stg -C "$root/b-store" merge -q origin/main >/dev/null 2>&1
+  before=$(stg -C "$root/b-store" rev-list --count HEAD)
+  err=$( (cd "$root/b" && st new "During conflict") 2>&1 >/dev/null ); rc=$?
+  assert_eq "store: unresolved conflict skips git and keeps file" \
+    "$rc|$(printf '%s' "$err" | grep -c 'unresolved conflict')|$(stg -C "$root/b-store" rev-list --count HEAD)|$(ls "$root/b/.todos/pending" | grep -c during-conflict)" \
+    "0|1|$before|1"
+  stg -C "$root/b-store" merge --abort >/dev/null 2>&1; rm -rf "$root"
+}
+test_store_unresolved_conflict
+
+test_store_index_lock_skips() {
+  local root err rc gd before; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  gd=$(stg -C "$root/a-store" rev-parse --path-format=absolute --git-dir)
+  : >"$gd/index.lock"; before=$(stg -C "$root/a-store" rev-list --count HEAD 2>/dev/null)
+  err=$( (cd "$root/a" && st new "Locked index") 2>&1 >/dev/null ); rc=$?
+  rm -f "$gd/index.lock"
+  assert_eq "store: index.lock skips git and keeps file" \
+    "$rc|$(printf '%s' "$err" | grep -c 'git index is locked')|$(stg -C "$root/a-store" rev-list --count HEAD)|$(ls "$root/a/.todos/pending" | grep -c locked-index)" \
+    "0|1|$before|1"
+  rm -rf "$root"
+}
+test_store_index_lock_skips
+
+test_store_dirt_does_not_block_pull() {
+  local root f id out; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a; mk_side "$root" b
+  printf 'local only\n' >>"$root/b-store/.gitignore"
+  f=$( (cd "$root/a" && st new "Needs pull") 2>/dev/null ); id=$(basename "$f" .md)
+  out=$( (cd "$root/b" && st list) 2>&1 )
+  assert_eq "store: dirty tracked file does not block pull" \
+    "$(printf '%s' "$out" | grep -c "$id.md")|$(stg -C "$root/b-store" status --porcelain)" "1| M .gitignore"
+  rm -rf "$root"
+}
+test_store_dirt_does_not_block_pull
+
+test_store_slow_remote() {
+  local root to start took rc err; root=$(canon_helper "$(mktemp -d)")
+  to=$(command -v timeout || command -v gtimeout || true)
+  if [ -z "$to" ]; then printf '  SKIP store: slow remote bounded by timeout (no timeout binary)\n'; rm -rf "$root"; return; fi
+  mk_remote "$root"; mk_side "$root" a
+  mkdir -p "$root/bin"; printf '#!/bin/sh\nsleep 30\n' >"$root/bin/git-remote-slow"; chmod +x "$root/bin/git-remote-slow"
+  stg -C "$root/a-store" remote set-url origin "slow::$root/remote.git"
+  start=$SECONDS
+  err=$( (cd "$root/a" && PATH="$root/bin:$PATH" TODOS_SYNC_TIMEOUT=1 st new "Slow") 2>&1 >/dev/null ); rc=$?
+  took=$((SECONDS - start))
+  assert_eq "store: slow remote bounded by timeout" \
+    "$rc|$([ "$took" -le 10 ] && echo bounded)|$([ "$(printf '%s\n' "$err" | grep -c '^todos: sync skipped:')" -ge 1 ] && echo warned)" \
+    "0|bounded|warned"
+  rm -rf "$root"
+}
+test_store_slow_remote
+
+test_store_ready_offline_untouched() {
+  local root gd head out rc; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  (cd "$root/a" && st new "Ready item") >/dev/null 2>&1
+  mv "$root/remote.git" "$root/remote.away"
+  gd=$(stg -C "$root/a-store" rev-parse --path-format=absolute --git-dir); rm -f "$gd/FETCH_HEAD"
+  head=$(stg -C "$root/a-store" rev-parse HEAD)
+  out=$( (cd "$root/a" && st ready 2026-09-24-ready-item) 2>&1 ); rc=$?
+  assert_eq "store: ready leaves store untouched offline" \
+    "$rc|$out|$([ "$(stg -C "$root/a-store" rev-parse HEAD)" = "$head" ] && echo same)|$([ -e "$gd/FETCH_HEAD" ] && echo fetched || echo none)" \
+    '0|{"ready":true,"task_id":"2026-09-24-ready-item","dependencies":[]}|same|none'
+  rm -rf "$root"
+}
+test_store_ready_offline_untouched
+
+test_store_busy_list_prints() {
+  local root lock holder i out rc; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  (cd "$root/a" && TODOS_OFFLINE=1 st new "Visible item") >/dev/null 2>&1
+  lock="$(stg -C "$root/a-store" rev-parse --path-format=absolute --git-common-dir)/todos-sync.lock"
+  python3 "$HERE/../todos_store.py" lock "$lock" 30 -- sleep 28.517 & holder=$!
+  for i in $(seq 1 50); do
+    python3 "$HERE/../todos_store.py" lock "$lock" 0 -- true; [ "$?" = 75 ] && break; sleep 0.1
+  done
+  out=$( (cd "$root/a" && TODOS_LOCK_WAIT=1 st list) 2>&1 ); rc=$?
+  kill -9 "$holder"; wait "$holder" 2>/dev/null; pkill -f 'sleep 28.517' 2>/dev/null
+  assert_eq "store: busy lock lets list print" \
+    "$rc|$(printf '%s' "$out" | grep -c 'todos: sync skipped: store is busy')|$(printf '%s' "$out" | grep -c visible-item)" "0|1|1"
+  rm -rf "$root"
+}
+test_store_busy_list_prints
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
