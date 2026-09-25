@@ -25,6 +25,24 @@ can override it explicitly without moving either runtime's plugin files.
   TODO.md                             auto-generated index of pending/
 ```
 
+## Store-backed `.todos`
+
+A repo's `.todos` may be a symlink into a separate git repository that opted
+in with `git config todos.store true`. Then the script keeps that
+repository in sync on every call: it takes a lock, commits hand edits one
+file at a time, pulls (`rebase --autostash`), commits its own change and
+pushes. Offline, verbs still work and print `todos: sync skipped: ...`;
+the next online call pushes. `todos.sh sync` does the same with no other
+change, and `todos.sh import <dir>` merges a directory of todos in (newer
+file wins, a completed todo beats a pending one). `ready` never touches
+the network.
+
+Only the personal Claude config may use a store-backed `.todos`: with
+`CLAUDE_CONFIG_DIR` set to any other config dir, verbs refuse with
+`todos: .todos is not available under this account`, and `brief` skips
+that repo. `TODOS_OFFLINE=1` skips the network; `TODOS_SYNC_TIMEOUT` and
+`TODOS_LOCK_WAIT` (seconds, default 10) bound network calls and the lock.
+
 Todo file:
 
 ```markdown
@@ -78,22 +96,22 @@ normally on the next `git add`.
 
 ## Commands
 
-| Command                                                                 | What it does                                                                                  |
-| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `todos.sh init`                                                         | Create `.todos/{pending,completed}/`, set local-only exclude                                  |
-| `todos.sh new "<title>" [--area A] [--file P]... [--depends-on REF]...` | Create a pending todo; prints the file path                                                   |
-| `todos.sh new "<t>" [--due D] [--surface D] [--priority L]`             | Time/priority fields on a new todo                                                            |
-| `todos.sh register`                                                     | Register the current repo for the cross-repo brief                                            |
-| `todos.sh repos`                                                        | List registered repos (warns on missing paths)                                                |
-| `todos.sh brief [--soon N] [--stale M] [--stale-cap K]`                 | Print time-relevant todos across all registered repos                                         |
-| `todos.sh list [--all] [--offline]`                                     | List pending todos with blocked-on annotations (`--all` adds completed; `--offline` skips gh) |
-| `todos.sh ready <exact-todo-id> [--offline|--online]`                     | Read-only JSON dependency verdict for one exact pending todo; offline by default             |
-| `todos.sh done <slug-or-substring>`                                     | Move a todo `pending/ -> completed/`                                                          |
-| `todos.sh depend <slug-or-substring> REF...`                            | Add dependency refs to a pending todo (`todo:<id>`, `branch:<name>`, `pr:<n>`); re-indexes    |
-| `todos.sh index`                                                        | Regenerate `TODO.md`                                                                          |
-| `todos.sh share`                                                        | Stop ignoring `.todos/` in this repo (opt into committing it)                                 |
-| `todos.sh path`                                                         | Print the `.todos/` directory path                                                            |
-| `todos.sh dashboard [--runtime claude\|codex] [--personal] [--open] [--online] [--out PATH] [--completed N]` | Render the local HTML board in the selected account scope |
+| Command                                                                                                      | What it does                                                                                  |
+| ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `todos.sh init`                                                                                              | Create `.todos/{pending,completed}/`, set local-only exclude                                  |
+| `todos.sh new "<title>" [--area A] [--file P]... [--depends-on REF]...`                                      | Create a pending todo; prints the file path                                                   |
+| `todos.sh new "<t>" [--due D] [--surface D] [--priority L]`                                                  | Time/priority fields on a new todo                                                            |
+| `todos.sh register`                                                                                          | Register the current repo for the cross-repo brief                                            |
+| `todos.sh repos`                                                                                             | List registered repos (warns on missing paths)                                                |
+| `todos.sh brief [--soon N] [--stale M] [--stale-cap K]`                                                      | Print time-relevant todos across all registered repos                                         |
+| `todos.sh list [--all] [--offline]`                                                                          | List pending todos with blocked-on annotations (`--all` adds completed; `--offline` skips gh) |
+| `todos.sh ready <exact-todo-id> [--offline\|--online]`                                                       | Read-only JSON dependency verdict for one exact pending todo; offline by default              |
+| `todos.sh done <slug-or-substring>`                                                                          | Move a todo `pending/ -> completed/`                                                          |
+| `todos.sh depend <slug-or-substring> REF...`                                                                 | Add dependency refs to a pending todo (`todo:<id>`, `branch:<name>`, `pr:<n>`); re-indexes    |
+| `todos.sh index`                                                                                             | Regenerate `TODO.md`                                                                          |
+| `todos.sh share`                                                                                             | Stop ignoring `.todos/` in this repo (opt into committing it)                                 |
+| `todos.sh path`                                                                                              | Print the `.todos/` directory path                                                            |
+| `todos.sh dashboard [--runtime claude\|codex] [--personal] [--open] [--online] [--out PATH] [--completed N]` | Render the local HTML board in the selected account scope                                     |
 
 `new` and `done` regenerate `TODO.md` automatically, so the index never drifts.
 
@@ -152,7 +170,11 @@ selects a substring, the newest item, or a task from another repository.
 Completed or duplicate pending/completed targets cannot dispatch.
 
 ```json
-{"ready":false,"task_id":"2026-09-06-fix-cache","dependencies":[{"ref":"pr:85","state":"unknown"}]}
+{
+  "ready": false,
+  "task_id": "2026-09-06-fix-cache",
+  "dependencies": [{ "ref": "pr:85", "state": "unknown" }]
+}
 ```
 
 The JSON includes every direct dependency in file order, including satisfied
