@@ -85,6 +85,7 @@ sh claude/hooks/scratch-policy.test.sh
 sh claude/hooks/orch-edit-guard.test.sh
 sh claude/hooks/git-remote-guard.test.sh
 sh claude/hooks/pr-post-guard.test.sh
+sh claude/hooks/gh-shim.test.sh
 sh claude/hooks/planning-artifact-guard.test.sh
 sh codex/hooks/codex-hooks.test.sh
 sh codex/skills/codex-skills.test.sh
