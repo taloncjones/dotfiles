@@ -18,6 +18,9 @@ FIX=$(mktemp -d /tmp/pr-post-guard.XXXXXX)
 trap 'rm -rf "$FIX"' EXIT
 
 export HERDR_ENV=1
+# The hook honors a go only when `gh` on its PATH is the shim that spends it.
+PATH="$(pwd)/bin/herdr-shims:$PATH"
+export PATH
 
 case_gate() {
     GATE="$FIX/gate-$1"
@@ -108,7 +111,10 @@ expect_rc "G4 post denied" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
 case_gate p1
 expect_rc "P1 mint (with trailing period)" 0 "$(payload_u s1 'Post it.')"
 expect_rc "P1 first post allowed" 0 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
-expect_rc "P1 second post denied" 2 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
+expect_rc "P1 second post passes the hook (the shim spends the go)" 0 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
+expect_file "P1 hook claims nothing" "$GATE/s1.post-used" absent
+: >"$GATE/s1.post-used"
+expect_rc "P1c post denied once the shim has spent the go" 2 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
 
 case_gate p2
 expect_rc "P2 mint" 0 "$(payload_u s1 'post it')"
@@ -154,7 +160,9 @@ expect_rc "B1 body edit denied under a post go" 2 "$(payload_b s1 'gh pr edit 5 
 case_gate b2
 expect_rc "B2 mint body" 0 "$(payload_u s1 'edit the pr body')"
 expect_rc "B2 first edit allowed" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
-expect_rc "B2 second edit denied" 2 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
+expect_rc "B2 second edit passes the hook (the shim spends the go)" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
+: >"$GATE/s1.body-used"
+expect_rc "B2c edit denied once the shim has spent the go" 2 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
 
 case_gate b3
 expect_rc "B3 mint body" 0 "$(payload_u s1 'edit the pr body')"
@@ -286,30 +294,30 @@ case_gate v3
 expect_rc "V3 a mid-word # in an argument does not defeat the post gate" 2 "$(payload_b s1 'gh pr comment 5 --body abc#hidden')"
 
 case_gate v4
-expect_rc "V4a timeout-wrapped gh pr comment is denied outright, no go" 2 "$(payload_b s1 'timeout 5 gh pr comment 5 --body x')"
+expect_rc "V4a timeout-wrapped gh pr comment is denied with no go" 2 "$(payload_b s1 'timeout 5 gh pr comment 5 --body x')"
 expect_rc "V4a mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "V4a still denied after a typed go (unknown wrapper, not gated)" 2 "$(payload_b s1 'timeout 5 gh pr comment 5 --body x')"
+expect_rc "V4a timeout-wrapped gh pr comment passes after a typed go" 0 "$(payload_b s1 'timeout 5 gh pr comment 5 --body x')"
 case_gate v4b
-expect_rc "V4b stdbuf-wrapped gh pr comment is denied outright, no go" 2 "$(payload_b s1 'stdbuf -oL gh pr comment 5 --body x')"
+expect_rc "V4b stdbuf-wrapped gh pr comment is denied with no go" 2 "$(payload_b s1 'stdbuf -oL gh pr comment 5 --body x')"
 
 case_gate v5
 expect_rc "V5 ANSI-C \$'...' quoting is denied outright, no go" 2 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
 expect_rc "V5 mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "V5 still denied after a typed go" 2 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
+expect_rc "V5 ANSI-C quoted post passes after a typed go" 0 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
 
 # --- U: an unclassifiable gh call is denied outright, no go covers it ------
 
 case_gate u1
-expect_rc "U1 unknown gh subcommand denied with no go" 2 "$(payload_b s1 'gh foo bar')"
+expect_rc "U1 unknown gh subcommand passes the hook (the shim denies it)" 0 "$(payload_b s1 'gh foo bar')"
 case_gate u1b
 expect_rc "U1b mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "U1b unknown gh subcommand still denied after a typed go" 2 "$(payload_b s1 'gh foo bar')"
+expect_rc "U1b unknown gh subcommand passes the hook after a typed go" 0 "$(payload_b s1 'gh foo bar')"
 
 case_gate u2
-expect_rc "U2 api POST to an ungated path denied with no go" 2 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
+expect_rc "U2 api POST to an ungated path passes the hook (the shim denies it)" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
 case_gate u2b
 expect_rc "U2b mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "U2b api POST to an ungated path still denied after a typed go" 2 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
+expect_rc "U2b api POST to an ungated path passes the hook after a typed go" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
 
 # --- W: every allowed read and known write form -----------------------------
 
@@ -358,10 +366,10 @@ sys.stdin = io.StringIO(json.dumps(payload))
 print(g.main())
 PY
 )
-if [ "$X1_RC" = 2 ]; then
-    printf 'PASS  X1 forced classify() exception on a gh command denies (herdr session)\n'; PASS=$((PASS + 1))
+if [ "$X1_RC" = 0 ]; then
+    printf 'PASS  X1 forced classify() exception fails open (the shim still gates)\n'; PASS=$((PASS + 1))
 else
-    printf 'FAIL  X1 forced classify() exception on a gh command denies (herdr session) (got %s)\n' "$X1_RC" >&2; FAIL=$((FAIL + 1))
+    printf 'FAIL  X1 forced classify() exception fails open (the shim still gates) (got %s)\n' "$X1_RC" >&2; FAIL=$((FAIL + 1))
 fi
 
 case_gate x2
@@ -395,6 +403,89 @@ if [ "$X2_RC" = 0 ]; then
 else
     printf 'FAIL  X2 forced classify() exception outside herdr still exits 0 (got %s)\n' "$X2_RC" >&2; FAIL=$((FAIL + 1))
 fi
+
+# --- H: second-layer rules for the exec-time gh shim -----------------------
+
+# A PATH with python3 but no shim: the unarmed session case.
+mkdir -p "$FIX/py"
+ln -s "$(command -v python3)" "$FIX/py/python3"
+
+case_gate h1
+expect_rc "H1 mint post" 0 "$(payload_u s1 'post it')"
+payload_b s1 'gh pr comment 5 --body x' | PATH="$FIX/py:/bin" python3 "$HOOK" >/dev/null 2>"$FIX/err"
+rc=$?
+if [ "$rc" = 2 ] && grep -q 'Relaunch' "$FIX/err"; then
+    printf 'PASS  H1 go not honored when gh on PATH is not the shim\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  H1 go not honored when gh on PATH is not the shim (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+payload_b s1 'gh pr view 5' | PATH="$FIX/py:/bin" python3 "$HOOK" >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 2 ]; then
+    printf 'PASS  H1 reads are denied too when the shim is not armed\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  H1 reads are denied too when the shim is not armed (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+payload_b s1 'g""h pr comment 5 --body x' | PATH="$FIX/py:/bin" python3 "$HOOK" >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 2 ]; then
+    printf 'PASS  H1 quote-split gh is denied too when the shim is not armed\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  H1 quote-split gh is denied too when the shim is not armed (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+unarmed_heredoc='bash <<EOF
+gh pr comment 5 --body x
+EOF'
+payload_b s1 "$unarmed_heredoc" | PATH="$FIX/py:/bin" python3 "$HOOK" >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 2 ]; then
+    printf 'PASS  H1 gh in a heredoc is denied too when the shim is not armed\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  H1 gh in a heredoc is denied too when the shim is not armed (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+payload_b s1 'ls -l' | PATH="$FIX/py:/bin" python3 "$HOOK" >/dev/null 2>&1
+rc=$?
+if [ "$rc" = 0 ]; then
+    printf 'PASS  H1 commands without gh pass when the shim is not armed\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  H1 commands without gh pass when the shim is not armed (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate h2
+expect_rc "H2 mint post" 0 "$(payload_u s1 'post it')"
+expect_rc "H2 path-qualified gh denied even with a go" 2 "$(payload_b s1 '/opt/homebrew/bin/gh pr view 5')"
+expect_rc "H2 path-qualified gh inside bash -c denied" 2 "$(payload_b s1 "bash -c '/opt/homebrew/bin/gh pr view 5'")"
+expect_rc "H2 path-qualified gh behind timeout denied" 2 "$(payload_b s1 'timeout 5 /opt/homebrew/bin/gh pr comment 5 --body x')"
+expect_rc "H2 path-qualified gh in an eval script denied" 2 "$(payload_b s1 "eval '/opt/homebrew/bin/gh pr comment 5 --body x'")"
+expect_rc "H2 shell behind a runner is checked" 2 "$(payload_b s1 "timeout 60 bash -c '/opt/homebrew/bin/gh pr comment 5 --body x'")"
+expect_rc "H2 login sh behind a runner denied" 2 "$(payload_b s1 "timeout 60 sh -lc 'gh pr comment 5 --body x'")"
+expect_rc "H2 pane text behind a flagged env denied" 2 "$(payload_b s1 "env -u FOO herdr pane run w1:p3 'gh pr comment 5 --body x'")"
+expect_rc "H2 backtick-built gh path denied" 2 "$(payload_b s1 '`brew --prefix`/bin/gh pr comment 5 --body x')"
+expect_rc "H2 substituted path-qualified gh denied" 2 "$(payload_b s1 '$(brew --prefix)/bin/gh pr view 5')"
+expect_rc "H2 login sh denied even with a go" 2 "$(payload_b s1 "sh -lc 'gh pr comment 5 --body x'")"
+expect_rc "H2 login dash denied" 2 "$(payload_b s1 'dash -l -c true')"
+expect_rc "H2 sh --login denied" 2 "$(payload_b s1 'sh --login -c true')"
+expect_rc "H2 bash --posix login denied" 2 "$(payload_b s1 'bash --posix -l -c true')"
+expect_rc "H2 zsh --emulate login denied" 2 "$(payload_b s1 'zsh --emulate sh -l -c true')"
+expect_rc "H2 interactive login bash denied" 2 "$(payload_b s1 "bash -lic 'gh pr comment 5 --body x'")"
+expect_rc "H2 split interactive login bash flags denied" 2 "$(payload_b s1 'bash -l -i -c true')"
+expect_rc "H2 gh sent to another pane denied" 2 "$(payload_b s1 "herdr pane run w1:p3 'gh pr view 5'")"
+expect_rc "H2 quote-split gh sent to another pane denied" 2 "$(payload_b s1 "herdr pane send-text w1:p3 'g\"\"h pr comment 5 --body x'")"
+
+case_gate h3
+expect_rc "H3 login bash passes (BASH_ENV anchors it)" 0 "$(payload_b s1 "bash -lc 'gh pr view 5'")"
+expect_rc "H3 login zsh passes (.zprofile anchors it)" 0 "$(payload_b s1 "zsh -lc 'gh pr view 5'")"
+expect_rc "H3 timeout wrapper passes (the shim gates at exec)" 0 "$(payload_b s1 'timeout 60 gh run watch 1')"
+expect_rc "H3 repo clone passes" 0 "$(payload_b s1 'gh repo clone o/r')"
+expect_rc "H3 ANSI-C elsewhere in the command passes" 0 "$(payload_b s1 "echo \$'a' && gh pr view 5")"
+expect_rc "H3 git add of the shim path passes" 0 "$(payload_b s1 'git add bin/herdr-shims/gh')"
+expect_rc "H3 a runner in front of git add passes" 0 "$(payload_b s1 'env -u HERDR_ENV git add bin/herdr-shims/gh')"
+expect_rc "H3 a runner in front of cat passes" 0 "$(payload_b s1 'timeout 5 cat bin/herdr-shims/gh')"
+expect_rc "H3 a backtick in single quotes passes" 0 "$(payload_b s1 "git commit -m 'run \`/opt/homebrew/bin/gh\` by hand'")"
+expect_rc "H3 sh -c with an -l argument passes" 0 "$(payload_b s1 "sh -c 'ls -l'")"
+expect_rc "H3 other text sent to a pane passes" 0 "$(payload_b s1 "herdr pane run w1:p3 'ls -l'")"
+expect_rc "H3 a gh-named task id sent to a pane passes" 0 "$(payload_b s1 "herdr pane run w1:p3 'python3 core.py run-mech --task-id 2026-09-25-fix-gh-shim'")"
+expect_rc "H3 help on an alias stays unknown and passes the hook" 0 "$(payload_b s1 'gh c 5 --help')"
 
 # --- C: classifier entries and the pid map the gh shim reads ---------------
 

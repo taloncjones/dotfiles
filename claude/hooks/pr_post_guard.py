@@ -14,34 +14,25 @@ Gate: decides only when HERDR_ENV=1; every other session exits 0 untouched
 - UserPromptSubmit mints a one-turn, one-session go ONLY from a prompt
   whose whole normalized text is "post it" or "edit the pr body" -- never
   from an AskUserQuestion answer (a tool result, not a typed prompt) and
-  never from a multiple-choice option string. The go expires in 600s and
-  is spent by one PreToolUse Bash call (post/body) or freely by any number
-  of delete calls while unexpired.
-- PreToolUse Bash deny-by-default, not enumerate-the-bad-shapes: three
-  rounds of co-review each found a new way to hide a `gh` write from the
-  classifier (an `if`/`while` prefix, a trailing comment, a punctuation-
-  glued token, a backslash line continuation), each a gap in a shell
-  tokenizer that can only ever be as complete as its list of known-bad
-  shapes. This hook flips the default instead. Any command whose raw text
-  mentions `gh` as a word is classified: it is allowed only if it parses
-  cleanly and every `gh` invocation in it is a known read, a known
-  non-comment write, or a gated kind (post/body/delete) covered by its
-  typed go; anything else -- an unparseable command, an unclassifiable
-  `gh` call, a wrapper this cannot see through -- is denied outright, and
-  no go can cover it. A command that never mentions `gh` is untouched.
+  never from a multiple-choice option string. The go expires in 600s.
+- PreToolUse Bash is the early second layer. The primary gate is the gh
+  shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv
+  after the shell has resolved quoting and substitution -- four review
+  rounds each hid a write from this text classifier (if/while prefixes,
+  comments, punctuation gluing, line continuations, backticks, `g\\h`,
+  `bash -lc`). This hook denies a gated kind it can see without a go, or
+  when the shim is not armed to spend the go; it only checks the go, the
+  shim spends it. It denies outright the two routes around the shim: a
+  path-qualified `gh`, and a login flag on a shell the PATH anchor does
+  not re-run in. Anything it cannot parse passes; the shim decides it.
 
 Override: none. Fixing a false positive means narrowing the classifier,
 not bypassing it.
 
-Accepted holes (see spec "Risks and accepted residuals"): aliases,
-functions, script files, and a subagent sharing the parent's session_id
-during the go turn. `push_guard.py` accepts the same class of hole for
-git push.
-
-Reuses rm_guard's tokenizer, comment-stripping, and wrapper-unwrapping the
-way git_remote_guard.py does; a command that never mentions `gh` fails
-open on any exception, same as before. A command that does mention `gh`
-now fails CLOSED on any exception, in herdr sessions only.
+Accepted holes (spec 2026-09-24-gh-exec-shim-design.md, "Risks and
+accepted residuals"): other GitHub clients and raw HTTP with the token,
+PATH or arming tampering, obfuscated uncovered login shells, a forged
+marker, and a child process sharing the go's session id.
 """
 
 from __future__ import annotations
@@ -64,10 +55,18 @@ TTL = 600
 PRUNE_AGE = 86400
 SID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 SHIM_MARK = b"gh_post_shim.py"
+# Commands that run their argument as a program, and the runner options
+# that take a value (`timeout -s KILL`, `sudo -u me`, `xargs -n 1`).
+COMMAND_RUNNERS = {"timeout", "stdbuf", "nice", "nohup", "time", "xargs", "env", "sudo", "command", "exec", "watch"}
+RUNNER_VALUE_FLAGS = {"-u", "-s", "-k", "-n", "-I", "-S", "-C", "-g", "-a"}
+RUNNER_ARG_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+UNANCHORED_SHELLS = {"sh", "dash", "ksh", "mksh", "csh", "tcsh", "fish"}
 KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 GH_WORD_RE = re.compile(r"\bgh\b")
-ANSI_C_QUOTE_RE = re.compile(r"\$'")
+# `gh` as a command word in pane text; `fix-gh-shim` or `.gh` is not one.
+PANE_GH_RE = re.compile(r"(?<![\w.-])gh(?![\w.-])")
+SHELL_QUOTING_RE = re.compile(r"[\\'\"`]")
 DELETE_PATH = re.compile(r"(issues|pulls)/comments/[^/\s]+$")
 POST_PATH = re.compile(r"(issues|pulls)/(\d+/)?comments|pulls/\d+/reviews|/reactions$|/replies$")
 BODY_PATH = re.compile(r"(issues|pulls)/\d+$")
@@ -182,29 +181,17 @@ def mentions_gh(text: str) -> bool:
     return GH_WORD_RE.search(text) is not None
 
 
+def unquoted(text: str) -> str:
+    """Drop the quotes, backslashes and backticks a shell removes, so `g""h`
+    and `g\\h` read as `gh`."""
+    return SHELL_QUOTING_RE.sub("", text)
+
+
 def find_gh_index(tokens: list[str]) -> int | None:
     for i, tok in enumerate(tokens):
         if rm_guard.basename(tok) == "gh":
             return i
     return None
-
-
-def last_wrapper_name(tokens: list[str]) -> str | None:
-    """Walk `tokens` from the start the way rm_guard.strip_prefixes does,
-    but return the last PREFIX_WRAPPERS name it passed through instead of
-    the remaining tokens -- so an env assignment ahead of the wrapper
-    (`FOO=1 sudo -u me gh ...`, round-3 minor) still names the wrapper that
-    stopped the unwrap, instead of hiding it behind the assignment."""
-    name = None
-    for tok in tokens:
-        if rm_guard.is_env_assignment(tok):
-            continue
-        base = rm_guard.basename(tok)
-        if base in rm_guard.PREFIX_WRAPPERS:
-            name = base
-            continue
-        break
-    return name
 
 
 def graphql_query_from_file(args: list[str]) -> bool:
@@ -302,60 +289,124 @@ def resolved_kind(sub: str) -> tuple[str | None, str | None]:
     return sub, None
 
 
+def effective_command(stripped: list[str]) -> list[str]:
+    """The command a segment runs once leading runners, their options and
+    durations are skipped: `timeout 60 bash -c ...` runs `bash -c ...`, and
+    `env -u X git add bin/herdr-shims/gh` runs `git`."""
+    i = 0
+    while i < len(stripped):
+        tok = stripped[i]
+        if tok in RUNNER_VALUE_FLAGS:
+            i += 2
+        elif tok.startswith("-") or RUNNER_ARG_RE.match(tok) or rm_guard.basename(tok) in COMMAND_RUNNERS:
+            i += 1
+        else:
+            break
+    return stripped[i:]
+
+
+def path_qualified_gh(command: list[str]) -> bool:
+    """A `gh` run by path skips the shim's PATH lookup."""
+    return bool(command) and rm_guard.basename(command[0]) == "gh" and "/" in command[0]
+
+
+def split_backticks(command: str) -> str:
+    """Turn each unquoted backtick into a segment break, so the command a
+    `` `...` `` substitution runs, or the path it builds, is checked like
+    any other segment. Single- and double-quoted text is left alone."""
+    out, quote = [], None
+    for ch in command:
+        if quote:
+            quote = None if ch == quote else quote
+            out.append(ch)
+        elif ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+        else:
+            out.append(" ; " if ch == "`" else ch)
+    return "".join(out)
+
+
+def shell_flags(seg: list[str]) -> list[str]:
+    """Leading option words of a shell invocation (`--emulate` takes a value)."""
+    flags, i = [], 1
+    while i < len(seg) and seg[i].startswith("-"):
+        flags.append(seg[i])
+        i += 2 if seg[i] == "--emulate" else 1
+    return flags
+
+
+def uncovered_login_shell(seg: list[str]) -> bool:
+    """A login shell the PATH anchor does not re-run in: its profile
+    re-derives PATH and can put the real gh ahead of the shim."""
+    if not seg:
+        return False
+    shell = rm_guard.basename(seg[0])
+    flags = shell_flags(seg)
+    short = [f for f in flags if not f.startswith("--")]
+    if not ("--login" in flags or any("l" in f[1:] for f in short)):
+        return False
+    if shell == "bash":
+        # BASH_ENV is skipped in POSIX mode and in interactive shells.
+        return "--posix" in flags or any(c in f[1:] for f in short for c in "pi")
+    if shell == "zsh":
+        return "--emulate" in flags
+    return shell in UNANCHORED_SHELLS
+
+
+def herdr_pane_text_mentions_gh(seg: list[str]) -> bool:
+    """`herdr pane run|send-text|send-keys` runs text in another pane's shell,
+    which is not armed; quotes and backslashes are dropped before the check
+    because that shell will drop them too."""
+    if len(seg) < 3 or rm_guard.basename(seg[0]) != "herdr" or seg[1] != "pane":
+        return False
+    if seg[2] not in ("run", "send-text", "send-keys"):
+        return False
+    return PANE_GH_RE.search(unquoted(" ".join(seg[3:]))) is not None
+
+
 def classify(command: str, depth: int = 0) -> tuple[list[str], list[str]]:
-    """Return (gated_kinds, denials) for `command`. `gated_kinds` need a
-    typed go (existing post/body/delete behavior); a non-empty `denials`
-    means outright deny, which no go can cover. A command that never
-    mentions `gh` (after joining continuations and dropping heredoc
-    bodies) returns ([], []) untouched."""
-    working = drop_heredoc_bodies(join_continuations(command))
-    if not mentions_gh(working):
-        return [], []
-    if ANSI_C_QUOTE_RE.search(working):
-        return [], ["this command uses $'...' ANSI-C quoting, which this gate's tokenizer does not support"]
+    """Return (gated_kinds, denials) for `command`. The gh shim is the
+    primary gate and sees the final argv; this is the early second layer.
+    `gated_kinds` need a typed go. `denials` are the routes that skip the
+    shim (a path-qualified gh, a login shell the anchor misses, gh sent to
+    another pane) and no go covers them. Anything this cannot parse or classify passes: the shim
+    decides it at exec."""
+    working = split_backticks(drop_heredoc_bodies(join_continuations(command)))
     tokens = strict_tokenize(working)
     if tokens is None:
-        return [], ["this command could not be parsed cleanly by the shell tokenizer"]
+        return [], []
     kinds: list[str] = []
     denials: list[str] = []
     for seg in rm_guard.split_segments(tokens):
         while seg and seg[0] in KEYWORDS:
             seg = seg[1:]
-        if not seg:
+        run = effective_command(rm_guard.strip_prefixes(seg))
+        if uncovered_login_shell(run):
+            denials.append(f"a login `{rm_guard.basename(run[0])}` can put the real `gh` ahead of the gh shim")
             continue
-        stripped = rm_guard.strip_prefixes(seg)
-        head = rm_guard.basename(stripped[0]) if stripped else None
-        kind = denial = None
+        if herdr_pane_text_mentions_gh(run):
+            denials.append("`gh` sent to another herdr pane runs in a shell without the gh shim")
+            continue
+        if not mentions_gh(" ".join(seg)):
+            continue
+        if path_qualified_gh(run):
+            denials.append("a path-qualified `gh` skips the gh shim")
+            continue
+        head = rm_guard.basename(run[0]) if run else None
         if head == "gh":
-            kind, denial = resolved_kind(classify_gh(stripped[1:]))
-        elif stripped and stripped[0].startswith("-"):
-            idx = find_gh_index(stripped)
-            if idx is not None:
-                wrapper = last_wrapper_name(seg) or rm_guard.basename(seg[0])
-                kind, denial = resolved_kind(classify_gh(stripped[idx + 1:]))
-                if denial:
-                    denial = f"`{wrapper}` wraps a `gh` call this cannot classify safely"
+            kind = classify_gh(run[1:])
+            if kind in ("post", "body", "delete"):
+                kinds.append(kind)
         elif (head in rm_guard.SHELL_WRAPPERS or head == "eval") and depth == 0:
             script = (
-                rm_guard.extract_shell_c_arg(stripped) if head in rm_guard.SHELL_WRAPPERS
-                else " ".join(stripped[1:])
+                " ".join(run[1:]) if head == "eval"
+                else rm_guard.extract_shell_c_arg(run)
             )
             if script:
                 sub_kinds, sub_denials = classify(script, depth + 1)
                 kinds.extend(sub_kinds)
                 denials.extend(sub_denials)
-                continue
-            if find_gh_index(seg) is not None:
-                denial = f"cannot statically extract the script `{head}` runs"
-        elif head in rm_guard.SHELL_WRAPPERS or head == "eval":
-            if find_gh_index(seg) is not None:
-                denial = "a shell wrapper nested more than one level deep reaches a `gh` call"
-        elif find_gh_index(seg) is not None:
-            denial = "`gh` is reached through an unrecognized command or wrapper"
-        if kind:
-            kinds.append(kind)
-        if denial:
-            denials.append(denial)
     return kinds, denials
 
 
@@ -445,8 +496,8 @@ def _denial(kind: str) -> str:
 def _unclassified_denial(reason: str) -> str:
     return (
         f"Blocked: {reason}.\n"
-        "Run a single plain `gh` command on one line, with no wrapper, "
-        "or type the go."
+        "Run plain `gh` as found on PATH, not from a login `sh`; "
+        "no typed go covers this."
     )
 
 
@@ -457,6 +508,13 @@ def is_shim(path: str) -> bool:
             return SHIM_MARK in handle.read(512)
     except OSError:
         return False
+
+
+def shim_armed() -> bool:
+    """The hook's PATH is the Claude process's, the base of every Bash
+    call's PATH (the shell snapshot), so this is what Bash will run."""
+    found = shutil.which("gh")
+    return found is not None and is_shim(found)
 
 
 def shim_session_id() -> str:
@@ -473,6 +531,14 @@ def shim_session_id() -> str:
             return mapped
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     return sid if SID_RE.match(sid) else ""
+
+
+def _unarmed_denial() -> str:
+    return (
+        "Blocked: `gh` on this session's PATH is not the herdr gh shim, so "
+        "no `gh` call can be gated.\nRelaunch the agent through claude(), "
+        "codex() or the herdr dispatcher, which arm the shim."
+    )
 
 
 def prune(directory: Path, now: float) -> None:
@@ -541,18 +607,19 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
     sid = payload.get("session_id")
     if not isinstance(sid, str):
         return None
+    if not shim_armed():
+        # No shim behind this session: any `gh` could reach the real one.
+        # Heredoc bodies count here: `bash <<EOF` runs them.
+        if mentions_gh(unquoted(join_continuations(command))):
+            return _unarmed_denial()
+        return None
     try:
         kinds, denials = classify(command)
-        if denials:
-            return _unclassified_denial(denials[0])
-        return check_go(kinds, sid, directory, now) or spend_go(kinds, sid, directory)
     except Exception:
-        # A command that never mentions `gh` keeps failing open (a crashed
-        # guard must never block ordinary work); one that does mention `gh`
-        # fails closed here instead, per the redesign's default-deny.
-        if mentions_gh(command):
-            return _unclassified_denial("an internal error occurred while classifying this command")
-        return None
+        return None  # fail open: the gh shim still gates at exec
+    if denials:
+        return _unclassified_denial(denials[0])
+    return check_go(kinds, sid, directory, now)
 
 
 def main() -> int:
