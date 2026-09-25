@@ -91,5 +91,86 @@ else
     pass "ai-update fails when reconcile cannot run (missing python3)"
 fi
 
+# Retired-plugin sweep end to end. The scratch HOME's ~/.claude still
+# registers ECC in project scope, with a known marketplace, a clone and a
+# cache. A stub claude mimics CLI 2.1.282's `plugin marketplace remove`.
+# SWEEP_STUB=fail makes it fail; SWEEP_STUB=lie makes it a no-op.
+SWEEP_HOME="$TMP/sweep-home"
+mkdir -p "$SWEEP_HOME/.claude/plugins/cache/ecc/ecc/2.2.0" "$SWEEP_HOME/.claude/plugins/marketplaces/ecc"
+printf '{"version": 2, "plugins": {"ecc@ecc": [{"scope": "project", "projectPath": "%s/gone"}]}}\n' \
+    "$TMP" >"$SWEEP_HOME/.claude/plugins/installed_plugins.json"
+printf '{"ecc": {"source": {"source": "git", "url": "https://github.com/affaan-m/ECC.git"}}}\n' \
+    >"$SWEEP_HOME/.claude/plugins/known_marketplaces.json"
+printf '{"enabledPlugins": {"ecc@ecc": false}}\n' >"$SWEEP_HOME/.claude/settings.json"
+SWEEP_STUB_BIN="$TMP/sweep-stub-bin"
+mkdir -p "$SWEEP_STUB_BIN"
+for tool in "$STUB_BIN"/*; do ln -s "$(readlink "$tool")" "$SWEEP_STUB_BIN/${tool##*/}"; done
+cat >"$SWEEP_STUB_BIN/claude" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$SWEEP_TRACE"
+case "${SWEEP_STUB:-ok}" in
+    fail) exit 1 ;;
+    lie) exit 0 ;;
+esac
+cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+[ "$1 $2 $3" = "plugin marketplace remove" ] || exit 0
+python3 - "$cfg" "$4" <<'PY'
+import json, os, shutil, sys
+cfg, market = sys.argv[1:]
+reg_path = os.path.join(cfg, "plugins", "installed_plugins.json")
+mk_path = os.path.join(cfg, "plugins", "known_marketplaces.json")
+reg = json.load(open(reg_path))
+reg["plugins"] = {k: v for k, v in reg["plugins"].items() if not k.endswith("@" + market)}
+json.dump(reg, open(reg_path, "w"))
+mk = json.load(open(mk_path))
+mk.pop(market, None)
+json.dump(mk, open(mk_path, "w"))
+shutil.rmtree(os.path.join(cfg, "plugins", "marketplaces", market), ignore_errors=True)
+PY
+EOF
+chmod +x "$SWEEP_STUB_BIN/claude"
+: >"$TMP/sweep-trace"
+if env -i HOME="$SWEEP_HOME" PATH="$SWEEP_STUB_BIN" TMPDIR="$TMP" SWEEP_TRACE="$TMP/sweep-trace" \
+        CODEX_HOME="$SWEEP_HOME/.codex" DOTFILEDIR="$DOTFILEDIR" \
+        bash "$AI_UPDATE" >"$TMP/sweep.log" 2>&1 &&
+   ! grep -q ecc "$SWEEP_HOME/.claude/settings.json" &&
+   ! grep -q ecc "$SWEEP_HOME/.claude/plugins/installed_plugins.json" &&
+   ! grep -q ecc "$SWEEP_HOME/.claude/plugins/known_marketplaces.json" &&
+   [ ! -e "$SWEEP_HOME/.claude/plugins/cache/ecc" ] && [ ! -e "$SWEEP_HOME/.claude/plugins/marketplaces/ecc" ]; then
+    pass "update --ai sweeps a registered ECC and leaves no ecc key"
+else
+    fail "update --ai sweeps a registered ECC and leaves no ecc key (see $TMP/sweep.log)"
+fi
+for f in settings.json plugins/installed_plugins.json plugins/known_marketplaces.json; do
+    cp "$SWEEP_HOME/.claude/$f" "$TMP/first.${f##*/}"
+done
+: >"$TMP/sweep-trace"
+if env -i HOME="$SWEEP_HOME" PATH="$SWEEP_STUB_BIN" TMPDIR="$TMP" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=fail \
+        CODEX_HOME="$SWEEP_HOME/.codex" DOTFILEDIR="$DOTFILEDIR" \
+        bash "$AI_UPDATE" >"$TMP/sweep2.log" 2>&1 &&
+   [ ! -s "$TMP/sweep-trace" ] &&
+   cmp -s "$SWEEP_HOME/.claude/settings.json" "$TMP/first.settings.json" &&
+   cmp -s "$SWEEP_HOME/.claude/plugins/installed_plugins.json" "$TMP/first.installed_plugins.json" &&
+   cmp -s "$SWEEP_HOME/.claude/plugins/known_marketplaces.json" "$TMP/first.known_marketplaces.json"; then
+    pass "second update --ai calls no claude subcommand and changes nothing"
+else
+    fail "second update --ai calls no claude subcommand and changes nothing"
+fi
+# A sweep that cannot finish fails the run, but only after the reconcile and
+# Codex steps have run.
+printf '{"ecc": {}}\n' >"$SWEEP_HOME/.claude/plugins/known_marketplaces.json"
+rm -f "$SWEEP_HOME/.codex/skills/handoff"
+if env -i HOME="$SWEEP_HOME" PATH="$SWEEP_STUB_BIN" TMPDIR="$TMP" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=lie \
+        CODEX_HOME="$SWEEP_HOME/.codex" DOTFILEDIR="$DOTFILEDIR" \
+        bash "$AI_UPDATE" >"$TMP/sweep3.log" 2>&1; then
+    fail "update --ai fails on an unfinished sweep after running Codex"
+elif grep -qF '[ai-update] [X] retired plugin sweep incomplete' "$TMP/sweep3.log" &&
+     ! grep -qF '[ai-update] Done.' "$TMP/sweep3.log" &&
+     [ -L "$SWEEP_HOME/.codex/skills/handoff" ]; then
+    pass "update --ai fails on an unfinished sweep after running Codex"
+else
+    fail "update --ai fails on an unfinished sweep after running Codex"
+fi
+
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

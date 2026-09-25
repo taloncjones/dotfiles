@@ -939,6 +939,35 @@ if cmp -s "$CFG/settings.json" "$TMP/link-first.json"; then
 else
     fail "second link run leaves settings.json byte-identical"
 fi
+
+# The link path sweeps before it reconciles: one run on a dir that still
+# registers ECC leaves no ecc substring in settings.json. A failed sweep does
+# not stop the link, and the reconcile keeps the plugin pinned off.
+LINKECC="$TMP/link-ecc"
+mkdir -p "$LINKECC/plugins"
+printf '{"version": 2, "plugins": {"ecc@ecc": [{"scope": "project", "projectPath": "%s/gone"}]}}\n' \
+    "$TMP" >"$LINKECC/plugins/installed_plugins.json"
+printf '{"ecc": {}}\n' >"$LINKECC/plugins/known_marketplaces.json"
+printf '{"enabledPlugins": {"ecc@ecc": false}}\n' >"$LINKECC/settings.json"
+(export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" HOME="$TMP/sweep-home"
+ link_claude_config_dir "$LINKECC") >"$TMP/link-ecc.out" 2>&1
+if ! grep -q ecc "$LINKECC/settings.json"; then
+    pass "link path sweeps a registered ECC and leaves no ecc key"
+else
+    fail "link path sweeps a registered ECC and leaves no ecc key"
+fi
+LINKFAIL="$TMP/link-fail"
+mkdir -p "$LINKFAIL/plugins"
+printf '{"ecc": {}}\n' >"$LINKFAIL/plugins/known_marketplaces.json"
+printf '{"version": 2, "plugins": {"ecc@ecc": [{"scope": "user"}]}}\n' >"$LINKFAIL/plugins/installed_plugins.json"
+(export PATH="$SWEEP_BIN:$PATH" SWEEP_TRACE="$TMP/sweep-trace" SWEEP_STUB=fail HOME="$TMP/sweep-home"
+ link_claude_config_dir "$LINKFAIL") >"$TMP/link-fail.out" 2>&1
+if [ -L "$LINKFAIL/hooks" ] &&
+   jget "$LINKFAIL/settings.json" "d['enabledPlugins']['ecc@ecc'] is False and 'hooks' in d"; then
+    pass "link path completes and keeps ecc@ecc pinned off when the sweep fails"
+else
+    fail "link path completes and keeps ecc@ecc pinned off when the sweep fails"
+fi
 if [ -L "$CFG/CLAUDE.md" ] && [ ! -L "$CFG/settings.json" ]; then
     pass "link path symlinks assets but keeps settings.json a real file"
 else

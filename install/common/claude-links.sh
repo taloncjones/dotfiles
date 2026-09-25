@@ -686,6 +686,8 @@ link_claude_config_dir() {
   # Seed from template on first install, then reconcile template drift on every
   # run -- plugin-installer keys survive the merge (see reconcile_claude_settings_file).
   seed_machine_local_file "$DOTFILEDIR"/claude/settings.json.tmpl "$cdir"/settings.json
+  # Sweep before the reconcile so a retired plugin's settings key goes with it.
+  sweep_retired_claude_plugins "$cdir" "[claude-links]" || true
   reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$cdir"/settings.json || true
   ln -sf "$DOTFILEDIR"/claude/commands "$cdir"/commands
   ln -sf "$DOTFILEDIR"/claude/agents "$cdir"/agents

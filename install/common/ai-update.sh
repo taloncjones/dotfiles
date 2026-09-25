@@ -19,10 +19,14 @@ echo "[ai-update] Linking Claude config dirs..."
 link_claude_config_dir "$HOME"/.claude
 link_claude_config_dir "$HOME"/.claude-work
 
-# link_claude_config_dir tolerates a failed reconcile (|| true) because the
-# full install must not die half-way on a machine without python3. The scoped
-# path exists precisely to deliver template changes, so here a reconcile that
-# cannot run IS a failure: re-run it strictly (idempotent) for both dirs.
+# link_claude_config_dir tolerates a failed sweep and reconcile (|| true)
+# because the full install must not die half-way on a machine without
+# python3. The scoped path exists precisely to deliver template changes and
+# finish plugin retirements, so here a step that cannot run IS a failure.
+# The sweep's failure is deferred so the reconcile and Codex steps still run.
+sweep_status=0
+sweep_retired_claude_plugins "$HOME"/.claude "[ai-update]" || sweep_status=1
+sweep_retired_claude_plugins "$HOME"/.claude-work "[ai-update]" || sweep_status=1
 reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$HOME"/.claude/settings.json "[ai-update]"
 reconcile_claude_settings_file "$DOTFILEDIR"/claude/settings.json.tmpl "$HOME"/.claude-work/settings.json "[ai-update]"
 
@@ -33,4 +37,8 @@ link_codex_surfaces
 echo "[ai-update] Refreshing plugins..."
 source "$DOTFILEDIR"/install/common/claude-plugins.sh
 
+if [ "$sweep_status" -ne 0 ]; then
+  echo "[ai-update] [X] retired plugin sweep incomplete; see the [X] lines above"
+  exit 1
+fi
 echo "[ai-update] Done."
