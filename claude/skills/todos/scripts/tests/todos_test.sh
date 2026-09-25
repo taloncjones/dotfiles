@@ -1191,7 +1191,7 @@ test_store_new_commits() {
   f=$( (cd "$root/a" && TODOS_OFFLINE=1 st new "First item") 2>/dev/null ); id=$(basename "$f" .md)
   assert_eq "store: opted-in store commits new" \
     "$(stg -C "$root/a-store" log -1 --format=%s)|$(stg -C "$root/a-store" show --name-only --format= HEAD)" \
-    "todos: new 2026-09-24-first-item|repos/dotfiles/.todos/pending/2026-09-24-first-item.md"
+    "todos: new|repos/dotfiles/.todos/pending/2026-09-24-first-item.md"
   rm -rf "$root"
 }
 test_store_new_commits
@@ -1226,6 +1226,21 @@ test_store_work_config_refuses() {
   rm -rf "$root"
 }
 test_store_work_config_refuses
+
+test_store_work_config_refuses_without_optin() {
+  # CR-3: the work-account gate must key on .todos crossing into another
+  # repository, not on todos.store=true -- a manually re-cloned or
+  # misconfigured store clone that never set that key must still refuse.
+  local root out rc; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  stg -C "$root/a-store" config --unset todos.store
+  (cd "$root/a" && TODOS_OFFLINE=1 st new "Secret plan") >/dev/null 2>&1
+  out=$( (cd "$root/a" && stw "$root/.claude-work" list) 2>&1 ); rc=$?
+  assert_eq "store: work config refuses list without todos.store set" "$rc|$out" \
+    "1|todos: .todos is not available under this account"
+  rm -rf "$root"
+}
+test_store_work_config_refuses_without_optin
 
 test_store_brief_scope() {
   local root reg work pers; root=$(canon_helper "$(mktemp -d)")
@@ -1284,7 +1299,7 @@ test_store_stray_edit_dated() {
   (cd "$root/a" && TODOS_OFFLINE=1 st new "Second item") >/dev/null 2>&1
   assert_eq "store: direct edit committed as dated sync before new" \
     "$(stg -C "$root/a-store" log -2 --format='%s@%at' | paste -sd'|' -)" \
-    "todos: new 2026-09-24-second-item@$(stg -C "$root/a-store" log -1 --format=%at)|todos: sync pending/2026-09-24-edited-item.md@1772323200"
+    "todos: new@$(stg -C "$root/a-store" log -1 --format=%at)|todos: sync@1772323200"
   rm -rf "$root"
 }
 test_store_stray_edit_dated
@@ -1316,7 +1331,7 @@ test_store_refused_stray_file() {
   printf 'SECRETWORD\n' >>"$f"
   err=$( (cd "$root/a" && TODOS_OFFLINE=1 st new "Clean after") 2>&1 >/dev/null )
   if printf '%s' "$err" | grep -q 'commit refused for pending/2026-09-24-leaky.md' \
-    && [ "$(stg -C "$root/a-store" log -1 --format=%s)" = "todos: new 2026-09-24-clean-after" ] \
+    && [ "$(stg -C "$root/a-store" log -1 --format=%s)" = "todos: new" ] \
     && stg -C "$root/a-store" status --porcelain | grep -q 'pending/2026-09-24-leaky.md'; then
     ok "store: refused stray file does not block others"
   else
@@ -1325,6 +1340,27 @@ test_store_refused_stray_file() {
   rm -rf "$root"
 }
 test_store_refused_stray_file
+
+test_store_title_banned_phrase() {
+  # CR-2: a title whose slug matches the repo's global commit-msg
+  # banned-phrase filter (git/hooks/commit-msg's "ai[- ]generated"
+  # alternation) must not wedge the store: the commit message is a generic
+  # verb, not the slug, so the hook has nothing to match.
+  local root; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  mkdir -p "$root/hooks"
+  printf '#!/bin/sh\ngrep -qiE "ai[- ]generated" "$1" && exit 1\nexit 0\n' >"$root/hooks/commit-msg"
+  chmod +x "$root/hooks/commit-msg"
+  stg -C "$root/a-store" config core.hooksPath "$root/hooks"
+  (cd "$root/a" && TODOS_OFFLINE=1 st new "AI generated notes") >/dev/null 2>&1
+  (cd "$root/a" && TODOS_OFFLINE=1 st new "Second item") >/dev/null 2>&1
+  assert_eq "store: a banned-phrase-tripping title still commits" \
+    "$(stg -C "$root/a-store" rev-list --count HEAD)" "3"
+  assert_eq "store: a banned-phrase-tripping title does not wedge later syncs" \
+    "$(stg -C "$root/a-store" status --porcelain)" ""
+  rm -rf "$root"
+}
+test_store_title_banned_phrase
 
 test_store_share_refuses() {
   local root out rc; root=$(canon_helper "$(mktemp -d)")
@@ -1570,7 +1606,7 @@ test_import_rules() {
   out=$( (cd "$root/a" && TODOS_OFFLINE=1 st import "$s") 2>/dev/null )
   assert_eq "import: copies absent file" \
     "$(cat "$d/pending/2026-01-01-absent.md")|$(stg -C "$root/a-store" log -1 --format=%s -- repos/dotfiles/.todos/pending/2026-01-01-absent.md)" \
-    "src|todos: import pending/2026-01-01-absent.md"
+    "src|todos: import"
   assert_eq "import: newer source replaces" "$(cat "$d/pending/2026-01-01-newer.md")" "src v2"
   assert_eq "import: older source kept" "$(cat "$d/pending/2026-01-01-older.md")" "store v1"
   assert_eq "import: tie keeps store" "$(cat "$d/pending/2026-01-01-tie.md")" "store v1"

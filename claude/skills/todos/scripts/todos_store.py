@@ -95,7 +95,10 @@ def commit_each(argv):
         full = os.path.join(top, rel_repo)
         rel = os.path.relpath(full, base)
         when = int(os.stat(full).st_mtime) if os.path.lexists(full) else None
-        if not commit_paths(repo, [full], f"todos: sync {rel}", when):
+        # A generic message, not the todo's path: a title-derived slug can
+        # trip the global commit-msg banned-phrase filter, and a refused
+        # commit would wedge every later sync while the file stays stray.
+        if not commit_paths(repo, [full], "todos: sync", when):
             print(f"todos: sync skipped: commit refused for {rel}; edit it and rerun", file=sys.stderr)
             status = 1
     return status
@@ -176,7 +179,7 @@ def import_tree(argv):
             print(f"kept {rel}")
             if not extra:
                 continue
-        if repo and not commit_paths(repo, [d, *extra], f"todos: import {rel}", mtime):
+        if repo and not commit_paths(repo, [d, *extra], "todos: import", mtime):
             print(f"todos: sync skipped: commit refused for {rel}", file=sys.stderr)
             ok = False
     return 0 if ok else 1

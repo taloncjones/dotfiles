@@ -138,7 +138,7 @@ if [ "$(g -C "$CLONE" remote get-url origin)" = "$R" ] && [ "$(g -C "$CLONE" con
 if [ ! -e "$H/Git/personal/.exocortex.clone.99999999" ]; then pass "install: removes a dead temp clone"; else fail "install: removes a dead temp clone"; fi
 f="$CLONE/repos/dotfiles/.todos/pending/2026-01-01-local-item.md"
 if [ -L "$DF/.todos" ] && [ -f "$f" ] && ls -d "$STATE"/*.imported >/dev/null 2>&1 \
-    && [ "$(g -C "$CLONE" log -1 --format=%s -- repos/dotfiles/.todos/pending/2026-01-01-local-item.md)" = "todos: import pending/2026-01-01-local-item.md" ] \
+    && [ "$(g -C "$CLONE" log -1 --format=%s -- repos/dotfiles/.todos/pending/2026-01-01-local-item.md)" = "todos: import" ] \
     && [ "$(g -C "$R" rev-parse main)" = "$(g -C "$CLONE" rev-parse HEAD)" ]; then
     pass "install: first run moves, links, imports and pushes"; else fail "install: first run moves, links, imports and pushes ($out)"; fi
 case "$(realpath_of "$DF/.todos")" in */repos/dotfiles/.todos) pass "install: link realpath keeps a .todos component" ;; *) fail "install: link realpath keeps a .todos component" ;; esac

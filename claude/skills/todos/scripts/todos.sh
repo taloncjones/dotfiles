@@ -394,27 +394,39 @@ personal_env() {
   [ -z "$cfg" ] || [ "$(canon "$cfg")" = "$(canon "$HOME/.claude")" ]
 }
 
-store_repo_of() {
-  # store_repo_of <repo-root> -> toplevel of the opted-in store holding
-  # <repo-root>/.todos, or nothing when .todos is local.
+store_linked_repo_of() {
+  # store_linked_repo_of <repo-root> -> toplevel of another repository
+  # holding <repo-root>/.todos, or nothing when .todos is local. Ignores
+  # todos.store: a misconfigured or freshly re-cloned store that never set
+  # that key must still gate work-account access (CR-3).
   local root="$1" dir top own theirs
   dir=$(cd -P "$root/$TODOS_DIRNAME" 2>/dev/null && pwd) || return 0
   top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 0
   own=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
   theirs=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
   [ "$(canon "$own")" != "$(canon "$theirs")" ] || return 0
+  printf '%s\n' "$top"
+}
+
+store_repo_of() {
+  # store_repo_of <repo-root> -> toplevel of the opted-in store holding
+  # <repo-root>/.todos, or nothing when .todos is local or not opted in.
+  local root="$1" top
+  top=$(store_linked_repo_of "$root")
+  [ -n "$top" ] || return 0
   [ "$(git -C "$top" config --bool todos.store 2>/dev/null)" = true ] || return 0
   printf '%s\n' "$top"
 }
 
 store_setup() {
   # Sets STORE_REPO; dies on a dangling link or outside the personal config.
-  local root; root=$(repo_root)
+  local root linked; root=$(repo_root)
   if [ -L "$root/$TODOS_DIRNAME" ] && [ ! -e "$root/$TODOS_DIRNAME" ]; then
     die ".todos link target is missing; rerun the dotfiles installer"
   fi
+  linked=$(store_linked_repo_of "$root")
+  [ -z "$linked" ] || personal_env || die ".todos is not available under this account"
   STORE_REPO=$(store_repo_of "$root")
-  [ -z "$STORE_REPO" ] || personal_env || die ".todos is not available under this account"
 }
 
 store_dir() { (cd -P "$(repo_root)/$TODOS_DIRNAME" && pwd); }
@@ -656,7 +668,10 @@ cmd_new() {
   } >"$file"
 
   regenerate_index
-  store_end "todos: new $cand" "$(store_dir)/pending/$cand.md"
+  # A generic message, not the slug: a todo title can trip the global
+  # commit-msg banned-phrase filter, and a refused commit here would
+  # otherwise wedge every later sync as long as the file stays uncommitted.
+  store_end "todos: new" "$(store_dir)/pending/$cand.md"
   printf '%s\n' "$file"
 }
 
@@ -757,7 +772,7 @@ cmd_ready() {
   esac
   root=$(git rev-parse --show-toplevel 2>/dev/null) \
     || { ready_error "$task_id" missing_repository; return 2; }
-  if [ -n "$(store_repo_of "$root")" ] && ! personal_env; then
+  if [ -n "$(store_linked_repo_of "$root")" ] && ! personal_env; then
     ready_error "$task_id" out_of_scope; return 2
   fi
   target="$root/$TODOS_DIRNAME/pending/$task_id.md"
@@ -794,7 +809,7 @@ cmd_done() {
   mkdir -p "$completed"
   mv "$f" "$completed/$(basename "$f")"
   regenerate_index
-  store_end "todos: done $(basename "$f" .md)" \
+  store_end "todos: done" \
     "$(store_dir)/pending/$(basename "$f")" "$(store_dir)/completed/$(basename "$f")"
   printf 'done: %s\n' "$(basename "$f")"
 }
@@ -815,7 +830,7 @@ cmd_depend() {
   done
   add_depends "$target" "${refs[@]}"
   regenerate_index
-  store_end "todos: depend $base" "$(store_dir)/pending/$base.md"
+  store_end "todos: depend" "$(store_dir)/pending/$base.md"
   printf '%s\n' "$target"
 }
 
@@ -939,7 +954,7 @@ cmd_share() {
 
 cmd_path() {
   local root; root=$(repo_root)
-  if [ -n "$(store_repo_of "$root")" ] && ! personal_env; then
+  if [ -n "$(store_linked_repo_of "$root")" ] && ! personal_env; then
     die ".todos is not available under this account"
   fi
   printf '%s/%s\n' "$root" "$TODOS_DIRNAME"
@@ -1076,7 +1091,7 @@ cmd_brief() {
     case "$seen" in *"|$repo|"*) continue ;; esac
     seen="$seen|$repo|"
     [ -d "$repo" ] || { printf 'todos: registered repo missing: %s\n' "$repo" >&2; continue; }
-    if [ "$personal" = 0 ] && [ -n "$(store_repo_of "$repo")" ]; then continue; fi
+    if [ "$personal" = 0 ] && [ -n "$(store_linked_repo_of "$repo")" ]; then continue; fi
     pend="$repo/$TODOS_DIRNAME/pending"
     [ -d "$pend" ] || continue
     name=$(basename "$repo")
