@@ -277,6 +277,10 @@ a user message whose whole text is `post it`, ignoring case, surrounding
 space, and one trailing `.` or `!`. Anything else, including any
 `AskUserQuestion` answer, is no.
 
+In a herdr pane (`HERDR_ENV=1`) the gh shim refuses this post: only a
+Claude hook mints the typed go, so it never reaches Codex. Leave the marker
+in `RUN_DIR` and tell the owner it is ready to post.
+
 On the go:
 
 ```bash

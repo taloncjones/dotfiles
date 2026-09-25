@@ -1593,8 +1593,11 @@ Rules (these are outward-facing writes, so treat them carefully):
 - The only agent post on a PR is the newest co-review marker, posted by the
   director only after the owner types `post it` as the whole message
   (co-review Publish). No replies to reviewers -- draft them. PR body edits
-  need `edit the pr body`. Enforced in herdr sessions by
-  `claude/hooks/pr_post_guard.py`.
+  need `edit the pr body`. Enforced in herdr agent sessions by the gh shim
+  (`bin/herdr-shims/gh`, `claude/hooks/gh_post_shim.py`), which gates the
+  final argv at exec time, with `claude/hooks/pr_post_guard.py` as the
+  typed-go source and second layer. Never send `gh` to another pane with
+  `herdr pane run`: that shell has no shim, and the hook refuses it.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
   nothing under it is ever git-tracked, and no marker is written into any
   worktree.
