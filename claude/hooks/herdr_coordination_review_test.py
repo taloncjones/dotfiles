@@ -680,6 +680,30 @@ class ReviewRegressions(unittest.TestCase):
                     )
                 )
 
+    def test_implement_attempt_survives_trailing_review_rows(self):
+        def row(launch, phase):
+            return {"phase": phase, "runtime": "claude", "workspace_id": "w1",
+                    "pane_id": "w1:p1", "launch_id": launch,
+                    "source_head_sha": "a" * 40}
+
+        i0, i1 = row("i0", "implement"), row("i1", "implement")
+        r1, r2, p1 = row("r1", "review"), row("r2", "review"), row("p1", "plan")
+        untyped = {k: v for k, v in r1.items() if k != "runtime"}
+        match = core.attempt_matches
+        self.assertTrue(match({"workers": [i1, r1]}, dict(i1), "implement", "w1"))
+        self.assertTrue(match({"workers": [i1, r1, r2]}, dict(i1), "implement", "w1"))
+        self.assertTrue(match({"workers": [i0, r1, i1, r2]}, dict(i1), "implement", "w1"))
+        self.assertFalse(match({"workers": [i0, r1, i1, r2]}, dict(i0), "implement", "w1"))
+        self.assertFalse(match({"workers": [i1, r1, p1]}, dict(i1), "implement", "w1"))
+        self.assertFalse(match({"workers": [i1, untyped]}, dict(i1), "implement", "w1"))
+        legacy_impl = {"phase": "implement", "workspace_id": "w1"}
+        self.assertFalse(match({"workers": [i0, legacy_impl, r1]}, dict(i0), "implement", "w1"))
+        self.assertFalse(match({"workers": [i0, legacy_impl, r1]}, dict(legacy_impl), "implement", "w1"))
+        self.assertFalse(match({"workers": [i1, "broken", r1]}, dict(i1), "implement", "w1"))
+        self.assertFalse(match({"workers": [i1, r1]}, dict(i1), "implement", "w2"))
+        self.assertFalse(match({"workers": [p1, r1]}, dict(p1), "plan", "w1"))
+        self.assertFalse(match({"workers": [r1, i1]}, dict(r1), "review", "w1"))
+
     def test_stale_native_emission_and_confirmation_reject_malformed_latest_row(self):
         home = self.root / "home"
         repo = home / "Git/personal/project"

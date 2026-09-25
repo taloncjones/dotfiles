@@ -188,22 +188,29 @@ function readGitInfo(dir) {
 }
 
 /**
- * Build the colored context-window meter segment, e.g. ' █████░░░░░ 47%'.
- * Returns '' when the host does not report remaining context.
+ * Usable-context percentage used, as the meter shows it: the host's
+ * remaining percentage minus the autocompact buffer, rescaled.
  */
-function buildContextMeter(remaining, totalCtx) {
-  if (remaining == null) return "";
+function usedPercent(remaining, totalCtx) {
   const acw = parseInt(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || "0", 10);
   const bufferPct =
     acw > 0
       ? Math.min(100, (acw / totalCtx) * 100)
       : DEFAULT_AUTO_COMPACT_BUFFER_PCT;
-
   const usableRemaining = Math.max(
     0,
     ((remaining - bufferPct) / (100 - bufferPct)) * 100,
   );
-  const used = Math.max(0, Math.min(100, Math.round(100 - usableRemaining)));
+  return Math.max(0, Math.min(100, Math.round(100 - usableRemaining)));
+}
+
+/**
+ * Build the colored context-window meter segment, e.g. ' █████░░░░░ 47%'.
+ * Returns '' when the host does not report remaining context.
+ */
+function buildContextMeter(remaining, totalCtx) {
+  if (remaining == null) return "";
+  const used = usedPercent(remaining, totalCtx);
 
   const filled = Math.floor(used / 10);
   const bar = "█".repeat(filled) + "░".repeat(10 - filled);
@@ -212,6 +219,42 @@ function buildContextMeter(remaining, totalCtx) {
   if (used < 65) return ` \x1b[33m${bar} ${used}%${RESET}`;
   if (used < 80) return ` \x1b[38;5;208m${bar} ${used}%${RESET}`;
   return ` \x1b[5;31m${bar} ${used}%${RESET}`;
+}
+
+const SESSION_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Record this herdr session's context fill for the director's check-in.
+ * The numbers come from the host's statusline input, never from the model.
+ */
+function recordContext(data, env, nowMs) {
+  try {
+    const session = data?.session_id;
+    const remaining = data?.context_window?.remaining_percentage;
+    if (env.HERDR_ENV !== "1" || typeof session !== "string") return;
+    if (!SESSION_ID_RE.test(session)) return;
+    if (typeof remaining !== "number" || !Number.isFinite(remaining)) return;
+    const used = usedPercent(
+      remaining,
+      data.context_window.total_tokens || DEFAULT_TOTAL_CTX,
+    );
+    const base = env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+    const dir = path.join(base, "herdr-orch", "context");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, `${session}.json`);
+    const tmp = `${file}.${process.pid}.tmp`;
+    const record = {
+      v: 1,
+      session_id: session,
+      used_pct: used,
+      ts: Math.floor(nowMs / 1000),
+    };
+    fs.writeFileSync(tmp, JSON.stringify(record) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    // Never break the statusline over a context record.
+  }
 }
 
 /**
@@ -275,7 +318,9 @@ function main() {
   process.stdin.on("end", () => {
     clearTimeout(timeout);
     try {
-      process.stdout.write(render(JSON.parse(input)));
+      const data = JSON.parse(input);
+      process.stdout.write(render(data));
+      recordContext(data, process.env, Date.now());
     } catch (e) {
       // Silent fail: never break the host's statusline on bad input.
     }
@@ -285,6 +330,8 @@ function main() {
 module.exports = {
   render,
   buildContextMeter,
+  usedPercent,
+  recordContext,
   readActiveTask,
   readGitInfo,
   buildDirSegment,

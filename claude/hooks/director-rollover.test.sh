@@ -294,6 +294,45 @@ $CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
 SH
 
+# Scripted herdr for the rollover delivery checks: sends log to $FX/herdr.log,
+# fail N times per verb ($FX/fail.<verb>, optional $FX/garbage.<verb> for a
+# malformed-JSON reply), and `pane read` shows $FX/screen.before until a
+# send-keys lands, then $FX/screen.after.
+ROLLOVER_STUB="$TMPDIR/rollover-herdr-stub.$$"
+cat > "$ROLLOVER_STUB" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+if [ "$1 $2" = "pane read" ]; then
+    if [ -e "$FX/entered" ]; then cat "$FX/screen.after"; else cat "$FX/screen.before"; fi
+    exit 0
+fi
+n=$(grep -c "^pane $2 " "$FX/herdr.log")
+fails=$(cat "$FX/fail.$2" 2>/dev/null || echo 0)
+if [ "$n" -le "$fails" ]; then
+    if [ -e "$FX/garbage.$2" ]; then
+        [ "$2" = send-keys ] && : > "$FX/entered"
+        printf 'not json\n'; exit 0
+    fi
+    echo boom >&2; exit 7
+fi
+[ "$2" = send-keys ] && : > "$FX/entered"
+printf '{"id":"x","result":{"type":"ok"}}\n'
+STUB
+chmod +x "$ROLLOVER_STUB"
+SCREENS="$TMPDIR/rollover-screens.$$"; mkdir -p "$SCREENS"
+python3 - "$SCREENS" <<'PY'
+import sys
+d, rule = sys.argv[1], "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+def w(name, *lines):
+    open(f"{d}/{name}", "w").write("\n".join(lines) + "\n")
+w("typed", "history", rule, "❯ /clear", rule, meter)
+w("empty", "history", rule, "❯", rule, meter)
+w("history-only", "❯ /clear", "done", rule, "❯", rule, meter)
+w("partial", "history", rule, "❯ /cl", rule, meter)
+PY
+export ROLLOVER_STUB SCREENS
+
 check "rollover: sends /clear then enter to HERDR_PANE_ID" <<'SH'
 cat > "$FX/bin/herdr" <<'STUB'
 #!/bin/sh
@@ -306,9 +345,80 @@ F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_S
 PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
 grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
-test "$(wc -l < "$FX/herdr.log" | tr -d ' ')" = 2
+test "$(wc -l < "$FX/herdr.log" | tr -d ' ')" = 3
 test "$(sed -n 1p "$FX/herdr.log")" = "pane send-text w9:p1 /clear"
 test "$(sed -n 2p "$FX/herdr.log")" = "pane send-keys w9:p1 enter"
+test "$(sed -n 3p "$FX/herdr.log")" = "pane read w9:p1 --source detection --lines 40"
+SH
+
+check "rollover: send-text replies malformed JSON but /clear is in the input -> no resend" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-text"; : > "$FX/garbage.send-text"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
+grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
+test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 1
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 1
+SH
+
+check "rollover: send-text failed and the input is empty (history has /clear) -> one resend" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/history-only" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-text"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
+grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
+test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 2
+SH
+
+check "rollover: send-text failed with partial input -> stop, no resend, no Enter" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/partial" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-text"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
+test "$rc" = 1
+grep -q 'delivery unknown' "$FX/e"
+test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 1
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 0
+SH
+
+check "rollover: Enter failed once with /clear still typed -> one retry" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 1 > "$FX/fail.send-keys"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
+grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 2
+SH
+
+check "rollover: Enter failing twice with /clear still typed -> stop, delivery unknown" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
+echo 2 > "$FX/fail.send-keys"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
+test "$rc" = 1
+grep -q 'delivery unknown' "$FX/e"
+test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 2
+test "$(grep -c '^pane read ' "$FX/herdr.log")" = 1
+SH
+
+check "rollover: /clear still typed after Enter -> exit 1 with the press-Enter message" <<'SH'
+cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/typed" "$FX/screen.after"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
+test "$rc" = 1
+grep -qF 'rollover: /clear typed but not submitted in pane w9:p1; press Enter there' "$FX/e"
 SH
 
 check "rollover: stale fence sends nothing" <<'SH'
@@ -395,6 +505,7 @@ assert d["hookEventName"] == "SessionStart"
 assert d["additionalContext"].startswith("[INFO] herdr director rollover"), d
 assert re.search(r"fence=%d$" % (int(sys.argv[2]) + 1), d["additionalContext"], re.M), d
 ' "$FX/h" "$F1"
+! grep -q 'auto-resume:' "$FX/h"
 SH
 
 check "hook: silent when the lease pid is not an ancestor" <<'SH'
@@ -425,6 +536,422 @@ assert d.startswith("[WARNING] herdr director rollover: lease NOT re-established
 ' "$FX/h"
 SH
 
+check "resume-helper: idle pane at the INFO block with an empty input -> one resume line" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo idle > "$FX/agent_status"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write("[INFO] herdr director rollover: lease re-established in place.\n\n"
+                             + rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5
+test "$(grep -c '^pane run w9:p1 resume director$' "$FX/herdr.log")" = 1
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=[json.loads(l) for l in open(sys.argv[1])]; assert len(r)==1 and r[0]["outcome"]=="sent", r' "$LOG"
+SH
+
+check "resume-helper: no INFO block in the pane -> timeout, nothing sent" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo idle > "$FX/agent_status"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+open(sys.argv[1], "w").write("history\n" + rule + "\n❯\n" + rule + "\n  status\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 3
+! grep -q '^pane run' "$FX/herdr.log"
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "input-not-empty"), r' "$LOG"
+SH
+
+check "resume-helper: idle empty prompt with no INFO block still sends (additionalContext never renders)" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo idle > "$FX/agent_status"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write(rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5
+test "$(grep -c '^pane run w9:p1 resume director$' "$FX/herdr.log")" = 1
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="sent", r' "$LOG"
+SH
+
+check "resume-helper: agent_status done (finished turn, no focus command run yet) still sends" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo done > "$FX/agent_status"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write(rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5
+test "$(grep -c '^pane run w9:p1 resume director$' "$FX/herdr.log")" = 1
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="sent", r' "$LOG"
+SH
+
+check "resume-helper: agent still working -> timeout, nothing sent" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo working > "$FX/agent_status"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+open(sys.argv[1], "w").write("[INFO] herdr director rollover: lease re-established in place.\n"
+                             + rule + "\n❯\n" + rule + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 3
+! grep -q '^pane run' "$FX/herdr.log"
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "agent-not-idle"), r' "$LOG"
+SH
+
+check "resume-helper: a fenced refresh after start supersedes it" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"%s"}]}}\n' "$(cat "$FX/agent_status")" ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"; echo idle > "$FX/agent_status"
+printf 'no marker yet\n' > "$FX/screen"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5 &
+HP=$!
+i=0; until grep -q '^agent list' "$FX/herdr.log" 2>/dev/null; do i=$((i + 1)); [ $i -lt 100 ] || exit 1; sleep 0.05; done
+$CORE refresh-owner --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F"
+wait $HP
+! grep -q '^pane run' "$FX/herdr.log"
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="superseded", r' "$LOG"
+SH
+
+check "resume-helper: a newer claim before start -> superseded without polling herdr" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+printf '{"id":"x","result":{"agents":[]}}\n'
+STUB
+chmod +x "$FX/bin/herdr"
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock >/dev/null
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5
+test ! -e "$FX/herdr.log"
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="superseded", r' "$LOG"
+SH
+
+check "resume-helper: input typed after the settled read stops the send" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"idle"}]}}\n' ;;
+  "pane read")
+    if [ "$(grep -c '^pane read' "$FX/herdr.log")" -le 2 ]; then cat "$FX/screen.ready"; else cat "$FX/screen.typed"; fi ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"
+python3 - "$FX" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+head = "[INFO] herdr director rollover: lease re-established in place.\n" + rule + "\n"
+open(sys.argv[1] + "/screen.ready", "w").write(head + "❯\n" + rule + "\n" + meter + "\n")
+open(sys.argv[1] + "/screen.typed", "w").write(head + "❯ hello\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 3
+! grep -q '^pane run' "$FX/herdr.log"
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "input-not-empty"), r' "$LOG"
+SH
+
+check "resume-helper: a same-fence write-task does not retire it (spec D17 boundary)" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"idle"}]}}\n' ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"
+printf 'no marker yet\n' > "$FX/screen"
+python3 - "$FX/screen.ready" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write("[INFO] herdr director rollover: lease re-established in place.\n"
+                             + rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 5 &
+HP=$!
+i=0; until grep -q '^agent list' "$FX/herdr.log" 2>/dev/null; do i=$((i + 1)); [ $i -lt 100 ] || exit 1; sleep 0.05; done
+$CORE write-task --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --task-id td-x --session $S1 --fence "$F" \
+    --json '{"task_id":"td-x","status":"in-progress","workers":[]}'
+cp "$FX/screen.ready" "$FX/screen"
+wait $HP
+test "$(grep -c '^pane run w9:p1 resume director$' "$FX/herdr.log")" = 1
+SH
+
+check "resume-helper: an owner lock held past the deadline ends in timeout, never a send" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"idle"}]}}\n' ;;
+  "pane read") cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write("[INFO] herdr director rollover: lease re-established in place.\n"
+                             + rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+python3 - "$FX_REPO" "$FX_SLUG" <<'PY' &
+import argparse, os, sys, time
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+c.select_payload(argparse.Namespace(repo_path=sys.argv[1], runtime="claude",
+                                    personal=False, repo_slug=sys.argv[2]))
+with c.owner_transaction(c.repo_dir(sys.argv[2])):
+    open(os.environ["FX"] + "/locked", "w").close()
+    time.sleep(2)
+PY
+HOLDER=$!
+i=0; until [ -e "$FX/locked" ]; do i=$((i + 1)); [ $i -lt 100 ] || exit 1; sleep 0.05; done
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 0.5
+wait $HOLDER
+! grep -q '^pane run' "$FX/herdr.log" 2>/dev/null
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert (r["outcome"], r["reason"])==("timeout", "lock-wait"), r' "$LOG"
+SH
+
+check "resume-helper: a final pane read that outlasts the deadline never sends" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"idle"}]}}\n' ;;
+  "pane read")
+    [ "$(grep -c '^pane read' "$FX/herdr.log")" -ge 3 ] && sleep 2
+    cat "$FX/screen" ;;
+  "pane run") printf 'ok\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"
+python3 - "$FX/screen" <<'PY'
+import sys
+rule = "─" * 40
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+open(sys.argv[1], "w").write("[INFO] herdr director rollover: lease re-established in place.\n"
+                             + rule + "\n❯\n" + rule + "\n" + meter + "\n")
+PY
+S1=11111111-1111-4111-8111-111111111111
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session $S1 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" python3 "$REPO_ROOT/claude/hooks/director_rollover.py" resume-helper \
+    --pane w9:p1 --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session $S1 --fence "$F" \
+    --poll-secs 0.05 --settle-secs 0 --max-wait-secs 0.8
+! grep -q '^pane run' "$FX/herdr.log"
+LOG=$(find "$FX" -name rollover.jsonl)
+python3 -c 'import json,sys; r=json.loads(open(sys.argv[1]).read()); assert r["outcome"]=="timeout", r' "$LOG"
+SH
+
+check "hook: clear with HERDR_PANE_ID spawns the resume helper and says so" <<'SH'
+cat > "$FX/bin/herdr" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FX/herdr.log"
+case "$1 $2" in
+  "agent list") printf '{"id":"x","result":{"agents":[{"pane_id":"w9:p1","agent_status":"working"}]}}\n' ;;
+  "pane read") printf 'no marker\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
+STUB
+chmod +x "$FX/bin/herdr"
+SOCK=/tmp/cc-socks/$$.sock
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+printf '{"hook_event_name":"SessionStart","source":"clear","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" \
+    python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h"
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"]
+assert d.startswith("[INFO] herdr director rollover") and "auto-resume:" in d, d
+' "$FX/h"
+i=0; until grep -q '^agent list' "$FX/herdr.log" 2>/dev/null; do i=$((i + 1)); [ $i -lt 100 ] || exit 1; sleep 0.1; done
+# Retire the detached helper before the fixture is removed: a newer claim.
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 33333333-3333-4333-8333-333333333333 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+i=0; until LOG=$(find "$FX" -name rollover.jsonl) && [ -n "$LOG" ] && grep -q superseded "$LOG"; do
+    i=$((i + 1)); [ $i -lt 100 ] || exit 1; sleep 0.1
+done
+SH
+
+check "statusline: records host context fill for a herdr session only; meter unchanged" <<'SH'
+unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+node - <<'JS'
+const fs = require("fs"), path = require("path");
+const sl = require(process.env.REPO_ROOT + "/claude/statusline.js");
+const dir = process.env.FX + "/cfg";
+const sid = "11111111-1111-4111-8111-111111111111";
+const data = { session_id: sid, context_window: { remaining_percentage: 60, total_tokens: 1000000 } };
+// (60 - 16.5) / 83.5 = 52.1% usable left -> 48% used, the meter's own figure.
+if (sl.usedPercent(60, 1000000) !== 48) throw new Error("used " + sl.usedPercent(60, 1000000));
+if (!sl.buildContextMeter(60, 1000000).includes(" 48%")) throw new Error("meter changed");
+sl.recordContext(data, { HERDR_ENV: "1", CLAUDE_CONFIG_DIR: dir }, 1700000000123);
+const rec = JSON.parse(fs.readFileSync(path.join(dir, "herdr-orch/context", sid + ".json"), "utf8"));
+if (rec.v !== 1 || rec.session_id !== sid || rec.used_pct !== 48 || rec.ts !== 1700000000)
+  throw new Error(JSON.stringify(rec));
+sl.recordContext(data, { CLAUDE_CONFIG_DIR: dir + "-off" }, 1);
+if (fs.existsSync(dir + "-off")) throw new Error("wrote without HERDR_ENV");
+sl.recordContext({ ...data, session_id: "../escape" }, { HERDR_ENV: "1", CLAUDE_CONFIG_DIR: dir }, 1);
+if (fs.readdirSync(path.join(dir, "herdr-orch/context")).length !== 1) throw new Error("bad id written");
+JS
+SH
+
+check "current_input: tolerates a real statusline.js footer with remaining_percentage null (no meter)" <<'SH'
+node - <<'JS' > "$FX/footers.json"
+const sl = require(process.env.REPO_ROOT + "/claude/statusline.js");
+const base = { session_id: "11111111-1111-4111-8111-111111111111",
+               workspace: { current_dir: process.env.FX_REPO },
+               model: { display_name: "Opus" } };
+const nullFooter = sl.render({ ...base, context_window: { remaining_percentage: null, total_tokens: 1000000 } });
+const numFooter = sl.render({ ...base, context_window: { remaining_percentage: 83, total_tokens: 1000000 } });
+process.stdout.write(JSON.stringify({ null_footer: nullFooter, num_footer: numFooter }));
+JS
+python3 -c '
+import json, sys
+sys.path.insert(0, sys.argv[1] + "/claude/hooks")
+import herdr_orch_core as c
+raw = json.load(open(sys.argv[2]))
+rule = "─" * 40
+null_footer = c.strip_ansi(raw["null_footer"])
+num_footer = c.strip_ansi(raw["num_footer"])
+assert "█" not in null_footer, null_footer  # remaining_percentage null -> no meter block cells
+assert "│" in null_footer, null_footer      # segments still join on the separator
+assert "█" in num_footer, num_footer        # a number still renders the meter
+def screen(footer):
+    return "\n".join([rule, "❯", rule, footer]) + "\n"
+assert c.current_input(screen(null_footer)) == "", null_footer
+assert c.current_input(screen(num_footer)) == "", num_footer
+' "$REPO_ROOT" "$FX/footers.json"
+SH
+
 check "hook: executable, python3 shebang, registered on clear|compact" <<'SH'
 test -x "$REPO_ROOT/claude/hooks/director_rollover.py"
 head -n 1 "$REPO_ROOT/claude/hooks/director_rollover.py" | grep -qxF '#!/usr/bin/env python3'
@@ -436,6 +963,8 @@ hits = [e for e in t["hooks"]["SessionStart"]
 assert len(hits) == 1 and hits[0]["matcher"] == "clear|compact", hits
 PY
 SH
+
+rm -f "$ROLLOVER_STUB"; rm -rf "$SCREENS"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

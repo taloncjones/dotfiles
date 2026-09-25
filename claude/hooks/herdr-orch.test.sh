@@ -1868,7 +1868,8 @@ rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --ba
 rel=$($CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B")
 [ "$rel" = claude/contracts/td-x-contract.json ]
 python3 -c "import json;d=json.load(open('$WT/$rel'));assert d=={'v':1,'task_id':'td-x','commands':[{'name':'t','run':'true'}]},d"
-git -C "$WT" add "$rel"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m c; B2=$(git -C "$WT" rev-parse HEAD)
+# -f: git/.gitignore_global ignores claude/contracts/ since #176.
+git -C "$WT" add -f "$rel"; git -C "$WT" -c user.name=t -c user.email=t@x commit -q -m c; B2=$(git -C "$WT" rev-parse HEAD)
 rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-x --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 2 ]   # exists
 printf '{"v":1,"user":"u","default_base":"origin/main"}' > "$RD/config.json"
 rc=0; $CLI mech-contract --repo-slug slug-c --task-id td-y --worktree "$WT" --base-sha "$B2" 2>/dev/null || rc=$?; [ "$rc" -eq 5 ]   # no template
@@ -2333,7 +2334,8 @@ grep -q 'route --step implementation-review' "$S"
 grep -q -- '--provisional' "$S"
 grep -q 'review-change' "$S"
 grep -q 'task-local readiness' "$S"
-grep -q '600-second deadline' "$S"
+grep -q 'sized review deadline' "$S"
+! grep -q '600_000_000_000' "$S"
 grep -q 'outcome: changes-requested' "$S"
 grep -q 'outcome: approved' "$S"
 grep -q 'Workflow opt-in: granted by the user' "$R/brief-template.md"
@@ -9644,6 +9646,43 @@ for terminal in ("merged", "failed", "abandoned"):
     assert got == "none", "%s -> %s" % (terminal, got)
 PY
 
+check "checkin_action: confirm-completion is suppressed only at the recorded review head" <<PY
+$LOAD
+base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
+            head="a" * 40, completed=True, plan_completed=False, reviewed=False,
+            review_correlates=False, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None,
+            review_at_head=False)
+assert c.checkin_action(base) == "confirm-completion"
+assert c.checkin_action({**base, "status": "blocked", "live": "blocked"}) == "confirm-completion"
+for st in ("review-dispatched", "reviewed", "changes-requested"):
+    got = c.checkin_action({**base, "status": st, "review_at_head": True})
+    assert got == "none", (st, got)
+assert c.checkin_action({**base, "status": "changes-requested"}) == "confirm-completion"
+PY
+
+check "checkin_facts: a repair worker's paused record after a review row reaches the director" <<PY
+$LOAD
+rd = tempfile.mkdtemp()
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+def row(l, p):
+    return {"phase": p, "runtime": "claude", "workspace_id": "w1", "pane_id": "w1:p1",
+            "launch_id": l, "source_head_sha": "a" * 40}
+i0, i1, r = row("i0", "implement"), row("i1", "implement"), row("r1", "review")
+done = os.path.join(rd, "tasks", "PROJ-1.done.json")
+task = {"v": 1, "task_id": "PROJ-1", "status": "changes-requested", "base_sha": "b" * 40,
+        "worktree": os.path.join(rd, "gone"), "workers": [i1, r]}
+open(done, "w").write(json.dumps(dict(i1, task_id="PROJ-1", outcome="paused")))
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["done_outcome"] == "paused" and facts["action"] == "paused", facts
+assert facts["review_at_head"] is False, facts
+task["workers"] = [i0, r, i1]
+open(done, "w").write(json.dumps(dict(i0, task_id="PROJ-1", outcome="paused")))
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["done_outcome"] is None and facts["action"] != "paused", facts
+PY
+
 check "checkin passes each correlation helper its own phase workspace" <<PY
 $LOAD
 task = {"task_id": "PROJ-1", "workers": [
@@ -9876,6 +9915,71 @@ mv "$FINDINGS.bak" "$FINDINGS"
     --agents-json "$root/a.json" --workspaces-json "$root/w.json" | grep -q 'unverifiable-evidence'
 SH
 
+check "task_record_files: dotted stems are sidecars; teardown scan ignores them" <<PY
+$LOAD
+from pathlib import Path
+d = Path(tempfile.mkdtemp())
+for n in ("PROJ-1.json", "PROJ-1.done.json", "PROJ-1.review.json", "PROJ-1.route.json",
+          "PROJ-1.repair2.route.json", "td-a_b.json", "PROJ-1.spend.jsonl"):
+    (d / n).write_text("{}")
+names = [p.name for p in c.task_record_files(d)]
+assert names == ["PROJ-1.json", "td-a_b.json"], names
+rd = Path(tempfile.mkdtemp())
+lead = rd / "leads" / "ldb-x" / "tasks"; lead.mkdir(parents=True)
+(lead / "td-x.route.json").write_text('{"route": "x"}')
+assert c.outstanding_descendants(rd, "ldb-x") == [], c.outstanding_descendants(rd, "ldb-x")
+PY
+
+check "sidecars never read as task records in checkin, status, review-deadlines" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+BASE=$(printf 'b%.0s' $(seq 1 40))
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+    --json '{"task_id":"PROJ-1","status":"reviewed","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude"}]}'
+printf '{"route":"x"}' > "$RD/tasks/PROJ-1.route.json"
+printf '{"status":"review-dispatched","workers":[{"phase":"review","runtime":"claude","launch_id":"L","workspace_id":"w3","pane_id":"p","source_head_sha":"'"$BASE"'","started_ns":1}]}' > "$RD/tasks/PROJ-1.repair2.route.json"
+printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"idle"}]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w3"}]}}' > "$root/w.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^None '
+printf '%s\n' "$out" | grep -qx 'changed: no'
+$CLI status --repo-slug slug-x > "$root/status.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "null" not in d and "PROJ-1" in d, sorted(d)' "$root/status.json"
+[ -z "$($CLI review-deadlines --repo-slug slug-x)" ]
+SH
+
+check "emit-done: an implement attempt stays current across a trailing review row; a superseded one is refused" <<'SH'
+unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+CLI="python3 $PWD/claude/hooks/herdr_orch_core.py"
+WT=$(mktemp -d); git -C "$WT" init -q -b main; git -C "$WT" remote add origin https://example.com/repo-rw.git
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; BASE=$(git -C "$WT" rev-parse HEAD)
+git -C "$WT" -c user.name=t -c user.email=t@x commit -q --allow-empty -m repair; HEAD=$(git -C "$WT" rev-parse HEAD)
+SLUG=$(python3 -c "import importlib.util; s=importlib.util.spec_from_file_location('c','claude/hooks/herdr_orch_core.py'); c=importlib.util.module_from_spec(s); s.loader.exec_module(c); print(c.repo_slug('https://example.com/repo-rw.git'))")
+RD="$CLAUDE_CONFIG_DIR/herdr-orch/$SLUG"
+F=$($CLI claim-owner --repo-slug $SLUG --repo-path $WT --session S1 --host h --pid 1)
+I='{"role":"impl","launch_id":"impl-1","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$BASE"'"}'
+R='{"role":"review","launch_id":"rev-1","phase":"review","runtime":"claude","workspace_id":"w1","pane_id":"w1:p2","source_head_sha":"'"$BASE"'"}'
+I2='{"role":"impl","launch_id":"impl-2","phase":"implement","runtime":"claude","workspace_id":"w1","pane_id":"w1:p1","source_head_sha":"'"$BASE"'"}'
+$CLI write-task --repo-slug $SLUG --task-id td-rw --session S1 --fence "$F" \
+  --json '{"task_id":"td-rw","status":"changes-requested","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","workers":['"$I"','"$R"']}'
+$CLI emit-done --repo-slug $SLUG --repo-path $WT --task-id td-rw --workspace w1 --agent impl-td-rw \
+  --phase implement --outcome completed --head-sha "$HEAD" --base-sha "$BASE" --runtime claude \
+  --launch-id impl-1 --pane-id w1:p1 --source-head-sha "$BASE"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["launch_id"]=="impl-1" and d["head_sha"]==sys.argv[2], d' "$RD/tasks/td-rw.done.json" "$HEAD"
+$CLI write-task --repo-slug $SLUG --task-id td-rw --session S1 --fence "$F" \
+  --json '{"task_id":"td-rw","status":"in-progress","base_sha":"'"$BASE"'","workers":['"$I"','"$R"','"$I2"']}'
+rc=0
+$CLI emit-done --repo-slug $SLUG --repo-path $WT --task-id td-rw --workspace w1 --agent impl-td-rw \
+  --phase implement --outcome completed --head-sha "$HEAD" --base-sha "$BASE" --runtime claude \
+  --launch-id impl-1 --pane-id w1:p1 --source-head-sha "$BASE" 2>"$ERRFILE" || rc=$?
+[ "$rc" -eq 2 ]
+grep -q 'result does not match the current dispatched attempt' "$ERRFILE"
+SH
+
 check "plan_record_matches: identity only, independent of artifacts" <<PY
 $LOAD
 task = {"task_id": "PROJ-1", "base_sha": "b" * 40, "workers": []}
@@ -9886,7 +9990,59 @@ assert c.plan_record_matches(task, done, "h" * 40, "w1")
 assert not c.plan_record_matches(task, dict(done, outcome="failed"), "h" * 40, "w1")
 PY
 
-check "review-deadlines: ceil remaining from the review row; unknown without one" <<PY
+check "review_deadline: sized from the pinned contract and the diff, ceiling on unknown input" <<PY
+$LOAD
+import hashlib, subprocess, time
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+rd = c.state_root() / "slug-d"; os.makedirs(rd / "tasks")
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "base"); base = g("rev-parse", "HEAD")
+for n in ("a.txt", "b.txt", "c.txt"):
+    open(os.path.join(wt, n), "w").write(n)
+g("add", "a.txt", "b.txt", "c.txt"); g("commit", "-q", "-m", "work"); head = g("rev-parse", "HEAD")
+os.makedirs(os.path.join(wt, "claude", "contracts"))
+rel = "claude/contracts/td-d-contract.json"
+body = json.dumps({"v": 1, "task_id": "td-d", "commands": [
+    {"name": "a", "run": "true", "timeout_secs": 100}, {"name": "b", "run": "true"}]}).encode()
+open(os.path.join(wt, rel), "wb").write(body)
+now = time.time_ns()
+row = {"phase": "review", "runtime": "claude", "launch_id": "rev-1", "workspace_id": "w1",
+       "pane_id": "w1:p2", "source_head_sha": head, "started_ns": now - 100 * 10**9}
+task = {"task_id": "td-d", "status": "review-dispatched", "worktree": wt, "base_sha": base,
+        "review_head_sha": head, "contract_path": rel,
+        "contract_sha256": hashlib.sha256(body).hexdigest(), "workers": [row]}
+d = c.review_deadline(rd, task, now)
+# floor 900 + contract (100 + 600) + 20 s x 3 files = 1660; hard = 1660 + 600
+assert (d["deadline_secs"], d["hard_secs"], d["contract"], d["files"]) == (1660, 2260, 700, 3), d
+assert (d["state"], d["remaining"], d["launch"]) == ("running", "1560", "rev-1"), d
+d = c.review_deadline(rd, task, now + 1700 * 10**9)
+assert (d["state"], d["remaining"]) == ("overdue", "460"), d
+d = c.review_deadline(rd, task, now + 2300 * 10**9)
+assert (d["state"], d["remaining"]) == ("expired", "0"), d
+d = c.review_deadline(rd, dict(task, contract_sha256="0" * 64), now)
+assert (d["contract"], d["deadline_secs"]) == ("unknown", 3600), d
+d = c.review_deadline(rd, dict(task, worktree=os.path.join(wt, "gone")), now)
+assert (d["files"], d["deadline_secs"]) == ("unknown", 3600), d
+d = c.review_deadline(rd, dict(task, workers=[{k: v for k, v in row.items() if k != "started_ns"}]), now)
+assert (d["state"], d["remaining"]) == ("unknown", "unknown"), d
+cfg = rd / "config.json"
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": 60, "deadline_ceiling_secs": 1000}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 820   # 60 + 700 + 60
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": 60, "deadline_ceiling_secs": 500}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 500
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": 900, "deadline_ceiling_secs": 100}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 900   # ceiling raised to the floor
+cfg.write_text(json.dumps({"review": {"deadline_floor_secs": True, "deadline_ceiling_secs": 99999}}))
+assert c.review_deadline(rd, task, now)["deadline_secs"] == 1660  # both invalid -> defaults
+assert not hasattr(c, "REVIEW_BOUND_NS")
+PY
+
+check "review-deadlines: sized state line per review-dispatched task; unknown without a row" <<PY
 $LOAD
 import subprocess, time
 root = tempfile.mkdtemp(); slug = "github-com-org-deadline-cafe0002"
@@ -9899,16 +10055,127 @@ def task(tid, status, started):
               open(os.path.join(rd, "tasks", f"{tid}.json"), "w"))
 now = time.time_ns()
 task("PROJ-1", "review-dispatched", now - 100 * 10**9)
-task("PROJ-2", "review-dispatched", now - 700 * 10**9)
+task("PROJ-2", "review-dispatched", now - 3700 * 10**9)
 task("PROJ-3", "completed", now)
 task("PROJ-4", "review-dispatched", None)
+task("PROJ-5", "review-dispatched", now - 4300 * 10**9)
 out = subprocess.run([sys.executable, "claude/hooks/herdr_legacy_fixture.py", "review-deadlines",
                       "--repo-slug", slug], env=dict(os.environ, CLAUDE_CONFIG_DIR=root),
                      capture_output=True, text=True, check=True).stdout.splitlines()
-assert "review-deadline task=PROJ-1 launch=rev-1 remaining=500" in out, out
-assert "review-deadline task=PROJ-2 launch=rev-1 remaining=0" in out, out
+tail = " deadline_secs=3600 hard_secs=4200 basis=contract:unknown,files:unknown"
+assert "review-deadline task=PROJ-1 launch=rev-1 remaining=3500 state=running" + tail in out, out
+assert "review-deadline task=PROJ-2 launch=rev-1 remaining=500 state=overdue" + tail in out, out
 assert not any("PROJ-3" in l for l in out), out
-assert "review-deadline task=PROJ-4 launch=unknown remaining=unknown" in out, out
+assert "review-deadline task=PROJ-4 launch=unknown remaining=unknown state=unknown" + tail in out, out
+assert "review-deadline task=PROJ-5 launch=rev-1 remaining=0 state=expired" + tail in out, out
+PY
+
+check "checkin: review-overdue line for an expired review, silent while running" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+BASE=$(printf 'b%.0s' $(seq 1 40))
+NOW=$(python3 -c 'import time; print(time.time_ns())')
+OLD=$(python3 -c 'import time; print(time.time_ns() - 5000 * 10**9)')
+for pair in "PROJ-1 $NOW" "PROJ-2 $OLD"; do
+  set -- $pair
+  $CLI write-task --repo-slug slug-x --task-id "$1" --session S --fence "$F" \
+    --json '{"task_id":"'"$1"'","status":"review-dispatched","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"rev-'"$1"'","pane_id":"w3:p2","source_head_sha":"'"$BASE"'","started_ns":'"$2"'}]}'
+done
+printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"working"}]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w3"}]}}' > "$root/w.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'review-overdue PROJ-2 state=expired launch=rev-PROJ-2 remaining=0'
+! printf '%s\n' "$out" | grep -q '^review-overdue PROJ-1 '
+printf '%s\n' "$out" | grep -qx 'changed: yes'
+SH
+
+check "checkin: a late verdict after a stale-verdict reset does not correlate" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "x"); base = g("rev-parse", "HEAD")
+g("commit", "--allow-empty", "-q", "-m", "y"); head = g("rev-parse", "HEAD")
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("One blocker. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L2", "pane_id": "pane2", "source_head_sha": head}
+task = {"v": 1, "task_id": "PROJ-1", "status": "completed", "base_sha": base,
+        "review_head_sha": None, "worktree": wt, "workers": [row]}
+late = dict(row, task_id="PROJ-1", outcome="changes-requested", reviewed_head_sha=head,
+            blocking_count=1, findings_ref=findings, findings_sha256=digest)
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(late))
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["review_correlates"] is False and facts["action"] == "dispatch-review", facts
+facts = c.checkin_facts(rd, dict(task, status="review-dispatched", review_head_sha=head),
+                        poll, c.state_root().parent)
+assert facts["review_correlates"] is True and facts["action"] == "changes-requested", facts
+PY
+
+check "checkin: rollover-due from a fresh host context record at or above rollover_pct" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SID=11111111-1111-4111-8111-111111111111
+F=$($CLI claim-owner --repo-slug slug-x --session "$SID" --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$root/herdr-orch/context"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+NOW=$(python3 -c 'import time; print(int(time.time()))')
+printf '{"v":1,"session_id":"%s","used_pct":44,"ts":%s}' "$SID" "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^rollover-due'
+printf '%s\n' "$out" | grep -qx 'changed: no'
+printf '{"v":1,"session_id":"%s","used_pct":45,"ts":%s}' "$SID" "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'rollover-due used_pct=45 threshold=45'
+printf '%s\n' "$out" | grep -qx 'changed: yes'
+printf '{"v":1,"session_id":"%s","used_pct":90,"ts":%s}' "$SID" "$((NOW - 700))" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^rollover-due'
+printf '{"v":1,"session_id":"22222222-2222-4222-8222-222222222222","used_pct":90,"ts":%s}' "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+! printf '%s\n' "$out" | grep -q '^rollover-due'
+printf '{"v":1,"user":"u","default_base":"origin/main","rollover_pct":30}' > "$RD/config.json"
+printf '{"v":1,"session_id":"%s","used_pct":31,"ts":%s}' "$SID" "$NOW" > "$root/herdr-orch/context/$SID.json"
+out=$($CLI checkin --repo-slug slug-x --session "$SID" --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'rollover-due used_pct=31 threshold=30'
+SH
+
+check "current_input: reads only the bordered input region, never history" <<PY
+$LOAD
+rule = "─" * 40
+tip = "  Tip: Use /clear to start fresh when switching topics"
+meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
+def screen(*lines):
+    return "\n".join(lines) + "\n"
+assert c.current_input(screen("history", tip, "", rule, "❯", rule, meter, "mode")) == ""
+assert c.current_input(screen(rule, "❯ /clear", rule, meter)) == "/clear"
+assert c.current_input(screen("❯ /clear", "done", rule, "❯", rule, meter)) == ""
+assert c.current_input(screen(rule, "❯ /cl", rule, meter)) == "/cl"
+assert c.current_input(screen("❯ /clear", "Working...", meter)) is None
+assert c.current_input(screen(rule, "some output", rule, meter)) is None
+# Bordered history (no live meter under the lower rule) is never input.
+assert c.current_input(screen(rule, "❯ /clear", rule)) is None
+assert c.current_input(screen(rule, "❯ /clear", rule, "o1")) is None
+assert c.current_input(screen(rule, "❯ /clear", rule, "o1", "o2", "o3", "o4")) is None
+assert c.current_input(screen(rule, "❯", rule, "output")) is None
+# A meterless footer (remaining_percentage null early in a session) still
+# has the "│" segment separator, so it is a valid footer, not history.
+assert c.current_input(screen(rule, "❯", rule, "Opus 5.5 │ dotfiles")) == ""
+assert c.current_input(screen(rule, "❯ /clear", rule, "Opus 5.5 │ dotfiles")) == "/clear"
+assert c.current_input("") is None
 PY
 
 check "SKILL.md routes a wake through checkin and states prompt-and-pause" <<PY
