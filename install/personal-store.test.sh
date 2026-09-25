@@ -146,5 +146,62 @@ case "$out" in
 esac
 g -C "$CLONE" checkout -q main
 
+# --- seed (R20) ---
+ADR="$TMP/adr.md"
+cat >"$ADR" <<'EOF'
+## Decision records
+
+### ADR-0001: First decision
+
+Context: one.
+Decision: two.
+
+### ADR-0002: Second, with detail
+
+Body line.
+
+#### Detail
+
+Kept in the body.
+
+## Other section
+
+Not part of any record.
+EOF
+
+H=$(new_home seed); DF=$(dotfiles_fixture "$H"); R="$TMP/seed.git"; g init -q --bare "$R"
+CLONE="$H/Git/personal/exocortex"
+hx "$H" "$R" "$DF" bash "$EXO" install >/dev/null 2>&1
+out=$(hx "$H" "$R" "$DF" bash "$EXO" seed --decisions-from "$ADR" --date 2026-09-24 2>&1); rc=$?
+first="$(head -4 "$CLONE/decisions/0001-first-decision.md" 2>/dev/null)"
+if [ "$rc" = 0 ] && [ "$first" = "$(printf '# ADR-0001: First decision\n\nStatus: Accepted\nDate: 2026-09-24')" ] \
+    && grep -q '^#### Detail$' "$CLONE/decisions/0002-second-with-detail.md" \
+    && ! grep -q 'Not part of any record' "$CLONE/decisions/0002-second-with-detail.md" \
+    && [ "$(g -C "$CLONE" rev-list --count HEAD)" = 1 ] \
+    && [ "$(g -C "$R" rev-parse main)" = "$(g -C "$CLONE" rev-parse HEAD)" ]; then
+    pass "seed: writes two ADR records and pushes one commit"; else fail "seed: writes two ADR records and pushes one commit ($out)"; fi
+
+H=$(new_home seeded); DF=$(dotfiles_fixture "$H"); R="$TMP/seeded.git"; g init -q --bare "$R"
+hx "$H" "$R" "$DF" bash "$EXO" install >/dev/null 2>&1
+seed_into "$R"
+out=$(hx "$H" "$R" "$DF" bash "$EXO" seed --decisions-from "$ADR" --date 2026-09-24 2>&1); rc=$?
+if [ "$rc" = 1 ] && [ ! -e "$H/Git/personal/exocortex/decisions" ] && case "$out" in *"remote already has commits"*) true ;; *) false ;; esac; then pass "seed: refuses a remote that already has commits"; else fail "seed: refuses a remote that already has commits ($rc|$out)"; fi
+
+H=$(new_home repush); DF=$(dotfiles_fixture "$H"); R="$TMP/repush.git"; g init -q --bare "$R"
+# GCFG disables hooks globally, so the bare remote gets its own hooksPath.
+mkdir -p "$R/hooks"; printf '#!/bin/sh\nexit 1\n' >"$R/hooks/pre-receive"; chmod +x "$R/hooks/pre-receive"; g -C "$R" config core.hooksPath "$R/hooks"
+hx "$H" "$R" "$DF" bash "$EXO" install >/dev/null 2>&1
+hx "$H" "$R" "$DF" bash "$EXO" seed --decisions-from "$ADR" --date 2026-09-24 >/dev/null 2>&1; rc1=$?
+out1=$(hx "$H" "$R" "$DF" bash "$EXO" install 2>/dev/null)
+rm -f "$R/hooks/pre-receive"
+hx "$H" "$R" "$DF" bash "$EXO" seed --decisions-from "$ADR" --date 2026-09-24 >/dev/null 2>&1; rc2=$?
+hx "$H" "$R" "$DF" bash "$EXO" install >/dev/null 2>&1
+case "$out1" in
+    *"seed was not pushed"*)
+        if [ "$rc1|$rc2" = "0|0" ] && [ "$(g -C "$R" rev-parse main 2>/dev/null)" = "$(g -C "$H/Git/personal/exocortex" rev-parse HEAD)" ] && [ -L "$DF/.todos" ]; then
+            pass "seed: a rejected push is retried by the next seed"; else fail "seed: a rejected push is retried by the next seed ($rc1|$rc2)"; fi ;;
+    *) fail "seed: a rejected push is retried by the next seed ($out1)" ;;
+esac
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

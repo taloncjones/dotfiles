@@ -176,6 +176,61 @@ link_and_import() {
   import_backups "$state"
 }
 
+push_seed() {
+  if net_git -C "$EXO_DIR" push --quiet -u origin HEAD >/dev/null 2>&1; then
+    say "seeded and pushed $EXO_DIR"
+  else
+    warn "seed committed but the push failed; rerun seed to push it"
+  fi
+}
+
+cmd_seed() {
+  local from="" date="" url refs
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --decisions-from) [ "$#" -ge 2 ] || die "--decisions-from needs a file"; from="$2"; shift 2 ;;
+      --date) [ "$#" -ge 2 ] || die "--date needs a value"; date="$2"; shift 2 ;;
+      *) die "unknown seed argument: $1" ;;
+    esac
+  done
+  [ -n "$from" ] && [ -f "$from" ] || die "seed needs --decisions-from <existing file>"
+  date="${date:-$(date -u +%Y-%m-%d)}"
+  case "$date" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) die "invalid --date: $date" ;; esac
+  [ -d "$EXO_DIR/.git" ] || die "no clone at $EXO_DIR; run install first"
+  url=$(remote_url)
+  refs=$(net_git ls-remote "$url" 2>/dev/null) || die "remote unreachable"
+  if git -C "$EXO_DIR" rev-parse --verify --quiet HEAD >/dev/null; then
+    if lone_seed && ! git -C "$EXO_DIR" rev-parse --verify --quiet '@{u}' >/dev/null 2>&1; then
+      # Safe advice: the clone holds nothing but its own seed commit.
+      [ -z "$refs" ] || die "remote was seeded elsewhere; delete $EXO_DIR and rerun install"
+      push_seed; return 0
+    fi
+    die "store already has commits; seed runs only on an empty store"
+  fi
+  [ -z "$refs" ] || die "remote already has commits; run install instead"
+  python3 "$HELPER_PY" decisions "$from" "$EXO_DIR/decisions" "$date" || die "no ADR sections in $from"
+  mkdir -p "$EXO_DIR/$STORE_SUBDIR/pending" "$EXO_DIR/$STORE_SUBDIR/completed"
+  : >"$EXO_DIR/$STORE_SUBDIR/pending/.gitkeep"; : >"$EXO_DIR/$STORE_SUBDIR/completed/.gitkeep"
+  printf 'TODO.md\n*.tmp.*\n*.swp\n*~\n.DS_Store\n' >"$EXO_DIR/.gitignore"
+  cat >"$EXO_DIR/README.md" <<'EOF'
+# exocortex
+
+Private knowledge store: todos now; memory, lessons, handoffs and
+orchestrator context later. Personal accounts only. Content flows one way,
+from work stores into this repository; nothing here is linked into a work
+account's configuration or read by a work session.
+
+- `decisions/` -- numbered decision records.
+- `repos/<key>/.todos/` -- a repository's todo list, linked from that
+  checkout's `.todos`.
+
+Wired by `install/common/exocortex.sh` in the dotfiles repository.
+EOF
+  git -C "$EXO_DIR" config todos.store true
+  git -C "$EXO_DIR" add -A && git -C "$EXO_DIR" commit --quiet -m "exocortex: seed" || die "seed commit failed"
+  push_seed
+}
+
 cmd_resolve() {
   [ "${1:-}" = --cwd ] && [ -n "${2:-}" ] || die "usage: exocortex.sh resolve --cwd DIR"
   personal_scope "$2" || exit 3
@@ -195,5 +250,6 @@ cmd_install() {
 case "${1:-}" in
   install) shift; cmd_install "$@" ;;
   resolve) shift; cmd_resolve "$@" ;;
+  seed) shift; cmd_seed "$@" ;;
   *) die "usage: exocortex.sh {install|resolve --cwd DIR|seed --decisions-from FILE [--date YYYY-MM-DD]}" ;;
 esac
