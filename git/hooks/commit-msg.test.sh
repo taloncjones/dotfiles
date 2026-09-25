@@ -242,6 +242,138 @@ assert_blocks_leaving "T19 mixed offense: trailer stripped, subject still blocke
 Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>" "codex: Generated with ${CODEX_NAME}
 "
 
+# --- Subject length ---------------------------------------------------------
+
+# "codex: " is 7 bytes, so these subjects are exactly 74 and 75 bytes.
+SUBJ74="codex: $(awk 'BEGIN { while (i++ < 67) printf "a" }')"
+SUBJ75="codex: $(awk 'BEGIN { while (i++ < 68) printf "a" }')"
+
+assert_passthrough "L1 passes a 74-character subject" "$SUBJ74"
+
+# L2: exit status exactly 1 and stderr exactly the length line.
+printf '%s\n' "$SUBJ75" >"$EXPECTED"
+printf '%s\n' 'commit-msg: subject is 75 characters; keep it under 75.' >"$EXPECTED_ERR"
+if run_hook "$SUBJ75"; then status=0; else status=$?; fi
+if [ "$status" -eq 1 ] && cmp -s "$MSG" "$EXPECTED" && cmp -s "$ERR" "$EXPECTED_ERR"; then
+    pass "L2 rejects a 75-character subject and reports its length"
+else
+    fail "L2 rejects a 75-character subject and reports its length"
+fi
+
+assert_passthrough "L3 ignores trailing whitespace on the subject" "$SUBJ74   "
+
+# L9: the strip notice comes first, then the length line; the file keeps
+# the stripped text.
+printf '%s\n' "$SUBJ75
+" >"$EXPECTED"
+printf '%s\n' 'commit-msg: stripped 1 agent attribution line(s).' 'commit-msg: subject is 75 characters; keep it under 75.' >"$EXPECTED_ERR"
+if run_hook "$SUBJ75
+
+Co-Authored-By: ${CLAUDE_NAME} <noreply@example.com>"; then status=0; else status=$?; fi
+if [ "$status" -eq 1 ] && cmp -s "$MSG" "$EXPECTED" && cmp -s "$ERR" "$EXPECTED_ERR"; then
+    pass "L9 strips a trailer, then rejects the long subject"
+else
+    fail "L9 strips a trailer, then rejects the long subject"
+fi
+# L4: one case per git-generated subject form the hook exempts.
+while IFS= read -r prefix; do
+    assert_passthrough "L4 exempts a generated subject: $prefix" "$prefix $SUBJ74"
+done <<'EOF'
+Merge branch '
+Merge branches '
+Merge remote-tracking branch '
+Merge remote-tracking branches '
+Merge tag '
+Merge tags '
+Merge commit '
+Merge commits '
+Merge pull request #1 from
+Merge https://example.invalid/
+Merge ../
+Revert "
+Reapply "
+fixup!
+squash!
+amend!
+EOF
+assert_blocks "L7 rejects a long subject that only starts with Merge" "Merge parsers $SUBJ74"
+
+# --- Wider trailer net ------------------------------------------------------
+
+# Na: a co-author naming each token in agent-tokens, capitalized as tools
+# write them. Reading the file keeps agent names out of this script.
+while read -r token; do
+    name="$(printf '%s' "$token" | awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }')"
+    assert_strips "Na strips a co-author naming token $token" "${BODY_MSG}
+
+Co-Authored-By: ${name} Agent <agent@example.com>" "${BODY_MSG}
+" 1
+done <git/hooks/agent-tokens
+
+assert_strips "Nb strips a co-author with a no-reply mailbox" "${BODY_MSG}
+
+Co-Authored-By: Build Helper <no-reply@example.com>" "${BODY_MSG}
+" 1
+
+assert_strips "Nc strips a co-author with a bot address" "${BODY_MSG}
+
+Co-Authored-By: helper <12345+helper[bot]@users.noreply.github.com>" "${BODY_MSG}
+" 1
+
+assert_strips "Nd1 strips a generated-with trailer key with any value" "${BODY_MSG}
+
+Generated-with: some tool 1.2" "${BODY_MSG}
+" 1
+
+assert_strips "Nd2 strips a generated-by trailer key, mixed case" "${BODY_MSG}
+
+Generated-By: anything at all" "${BODY_MSG}
+" 1
+
+assert_strips "Ne strips a bare session trailer key" "${BODY_MSG}
+
+Session: 01ABC" "${BODY_MSG}
+" 1
+
+CURSOR_NAME="Cur""sor"
+assert_strips "Nf strips an agent session key for a new token" "${BODY_MSG}
+
+${CURSOR_NAME}-Session: local run" "${BODY_MSG}
+" 1
+
+GEMINI_NAME="Gem""ini"
+assert_strips "Ng strips a generated-with footer naming a new token" "${BODY_MSG}
+
+Generated with ${GEMINI_NAME}" "${BODY_MSG}
+" 1
+
+assert_passthrough "P1 keeps a human co-author with a GitHub noreply address" "${BODY_MSG}
+
+Co-Authored-By: Jane Doe <12345+jane@users.noreply.github.com>"
+
+assert_passthrough "P2 keeps a human co-author whose surname contains a token" "${BODY_MSG}
+
+Co-Authored-By: Jane Raider <jane@example.com>"
+
+DEVIN_NAME="Dev""in"
+assert_strips "C1 accepted collision: human co-author named like a token" "${BODY_MSG}
+
+Co-Authored-By: ${DEVIN_NAME} Smith <ds@example.com>" "${BODY_MSG}
+" 1
+
+assert_blocks "C2 accepted collision: surname starting with a token is refused" "${BODY_MSG}
+
+Co-Authored-By: Jane ${DEVIN_NAME}e <jd@example.com>"
+
+assert_blocks "C3 refuses a co-author with a token glued to another word" "${BODY_MSG}
+
+Co-Authored-By: ${CLAUDE_NAME}Bot <bot@example.com>"
+
+GPT_PREFIXED_NAME="Auto""GPT"
+assert_blocks "C4 refuses a co-author with a prefix glued in front of a token" "${BODY_MSG}
+
+Co-Authored-By: ${GPT_PREFIXED_NAME} <agent@example.com>"
+
 # --- Environment cases ------------------------------------------------------
 # Failure paths are forced with PATH shims (a tool that always exits 1), not
 # filesystem permissions, so they behave identically as root and as a user.
@@ -333,6 +465,41 @@ elif cmp -s "$DIR23/msg" "$EXPECTED" && grep -q 'commit-msg: failed to replace' 
 else
     fail "T23 fails closed when mv fails and leaves no temp file"
 fi
+
+# L8: the length check needs no rg, so it still rejects with rg absent.
+printf '%s\n' "$SUBJ75" >"$MSG"
+cp "$MSG" "$EXPECTED"
+if PATH="$TOOLS" "$HOOK" "$MSG" >"$OUT" 2>"$ERR"; then
+    fail "L8 rejects a 75-character subject without rg on PATH"
+elif cmp -s "$MSG" "$EXPECTED" && grep -q 'subject is 75 characters' "$ERR"; then
+    pass "L8 rejects a 75-character subject without rg on PATH"
+else
+    fail "L8 rejects a 75-character subject without rg on PATH"
+fi
+
+# K1/K2: the token file is missing or holds an invalid line. The hook is
+# copied so the fixture never touches the real agent-tokens.
+for case in missing empty invalid crlf; do
+    dir="$WORK/tokens-$case"
+    mkdir "$dir"
+    cp "$HOOK" "$dir/commit-msg"
+    if [ "$case" = empty ]; then
+        : >"$dir/agent-tokens"
+    elif [ "$case" = invalid ]; then
+        printf 'valid\nNot A Token\n' >"$dir/agent-tokens"
+    elif [ "$case" = crlf ]; then
+        printf 'valid\r\n' >"$dir/agent-tokens"
+    fi
+    printf '%s\n' "$AGENT_MSG" >"$MSG"
+    cp "$MSG" "$EXPECTED"
+    if "$dir/commit-msg" "$MSG" >"$OUT" 2>"$ERR"; then
+        fail "K refuses when agent-tokens is $case"
+    elif cmp -s "$MSG" "$EXPECTED" && grep -q 'agent-tokens is missing, empty, or invalid' "$ERR"; then
+        pass "K refuses when agent-tokens is $case"
+    else
+        fail "K refuses when agent-tokens is $case"
+    fi
+done
 
 # --- Summary ---------------------------------------------------------------
 
