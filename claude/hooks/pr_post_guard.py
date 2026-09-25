@@ -50,6 +50,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sys
 import time
 from collections import Counter
@@ -62,6 +63,7 @@ GO = {"post it": "post", "edit the pr body": "body"}
 TTL = 600
 PRUNE_AGE = 86400
 SID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+SHIM_MARK = b"gh_post_shim.py"
 KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 GH_WORD_RE = re.compile(r"\bgh\b")
@@ -83,8 +85,15 @@ READ_SUBCOMMANDS = {
     ("run", "view"), ("run", "list"), ("run", "watch"),
     ("issue", "view"), ("issue", "list"),
     ("repo", "view"),
+    ("workflow", "list"), ("workflow", "view"),
     ("auth", "status"),
+    # The token is already exported by zsh/.zprofile; git-credential keeps a
+    # `gh auth setup-git` credential helper working in armed sessions.
+    ("auth", "token"), ("auth", "git-credential"),
 }
+
+# One-word `gh` commands that only read.
+READ_COMMANDS = {"status", "version", "help", "--version"}
 
 # Non-comment `gh` writes this repo's own skills already invoke (grepped
 # from claude/, codex/, bin/, install/); anything else classifies unknown
@@ -92,6 +101,7 @@ READ_SUBCOMMANDS = {
 KNOWN_WRITES = {
     ("pr", "create"),  # claude/commands/pr.md, claude/skills/voice
     ("pr", "merge"),   # claude/skills/ship/SKILL.md
+    ("pr", "ready"), ("pr", "checkout"), ("repo", "clone"), ("run", "rerun"),
 }
 
 
@@ -197,6 +207,18 @@ def last_wrapper_name(tokens: list[str]) -> str | None:
     return name
 
 
+def graphql_query_from_file(args: list[str]) -> bool:
+    """A query read from a file or stdin can hold a mutation this cannot see:
+    `--input`, or a typed field (`-F`/`--field`) whose value is `@file`."""
+    for j, arg in enumerate(args):
+        if arg == "--input" or arg.startswith("--input="):
+            return True
+        typed = arg.startswith(("-F", "--field=")) or (j and args[j - 1] in ("-F", "--field"))
+        if typed and "=@" in arg:
+            return True
+    return False
+
+
 def classify_api(args: list[str]) -> str:
     method, path, has_field, i = None, None, False, 0
     while i < len(args):
@@ -218,7 +240,9 @@ def classify_api(args: list[str]) -> str:
             path = tok.lstrip("/")
         i += 1
     if path == "graphql":
-        return "post" if any("mutation" in a for a in args) else "read"
+        if graphql_query_from_file(args) or any("mutation" in a for a in args):
+            return "post"
+        return "read"
     method = method or ("POST" if has_field else "GET")
     if method == "GET":
         return "read"
@@ -237,6 +261,12 @@ def classify_gh(args: list[str]) -> str:
     """Classify one `gh` invocation's own argv (after the `gh` token) as
     "read", "write" (a known non-comment write), "post"/"body"/"delete"
     (gated, needs its typed go), or "unknown" (denied outright)."""
+    if args[-1:] in (["-h"], ["--help"]) and (len(args) < 2 or not args[-2].startswith("-")):
+        # Help on a known command; `--body --help` still posts "--help", and
+        # an alias or extension stays unknown.
+        return "read" if len(args) < 2 or classify_gh(args[:-1]) != "unknown" else "unknown"
+    if args[:1] and args[0] in READ_COMMANDS:
+        return "read"
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in ("-R", "--repo", "--hostname") else 1
@@ -374,14 +404,13 @@ def claim(path: Path) -> bool:
     return True
 
 
-def decide(kinds: list[str], sid: str, directory: Path, now: float) -> str | None:
-    """Denial text for the first ungranted kind in `kinds`, or None."""
+def check_go(kinds: list[str], sid: str, directory: Path, now: float) -> str | None:
+    """Denial text for the first kind in `kinds` its typed go does not cover,
+    or None. Reads only: the gh shim spends the go (spend_go) at exec."""
     if not kinds:
         return None
     counts = Counter(kinds)
-    # One go covers exactly one post and one body write; a command chaining
-    # two of the same kind (`&&`, `;`, multi-line) can't be covered by one go
-    # even if it were otherwise present, so reject it outright.
+    # One go covers exactly one post and one body write.
     for kind in ("post", "body"):
         if counts[kind] > 1:
             return _denial(kind)
@@ -389,15 +418,18 @@ def decide(kinds: list[str], sid: str, directory: Path, now: float) -> str | Non
         return _denial(kinds[0])
     marker = marker_kind(directory, sid, now)
     for kind in counts:
-        if kind == "delete":
-            if marker != "post":
-                return _denial(kind)
-        elif marker != kind:
+        needed = "post" if kind == "delete" else kind
+        if marker != needed:
             return _denial(kind)
-    for kind in counts:
-        if kind == "post" and not claim(directory / f"{sid}.post-used"):
+        if kind != "delete" and (directory / f"{sid}.{kind}-used").exists():
             return _denial(kind)
-        if kind == "body" and not claim(directory / f"{sid}.body-used"):
+    return None
+
+
+def spend_go(kinds: list[str], sid: str, directory: Path) -> str | None:
+    """Claim each post/body go in `kinds`; denial text if one is spent."""
+    for kind in kinds:
+        if kind != "delete" and not claim(directory / f"{sid}.{kind}-used"):
             return _denial(kind)
     return None
 
@@ -418,6 +450,31 @@ def _unclassified_denial(reason: str) -> str:
     )
 
 
+def is_shim(path: str) -> bool:
+    """A gh shim names gh_post_shim.py in its first bytes; real gh does not."""
+    try:
+        with open(path, "rb") as handle:
+            return SHIM_MARK in handle.read(512)
+    except OSError:
+        return False
+
+
+def shim_session_id() -> str:
+    """Session id for the shim: the hook's pid map first (it follows
+    /clear), then CLAUDE_CODE_SESSION_ID."""
+    pid = os.environ.get("CLAUDE_PID", "")
+    if pid.isdigit():
+        try:
+            with open(gate_dir() / f"pid-{pid}.sid", encoding="utf-8") as handle:
+                mapped = handle.read().strip()
+        except OSError:
+            mapped = ""
+        if SID_RE.match(mapped):
+            return mapped
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    return sid if SID_RE.match(sid) else ""
+
+
 def prune(directory: Path, now: float) -> None:
     try:
         entries = list(directory.iterdir())
@@ -431,6 +488,25 @@ def prune(directory: Path, now: float) -> None:
             continue
 
 
+def write_pid_map(directory: Path, sid: str) -> None:
+    """Record which session this Claude process (the hook's parent) is on,
+    so the shim can find the go after a /clear changes the session id.
+    Written whole or not at all; a failure only costs the /clear fallback."""
+    target = directory / f"pid-{os.getppid()}.sid"
+    temp = directory / f".pid-{os.getppid()}.{os.getpid()}.tmp"
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(sid)
+        os.replace(temp, target)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+
+
 def handle_prompt(payload: dict, directory: Path, now: float) -> None:
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SID_RE.match(sid):
@@ -438,6 +514,7 @@ def handle_prompt(payload: dict, directory: Path, now: float) -> None:
     _unlink(directory / f"{sid}.json")
     _unlink(directory / f"{sid}.post-used")
     _unlink(directory / f"{sid}.body-used")
+    write_pid_map(directory, sid)
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         return
@@ -468,7 +545,7 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
         kinds, denials = classify(command)
         if denials:
             return _unclassified_denial(denials[0])
-        return decide(kinds, sid, directory, now)
+        return check_go(kinds, sid, directory, now) or spend_go(kinds, sid, directory)
     except Exception:
         # A command that never mentions `gh` keeps failing open (a crashed
         # guard must never block ordinary work); one that does mention `gh`

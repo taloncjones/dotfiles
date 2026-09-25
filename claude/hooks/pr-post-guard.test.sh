@@ -396,6 +396,25 @@ else
     printf 'FAIL  X2 forced classify() exception outside herdr still exits 0 (got %s)\n' "$X2_RC" >&2; FAIL=$((FAIL + 1))
 fi
 
+# --- C: classifier entries and the pid map the gh shim reads ---------------
+
+case_gate c1
+expect_rc "C1 help on a gated subcommand is a read" 0 "$(payload_b s1 'gh pr comment 5 --help')"
+expect_rc "C1 graphql query from a file is gated" 2 "$(payload_b s1 'gh api graphql -F query=@m.graphql')"
+expect_rc "C1 graphql query from stdin is gated" 2 "$(payload_b s1 'gh api graphql --input -')"
+
+case_gate h4
+expect_rc "H4 prompt writes the pid map" 0 "$(payload_u s1 'thanks')"
+if [ "$(cat "$GATE"/pid-*.sid 2>/dev/null)" = s1 ] && [ "$(stat -f %Lp "$GATE"/pid-*.sid 2>/dev/null || stat -c %a "$GATE"/pid-*.sid)" = 600 ]; then
+    printf 'PASS  H4 pid map holds the session id, mode 0600\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  H4 pid map holds the session id, mode 0600\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate h5
+: >"$GATE"
+expect_rc "H5 an unwritable gate dir never blocks a prompt" 0 "$(payload_u s1 'thanks')"
+
 # --- M: gate mechanics ------------------------------------------------------
 
 case_gate m1
