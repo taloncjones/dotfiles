@@ -7,6 +7,16 @@
 #
 # Requires: DOTFILEDIR must be set before calling the functions.
 
+# Retired Claude plugins, keyed by plugin id. The settings reconcile and
+# sweep_retired_claude_plugins both read this one table. `marketplace` is
+# removed with the plugin; the shared official marketplace is not.
+RETIRED_CLAUDE_PLUGINS_JSON='{
+  "ecc@ecc": {"marketplace": "ecc", "cache": "cache/ecc",
+              "source": "https://github.com/affaan-m/ECC.git"},
+  "superpowers@claude-plugins-official": {"cache": "cache/claude-plugins-official/superpowers",
+              "source": "https://github.com/obra/superpowers.git"}
+}'
+
 # Seed a machine-local file from a template, with defensive symlink + size guards.
 # Why this exists: the destination is intended to be a real file (Claude/plugin
 # installers write into it), but earlier dotfiles installs symlinked it to a repo
@@ -57,7 +67,7 @@ seed_machine_local_file() {
 #   - plugin-installer-owned keys (enabledPlugins, extraKnownMarketplaces) are
 #     unioned with live state winning on conflict, so nothing an installer
 #     wrote is lost;
-#   - retired plugins (RETIRED_PLUGINS) are forced off, their marketplaces dropped, and their env keys (RETIRED_ENV_KEYS) swept;
+#   - retired plugins (RETIRED_CLAUDE_PLUGINS_JSON) are pinned off while still registered and dropped once gone, their marketplaces dropped, and their env keys (RETIRED_ENV_KEYS) swept;
 #   - keys the template does not define are preserved as-is.
 # A corrupt/unparseable destination is rebuilt from the template. Idempotent.
 # History: the merge logic originated in bootstrap-cloud.sh (910f2bc), which
@@ -78,7 +88,8 @@ reconcile_claude_settings_file() {
     return 1
   fi
 
-  RECONCILE_LABEL="$label" python3 - "$tmpl" "$dest" <<'PY'
+  RECONCILE_LABEL="$label" RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" \
+    python3 - "$tmpl" "$dest" <<'PY'
 import json, os, sys
 
 label = os.environ.get("RECONCILE_LABEL", "[claude-links]")
@@ -125,9 +136,9 @@ for key in [k for k in env if k.startswith("ANTHROPIC_DEFAULT_") and k.endswith(
 # where live state wins, so dropping a plugin from the template alone would
 # leave it enabled on every machine that had it. Force it off and stop
 # refreshing its marketplace; `<name>-uninstall` removes the files.
-RETIRED_PLUGINS = ("ecc@ecc", "superpowers@claude-plugins-official")
-# claude-plugins-official stays: other plugins come from it.
-RETIRED_MARKETPLACES = ("ecc",)
+RETIRED = json.loads(os.environ["RETIRED_CLAUDE_PLUGINS_JSON"])
+RETIRED_PLUGINS = tuple(RETIRED)
+RETIRED_MARKETPLACES = tuple(e["marketplace"] for e in RETIRED.values() if "marketplace" in e)
 # Only ECC carries isolation env keys, so only an installed ECC may hold them.
 RETIRED_ENV_OWNERS = ("ecc@ecc",)
 
@@ -145,17 +156,33 @@ RETIRED_ENV_KEYS = ("ECC_CONTEXT_MONITOR_COST_WARNINGS", "ECC_DISABLED_HOOKS", "
                     "ECC_PLAN_CANVAS_STATE_DIR", "GATEGUARD_BASH_ROUTINE_DISABLED",
                     "GATEGUARD_EXEMPT_GLOBS")
 installed_plugins_path = os.path.join(os.path.dirname(os.path.abspath(dest_path)), "plugins", "installed_plugins.json")
-retired_plugins_still_installed = False
-if os.path.isfile(installed_plugins_path):
-    try:
+installed_names = set()
+# Same validity rule as sweep_retired_claude_plugins. Unreadable means every
+# retired plugin may still be there: keep them pinned off and keep ECC's
+# isolation keys rather than act on a guess.
+try:
+    if os.path.lexists(installed_plugins_path):
+        if os.path.islink(installed_plugins_path):
+            raise ValueError("symlinked registry")
         with open(installed_plugins_path) as fh:
             installed = json.load(fh)
-        installed_names = set(installed.get("plugins", {}) if isinstance(installed, dict) else {})
-    except (json.JSONDecodeError, AttributeError):
-        # Unreadable installed_plugins.json: assume the plugin may still be
-        # there rather than sweep isolation keys on a guess.
-        installed_names = set(RETIRED_ENV_OWNERS)
-    retired_plugins_still_installed = bool(installed_names & set(RETIRED_ENV_OWNERS))
+        plugins = installed.get("plugins", {}) if isinstance(installed, dict) else None
+        if not (isinstance(plugins, dict) and all(
+                isinstance(recs, list) and all(isinstance(r, dict) for r in recs) for recs in plugins.values())):
+            raise ValueError("unexpected registry shape")
+        installed_names = set(plugins)
+    # A known retired marketplace can still offer its plugin, so it counts
+    # as installed too -- the same evidence the sweep uses.
+    known_path = os.path.join(os.path.dirname(installed_plugins_path), "known_marketplaces.json")
+    if os.path.lexists(known_path):
+        with open(known_path) as fh:
+            known = json.load(fh)
+        if not isinstance(known, dict):
+            raise ValueError("unexpected known_marketplaces shape")
+        installed_names |= {p for p, e in RETIRED.items() if e.get("marketplace") in known}
+except (OSError, ValueError):
+    installed_names = set(RETIRED_PLUGINS)
+retired_plugins_still_installed = bool(installed_names & set(RETIRED_ENV_OWNERS))
 if retired_plugins_still_installed:
     # A corrupt or empty dest (handled above by falling back to {}) has no
     # existing env to inherit these keys from, and the template no longer
@@ -197,10 +224,15 @@ for key, value in dest.items():
     if key not in result:
         result[key] = value
 
-result["enabledPlugins"] = {
-    **result.get("enabledPlugins", {}),
-    **{plugin: False for plugin in RETIRED_PLUGINS},
-}
+# Pin a retired plugin off only while this config dir still registers it;
+# once it is gone the key goes too, so settings.json stops naming it.
+enabled = dict(result.get("enabledPlugins", {}))
+for plugin in RETIRED_PLUGINS:
+    if plugin in installed_names:
+        enabled[plugin] = False
+    else:
+        enabled.pop(plugin, None)
+result["enabledPlugins"] = enabled
 markets = {
     name: value
     for name, value in result.get("extraKnownMarketplaces", {}).items()

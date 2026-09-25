@@ -180,10 +180,10 @@ cat >"$RETDEST" <<'EOF'
 }
 EOF
 reconcile_claude_settings_file "$RETTMPL" "$RETDEST" "[test]" >/dev/null 2>&1
-if jget "$RETDEST" "d['enabledPlugins']['ecc@ecc'] is False"; then
-    pass "reconcile forces retired plugin ecc@ecc to false"
+if jget "$RETDEST" "'ecc@ecc' not in d['enabledPlugins']"; then
+    pass "reconcile drops an unregistered retired ecc@ecc key"
 else
-    fail "reconcile forces retired plugin ecc@ecc to false"
+    fail "reconcile drops an unregistered retired ecc@ecc key"
 fi
 if jget "$RETDEST" "'ecc' not in d['extraKnownMarketplaces']"; then
     pass "reconcile drops the retired ecc marketplace"
@@ -223,10 +223,10 @@ cat >"$SPDEST" <<'EOF'
 }
 EOF
 reconcile_claude_settings_file "$RETTMPL" "$SPDEST" "[test]" >/dev/null 2>&1
-if jget "$SPDEST" "d['enabledPlugins']['superpowers@claude-plugins-official'] is False and d['enabledPlugins']['sample@claude-plugins-official'] is True"; then
-    pass "reconcile forces retired superpowers off"
+if jget "$SPDEST" "'superpowers@claude-plugins-official' not in d['enabledPlugins'] and d['enabledPlugins']['sample@claude-plugins-official'] is True"; then
+    pass "reconcile drops an unregistered retired superpowers key"
 else
-    fail "reconcile forces retired superpowers off"
+    fail "reconcile drops an unregistered retired superpowers key"
 fi
 if jget "$SPDEST" "'claude-plugins-official' in d['extraKnownMarketplaces']"; then
     pass "retirement keeps the shared claude-plugins-official marketplace"
@@ -246,6 +246,53 @@ if jget "$SPCFG/settings.json" "not [k for k in d['env'] if k.startswith(('ECC_'
     pass "superpowers installed without ECC restores no ECC env key"
 else
     fail "superpowers installed without ECC restores no ECC env key"
+fi
+
+if jget "$SPCFG/settings.json" "d['enabledPlugins']['superpowers@claude-plugins-official'] is False and 'ecc@ecc' not in d['enabledPlugins']"; then
+    pass "reconcile forces a registered retired superpowers to false"
+else
+    fail "reconcile forces a registered retired superpowers to false"
+fi
+
+# A registry listing only other plugins retires nothing it lists: both
+# retired keys go, the listed plugin stays.
+OTHERCFG="$TMP/other-registry"
+mkdir -p "$OTHERCFG/plugins"
+printf '{"plugins": {"sample@claude-plugins-official": [{"scope": "user"}]}}\n' \
+    >"$OTHERCFG/plugins/installed_plugins.json"
+printf '{"enabledPlugins": {"ecc@ecc": false, "superpowers@claude-plugins-official": false, "sample@claude-plugins-official": true}}\n' \
+    >"$OTHERCFG/settings.json"
+reconcile_claude_settings_file "$RETTMPL" "$OTHERCFG/settings.json" "[test]" >/dev/null 2>&1
+if jget "$OTHERCFG/settings.json" "'ecc@ecc' not in d['enabledPlugins'] and 'superpowers@claude-plugins-official' not in d['enabledPlugins'] and d['enabledPlugins']['sample@claude-plugins-official'] is True"; then
+    pass "reconcile drops retired keys when the registry lists only other plugins"
+else
+    fail "reconcile drops retired keys when the registry lists only other plugins"
+fi
+
+# The sweep's validity rule: a record list that is not a list of objects is
+# unreadable, so both retired ids stay pinned off and ECC isolation stays.
+SHAPECFG="$TMP/shape-registry"
+mkdir -p "$SHAPECFG/plugins"
+printf '{"plugins": {"ecc@ecc": {"scope": "user"}}}\n' >"$SHAPECFG/plugins/installed_plugins.json"
+printf '{"env": {}}\n' >"$SHAPECFG/settings.json"
+reconcile_claude_settings_file "$RETTMPL" "$SHAPECFG/settings.json" "[test]" >/dev/null 2>&1
+if jget "$SHAPECFG/settings.json" "d['enabledPlugins']['ecc@ecc'] is False and d['enabledPlugins']['superpowers@claude-plugins-official'] is False and d['env'].get('ECC_DISABLED_HOOKS')"; then
+    pass "reconcile treats a wrong-shape registry as unreadable"
+else
+    fail "reconcile treats a wrong-shape registry as unreadable"
+fi
+
+# ECC records pruned but its marketplace still known: the marketplace can
+# still offer ECC, so the pin and the isolation keys stay.
+KEYCFG="$TMP/key-only"
+mkdir -p "$KEYCFG/plugins"
+printf '{"ecc": {}}\n' >"$KEYCFG/plugins/known_marketplaces.json"
+printf '{"env": {"ECC_DISABLED_HOOKS": "a,b"}}\n' >"$KEYCFG/settings.json"
+reconcile_claude_settings_file "$RETTMPL" "$KEYCFG/settings.json" "[test]" >/dev/null 2>&1
+if jget "$KEYCFG/settings.json" "d['enabledPlugins']['ecc@ecc'] is False and d['env']['ECC_DISABLED_HOOKS'] == 'a,b' and 'superpowers@claude-plugins-official' not in d['enabledPlugins']"; then
+    pass "reconcile keeps ECC pinned while its marketplace is still known"
+else
+    fail "reconcile keeps ECC pinned while its marketplace is still known"
 fi
 
 # An unreadable registry means "ECC may still be installed", never
@@ -442,10 +489,10 @@ if jget "$CFG/settings.json" "not any(k.startswith('ANTHROPIC_DEFAULT_') for k i
 else
     fail "link path leaves every model alias un-pinned"
 fi
-if jget "$CFG/settings.json" "d['enabledPlugins']['ecc@ecc'] is False and 'ecc' not in d.get('extraKnownMarketplaces', {}) and not [k for k in d.get('env', {}) if k.startswith(('ECC_', 'GATEGUARD_'))] and 'CLAUDE_CONFIG_DIR' not in json.dumps(d)"; then
-    pass "link path delivers no ECC env and disables ecc@ecc"
+if jget "$CFG/settings.json" "'ecc@ecc' not in d['enabledPlugins'] and 'ecc' not in d.get('extraKnownMarketplaces', {}) and not [k for k in d.get('env', {}) if k.startswith(('ECC_', 'GATEGUARD_'))] and 'CLAUDE_CONFIG_DIR' not in json.dumps(d)"; then
+    pass "link path delivers no ECC env and no ecc@ecc key"
 else
-    fail "link path delivers no ECC env and disables ecc@ecc"
+    fail "link path delivers no ECC env and no ecc@ecc key"
 fi
 # Two consecutive update runs must converge: the exclusion is delivered once
 # and never re-written differently.
