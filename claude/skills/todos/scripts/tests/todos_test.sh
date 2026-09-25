@@ -1542,5 +1542,93 @@ test_store_busy_list_prints() {
 }
 test_store_busy_list_prints
 
+# Epochs used by the import fixtures (UTC midnight).
+T_FEB=1769904000   # 2026-02-01
+T_MAR=1772323200   # 2026-03-01
+T_APR=1775001600   # 2026-04-01
+
+test_import_rules() {
+  local root s d out; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  d="$root/a-store/repos/dotfiles/.todos"
+  printf 'store v1\n' >"$d/pending/2026-01-01-newer.md"
+  printf 'store v1\n' >"$d/pending/2026-01-01-older.md"
+  printf 'store v1\n' >"$d/pending/2026-01-01-tie.md"
+  printf 'done\n' >"$d/completed/2026-01-01-closed-in-store.md"
+  printf 'store pending\n' >"$d/pending/2026-01-01-closed-in-src.md"
+  stg -C "$root/a-store" add -A
+  GIT_AUTHOR_DATE="$T_MAR +0000" stg -C "$root/a-store" commit -qm fixture
+  s="$root/src"; mkdir -p "$s/pending" "$s/completed" "$s/research/notes"
+  printf 'src\n' >"$s/pending/2026-01-01-absent.md"
+  printf 'src v2\n' >"$s/pending/2026-01-01-newer.md"; set_mtime "$s/pending/2026-01-01-newer.md" "$T_APR"
+  printf 'src v0\n' >"$s/pending/2026-01-01-older.md"; set_mtime "$s/pending/2026-01-01-older.md" "$T_FEB"
+  printf 'src tie\n' >"$s/pending/2026-01-01-tie.md"; set_mtime "$s/pending/2026-01-01-tie.md" "$T_MAR"
+  printf 'src pending\n' >"$s/pending/2026-01-01-closed-in-store.md"
+  printf 'src done\n' >"$s/completed/2026-01-01-closed-in-src.md"
+  printf 'research\n' >"$s/research/notes/a.md"
+  printf 'index\n' >"$s/TODO.md"
+  out=$( (cd "$root/a" && TODOS_OFFLINE=1 st import "$s") 2>/dev/null )
+  assert_eq "import: copies absent file" \
+    "$(cat "$d/pending/2026-01-01-absent.md")|$(stg -C "$root/a-store" log -1 --format=%s -- repos/dotfiles/.todos/pending/2026-01-01-absent.md)" \
+    "src|todos: import pending/2026-01-01-absent.md"
+  assert_eq "import: newer source replaces" "$(cat "$d/pending/2026-01-01-newer.md")" "src v2"
+  assert_eq "import: older source kept" "$(cat "$d/pending/2026-01-01-older.md")" "store v1"
+  assert_eq "import: tie keeps store" "$(cat "$d/pending/2026-01-01-tie.md")" "store v1"
+  assert_eq "import: closure from store completed" \
+    "$([ -e "$d/pending/2026-01-01-closed-in-store.md" ] && echo open || echo closed)" "closed"
+  assert_eq "import: closure from source completed" \
+    "$([ -e "$d/pending/2026-01-01-closed-in-src.md" ] && echo open || echo closed)|$(cat "$d/completed/2026-01-01-closed-in-src.md")" \
+    "closed|src done"
+  assert_eq "import: research union" "$(cat "$d/research/notes/a.md" 2>/dev/null)" "research"
+  assert_eq "import: TODO.md skipped" "$(printf '%s\n' "$out" | grep -c 'TODO.md')" "0"
+  rm -rf "$root"
+}
+test_import_rules
+
+test_import_newer_machine_and_rerun() {
+  local root s1 s2 d before; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  d="$root/a-store/repos/dotfiles/.todos"
+  s1="$root/s1"; mkdir -p "$s1/pending"
+  printf 'machine A\n' >"$s1/pending/2026-01-01-x.md"; set_mtime "$s1/pending/2026-01-01-x.md" "$T_FEB"
+  (cd "$root/a" && st import "$s1") >/dev/null 2>&1
+  s2="$root/s2"; mkdir -p "$s2/pending"
+  printf 'machine B\n' >"$s2/pending/2026-01-01-x.md"; set_mtime "$s2/pending/2026-01-01-x.md" "$T_MAR"
+  (cd "$root/a" && st import "$s2") >/dev/null 2>&1
+  assert_eq "import: newer machine wins after earlier import" "$(cat "$d/pending/2026-01-01-x.md")" "machine B"
+  before=$(stg -C "$root/a-store" rev-list --count HEAD)
+  (cd "$root/a" && st import "$s2") >/dev/null 2>&1
+  assert_eq "import: rerun makes no commit" "$(stg -C "$root/a-store" rev-list --count HEAD)" "$before"
+  rm -rf "$root"
+}
+test_import_newer_machine_and_rerun
+
+test_import_interrupted_keeps_mtime() {
+  local root s d; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  d="$root/a-store/repos/dotfiles/.todos"
+  s="$root/src"; mkdir -p "$s/pending"
+  printf 'copied then killed\n' >"$s/pending/2026-01-01-y.md"; set_mtime "$s/pending/2026-01-01-y.md" "$T_FEB"
+  cp -p "$s/pending/2026-01-01-y.md" "$d/pending/2026-01-01-y.md"
+  (cd "$root/a" && TODOS_OFFLINE=1 st import "$s") >/dev/null 2>&1
+  assert_eq "import: interrupted copy keeps its source date" \
+    "$(stg -C "$root/a-store" log -1 --format=%at -- repos/dotfiles/.todos/pending/2026-01-01-y.md)" "$T_FEB"
+  rm -rf "$root"
+}
+test_import_interrupted_keeps_mtime
+
+test_import_skips_leftover_temp() {
+  local root s d; root=$(canon_helper "$(mktemp -d)")
+  mk_remote "$root"; mk_side "$root" a
+  d="$root/a-store/repos/dotfiles/.todos"
+  printf 'half' >"$d/pending/.2026-01-01-z.md.tmp.99999999"
+  s="$root/src"; mkdir -p "$s/pending"; printf 'whole\n' >"$s/pending/2026-01-01-z.md"
+  (cd "$root/a" && TODOS_OFFLINE=1 st import "$s") >/dev/null 2>&1
+  assert_eq "import: a temp file from a killed copy is skipped" \
+    "$(cat "$d/pending/2026-01-01-z.md")|$(stg -C "$root/a-store" ls-files -- 'repos/dotfiles/.todos/pending/.*.tmp.*' | wc -l | tr -d ' ')" "whole|0"
+  rm -rf "$root"
+}
+test_import_skips_leftover_temp
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

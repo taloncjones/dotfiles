@@ -10,7 +10,9 @@ process dies, and the lock descriptor is not inherited by the command.
 """
 
 import fcntl
+import filecmp
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -99,7 +101,88 @@ def commit_each(argv):
     return status
 
 
-COMMANDS = {"lock": lock, "commit-each": commit_each}
+SCRATCH_SUFFIXES = (".swp", "~")
+
+
+def scratch(name):
+    return name == ".DS_Store" or name.endswith(SCRATCH_SUFFIXES) or ".tmp." in name
+
+
+def source_files(src):
+    """Relative paths of regular files under src, symlinks and scratch skipped."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)))
+        for name in sorted(filenames):
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, src)
+            if rel == "TODO.md" or scratch(name) or os.path.islink(path) or not os.path.isfile(path):
+                continue
+            out.append(rel)
+    return out
+
+
+def store_time(repo, path):
+    if repo:
+        out = git(repo, "log", "-1", "--format=%at", "--", path)
+        if out.returncode == 0 and out.stdout.strip():
+            return int(out.stdout.strip())
+    return int(os.stat(path).st_mtime)
+
+
+def copy(src, dst):
+    """Copy with mtime through a store-ignored temp name, then rename."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = os.path.join(os.path.dirname(dst), f".{os.path.basename(dst)}.tmp.{os.getpid()}")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
+
+
+def import_tree(argv):
+    if len(argv) not in (2, 4) or (len(argv) == 4 and argv[2] != "--commit-repo"):
+        print("usage: todos_store.py import <source-dir> <todos-dir> [--commit-repo <repo>]", file=sys.stderr)
+        return 2
+    src, dst = argv[0], argv[1]
+    repo = argv[3] if len(argv) == 4 else None
+    ok = True
+    for rel in source_files(src):
+        s, d = os.path.join(src, rel), os.path.join(dst, rel)
+        mtime = int(os.stat(s).st_mtime)
+        bucket, _, name = rel.partition(os.sep)
+        top = os.sep not in name
+        if bucket == "pending" and top and (
+            os.path.exists(os.path.join(dst, "completed", name))
+            or os.path.exists(os.path.join(src, "completed", name))
+        ):
+            print(f"closed {rel}")
+            continue
+        extra = []
+        if bucket == "completed" and top:
+            stale = os.path.join(dst, "pending", name)
+            if os.path.exists(stale):
+                os.remove(stale)
+                extra.append(stale)
+                print(f"closed pending/{name}")
+        if not os.path.exists(d):
+            copy(s, d)
+            print(f"copied {rel}")
+        elif filecmp.cmp(s, d, shallow=False):
+            if not extra:
+                continue
+        elif mtime > store_time(repo, d):
+            copy(s, d)
+            print(f"replaced {rel}")
+        else:
+            print(f"kept {rel}")
+            if not extra:
+                continue
+        if repo and not commit_paths(repo, [d, *extra], f"todos: import {rel}", mtime):
+            print(f"todos: sync skipped: commit refused for {rel}", file=sys.stderr)
+            ok = False
+    return 0 if ok else 1
+
+
+COMMANDS = {"lock": lock, "commit-each": commit_each, "import": import_tree}
 
 
 def main(argv):

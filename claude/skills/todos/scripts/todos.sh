@@ -901,6 +901,25 @@ cmd_pull_locked() {
   [ "$(git -C "$STORE_REPO" rev-parse HEAD 2>/dev/null || true)" = "$before" ] || regenerate_index
 }
 
+cmd_import() {
+  [ "$#" -eq 1 ] || die "import requires one directory"
+  [ -d "$1" ] || die "not a directory: $1"
+  local src rc=0
+  src=$(canon "$1")
+  store_setup
+  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
+  ensure_init
+  if [ -n "$STORE_REPO" ] && [ "$STORE_SYNC" = 1 ]; then
+    python3 "$TODOS_HELPER" import "$src" "$(store_dir)" --commit-repo "$STORE_REPO" || rc=$?
+  else
+    python3 "$TODOS_HELPER" import "$src" "$(repo_root)/$TODOS_DIRNAME" || rc=$?
+  fi
+  regenerate_index
+  store_end "todos: import"
+  if [ -n "$STORE_REPO" ] && [ "$STORE_SYNC" != 1 ]; then rc=1; fi
+  return "$rc"
+}
+
 cmd_share() {
   store_setup
   [ -z "$STORE_REPO" ] || die ".todos is stored in a separate repository; share does not apply"
@@ -1112,6 +1131,7 @@ main() {
     share)    cmd_share "$@" ;;
     path)     cmd_path "$@" ;;
     sync)     cmd_sync "$@" ;;
+    import)   cmd_import "$@" ;;
     _pull)    cmd_pull_locked ;;
     dashboard) store_setup; exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_dashboard.py" "$@" ;;
     today)    today ;;
