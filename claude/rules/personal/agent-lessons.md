@@ -45,3 +45,5 @@ is the staging tier, not an archive.
   the repair worker emits: a superseded attempt row refuses its emit-done.
 - (2026-09) Re-read a PR body against the final head before posting it: wording
   written mid-fix (record-only vs asserted, tip sha vs bench sha) drifts.
+- (2026-09) The commit guard rejects the bare word "claude" in a commit message:
+  write "substitute seat" or "work config" up front, not after a block.
