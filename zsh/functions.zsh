@@ -271,30 +271,18 @@ function vscode-ext-sync() {    # vscode-ext-sync() will rewrite vscode/extensio
 ###### Claude Code Plugins
 ##############################
 
-# --- Plugin install ground truth (ported from bootstrap-cloud.sh) ---
-# `claude plugins install` can exit 0 without installing: a marketplace that is
-# registered but still mid-fetch resolves the plugin to "nothing to do" and the
-# command "succeeds". Exit codes and CLI output are therefore not evidence; the
-# on-disk record <config-dir>/plugins/installed_plugins.json is.
-
-# helper: true iff the plugin id is recorded in the config dir's installed_plugins.json
-function _claude_plugin_installed() {
-    local cfg_dir="$1" plugin_id="$2"
-    local record="$cfg_dir/plugins/installed_plugins.json"
-    [[ -f "$record" ]] && grep -q "$plugin_id" "$record"
-}
-
-# Run a Claude plugin operation in the selected account namespace. Native
-# personal Claude uses an unset variable; work and custom directories remain
-# explicit. The subshell keeps the caller's environment unchanged.
-function _claude_plugin_run() {
-    local cfg_dir="$1"
-    shift
-    if [[ "$cfg_dir" == "$HOME/.claude" ]]; then
-        ( unset CLAUDE_CONFIG_DIR; command claude "$@" )
-    else
-        CLAUDE_CONFIG_DIR="$cfg_dir" command claude "$@"
+# Retired plugins leave Claude registrations behind. The bash sweep in
+# install/common/claude-links.sh removes them for one config dir; update and
+# update --ai run the same code, so the two paths cannot disagree.
+function _claude_sweep_retired() {
+    local cfg_dir="$1" label="$2" plugin_id="$3"
+    local links="$DOTFILEDIR/install/common/claude-links.sh"
+    if [[ ! -f "$links" ]]; then
+        echo "[X] $links not found; cannot sweep $plugin_id from $cfg_dir"
+        return 1
     fi
+    bash -c '. "$1"; sweep_retired_claude_plugins "$2" "$3" "$4"' _ \
+        "$links" "$cfg_dir" "$label" "$plugin_id"
 }
 
 # --- Codex plugin lifecycle ---
@@ -339,7 +327,8 @@ SUPERPOWERS_REPO_DIR="${SUPERPOWERS_REPO_DIR:-$HOME/.local/share/dotfiles/source
 # Retired entry points survive `reload` in a long-running shell -- drop them.
 for _ecc_fn in ecc-install ecc-update _ecc_legacy_rules_notice _codex_stage_ecc_plugin \
         _codex_install_ecc_plugin _codex_update_ecc_plugin \
-        _claude_plugin_check_update _claude_plugin_epoch_write; do
+        _claude_plugin_check_update _claude_plugin_epoch_write \
+        _claude_plugin_installed _claude_plugin_run _claude_plugin_records; do
     (( ${+functions[$_ecc_fn]} )) && unfunction "$_ecc_fn"
 done
 unset _ecc_fn
@@ -415,10 +404,7 @@ function ecc-uninstall() {    # ecc-uninstall() removes ECC from Claude and Code
     local cfg_dir
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if _claude_plugin_installed "$cfg_dir" "ecc@ecc"; then
-            echo "[INFO] Removing ECC plugin ($cfg_dir)..."
-            _claude_plugin_run "$cfg_dir" plugins uninstall ecc@ecc 2>/dev/null || uninstall_status=1
-        fi
+        _claude_sweep_retired "$cfg_dir" "[ecc-uninstall]" ecc@ecc || uninstall_status=1
     done
 
     _codex_remove_plugin "ecc@dotfiles-workflows" || uninstall_status=1
@@ -627,63 +613,14 @@ function gsd-uninstall() {    # gsd-uninstall([--local] [--claude|--codex]) full
 # The settings reconcile forces superpowers@claude-plugins-official off and
 # the Codex dedupe disables its Codex copies; superpowers-uninstall removes
 # what is still on disk.
-
-# helper: print "<scope>\t<projectPath>" for each install record of a plugin
-# in one config dir. No registry file means nothing is installed (exit 0);
-# an unreadable one exits 2 so callers cannot mistake it for "absent".
-function _claude_plugin_records() {
-    local cfg_dir="$1" plugin_id="$2"
-    local record="$cfg_dir/plugins/installed_plugins.json"
-    [[ -f "$record" ]] || return 0
-    command python3 - "$record" "$plugin_id" <<'PY'
-import json, sys
-path, plugin = sys.argv[1:]
-try:
-    with open(path) as fh:
-        records = json.load(fh).get("plugins", {}).get(plugin, [])
-except (OSError, ValueError, AttributeError):
-    sys.exit(2)
-if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
-    sys.exit(2)
-for rec in records:
-    print(f"{rec.get('scope', 'user')}\t{rec.get('projectPath', '')}")
-PY
-}
+# Its Claude registrations go through the shared sweep that update also runs.
 
 function superpowers-uninstall() {    # superpowers-uninstall() removes the retired Superpowers plugin from Claude and Codex. ex: $ superpowers-uninstall
-    local plugin_id="superpowers@claude-plugins-official"
-    local cfg_dir records remaining scope project dir_status uninstall_status=0
+    local cfg_dir uninstall_status=0
     for cfg_dir in "$HOME/.claude" "${CLAUDE_WORK_CONFIG_DIR:-$HOME/.claude-work}"; do
         [[ -d "$cfg_dir" ]] || continue
-        if ! records=$(_claude_plugin_records "$cfg_dir" "$plugin_id"); then
-            echo "[X] unreadable plugin registry in $cfg_dir; trying one user-scope uninstall"
-            _claude_plugin_run "$cfg_dir" plugin uninstall --scope user "$plugin_id" </dev/null
-            uninstall_status=1
-            continue
-        fi
-        if [[ -z "$records" ]]; then
-            echo "[INFO] Superpowers not installed ($cfg_dir)"
-            continue
-        fi
-        dir_status=0
-        while IFS=$'\t' read -r scope project; do
-            if [[ "$scope" == user ]]; then
-                _claude_plugin_run "$cfg_dir" plugin uninstall --scope user "$plugin_id" </dev/null || dir_status=1
-            elif [[ -n "$project" && -d "$project" ]]; then
-                ( cd "$project" && _claude_plugin_run "$cfg_dir" plugin uninstall --scope "$scope" "$plugin_id" </dev/null ) || dir_status=1
-            else
-                echo "[X] $scope-scope Superpowers record names a missing project: ${project:-<none>} ($cfg_dir)"
-                dir_status=1
-            fi
-        done <<< "$records"   # CLI calls read /dev/null so they cannot eat these lines
-        # The registry, not the CLI exit code, decides success.
-        remaining=$(_claude_plugin_records "$cfg_dir" "$plugin_id") && [[ -z "$remaining" ]] || dir_status=1
-        if (( dir_status == 0 )); then
-            echo "[OK] Superpowers uninstalled ($cfg_dir)"
-        else
-            echo "[X] Superpowers still recorded in $cfg_dir"
-            uninstall_status=1
-        fi
+        _claude_sweep_retired "$cfg_dir" "[superpowers-uninstall]" superpowers@claude-plugins-official \
+            || uninstall_status=1
     done
     _codex_remove_plugin "superpowers@dotfiles-workflows" || uninstall_status=1
     _codex_remove_plugin "superpowers@openai-curated" || uninstall_status=1
