@@ -89,6 +89,26 @@ assert "tracked-artifact scan catches a planted contract and spec" \
     tracked_artifacts_detect_plants
 assert "no tracked planning artifacts or verification contracts" \
     tracked_artifacts_clean
+tracked_todos() { git -C "$1" ls-files -- .todos '.todos/**'; }
+tracked_todos_clean() { ! tracked_todos . | grep -q .; }
+tracked_todos_detect_plants() {
+    tmp_repo="$(mktemp -d)" || return 1
+    (
+        export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+        git -C "$tmp_repo" init -q || exit 1
+        mkdir -p "$tmp_repo/.todos/pending" || exit 1
+        echo "plant" > "$tmp_repo/.todos/pending/plant.md"
+        git -C "$tmp_repo" add -f .todos/pending/plant.md || exit 1
+        tracked_todos "$tmp_repo" | grep -q '.todos/pending/plant.md' || exit 1
+    )
+    result=$?
+    rm -rf "$tmp_repo"
+    return "$result"
+}
+assert "tracked-todos scan catches a planted .todos file" \
+    tracked_todos_detect_plants
+assert "no tracked .todos in the public tree" \
+    tracked_todos_clean
 assert "no hardcoded local user paths" \
     git_grep_clean '/Users/talon' . ':(exclude)git/hooks/public-safety.test.sh'
 assert "no high-confidence secrets in tracked content" \

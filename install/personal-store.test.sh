@@ -203,5 +203,30 @@ case "$out1" in
     *) fail "seed: a rejected push is retried by the next seed ($out1)" ;;
 esac
 
+# --- isolation (R23): a work-scoped launch resolves no store path ---
+H=$(new_home iso); DF=$(dotfiles_fixture "$H"); R="$TMP/iso.git"; seeded_remote "$R"
+CLONE="$H/Git/personal/exocortex"; W="$H/Git/work/acme"
+( HOME="$H"; DOTFILEDIR="$REPO"; export HOME DOTFILEDIR
+  . "$REPO/install/common/claude-links.sh"
+  link_claude_config_dir "$H/.claude"; link_claude_config_dir "$H/.claude-work" ) >/dev/null 2>&1
+hx "$H" "$R" "$DF" bash "$EXO" install >/dev/null 2>&1
+g init -q "$W"; g -C "$W" commit -q --allow-empty -m base; mkdir -p "$W/.todos/pending"
+real=$(realpath_of "$CLONE")
+links=$(find -P "$H/.claude-work" -type l | wc -l | tr -d ' ')
+link_into_store() { case "$1" in "$2"|"$2"/*) return 0 ;; *) return 1 ;; esac; }
+bad=$(find -P "$H/.claude-work" -type l | while IFS= read -r l; do
+    link_into_store "$(realpath_of "$l")" "$real" && printf '%s\n' "$l"
+done)
+if [ "$links" -gt 0 ] && [ -z "$bad" ]; then pass "isolation: no link under the work config resolves into the store"; else fail "isolation: no link under the work config resolves into the store ($links|$bad)"; fi
+out=$(hx "$H" "$R" "$DF" env CLAUDE_CONFIG_DIR="$H/.claude-work" bash "$EXO" resolve --cwd "$W"); rc=$?
+if [ "$rc|$out" = "3|" ]; then pass "isolation: resolve for the work repo under the work config exits 3"; else fail "isolation: resolve for the work repo under the work config exits 3 ($rc|$out)"; fi
+p=$(cd "$W" && hx "$H" "" "$W" env CLAUDE_CONFIG_DIR="$H/.claude-work" bash "$REPO/$TODOS" path)
+case "$(realpath_of "$p")" in "$real"|"$real"/*) fail "isolation: the work repo's todos path is outside the store" ;; *) pass "isolation: the work repo's todos path is outside the store" ;; esac
+out=$(cd "$DF" && hx "$H" "" "$DF" env CLAUDE_CONFIG_DIR="$H/.claude-work" bash "$REPO/$TODOS" list 2>&1); rc=$?
+case "$rc|$out" in "1|todos: .todos is not available under this account") pass "isolation: list under the work config reads nothing from the store" ;; *) fail "isolation: list under the work config reads nothing from the store ($rc|$out)" ;; esac
+leaks=$(git -C "$REPO" grep --untracked -il exocortex -- claude codex zsh bin git ssh templates vscode zed ghostty)
+own=$(git -C "$REPO" grep --untracked -il exocortex -- install/common/exocortex.sh)
+if [ -z "$leaks" ] && [ -n "$own" ]; then pass "isolation: no shared surface names the store"; else fail "isolation: no shared surface names the store ($leaks)"; fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

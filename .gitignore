@@ -168,3 +168,5 @@ settings.local.json
 .netrc
 *credentials*
 *.tfstate
+# Todo backlog: machine-local or linked into a private store; never public.
+/.todos

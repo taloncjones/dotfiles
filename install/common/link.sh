@@ -85,6 +85,10 @@ echo "Setting up symbolic links for Claude Code..."
 link_claude_config_dir "$HOME"/.claude
 link_claude_config_dir "$HOME"/.claude-work
 
+# Private todo store: personal scope only; skips cleanly when unreachable,
+# in cloud containers, or outside ~/Git/personal. See install-layout.md.
+bash "$DOTFILEDIR"/install/common/exocortex.sh install || echo "[WARNING] private store step failed; todos stay as they were."
+
 # The Dockerized Claude sandbox (claude/sandbox/, bin/claude-sandbox) was
 # retired along with GSD -- permission auto mode covers the same need. Sweep
 # the launcher symlink and the sandbox config dir so `update` self-heals.
