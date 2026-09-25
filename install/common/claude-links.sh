@@ -274,6 +274,343 @@ print(label + " Reconciled settings.json (SessionStart: "
 PY
 }
 
+# Remove still-registered retired plugins (RETIRED_CLAUDE_PLUGINS_JSON) from
+# one config dir. The settings reconcile only pins them off at user scope;
+# project-scope records, the marketplace clone and the cache stay behind
+# until this runs. The CLI handles what it can reach from a neutral cwd
+# (ECC's marketplace, a user-scope record); the rest of the records are
+# pruned from the registry, because a CLI project uninstall rewrites that
+# project's own settings file and cannot reach a deleted project at all.
+# Usage: sweep_retired_claude_plugins <cfg_dir> <label> [plugin_id ...]
+sweep_retired_claude_plugins() {
+  local cfg="${1:?sweep_retired_claude_plugins: config dir required}"
+  local label="${2:?sweep_retired_claude_plugins: label required}"
+  shift 2
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "$label [X] python3 not on PATH; cannot sweep retired plugins in $cfg"
+    return 1
+  fi
+  RETIRED_CLAUDE_PLUGINS_JSON="$RETIRED_CLAUDE_PLUGINS_JSON" python3 - "$cfg" "$label" "$@" <<'PY'
+import datetime, json, os, shutil, subprocess, sys, tempfile
+
+cfg, label, wanted = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3:]
+retired = json.loads(os.environ["RETIRED_CLAUDE_PLUGINS_JSON"])
+wanted = wanted or list(retired)
+unknown = [p for p in wanted if p not in retired]
+if unknown:
+    print(f"{label} [X] not a retired plugin: {', '.join(unknown)}")
+    sys.exit(2)
+plugins_dir = os.path.join(cfg, "plugins")
+registry_path = os.path.join(plugins_dir, "installed_plugins.json")
+markets_path = os.path.join(plugins_dir, "known_marketplaces.json")
+settings_path = os.path.join(cfg, "settings.json")
+personal_cfg = os.path.abspath(os.path.join(os.path.expanduser("~"), ".claude"))
+git_missing_noted = False
+
+
+class Unreadable(Exception):
+    pass
+
+
+def registry_valid(data):
+    # Same rule as the reconcile's registry read.
+    plugins = data.get("plugins", {}) if isinstance(data, dict) else None
+    return isinstance(plugins, dict) and all(
+        isinstance(recs, list) and all(isinstance(r, dict) for r in recs) for recs in plugins.values())
+
+
+def is_object(data):
+    return isinstance(data, dict)
+
+
+def read_json(path, valid, refuse_link):
+    if refuse_link and os.path.islink(path):
+        raise Unreadable(f"{path} is a symlink")
+    if not os.path.lexists(path):
+        return {}, None
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        data = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        raise Unreadable(str(exc))
+    if not valid(data):
+        raise Unreadable(f"unexpected shape in {path}")
+    return data, raw
+
+
+def read_state():
+    registry, raw = read_json(registry_path, registry_valid, True)
+    markets, _ = read_json(markets_path, is_object, False)
+    return registry.get("plugins", {}), markets, raw
+
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_atomically(path, data):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if os.path.exists(path):
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+        fsync_dir(os.path.dirname(path))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+# The CLI rewrites these three files; a torn one must not outlive the call.
+GUARDED = ((settings_path, is_object, False), (registry_path, registry_valid, True),
+           (markets_path, is_object, False))
+
+
+def file_ok(path, valid, refuse):
+    try:
+        read_json(path, valid, refuse)
+        return True
+    except Unreadable:
+        return False
+
+
+def snapshot():
+    # (bytes or None when absent, valid before the call). Only a file that was
+    # valid (or absent) before the call is the CLI's to have torn; a symlink or
+    # an already-broken file is left alone.
+    snap = {}
+    for path, valid, refuse in GUARDED:
+        if os.path.islink(path):
+            snap[path] = (None, False)
+        elif os.path.isfile(path):
+            with open(path, "rb") as fh:
+                snap[path] = (fh.read(), file_ok(path, valid, refuse))
+        else:
+            snap[path] = (None, True)
+    return snap
+
+
+def restore_torn(snap, args):
+    torn = False
+    for path, valid, refuse in GUARDED:
+        before, valid_before = snap[path]
+        if not valid_before:
+            print(f"{label} [INFO] {path} was already unreadable before the CLI call; left as is")
+            continue
+        if not os.path.lexists(path) or file_ok(path, valid, refuse):
+            continue
+        if before is not None:
+            write_atomically(path, before)
+            outcome = "restored it"
+        else:
+            os.unlink(path)
+            outcome = "removed it"
+        print(f"{label} [X] claude {' '.join(args)} left {path} unreadable; {outcome}")
+        torn = True
+    return torn
+
+
+def run_claude(plugin, *args):
+    claude = shutil.which("claude")
+    if not claude:
+        print(f"{label} [X] claude CLI not found; cannot remove {plugin} from {cfg}")
+        return False
+    # Match the plain-shell probes: no parent session or pane identity.
+    env = {k: v for k, v in os.environ.items()
+           if k != "CLAUDECODE" and not k.startswith(("CLAUDE_CODE_", "HERDR_"))}
+    prefix = ""
+    if cfg == personal_cfg:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = cfg
+        prefix = f"CLAUDE_CONFIG_DIR={cfg} "
+    snap = snapshot()
+    with tempfile.TemporaryDirectory() as cwd:
+        rc = subprocess.run([claude, *args], cwd=cwd, env=env, stdin=subprocess.DEVNULL).returncode
+    if restore_torn(snap, args):
+        return False
+    if rc != 0:
+        print(f"{label} [X] claude {' '.join(args)} exited {rc} for {cfg}; "
+              f"run by hand: {prefix}claude {' '.join(args)}")
+        return False
+    return True
+
+
+def write_backup(raw):
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = f"{registry_path}.bak-retired-{stamp}"
+    for n in range(100):
+        path = base if n == 0 else f"{base}-{n}"
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        fsync_dir(plugins_dir)
+        return
+    raise OSError(f"no free backup name for {base}")
+
+
+def prune(plugin):
+    for _attempt in range(2):
+        plugins, _markets, before = read_state()
+        if before is None or plugin not in plugins:
+            return True
+        write_backup(before)
+        data = json.loads(before)
+        data["plugins"].pop(plugin)
+        fd, tmp = tempfile.mkstemp(dir=plugins_dir, prefix=".installed_plugins.json.")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write((json.dumps(data, indent=2) + "\n").encode())
+                fh.flush()
+                os.fsync(fh.fileno())
+            shutil.copymode(registry_path, tmp)
+            hook = os.environ.get("SWEEP_TEST_BEFORE_RECHECK")
+            if hook:
+                subprocess.run(["sh", "-c", hook], check=False)
+            with open(registry_path, "rb") as fh:
+                if fh.read() != before:
+                    continue
+            os.replace(tmp, registry_path)
+            fsync_dir(plugins_dir)
+            return True
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    print(f"{label} [X] registry changed during the sweep; {plugin} not pruned ({cfg})")
+    return False
+
+
+def normalize(url):
+    url = url.strip().lower()
+    url = url[:-1] if url.endswith("/") else url
+    return url[:-4] if url.endswith(".git") else url
+
+
+def retired_clones(source):
+    global git_missing_noted
+    cache = os.path.join(plugins_dir, "cache")
+    if not os.path.isdir(cache):
+        return []
+    candidates = [os.path.join(cache, n) for n in sorted(os.listdir(cache))
+                  if n.startswith("temp_git_") and os.path.isfile(os.path.join(cache, n, ".git", "config"))]
+    if not candidates:
+        return []
+    git = shutil.which("git")
+    if not git:
+        if not git_missing_noted:
+            print(f"{label} [INFO] git not on PATH; temp_git leftovers in {cfg} not checked")
+            git_missing_noted = True
+        return []
+    found = []
+    for clone in candidates:
+        url = subprocess.run([git, "config", "--file", os.path.join(clone, ".git", "config"),
+                              "--get", "remote.origin.url"], capture_output=True, text=True).stdout
+        if normalize(url) == normalize(source):
+            found.append(clone)
+    return found
+
+
+def remove_clone(clone):
+    # Rename to a sweep-owned name first: a half-deleted temp_git dir loses
+    # its git config and would no longer be recognised, but a .retired-* dir
+    # is always finished by the next run (finish_staged_clones).
+    staged = os.path.join(os.path.dirname(clone), ".retired-" + os.path.basename(clone))
+    os.rename(clone, staged)
+    remove_path(staged)
+
+
+def finish_staged_clones():
+    cache = os.path.join(plugins_dir, "cache")
+    if os.path.isdir(cache):
+        for name in sorted(os.listdir(cache)):
+            if name.startswith(".retired-temp_git_"):
+                remove_path(os.path.join(cache, name))
+
+
+def remove_path(path):
+    if os.path.islink(path):
+        os.unlink(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+    else:
+        return False
+    return True
+
+
+try:
+    read_state()
+except Unreadable as exc:
+    print(f"{label} [X] unreadable plugin registry in {cfg} ({exc}); nothing removed")
+    sys.exit(1)
+
+status = 0
+try:
+    finish_staged_clones()
+except OSError as exc:
+    print(f"{label} [X] staged temp_git leftovers not removed from {cfg}: {exc}")
+    status = 1
+
+for plugin in wanted:
+    entry = retired[plugin]
+    market = entry.get("marketplace")
+    clone_dir = os.path.join(plugins_dir, "marketplaces", market) if market else None
+    cache_dir = os.path.join(plugins_dir, entry["cache"])
+    try:
+        plugins, markets, _raw = read_state()
+        present = (plugin in plugins or (market and market in markets)
+                   or (clone_dir and os.path.lexists(clone_dir))
+                   or os.path.lexists(cache_dir) or retired_clones(entry["source"]))
+        if not present:
+            continue
+        ok = True
+        if market and market in markets:
+            ok = run_claude(plugin, "plugin", "marketplace", "remove", market)
+        elif not market and any(r.get("scope") == "user" for r in plugins.get(plugin, [])):
+            ok = run_claude(plugin, "plugin", "uninstall", "--scope", "user", plugin)
+        ok = ok and prune(plugin)
+        if ok:
+            plugins, markets, _raw = read_state()
+            if plugin in plugins or (market and market in markets):
+                print(f"{label} [X] {plugin} is still registered in {cfg}; keeping its cache")
+                ok = False
+        removed_cache = False
+        if ok:
+            if clone_dir:
+                remove_path(clone_dir)
+            removed_cache = remove_path(cache_dir)
+            for clone in retired_clones(entry["source"]):
+                remove_clone(clone)
+    except Unreadable as exc:
+        # Earlier plugins' completed changes stay; nothing further is touched.
+        print(f"{label} [X] unreadable plugin registry in {cfg} ({exc}); stopping")
+        status = 1
+        break
+    except OSError as exc:
+        print(f"{label} [X] {plugin} or its leftovers not removed from {cfg}: {exc}")
+        ok = False
+    if not ok:
+        status = 1
+        continue
+    print(f"{label} [OK] Removed {plugin} from {cfg}")
+    if removed_cache:
+        print(f"{label} [INFO] Restart running Claude sessions: {plugin} hooks ran from the removed cache")
+sys.exit(status)
+PY
+}
+
 # Link the dotfiles-managed Claude Code assets into one config dir.
 # Two config dirs share the same dotfiles-managed assets via symlinks:
 #   ~/.claude       personal account (default; desktop app lands here)
