@@ -2310,11 +2310,12 @@ def watch_state(root_pid, slug):
 
 _RULE_LINE_RE = re.compile(r"─{20,}")
 _PROMPT_LINE_RE = re.compile(r"❯(?: (.*))?")
-# The live statusline footer (claude/statusline.js render()): its segments
-# always join on U+2502, with or without the context-meter segment (it is
-# omitted when the host reports no remaining_percentage, e.g. early in a
-# session). That separator is the invariant, not the meter's block cells.
-_FOOTER_LINE_RE = re.compile(r".*│.*")
+# The live statusline footer (claude/statusline.js render()): either the
+# context-meter segment (ten block cells and NN%), or, when the host
+# reports no remaining_percentage (e.g. early in a session) and
+# buildContextMeter() returns '', any line carrying the U+2502 segment
+# separator the remaining segments always join on.
+_FOOTER_LINE_RE = re.compile(r"(?: *[█░]{10} \d{1,3}%.*)|(?:.*│.*)")
 ROLLOVER_READ_SETTLE_SECS = 0.5
 
 
