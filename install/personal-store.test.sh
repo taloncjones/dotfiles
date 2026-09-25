@@ -147,9 +147,17 @@ hx "$H" "$R" "$DF" bash "$EXO" install >/dev/null 2>&1
 if [ "$(g -C "$CLONE" rev-parse HEAD)" = "$head" ] && [ "$(ls "$STATE" | wc -l)" = "$n" ]; then pass "install: a second run changes nothing"; else fail "install: a second run changes nothing"; fi
 mkdir -p "$STATE/20260101T000000Z-99999999/todos/pending"
 printf -- '---\ncreated: 2026-01-02\ntitle: Late item\n---\n' >"$STATE/20260101T000000Z-99999999/todos/pending/2026-01-02-late-item.md"
-hx "$H" "$R" "$DF" bash "$EXO" install >/dev/null 2>&1
+out=$(hx "$H" "$R" "$DF" bash "$EXO" install 2>&1)
 if [ -f "$CLONE/repos/dotfiles/.todos/pending/2026-01-02-late-item.md" ] && [ -d "$STATE/20260101T000000Z-99999999.imported" ]; then
     pass "install: an interrupted import resumes"; else fail "install: an interrupted import resumes"; fi
+# CX-3: the import summary line must say which local edits were kept vs.
+# superseded, not vanish into /dev/null.
+case "$out" in *"imported"*"1 copied"*) pass "install: import surfaces a copied-file summary" ;; *) fail "install: import surfaces a copied-file summary ($out)" ;; esac
+mkdir -p "$STATE/20260101T000000Z-77777777/todos/pending"
+printf -- '---\ncreated: 2026-01-02\ntitle: Late item\n---\nstale edit\n' >"$STATE/20260101T000000Z-77777777/todos/pending/2026-01-02-late-item.md"
+touch -t 202001010000 "$STATE/20260101T000000Z-77777777/todos/pending/2026-01-02-late-item.md"
+out=$(hx "$H" "$R" "$DF" bash "$EXO" install 2>&1)
+case "$out" in *"imported"*"1 kept"*) pass "install: import surfaces a kept (superseded-backup) summary" ;; *) fail "install: import surfaces a kept (superseded-backup) summary ($out)" ;; esac
 mkdir -p "$H/.claude-work/projects/x"; ln -s "$CLONE/repos" "$H/.claude-work/projects/x/memory"
 out=$(hx "$H" "$R" "$DF" bash "$EXO" install 2>&1)
 case "$out" in *"WARNING: $H/.claude-work/projects/x/memory links into"*) pass "install: audit warns about a link into the store" ;; *) fail "install: audit warns about a link into the store ($out)" ;; esac

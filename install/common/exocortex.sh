@@ -133,8 +133,20 @@ audit_links() {
   done
 }
 
+import_summary() {
+  # import_summary <import stdout> -> "N copied, N replaced, N kept, N
+  # closed", one clause per nonzero count, "no changes" if all zero. Lets a
+  # human see which local edits were kept vs. superseded (CX-3).
+  local out="$1" verb n parts=""
+  for verb in copied replaced kept closed; do
+    n=$(printf '%s\n' "$out" | grep -c "^$verb ")
+    [ "$n" -eq 0 ] || parts="${parts:+$parts, }$n $verb"
+  done
+  printf '%s' "${parts:-no changes}"
+}
+
 import_backups() {
-  local state="$1" d pid rc
+  local state="$1" d pid rc out
   [ -d "$state" ] || return 0
   for d in "$state"/*; do
     [ -d "$d" ] || continue
@@ -145,9 +157,9 @@ import_backups() {
       kill -0 "$pid" 2>/dev/null || rmdir "$d" 2>/dev/null || true
       continue
     fi
-    rc=0; (cd "$DOTFILEDIR" && bash "$TODOS_SH" import "$d/todos") >/dev/null || rc=$?
+    rc=0; out=$(cd "$DOTFILEDIR" && bash "$TODOS_SH" import "$d/todos") || rc=$?
     if [ "$rc" -eq 0 ]; then
-      python3 "$HELPER_PY" rename "$d" "$d.imported" && say "imported $d"
+      python3 "$HELPER_PY" rename "$d" "$d.imported" && say "imported $d ($(import_summary "$out"))"
     else
       warn "import of $d failed (exit $rc); kept for the next run"
     fi
