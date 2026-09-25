@@ -21,6 +21,8 @@ _spec.loader.exec_module(gate)
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+QUOTA_ATTEMPT = {"runtime": "codex", "status": "error", "result": None,
+                 "errors": ["You've hit your usage limit."]}
 AXES = (
     "ownership_authority",
     "dependency_boundaries",
@@ -194,6 +196,376 @@ class GateReportTests(unittest.TestCase):
             self.report["seats"]["verifier"]["runtime"] = bad
             self.assertEqual(self.verdict()["verdict"], "INCOMPLETE")
 
+    def test_light_codex_substitute_after_quota_failure_approves(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "APPROVE")
+        self.assertIn(
+            f"seat codex ran on claude after a failed codex attempt (quota): "
+            f"codex.codex-attempt.json sha256={attempt['sha256']}",
+            result["reasons"],
+        )
+
+    def test_light_codex_substitute_accepts_unparseable_auth_failure(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        payload = {
+            "runtime": "codex", "status": "unparseable", "result": None,
+            "errors": ["no completed Codex turn", "Not logged in"],
+        }
+        attempt = self._write("codex.codex-attempt.json", json.dumps(payload))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "auth", "attempt": attempt}
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_light_codex_substitute_accepts_unavailable_reason(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "unavailable", "attempt": attempt}
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_light_without_any_codex_attempt_stays_incomplete(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("light seats must be one claude and one codex runtime", result["reasons"])
+        self.assertIn("seat codex ran on claude without a codex_substitute", result["reasons"])
+
+    def test_light_codex_seat_on_claude_needs_a_substitute(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "codex"))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("seat codex ran on claude without a codex_substitute", result["reasons"])
+
+    def test_light_substitute_with_a_codex_verifier_stays_incomplete(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "codex"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("light seats must be one claude and one codex runtime", result["reasons"])
+
+    def test_codex_substitute_rejects_attempts_that_are_not_access_failures(self):
+        for status in ("timeout", "interrupted", "success"):
+            with self.subTest(status=status):
+                self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+                payload = {**QUOTA_ATTEMPT, "status": status}
+                attempt = self._write("codex.codex-attempt.json", json.dumps(payload))
+                self.report["seats"]["codex"]["codex_substitute"] = {
+                    "reason": "quota", "attempt": attempt
+                }
+                result = self.verdict()
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertIn(
+                    "seat codex codex_substitute is invalid: "
+                    "attempt status is not error or unparseable",
+                    result["reasons"],
+                )
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        payload = {**QUOTA_ATTEMPT, "result": "a full review"}
+        attempt = self._write("codex.codex-attempt.json", json.dumps(payload))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat codex codex_substitute is invalid: attempt produced a review result",
+            result["reasons"],
+        )
+
+    def test_codex_substitute_rejects_non_codex_or_errorless_attempts(self):
+        no_runtime = {k: v for k, v in QUOTA_ATTEMPT.items() if k != "runtime"}
+        cases = (
+            ({**QUOTA_ATTEMPT, "runtime": "claude"}, "attempt runtime is not codex"),
+            (no_runtime, "attempt runtime is not codex"),
+            ({"status": "error", "error": "x"}, "attempt runtime is not codex"),
+            ({**QUOTA_ATTEMPT, "errors": []}, "attempt errors are empty"),
+            ({**QUOTA_ATTEMPT, "errors": ["   "]}, "attempt errors are empty"),
+            ({**QUOTA_ATTEMPT, "errors": [5, None]}, "attempt errors are empty"),
+            ({**QUOTA_ATTEMPT, "errors": "text"}, "attempt errors are empty"),
+        )
+        for payload, cause in cases:
+            with self.subTest(payload=payload):
+                self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+                attempt = self._write("codex.codex-attempt.json", json.dumps(payload))
+                self.report["seats"]["codex"]["codex_substitute"] = {
+                    "reason": "quota", "attempt": attempt
+                }
+                result = self.verdict()
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertIn(
+                    f"seat codex codex_substitute is invalid: {cause}", result["reasons"]
+                )
+        for body in ("[]", "usage limit"):
+            with self.subTest(body=body):
+                self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+                attempt = self._write("codex.codex-attempt.json", body)
+                self.report["seats"]["codex"]["codex_substitute"] = {
+                    "reason": "quota", "attempt": attempt
+                }
+                result = self.verdict()
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertIn(
+                    "seat codex codex_substitute is invalid: attempt is not a JSON object",
+                    result["reasons"],
+                )
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write_bytes("codex.codex-attempt.json", b"\xff\xfe{}")
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat codex codex_substitute is invalid: attempt is not a JSON object",
+            result["reasons"],
+        )
+
+    def test_codex_substitute_rejects_bad_binding(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        attempt = {**attempt, "sha256": "0" * 64}
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat codex codex_substitute is invalid: attempt artifact digest does not match",
+            result["reasons"],
+        )
+
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        missing = {"artifact": "missing.json", "sha256": "0" * 64}
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": missing}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat codex codex_substitute is invalid: attempt artifact cannot be read",
+            result["reasons"],
+        )
+
+        original_root = self.root
+        run = original_root / "run"
+        run.mkdir()
+        self.root = run
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        outside_path = original_root / "outside.json"
+        outside_path.write_text(json.dumps(QUOTA_ATTEMPT), encoding="utf-8")
+        escape = {"artifact": "../outside.json", "sha256": digest(outside_path)}
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": escape}
+        result = self.verdict()
+        self.root = original_root
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat codex codex_substitute is invalid: attempt artifact cannot be read",
+            result["reasons"],
+        )
+
+    def test_codex_substitute_rejects_bad_record_shape(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "other", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat codex codex_substitute is invalid: reason is not quota, auth or unavailable",
+            result["reasons"],
+        )
+
+        bad_records = ({"attempt": attempt}, {"reason": "quota", "note": "x"}, "quota")
+        for record in bad_records:
+            with self.subTest(record=record):
+                self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+                fresh_attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+                value = {**record, "attempt": fresh_attempt} if isinstance(record, dict) else record
+                self.report["seats"]["codex"]["codex_substitute"] = value
+                result = self.verdict()
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertIn(
+                    "seat codex codex_substitute is invalid: "
+                    "record keys must be reason and attempt",
+                    result["reasons"],
+                )
+
+        bad_attempts = (
+            {"artifact": "codex.codex-attempt.json"},
+            {"artifact": "", "sha256": "0" * 64},
+        )
+        for attempt_fields in bad_attempts:
+            with self.subTest(attempt_fields=attempt_fields):
+                self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+                self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+                self.report["seats"]["codex"]["codex_substitute"] = {
+                    "reason": "quota", "attempt": attempt_fields
+                }
+                result = self.verdict()
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertIn(
+                    "seat codex codex_substitute is invalid: "
+                    "attempt keys must be artifact and sha256",
+                    result["reasons"],
+                )
+
+    def test_codex_substitute_needs_a_claude_seat_runtime(self):
+        for runtime in ("codex", "unknown"):
+            with self.subTest(runtime=runtime):
+                self._light(
+                    "diff --git a/README.md b/README.md\n+x\n", runtimes=(runtime, "claude")
+                )
+                attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+                self.report["seats"]["codex"]["codex_substitute"] = {
+                    "reason": "quota", "attempt": attempt
+                }
+                result = self.verdict()
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertIn(
+                    "seat codex codex_substitute is invalid: seat runtime is not claude",
+                    result["reasons"],
+                )
+
+    def test_codex_substitute_only_on_codex_routed_seats(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("codex", "claude"))
+        attempt = self._write("verifier.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["verifier"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("seat verifier cannot take a codex_substitute", result["reasons"])
+
+        for name in ("claude", "verifier"):
+            with self.subTest(name=name):
+                self.report = self._report()
+                attempt = self._write(f"{name}.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+                self.report["seats"][name]["codex_substitute"] = {
+                    "reason": "quota", "attempt": attempt
+                }
+                result = self.verdict()
+                self.assertEqual(result["verdict"], "INCOMPLETE")
+                self.assertIn(f"seat {name} cannot take a codex_substitute", result["reasons"])
+
+    def test_full_tier_applies_the_same_codex_substitute_rule(self):
+        self.report = self._report()
+        self.report["seats"]["breaker"]["runtime"] = "claude"
+        attempt = self._write("breaker.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["breaker"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "APPROVE")
+        self.assertIn(
+            f"seat breaker ran on claude after a failed codex attempt (quota): "
+            f"breaker.codex-attempt.json sha256={attempt['sha256']}",
+            result["reasons"],
+        )
+
+        self.report = self._report()
+        self.report["seats"]["codex"]["runtime"] = "claude"
+        timeout_attempt = self._write(
+            "codex.codex-attempt.json", json.dumps({**QUOTA_ATTEMPT, "status": "timeout"})
+        )
+        self.report["seats"]["codex"]["codex_substitute"] = {
+            "reason": "quota", "attempt": timeout_attempt
+        }
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat codex codex_substitute is invalid: attempt status is not error or unparseable",
+            result["reasons"],
+        )
+
+    def test_full_tier_codex_seat_on_claude_needs_a_substitute(self):
+        self.report = self._report()
+        self.report["seats"]["codex"]["runtime"] = "claude"
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn("seat codex ran on claude without a codex_substitute", result["reasons"])
+
+    def test_full_tier_rejects_a_shared_codex_attempt(self):
+        self.report = self._report()
+        self.report["seats"]["codex"]["runtime"] = "claude"
+        self.report["seats"]["breaker"]["runtime"] = "claude"
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        self.report["seats"]["breaker"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat breaker codex_substitute is invalid: attempt is shared with seat codex",
+            result["reasons"],
+        )
+
+        self.report = self._report()
+        self.report["seats"]["codex"]["runtime"] = "claude"
+        self.report["seats"]["breaker"]["runtime"] = "claude"
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        alias = {"artifact": "./codex.codex-attempt.json", "sha256": attempt["sha256"]}
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        self.report["seats"]["breaker"]["codex_substitute"] = {"reason": "quota", "attempt": alias}
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat breaker codex_substitute is invalid: attempt is shared with seat codex",
+            result["reasons"],
+        )
+
+        self.report = self._report()
+        self.report["seats"]["codex"]["runtime"] = "claude"
+        self.report["seats"]["breaker"]["runtime"] = "claude"
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        symlink_path = self.root / "breaker.codex-attempt.json"
+        symlink_path.symlink_to(self.root / "codex.codex-attempt.json")
+        symlink_attempt = {"artifact": "breaker.codex-attempt.json", "sha256": attempt["sha256"]}
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        self.report["seats"]["breaker"]["codex_substitute"] = {
+            "reason": "quota", "attempt": symlink_attempt
+        }
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertIn(
+            "seat breaker codex_substitute is invalid: attempt is shared with seat codex",
+            result["reasons"],
+        )
+
+        self.report = self._report()
+        self.report["seats"]["codex"]["runtime"] = "claude"
+        self.report["seats"]["breaker"]["runtime"] = "claude"
+        attempt_codex = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        attempt_breaker = self._write("breaker-2.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {
+            "reason": "quota", "attempt": attempt_codex
+        }
+        self.report["seats"]["breaker"]["codex_substitute"] = {
+            "reason": "quota", "attempt": attempt_breaker
+        }
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "APPROVE")
+
+    def test_changes_verdict_keeps_the_substitute_note(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        self.report["findings"] = [{
+            "id": "f1", "severity": "high", "disposition": "confirmed",
+            "scenario": "s", "evidence": "e", "impact": "i",
+        }]
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "CHANGES")
+        self.assertIn(
+            f"seat codex ran on claude after a failed codex attempt (quota): "
+            f"codex.codex-attempt.json sha256={attempt['sha256']}",
+            result["reasons"],
+        )
+
+    def test_audit_comment_names_a_substitute_without_evidence_text(self):
+        self._light("diff --git a/README.md b/README.md\n+x\n", runtimes=("claude", "claude"))
+        attempt = self._write("codex.codex-attempt.json", json.dumps(QUOTA_ATTEMPT))
+        self.report["seats"]["codex"]["codex_substitute"] = {"reason": "quota", "attempt": attempt}
+        result = self._cli_audit(self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = result.stdout
+        tier_index = body.index("- Tier:")
+        substitute_index = body.index(
+            "- Substitute: codex seat ran on claude after a codex quota failure"
+        )
+        ci_index = body.index("- CI:")
+        self.assertGreater(substitute_index, tier_index)
+        self.assertLess(substitute_index, ci_index)
+        self.assertNotIn("codex.codex-attempt.json", body)
+        self.assertNotIn("usage limit", body)
+
     def test_full_report_over_markdown_diff_approves(self):
         self.report["preconditions"]["diff"] = self._write(
             "review.diff", "diff --git a/README.md b/README.md\n+x\n")
@@ -206,6 +578,13 @@ class GateReportTests(unittest.TestCase):
         self.assertEqual(shape["report_example"]["class"], "full")
         self.assertEqual(shape["expected_example"]["class"], "full")
         self.assertNotIn("required_seats", shape)
+        self.assertEqual(
+            shape["codex_substitute"]["seats"],
+            {"light": ["codex"], "full": ["codex", "breaker"]},
+        )
+        self.assertEqual(
+            shape["codex_substitute"]["reasons"], ["quota", "auth", "unavailable"]
+        )
 
     def test_valid_report_approves(self):
         result = self.verdict()
@@ -396,6 +775,7 @@ class GateReportTests(unittest.TestCase):
                      "- Tier: full (4 seats)", "- CI: 1/1 checks passed",
                      "- Report: ~/report.json"):
             self.assertIn(text, body)
+        self.assertNotIn("Substitute", body)
 
     def test_audit_comment_refuses_non_approval(self):
         self.report["findings"] = [{"id": "f1", "severity": "high", "disposition": "confirmed",

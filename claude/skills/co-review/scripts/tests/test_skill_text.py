@@ -70,11 +70,105 @@ class CoReviewSkillText(unittest.TestCase):
              "policy", "--section", "POLICY"],
             capture_output=True, text=True, check=True,
         ).stdout
-        for needle in ("light tier", "full tier", "`codex` and `verifier`", "change_class.py"):
+        for needle in ("light tier", "full tier", "`codex` and `verifier`", "change_class.py",
+                       "codex_substitute", "quota, auth or availability",
+                       "`breaker` in the full tier"):
             self.assertIn(needle, policy)
         self.assertNotIn("All four seats", policy)
         self.assertNotIn("first three", policy)
         self.assertNotIn("first-three", policy)
+
+    def test_co_review_documents_the_codex_substitute_procedure(self):
+        for needle in ("codex_substitute", ".codex-attempt.json", "substitute-probe-",
+                       "SUBSTITUTE", "not the fallback for a Codex outage",
+                       "A failed probe never switches runtime on its own"):
+            self.assertIn(needle, CO_REVIEW)
+        probe_needle = '"$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json"'
+        substitute_needle = '>"$RUN_DIR/substitute-probe-'
+        seat_needle = '--prompt-file "$RUN_DIR/codex.prompt"'
+        self.assertGreater(CO_REVIEW.index(substitute_needle), CO_REVIEW.index(probe_needle))
+        self.assertLess(CO_REVIEW.index(substitute_needle), CO_REVIEW.index(seat_needle))
+        block = _extract_block(CO_REVIEW, substitute_needle)
+        status_index = block.index('"status") == "success"')
+        mv_index = block.index("mv --")
+        runner_index = block.index('"$RUNNER" run')
+        self.assertLess(status_index, mv_index)
+        self.assertLess(mv_index, runner_index)
+        self.assertIn('--cwd "$CLAUDE_ROOT"', block)
+
+    def test_co_review_substitute_block_runs_under_bash_and_zsh(self):
+        import json as jsonlib
+        import shutil
+        import subprocess as sp
+        import sys as syslib
+        import tempfile
+
+        body = _extract_block(CO_REVIEW, '>"$RUN_DIR/substitute-probe-').split("\n", 1)[1]
+        stub_runner = Path(tempfile.mkstemp(suffix=".py")[1])
+        stub_runner.write_text(
+            "import json, sys\nprint(json.dumps({'status': 'success'}))\n", encoding="utf-8"
+        )
+        script = (
+            "uv() { shift 3; \"$PYTHON\" \"$@\"; }\n"
+            f'PYTHON="{syslib.executable}"\n'
+            f'RUNNER="{stub_runner}"\n'
+            + body
+        )
+
+        def run_case(shell, run_dir, substitute, reviewer_status, skeptic_status):
+            (run_dir / "probe-codex-reviewer.json").write_text(
+                jsonlib.dumps({"status": reviewer_status, "runtime": "codex",
+                               "errors": ["fail"]}), encoding="utf-8"
+            )
+            (run_dir / "probe-codex-skeptic.json").write_text(
+                jsonlib.dumps({"status": skeptic_status, "runtime": "codex",
+                               "errors": ["fail"]}), encoding="utf-8"
+            )
+            (run_dir / "probe-claude-reviewer.json").write_text(
+                jsonlib.dumps({"status": "success"}), encoding="utf-8"
+            )
+            (run_dir / "probe-claude-skeptic.json").write_text(
+                jsonlib.dumps({"status": "success"}), encoding="utf-8"
+            )
+            env = {**__import__("os").environ, "RUN_DIR": str(run_dir),
+                   "SUBSTITUTE": substitute, "CLAUDE_ROOT": str(run_dir)}
+            return sp.run([shell, "-c", script], capture_output=True, text=True, env=env)
+
+        for shell in ("bash", "zsh"):
+            if shell == "zsh" and not shutil.which("zsh"):
+                self.skipTest("zsh not found")
+            with self.subTest(shell=shell):
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    result = run_case(shell, run_dir, "codex breaker", "error", "error")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        (run_dir / "codex.codex-attempt.json").read_text(encoding="utf-8"),
+                        jsonlib.dumps({"status": "error", "runtime": "codex", "errors": ["fail"]}),
+                    )
+                    self.assertEqual(
+                        (run_dir / "breaker.codex-attempt.json").read_text(encoding="utf-8"),
+                        jsonlib.dumps({"status": "error", "runtime": "codex", "errors": ["fail"]}),
+                    )
+                    self.assertTrue((run_dir / "substitute-probe-codex.json").exists())
+                    self.assertTrue((run_dir / "substitute-probe-breaker.json").exists())
+                    self.assertFalse(list(run_dir.glob("probe-codex-*.json")))
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    result = run_case(shell, run_dir, "codex", "success", "error")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue((run_dir / "probe-codex-reviewer.json").exists())
+                    self.assertFalse((run_dir / "codex.codex-attempt.json").exists())
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    result = run_case(shell, run_dir, "codex breaker", "error", "success")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue((run_dir / "probe-codex-reviewer.json").exists())
+                    self.assertTrue((run_dir / "probe-codex-skeptic.json").exists())
+                    self.assertFalse(list(run_dir.glob("*.codex-attempt.json")))
+                    self.assertFalse(list(run_dir.glob("substitute-probe-*")))
 
     def test_co_review_probes_every_runner_route_before_seats(self):
         probe = CO_REVIEW.index('"$RUN_DIR/probe-')
