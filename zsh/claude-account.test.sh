@@ -533,5 +533,33 @@ run_case "director passes --permission-mode=value through" \
 run_case "director keeps work-account routing" \
     "$SBHOME/Git/work/proj" "HERDR_ENV=1 director" "$SBHOME/.claude-work"
 
+# --- herdr gh shim arming ---------------------------------------------------
+# claude() arms a subshell for the launch when HERDR_ENV=1: the gh shim first
+# on PATH and BASH_ENV at its anchor. The calling shell stays unarmed.
+mkdir -p "$TMP/armbin" "$TMP/pyonly"
+ln -s "$(command -v python3)" "$TMP/pyonly/python3"
+cat >"$TMP/armbin/claude" <<'EOF'
+#!/bin/sh
+printf '%s|%s\n' "$(command -v gh)" "${BASH_ENV:-}" > "$RECORD"
+EOF
+chmod +x "$TMP/armbin/claude"
+SHIMS="$REPO/bin/herdr-shims"
+for herdr in 1 0; do
+    : > "$TMP/rec"
+    after=$(env -u BASH_ENV RECORD="$TMP/rec" HOME="$SBHOME" HERDR_ENV="$herdr" CLAUDE_PERSONAL_ONLY=1 \
+        PATH="$TMP/armbin:$TMP/pyonly:/usr/bin:/bin" \
+        zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude -p hi; print -r -- \"\$PATH\"" 2>/dev/null)
+    if [ "$herdr" = 1 ]; then want="$SHIMS/gh|$SHIMS/path.sh"; else want="|"; fi
+    case "$after" in
+        *herdr-shims*) leaked=yes ;;
+        *) leaked=no ;;
+    esac
+    if [ "$(cat "$TMP/rec")" = "$want" ] && [ "$leaked" = no ]; then
+        pass "HERDR_ENV=$herdr: claude arms the gh shim only for the launch"
+    else
+        fail "HERDR_ENV=$herdr: claude arms the gh shim only for the launch (got '$(cat "$TMP/rec")' leaked=$leaked)"
+    fi
+done
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

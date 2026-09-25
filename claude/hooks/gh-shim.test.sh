@@ -253,6 +253,20 @@ else
     fail "A3 login shells resolve the shim (bash=$got_bl zsh=$got_zl)"
 fi
 
+# Startup files come through symlinks in a temp ZDOTDIR: they resolve the
+# repo through their own path, and compinit writes its dump here, not into zsh/.
+mkdir -p "$T/zrepo"
+for f in .zshenv .zprofile .zshrc; do ln -s "$REPO/zsh/$f" "$T/zrepo/$f"; done
+got_zl=$(ZDOTDIR="$T/zrepo" PATH="/usr/bin:/bin:$SHIMS" "$ZSH" -lc 'command -v gh' 2>/dev/null | tail -1)
+got_core=$(env -i HOME="$T/home" GH_CONFIG_DIR="$T/ghc" GH_HOST=gh-shim-test.invalid PATH="$SHIMS:/usr/bin:/bin" ZDOTDIR="$T/zrepo" "$ZSH" -lc 'command -v gh' 2>/dev/null | tail -1)
+got_off=$(env -u BASH_ENV ZDOTDIR="$T/zrepo" HERDR_ENV=1 PATH="$T/fake:/usr/bin:/bin" \
+    "$ZSH" -ic 'print -r -- "$(command -v gh)|${BASH_ENV:-}"' 2>/dev/null | tail -1)
+if [ "$got_zl" = "$SHIMS/gh" ] && [ "$got_core" = "$SHIMS/gh" ] && [ "$got_off" = "$T/fake/gh|" ]; then
+    pass "A4 repo .zprofile re-anchors an armed login zsh; an unarmed herdr shell is untouched"
+else
+    fail "A4 startup files (armed login=$got_zl core-env login=$got_core unarmed=$got_off)"
+fi
+
 # --- B: bypass matrix -- rounds 1-4 plus siblings ----------------------------
 
 NL='

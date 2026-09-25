@@ -189,5 +189,38 @@ else
     fail ".zshenv stays silent ($out)"
 fi
 
+# --- herdr gh shim arming ---------------------------------------------------
+# codex() arms a subshell when HERDR_ENV=1 and hands Codex BASH_ENV, which its
+# core-only shell environment would otherwise drop.
+mkdir -p "$TMP/armbin" "$TMP/pyonly"
+ln -s "$(command -v python3)" "$TMP/pyonly/python3"
+cat >"$TMP/armbin/codex" <<'EOF'
+#!/bin/sh
+{ printf '%s\n' "$(command -v gh)"; printf '%s\n' "$@"; } > "$RECORD"
+EOF
+chmod +x "$TMP/armbin/codex"
+SHIMS="$REPO/bin/herdr-shims"
+: > "$TMP/record"
+RECORD="$TMP/record" HOME="$SBHOME" ZDOTDIR="$TMP/zdot" HERDR_ENV=1 CLAUDE_PERSONAL_ONLY=1 \
+    PATH="$TMP/armbin:$TMP/pyonly:/usr/bin:/bin" CASE_CWD="$UNKNOWN" \
+    zsh -c 'cd -- "$CASE_CWD" && codex exec hi' >/dev/null 2>&1
+if [ "$(sed -n 1p "$TMP/record")" = "$SHIMS/gh" ] \
+    && grep -qx "shell_environment_policy.set.BASH_ENV=\"$SHIMS/path.sh\"" "$TMP/record"; then
+    pass "HERDR_ENV=1: codex arms the gh shim and passes BASH_ENV"
+else
+    fail "HERDR_ENV=1: codex arms the gh shim and passes BASH_ENV"
+    cat "$TMP/record" >&2
+fi
+: > "$TMP/record"
+env -u HERDR_ENV RECORD="$TMP/record" HOME="$SBHOME" ZDOTDIR="$TMP/zdot" CLAUDE_PERSONAL_ONLY=1 \
+    PATH="$SHIMS:$TMP/armbin:$TMP/pyonly:/usr/bin:/bin" CASE_CWD="$UNKNOWN" \
+    zsh -c 'cd -- "$CASE_CWD" && codex exec hi' >/dev/null 2>&1
+if grep -qx "shell_environment_policy.set.BASH_ENV=\"$SHIMS/path.sh\"" "$TMP/record"; then
+    pass "already-armed PATH: codex still passes BASH_ENV"
+else
+    fail "already-armed PATH: codex still passes BASH_ENV"
+    cat "$TMP/record" >&2
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

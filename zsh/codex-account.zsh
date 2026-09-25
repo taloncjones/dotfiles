@@ -6,6 +6,14 @@
 
 function codex() {
     emulate -L zsh
+    if (( $+functions[dotfiles_gh_shim_wanted] )) && dotfiles_gh_shim_wanted; then
+        ( dotfiles_arm_gh_shim; codex "$@" )
+        return $?
+    fi
+    if [[ ( "${HERDR_ENV:-}" == 1 || ":$PATH:" == *"/bin/herdr-shims:"* ) && -r "${DOTFILES_GH_SHIM_HOME:-}/path.sh" ]]; then
+        # Codex passes only core variables to its shells, so hand it BASH_ENV.
+        set -- -c "shell_environment_policy.set.BASH_ENV=\"$DOTFILES_GH_SHIM_HOME/path.sh\"" "$@"
+    fi
     # The machine's personal-only policy applies regardless of launch directory.
     if [[ "${CLAUDE_PERSONAL_ONLY:-}" == 1 ]]; then
         command codex -c 'plugins."atlassian@claude-plugins-official".enabled=false' "$@"
