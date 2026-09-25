@@ -12,7 +12,11 @@ Orchestrator sessions, plain sessions, and headless mech/think runs (which
 inherit the orchestrator's workspace id, never indexed) are never gated.
 A native attempt is gated only in its own pane: when HERDR_PANE_ID is
 missing, blank, or names a pane other than the dispatched row's pane_id,
-the stop is allowed silently, with no emit command.
+the stop is allowed silently, with no emit command. A process launched by
+agent_runtime.run_bounded carries HERDR_BOUNDED_CHILD=1 and is always
+allowed, before any state read. When no row of the index role is current
+(a newer native row of another role follows it), the pane of the
+workspace's latest native row is used instead.
 
 Gate: tasks/<task_id>.done.json (impl) or .review.json (review) must carry
 this task id, workspace id, and a valid lifecycle timestamp/outcome. Native
@@ -140,6 +144,17 @@ def launch_entry(task, ws, role):
             elif "runtime" in entry:
                 # A malformed newer native attempt cannot revive an old role.
                 found = None
+    return found
+
+
+def latest_native_row(task, ws):
+    """Last workers[] row on workspace `ws` that carries a runtime, else None."""
+    if not task or not isinstance(task.get("workers"), list):
+        return None
+    found = None
+    for entry in task["workers"]:
+        if isinstance(entry, dict) and entry.get("workspace_id") == ws and "runtime" in entry:
+            found = entry
     return found
 
 
@@ -415,6 +430,10 @@ def evaluate(payload, native=False):
     """Classify a Stop event without emitting runtime-specific hook output."""
     if not isinstance(payload, dict) or payload.get("hook_event_name") != "Stop":
         return {"action": "allow"}
+    if os.environ.get("HERDR_BOUNDED_CHILD") == "1":
+        # agent_runtime.run_bounded sets this in every child: a bounded
+        # child is a helper, never a lifecycle attempt that owes a record.
+        return {"action": "allow"}
     if native and type(payload.get("stop_hook_active")) is not bool:
         return {"action": "allow"}
     if os.environ.get("HERDR_ENV") != "1":
@@ -484,12 +503,14 @@ def evaluate(payload, native=False):
         return {"action": "allow"}
     task = read_json_object(Path(rd) / "tasks" / f"{task_id}.json", root)
     entry = launch_entry(task, ws, role)
-    if isinstance(entry, dict) and "runtime" in entry:
-        if os.environ.get("HERDR_PANE_ID") != entry.get("pane_id"):
-            # Inside herdr (HERDR_ENV is 1 here) a native attempt is gated
-            # only in its dispatched pane. Another pane, or a process with no
-            # pane identity (a headless child), is not the dispatched agent:
-            # no nudge and no identity tuple.
+    # A legacy entry never consults the pane. With no current entry, a newer
+    # native row of another role still names the only pane that is an agent.
+    pane_row = entry if entry is not None else latest_native_row(task, ws)
+    if isinstance(pane_row, dict) and "runtime" in pane_row:
+        if os.environ.get("HERDR_PANE_ID") != pane_row.get("pane_id"):
+            # Inside herdr (HERDR_ENV is 1 here) a native task is gated only
+            # in that pane. Another pane, or a process with no pane identity,
+            # is not the dispatched agent: no nudge and no identity tuple.
             return {"action": "allow"}
     selection = (
         native_scope(task, entry, scope, root, runtime, context, personal)

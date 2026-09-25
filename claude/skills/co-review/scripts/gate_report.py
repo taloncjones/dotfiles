@@ -15,6 +15,9 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 LIGHT_SEATS = ("codex", "verifier")
 FULL_SEATS = ("claude", "codex", "breaker", "verifier")
 _TIER_SEATS = {"light": LIGHT_SEATS, "full": FULL_SEATS}
+_CODEX_SEATS = {"light": ("codex",), "full": ("codex", "breaker")}
+_SUBSTITUTE_REASONS = ("quota", "auth", "unavailable")
+_FAILED_CODEX_STATUSES = ("error", "unparseable")
 _AXES = (
     "ownership_authority",
     "dependency_boundaries",
@@ -93,6 +96,88 @@ def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> No
         reasons.append(f"seat {name} artifact is empty")
     if hashlib.sha256(content).hexdigest() != expected:
         reasons.append(f"seat {name} artifact digest does not match")
+
+
+def _substitute_cause(seat: dict, root: Path) -> tuple[str | None, Path | None]:
+    """Return (cause, None) for spec rules a-k, or (None, resolved_path) when valid."""
+    if seat.get("runtime") != "claude":
+        return "seat runtime is not claude", None
+    record = seat.get("codex_substitute")
+    if not isinstance(record, dict) or set(record) != {"reason", "attempt"}:
+        return "record keys must be reason and attempt", None
+    if record["reason"] not in _SUBSTITUTE_REASONS:
+        return "reason is not quota, auth or unavailable", None
+    attempt = record["attempt"]
+    if (
+        not isinstance(attempt, dict)
+        or set(attempt) != {"artifact", "sha256"}
+        or not _nonempty(attempt.get("artifact"))
+        or not _nonempty(attempt.get("sha256"))
+    ):
+        return "attempt keys must be artifact and sha256", None
+    resolved, errors = _load_preconditions()._artifact(attempt, root, "attempt")
+    if errors:
+        return errors[0], None
+    try:
+        payload = json.loads(resolved.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        return "attempt is not a JSON object", None
+    if not isinstance(payload, dict):
+        return "attempt is not a JSON object", None
+    if payload.get("runtime") != "codex":
+        return "attempt runtime is not codex", None
+    if payload.get("status") not in _FAILED_CODEX_STATUSES:
+        return "attempt status is not error or unparseable", None
+    if payload.get("result") is not None:
+        return "attempt produced a review result", None
+    errors_field = payload.get("errors")
+    if not isinstance(errors_field, list) or not any(
+        isinstance(item, str) and item.strip() for item in errors_field
+    ):
+        return "attempt errors are empty", None
+    return None, resolved
+
+
+def _substitutes(
+    tier: str, seats: dict, root: Path, reasons: list[str], visible: list[str]
+) -> set[str]:
+    """Validate codex_substitute records for the tier's seats; return substituted names."""
+    codex_routed = set(_CODEX_SEATS[tier])
+    substituted: set[str] = set()
+    seen: dict[tuple[int, int], str] = {}
+    for name in _TIER_SEATS[tier]:
+        seat = seats.get(name)
+        if not isinstance(seat, dict):
+            continue
+        has_record = "codex_substitute" in seat
+        if name not in codex_routed:
+            if has_record:
+                reasons.append(f"seat {name} cannot take a codex_substitute")
+            continue
+        if not has_record:
+            if seat.get("runtime") == "claude":
+                reasons.append(f"seat {name} ran on claude without a codex_substitute")
+            continue
+        cause, resolved = _substitute_cause(seat, root)
+        if cause is not None:
+            reasons.append(f"seat {name} codex_substitute is invalid: {cause}")
+            continue
+        key = (resolved.stat().st_dev, resolved.stat().st_ino)
+        if key in seen:
+            reasons.append(
+                f"seat {name} codex_substitute is invalid: "
+                f"attempt is shared with seat {seen[key]}"
+            )
+            continue
+        seen[key] = name
+        record = seat["codex_substitute"]
+        visible.append(
+            f"seat {name} ran on claude after a failed codex attempt "
+            f"({record['reason']}): {record['attempt']['artifact']} "
+            f"sha256={record['attempt']['sha256']}"
+        )
+        substituted.add(name)
+    return substituted
 
 
 def _light_diff_ok(preconditions: object, root: Path) -> bool:
@@ -257,10 +342,17 @@ def evaluate(report: dict, expected: dict, artifact_root: Path) -> dict:
     else:
         for name in required:
             _artifact_ok(seats[name], artifact_root, name, reasons)
+        substituted = _substitutes(tier, seats, artifact_root, reasons, visible)
         if tier == "light":
-            runtimes = {seats[name].get("runtime") for name in required
-                        if isinstance(seats[name], dict)
-                        and isinstance(seats[name].get("runtime"), str)}
+            runtimes = set()
+            for name in required:
+                seat = seats[name]
+                if not isinstance(seat, dict):
+                    continue
+                if name in substituted:
+                    runtimes.add("codex")
+                elif isinstance(seat.get("runtime"), str):
+                    runtimes.add(seat.get("runtime"))
             if runtimes != {"claude", "codex"}:
                 reasons.append("light seats must be one claude and one codex runtime")
     if tier == "light" and not _light_diff_ok(report.get("preconditions"), artifact_root):
@@ -303,6 +395,13 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
     if shown == home or shown.startswith(home + os.sep):
         shown = "~" + shown[len(home):]
     tier = report["class"]
+    seats = report["seats"]
+    substitute_lines = tuple(
+        f"- Substitute: {name} seat ran on claude after a codex "
+        f"{seats[name]['codex_substitute']['reason']} failure"
+        for name in _TIER_SEATS[tier]
+        if isinstance(seats.get(name), dict) and "codex_substitute" in seats[name]
+    )
     lines = (
         f"<!-- co-review-audit head={report['head']} run={report['run_id']} -->",
         "Co-review gate: APPROVE",
@@ -310,6 +409,7 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
         f"- Run: {report['run_id']}",
         f"- Head: {report['head']}",
         f"- Tier: {tier} ({len(_TIER_SEATS[tier])} seats)",
+        *substitute_lines,
         f"- CI: {ci_line}",
         f"- Report: {shown}",
     )
@@ -383,6 +483,22 @@ def schema() -> dict:
         "bindings": {
             "manifest.source.source_tree": "expected.tree",
             "snapshot.codex_tree": "report.reviewed_tree",
+        },
+        "codex_substitute": {
+            "seats": {k: list(v) for k, v in _CODEX_SEATS.items()},
+            "reasons": list(_SUBSTITUTE_REASONS),
+            "seat_runtime": "claude",
+            "seat_field": {
+                "reason": "quota, auth, or unavailable",
+                "attempt": {
+                    "artifact": "report-relative path to the preserved failed Codex runner JSON",
+                    "sha256": "SHA-256",
+                },
+            },
+            "attempt_must_show": (
+                "runtime codex; status error or unparseable; "
+                "result absent or null; at least one nonempty string in errors"
+            ),
         },
     }
 

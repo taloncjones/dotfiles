@@ -157,7 +157,8 @@ evidence, not an empty success.
 The seat set follows the change class (`scripts/change_class.py`; `co-review
 --full` forces full). The full tier runs four seats: `claude`, `codex`,
 `breaker`, `verifier`. The light tier runs `codex` and `verifier`, one Codex
-and one Claude runtime, for a diff whose every path is Markdown or `.todos/`
+and one Claude runtime, unless the `codex` seat is an evidenced substitute
+(below), for a diff whose every path is Markdown or `.todos/`
 outside the gate skills. Every seat is fresh, read-only, independently
 completed runtime calls with a 600-second bound. Record requested and
 observed runtime/model/effort; an
@@ -166,13 +167,26 @@ SHA-256-bound, and records an actual completion. A narrated dispatch, a
 controller opinion, or a current-session implementer does not fill a seat.
 
 1. `claude`: fresh Claude reviewer route.
-2. `codex`: fresh native Codex reviewer route. A Codex-led controller creates a
+2. `codex`: fresh native Codex reviewer route, or, after a failed Codex
+   attempt, an evidenced Claude substitute. A Codex-led controller creates a
    native child; it never shells into a generic Codex CLI review path.
-3. `breaker`: fresh skeptic route, independent of both finder reports.
+3. `breaker`: fresh Codex skeptic route (or an evidenced Claude substitute),
+   independent of both finder reports.
 4. `verifier`: fresh skeptic route after every finder report exists (three in
    the full tier, the `codex` report in the light tier). It receives those
    reports and every known blocker, but performs its own frozen evidence
    check.
+
+The Codex-routed seats are `codex` in both tiers and `breaker` in the full tier.
+Such a seat may run on the fresh Claude route of the same role only after its
+own Codex attempt in this gate failed for quota, auth or availability. It then
+records runtime `claude` and a
+`codex_substitute` with that reason and the digest-bound failed runner JSON.
+The evaluator accepts only a Codex runtime result with status `error`
+or `unparseable`, no review result, and nonempty errors, and names the
+substitute in its result. A Claude runtime in a Codex-routed seat without
+that record is incomplete. A timeout, a success or a pre-launch failure
+cannot back a substitute.
 
 Use the shared resolver for every seat. Preserve the original repository's
 account route; a personal Claude route unsets `CLAUDE_CONFIG_DIR`. The finder

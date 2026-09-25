@@ -416,7 +416,7 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
     for Codex and retain `--personal` for a personal account in a work repo
 - `review-change` - bounded single-seat development review
 - `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) final/spec/plan review gates
-- `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection
+- `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection; `handoff retire` archives a finished task
 - `voice` - shared prose lint and independent rewrite with protected facts
 - `herdr-orchestration` - Claude-led shared lifecycle; Codex supplies bounded UI/prose/review work
 - `lib/workflow_context.py` - canonical repository identity and account scope
@@ -443,9 +443,10 @@ Requested settings and observed runtime evidence are reported separately.
 
 Handoff history lives under
 `${XDG_STATE_HOME:-~/.local/state}/dotfiles/workflows/handoffs`, partitioned by
-account, canonical repository, and task. `handoff list` presents candidates;
-`kickoff` requires a selected task. Personal Claude use remains supported in
-work repositories through `claude --personal`. Default personal subprocesses
+account, canonical repository, and task. `handoff list` presents candidates
+and `handoff retire` moves a finished task out of it; `kickoff` requires a
+selected task. Personal Claude use remains supported in work repositories
+through `claude --personal`. Default personal subprocesses
 unset `CLAUDE_CONFIG_DIR`; Codex preserves the user's actual `CODEX_HOME`.
 Ambiguous external worktrees require an explicit personal choice instead of
 inheriting an unverified work account.
@@ -459,7 +460,7 @@ inheriting an unverified work account.
 - `commit_guard.py` - Enforce commit message standards (no attribution, no emojis)
 - `emoji_guard.py` - Block emojis in edited files
 - `format_files.py` - Auto-format edited files with prettier
-- `no_ai_attribution_bash.py` - Block AI attribution phrases in shell command bodies
+- `no_ai_attribution_bash.py` - Block AI attribution phrases in shell command bodies (agent names from `git/hooks/agent-tokens`)
 - `no_ai_comments.py` - Block tool-generated comments in code
 - `planning_artifact_guard.py` - Refuse staging or committing private specs, plans, and verification contracts in Claude and native Codex shell events
 - `protect_claude_md.py` - Warn before editing global CLAUDE.md
@@ -503,24 +504,38 @@ work identity run `identity-setup` or edit `~/.gitconfig-work` directly.
 `.gitconfig` sets `core.hooksPath` to `~/.config/git/hooks`, which the installer
 symlinks to `git/hooks/` in this repo. Two hooks are described below. The `post-checkout` hook is a no-op
 for repos that do not use `.todos/` or `.planning/`, and `commit-msg` enforces
-attribution and emoji policy, so both are safe to leave globally enabled.
+attribution, subject-length, and emoji policy, so both are safe to leave
+globally enabled.
 
-**`commit-msg`** — runs on every commit before the message is recorded. Two
-layers, in order:
+**`commit-msg`** — runs on every commit before the message is recorded. Agent
+names come from `git/hooks/agent-tokens`, one lowercase token per line; the
+Bash attribution hooks in `claude/hooks/` and `codex/hooks/` read the same
+file. Three layers, in order:
 
 - **Strip** (no `rg` needed): removes agent attribution lines from line 2 onward
-  while preserving other line content: `Co-Authored-By` trailers
-  naming an agent (Claude, Anthropic, Copilot, ChatGPT, GPT, Codex); session
-  trailers (`Claude-Session:` with any value, or any `*Session*:` key whose value
-  is a URL); and `Generated with|by <agent>` footer lines, emoji prefix included.
-  Rewriting adds LF to an unterminated retained final line. A message with
-  nothing to strip is not rewritten. When it strips, the hook
-  prints `commit-msg: stripped N agent attribution line(s).` on stderr. A missing
-  `awk`/`grep`/`sed`/`mktemp` fails closed (the commit is refused).
+  while preserving other line content. Stripped shapes: `Co-Authored-By`
+  trailers that name an agent as a whole word, use a `noreply` or `no-reply`
+  mailbox, or use a `[bot]` address (a person's `users.noreply.github.com`
+  address is kept); `Generated-with:`, `Generated-by:`, and bare `Session:`
+  trailer keys with any value; `<agent>-Session:` keys with any value, or any
+  `*Session*:` key whose value is a URL; and `Generated with|by <agent>` footer
+  lines, emoji prefix included. Rewriting adds LF to an unterminated retained
+  final line. A message with nothing to strip is not rewritten. When it strips,
+  the hook prints `commit-msg: stripped N agent attribution line(s).` on stderr.
+  A missing `awk`/`grep`/`sed`/`mktemp`, or a missing or invalid
+  `agent-tokens`, fails closed (the commit is refused).
+- **Subject length** (no `rg` needed): refuses a first line of 75 or more characters
+  (bytes, trailing whitespace ignored) with
+  `commit-msg: subject is N characters; keep it under 75.` Subjects git
+  generates are exempt: merges (`Merge branch ...`, `Merge tag ...`,
+  `Merge pull request ...`, `Merge <url>`, and the other `git merge` forms),
+  `Revert "..."`, `Reapply "..."`, and `fixup!`/`squash!`/`amend!` subjects.
 - **Block** (needs `rg`; warns and skips without it): rejects inline attribution
-  in the subject or body and emojis, as before.
+  in the subject or body, co-author lines naming an agent anywhere in the line
+  (a leading word boundary only for `aider`, which also matches inside
+  surnames like Raider), and emojis.
 
-`DOTFILES_SKIP_COMMIT_MSG_GUARD=1` bypasses both layers. The hook cannot reach a
+`DOTFILES_SKIP_COMMIT_MSG_GUARD=1` bypasses every layer. The hook cannot reach a
 squash merge: GitHub composes that message from the PR body, so the guard for PR
 descriptions is the `attribution.pr = ""` opt-out in `claude/settings.json.tmpl`
 (with `attribution.commit = ""` and `attribution.sessionUrl = false` as the first

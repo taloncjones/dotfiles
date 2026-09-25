@@ -15,6 +15,8 @@ fi
 import json
 import os
 import re
+import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -633,7 +635,8 @@ def test_native_argv_mappings_are_exact():
         "auto",
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
     ]
 
 
@@ -685,7 +688,8 @@ def test_slim_boot_roles_launch_without_mcp_servers():
             "--strict-mcp-config",
             "-p",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
         ], (role, headless)
 
 
@@ -744,7 +748,8 @@ def test_full_boot_roles_and_codex_keep_mcp_servers():
         "auto",
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
     ], headless
     for role in ("controller", "implementation", "think"):
         route = runtime.resolve_route("claude", role, config={"provisional": True})
@@ -806,7 +811,8 @@ def test_bounded_run_passes_strict_mcp_config_for_reviewer():
             "--strict-mcp-config",
             "-p",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
         ], call
 
 
@@ -1027,6 +1033,429 @@ def init_repo(path):
     )
 
 
+STREAM_JSON_FIXTURE = "\n".join(
+    json.dumps(row)
+    for row in (
+        {"type": "system", "subtype": "hook_started", "hook_id": "h-1",
+         "hook_name": "SessionStart:startup", "hook_event": "SessionStart",
+         "session_id": "sess-fixture"},
+        {"type": "system", "subtype": "hook_response", "hook_id": "h-1",
+         "hook_name": "SessionStart:startup", "hook_event": "SessionStart",
+         "exit_code": 0, "outcome": "success", "session_id": "sess-fixture"},
+        {"type": "system", "subtype": "init", "session_id": "sess-fixture",
+         "mcp_servers": []},
+        {"type": "assistant", "session_id": "sess-fixture",
+         "timestamp": "2026-09-24T18:13:00.253Z",
+         "message": {"content": [{"type": "tool_use", "id": "t-1",
+                                  "name": "Bash",
+                                  "input": {"command": "git rev-parse --short HEAD"}}]}},
+        {"type": "rate_limit_event", "session_id": "sess-fixture",
+         "rate_limit_info": {"status": "allowed_warning"}},
+        {"type": "user", "session_id": "sess-fixture",
+         "timestamp": "2026-09-24T18:13:01.242Z",
+         "message": {"content": [{"type": "tool_result", "tool_use_id": "t-1",
+                                  "content": "8d61895"}]}},
+        {"type": "assistant", "session_id": "sess-fixture",
+         "timestamp": "2026-09-24T18:13:02.508Z",
+         "message": {"content": [{"type": "text", "text": "8d61895"}]}},
+        {"type": "result", "subtype": "success", "is_error": False,
+         "result": "8d61895", "num_turns": 2, "session_id": "sess-fixture",
+         "total_cost_usd": 0.01, "modelUsage": {"claude-opus-5-5": {}}},
+    )
+) + "\n"
+
+
+def test_stream_json_result_parses_like_single_object():
+    result = runtime.parse_runtime_result("claude", STREAM_JSON_FIXTURE)
+    assert result["status"] == "success", result
+    assert result["result"] == "8d61895", result
+    assert result["num_turns"] == 2, result
+    assert result["session_id"] == "sess-fixture", result
+    assert result["observed_model"] == "claude-opus-5-5", result
+
+
+def test_stream_json_result_survives_unicode_line_separators():
+    for separator in (" ", " ", "\u0085"):
+        row = {"type": "result", "subtype": "success", "is_error": False,
+               "result": f"before{separator}after", "num_turns": 1,
+               "session_id": "sess-fixture", "total_cost_usd": 0.01,
+               "modelUsage": {"claude-opus-5-5": {}}}
+        init = json.dumps({"type": "system", "subtype": "init",
+                            "session_id": "sess-fixture", "mcp_servers": []})
+        output = init + "\n" + json.dumps(row, ensure_ascii=False) + "\n"
+        result = runtime.parse_runtime_result("claude", output)
+        assert result["status"] == "success", (separator, result)
+        assert result["result"] == f"before{separator}after", (separator, result)
+
+
+def fake_claude_rows(bindir, rows, pidfile=None, sleep=30):
+    """A fake `claude` that prints JSONL rows (raw strings allowed), then sleeps."""
+    lines = "".join(
+        f"print({row!r}, flush=True)\n" if isinstance(row, str)
+        else f"print({json.dumps(row)!r}, flush=True)\n"
+        for row in rows
+    )
+    record = f"open({str(pidfile)!r},'w').write(str(os.getpid()))\n" if pidfile else ""
+    executable(
+        bindir / "claude",
+        "exec python3 - <<'STUB'\nimport os,time\n" + record + lines
+        + f"time.sleep({sleep})\nSTUB\n",
+    )
+
+
+def claude_route():
+    return runtime.resolve_route(
+        "claude", "planner", capabilities={"models": {"opus": model()}}
+    )
+
+
+def test_timeout_while_working_keeps_partial_progress():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [json.loads(line) for line in STREAM_JSON_FIXTURE.splitlines()][:6]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["status"] == "timeout" and result["timed_out"] is True, result
+        assert result["observation"] == "timeout-while-working", result
+        assert result["session_id"] == "sess-fixture", result
+        progress = result["progress"]
+        assert progress["init_seen"] is True, progress
+        assert progress["pending_hooks"] == [], progress
+        assert progress["assistant_turns"] == 1, progress
+        assert progress["tool_calls"] == 1, progress
+        assert progress["last_tool"] == "Bash", progress
+        assert progress["last_event_at"] == "2026-09-24T18:13:01.242Z", progress
+        assert isinstance(progress["idle_secs_before_kill"], int), progress
+        assert progress["rate_limit_status"] == "allowed_warning", progress
+
+
+def test_timeout_skips_a_truncated_final_line():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-trunc"},
+            {"type": "assistant", "message": {"content": []}},
+            {"type": "assistant", "message": {"content": []}},
+            '{"type": "assistant", "message": {"cont',
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-while-working", result
+        assert result["progress"]["assistant_turns"] == 2, result
+        assert result["session_id"] == "s-trunc", result
+
+
+def test_timeout_before_init_names_the_pending_hook():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [{"type": "system", "subtype": "hook_started", "hook_id": "h-9",
+                 "hook_name": "SessionStart:startup", "session_id": "s-hook"}]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-before-init", result
+        assert result["progress"]["init_seen"] is False, result
+        assert result["progress"]["pending_hooks"] == ["SessionStart:startup"], result
+
+
+def test_timeout_before_first_turn():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-idle"},
+            {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected"}},
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-before-first-turn", result
+        assert result["progress"]["assistant_turns"] == 0, result
+        assert result["progress"]["rate_limit_status"] == "rejected", result
+
+
+def test_timeout_without_timestamps_reports_null_timing():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-nots"},
+            {"type": "assistant", "message": {"content": []}},
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["progress"]["last_event_at"] is None, result
+        assert result["progress"]["idle_secs_before_kill"] is None, result
+
+
+def test_timeout_never_leaks_tool_input():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        marker = "LEAK-MARKER-7f3a"
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-leak"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t", "name": "Bash",
+                 "input": {"command": f"echo {marker}"}}]}},
+        ]
+        fake_claude_rows(bindir, rows)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        result = runtime.run_bounded(
+            claude_route(), "prompt", repo, "read-only", timeout_secs=2.0, env=env
+        )
+        assert result["progress"]["last_tool"] == "Bash", result
+        assert marker not in json.dumps(result), result
+
+
+def test_codex_timeout_progress_counts_by_item_type():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        rows = [
+            {"type": "thread.started", "thread_id": "th-1"},
+            {"type": "item.completed", "item": {"type": "reasoning"}},
+            {"type": "item.completed", "item": {"type": "command_execution"}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "x"}},
+            {"type": "item.completed", "item": {"type": "file_change"}},
+        ]
+        lines = "".join(f"print({json.dumps(row)!r}, flush=True)\n" for row in rows)
+        executable(
+            bindir / "codex",
+            "exec python3 - <<'STUB'\nimport time\n" + lines + "time.sleep(30)\nSTUB\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        result = runtime.run_bounded(
+            route, "prompt", repo, "workspace-write", timeout_secs=2.0, env=env
+        )
+        assert result["observation"] == "timeout-while-working", result
+        assert result["session_id"] == "th-1", result
+        assert result["progress"] == {
+            "init_seen": True, "pending_hooks": None, "assistant_turns": 1,
+            "tool_calls": 2, "last_tool": "file_change", "last_event_at": None,
+            "idle_secs_before_kill": None, "rate_limit_status": None,
+        }, result
+
+
+def test_sigterm_to_the_uv_wrapper_reaps_the_seat_once():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        pidfile = root / "child.pid"
+        rows = [
+            {"type": "system", "subtype": "init", "session_id": "s-sig"},
+            {"type": "assistant", "message": {"content": []}},
+            {"type": "assistant", "message": {"content": []}},
+        ]
+        fake_claude_rows(bindir, rows, pidfile=pidfile, sleep=60)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        prompt = root / "prompt.txt"
+        prompt.write_text("Reply ok\n")
+        launcher = (
+            ["uv", "run", "--offline", "--no-project", "python"]
+            if shutil.which("uv")
+            else [sys.executable]
+        )
+        wrapper = subprocess.Popen(
+            [*launcher, runtime.__file__, "run", "--runtime", "claude",
+             "--role", "reviewer", "--risk", "normal", "--provisional",
+             "--cwd", str(repo), "--sandbox", "read-only",
+             "--timeout-secs", "60", "--prompt-file", str(prompt)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (
+            pidfile.exists() and pidfile.read_text()
+        ):
+            time.sleep(0.05)
+        assert pidfile.exists(), "fake claude never started"
+        time.sleep(0.5)
+        started = time.monotonic()
+        wrapper.send_signal(signal.SIGTERM)
+        time.sleep(0.2)
+        if wrapper.poll() is None:
+            wrapper.send_signal(signal.SIGTERM)
+        out, _err = wrapper.communicate(timeout=10)
+        assert time.monotonic() - started < 10
+        result = json.loads(out)
+        assert result["observation"] == "runner-interrupted", result
+        assert result["status"] == "interrupted" and result["timed_out"] is False, result
+        assert result["signal"] == "SIGTERM", result
+        assert result["progress"]["assistant_turns"] == 2, result
+        assert wrapper.returncode == 1, wrapper.returncode
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(child, 9)
+        assert not alive, f"seat {child} survived the runner interrupt"
+
+
+def test_inherited_ignored_sighup_stays_ignored():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        executable(
+            bindir / "claude",
+            "exec python3 - <<'STUB'\n"
+            "import json,os,signal\n"
+            "os.kill(os.getppid(), signal.SIGHUP)\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+            "'result':'ok','num_turns':1,'modelUsage':{'claude-opus-5-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            result = runtime.run_bounded(
+                claude_route(), "prompt", repo, "read-only", timeout_secs=10, env=env
+            )
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+        finally:
+            signal.signal(signal.SIGHUP, previous)
+        assert result["status"] == "success", result
+
+
+def test_signal_during_popen_still_reaps_the_child():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        pidfile = root / "child.pid"
+        fake_claude_rows(bindir, [], pidfile=pidfile, sleep=60)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        real_popen = subprocess.Popen
+
+        def popen_then_signal(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            # The patch also catches _descendants()' `ps` call; signal only
+            # for the seat launch itself.
+            if not str(args[0][0]).endswith("claude"):
+                return process
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not (
+                pidfile.exists() and pidfile.read_text()
+            ):
+                time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return process
+
+        runtime.subprocess.Popen = popen_then_signal
+        try:
+            result = runtime.run_bounded(
+                claude_route(), "prompt", repo, "read-only", timeout_secs=30, env=env
+            )
+        finally:
+            runtime.subprocess.Popen = real_popen
+        assert result["observation"] == "runner-interrupted", result
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        if alive:
+            os.kill(child, 9)
+        assert not alive, f"seat {child} survived a signal during Popen"
+
+
+def test_read_only_child_writes_no_bytecode():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os\n"
+            "json.dump({'value': os.environ.get('PYTHONDONTWRITEBYTECODE','UNSET')},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'modelUsage':{'claude-opus-5-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = dict(os.environ)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        env.update({"PATH": f"{bindir}:{env['PATH']}", "RUN_LOG": str(log)})
+        runtime.run_bounded(claude_route(), "prompt", repo, "read-only", timeout_secs=10, env=env)
+        read_only = json.loads(log.read_text())["value"]
+        runtime.run_bounded(claude_route(), "prompt", repo, "workspace-write", timeout_secs=10, env=env)
+        writable = json.loads(log.read_text())["value"]
+        assert read_only == "1", read_only
+        assert writable == "UNSET", writable
+
+
 def test_run_uses_argv_and_unsets_default_claude_config():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -1116,6 +1545,155 @@ def test_run_bounded_strips_pane_identity_from_the_child():
         call = json.loads(log.read_text())
         assert call["HERDR_PANE_ID"] == "UNSET" and call["HERDR_TAB_ID"] == "UNSET", call
         assert call["HERDR_ENV"] == "1" and call["HERDR_WORKSPACE_ID"] == "w1", call
+
+
+def test_run_bounded_marks_the_child_as_bounded():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os,sys\n"
+            "json.dump({k:os.environ.get(k,'UNSET') for k in ('HERDR_BOUNDED_CHILD','HERDR_PANE_ID','HERDR_ENV','HERDR_WORKSPACE_ID')},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-fable-5':{}}}))\n"
+            "STUB\n",
+        )
+        route = runtime.resolve_route(
+            "claude", "planner", capabilities={"models": {"opus": model()}}
+        )
+        env = dict(os.environ)
+        env.pop("HERDR_BOUNDED_CHILD", None)
+        env.update(
+            {
+                "PATH": f"{bindir}:{env['PATH']}",
+                "RUN_LOG": str(log),
+                "HERDR_ENV": "1",
+                "HERDR_WORKSPACE_ID": "w1",
+                "HERDR_PANE_ID": "w1:p1",
+            }
+        )
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        absent = json.loads(log.read_text())
+        env["HERDR_BOUNDED_CHILD"] = "0"
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        zero = json.loads(log.read_text())
+        original = runtime.execution_context
+
+        def conflicting_launch_env(cwd, runtime_name, personal=False):
+            repository, scope = original(cwd, runtime_name, personal)
+            launch_env = {**scope["launch_env"], "HERDR_BOUNDED_CHILD": None}
+            return repository, {**scope, "launch_env": launch_env}
+
+        runtime.execution_context = conflicting_launch_env
+        try:
+            runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        finally:
+            runtime.execution_context = original
+        conflicting = json.loads(log.read_text())
+
+        assert absent["HERDR_BOUNDED_CHILD"] == "1", absent
+        assert zero["HERDR_BOUNDED_CHILD"] == "1", zero
+        assert conflicting["HERDR_BOUNDED_CHILD"] == "1", conflicting
+        assert absent["HERDR_PANE_ID"] == "UNSET", absent
+        assert absent["HERDR_ENV"] == "1" and absent["HERDR_WORKSPACE_ID"] == "w1", absent
+
+
+def test_bounded_child_runs_the_stop_gate_silently():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        config = root / "gate-config"
+        state = config / "herdr-orch" / "slug-x"
+        (state / "workspaces").mkdir(parents=True)
+        (state / "tasks").mkdir()
+        (state / "workspaces" / "w1.json").write_text(
+            json.dumps({"task_id": "PROJ-1", "repo_slug": "slug-x", "role": "impl"})
+        )
+        (state / "tasks" / "PROJ-1.json").write_text(
+            json.dumps(
+                {
+                    "v": 1,
+                    "task_id": "PROJ-1",
+                    "base_sha": "b" * 40,
+                    "workers": [
+                        {
+                            "role": "impl",
+                            "phase": "implement",
+                            "workspace_id": "w1",
+                            "agent": "impl-proj-1",
+                            "ts": "2026-09-06T12:00:00Z",
+                        }
+                    ],
+                }
+            )
+        )
+        hook = Path(os.environ["DOTFILES_TEST_ROOT"]) / "claude" / "hooks" / "herdr_stop_gate.py"
+        payload = json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "11111111-1111-1111-1111-111111111111",
+                "stop_hook_active": False,
+            }
+        )
+        log = root / "gate.json"
+        executable(
+            bindir / "claude",
+            "python3 - <<'STUB'\n"
+            "import json,os,subprocess,sys\n"
+            "env={k:v for k,v in os.environ.items() if k not in "
+            "('WORKFLOW_PERSONAL_ACCOUNT','CLAUDE_PERSONAL_ONLY','HERDR_PERSONAL','HERDR_ACCOUNT_ID')}\n"
+            "env['CLAUDE_CONFIG_DIR']=os.environ['GATE_CONFIG']\n"
+            "p=subprocess.run([sys.executable,os.environ['GATE_HOOK']],input=os.environ['GATE_PAYLOAD'],"
+            "capture_output=True,text=True,env=env)\n"
+            "json.dump({'rc':p.returncode,'out':p.stdout,'err':p.stderr},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-fable-5':{}}}))\n"
+            "STUB\n",
+        )
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("HERDR_BOUNDED_CHILD", "HERDR_PERSONAL", "HERDR_ACCOUNT_ID")
+        }
+        env.update(
+            {
+                "PATH": f"{bindir}:{env['PATH']}",
+                "RUN_LOG": str(log),
+                "HERDR_ENV": "1",
+                "HERDR_WORKSPACE_ID": "w1",
+                "HERDR_PANE_ID": "w1:p1",
+                "GATE_CONFIG": str(config),
+                "GATE_HOOK": str(hook),
+                "GATE_PAYLOAD": payload,
+            }
+        )
+        control_env = {
+            k: v
+            for k, v in env.items()
+            if k not in ("WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_PERSONAL_ONLY")
+        }
+        control_env["CLAUDE_CONFIG_DIR"] = str(config)
+        control = subprocess.run(
+            [sys.executable, str(hook)], input=payload, capture_output=True,
+            text=True, env=control_env,
+        )
+        route = runtime.resolve_route(
+            "claude", "planner", capabilities={"models": {"opus": model()}}
+        )
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=20, env=env)
+        bounded = json.loads(log.read_text())
+
+        assert control.returncode == 2 and "herdr-stop-gate" in control.stderr, control
+        assert bounded == {"rc": 0, "out": "", "err": ""}, bounded
 
 
 def test_run_consumes_shared_work_account_scope():
@@ -1294,6 +1872,7 @@ def test_timeout_kills_the_process_group():
         assert result["status"] == "timeout", result
         assert result["timed_out"] is True, result
         assert result["total_cost_usd"] is None, result
+        assert result["observation"] == "timeout-before-init", result
 
 
 def test_timeout_returns_when_a_detached_child_holds_the_pipe():
@@ -1345,6 +1924,10 @@ def test_timeout_returns_when_a_detached_child_holds_the_pipe():
         assert elapsed < 10, elapsed
         assert result["status"] == "timeout", result
         assert result["timed_out"] is True, result
+        # The unchanged _descendants()/kill loop still catches and reaps this
+        # setsid grandchild by ppid snapshot before the drain runs, so the
+        # pipe closes normally and this stays a before-init timeout.
+        assert result["observation"] == "timeout-before-init", result
         # The detached (setsid) worker must be dead too, not left running
         # after the runner reported a timeout.
         deadline = time.monotonic() + 5
@@ -1364,6 +1947,50 @@ def test_timeout_returns_when_a_detached_child_holds_the_pipe():
         if alive:
             os.kill(worker, 9)
         assert not alive, f"detached worker {worker} survived timeout cleanup"
+
+
+def test_timeout_reports_pipe_held_when_descendants_miss_the_worker():
+    # If _descendants() fails to find a detached worker (for example a
+    # ps-parsing gap), the kill loop cannot reap it and the pipe stays open;
+    # this is the timeout-pipe-held path the pipe-held drain sets.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        pidfile = root / "worker.pid"
+        executable(
+            bindir / "codex",
+            "exec python3 -c '"
+            "import os,sys,time\n"
+            "if os.fork()==0:\n"
+            "    os.setsid()\n"
+            f'    open("{pidfile}","w").write(str(os.getpid()))\n'
+            "    time.sleep(120); sys.exit(0)\n"
+            "time.sleep(120)'\n",
+        )
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        route = runtime.resolve_route(
+            "codex", "implementation", capabilities=codex_capabilities()
+        )
+        real_descendants = runtime._descendants
+        runtime._descendants = lambda root_pid: []
+        try:
+            result = runtime.run_bounded(
+                route, "prompt", repo, "workspace-write", timeout_secs=1.0, env=env
+            )
+        finally:
+            runtime._descendants = real_descendants
+        assert result["status"] == "timeout", result
+        assert result["observation"] == "timeout-pipe-held", result
+        deadline = time.monotonic() + 5
+        while not pidfile.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "worker never recorded its pid"
+        worker = int(pidfile.read_text())
+        os.kill(worker, 9)
 
 
 def test_route_and_launch_plan_cli_emit_json_contracts():
@@ -2100,11 +2727,27 @@ for name, test in (
     ("error and malformed runtime output fail closed", test_result_errors_and_malformed_output_fail_closed),
     ("bounded run uses argv and native personal Claude env", test_run_uses_argv_and_unsets_default_claude_config),
     ("run_bounded strips the pane identity from the child", test_run_bounded_strips_pane_identity_from_the_child),
+    ("run_bounded marks the child as bounded", test_run_bounded_marks_the_child_as_bounded),
+    ("bounded child runs the stop gate silently", test_bounded_child_runs_the_stop_gate_silently),
     ("bounded run consumes the shared work account scope", test_run_consumes_shared_work_account_scope),
     ("bounded Codex launch applies repository plugin policy", test_bounded_codex_plugin_policy_uses_resolved_repository_scope),
     ("Codex rejects unsupported caps before invocation", test_codex_caps_reject_before_invocation),
     ("bounded run kills the process group on timeout", test_timeout_kills_the_process_group),
     ("bounded run returns when a detached child holds the pipe", test_timeout_returns_when_a_detached_child_holds_the_pipe),
+    ("timeout reports pipe-held when descendants miss the worker", test_timeout_reports_pipe_held_when_descendants_miss_the_worker),
+    ("stream-json result parses like the single object", test_stream_json_result_parses_like_single_object),
+    ("stream-json result survives unicode line separators", test_stream_json_result_survives_unicode_line_separators),
+    ("timeout while working keeps partial progress", test_timeout_while_working_keeps_partial_progress),
+    ("timeout skips a truncated final line", test_timeout_skips_a_truncated_final_line),
+    ("timeout before init names the pending hook", test_timeout_before_init_names_the_pending_hook),
+    ("timeout before the first turn", test_timeout_before_first_turn),
+    ("timeout without timestamps reports null timing", test_timeout_without_timestamps_reports_null_timing),
+    ("timeout never leaks tool input", test_timeout_never_leaks_tool_input),
+    ("Codex timeout progress counts by item type", test_codex_timeout_progress_counts_by_item_type),
+    ("SIGTERM to the uv wrapper reaps the seat once", test_sigterm_to_the_uv_wrapper_reaps_the_seat_once),
+    ("inherited ignored SIGHUP stays ignored", test_inherited_ignored_sighup_stays_ignored),
+    ("signal during Popen still reaps the child", test_signal_during_popen_still_reaps_the_child),
+    ("read-only child writes no bytecode", test_read_only_child_writes_no_bytecode),
     ("route and launch-plan CLI emit JSON contracts", test_route_and_launch_plan_cli_emit_json_contracts),
     ("launch-plan applies personal repository plugin policy", test_launch_plan_applies_personal_repository_plugin_policy),
     ("difficulty requires confirmation", test_difficulty_requires_confirmation),

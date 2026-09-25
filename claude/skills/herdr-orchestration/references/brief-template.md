@@ -98,9 +98,10 @@ When you finish, pause, or fail this phase:
    the director decides whether its grandfather rule applies). On ANY
    other nonzero exit, emit `failed` or `paused` instead -- never
    `completed`.
-3. Run:
+3. <lessons-step>
+4. Run:
    `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
-4. Then STOP and go idle -- hand back to the director. Do NOT run
+5. Then STOP and go idle -- hand back to the director. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan the next slice, do
    NOT open a PR or merge. Your `emit-done` record is the ONLY completion
    signal; the director detects it on its next check-in and drives what
@@ -129,7 +130,12 @@ PRODUCE (do NOT implement yet) the repo's spec + plan for this task, following
 its own pipeline: brainstorming -> writing-specs (spec to private `docs/superpowers/specs/`) ->
 independent spec review -> writing-plans (plan to private `docs/superpowers/plans/`) ->
 independent plan review. In Claude use codex-spec-review/codex-plan-review;
-in Codex use claude-spec-review/claude-plan-review. Author the task's verification contract at
+in Codex use claude-spec-review/claude-plan-review. Codex review caps: at most
+<spec-cap> spec rounds and <plan-cap> plan rounds (defaults 4 spec rounds and
+2 plan rounds; only this brief raises them), with
+`ARTIFACT_CLASS=<advisory|behavior>` (advisory when the change is workflow
+prose with no durable write of its own; non-defect findings then go to the
+spec's accepted residuals). Author the task's verification contract at
 `claude/contracts/<task_id>-contract.json` alongside the plan. It is a private
 orchestration artifact: it stays untracked and git-ignored on disk, and the
 planning-artifact guard refuses `git add` of it. 1-32 commands, each
@@ -152,9 +158,10 @@ The controller records the same two references in the task before
 ## Close
 When the private spec + plan are frozen and reviewed:
 1. Commit intended public code only. Keep private plans, the verification contract, and state untracked.
-2. Run (note `--phase plan`):
+2. <lessons-step>
+3. Run (note `--phase plan`):
    `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase plan --plan-artifacts <artifact-list-json> --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
-3. Then STOP and go idle -- hand back to the director. Do NOT run
+4. Then STOP and go idle -- hand back to the director. Do NOT run
    `/handoff`, do NOT author a resume brief, do NOT plan or start the
    implement slice, do NOT open a PR or merge. Your `emit-done` record is the
    ONLY completion signal; the director detects it on its next check-in
@@ -163,6 +170,39 @@ When the private spec + plan are frozen and reviewed:
 Do not report completion any other way. The director advances to the
 implement phase only on this `phase: plan` record.
 ```
+
+## Fast-path implement brief variant (`impl-<t>`, fast-path items only)
+
+Sent instead of the implement brief when kickoff takes the fast path
+(SKILL.md section 2). Same workspace, `## Routing`, ground-rules, and Close
+framing as the implement brief above; only the task section changes:
+
+```
+You are `<agent-name>` working task `<task_id>` in repo `<repo_slug>`.
+
+## Task
+<task_id>: <todo title>
+
+<full todo body, frontmatter included>
+
+This task took the fast path: no spec or plan exists; the todo's Solution is
+the plan. Edit only the files the todo names -- each already verified as a
+normalized, canonical repo-relative path to a regular file, not a directory,
+glob, or symlink, by the fast-path maturity check: <file list>.
+<contract-provenance> Run
+`<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`
+before closing. If the work needs a design decision the todo does not settle,
+or a file outside that list, commit what is safe and close with
+`<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome paused --reason needs_design --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`;
+the director re-kicks the item as raw.
+```
+
+`<contract-provenance>` renders one of two sentences, matching the fast-path
+contract source that actually produced the pinned contract (SKILL.md section
+2): "The pinned verification contract was written by the director from the
+todo's Verification section, plus config regression suites." for source (2),
+or "The pinned verification contract was found on disk at kickoff." for
+source (1).
 
 ## Mech brief variant (`mech-<t>`)
 
@@ -211,8 +251,9 @@ appear in a script you author:
 1. Commit intended public code only. Keep private plans, the verification contract, and state untracked.
 2. Run `<core-command> verify-contract <core-context> --repo-slug <repo_slug> --task-id <task_id> --worktree <worktree_path>`;
    `--outcome completed` only on exit 0 (or exit 5, noting "exit 5, no pin").
-3. Run `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head> [--reason needs_design|blocked_on_human|other]`
-4. Stop. Never push, merge, open a PR, or run /handoff.
+3. <lessons-step>
+4. Run `<core-command> emit-done <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --phase implement --outcome completed|failed|paused --head-sha <sha> --base-sha <base_sha> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head> [--reason needs_design|blocked_on_human|other]`
+5. Stop. Never push, merge, open a PR, or run /handoff.
 ```
 
 If the worker never runs `emit-done` (a genuinely stuck/hung headless
@@ -239,12 +280,14 @@ intended behavior, and affected callers. You are a fresh agent in the task's
 own worktree. Report blocking findings, useful advisories, coverage gaps, and
 safe reproduction evidence. Do not edit the branch, invoke co-review or another
 reviewer, post externally, push, merge, or open a PR.
+<fast-path-line>
 
 ## Close
 When review is complete:
 0. Write your findings report to `<findings_path>`: create its directory,
    write to a temporary name there, rename onto `findings.md`;
    `--findings-ref` below must name exactly that file.
+   <lessons-step>
 1. Run (`--blocking-count` is the number of findings you classified as
    blocking; set `--outcome changes-requested` whenever it is non-zero):
    `<core-command> emit-review <core-context> --repo-slug <repo_slug> --task-id <task_id> --workspace <workspace_id> --agent <agent-name> --reviewed-head-sha <sha> --outcome approved|changes-requested --blocking-count <n> --findings-ref <path to review-change findings> --launch-id <launch_id> --pane-id <pane_id> --source-head-sha <launch_source_head>`
@@ -261,6 +304,11 @@ When review is complete:
 
 Never push, merge, or open a PR.
 ```
+
+Render `<fast-path-line>` only for a fast-path task, as: "This task took the
+fast path: no spec or plan exists. Review against todo `<todo_id>` and its
+named files; flag any design decision the todo does not settle." Omit the
+line otherwise.
 
 ## Deep-think brief variant (`<think_id>`)
 
@@ -303,3 +351,51 @@ The thinker's channel back is the structured answer only
 runs, or fetches. An attempt-2 retry (model-attributable failure only)
 copies the parent's question byte-for-byte to `<think_id>-2.question.md`
 rather than re-authoring it.
+
+## Lessons step (<lessons-step>)
+
+Every worker brief except deep think renders `<lessons-step>` in its Close
+from the text below, so a process lesson is written down where the friction
+happened and the director can harvest it (SKILL.md section 4, Lesson
+harvest). Fill `<task_id>`, and fill `<phase>` with the attempt's phase:
+plan, implement, repair, review, ship, mech. Open with the phrase for the phase:
+
+- plan, implement, repair, mech: "Write, in the same message as your completion call, before it,"
+- review: "Before the rename, add a final `## Lessons` section in the findings report with"
+- ship: "Before you stop, add a `## Lessons` section in the ship report, in the same write as the rest of it, with"
+
+Then continue with this text, verbatim apart from the filled tag:
+
+```
+one line per process lesson from this phase: the prefix `LESSON:`, one
+space, the tag `[<task_id> <phase>]`, one space, then one sentence of
+at most 160 characters naming a repeatable process failure and the rule that
+prevents it: tooling or CLI friction, a wrong brief assumption, a retry, a
+hang, a guard or classifier block, helper work you had to redo. Fold your
+helpers' friction into your own lines. With no lesson, write the prefix and
+the tag followed by `none`. Never record a product bug, a secret, or an
+employer-specific detail.
+```
+
+The prefix and the tag are named apart on purpose: a rendered brief must never
+hold the two joined, so text echoed from a brief can never be harvested as a
+lesson.
+
+The 160-character cap does not guarantee one physical row: the TUI
+hard-wraps a long line into several. The harvest step (SKILL.md section 4)
+joins wrapped continuation rows before matching, so a lesson still files
+intact.
+
+## Director-authored repair and ship briefs
+
+Repair and ship briefs have no fixed template; the director writes them per
+task. Each still carries `<lessons-step>`:
+
+- A repair brief (a fresh implement attempt after changes-requested) reuses
+  the implement Close above, including `<lessons-step>` with phase `repair`.
+- A ship brief includes `<lessons-step>` in its ship-report form with phase `ship`.
+  The ship worker writes that section in the same write as the rest of `ship.md`.
+  When a `ship.md` already exists, it must
+  carry forward that report's `## Lessons` lines into the new one.
+  The director does not harvest a ship report at check-in; `/post-merge`
+  step 1 reads it.

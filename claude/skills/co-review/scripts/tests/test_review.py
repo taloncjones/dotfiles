@@ -330,10 +330,40 @@ class ReviewHelperTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text())
             ignored = Path(manifest["snapshot"][snapshot_key]) / "ignored.tmp"
             ignored.write_text("do not delete\n")
+            cache = Path(manifest["snapshot"][snapshot_key]) / "__pycache__" / "x.cpython-313.pyc"
+            cache.parent.mkdir()
+            cache.write_bytes(b"\0")
 
-            self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+            refused = self.command("cleanup", "--manifest", str(manifest_path), expect=2)
 
+            self.assertIn("ignored.tmp", refused.stderr)
+            self.assertIn("__pycache__/x.cpython-313.pyc", refused.stderr)
             self.assertTrue(ignored.exists())
+
+    def test_cleanup_names_an_unexpected_staged_path(self) -> None:
+        manifest_path, manifest = self.prepare()
+        claude_root = Path(manifest["snapshot"]["claude_root"])
+        extra = claude_root / "extra-staged.txt"
+        extra.write_text("staged by a seat\n")
+        subprocess.run(["git", "-C", str(claude_root), "add", "extra-staged.txt"], check=True)
+
+        refused = self.command("cleanup", "--manifest", str(manifest_path), expect=2)
+
+        self.assertIn("snapshot index tree changed", refused.stderr)
+        self.assertIn("extra-staged.txt", refused.stderr)
+
+    def test_designed_staged_patch_passes_verification(self) -> None:
+        (self.repo / "tracked.txt").write_text("changed by the reviewed diff\n")
+        manifest_path, manifest = self.prepare()
+        claude_root = Path(manifest["snapshot"]["claude_root"])
+        staged = subprocess.run(
+            ["git", "-C", str(claude_root), "diff", "--cached", "--quiet"], check=False
+        )
+        self.assertEqual(staged.returncode, 1)
+
+        self.command("cleanup", "--manifest", str(manifest_path))
+
+        self.assertFalse(claude_root.exists())
 
     def test_artifact_requires_explicit_repo_scoped_target_and_freezes_content(
         self,
@@ -637,6 +667,42 @@ class ReviewHelperTests(unittest.TestCase):
         for skill in codex_skills:
             self.assertIn("--runtime claude", skill.read_text())
 
+    def test_codex_spec_review_caps_rounds_and_sends_diffs(self) -> None:
+        content = " ".join((DOTFILES_ROOT / "claude/skills/codex-spec-review/SKILL.md").read_text().split())
+        self.assertRegex(
+            content,
+            r"\|\s*codex-spec-review\s*\|\s*4\s*\|\s*the kickoff instruction only\s*\|",
+        )
+        self.assertIn('ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"', content)
+        self.assertIn('SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"', content)
+        self.assertIn('ROUND_DIFF="$OUTPUT_DIR/spec-round-$ROUND.diff"', content)
+        self.assertIn('OPEN_FINDINGS="$OUTPUT_DIR/spec-open-findings-$ROUND.md"', content)
+        self.assertIn('diff -u "$PREVIOUS_FROZEN_SPEC" "$FROZEN_SPEC" >"$ROUND_DIFF" || DIFF_STATUS=$?', content)
+        self.assertIn('[ "$DIFF_STATUS" -le 1 ] || exit 2', content)
+        self.assertEqual(content.count("for task $TASK_ID"), 2)
+        self.assertEqual(content.count("Review only frozen specification"), 2)
+        self.assertIn("own row in the spec's revision history", content)
+        self.assertIn("incomplete last call", content)
+        self.assertIn("critical or high", content)
+
+    def test_codex_plan_review_caps_rounds_and_sends_diffs(self) -> None:
+        content = " ".join((DOTFILES_ROOT / "claude/skills/codex-plan-review/SKILL.md").read_text().split())
+        self.assertRegex(
+            content,
+            r"\|\s*codex-plan-review\s*\|\s*2\s*\|\s*the kickoff instruction only\s*\|",
+        )
+        self.assertIn('ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"', content)
+        self.assertIn('PLAN_MAX_ROUNDS="${PLAN_MAX_ROUNDS:-2}"', content)
+        self.assertIn('ROUND_DIFF="$OUTPUT_DIR/plan-round-$ROUND.diff"', content)
+        self.assertIn('OPEN_FINDINGS="$OUTPUT_DIR/plan-open-findings-$ROUND.md"', content)
+        self.assertIn('diff -u "$PREVIOUS_FROZEN_PLAN" "$FROZEN_PLAN" >"$ROUND_DIFF" || DIFF_STATUS=$?', content)
+        self.assertIn('[ "$DIFF_STATUS" -le 1 ] || exit 2', content)
+        self.assertEqual(content.count("for task $TASK_ID"), 2)
+        self.assertEqual(content.count("Review only frozen plan"), 2)
+        self.assertIn("own row in the plan's revision notes", content)
+        self.assertIn("incomplete last call", content)
+        self.assertIn("critical or high", content)
+
     def test_review_skills_resolve_installed_symlinks_without_shell_profile(
         self,
     ) -> None:
@@ -713,9 +779,16 @@ class ReviewHelperTests(unittest.TestCase):
                         DOTFILES_ROOT
                         / f"{host}/skills/{partner}-{kind}-review/SKILL.md"
                     )
-                    snippet = (
-                        skill.read_text().rsplit("```bash\n", 1)[1].split("```", 1)[0]
-                    )
+                    content = skill.read_text()
+                    round_1_marker = "## Round 1:"
+                    if round_1_marker in content:
+                        snippet = (
+                            content.split(round_1_marker, 1)[1]
+                            .split("```bash\n", 1)[1]
+                            .split("```", 1)[0]
+                        )
+                    else:
+                        snippet = content.rsplit("```bash\n", 1)[1].split("```", 1)[0]
                     snippet = snippet.replace(
                         "uv run --no-project python", shlex.quote(sys.executable)
                     )

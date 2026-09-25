@@ -120,6 +120,118 @@ The full tier runs `claude`, `codex`, and `breaker`, then `verifier`. The
 light tier runs `codex` and `verifier`: the `codex` reviewer command below,
 then the verifier with that one finder artifact; skip `claude` and `breaker`.
 
+Probe every runner route the tier uses before spending seats. Each probe is a
+60-second `Reply ok` run on that seat's route and snapshot root, written under
+`RUN_DIR` (never the manifest output dir, which `cleanup` checks). The probes
+run concurrently. Any non-success probe stops co-review with the existing
+incomplete report, quoting the probe's `status`, `observation` and `errors`.
+A failed probe never switches runtime on its own; see "Substitute a failed
+Codex probe" below for the explicit, truthfully recorded operator decision
+that can. A probe is never a seat artifact.
+
+```bash
+printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
+uv run --no-project python "$RUNNER" run \
+  --runtime codex --role reviewer --risk normal --provisional \
+  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
+  --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json" &
+uv run --no-project python "$RUNNER" run \
+  --runtime claude --role skeptic --risk normal --provisional \
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+  --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-skeptic.json" &
+if [ "$CLASS" != "light" ]; then
+  uv run --no-project python "$RUNNER" run \
+    --runtime claude --role reviewer --risk normal --provisional \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-reviewer.json" &
+  uv run --no-project python "$RUNNER" run \
+    --runtime codex --role skeptic --risk normal --provisional \
+    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-skeptic.json" &
+fi
+wait
+uv run --no-project python - "$RUN_DIR"/probe-*.json <<'PY' || exit 2
+import json
+import sys
+
+failed = []
+for path in sys.argv[1:]:
+    try:
+        with open(path) as handle:
+            result = json.load(handle)
+    except (OSError, ValueError):
+        failed.append(f"{path}: no runner JSON")
+        continue
+    if result.get("status") != "success":
+        failed.append(f"{path}: {result.get('status')} {result.get('observation')} {result.get('errors')}")
+if failed:
+    print("\n".join(failed))
+    sys.exit(1)
+PY
+```
+
+### Substitute a failed Codex probe
+
+This is an explicit operator decision, made only when every failed probe is a
+Codex probe and its errors show a quota, auth or availability failure. Any
+failed Claude probe stops co-review, as always. A Codex seat that fails
+after its own probe succeeded is not substituted: the gate is `INCOMPLETE`,
+and a fresh gate's probe records the outage. The probe runs are never
+repeated. Every gate needs its own Codex attempt, including a fresh gate
+after an interruption and a `--fix` follow-up; never copy an attempt from
+another `RUN_DIR`. `co-review --full` is not the fallback for a Codex outage;
+the substitute rule applies in both tiers. `SUBSTITUTE` stays set for the
+seat block below.
+
+Set `SUBSTITUTE` to the literal, space-separated seats whose own Codex probe
+failed on quota, auth or availability: `codex` when `probe-codex-reviewer.json`
+failed, and (full tier) `breaker` when `probe-codex-skeptic.json` failed. Then
+run the block below, which iterates a literal word list rather than
+`$SUBSTITUTE` itself, because the coordinator's zsh does not word-split an
+unquoted variable. A first pass refuses (exit 2), before anything moves, when
+any member seat's probe is missing or already succeeded. A second pass moves
+each member's probe out of the `probe-*` glob into its
+`<seat>.codex-attempt.json` evidence file, then runs a 60-second `Reply ok`
+probe on the Claude route to confirm it is available before the seat runs.
+
+```bash
+# SUBSTITUTE names exactly the seats whose own Codex probe failed on quota,
+# auth or availability: "codex" and/or (full tier) "breaker". The literal
+# word list keeps this loop the same in bash and zsh.
+for seat in codex breaker; do
+  case " $SUBSTITUTE " in *" $seat "*) ;; *) continue ;; esac
+  case $seat in codex) role=reviewer ;; breaker) role=skeptic ;; esac
+  uv run --no-project python -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("status") == "success")' \
+    "$RUN_DIR/probe-codex-$role.json" || exit 2
+done
+for seat in codex breaker; do
+  case " $SUBSTITUTE " in *" $seat "*) ;; *) continue ;; esac
+  case $seat in codex) role=reviewer ;; breaker) role=skeptic ;; esac
+  mv -- "$RUN_DIR/probe-codex-$role.json" "$RUN_DIR/$seat.codex-attempt.json" || exit 2
+  uv run --no-project python "$RUNNER" run \
+    --runtime claude --role "$role" --risk normal --provisional \
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/substitute-probe-$seat.json"
+done
+uv run --no-project python - "$RUN_DIR"/probe-*.json "$RUN_DIR"/substitute-probe-*.json <<'PY' || exit 2
+import json
+import sys
+
+failed = []
+for path in sys.argv[1:]:
+    try:
+        with open(path) as handle:
+            status = json.load(handle).get("status")
+    except (OSError, ValueError):
+        status = "no runner JSON"
+    if status != "success":
+        failed.append(f"{path}: {status}")
+if failed:
+    print("\n".join(failed))
+    sys.exit(1)
+PY
+```
+
 Save the exact `POLICY`, frozen diff, and the complete `## Classes` section of
 `$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md`, manifest
 identity, expected identity, and declared threat model in each prompt. The
@@ -139,22 +251,35 @@ for seat in $SEATS; do
 done
 ```
 
+Seats run concurrently for up to 1200 seconds each, beyond a foreground
+command limit: a Claude coordinator runs each seat block with the Bash
+tool's `run_in_background` and waits for its completion notification (or a
+Monitor until-loop on the runtime JSON files) before continuing. Worst case is
+about 41 minutes: probes, finders, then the verifier.
+
 ```bash
+# A Codex-routed seat runs on Claude only when the substitute block above
+# named it in SUBSTITUTE; otherwise it takes its normal Codex route.
+CODEX_SEAT_RUNTIME=codex CODEX_SEAT_ROOT=$CODEX_ROOT
+case " ${SUBSTITUTE:-} " in *" codex "*) CODEX_SEAT_RUNTIME=claude CODEX_SEAT_ROOT=$CLAUDE_ROOT ;; esac
+BREAKER_SEAT_RUNTIME=codex BREAKER_SEAT_ROOT=$CODEX_ROOT
+case " ${SUBSTITUTE:-} " in *" breaker "*) BREAKER_SEAT_RUNTIME=claude BREAKER_SEAT_ROOT=$CLAUDE_ROOT ;; esac
 # Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
 uv run --no-project python "$RUNNER" run \
-  --runtime codex --role reviewer --risk normal --provisional \
-  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json"
+  --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
+  --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
 if [ "$CLASS" != "light" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
-    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json"
+    --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" &
   uv run --no-project python "$RUNNER" run \
-    --runtime codex --role skeptic --risk normal --provisional \
-    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 600 \
-    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json"
+    --runtime "$BREAKER_SEAT_RUNTIME" --role skeptic --risk normal --provisional \
+    --cwd "$BREAKER_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --prompt-file "$RUN_DIR/breaker.prompt" >"$RUN_DIR/breaker.runtime.json" &
 fi
+wait
 ```
 
 The Claude invocation preserves the original repository's selected account;
@@ -178,8 +303,9 @@ only for follow-up verification.
 ```bash
 uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
-  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 600 \
-  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json"
+  --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
+  --prompt-file "$RUN_DIR/verifier.prompt" >"$RUN_DIR/verifier.runtime.json" &
+wait
 ```
 
 The selected reviewer/skeptic runtime for each seat is resolved by the shared
@@ -188,6 +314,12 @@ An unknown observed model or effort stays unknown; no completion, empty output,
 failed runner result, bad digest, or missing seat is an incomplete report.
 
 ## Assemble, evaluate, and clean up
+
+The Claude snapshot root is the base commit plus the frozen patch applied
+with `git apply --index`, so its staged diff is by design. Cleanup refuses a
+root holding any other untracked, ignored or staged path and names up to five
+of them; remove what a seat left (for example a stray cache) or re-run from a
+fresh `prepare`.
 
 Run `gate_report.py schema` now and start `RUN_DIR/report.json` from its exact
 example.
@@ -198,7 +330,11 @@ for `CLASS` (`schema` lists `light_seats` and `full_seats`) and set
 `report.class` to `CLASS`; put their raw runtime JSON paths and observed
 metadata in the fields named by the schema. Never replace a
 failed runtime result with coordinator prose. Token presence is advisory context;
-unfinished behavior blocks only with a concrete material consequence.
+unfinished behavior blocks only with a concrete material consequence. A
+seat substituted from the block above keeps its seat name, records
+`runtime: claude`, and carries `codex_substitute` with
+`{"artifact": "<SEAT>.codex-attempt.json", "sha256": ...}` as `schema`
+describes.
 
 Verify once more before evaluating. The expected file remains the independent
 current-workflow authority; it is never copied from the report.

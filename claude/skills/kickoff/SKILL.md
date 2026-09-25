@@ -32,6 +32,11 @@ verify. Do not change accounts or try another task to make a missing record
 disappear. Partial, invalid, mismatched or symlinked state is an error, not an
 invitation to fall back to another latest record.
 
+A retired task makes `load` and `verify` fail with a message naming
+`restore`. Report it as complete. Inspect it with `load --archived` when
+needed, and reopen it with `restore` only on an explicit user or lead
+decision.
+
 ## Reconcile and continue
 
 Read the returned brief in full.

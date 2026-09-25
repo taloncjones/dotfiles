@@ -43,3 +43,5 @@ is the staging tier, not an archive.
   past a static deadline is re-sized or waited on, never interrupted and re-run.
 - (2026-09) After a review round, re-dispatch a fresh implement attempt before
   the repair worker emits: a superseded attempt row refuses its emit-done.
+- (2026-09) Re-read a PR body against the final head before posting it: wording
+  written mid-fix (record-only vs asserted, tip sha vs bench sha) drifts.
