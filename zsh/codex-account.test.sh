@@ -27,6 +27,7 @@ ln -s "$PERSONAL" "$SBHOME/personal-shortcut"
 cat > "$TMP/bin/codex" <<'EOF'
 #!/bin/sh
 printf '%s\0' "$@" > "$RECORD"
+printf '%s' "${CLAUDE_CONFIG_DIR-unset}" > "${ENVRECORD:-/dev/null}"
 if [ "${TEST_CODEX_STDIO:-0}" = 1 ]; then
     cat
     printf 'codex stderr\n' >&2
@@ -85,6 +86,18 @@ run_case "prompt --cd= text after -- stays literal" "$PERSONAL" yes -- "--cd=$WO
 run_case "other config and quoted argv are preserved" "$PERSONAL" yes \
     -c 'model="gpt-6-astra"' exec 'a prompt with spaces' '' 'line one
 line two'
+
+env_case() {
+    label="$1" cwd="$2" expected="$3"
+    : > "$TMP/envrecord"
+    RECORD="$TMP/record" ENVRECORD="$TMP/envrecord" HOME="$SBHOME" ZDOTDIR="$TMP/zdot" \
+        PATH="$TMP/bin:$PATH" CASE_CWD="$cwd" \
+        zsh -c 'cd -- "$CASE_CWD" && codex exec hi' >/dev/null 2>&1
+    got="$(cat "$TMP/envrecord")"
+    if [ "$got" = "$expected" ]; then pass "$label"; else fail "$label (got '$got')"; fi
+}
+env_case "work directory passes the work Claude config to Codex" "$WORK" "$SBHOME/.claude-work"
+env_case "personal directory leaves the Claude config unset for Codex" "$PERSONAL" "unset"
 
 # Either personal checkout location or canonical ownership requires personal policy.
 git_fixture() {
