@@ -138,12 +138,17 @@ def _bind_pane_environment(
                 f"unset -f '{runtime}' 2>/dev/null || :",
                 f"unalias '{runtime}' 2>/dev/null || :",
                 f'export PATH={shlex.quote(str(Path(runtime_binary).parent))}:"$PATH"',
+                # The gh shim goes in front of the runtime dir, which can hold
+                # the real gh (agent_runtime.arm_gh_shim, gh_post_shim.py).
+                f'export PATH={shlex.quote(str(agent_runtime.GH_SHIM_DIR))}:"$PATH"',
+                f'export BASH_ENV="${{BASH_ENV:-{agent_runtime.GH_SHIM_ANCHOR}}}"',
                 "hash -r",
             ]
         )
         probes.append(
             f"printf '{token}:RUNTIME_BINARY=%s\\n' \"$(command -v '{runtime}')\""
         )
+        probes.append(f"printf '{token}:GH=%s\\n' \"$(command -v gh)\"")
     ready_probe = (
         "printf '%s%s\\n' "
         f"{shlex.quote(ready_marker[:marker_split])} "
@@ -185,6 +190,7 @@ def _bind_pane_environment(
     expected.add(ready_marker)
     if runtime_binary is not None:
         expected.add(f"{token}:RUNTIME_BINARY={runtime_binary}")
+        expected.add(f"{token}:GH={agent_runtime.GH_SHIM_DIR / 'gh'}")
     if not isinstance(text, str) or not expected.issubset(set(text.splitlines())):
         raise DispatchError(
             "target pane account environment or runtime executable could not be verified"

@@ -2049,6 +2049,29 @@ assert seen == "w1:p1|w1:t1|1|w1", seen
 PY
 SH
 
+check "run_headless arms the gh shim for a herdr child" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-hl2.git
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+export FAKE_CLAUDE_LOG="$root/log"
+export FAKE_CLAUDE_HOOK='printf "%s|%s\n" "${PATH%%:*}" "${BASH_ENV:-UNSET}" > "$FAKE_CLAUDE_LOG.env"'
+env -u BASH_ENV HERDR_ENV=1 PATH="$FAKE_CLAUDE_DIR:$PATH" python3 - "$LF_REPO" <<'PY'
+import os
+import sys
+sys.path.insert(0, "claude/hooks")
+import agent_runtime
+import herdr_orch_core as c
+repo = sys.argv[1]
+env_dump = os.environ["FAKE_CLAUDE_LOG"] + ".env"
+token = c._PAYLOAD_SELECTION.set(None)
+try:
+    c.run_headless(["claude", "-p"], repo, "hello", 30)
+finally:
+    c._PAYLOAD_SELECTION.reset(token)
+seen = open(env_dump).read().strip()
+assert seen == f"{agent_runtime.GH_SHIM_DIR}|{agent_runtime.GH_SHIM_ANCHOR}", seen
+PY
+SH
+
 check "run-mech: a brief-compliant native emit-done succeeds inside a real pane" <<'SH'
 # Regression for the bug run_headless's old pane-stripping caused: a legacy
 # mech worker's own emit-done call, exactly as brief-template.md documents it
