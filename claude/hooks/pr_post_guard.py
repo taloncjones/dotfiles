@@ -22,17 +22,18 @@ Gate: decides only when HERDR_ENV=1; every other session exits 0 untouched
   comments, punctuation gluing, line continuations, backticks, `g\\h`,
   `bash -lc`). This hook denies a gated kind it can see without a go, or
   when the shim is not armed to spend the go; it only checks the go, the
-  shim spends it. It denies outright the two routes around the shim: a
+  shim spends it. It denies, best effort, two routes around the shim: a
   path-qualified `gh`, and a login flag on a shell the PATH anchor does
   not re-run in. Anything it cannot parse passes; the shim decides it.
 
 Override: none. Fixing a false positive means narrowing the classifier,
 not bypassing it.
 
-Accepted holes (spec 2026-09-24-gh-exec-shim-design.md, "Risks and
-accepted residuals"): other GitHub clients and raw HTTP with the token,
-PATH or arming tampering, obfuscated uncovered login shells, a forged
-marker, and a child process sharing the go's session id.
+Boundary: a momentum guardrail against a well-meaning agent posting
+through `gh` as found on PATH, not a security boundary (spec
+2026-09-25-pr-post-gate-blockers-design.md, accepted by the owner
+2026-09-26). Shell tricks that change how `gh` resolves, forged gate
+state, raw HTTP with the token, and Codex sessions are accepted residuals.
 """
 
 from __future__ import annotations

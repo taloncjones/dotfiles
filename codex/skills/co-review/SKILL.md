@@ -318,6 +318,11 @@ evaluator verdict is `APPROVE` or `CHANGES` -- never for `INCOMPLETE` or a
 local no-PR review. A `--fix` coordinator publishes at most once, after its
 final gate.
 
+The herdr post gate enforcing this is a momentum guardrail, not a security boundary:
+it stops a well-meaning agent posting through `gh` as found on PATH. Run
+the marker post and each supersede delete as a plain `gh` command. The
+shim runs a delete only on this account's own co-review marker.
+
 Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
 expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
