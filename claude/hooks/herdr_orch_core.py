@@ -10,6 +10,7 @@ import contextvars
 import datetime
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -3471,6 +3472,160 @@ def merge_authority(repo_slug, repo_path, runtime="claude", personal=False):
             "reason": "not a personal repository"}
 
 
+SHIP_CI_OK = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+
+
+def _gate_report_module():
+    path = Path(__file__).resolve().parents[1] / "skills" / "co-review" / "scripts" / "gate_report.py"
+    spec = importlib.util.spec_from_file_location("dotfiles_gate_report", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _ci_reasons(rollup):
+    """Failing CI entries on the PR head; an empty rollup is itself a failure."""
+    if not isinstance(rollup, list) or not rollup:
+        return ["no status checks on the PR head"]
+    bad = []
+    for entry in rollup:
+        entry = entry if isinstance(entry, dict) else {}
+        kind = entry.get("__typename")
+        name = entry.get("name") or entry.get("context") or "?"
+        if kind == "CheckRun":
+            if entry.get("status") != "COMPLETED" or entry.get("conclusion") not in SHIP_CI_OK:
+                bad.append(f"{name}: {entry.get('status')}/{entry.get('conclusion')}")
+        elif kind == "StatusContext":
+            if entry.get("state") != "SUCCESS":
+                bad.append(f"{name}: {entry.get('state')}")
+        else:
+            bad.append(f"{name}: unknown rollup entry {kind!r}")
+    return bad
+
+
+def _file_sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=False):
+    """Every director-merge precondition for one task (spec R2). Read-only."""
+    reasons = []
+    out = {"ready": False, "reasons": reasons, "pr_number": pr.get("number"),
+           "head_sha": None, "base_sha": pr.get("baseRefOid"),
+           "report_path": None, "expected_path": None,
+           "handoff_state": "none", "handoff_verdict": None}
+
+    def fail(code, detail):
+        reasons.append({"code": code, "detail": detail})
+
+    try:
+        task = json.loads(read_payload_text(rd / "tasks" / f"{task_id}.json"))
+    except (OSError, ValueError) as exc:
+        fail("task-state", f"task record unreadable: {exc}")
+        return out
+    worktree = task.get("worktree") or ""
+    head, launch = task.get("review_head_sha"), task.get("ship_launch_id")
+    out["head_sha"] = head
+    live_head = None
+    if not worktree:
+        fail("head-moved", "task record has no worktree")
+    else:
+        try:
+            live_head = context_git(worktree, "rev-parse", "HEAD")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            fail("head-moved", f"cannot read the task worktree: {exc}")
+    # Handoff currency is reported even when later checks fail: the director's
+    # dispatch rule (section 6) reads it from this one run.
+    # A launch id is path material: it must be a plain id inside this task's
+    # artifacts, and ship.json is read without following links.
+    launch_dir = rd / "artifacts" / task_id / f"ship-{launch}" if launch else None
+    if launch_dir is not None and not (valid_task_id(launch) and contained(launch_dir, rd / "artifacts" / task_id)):
+        fail("handoff", f"invalid ship_launch_id {launch!r}")
+        launch_dir = None
+    handoff = None
+    if launch_dir is not None:
+        try:
+            loaded = json.loads(read_payload_text(launch_dir / "ship.json"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict) and loaded.get("launch_id") == launch:
+            handoff = loaded
+    if handoff is not None:
+        out["handoff_verdict"] = handoff.get("verdict")
+        current = live_head is not None and handoff.get("head_sha") == live_head == head
+        out["handoff_state"] = "current" if current else "stale"
+    authority = merge_authority(repo_slug, worktree, runtime, personal)
+    if authority["authority"] != "director":
+        fail("not-director-repo", authority["reason"])
+    if task.get("status") != "reviewed" or not head or not launch:
+        fail("task-state", f"status={task.get('status')} review_head_sha={head} "
+                           f"ship_launch_id={launch}")
+        return out
+    if live_head is not None and live_head != head:
+        fail("head-moved", f"live HEAD {live_head} is not the reviewed head {head}")
+    if handoff is None or out["handoff_state"] != "current" or handoff.get("verdict") != "APPROVE":
+        fail("handoff", f"launch={launch} state={out['handoff_state']} "
+                        f"verdict={out['handoff_verdict']}")
+        return out
+    report_path, expected_path = handoff.get("report_path"), handoff.get("expected_path")
+    for path in (report_path, expected_path):
+        if not path or not contained(path, launch_dir):
+            fail("handoff", f"{path} is outside {launch_dir}")
+            return out
+    out["report_path"], out["expected_path"] = report_path, expected_path
+    try:
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+        expected = json.loads(Path(expected_path).read_text(encoding="utf-8"))
+        same = (_file_sha256(report_path) == handoff.get("report_sha256")
+                and _file_sha256(expected_path) == handoff.get("expected_sha256"))
+    except (OSError, ValueError) as exc:
+        fail("hash", f"gate files unreadable: {exc}")
+        return out
+    if not same:
+        fail("hash", "report or expected identity changed after the handoff")
+        return out
+    try:
+        live_tree = context_git(worktree, "rev-parse", f"{live_head}^{{tree}}")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        live_tree = None
+        fail("identity", f"cannot read the head tree: {exc}")
+    if len({live_head, pr.get("headRefOid"), expected.get("head")}) != 1:
+        fail("head-moved", f"live={live_head} pr={pr.get('headRefOid')} "
+                           f"expected={expected.get('head')}")
+    if not expected.get("base") == handoff.get("base_sha") == pr.get("baseRefOid"):
+        fail("base-moved", f"expected={expected.get('base')} handoff={handoff.get('base_sha')} "
+                           f"pr={pr.get('baseRefOid')}")
+    default = (repo.get("defaultBranchRef") or {}).get("name")
+    if (expected.get("repository") != repo.get("nameWithOwner")
+            or expected.get("pr_number") != pr.get("number")
+            or not expected.get("base_ref") == pr.get("baseRefName") == default
+            or expected.get("tree") != live_tree):
+        fail("identity", f"expected {expected.get('repository')}#{expected.get('pr_number')} "
+                         f"{expected.get('base_ref')} tree {expected.get('tree')}; live "
+                         f"{repo.get('nameWithOwner')}#{pr.get('number')} {pr.get('baseRefName')} "
+                         f"(default {default}) tree {live_tree}")
+    if pr.get("state") != "OPEN" or pr.get("isDraft") is not False:
+        fail("pr-state", f"state={pr.get('state')} isDraft={pr.get('isDraft')}")
+    if pr.get("mergeable") != "MERGEABLE":
+        fail("not-mergeable", f"mergeable={pr.get('mergeable')}")
+    ci = _ci_reasons(pr.get("statusCheckRollup"))
+    if ci:
+        fail("ci", "; ".join(ci))
+    refused = task.get("merge_check")
+    if (isinstance(refused, dict) and refused.get("result") == "fail"
+            and refused.get("branch_head_sha") == live_head
+            and refused.get("base_main_sha") == pr.get("baseRefOid")):
+        fail("merge-refused", str(refused.get("reason")))
+    try:
+        verdict = _gate_report_module().evaluate(report, expected, Path(report_path).resolve().parent)
+    except Exception as exc:  # the gate fails closed
+        verdict = {"verdict": "INCOMPLETE", "approve_allowed": False, "reasons": [str(exc)]}
+    if verdict.get("verdict") != "APPROVE" or verdict.get("approve_allowed") is not True:
+        fail("gate", f"{verdict.get('verdict')}: {verdict.get('reasons')}")
+    out["ready"] = not reasons
+    return out
+
+
 def _main(argv=None) -> int:
     import argparse
 
@@ -3652,6 +3807,7 @@ def _main(argv=None) -> int:
     vc.add_argument("--allow-unpinned", action="store_true")
     vc.add_argument("--validate-only", action="store_true")
     add("merge-authority")
+    add("merge-ready", "--task-id", "--pr-json", "--repo-json")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "resume-owner":
@@ -5761,6 +5917,20 @@ def _main(argv=None) -> int:
         except (OSError, ValueError):
             return 1
         return 0 if should_dispatch_review(task, ns.head_sha) else 1
+    if ns.cmd == "merge-ready":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require(valid_task_id(ns.task_id), "invalid task-id")
+        _require(ns.repo_path is not None, "merge-ready needs --repo-path")
+        try:
+            pr = json.loads(Path(ns.pr_json).read_text(encoding="utf-8"))
+            repo = json.loads(Path(ns.repo_json).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            _require(False, f"unreadable --pr-json/--repo-json: {exc}")
+        _require(isinstance(pr, dict) and isinstance(repo, dict), "gh JSON must be objects")
+        result = merge_ready(repo_dir(ns.repo_slug), ns.repo_slug, ns.task_id, pr, repo,
+                             ns.runtime or "claude", ns.personal)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["ready"] else 1
     if ns.cmd in ("confirm-completion", "confirm-plan"):
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")

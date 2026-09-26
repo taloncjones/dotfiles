@@ -2408,6 +2408,176 @@ assert gone["authority"] == "human" and gone["reason"], gone
 assert sorted(str(p) for p in sb.rglob("*")) == before, "merge-authority wrote files"
 PY
 
+check "merge-ready: good handoff is ready; every single broken precondition names its code" <<'PY'
+import contextlib, copy, hashlib, io, json, os, subprocess, sys, tempfile
+from pathlib import Path
+for k in ("CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
+          "CLAUDE_WORK_TREE", "CLAUDE_WORK_CONFIG_DIR"):
+    os.environ.pop(k, None)
+for k in [k for k in os.environ if k.startswith("GIT_")]:
+    os.environ.pop(k)
+sb = Path(tempfile.mkdtemp()); os.environ["HOME"] = str(sb)
+sys.path[:0] = ["claude/hooks", "claude/skills/lib", "claude/skills/co-review/scripts/tests"]
+import herdr_orch_core as c, workflow_context as w, test_gate_report as tg
+
+def git(cwd, *a):
+    return subprocess.run(["git", "-C", str(cwd), *a], check=True,
+                          capture_output=True, text=True).stdout.strip()
+def commit(cwd, msg):
+    git(cwd, "-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-q", "--allow-empty", "-m", msg)
+def make_repo(path):
+    path.mkdir(parents=True)
+    git(path, "init", "-q"); commit(path, "init")
+    return path
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+def build(repo, tid="td-merge", launch="ship-a1"):
+    slug = c._context_slug(w.repository_context(str(repo)))
+    head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
+    c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
+                                      "runtime": "claude", "personal": False})())
+    rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
+    ld = rd / "artifacts" / tid / f"ship-{launch}"; ld.mkdir(parents=True)
+    t = tg.GateReportTests(); t.setUp(); t.root = ld
+    rep = t._report(); exp = dict(t.expected)
+    ci = json.loads((ld / "ci.json").read_text()); ci["head"] = head
+    (ld / "ci.json").write_text(json.dumps(ci))
+    rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
+    for obj in (rep, exp):
+        obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base="b" * 40, base_ref="main")
+    rep["reviewed_tree"] = tree
+    rep["preconditions"].update(head=head, tree=tree)
+    (ld / "report.json").write_text(json.dumps(rep)); (ld / "expected.json").write_text(json.dumps(exp))
+    hand = {"task_id": tid, "launch_id": launch, "pr_number": 7, "pr_url": "u", "head_sha": head,
+            "base_ref": "main", "base_sha": "b" * 40, "tree_sha": tree,
+            "report_path": str(ld / "report.json"), "report_sha256": sha(ld / "report.json"),
+            "expected_path": str(ld / "expected.json"), "expected_sha256": sha(ld / "expected.json"),
+            "verdict": "APPROVE", "written_at": "t"}
+    (ld / "ship.json").write_text(json.dumps(hand))
+    (rd / "tasks").mkdir(parents=True, exist_ok=True)
+    task = {"task_id": tid, "status": "reviewed", "review_head_sha": head,
+            "ship_launch_id": launch, "worktree": str(repo), "branch": "topic",
+            "merge_check": None}
+    (rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
+    pr = {"number": 7, "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
+          "headRefOid": head, "baseRefName": "main", "baseRefOid": "b" * 40,
+          "statusCheckRollup": [{"__typename": "CheckRun", "name": "tests",
+                                 "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+    rp = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
+    return slug, rd, tid, ld, task, pr, rp
+
+def run(repo, slug, tid, pr, rp):
+    pf = sb / "pr.json"; pf.write_text(json.dumps(pr))
+    rf = sb / "repo.json"; rf.write_text(json.dumps(rp))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = c.main(["merge-ready", "--repo-slug", slug, "--repo-path", str(repo),
+                     "--task-id", tid, "--pr-json", str(pf), "--repo-json", str(rf)])
+    return rc, json.loads(buf.getvalue())
+
+personal = make_repo(sb / "Git" / "personal" / "p")
+slug, rd, tid, ld, task, pr, rp = build(personal)
+# A superseded launch's handoff must not matter.
+other = ld.parent / "ship-old"; other.mkdir()
+(other / "ship.json").write_text(json.dumps({"launch_id": "old", "verdict": "CHANGES"}))
+before = sorted(str(p) for p in rd.rglob("*"))
+rc, out = run(personal, slug, tid, pr, rp)
+assert rc == 0 and out["ready"] is True, out
+assert out["handoff_state"] == "current" and out["handoff_verdict"] == "APPROVE", out
+assert sorted(str(p) for p in rd.rglob("*")) == before, "merge-ready wrote files"
+
+def expect(code, *, state=None, task_edit=None, pr_edit=None, rp_edit=None, file_edit=None, hand_edit=None):
+    tf = rd / "tasks" / f"{tid}.json"; hf = ld / "ship.json"
+    saved = {p: p.read_bytes() for p in (tf, hf, ld / "report.json", ld / "claude.txt")}
+    try:
+        t2 = copy.deepcopy(task); p2 = copy.deepcopy(pr); r2 = copy.deepcopy(rp)
+        if task_edit: task_edit(t2)
+        tf.write_text(json.dumps(t2))
+        if hand_edit:
+            h = json.loads(hf.read_text()); hand_edit(h); hf.write_text(json.dumps(h))
+        if pr_edit: pr_edit(p2)
+        if rp_edit: rp_edit(r2)
+        if file_edit: file_edit()
+        rc, out = run(personal, slug, tid, p2, r2)
+        codes = [r["code"] for r in out["reasons"]]
+        assert rc == 1 and out["ready"] is False and code in codes, (code, rc, out)
+        assert state is None or out["handoff_state"] == state, (state, out)
+        return out
+    finally:
+        for p, b in saved.items():
+            p.write_bytes(b)
+
+expect("task-state", task_edit=lambda t: t.update(status="completed"))
+expect("task-state", state="none", task_edit=lambda t: t.update(ship_launch_id=None))
+# Pinning the superseded launch reads its own CHANGES handoff (no head_sha): stale.
+expect("handoff", state="stale", task_edit=lambda t: t.update(ship_launch_id="old"))
+expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="never-launched"))
+expect("handoff", state="current", hand_edit=lambda h: h.update(verdict="CHANGES"))
+expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json")))
+expect("hash", file_edit=lambda: (ld / "report.json").write_text("{}"))
+expect("handoff", state="stale", task_edit=lambda t: t.update(review_head_sha="c" * 40))
+expect("head-moved", pr_edit=lambda p: p.update(headRefOid="c" * 40))
+expect("base-moved", pr_edit=lambda p: p.update(baseRefOid="d" * 40))
+expect("identity", rp_edit=lambda r: r.update(defaultBranchRef={"name": "dev"}))
+expect("identity", rp_edit=lambda r: r.update(nameWithOwner="x/y"))
+expect("pr-state", pr_edit=lambda p: p.update(isDraft=True))
+expect("pr-state", pr_edit=lambda p: p.update(state="MERGED"))
+expect("not-mergeable", pr_edit=lambda p: p.update(mergeable="CONFLICTING"))
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[]))
+expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(status="IN_PROGRESS", conclusion=None))
+expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(conclusion="FAILURE"))
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "StatusContext", "context": "x", "state": "PENDING"}]))
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "Mystery"}]))
+expect("gate", file_edit=lambda: (ld / "claude.txt").write_text("tampered\n"))
+out = expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="../../x"))
+assert any("invalid ship_launch_id" in r["detail"] for r in out["reasons"]), out
+# Tree mismatch: expected tree differs while every head field agrees.
+def bad_tree():
+    e = json.loads((ld / "expected.json").read_text()); e["tree"] = "e" * 40
+    (ld / "expected.json").write_text(json.dumps(e))
+    h = json.loads((ld / "ship.json").read_text()); h["expected_sha256"] = sha(ld / "expected.json")
+    (ld / "ship.json").write_text(json.dumps(h))
+saved_expected = (ld / "expected.json").read_bytes()
+expect("identity", file_edit=bad_tree)
+(ld / "expected.json").write_bytes(saved_expected)
+# Before a PR exists the director passes {} for both gh inputs; currency still reports.
+rc, out = run(personal, slug, tid, {}, {})
+assert rc == 1 and out["handoff_state"] == "current", out
+head0 = task["review_head_sha"]
+expect("merge-refused", task_edit=lambda t: t.update(merge_check={
+    "result": "fail", "reason": "protected", "branch_head_sha": head0,
+    "base_main_sha": "b" * 40, "ts": "t"}))
+# The same refusal at an older head is stale and does not block.
+t_old = dict(task, merge_check={"result": "fail", "reason": "protected",
+                                "branch_head_sha": "c" * 40, "base_main_sha": "b" * 40, "ts": "t"})
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(t_old))
+rc, out = run(personal, slug, tid, pr, rp)
+assert rc == 0 and out["ready"] is True, out
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
+# Live HEAD alone moves (task, handoff and PR still at the old head).
+commit(personal, "drift")
+out = expect("head-moved", state="stale")
+git(personal, "reset", "-q", "--hard", "HEAD~1")
+assert sorted(str(p) for p in rd.rglob("*")) == before, "merge-ready wrote files"
+# A CHANGES handoff at the old head, task re-reviewed at a new head: stale.
+commit(personal, "repair")
+new = git(personal, "rev-parse", "HEAD")
+out = expect("handoff", state="stale",
+             task_edit=lambda t: t.update(review_head_sha=new),
+             hand_edit=lambda h: h.update(verdict="CHANGES"),
+             pr_edit=lambda p: p.update(headRefOid=new))
+assert out["handoff_verdict"] == "CHANGES", out
+git(personal, "reset", "-q", "--hard", "HEAD~1")
+# Work repository: the identical fixture outside ~/Git/personal.
+work = make_repo(sb / "Git" / "work" / "w")
+wslug, wrd, wtid, wld, wtask, wpr, wrp = build(work)
+rc, out = run(work, wslug, wtid, wpr, wrp)
+assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], out
+import shutil; shutil.rmtree(sb)
+PY
+
 check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state layout" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 P="claude/skills/post-merge/SKILL.md"
