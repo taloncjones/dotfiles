@@ -3450,6 +3450,27 @@ def _resume_owner(ns) -> int:
     return 0
 
 
+def merge_authority(repo_slug, repo_path, runtime="claude", personal=False):
+    """Who may merge in this repository: "director" or "human"; fails closed."""
+    if not repo_path:
+        return {"authority": "human", "personal_repository": None,
+                "reason": "no --repo-path given"}
+    try:
+        context = repository_context(repo_path)
+        if _context_slug(context) != repo_slug:
+            return {"authority": "human", "personal_repository": None,
+                    "reason": "repo-slug does not match repository identity"}
+        owned = account_scope(context["root"], runtime, personal=personal)["personal_repository"]
+    except Exception as exc:  # any failure keeps the human merge go
+        return {"authority": "human", "personal_repository": None,
+                "reason": f"cannot resolve repository scope: {exc}"}
+    if owned is True:
+        return {"authority": "director", "personal_repository": True,
+                "reason": "personal repository"}
+    return {"authority": "human", "personal_repository": owned,
+            "reason": "not a personal repository"}
+
+
 def _main(argv=None) -> int:
     import argparse
 
@@ -3630,10 +3651,19 @@ def _main(argv=None) -> int:
     vc.add_argument("--contract", default=None)
     vc.add_argument("--allow-unpinned", action="store_true")
     vc.add_argument("--validate-only", action="store_true")
+    add("merge-authority")
     ns = ap.parse_args(argv)
 
     if ns.cmd == "resume-owner":
         return _resume_owner(ns)
+
+    # Before select_payload: this verb answers "human" for a bad path or
+    # slug instead of exiting 2, so the director never mistakes an error.
+    if ns.cmd == "merge-authority":
+        print(json.dumps(merge_authority(ns.repo_slug, ns.repo_path,
+                                         ns.runtime or "claude", ns.personal),
+                         sort_keys=True))
+        return 0
 
     if ns.repo_path is not None or ns.runtime is not None or ns.personal:
         select_payload(ns)

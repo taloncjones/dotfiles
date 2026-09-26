@@ -2357,6 +2357,57 @@ grep -q 'think/' "$R/event-schema.md"
 grep -q 'models.think\|"think": \["fable", "opus"\]' "$R/state-layout.md"
 SH
 
+check "merge-authority: personal repos and linked worktrees get director; work, overrides and errors get human" <<'PY'
+import json, os, subprocess, sys, tempfile
+from pathlib import Path
+sb = Path(tempfile.mkdtemp())
+env = {k: v for k, v in os.environ.items() if k not in (
+    "CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
+    "CLAUDE_WORK_TREE", "CLAUDE_WORK_CONFIG_DIR") and not k.startswith("GIT_")}
+env["HOME"] = str(sb)
+def git(*a):
+    subprocess.run(["git", *a], check=True, capture_output=True, env=env)
+def repo(path):
+    path.mkdir(parents=True)
+    git("init", "-q", str(path))
+    git("-C", str(path), "-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-q", "--allow-empty", "-m", "init")
+    return path
+personal = repo(sb / "Git" / "personal" / "p")
+work = repo(sb / "Git" / "work" / "w")
+linked = sb / "elsewhere" / "wt"
+git("-C", str(personal), "worktree", "add", "-q", str(linked), "-b", "topic")
+def slug(path, extra_env=None):
+    code = ("import sys; sys.path.insert(0, 'claude/hooks'); sys.path.insert(0, 'claude/skills/lib');"
+            "import herdr_orch_core as c, workflow_context as w;"
+            "print(c._context_slug(w.repository_context(sys.argv[1])))")
+    return subprocess.run([sys.executable, "-c", code, str(path)], check=True,
+                          capture_output=True, text=True, env={**env, **(extra_env or {})}).stdout.strip()
+def ask(slug_value, path, *flags, extra_env=None):
+    argv = [sys.executable, "claude/hooks/herdr_orch_core.py", "merge-authority", "--repo-slug", slug_value]
+    if path is not None:
+        argv += ["--repo-path", str(path)]
+    out = subprocess.run(argv + list(flags), capture_output=True, text=True,
+                         env={**env, **(extra_env or {})})
+    assert out.returncode == 0, (argv, out.returncode, out.stderr)
+    return json.loads(out.stdout)
+before = sorted(str(p) for p in sb.rglob("*"))
+assert ask(slug(personal), personal)["authority"] == "director"
+assert ask(slug(linked), linked)["authority"] == "director"
+assert ask(slug(work), work)["authority"] == "human"
+assert ask(slug(work), work, "--personal")["authority"] == "human"
+assert ask(slug(work), work, extra_env={"WORKFLOW_PERSONAL_ACCOUNT": "1"})["authority"] == "human"
+assert ask(slug(work, {"CLAUDE_PERSONAL_ONLY": "1"}), work,
+           extra_env={"CLAUDE_PERSONAL_ONLY": "1"})["authority"] == "director"
+mismatch = ask("not-the-slug", personal)
+assert mismatch["authority"] == "human" and mismatch["reason"], mismatch
+missing = ask(slug(personal), None)
+assert missing["authority"] == "human" and missing["reason"], missing
+gone = ask(slug(personal), sb / "nope")
+assert gone["authority"] == "human" and gone["reason"], gone
+assert sorted(str(p) for p in sb.rglob("*")) == before, "merge-authority wrote files"
+PY
+
 check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state layout" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 P="claude/skills/post-merge/SKILL.md"
