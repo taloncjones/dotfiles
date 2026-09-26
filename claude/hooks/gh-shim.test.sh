@@ -24,6 +24,23 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/fake" "$T/home" "$T/ghc" "$T/work" "$T/zdot"
 cat >"$T/fake/gh" <<'FAKE'
 #!/bin/sh
+# The shim's ownership reads before a delete are answered here and logged
+# apart, so FAKE_LOG still counts only the commands the shim execs. A read
+# made with a TTY-forcing env gets colored junk, as real gh would print.
+case "$*" in
+    "api user"*|"api repos/"*"/comments/"*)
+        printf '%s\n' "$*" >>"$FAKE_GETLOG"
+        if [ -n "${GH_FORCE_TTY:-}${CLICOLOR_FORCE:-}" ] || [ "${NO_COLOR:-}" != 1 ]; then
+            printf '\033[1;38m{\033[m\n'
+            exit 0
+        fi
+        case "$*" in
+            "api user"*) printf '{"login":"me"}\n' ;;
+            *) printf '%s\n' "$FAKE_COMMENT" ;;
+        esac
+        exit "${FAKE_GET_RC:-0}"
+        ;;
+esac
 printf '%s\n' "$*" >>"$FAKE_LOG"
 [ -n "${FAKE_STDIN:-}" ] && cat >"$FAKE_STDIN"
 [ -n "${FAKE_OUT:-}" ] && printf '%s\n' "$FAKE_OUT"
@@ -39,6 +56,9 @@ export HOME="$T/home" GH_CONFIG_DIR="$T/ghc" GH_HOST=gh-shim-test.invalid ZDOTDI
 export BASH_ENV="$SHIMS/path.sh"
 export DOTFILES_REAL_GH="$T/fake/gh" CLAUDE_CODE_SESSION_ID=s1 HERDR_ENV=1
 export FAKE_LOG="$T/log"
+MARK='<!-- co-review: sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb base_ref=main verdict=CHANGES round=1 -->'
+export FAKE_GETLOG="$T/getlog" FAKE_COMMENT="{\"user\":{\"login\":\"me\"},\"body\":\"$MARK\\nVerdict: CHANGES\"}"
+unset GH_FORCE_TTY CLICOLOR_FORCE
 export PATH="$SHIMS:$T/fake:/usr/bin:/bin"
 cd "$T/work" || exit 1
 # Without the launcher, login-shell shapes below would reach the real gh.
@@ -120,9 +140,9 @@ gh api --method DELETE repos/o/r/issues/comments/8 >/dev/null 2>&1; rc2=$?
 gh pr comment 5 --body x >/dev/null 2>&1; rc3=$?
 gh api -X DELETE repos/o/r/issues/comments/7 >/dev/null 2>&1; rc4=$?
 if [ "$rc1$rc2$rc3$rc4" = 0000 ] && [ "$(log_lines)" = 4 ]; then
-    pass "S6 deletes run freely under a live post go, before and after the post"
+    pass "S6 own-marker deletes run freely under a live post go, before and after the post"
 else
-    fail "S6 deletes run freely under a live post go (rc=$rc1$rc2$rc3$rc4 log=$(log_lines))"
+    fail "S6 own-marker deletes run freely under a live post go, before and after the post (rc=$rc1$rc2$rc3$rc4 log=$(log_lines))"
 fi
 
 fresh_gate
@@ -131,6 +151,70 @@ if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
     pass "S7 delete without a go is denied"
 else
     fail "S7 delete without a go is denied (rc=$rc)"
+fi
+
+# --- O: a delete removes only this account's own co-review marker ----------
+
+fresh_gate
+mint "post it"
+FAKE_COMMENT="{\"user\":{\"login\":\"rev\"},\"body\":\"$MARK\"}" \
+    gh api -X DELETE repos/o/r/issues/comments/9 >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q 'own co-review marker' "$T/err"; then
+    pass "O1 delete of another author's comment is refused"
+else
+    fail "O1 delete of another author's comment is refused (rc=$rc log=$(log_lines))"
+fi
+
+fresh_gate
+mint "post it"
+FAKE_COMMENT='{"user":{"login":"me"},"body":"thanks, fixed"}' \
+    gh api -X DELETE repos/o/r/issues/comments/9 >/dev/null 2>&1; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
+    pass "O2 delete of our own non-marker comment is refused"
+else
+    fail "O2 delete of our own non-marker comment is refused (rc=$rc log=$(log_lines))"
+fi
+
+fresh_gate
+mint "post it"
+FAKE_COMMENT='not json' gh api -X DELETE repos/o/r/issues/comments/9 >/dev/null 2>&1; rc1=$?
+FAKE_GET_RC=1 gh api -X DELETE repos/o/r/issues/comments/9 >/dev/null 2>&1; rc2=$?
+if [ "$rc1$rc2" = 11 ] && [ "$(log_lines)" = 0 ]; then
+    pass "O3 an unreadable or failed ownership read refuses the delete"
+else
+    fail "O3 an unreadable or failed ownership read refuses the delete (rc=$rc1$rc2 log=$(log_lines))"
+fi
+
+fresh_gate
+: >"$FAKE_GETLOG"
+mint "post it"
+gh api --hostname h.example -X DELETE repos/o/r/issues/comments/9 >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ] \
+    && grep -qx 'api repos/o/r/issues/comments/9 --hostname h.example' "$FAKE_GETLOG" \
+    && grep -qx 'api user --hostname h.example' "$FAKE_GETLOG"; then
+    pass "O4 ownership reads carry the delete's --hostname"
+else
+    fail "O4 ownership reads carry the delete's --hostname (rc=$rc log=$(log_lines) get=$(cat "$FAKE_GETLOG"))"
+fi
+
+fresh_gate
+: >"$FAKE_GETLOG"
+mint "post it"
+GH_FORCE_TTY=1 CLICOLOR_FORCE=1 GH_PAGER=less \
+    gh api -X DELETE repos/o/r/issues/comments/9 >/dev/null 2>&1; rc=$?
+if [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ] && [ -s "$FAKE_GETLOG" ]; then
+    pass "O5 ownership reads pin a plain output env"
+else
+    fail "O5 ownership reads pin a plain output env (rc=$rc log=$(log_lines))"
+fi
+fresh_gate
+mint "post it"
+FAKE_COMMENT="{\"user\":{\"login\":\"rev\"},\"body\":\"$MARK\"}" \
+    gh api -iX DELETE repos/o/r/issues/comments/9 >/dev/null 2>&1; rc=$?
+if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
+    pass "O6 a clustered -iX DELETE of another author's comment is refused"
+else
+    fail "O6 a clustered -iX DELETE of another author's comment is refused (rc=$rc log=$(log_lines))"
 fi
 
 fresh_gate
