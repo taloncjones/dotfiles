@@ -10020,6 +10020,53 @@ out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
 printf '%s\n' "$out" | grep -qx 'unreadable-record PROJ-1.done.json'
 SH
 
+check "prune_context_records: age-only, bounded, no-follow, keeps the caller's session" <<PY
+$LOAD
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+assert c.prune_context_records(now=10000.0) == 0          # no directory yet
+d = str(c.context_dir()); os.makedirs(d)
+U = ["%08d-0000-4000-8000-%012d" % (i, i) for i in range(6)]
+def put(name, age):
+    p = os.path.join(d, name); open(p, "w").write("{}"); os.utime(p, (10000.0 - age, 10000.0 - age)); return p
+put(U[0] + ".json", 10)                 # fresh: kept
+put(U[1] + ".json", 601)                # stale: removed
+put(U[2] + ".json.123.tmp", 601)        # stale writer temp: removed
+put(U[3] + ".json", 5000)               # stale but keep: kept
+put("notes.json", 5000)                 # foreign: kept
+put("ABCDEF01-0000-4000-8000-000000000000.json", 5000)   # uppercase: kept
+outside = os.path.join(root, "target.json"); open(outside, "w").write("{}"); os.utime(outside, (1.0, 1.0))
+os.symlink(outside, os.path.join(d, U[5] + ".json"))    # symlink: kept, target untouched
+assert c.prune_context_records(now=10000.0, keep=U[3]) == 2
+assert sorted(os.listdir(d)) == sorted([U[0] + ".json", U[3] + ".json", "notes.json",
+    "ABCDEF01-0000-4000-8000-000000000000.json", U[5] + ".json"]), sorted(os.listdir(d))
+assert os.path.exists(outside)
+for i in range(3):
+    put("%08d-1111-4000-8000-%012d.json" % (i, i), 700)
+assert c.prune_context_records(now=10000.0, limit=2) == 2
+# U[3] sorts after the three new records and, without `keep` this call, is
+# itself still stale -- the second batch removes the one remaining new
+# record plus U[3].
+assert c.prune_context_records(now=10000.0, limit=2) == 2
+assert c.context_record_path(U[0]) == c.context_dir() / (U[0] + ".json")
+PY
+
+check "checkin: prunes stale context records without changing its output" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+before=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+CTX=$(python3 -c 'import importlib.util as u; s = u.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py"); c = u.module_from_spec(s); s.loader.exec_module(c); print(c.context_dir())')
+mkdir -p "$CTX"
+OLD="$CTX/00000000-0000-4000-8000-000000000000.json"
+printf '{}' > "$OLD"; touch -t 202001010000 "$OLD"
+after=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+test ! -e "$OLD"
+test "$before" = "$after"
+SH
+
 check "checkin: wake= column from the marker, read-only" <<'SH'
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"

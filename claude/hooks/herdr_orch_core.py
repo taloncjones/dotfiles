@@ -904,12 +904,16 @@ ROLLOVER_PCT_DEFAULT = 45
 _CONTEXT_SESSION_RE = re.compile(r"[A-Za-z0-9-]{1,64}\Z")
 
 
-def context_record_path(session):
-    """Where statusline.js records a session's host-reported context fill.
-    Same base as state_root() without a payload selection, which is the
-    formula the statusline uses."""
+def context_dir():
+    """Where statusline.js records host-reported context fill. Same base as
+    state_root() without a payload selection, which is the formula the
+    statusline uses."""
     base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home().resolve() / ".claude")
-    return coordination.payload_path(base) / "herdr-orch" / "context" / f"{session}.json"
+    return coordination.payload_path(base) / "herdr-orch" / "context"
+
+
+def context_record_path(session):
+    return context_dir() / f"{session}.json"
 
 
 def rollover_due(rd, session, now=None):
@@ -937,6 +941,40 @@ def rollover_due(rd, session, now=None):
     if not isinstance(pct, int) or isinstance(pct, bool) or not 10 <= pct <= 95:
         pct = ROLLOVER_PCT_DEFAULT
     return (used, pct) if used >= pct else None
+
+
+CONTEXT_PRUNE_LIMIT = 64
+_CONTEXT_FILE_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json(\.[0-9]+\.tmp)?\Z")
+
+
+def prune_context_records(now=None, keep=None, limit=CONTEXT_PRUNE_LIMIT) -> int:
+    """Unlink context records and orphaned writer temp files older than
+    CONTEXT_FRESH_SECS. A stale record is already inert for rollover_due, so
+    removal changes no decision. Bounded, no-follow, never raises."""
+    now = time.time() if now is None else now
+    d = context_dir()
+    try:
+        names = sorted(payload_names(d))
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        if removed >= limit:
+            break
+        m = _CONTEXT_FILE_RE.fullmatch(name)
+        if not m or m.group(1) == keep:
+            continue
+        try:
+            with coordination.payload_parent(d / name) as (parent, base):
+                st = os.stat(base, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode) or st.st_mtime >= now - CONTEXT_FRESH_SECS:
+                    continue
+                os.unlink(base, dir_fd=parent)
+        except (OSError, ValueError):
+            continue
+        removed += 1
+    return removed
 
 
 def read_capabilities(rd, session_id):
@@ -5621,6 +5659,7 @@ def _main(argv=None) -> int:
             print("owner: stale-fence")
             return 1
         acked = undelivered_blocks(rd)
+        prune_context_records(keep=ns.session)
         poll, reason = _checkin_poll(ns)
         if poll is None:
             print(f"poll: failed ({reason})")
