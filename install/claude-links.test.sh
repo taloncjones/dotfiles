@@ -901,6 +901,11 @@ if jget "$CFG/settings.json" "'Skill(review-change)' in d['permissions']['allow'
 else
     fail "link path grants review-change skill permission"
 fi
+if jget "$CFG/settings.json" "all(d['permissions']['allow'].count(r) == 1 for r in ['Bash(bash claude/hooks/*.test.sh*)', 'Bash(bash install/*.test.sh*)', 'Bash(bash bin/*.test.sh*)', 'Bash(bin/dotfiles-tests:*)', 'Bash(env -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/*.test.sh*)', 'Bash(env -u WORKFLOW_PERSONAL_ACCOUNT bash install/*.test.sh*)', 'Bash(env -u WORKFLOW_PERSONAL_ACCOUNT bash bin/*.test.sh*)'])"; then
+    pass "link path grants the repo test-suite allow rules"
+else
+    fail "link path grants the repo test-suite allow rules"
+fi
 if jget "$CFG/settings.json" "d['permissions']['deny'] == [] and 'Bash(rm:*)' not in d['permissions']['ask']"; then
     pass "link path drops the rm ask rule and deny floor"
 else
