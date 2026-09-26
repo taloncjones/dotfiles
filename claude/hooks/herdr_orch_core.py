@@ -2246,14 +2246,16 @@ class NotLeaseHolder(ValueError):
     """resume-owner's precondition failed: this process holds no lease."""
 
 
-def _resume_eligible(cur, require_pid, adopt_pid, account_id) -> bool:
+def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) -> bool:
     """True when the shared owner record cur is this Claude process's own
-    launcher lease: same pid (proven an ancestor), account, runtime, tier.
-    Freshness is not required; a stale lease that passes is ours."""
+    launcher lease: same pid (proven an ancestor) and start identity when the
+    record carries one, account, runtime, tier. Freshness is not required."""
     return (
         cur is not None
         and cur.get("pid") == require_pid
         and adopt_pid == require_pid
+        and ("pid_start" not in cur
+             or (isinstance(adopt_start, str) and cur["pid_start"] == adopt_start))
         and cur.get("account_id") == account_id
         and cur.get("runtime", "claude") == "claude"
         and cur.get("thread_id") is None
@@ -2275,6 +2277,10 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
         raise ValueError("require_pid is launcher-only")
     adopt_pid = (sock_pid if control_tier == "launcher" and reason == "ok"
                  and _is_ancestor(sock_pid) else None)
+    recorded_pid = sock_pid if reason == "ok" else pid
+    pid_start = (coordination.process_start_id(recorded_pid)
+                 if control_tier == "launcher" else None)
+    adopt_start = pid_start if adopt_pid is not None else None
     if control_tier == "launcher":
         if workspace_root is not None or binding_id is not None:
             raise ValueError("workspace_root/binding are only valid for a lead claim")
@@ -2396,11 +2402,12 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                 write_json_atomic(mirror, dict(lease, messaging_socket=sock))
             return fence
         if require_pid is not None and not _resume_eligible(
-            tx.current, require_pid, adopt_pid, tx.account_id
+            tx.current, require_pid, adopt_pid, tx.account_id, adopt_start
         ):
             raise NotLeaseHolder("no lease held by this process")
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
-                         runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid)
+                         runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid,
+                         pid_start=pid_start, adopt_start=adopt_start)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.

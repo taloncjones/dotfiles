@@ -145,6 +145,135 @@ test -n "$F2"
 test "$F2" -ge "$F1"
 SH
 
+check "pid_start: process_start_id, _valid_owner, _owner_metadata, _adoptable matrix" <<'SH'
+python3 - <<'PY'
+import os, sys, time
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_coordination as co
+me = co.process_start_id(os.getpid())
+assert isinstance(me, str) and me and me == co.process_start_id(os.getpid()), me
+assert co.process_start_id(1) not in (None, me)
+assert co.process_start_id(99999999) is None
+assert co.process_start_id(0) is None and co.process_start_id("1") is None
+base = {"session_id": "a", "host": "h", "pid": 42, "fence": 3, "heartbeat_ts": time.time()}
+assert co._valid_owner(base) and co._valid_owner(dict(base, pid_start="ps:x"))
+for bad in (5, "", "x" * 129, None):
+    assert not co._valid_owner(dict(base, pid_start=bad)), bad
+    assert not co._valid_pid_start(bad), bad
+assert co._owner_metadata(dict(base, pid_start="ps:x"))["pid_start"] == "ps:x"
+assert "pid_start" not in co._owner_metadata(base)
+assert "pid_start" not in co._observation(dict(base, pid_start="ps:x"))
+old = {"session_id": "a", "pid": 42, "runtime": "claude", "thread_id": None, "account_id": "acct",
+       "control_tier": "launcher", "heartbeat_ts": time.time(), "fence": 3, "pid_start": "ps:a"}
+tx = object.__new__(co.OwnerTransaction)
+tx.account_id = "acct"
+assert tx._adoptable(old, 42, "claude", None, "ps:a")
+assert not tx._adoptable(old, 42, "claude", None, "ps:b")
+assert not tx._adoptable(old, 42, "claude", None, None)
+legacy = {k: v for k, v in old.items() if k != "pid_start"}
+assert tx._adoptable(legacy, 42, "claude", None)
+assert tx._adoptable(legacy, 42, "claude", None, None)
+PY
+SH
+
+check "pid_start: a fresh claim records the claimant's start identity" <<'SH'
+SOCK=/tmp/cc-socks/$$.sock
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+python3 - "$$" <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+import herdr_coordination as co
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    cur = dict(tx.current)
+assert cur["pid"] == int(sys.argv[1]), cur
+assert cur["pid_start"] == co.process_start_id(int(sys.argv[1])), cur
+PY
+SH
+
+check "adopt refused: pid matches but start identity differs -> BUSY; resume-owner silent exit 3" <<'SH'
+SOCK=/tmp/cc-socks/$$.sock
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+python3 - <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    tx.current = dict(tx.current, pid_start="ps:Thu Jan 1 00:00:00 1970")
+    tx._owner_write(tx.current)
+PY
+out=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket "$SOCK") && rc=0 || rc=$?
+test "$rc" = 1
+test "$out" = BUSY
+$CORE resume-owner --repo-path "$FX_REPO" --session 33333333-3333-4333-8333-333333333333 \
+    --messaging-socket "$SOCK" > "$FX/resume" 2>&1 && rc=0 || rc=$?
+test "$rc" = 3
+test ! -s "$FX/resume"
+SH
+
+check "adopt: a legacy record without pid_start still adopts by pid and gains pid_start" <<'SH'
+SOCK=/tmp/cc-socks/$$.sock
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
+python3 - <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    tx.current = {k: v for k, v in tx.current.items() if k != "pid_start"}
+    tx._owner_write(tx.current)
+PY
+F2=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket "$SOCK")
+test "$F2" -eq $((F1 + 1))
+python3 - <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    assert isinstance(tx.current.get("pid_start"), str), tx.current
+PY
+SH
+
+check "resume-owner: a legacy record without pid_start still resumes and gains pid_start" <<'SH'
+SOCK=/tmp/cc-socks/$$.sock
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
+python3 - <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    tx.current = {k: v for k, v in tx.current.items() if k != "pid_start"}
+    tx._owner_write(tx.current)
+PY
+$CORE resume-owner --repo-path "$FX_REPO" --session 22222222-2222-4222-8222-222222222222 \
+    --messaging-socket "$SOCK" > "$FX/info"
+grep -qxF "repo_slug=$FX_SLUG session=22222222-2222-4222-8222-222222222222 fence=$((F1 + 1))" "$FX/info"
+python3 - <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    assert isinstance(tx.current.get("pid_start"), str), tx.current
+PY
+SH
+
 check "resume-owner: adopts after /clear and prints INFO with the new fence" <<'SH'
 SOCK=/tmp/cc-socks/$$.sock
 F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
