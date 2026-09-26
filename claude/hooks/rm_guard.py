@@ -87,6 +87,41 @@ def strip_prefixes(tokens: list[str]) -> list[str]:
     return tokens[i:]
 
 
+def strip_line_comments(command: str) -> str:
+    """Remove an unquoted `# ...` through end of line, keeping the newline.
+    Quote-aware so a stray apostrophe or quote inside a comment can never
+    desync the tokenizer below: shlex's own `#` handling reads to end of
+    line too, but via `readline()`, which consumes the newline itself and
+    merges the commented line into the next one."""
+    out = []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 1
+                out.append(command[i])
+            elif ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+        elif ch == "\\" and i + 1 < n:
+            out.append(ch)
+            i += 1
+            out.append(command[i])
+        elif ch == "#":
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def tokenize(command: str) -> list[str]:
     """Tokenize the whole command in one quote-aware pass: `;`, `&`, `|`,
     `(`, `)` become their own tokens (so `&&`/`||` stay one token each)
@@ -96,30 +131,39 @@ def tokenize(command: str) -> list[str]:
     would slice through a quoted script the same way it slices real segment
     separators, corrupting the extracted `-c` argument."""
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=SEGMENT_OPERATORS)
+        lexer = shlex.shlex(
+            strip_line_comments(command), posix=True, punctuation_chars=SEGMENT_OPERATORS
+        )
         lexer.whitespace_split = True
         # A bare newline separates commands like `;` does (e.g. a heredoc'd
         # multi-line script); punctuation_chars alone does not take effect
         # for it because shlex's default whitespace set consumes it first.
         lexer.whitespace = lexer.whitespace.replace("\n", "")
+        # Comments are already stripped above; disabling shlex's own handling
+        # avoids its newline-eating readline() path entirely.
+        lexer.commenters = ""
         return list(lexer)
     except ValueError:
         return command.split()
 
 
 def split_segments(tokens: list[str]) -> list[list[str]]:
-    """Split a token stream on `;`/`&`/`|` operator tokens; drop grouping
-    `(`/`)` tokens so a subshell's contents are treated the same as an
-    unparenthesized compound command (BF3: `(cd / && rm -rf *)`)."""
+    """Split a token stream on `;`/`&`/`|`/`\\n` operator tokens, dropping
+    grouping `(`/`)` tokens so a subshell's contents are treated the same as
+    an unparenthesized compound command (BF3: `(cd / && rm -rf *)`).
+
+    shlex's `punctuation_chars` greedily glues any run of adjacent operator
+    characters into one token -- not just real shell operators like `&&`, but
+    also e.g. `)\\n` or `;\\n` when a paren or `;` sits right before a
+    newline. Such a token is still pure punctuation, so it is a segment
+    boundary the same as any of its individual characters would be."""
     segments = []
     current = []
     for tok in tokens:
-        if tok and all(c in ";&|\n" for c in tok):
+        if tok and all(c in SEGMENT_OPERATORS for c in tok):
             if current:
                 segments.append(current)
                 current = []
-        elif tok in ("(", ")"):
-            continue
         else:
             current.append(tok)
     if current:

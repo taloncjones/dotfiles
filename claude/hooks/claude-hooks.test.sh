@@ -414,6 +414,7 @@ want = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
 ]
@@ -1216,6 +1217,7 @@ want_bash = [
     "~/.claude/hooks/push_guard.py",
     "~/.claude/hooks/herdr_worktree_guard.py",
     "~/.claude/hooks/rm_guard.py",
+    "~/.claude/hooks/pr_post_guard.py",
     "~/.claude/hooks/orch_edit_guard.py",
     "~/.claude/hooks/planning_artifact_guard.py",
 ]

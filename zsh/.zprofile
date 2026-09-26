@@ -24,3 +24,7 @@ if command -v gh >/dev/null 2>&1; then
     _gh_token="$(gh auth token 2>/dev/null)" && export GITHUB_PERSONAL_ACCESS_TOKEN="$_gh_token"
     unset _gh_token
 fi
+
+# Armed herdr agent sessions: put the gh shim back in front after startup
+# rewrote PATH. A no-op in any other shell (bin/herdr-shims/path.sh).
+[[ -r "${${(%):-%N}:A:h:h}/bin/herdr-shims/path.sh" ]] && source "${${(%):-%N}:A:h:h}/bin/herdr-shims/path.sh"

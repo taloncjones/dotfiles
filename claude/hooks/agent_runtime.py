@@ -229,6 +229,22 @@ def strip_pane_identity(environment: dict[str, str]) -> None:
     environment.pop("HERDR_TAB_ID", None)
 
 
+# Herdr agents run gh through this dir (gh_post_shim.py, bin/herdr-shims/).
+GH_SHIM_DIR = Path(__file__).resolve().parents[2] / "bin" / "herdr-shims"
+GH_SHIM_ANCHOR = GH_SHIM_DIR / "path.sh"
+
+
+def arm_gh_shim(environment: dict[str, str]) -> None:
+    """Put the gh shim first on a herdr child's PATH, and point BASH_ENV at
+    the anchor that keeps it first after a login shell rewrites PATH."""
+    if environment.get("HERDR_ENV") != "1":
+        return
+    entries = [e for e in environment.get("PATH", "").split(os.pathsep) if e and e != str(GH_SHIM_DIR)]
+    environment["PATH"] = os.pathsep.join([str(GH_SHIM_DIR), *entries])
+    if not environment.get("BASH_ENV"):
+        environment["BASH_ENV"] = str(GH_SHIM_ANCHOR)
+
+
 def _apply_launch_environment(environment: dict[str, str], scope: dict) -> None:
     for key, value in scope["launch_env"].items():
         if value is None:
@@ -674,6 +690,11 @@ def launch_argv(
                     if personal_repository
                     else []
                 ),
+                # Codex passes only core variables to its shells. PATH carries
+                # an armed gh shim; this anchor keeps it first in bash and is
+                # a no-op otherwise.
+                "-c",
+                f'shell_environment_policy.set.BASH_ENV="{GH_SHIM_ANCHOR}"',
                 "-C",
                 selected_cwd,
                 "--sandbox",
@@ -1207,6 +1228,7 @@ def run_bounded(
     child_env = dict(os.environ if env is None else env)
     strip_pane_identity(child_env)
     _apply_launch_environment(child_env, scope)
+    arm_gh_shim(child_env)
     # herdr_stop_gate allows any stop carrying this: a bounded child is a
     # helper, and a `-p` child does act on a stop-hook nudge.
     child_env["HERDR_BOUNDED_CHILD"] = "1"

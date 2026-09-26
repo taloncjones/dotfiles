@@ -190,6 +190,10 @@
           },
           {
             "type": "command",
+            "command": "~/.claude/hooks/pr_post_guard.py"
+          },
+          {
+            "type": "command",
             "command": "~/.claude/hooks/orch_edit_guard.py"
           },
           {
@@ -229,6 +233,9 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "~/.claude/hooks/pr_post_guard.py" } ] }
     ],
     "PostToolUse": [
       {

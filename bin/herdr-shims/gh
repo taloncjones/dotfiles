@@ -1,0 +1,3 @@
+#!/bin/sh
+# herdr gh shim: gates PR/issue writes at exec time; see claude/hooks/gh_post_shim.py.
+exec python3 -I "${0%/*}/../../claude/hooks/gh_post_shim.py" "$0" "$@"

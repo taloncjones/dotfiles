@@ -203,3 +203,7 @@ export PATH="$BUN_INSTALL/bin:$PATH"
 # Machine-local work overrides (not tracked in this repo).
 # Put work-specific PATH, env, aliases, and functions in ~/.zsh-work.zsh.
 [ -f "$HOME/.zsh-work.zsh" ] && source "$HOME/.zsh-work.zsh"
+
+# Armed herdr agent sessions: put the gh shim back in front after startup
+# rewrote PATH. A no-op in any other shell (bin/herdr-shims/path.sh).
+[[ -r "${${(%):-%N}:A:h:h}/bin/herdr-shims/path.sh" ]] && source "${${(%):-%N}:A:h:h}/bin/herdr-shims/path.sh"

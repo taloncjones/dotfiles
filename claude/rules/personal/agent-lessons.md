@@ -32,7 +32,7 @@ is the staging tier, not an archive.
 - (2026-09) Never change or fix one instance in isolation: name the failure
   class or consumer set, grep every sibling site, and run their suites too.
 - (2026-09) A protected main makes a local merge unshippable: open the PR
-  first, so co-review round comments and markers land on it, then merge there.
+  first, so the co-review gate runs against it, then merge there.
 - (2026-09) A completion-enforcing hook is not user consent: hold the gated
   action, say you are blocked once, and wait instead of restating.
 - (2026-09) Verify external CLI syntax against its help/docs before writing it

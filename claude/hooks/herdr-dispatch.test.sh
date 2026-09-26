@@ -177,6 +177,10 @@ elif args[:2] == ["pane", "run"]:
                 value = str(Path(os.environ["FAKE_RUNTIME_DIR"]).resolve() / os.environ.get("FAKE_RUNTIME", "codex"))
                 if mode == "wrong-runtime-binary":
                     value = "/wrong/codex"
+            elif key == "GH":
+                value = values.get("PATH", "").split(":", 1)[0] + "/gh"
+                if mode == "unarmed-gh":
+                    value = "/opt/homebrew/bin/gh"
             else:
                 value = "wrong" if mode == "wrong-shell-env" else values[key]
             lines.append(f"{match.group(1)}:{key}={value}")
@@ -634,6 +638,8 @@ def test_launch_records_attempt_before_native_start():
             'model_reasoning_effort="medium"',
             "-c",
             'plugins."atlassian@claude-plugins-official".enabled=false',
+            "-c",
+            f'shell_environment_policy.set.BASH_ENV="{agent_runtime.GH_SHIM_ANCHOR}"',
             "-C",
             str(fixture.repo),
             "--sandbox",
@@ -696,6 +702,37 @@ def test_missing_or_mismatched_binary_refuses_before_attempt_and_start():
             assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
         finally:
             fixture.close()
+
+
+def test_runtime_binding_arms_gh_shim_after_runtime_path():
+    fixture = Fixture()
+    try:
+        fixture.launch()
+        shim = agent_runtime.GH_SHIM_DIR
+        command = next(call[3] for call in fixture.calls() if call[:2] == ["pane", "run"])
+        parts = command.split("; ")
+        runtime_path = next(i for i, part in enumerate(parts) if part.startswith("export PATH="))
+        assert parts[runtime_path + 1] == f'export PATH={shlex.quote(str(shim))}:"$PATH"', parts
+        assert parts[runtime_path + 2] == f'export BASH_ENV="${{BASH_ENV:-{shim}/path.sh}}"', parts
+        assert any("GH=%s" in part and "command -v gh" in part for part in parts), parts
+    finally:
+        fixture.close()
+
+
+def test_unarmed_gh_refuses_before_attempt_and_start():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "unarmed-gh"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert "runtime executable" in str(exc), exc
+        else:
+            raise AssertionError("a pane whose gh is not the shim was accepted")
+        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
+    finally:
+        fixture.close()
 
 
 def test_runtime_resolution_preserves_filesystem_parent_semantics():
@@ -2264,6 +2301,8 @@ for name, test in (
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
     ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_attempt_and_start),
+    ("runtime binding arms the gh shim after the runtime PATH", test_runtime_binding_arms_gh_shim_after_runtime_path),
+    ("a pane whose gh is not the shim blocks before launch", test_unarmed_gh_refuses_before_attempt_and_start),
     ("real shells bypass stale runtime wrappers and hashes", test_runtime_binding_bypasses_aliases_functions_and_stale_hashes),
     ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
     ("Claude reviewer pane launch passes strict MCP config", test_claude_reviewer_pane_launch_passes_strict_mcp_config),

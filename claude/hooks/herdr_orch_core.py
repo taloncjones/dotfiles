@@ -1659,6 +1659,7 @@ def run_headless(argv, cwd, stdin_text, timeout_secs):
     child_env = _selected_headless_environment(cwd)
     if child_env is None:
         child_env = dict(os.environ)
+    agent_runtime.arm_gh_shim(child_env)
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,

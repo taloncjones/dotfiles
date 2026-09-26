@@ -429,5 +429,93 @@ class TargetTipTests(unittest.TestCase):
         self.assertEqual(decision, "FAIL")
 
 
+L1 = "<!-- co-review: sha=" + SHA_A + " base=" + BASE_A + " base_ref=main verdict=CHANGES round=1 -->"
+L2 = "<!-- co-review: sha=" + SHA_B + " base=" + BASE_A + " base_ref=main verdict=APPROVE round=2 -->"
+
+
+def c(i, login, created, body):
+    return {"id": i, "user": {"login": login}, "created_at": created, "body": body}
+
+
+class SupersedeTests(unittest.TestCase):
+    def test_s1_lists_only_our_older_markers(self):
+        comments = [
+            c(1, "me", "2026-09-01T00:00:00Z", L1),
+            c(2, "me", "2026-09-02T00:00:00Z", L2),
+        ]
+        self.assertEqual(gate.superseded_marker_ids(comments, "me", L2), [1])
+
+    def test_s2_ignores_other_authors(self):
+        comments = [
+            c(1, "bob", "2026-09-01T00:00:00Z", L1),
+            c(2, "me", "2026-09-02T00:00:00Z", L2),
+        ]
+        self.assertEqual(gate.superseded_marker_ids(comments, "me", L2), [])
+
+    def test_s3_ignores_coworker_markers_and_fenced_examples(self):
+        fence = "\n" + "`" * 3 + "\n"
+        comments = [
+            c(1, "me", "2026-09-01T00:00:00Z", "<!-- co-review-coworker: x -->"),
+            c(2, "me", "2026-09-02T00:00:00Z", fence + L1 + fence),
+            c(3, "me", "2026-09-03T00:00:00Z", L2),
+        ]
+        self.assertEqual(gate.superseded_marker_ids(comments, "me", L2), [])
+
+    def test_s4_ignores_a_marker_below_prose(self):
+        comments = [
+            c(1, "me", "2026-09-01T00:00:00Z", "note\n" + L1),
+            c(2, "me", "2026-09-02T00:00:00Z", L2),
+        ]
+        self.assertEqual(gate.superseded_marker_ids(comments, "me", L2), [])
+
+    def test_s5_counts_a_malformed_marker(self):
+        comments = [
+            c(1, "me", "2026-09-01T00:00:00Z", "<!-- co-review: truncated"),
+            c(2, "me", "2026-09-02T00:00:00Z", L2),
+        ]
+        self.assertEqual(gate.superseded_marker_ids(comments, "me", L2), [1])
+
+    def test_s6_raises_when_newest_is_not_the_posted_line(self):
+        comments = [c(1, "me", "2026-09-01T00:00:00Z", L1)]
+        with self.assertRaises(gate.GateInputError):
+            gate.superseded_marker_ids(comments, "me", L2)
+
+    def test_s7_raises_on_bad_created_at_of_a_candidate(self):
+        comments = [
+            c(1, "me", "x", L1),
+            c(2, "me", "2026-09-02T00:00:00Z", L2),
+        ]
+        with self.assertRaises(gate.GateInputError):
+            gate.superseded_marker_ids(comments, "me", L2)
+
+    def test_s8_flattens_slurp_pages_and_cli_exit_codes(self):
+        pages = [[c(1, "me", "2026-09-01T00:00:00Z", L1)], [c(2, "me", "2026-09-02T00:00:00Z", L2)]]
+        self.assertEqual(gate.superseded_marker_ids(pages, "me", L2), [1])
+
+        bad = subprocess.run(
+            [sys.executable, str(SPEC), "supersede", "--comments", "/nonexistent.json",
+             "--author", "me", "--expect-marker", L2],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(bad.returncode, 1)
+        self.assertEqual(bad.stdout, "")
+
+        import json
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(pages, handle)
+            path = handle.name
+        try:
+            good = subprocess.run(
+                [sys.executable, str(SPEC), "supersede", "--comments", path,
+                 "--author", "me", "--expect-marker", L2],
+                capture_output=True, text=True,
+            )
+        finally:
+            Path(path).unlink()
+        self.assertEqual(good.returncode, 0)
+        self.assertEqual(json.loads(good.stdout), [1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -90,8 +90,28 @@ function claude-account() {    # claude-account() prints which Claude account/co
     esac
 }
 
+# Herdr agent launches gate `gh` at exec time (claude/hooks/gh_post_shim.py).
+# Resolved here because the Claude shell snapshot keeps functions, not this
+# file's path; no leading underscore because the snapshot strips those.
+typeset -g DOTFILES_GH_SHIM_HOME="${${(%):-%N}:A:h:h}/bin/herdr-shims"
+
+function dotfiles_arm_gh_shim() {    # dotfiles_arm_gh_shim() puts the herdr gh shim first on PATH for an agent launched from this shell. ex: $ ( dotfiles_arm_gh_shim; command claude )
+    export PATH="$DOTFILES_GH_SHIM_HOME:$PATH"
+    [[ -n "${BASH_ENV:-}" ]] || export BASH_ENV="$DOTFILES_GH_SHIM_HOME/path.sh"
+}
+
+# dotfiles_gh_shim_wanted() is true in a herdr pane whose first gh is not the
+# shim yet: the same test the post-gate hook applies to the session's PATH.
+function dotfiles_gh_shim_wanted() {
+    [[ "${HERDR_ENV:-}" == 1 && "${commands[gh]:-}" != */bin/herdr-shims/gh && -x "${DOTFILES_GH_SHIM_HOME:-}/gh" ]]
+}
+
 function claude() {    # claude() will launch Claude Code with the work account inside ~/Git/work, personal elsewhere. Pass --personal to force the personal account. ex: $ claude --personal
     emulate -L zsh
+    if dotfiles_gh_shim_wanted; then
+        ( dotfiles_arm_gh_shim; claude "$@" )
+        return $?
+    fi
     local use_personal=0 arg cfg scope kind target="$PWD" take_cd=0 parse_cd=1
     local -a forwarded=()
     [[ "${CLAUDE_PERSONAL_ONLY:-}" == 1 ]] && use_personal=1
