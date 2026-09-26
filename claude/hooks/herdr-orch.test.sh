@@ -10204,5 +10204,13 @@ assert "<cmd>" not in t
 assert t.count("\n") <= 441
 PY
 
+check "brief template treats a stop-gate nudge as no reason to emit" <<'PY'
+import sys
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+for phrase in ("not a request to emit", "genuinely stopping short"):
+    assert phrase in rules, phrase
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
