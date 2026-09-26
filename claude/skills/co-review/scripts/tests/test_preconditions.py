@@ -94,6 +94,27 @@ class PreconditionsTests(unittest.TestCase):
                 checks.evaluate(self.report(ci=ci), self.root)["approve_allowed"]
             )
 
+    def test_completed_skipped_check_run_is_accepted_but_neutral_still_fails(self):
+        ci_skipped = {
+            "head": SHA,
+            "check_runs": [
+                {"status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"status": "COMPLETED", "conclusion": "SKIPPED"},
+            ],
+            "status_contexts": [],
+        }
+        result = checks.evaluate(self.report(ci=ci_skipped), self.root)
+        self.assertEqual(result["reasons"], [])
+        self.assertTrue(result["approve_allowed"])
+
+        ci_neutral = {
+            "head": SHA,
+            "check_runs": [{"status": "COMPLETED", "conclusion": "NEUTRAL"}],
+            "status_contexts": [],
+        }
+        result = checks.evaluate(self.report(ci=ci_neutral), self.root)
+        self.assertFalse(result["approve_allowed"])
+
     def test_explicit_no_ci_allows_empty_captured_checks(self):
         report = self.report(
             ci={"head": SHA, "check_runs": [], "status_contexts": []},
