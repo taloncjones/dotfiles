@@ -206,19 +206,67 @@ def graphql_query_from_file(args: list[str]) -> bool:
     return False
 
 
-def classify_api(args: list[str]) -> str:
-    method, path, has_field, i = None, None, False, 0
+# gh api's short flags (gh 2.96 `gh api --help`): -i/-h take no value.
+API_BOOL_SHORTS = set("ih")
+API_VALUE_SHORTS = set("XfFHqtp")
+
+
+def normalize_api_args(args: list[str]) -> list[str] | None:
+    """Split gh api's argv the way pflag does: a short cluster such as `-iX`
+    becomes `-i -X`, a value flag takes the rest of its word or the next
+    argument (even one starting with `-`), and `-X=GET` drops the `=`.
+    None for a short flag gh api does not have."""
+    out, i = [], 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if tok == "--":
+            return out + [tok] + args[i:]
+        if not tok.startswith("-") or tok == "-" or tok.startswith("--"):
+            out.append(tok)
+            if tok in VALUE_FLAGS + ("--method",) and i < len(args):
+                out.append(args[i])
+                i += 1
+            continue
+        rest = tok[1:]
+        while rest:
+            flag, rest = rest[0], rest[1:]
+            if flag in API_BOOL_SHORTS:
+                out.append("-" + flag)
+                continue
+            if flag not in API_VALUE_SHORTS:
+                return None
+            if rest:
+                value = rest[1:] if rest[0] == "=" else rest
+            elif i < len(args):
+                value = args[i]
+                i += 1
+            else:
+                return None
+            out += ["-" + flag, value]
+            rest = ""
+    return out
+
+
+def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool]:
+    """(method, path, hostname, has_field) of one `gh api` argv."""
+    method, path, host, has_field, i = None, None, None, False, 0
+    args = normalize_api_args(args) or list(args)
     while i < len(args):
         tok = args[i]
         if tok in ("-X", "--method") and i + 1 < len(args):
             method, i = args[i + 1].upper(), i + 2
             continue
+        if tok == "--hostname" and i + 1 < len(args):
+            host = args[i + 1]
         if tok in VALUE_FLAGS:
             has_field = has_field or tok in FIELD_FLAGS
             i += 2
             continue
         if tok.startswith("--method="):
             method = tok.split("=", 1)[1].upper()
+        elif tok.startswith("--hostname="):
+            host = tok.split("=", 1)[1]
         elif tok.startswith("-X") and len(tok) > 2:
             method = tok[2:].upper()
         elif tok[:2] in ("-f", "-F") or tok.startswith(("--raw-field=", "--field=", "--input=")):
@@ -226,8 +274,16 @@ def classify_api(args: list[str]) -> str:
         elif not tok.startswith("-") and path is None:
             path = tok.lstrip("/")
         i += 1
+    return method, path, host, has_field
+
+
+def classify_api(args: list[str]) -> str:
+    normalized = normalize_api_args(args)
+    if normalized is None:
+        return "unknown"
+    method, path, _host, has_field = parse_api(normalized)
     if path == "graphql":
-        if graphql_query_from_file(args) or any("mutation" in a for a in args):
+        if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
             return "post"
         return "read"
     method = method or ("POST" if has_field else "GET")

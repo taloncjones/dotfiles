@@ -487,6 +487,32 @@ expect_rc "H3 other text sent to a pane passes" 0 "$(payload_b s1 "herdr pane ru
 expect_rc "H3 a gh-named task id sent to a pane passes" 0 "$(payload_b s1 "herdr pane run w1:p3 'python3 core.py run-mech --task-id 2026-09-25-fix-gh-shim'")"
 expect_rc "H3 help on an alias stays unknown and passes the hook" 0 "$(payload_b s1 'gh c 5 --help')"
 
+# --- PA: gh api argv is split the way gh splits it --------------------------
+
+# expect_class LABEL WANT ARG... -> classify_gh verdict for one gh argv
+expect_class() {
+    label="$1"; want="$2"; shift 2
+    got=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import pr_post_guard; print(pr_post_guard.classify_gh(sys.argv[2:]))' "$(dirname "$HOOK")" "$@")
+    if [ "$got" = "$want" ]; then
+        printf 'PASS  %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (want %s got %s)\n' "$label" "$want" "$got" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+
+expect_class "PA1 clustered -iX DELETE is a delete" delete api -iX DELETE repos/o/r/issues/comments/1
+expect_class "PA2 clustered -if field is a post" post api -ifbody=x repos/o/r/issues/1/comments
+expect_class "PA3 clustered -iF graphql query file is a post" post api graphql -iF query=@m.graphql
+expect_class "PA4 -X=GET is a read" read api -X=GET repos/o/r/issues/1
+expect_class "PA5 an unknown short flag is unknown" unknown api -Z repos/o/r/issues/1
+expect_class "PA6 a value flag takes a dash-led next arg; fields still post" post api -t -iXGET repos/o/r/issues/1/comments -f body=hi
+expect_class "PA7 -q taking -iXGET keeps the DELETE" delete api -X DELETE -q -iXGET repos/o/r/issues/comments/1
+expect_class "PA8 plain -X DELETE is still a delete" delete api -X DELETE repos/o/r/issues/comments/1
+expect_class "PA9 a paginated read is still a read" read api repos/o/r/issues/1/comments --paginate
+
+case_gate pa10
+expect_rc "PA10 the hook denies a clustered delete without a go" 2 "$(payload_b s1 'gh api -iX DELETE repos/o/r/issues/comments/1')"
+
 # --- C: classifier entries and the pid map the gh shim reads ---------------
 
 case_gate c1
