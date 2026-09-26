@@ -818,6 +818,13 @@ def payload_files(path, pattern):
         return []
 
 
+def task_record_files(tasks_dir):
+    """Primary task records in tasks_dir, sorted. TASK_ID_RE admits no dot,
+    so any dotted stem is a sidecar (.done, .review, .route, .repair2.route)."""
+    return sorted(f for f in payload_files(tasks_dir, "*.json")
+                  if "." not in f.name[: -len(".json")])
+
+
 def create_payload_dir(path):
     with coordination.payload_parent(Path(path) / ".directory", create=True):
         pass
@@ -890,6 +897,46 @@ def read_config(rd):
     except (OSError, ValueError):
         return {}
     return cfg if isinstance(cfg, dict) else {}
+
+
+CONTEXT_FRESH_SECS = 600
+ROLLOVER_PCT_DEFAULT = 45
+_CONTEXT_SESSION_RE = re.compile(r"[A-Za-z0-9-]{1,64}\Z")
+
+
+def context_record_path(session):
+    """Where statusline.js records a session's host-reported context fill.
+    Same base as state_root() without a payload selection, which is the
+    formula the statusline uses."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home().resolve() / ".claude")
+    return coordination.payload_path(base) / "herdr-orch" / "context" / f"{session}.json"
+
+
+def rollover_due(rd, session, now=None):
+    """(used_pct, threshold) when this session's fresh context record has
+    reached config rollover_pct, else None. A stale, foreign, oversized or
+    malformed record never triggers; the model never writes the record."""
+    if not isinstance(session, str) or not _CONTEXT_SESSION_RE.fullmatch(session):
+        return None
+    try:
+        raw = read_payload_bytes(context_record_path(session))
+        rec = json.loads(raw) if len(raw) <= 4096 else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict) or rec.get("session_id") != session:
+        return None
+    used, ts = rec.get("used_pct"), rec.get("ts")
+    if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= 100:
+        return None
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    now = time.time() if now is None else now
+    if not now - CONTEXT_FRESH_SECS <= ts <= now + 60:
+        return None
+    pct = read_config(rd).get("rollover_pct")
+    if not isinstance(pct, int) or isinstance(pct, bool) or not 10 <= pct <= 95:
+        pct = ROLLOVER_PCT_DEFAULT
+    return (used, pct) if used >= pct else None
 
 
 def read_capabilities(rd, session_id):
@@ -1792,7 +1839,6 @@ BACKSTOP_GRACE_SECS = 120
 # otherwise a stalled worker with no completion record (a block, or an exit
 # with nothing written) has no path back to the director at all.
 BACKSTOP_HEARTBEAT_SECS = 600
-REVIEW_BOUND_NS = 600_000_000_000
 ACTIVE_STATUSES = frozenset({"in-progress", "blocked", "review-dispatched"})
 
 
@@ -2263,6 +2309,40 @@ def watch_state(root_pid, slug):
     return live, ("live" if live else "none")
 
 
+_RULE_LINE_RE = re.compile(r"─{20,}")
+_PROMPT_LINE_RE = re.compile(r"❯(?: (.*))?")
+# The live statusline footer (claude/statusline.js render()): either the
+# context-meter segment (ten block cells and NN%), or, when the host
+# reports no remaining_percentage (e.g. early in a session) and
+# buildContextMeter() returns '', any line carrying the U+2502 segment
+# separator the remaining segments always join on.
+_FOOTER_LINE_RE = re.compile(r"(?: *[█░]{10} \d{1,3}%.*)|(?:.*│.*)")
+ROLLOVER_READ_SETTLE_SECS = 0.5
+
+
+def current_input(text):
+    """The Claude Code input region's text from a `pane read`, or None.
+
+    The region is the prompt line (U+276F) plus any continuation lines
+    between the bottom-most two full-width U+2500 rules, and the line under
+    the lower rule must be the live statusline footer: the footer is redrawn
+    in place, so it never appears in history. Anything else is ambiguous and
+    returns None."""
+    lines = [line.rstrip() for line in text.rstrip().splitlines()[-20:]]
+    rules = [i for i, line in enumerate(lines) if _RULE_LINE_RE.fullmatch(line)]
+    if len(rules) < 2:
+        return None
+    upper, lower = rules[-2], rules[-1]
+    if lower - upper < 2 or lower + 1 >= len(lines):
+        return None
+    if not _FOOTER_LINE_RE.fullmatch(lines[lower + 1]):
+        return None
+    m = _PROMPT_LINE_RE.fullmatch(lines[upper + 1])
+    if not m:
+        return None
+    return "\n".join([m.group(1) or ""] + lines[upper + 2:lower]).strip()
+
+
 def rollover_warning(reason) -> str:
     return (f"[WARNING] herdr director rollover: lease NOT re-established ({reason}).\n"
             "Run the herdr-orchestration section-1 preflight; if it reports BUSY, stop\n"
@@ -2381,24 +2461,37 @@ def require_not_consumed(rd, binding_id):
              "binding envelope already integrated; writes are frozen")
 
 
+# Rows that may follow a phase's latest row without superseding it. A live
+# repair worker keeps its implement attempt across a review dispatched into
+# the same workspace; a later plan or implement row still supersedes it.
+TRAILING_PHASES = {"implement": frozenset({"review"})}
+
+
 def attempt_matches(task, done, phase, workspace):
-    """Native history requires the latest row; wholly legacy history stays readable."""
+    """Native history requires the latest row of `phase`, followed only by
+    native rows TRAILING_PHASES allows; wholly legacy history stays readable."""
     workers = task.get("workers", [])
     if not isinstance(workers, list):
         return False
     native = any(isinstance(w, dict) and "runtime" in w for w in workers)
     # A malformed or untyped successor cannot revive an older native attempt
     # or downgrade this task to the permissive legacy matching rules.
-    if native and (
-        not isinstance(workers[-1], dict)
-        or "runtime" not in workers[-1]
-        or workers[-1].get("phase") != phase
-    ):
+    if native and (not isinstance(workers[-1], dict) or "runtime" not in workers[-1]):
         return False
-    matching = [w for w in workers if isinstance(w, dict) and w.get("phase") == phase]
-    if not matching:
+    positions = [i for i, w in enumerate(workers)
+                 if isinstance(w, dict) and w.get("phase") == phase]
+    if not positions:
         return not native
-    worker = matching[-1]
+    worker = workers[positions[-1]]
+    if native:
+        # The selected row must itself be native: an untyped row can never
+        # stand in for a native attempt's full identity.
+        if "runtime" not in worker:
+            return False
+        allowed = TRAILING_PHASES.get(phase, frozenset())
+        if not all(isinstance(w, dict) and "runtime" in w and w.get("phase") in allowed
+                   for w in workers[positions[-1] + 1:]):
+            return False
     if worker.get("workspace_id") != workspace:
         return False
     # Migration is additive: old attempts compare any recorded fields; native
@@ -2759,6 +2852,96 @@ def should_dispatch_review(task, head_sha) -> bool:
     return task.get("review_head_sha") != head_sha
 
 
+REVIEW_SECS_PER_FILE = 20
+REVIEW_GRACE_SECS = 600
+REVIEW_DEADLINE_DEFAULTS = {"deadline_floor_secs": 900, "deadline_ceiling_secs": 3600}
+REVIEW_DEADLINE_BOUNDS = (60, 14400)
+
+
+def _review_deadline_config(rd):
+    """(floor, ceiling) from config.json `review`; a bad value takes its default."""
+    section = read_config(rd).get("review")
+    section = section if isinstance(section, dict) else {}
+    lo, hi = REVIEW_DEADLINE_BOUNDS
+    values = {}
+    for key, default in REVIEW_DEADLINE_DEFAULTS.items():
+        v = section.get(key)
+        ok = isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+        values[key] = v if ok else default
+    floor = values["deadline_floor_secs"]
+    return floor, max(floor, values["deadline_ceiling_secs"])
+
+
+def _pinned_contract_secs(task):
+    """Summed timeout_secs of the task's pinned contract, or None when the
+    pin, the file, its digest, or its schema cannot be established."""
+    wt, rel, pin = task.get("worktree"), task.get("contract_path"), task.get("contract_sha256")
+    if not all(isinstance(v, str) and v for v in (wt, rel, pin)):
+        return None
+    path = Path(wt) / rel
+    try:
+        if path.is_symlink() or not contained(path, wt) or not path.is_file():
+            return None
+        data = path.read_bytes()
+        rec = json.loads(data)
+    except (OSError, ValueError):
+        return None
+    if hashlib.sha256(data).hexdigest() != pin:
+        return None
+    if validate_contract(rec, task.get("task_id")) is not None:
+        return None
+    return sum(cmd.get("timeout_secs", CONTRACT_DEFAULT_TIMEOUT) for cmd in rec["commands"])
+
+
+def _review_diff_files(task):
+    """Files changed between the base and the dispatched review head, or None."""
+    wt, base, head = task.get("worktree"), task.get("base_sha"), task.get("review_head_sha")
+    if not isinstance(wt, str) or not Path(wt).is_dir():
+        return None
+    if not all(isinstance(s, str) and SHA40_RE.fullmatch(s) for s in (base, head)):
+        return None
+    out = _git(wt, "diff", "--name-only", base, head)
+    if out is None:
+        return None
+    return len([line for line in out.splitlines() if line.strip()])
+
+
+def review_deadline(rd, task, now_ns):
+    """The sized bound for the task's latest native review row.
+
+    Recomputed on every call; an input that cannot be established makes the
+    deadline the ceiling, so a missing input never cuts a review short."""
+    floor, ceiling = _review_deadline_config(rd)
+    contract, files = _pinned_contract_secs(task), _review_diff_files(task)
+    if contract is None or files is None:
+        deadline = ceiling
+    else:
+        deadline = min(ceiling, floor + contract + REVIEW_SECS_PER_FILE * files)
+    hard = deadline + REVIEW_GRACE_SECS
+    row = latest_native_attempt(task, "review")
+    started = row.get("started_ns") if row else None
+    if isinstance(started, int) and not isinstance(started, bool):
+        elapsed = now_ns - started
+        if elapsed < deadline * 1_000_000_000:
+            state, target = "running", deadline
+        elif elapsed < hard * 1_000_000_000:
+            state, target = "overdue", hard
+        else:
+            state, target = "expired", None
+        if target is None:
+            remaining = "0"
+        else:
+            left = started + target * 1_000_000_000 - now_ns
+            remaining = str(max(0, -(-left // 1_000_000_000)))
+    else:
+        state, remaining = "unknown", "unknown"
+    return {"launch": row.get("launch_id") if row else "unknown",
+            "deadline_secs": deadline, "hard_secs": hard,
+            "state": state, "remaining": remaining,
+            "contract": "unknown" if contract is None else contract,
+            "files": "unknown" if files is None else files}
+
+
 CHECKIN_TERMINAL = frozenset({"failed", "abandoned", "merged"})
 _REVIEW_STATES = frozenset({"review-dispatched", "reviewed", "changes-requested"})
 
@@ -2788,7 +2971,10 @@ def checkin_action(f) -> str:
         ("changes-requested", f.get("review_correlates") and not f.get("reviewed")
                               and status != "changes-requested"),
         ("dispatch-review", f.get("dispatch_review")),
-        ("confirm-completion", f.get("completed") and status != "completed"),
+        # A completion at the head already under review is not new work.
+        ("confirm-completion", f.get("completed") and status != "completed"
+                               and not (status in _REVIEW_STATES
+                                        and f.get("review_at_head"))),
         ("confirm-plan", f.get("plan_completed") and not f.get("plan_advanced")),
         ("mech-ledger", f.get("mech_unsettled")),
         # done_outcome is already gated on correlating to the CURRENT attempt
@@ -2907,13 +3093,19 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     plan_completed = bool(head and plan_ws
                           and is_plan_completed(task, done, head, plan_ws, payload_root))
     reviewed = bool(head and rev_ws and is_reviewed(task, review, head, rev_ws))
+    # Clearing review_head_sha (the stale-verdict reset) retires every
+    # earlier verdict, as it already does for is_reviewed.
     review_correlates = bool(
         review and rev_ws and head
+        and task.get("review_head_sha") == head
         and attempt_matches(task, review, "review", rev_ws)
         and review.get("reviewed_head_sha") == head
         and _findings_evidence_ok(review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
+    review_at_head = bool(task.get("review_head_sha") and head
+                          and task["review_head_sha"] == head)
+    done_phase = done.get("phase") if done else None
     mech_unsettled = bool(latest.get("role") == "mech"
                           and status not in CHECKIN_TERMINAL
                           and not _attempt_settled(latest, done))
@@ -2949,7 +3141,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         "poll_ok": poll is not None, "worktree_exists": worktree_exists,
         "completed": completed, "plan_completed": plan_completed,
         "reviewed": reviewed, "review_correlates": review_correlates,
-        "review_stale": review_stale,
+        "review_stale": review_stale, "review_at_head": review_at_head,
         "dispatch_review": bool(head and should_dispatch_review(task, head)),
         "mech_unsettled": mech_unsettled,
         "plan_advanced": any(isinstance(w, dict) and w.get("phase") == "implement"
@@ -2960,9 +3152,9 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # in the core deletes done.json on relaunch.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "done_outcome": (done.get("outcome")
-                         if done and latest
-                         and attempt_matches(task, done, latest.get("phase"),
-                                             latest.get("workspace_id"))
+                         if done and latest and done_phase in DESCENDANT_PHASES
+                         and attempt_matches(task, done, done_phase,
+                                             phase_workspace(task, done_phase))
                          else None),
     }
     facts["action"] = checkin_action(facts)
@@ -3070,9 +3262,9 @@ def _attempt_settled(att, settle):
     """The settlement record covers this exact attempt row.
 
     Compares the FULL ATTEMPT_FIELDS tuple directly against the selected
-    row. Deliberately NOT attempt_matches: its native last-row-phase rule
-    reports a settled implement attempt as unmatched forever once a review
-    row follows it. No legacy field-subset rule here: an identity-less row
+    row. Deliberately NOT attempt_matches: settlement must not depend on
+    later rows, and attempt_matches reports a plan or review attempt as
+    unmatched once any later row follows it. No legacy field-subset rule here: an identity-less row
     would settle vacuously, and binding-scoped write-task only accepts
     native rows anyway -- the caller rejects non-native rows outright."""
     if not isinstance(settle, dict):
@@ -3101,9 +3293,7 @@ def outstanding_descendants(rd, binding_id):
     as terminated. The sentinel is reserved at the writer by _native_worker_row."""
     base = rd / "leads" / binding_id
     panes = set()
-    for tf in payload_files(base / "tasks", "*.json"):
-        if tf.name.endswith((".done.json", ".review.json")):
-            continue
+    for tf in task_record_files(base / "tasks"):
         try:
             task = json.loads(read_payload_text(tf))
         except (OSError, ValueError, RecursionError):
@@ -3523,16 +3713,48 @@ def _main(argv=None) -> int:
             print("owner: stale-fence")
             return 1
         env = dict(os.environ)
-        try:
-            run_herdr(exe, ["pane", "send-text", pane, "/clear"], env=env)
-            run_herdr(exe, ["pane", "send-keys", pane, "enter"], env=env)
-        except Exception as exc:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
-            # Either send may have partly reached the pane; a blind retry could
-            # append a second /clear to a half-typed line.
-            print(f"rollover: delivery unknown ({exc}); do not re-run rollover. Check this "
+
+        def pane_input():
+            time.sleep(ROLLOVER_READ_SETTLE_SECS)
+            try:
+                return current_input(run_herdr(
+                    exe, ["pane", "read", pane, "--source", "detection", "--lines", "40"],
+                    env=env, json_result=False))
+            except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+                return None
+
+        def send(argv, landed, retry):
+            # herdr has returned malformed JSON for a send that landed, so a
+            # failed reply is judged by the input region: resend only when it
+            # proves the send missed, and stop on anything ambiguous.
+            for attempt in (1, 2):
+                try:
+                    run_herdr(exe, argv, env=env)
+                    return True
+                except Exception:  # noqa: BLE001 -- DispatchError lives in a lazily imported module
+                    if attempt == 2:
+                        return False
+                    seen = pane_input()
+                    if seen == landed:
+                        return True
+                    if seen != retry:
+                        return False
+            return False
+
+        if not (send(["pane", "send-text", pane, "/clear"], landed="/clear", retry="")
+                and send(["pane", "send-keys", pane, "enter"], landed="", retry="/clear")):
+            print("rollover: delivery unknown; do not re-run rollover. Check this "
                   "pane's input line: if it shows exactly /clear, press Enter; otherwise "
                   "clear it.", file=sys.stderr)
             return 1
+        seen = pane_input()
+        if seen == "/clear":
+            print(f"rollover: /clear typed but not submitted in pane {pane}; press Enter there",
+                  file=sys.stderr)
+            return 1
+        if seen is None:
+            print(f"rollover: input line not found in pane {pane}; delivery unverified",
+                  file=sys.stderr)
         print(f"rollover: queued /clear for pane {pane}; end this turn now")
         return 0
     if ns.cmd == "write-task":
@@ -5300,9 +5522,8 @@ def _main(argv=None) -> int:
             print(f"poll: failed ({reason})")
         payload_root = state_root().parent
         changed = poll is None
-        for tf in sorted(payload_files(rd / "tasks", "*.json")):
-            if tf.name.endswith((".done.json", ".review.json")):
-                continue
+        now_ns = time.time_ns()
+        for tf in task_record_files(rd / "tasks"):
             try:
                 task = json.loads(read_payload_text(tf))
             except (OSError, ValueError):
@@ -5328,30 +5549,34 @@ def _main(argv=None) -> int:
                   f"head={(f['head'] or 'unknown')[:7]} ahead={f['ahead']} "
                   f"dirty={f['dirty']} done={f['done']} review={f['review']} "
                   f"hint={f['hint']} action={f['action']} wake={f['wake']}")
+            if task.get("status") == "review-dispatched":
+                d = review_deadline(rd, task, now_ns)
+                if d["state"] in ("overdue", "expired"):
+                    print(f"review-overdue {f['task_id']} state={d['state']} "
+                          f"launch={d['launch']} remaining={d['remaining']}")
+                    changed = True
+        due = rollover_due(rd, ns.session)
+        if due:
+            print(f"rollover-due used_pct={due[0]} threshold={due[1]}")
+            changed = True
         print(f"changed: {'yes' if changed else 'no'}")
         return 0
     if ns.cmd == "review-deadlines":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         rd = repo_dir(ns.repo_slug)
         now_ns = time.time_ns()
-        for tf in sorted(payload_files(rd / "tasks", "*.json")):
-            if tf.name.endswith((".done.json", ".review.json")):
-                continue
+        for tf in task_record_files(rd / "tasks"):
             try:
                 task = json.loads(read_payload_text(tf))
             except (OSError, ValueError):
                 continue
             if not isinstance(task, dict) or task.get("status") != "review-dispatched":
                 continue
-            row = latest_native_attempt(task, "review")
-            started = row.get("started_ns") if row else None
-            if isinstance(started, int) and not isinstance(started, bool):
-                left = started + REVIEW_BOUND_NS - now_ns
-                remaining = str(max(0, -(-left // 1_000_000_000)))
-            else:
-                remaining = "unknown"
-            launch = row.get("launch_id") if row else "unknown"
-            print(f"review-deadline task={task.get('task_id')} launch={launch} remaining={remaining}")
+            d = review_deadline(rd, task, now_ns)
+            print(f"review-deadline task={task.get('task_id')} launch={d['launch']} "
+                  f"remaining={d['remaining']} state={d['state']} "
+                  f"deadline_secs={d['deadline_secs']} hard_secs={d['hard_secs']} "
+                  f"basis=contract:{d['contract']},files:{d['files']}")
         return 0
     if ns.cmd == "status":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
@@ -5375,9 +5600,7 @@ def _main(argv=None) -> int:
         totals["usd"] = 0.0
         untracked = 0
         primary = set()
-        for tf in sorted(payload_files(rd / "tasks", "*.json")):
-            if tf.name.endswith((".done.json", ".review.json")):
-                continue
+        for tf in task_record_files(rd / "tasks"):
             try:
                 task = json.loads(read_payload_text(tf))
             except ValueError:

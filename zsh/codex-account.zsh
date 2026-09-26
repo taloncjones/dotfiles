@@ -19,7 +19,7 @@ function codex() {
         command codex -c 'plugins."atlassian@claude-plugins-official".enabled=false' "$@"
         return $?
     fi
-    local target="$PWD" scope kind personal_repository
+    local target="$PWD" scope kind personal_repository cfg
     local arg take_cd=0
     for arg in "$@"; do
         if (( take_cd )); then
@@ -44,7 +44,12 @@ function codex() {
     personal_repository="$(workflow_scope_bool "$scope" personal_repository)" || return 2
     if [[ "$kind" == personal && "$personal_repository" == 1 ]]; then
         command codex -c 'plugins."atlassian@claude-plugins-official".enabled=false' "$@"
-    else
+    elif [[ "$kind" == personal ]]; then
         command codex "$@"
+    else
+        # Match launch_env for headless Codex: account-keyed tools read the
+        # Claude config dir to tell a work session from a personal one.
+        cfg="$(workflow_scope_field "$scope" account_root)" || return 2
+        CLAUDE_CONFIG_DIR="$cfg" command codex "$@"
     fi
 }

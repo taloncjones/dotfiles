@@ -23,10 +23,23 @@
 #   todos.sh share                      stop ignoring .todos/ (commit in this repo)
 #   todos.sh path                       print the .todos/ directory path
 #   todos.sh dashboard [--open] [--online] [--out PATH] [--completed N]   render the HTML board
+#   todos.sh sync                       commit, pull and push a store-backed .todos
+#   todos.sh import <dir>               merge a directory of todos in (newest wins)
+#
+# Store mode: when .todos resolves into a separate git repository that opted
+# in with `git config todos.store true`, verbs lock that repository, commit,
+# pull and push it. Only the personal Claude config may use it: with
+# CLAUDE_CONFIG_DIR set to another config dir, store-backed verbs refuse and
+# `brief` skips the repo.
 
 set -euo pipefail
 
 TODOS_DIRNAME=".todos"
+TODOS_SCRIPT="${BASH_SOURCE[0]}"
+TODOS_HELPER="$(cd "$(dirname "$TODOS_SCRIPT")" && pwd)/todos_store.py"
+STORE_REPO=""
+STORE_SYNC=1
+STORE_PUSH=1
 
 today() { printf '%s\n' "${TODOS_TODAY:-$(date +%Y-%m-%d)}"; }
 
@@ -374,6 +387,187 @@ join_refs() {
     END { printf "%s", out }'
 }
 
+# --- store-backed .todos ----------------------------------------------------
+
+personal_env() {
+  local cfg="${CLAUDE_CONFIG_DIR:-}"
+  [ -z "$cfg" ] || [ "$(canon "$cfg")" = "$(canon "$HOME/.claude")" ]
+}
+
+store_linked_repo_of() {
+  # store_linked_repo_of <repo-root> -> toplevel of another repository
+  # holding <repo-root>/.todos, or nothing when .todos is local. Ignores
+  # todos.store: a misconfigured or freshly re-cloned store that never set
+  # that key must still gate work-account access (CR-3).
+  local root="$1" dir top own theirs
+  dir=$(cd -P "$root/$TODOS_DIRNAME" 2>/dev/null && pwd) || return 0
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 0
+  own=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  theirs=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  [ "$(canon "$own")" != "$(canon "$theirs")" ] || return 0
+  printf '%s\n' "$top"
+}
+
+store_repo_of() {
+  # store_repo_of <repo-root> -> toplevel of the opted-in store holding
+  # <repo-root>/.todos, or nothing when .todos is local or not opted in.
+  local root="$1" top
+  top=$(store_linked_repo_of "$root")
+  [ -n "$top" ] || return 0
+  [ "$(git -C "$top" config --bool todos.store 2>/dev/null)" = true ] || return 0
+  printf '%s\n' "$top"
+}
+
+store_setup() {
+  # Sets STORE_REPO; dies on a dangling link or outside the personal config.
+  local root linked; root=$(repo_root)
+  if [ -L "$root/$TODOS_DIRNAME" ] && [ ! -e "$root/$TODOS_DIRNAME" ]; then
+    die ".todos link target is missing; rerun the dotfiles installer"
+  fi
+  linked=$(store_linked_repo_of "$root")
+  [ -z "$linked" ] || personal_env || die ".todos is not available under this account"
+  STORE_REPO=$(store_repo_of "$root")
+}
+
+store_dir() { (cd -P "$(repo_root)/$TODOS_DIRNAME" && pwd); }
+
+store_gitdir() { git -C "$STORE_REPO" rev-parse --path-format=absolute --git-dir; }
+
+sync_warn() { printf 'todos: sync skipped: %s\n' "$1" >&2; }
+
+store_git_net() {
+  # store_git_net <git args...>: one bounded network call in the store.
+  local base to
+  base="${GIT_SSH_COMMAND:-}"
+  [ -n "$base" ] || base=$(git -C "$STORE_REPO" config core.sshCommand 2>/dev/null || true)
+  [ -n "$base" ] || base=ssh
+  to=$(command -v timeout || command -v gtimeout || true)
+  if [ -n "$to" ]; then
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$base -o BatchMode=yes -o ConnectTimeout=5" \
+      "$to" --kill-after=2 "${TODOS_SYNC_TIMEOUT:-10}s" git -C "$STORE_REPO" "$@"
+  else
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$base -o BatchMode=yes -o ConnectTimeout=5" \
+      git -C "$STORE_REPO" "$@"
+  fi
+}
+
+store_pull() {
+  # Fetch, then rebase local commits onto the upstream inside the marker.
+  # 1 means the caller must skip its push.
+  local gd head orig rc=0
+  git -C "$STORE_REPO" rev-parse --verify --quiet '@{u}' >/dev/null 2>&1 \
+    || { sync_warn "no upstream"; return 1; }
+  store_git_net fetch --quiet >/dev/null 2>&1 || { sync_warn "fetch failed"; return 1; }
+  gd=$(store_gitdir); head=$(git -C "$STORE_REPO" rev-parse HEAD)
+  printf '%s\n' "$head" >"$gd/todos-rebase"
+  git -C "$STORE_REPO" rebase --quiet --autostash '@{u}' >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    orig=$(cat "$gd/rebase-merge/orig-head" 2>/dev/null || cat "$gd/rebase-apply/orig-head" 2>/dev/null || true)
+    # Abort only the rebase this run started; one that never began is not ours.
+    if [ "$orig" = "$head" ]; then git -C "$STORE_REPO" rebase --abort >/dev/null 2>&1 || true; fi
+    rm -f "$gd/todos-rebase"
+    sync_warn "store diverged; resolve in $STORE_REPO"
+    return 1
+  fi
+  rm -f "$gd/todos-rebase"
+}
+
+store_push() {
+  local ahead
+  ahead=$(git -C "$STORE_REPO" rev-list --count '@{u}..HEAD' 2>/dev/null || printf '0')
+  [ "$ahead" -gt 0 ] || return 0
+  store_git_net push --quiet >/dev/null 2>&1 && return 0
+  store_pull || return 0
+  store_git_net push --quiet >/dev/null 2>&1 || sync_warn "push failed; commits stay in $STORE_REPO"
+}
+
+store_list_sync() {
+  # list pulls under the lock when it can get it; a busy lock only warns.
+  command -v python3 >/dev/null 2>&1 || { sync_warn "python3 is missing"; return 0; }
+  local lock rc=0
+  lock="$(git -C "$STORE_REPO" rev-parse --path-format=absolute --git-common-dir)/todos-sync.lock"
+  TODOS_STORE_LOCKED=1 python3 "$TODOS_HELPER" lock "$lock" "${TODOS_LOCK_WAIT:-10}" \
+    -- bash "$TODOS_SCRIPT" _pull || rc=$?
+  [ "$rc" -ne 75 ] || sync_warn "store is busy"
+}
+
+store_locked() {
+  # Re-run this invocation under the store lock unless already inside it.
+  [ -z "${TODOS_STORE_LOCKED:-}" ] || return 0
+  command -v python3 >/dev/null 2>&1 || die "a store-backed .todos needs python3"
+  local lock rc=0
+  lock="$(git -C "$STORE_REPO" rev-parse --path-format=absolute --git-common-dir)/todos-sync.lock"
+  TODOS_STORE_LOCKED=1 python3 "$TODOS_HELPER" lock "$lock" "${TODOS_LOCK_WAIT:-10}" \
+    -- bash "$TODOS_SCRIPT" "${TODOS_ARGV[@]}" || rc=$?
+  [ "$rc" -ne 75 ] || die "store is busy"
+  exit "$rc"
+}
+
+store_repair() {
+  # 0 when git steps may run. Aborts only a rebase whose orig-head matches
+  # the oid this script wrote to the marker; a stale marker is just removed.
+  local gd marker orig=""
+  gd=$(store_gitdir) || return 1
+  if [ -e "$gd/index.lock" ]; then sync_warn "git index is locked ($gd/index.lock)"; return 1; fi
+  if [ -e "$gd/todos-rebase" ]; then
+    marker=$(cat "$gd/todos-rebase" 2>/dev/null || true)
+    if [ -f "$gd/rebase-merge/orig-head" ]; then orig=$(cat "$gd/rebase-merge/orig-head"); fi
+    if [ -f "$gd/rebase-apply/orig-head" ]; then orig=$(cat "$gd/rebase-apply/orig-head"); fi
+    if [ -n "$marker" ] && [ "$orig" = "$marker" ]; then
+      git -C "$STORE_REPO" rebase --abort >/dev/null 2>&1 || true
+      printf 'todos: aborted an interrupted sync rebase\n' >&2
+    fi
+    rm -f "$gd/todos-rebase"
+  fi
+  if [ -n "$(git -C "$STORE_REPO" ls-files -u 2>/dev/null)" ]; then
+    sync_warn "unresolved conflict in $STORE_REPO; finish it and check git stash list"; return 1
+  fi
+  if [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ] || [ -e "$gd/MERGE_HEAD" ]; then
+    sync_warn "rebase or merge in progress in $STORE_REPO"; return 1
+  fi
+}
+
+store_commit_stray() {
+  # Commit stray edits one file per commit; 1 when a .todos path stays
+  # uncommitted (a refused commit), which stops this run's pull and push.
+  local left
+  python3 "$TODOS_HELPER" commit-each "$STORE_REPO" "$(store_dir)" && return 0
+  left=$(git -C "$STORE_REPO" status --porcelain --untracked-files=all -- "$(store_dir)" | head -1 | cut -c4- | sed 's|^.*\.todos/||')
+  sync_warn "uncommitted ${left:-changes under .todos}"
+  return 1
+}
+
+store_commit_paths() {
+  # store_commit_paths <message> <abs path>...: commit only these paths.
+  local msg="$1" dir; shift
+  dir=$(store_dir)
+  git -C "$STORE_REPO" add -A -- "$@" >/dev/null 2>&1 || true
+  git -C "$STORE_REPO" diff --cached --quiet -- "$@" && return 0
+  if ! git -C "$STORE_REPO" commit --quiet -m "$msg" -- "$@" >/dev/null 2>&1; then
+    git -C "$STORE_REPO" reset -q -- "$@" >/dev/null 2>&1 || true
+    sync_warn "commit refused for $(printf '%s\n' "$@" | sed "s|^$dir/||" | paste -sd' ' -)"
+    return 1
+  fi
+}
+
+store_begin() {
+  # Under the lock: repair, commit stray edits one file at a time, pull.
+  STORE_SYNC=1; STORE_PUSH=1
+  store_repair || { STORE_SYNC=0; return 0; }
+  store_commit_stray || { STORE_PUSH=0; return 0; }
+  if [ -n "${TODOS_OFFLINE:-}" ]; then STORE_PUSH=0; return 0; fi
+  store_pull || STORE_PUSH=0
+}
+
+store_end() {
+  # store_end <message> [<abs path>...]: commit the verb's own paths, push.
+  [ -n "$STORE_REPO" ] && [ "$STORE_SYNC" = 1 ] || return 0
+  local msg="$1"; shift
+  [ "$#" -eq 0 ] || store_commit_paths "$msg" "$@" || true
+  [ "$STORE_PUSH" = 1 ] || return 0
+  store_push
+}
+
 ensure_init() {
   local root pending completed
   root=$(repo_root)
@@ -395,6 +589,7 @@ ensure_init() {
 }
 
 cmd_init() {
+  store_setup
   ensure_init
   local root; root=$(repo_root)
   printf 'Initialized %s/%s/ (local-only; run `todos.sh share` to commit it here)\n' "$root" "$TODOS_DIRNAME"
@@ -415,6 +610,8 @@ cmd_new() {
       *) die "unknown flag for new: $1" ;;
     esac
   done
+  store_setup
+  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
 
   [ -z "$due" ]     || validate_date "$due"     || die "invalid --due (need calendar YYYY-MM-DD): $due"
   [ -z "$surface" ] || validate_date "$surface" || die "invalid --surface (need calendar YYYY-MM-DD): $surface"
@@ -471,6 +668,10 @@ cmd_new() {
   } >"$file"
 
   regenerate_index
+  # A generic message, not the slug: a todo title can trip the global
+  # commit-msg banned-phrase filter, and a refused commit here would
+  # otherwise wedge every later sync as long as the file stays uncommitted.
+  store_end "todos: new" "$(store_dir)/pending/$cand.md"
   printf '%s\n' "$file"
 }
 
@@ -511,6 +712,10 @@ cmd_list() {
   DEPS_CACHE=$(mktemp)
   # shellcheck disable=SC2064
   trap "rm -f '$DEPS_CACHE'" RETURN
+  store_setup
+  if [ -n "$STORE_REPO" ] && [ "$DEPS_OFFLINE" = 0 ] && [ -z "${TODOS_OFFLINE:-}" ]; then
+    store_list_sync
+  fi
   local root; root=$(repo_root)
   list_dir "$root/$TODOS_DIRNAME/pending" "pending" 1
   [ "$all" -eq 1 ] && list_dir "$root/$TODOS_DIRNAME/completed" "completed" 0
@@ -567,6 +772,9 @@ cmd_ready() {
   esac
   root=$(git rev-parse --show-toplevel 2>/dev/null) \
     || { ready_error "$task_id" missing_repository; return 2; }
+  if [ -n "$(store_linked_repo_of "$root")" ] && ! personal_env; then
+    ready_error "$task_id" out_of_scope; return 2
+  fi
   target="$root/$TODOS_DIRNAME/pending/$task_id.md"
   if [ ! -f "$target" ] || [ ! -r "$target" ] || [ -L "$target" ] \
     || [ -e "$root/$TODOS_DIRNAME/completed/$task_id.md" ]; then
@@ -589,6 +797,8 @@ cmd_ready() {
 cmd_done() {
   [ "$#" -ge 1 ] || die "done requires a slug or substring"
   local query="$1"
+  store_setup
+  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
   local root pending completed
   root=$(repo_root)
   pending="$root/$TODOS_DIRNAME/pending"
@@ -599,6 +809,8 @@ cmd_done() {
   mkdir -p "$completed"
   mv "$f" "$completed/$(basename "$f")"
   regenerate_index
+  store_end "todos: done" \
+    "$(store_dir)/pending/$(basename "$f")" "$(store_dir)/completed/$(basename "$f")"
   printf 'done: %s\n' "$(basename "$f")"
 }
 
@@ -606,6 +818,8 @@ cmd_depend() {
   [ "$#" -ge 1 ] || die "depend requires a slug or substring"
   local query="$1"; shift
   [ "$#" -ge 1 ] || die "depend requires at least one ref"
+  store_setup
+  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
   local target base refs=() ref d
   target=$(find_pending "$query") || exit 1
   base=$(basename "$target" .md)
@@ -616,6 +830,7 @@ cmd_depend() {
   done
   add_depends "$target" "${refs[@]}"
   regenerate_index
+  store_end "todos: depend" "$(store_dir)/pending/$base.md"
   printf '%s\n' "$target"
 }
 
@@ -672,9 +887,57 @@ regenerate_index() {
   mv "$tmp" "$index"
 }
 
-cmd_index() { regenerate_index; printf 'regenerated %s/%s/TODO.md\n' "$(repo_root)" "$TODOS_DIRNAME"; }
+cmd_index() {
+  store_setup
+  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
+  regenerate_index
+  store_end "todos: index"
+  printf 'regenerated %s/%s/TODO.md\n' "$(repo_root)" "$TODOS_DIRNAME"
+}
+
+cmd_sync() {
+  store_setup
+  if [ -z "$STORE_REPO" ]; then printf 'todos: .todos is local; nothing to sync\n'; return 0; fi
+  store_locked; store_begin
+  regenerate_index
+  store_end "todos: sync"
+  printf 'synced %s\n' "$STORE_REPO"
+}
+
+cmd_pull_locked() {
+  # Internal (list): repair, stray commits, pull; regenerate TODO.md on change.
+  local before
+  store_setup
+  [ -n "$STORE_REPO" ] || return 0
+  store_repair || return 0
+  store_commit_stray || return 0
+  before=$(git -C "$STORE_REPO" rev-parse HEAD 2>/dev/null || true)
+  store_pull || true
+  [ "$(git -C "$STORE_REPO" rev-parse HEAD 2>/dev/null || true)" = "$before" ] || regenerate_index
+}
+
+cmd_import() {
+  [ "$#" -eq 1 ] || die "import requires one directory"
+  [ -d "$1" ] || die "not a directory: $1"
+  local src rc=0
+  src=$(canon "$1")
+  store_setup
+  if [ -n "$STORE_REPO" ]; then store_locked; store_begin; fi
+  ensure_init
+  if [ -n "$STORE_REPO" ] && [ "$STORE_SYNC" = 1 ]; then
+    python3 "$TODOS_HELPER" import "$src" "$(store_dir)" --commit-repo "$STORE_REPO" || rc=$?
+  else
+    python3 "$TODOS_HELPER" import "$src" "$(repo_root)/$TODOS_DIRNAME" || rc=$?
+  fi
+  regenerate_index
+  store_end "todos: import"
+  if [ -n "$STORE_REPO" ] && [ "$STORE_SYNC" != 1 ]; then rc=1; fi
+  return "$rc"
+}
 
 cmd_share() {
+  store_setup
+  [ -z "$STORE_REPO" ] || die ".todos is stored in a separate repository; share does not apply"
   local excl tmp root
   root=$(repo_root)
   excl=$(exclude_file)
@@ -689,7 +952,13 @@ cmd_share() {
   printf '%s/ is no longer git-ignored in this repo; it will be committed when you `git add` it.\n' "$TODOS_DIRNAME"
 }
 
-cmd_path() { printf '%s/%s\n' "$(repo_root)" "$TODOS_DIRNAME"; }
+cmd_path() {
+  local root; root=$(repo_root)
+  if [ -n "$(store_linked_repo_of "$root")" ] && ! personal_env; then
+    die ".todos is not available under this account"
+  fi
+  printf '%s/%s\n' "$root" "$TODOS_DIRNAME"
+}
 
 # Emit one tab-separated row or nothing. Row: bucket \t pw \t sortkey \t name \t title \t when \t priority
 process_todo() {
@@ -814,6 +1083,7 @@ cmd_brief() {
   local rows; rows=$(mktemp)
   # shellcheck disable=SC2064
   trap "rm -f '$rows'" RETURN
+  local personal=1; personal_env || personal=0
   local line repo name pend f seen=""
   while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
@@ -821,6 +1091,7 @@ cmd_brief() {
     case "$seen" in *"|$repo|"*) continue ;; esac
     seen="$seen|$repo|"
     [ -d "$repo" ] || { printf 'todos: registered repo missing: %s\n' "$repo" >&2; continue; }
+    if [ "$personal" = 0 ] && [ -n "$(store_linked_repo_of "$repo")" ]; then continue; fi
     pend="$repo/$TODOS_DIRNAME/pending"
     [ -d "$pend" ] || continue
     name=$(basename "$repo")
@@ -861,7 +1132,8 @@ cmd_repos() {
 }
 
 main() {
-  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|ready|done|depend|index|share|path|register|repos|brief|today} ..."
+  [ "$#" -ge 1 ] || die "usage: todos.sh {init|new|list|ready|done|depend|index|share|path|register|repos|brief|today|sync|import} ..."
+  TODOS_ARGV=("$@")
   local cmd="$1" ref; shift
   case "$cmd" in
     init)     cmd_init "$@" ;;
@@ -873,7 +1145,10 @@ main() {
     index)    cmd_index "$@" ;;
     share)    cmd_share "$@" ;;
     path)     cmd_path "$@" ;;
-    dashboard) exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_dashboard.py" "$@" ;;
+    sync)     cmd_sync "$@" ;;
+    import)   cmd_import "$@" ;;
+    _pull)    cmd_pull_locked ;;
+    dashboard) store_setup; exec python3 "$(dirname "${BASH_SOURCE[0]}")/todos_dashboard.py" "$@" ;;
     today)    today ;;
     register) cmd_register "$@" ;;
     repos)    cmd_repos "$@" ;;

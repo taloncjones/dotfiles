@@ -113,6 +113,7 @@ sh install/codex-stop-hook.test.sh
 sh install/ai-update.test.sh
 sh .claude/skills/dotfiles-diagnostics-and-tooling/scripts/symlink-audit.test.sh
 sh install/repo-sync.test.sh
+sh install/personal-store.test.sh
 sh claude/hooks/settings-drift-check.test.sh
 "
 

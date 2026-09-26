@@ -90,7 +90,10 @@ both fully retired: their install/update entry points are removed, and each
 one's uninstall function is the only surviving retired-plugin-named
 function, for sweeping leftovers (plugin registration, staged Codex copy or
 repo clone, cache stamp; see "Post-merge operator steps" below for the exact
-command). ECC's
+command); since 2026-09-24 every `update`/`update --ai` removes the Claude
+registration itself (`sweep_retired_claude_plugins`), so the uninstall
+functions are only needed for Codex copies, source checkouts and legacy
+vendored files. ECC's
 language-rules vendoring was retired earlier still (2026-07-02) -- any
 leftover `claude/rules/` language dirs from an older machine are inert and
 should be deleted by hand; only `claude/rules/personal/` is tracked (our
@@ -102,7 +105,7 @@ After the settings/installer retirement lands, in order, on a machine that
 still has a retired plugin installed:
 
 ```bash
-update --ai            # 1. reconcile settings so the plugin is forced off
+update --ai            # 1. removes retired plugin registrations and their settings keys
 reload                  # 2. new shell: `update` runs in a subprocess and
                          #    never redefines the calling shell's functions
 superpowers-uninstall   # 3. remove Superpowers from Claude, Codex and disk
@@ -110,6 +113,11 @@ superpowers-uninstall   # 3. remove Superpowers from Claude, Codex and disk
 
 Then start a fresh session and confirm the retired `superpowers:` skill
 prefix lists nothing -- the plugin should be gone entirely.
+
+A pruned registry keeps a `plugins/installed_plugins.json.bak-retired-*`
+copy. To restore, copy only the retired plugin id's record list back into
+the live file. Restoring the whole file reverts every other plugin's later
+changes.
 
 ### Staleness nag and cache stamps (retired)
 

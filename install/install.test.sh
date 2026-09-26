@@ -76,5 +76,10 @@ assert "macOS Brewfile installs zed cask" \
 assert "macOS Brewfile installs node for agent adapters" \
     rg -q 'brew "node"' install/macos/Brewfile.rb
 
+assert "link.sh runs the private store step without aborting the install" \
+    rg -q -F 'bash "$DOTFILEDIR"/install/common/exocortex.sh install || echo "[WARNING]' install/common/link.sh
+assert "cloud bootstrap never runs the private store step" \
+    sh -c "! rg -q -i exocortex bootstrap-cloud.sh"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

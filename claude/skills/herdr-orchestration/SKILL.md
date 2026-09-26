@@ -293,9 +293,12 @@ for the provider's `launch_env` mapping.
 
 ## 1a. Rollover in place
 
-Roll over when the human asks, or when this session's context is heavy
-enough that the next few check-ins would crowd it. (The automatic
-context-fill threshold is tracked separately and is not implemented here.)
+Roll over when the human asks, or when a check-in prints
+`rollover-due used_pct=<n> threshold=<t>`. That line comes from the host's
+own context reading (the statusline records it per session; `config.json`
+`rollover_pct`, default 45, sets the threshold); never estimate the fill
+yourself and never write the record. On `rollover-due`, write that pass's
+transitions, start no kickoff or dispatch in the same turn, then roll over.
 
 1. Finish or park the current action. Never roll over mid-kickoff or
    mid-dispatch.
@@ -305,18 +308,23 @@ context-fill threshold is tracked separately and is not implemented here.)
    restate them. Task state is already on disk; do not restate it.
 3. Run, as the LAST tool call of the turn:
    `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence>`
-4. End the turn. The verb typed `/clear` into this pane; it runs when the
-   turn ends. If the verb reports that `/clear` was typed but Enter failed,
-   say so; the human presses Enter or clears the input.
-5. In the fresh context, the `director_rollover` SessionStart hook has
-   already re-claimed the lease under the new session id and printed an
-   `[INFO] herdr director rollover` block with the fence and the watch
-   state. Follow its `Next:` line: load this skill, use the printed fence,
-   skip the initial-claim-only steps (workspace label, `dashboard --open`),
-   and run a section-4 check-in before any dispatch.
+4. End the turn. The verb typed `/clear` into this pane and read the input line back; it runs when the
+   turn ends. If the verb exits 1, say what it printed; the human presses
+   Enter or clears the input.
+5. In the fresh context, the `director_rollover` SessionStart hook has already
+   re-claimed the lease under the new session id, printed an `[INFO] herdr
+director rollover` block with the fence and the watch state, and started
+   a helper that sends one `resume director` line into this pane once it is
+   idle (the block's `auto-resume:` line says so). That line is your first
+   turn: follow the block's `Next:` line. Follow its `Next:` line: load this
+   skill, use the printed fence, skip the initial-claim-only steps
+   (workspace label, `dashboard --open`), and run a section-4 check-in
+   before any dispatch.
 6. If the block is a `[WARNING]`, or no block appears, run section 1
    preflight. Its `claim-owner` adopts the lease the same way; on `BUSY`,
-   stop and ask the human.
+   stop and ask the human. If no `resume director` line arrives within two minutes, the
+   human types it after checking the pane shows no earlier one; the helper's
+   outcome is in `<slug>/rollover.jsonl`.
 
 No handoff record, second pane, `/exit`, or `--stale-secs` wait is part of
 a director rollover.
@@ -688,7 +696,9 @@ Each `action` names the transition still to be written: `confirm-completion`,
 `stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
 `mech-ledger`, `paused`, `failed`. An action fires only while that transition
 is unrecorded, so a settled task reports `none` instead of re-reporting its
-evidence forever.
+evidence forever. Two non-task lines
+also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
+and `rollover-due ...` (section 1a).
 
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
@@ -968,6 +978,10 @@ designated agent. Never read a helper's idle state as review completion,
 and never accept a verdict from a pane other than the dispatched one (the
 record's `emitter_pane_id` is the audit field; `emit-review` itself exits 3
 for a foreign or missing pane).
+A headless `--permission-mode plan` child is not write enforcement: it still
+runs allowlisted Bash (for example `python3`) when a hook or prompt tells it
+to, so only the bounded-child marker and the pane-bound emit guard keep a
+helper from publishing.
 
 1. Verify: branch exists, HEAD is ahead of base, worktree is clean. Capture the
    HEAD SHA as the intended `review_head_sha`.
@@ -987,11 +1001,16 @@ for a foreign or missing pane).
    block any result whose `ready` field remains false. Set the
    workspace index to `role: review`; preserve implementation completion and
    record `review_head_sha`. Set `review-dispatched` only when dispatch is
-   accepted. A failed attempt is visible and retryable. The active coordinator
-   establishes the exact review deadline as this persisted native row's
-   `started_ns + 600_000_000_000` (600 seconds), keyed by `launch_id`; it
-   recomputes that value after a coordinator restart rather than adding a second
-   state field. This is the `600-second deadline`. Refresh both agent and
+   accepted. A failed attempt is visible and retryable. The active coordinator reads the review's `sized review deadline` from
+   `review-deadlines`: `deadline_secs` is the floor (900 s) plus the pinned
+   contract's summed `timeout_secs` plus 20 s per changed file, capped at the
+   ceiling (3600 s), and is the ceiling whenever an input cannot be read;
+   `hard_secs` adds a 600 s grace. Both are measured from this native row's
+   `started_ns`, keyed by `launch_id`, and recomputed on every call, so a
+   coordinator restart needs no extra state field. `config.json`
+   `review.deadline_floor_secs` / `review.deadline_ceiling_secs` override
+   the floor and ceiling.
+   Refresh both agent and
    workspace display metadata.
 
    **Deadline timer.** Right after the dispatch, and at every preflight,
@@ -1000,7 +1019,9 @@ for a foreign or missing pane).
    `Bash run_in_background` timer running `sleep <remaining + 30>`; for
    `remaining=0` or `remaining=unknown`, run the check-in now instead. The
    timer's exit runs the check-in, which enforces step 6's bound. On
-   yielding ownership, TaskStop these timers.
+   yielding ownership, TaskStop these timers. A `running` line's `remaining`
+   counts to the deadline and an `overdue` line's to the hard bound; re-arm
+   after each firing while the state is `running` or `overdue`.
 
 4. **Jira writeback** (kind == `"jira"` only): on successful dispatch,
    transition the ticket to In Review -- see section 10.
@@ -1037,20 +1058,40 @@ for a foreign or missing pane).
 6. At every coordinator check-in while `review-dispatched`, enforce the bound
    before reading a verdict. Resolve the latest `phase: review` native row and
    require its task, workspace, launch, agent, pane, source HEAD, and
-   `review_head_sha` to match the dispatched attempt. If no exact accepted
-   review record exists at `started_ns + 600_000_000_000`, interrupt only that
-   agent: `herdr agent send-keys <recorded-agent> esc`, then
-   `herdr agent prompt <recorded-agent> /exit --wait --timeout 10000`. Wait at
-   most 10 seconds for that named agent; if it remains live, re-check the tuple
-   and run `herdr pane close <recorded-pane>`. Never use `release-agent` as an
-   interrupt and never close the workspace. Use `$CORE write-task` to carry the
-   full task record forward with `status: changes-requested`, report `review incomplete: 600-second
-deadline, <launch_id>`, and never fabricate a review record, blocker count,
-   or approval. A late sidecar cannot change that non-approved status. Herd's
-   interactive start timeout bounds startup, not a running agent turn; exact-pane
-   close is the controller's available interruption. If it cannot confirm the
-   agent settled after close, report the detached-process risk and do not
-   relaunch or surface readiness until reconciliation.
+   `review_head_sha` to match the dispatched attempt. Read its line from
+   `review-deadlines` (the check-in also prints `review-overdue` for it).
+   Before any interrupt, re-read `tasks/<task_id>.review.json`: an exact
+   accepted review record for this attempt means read that verdict below and
+   do not interrupt.
+   - `running`: nothing to do.
+   - `overdue` with the recorded agent `working`: tell the user the review is
+     past its sized deadline and re-arm the timer; do not interrupt.
+   - `overdue` with the recorded agent idle or absent, or `expired`: interrupt
+     only that agent: `herdr agent send-keys <recorded-agent> esc`, then
+     `herdr agent prompt <recorded-agent> /exit --wait --timeout 10000`. Wait
+     at most 10 seconds for that named agent; if it remains live, re-check the
+     tuple and run `herdr pane close <recorded-pane>`. Never use
+     `release-agent` as an interrupt and never close the workspace. Herd's
+     interactive start timeout bounds startup, not a running agent turn;
+     exact-pane close is the controller's available interruption. Confirm the
+     agent settled (the recorded agent and pane are gone). If you cannot,
+     report the detached-process risk, leave the task `review-dispatched`,
+     and do not relaunch, reset, or surface readiness until reconciliation;
+     the next check-in repeats `review-overdue`. Once settled, re-read the
+     review record (a verdict that landed during the interrupt wins), and
+     only then use `$CORE write-task` to carry the full task record forward
+     with `status: changes-requested`, report `review incomplete: sized
+review deadline, <launch_id>`, and never fabricate a review record,
+     blocker count, or approval. A late sidecar cannot change that
+     non-approved status.
+   - After that write, ask with `AskUserQuestion`:
+     "Re-dispatch the review at <sha> (Recommended)" applies the
+     stale-verdict reset (`status: completed`, `review_head_sha: null`) with
+     `write-task` and continues with this section's dispatch; "Leave for
+     repair" changes nothing. The answer is not stored: ask again whenever
+     you report on a task that is `changes-requested` at an unchanged HEAD
+     with no correlating record for its latest review row, until the human
+     picks re-dispatch or the HEAD moves.
 
    Otherwise read the reviewer's completion record.
 
@@ -1511,24 +1552,24 @@ The "Event" column below names the conceptual transition, not an emitted
 row's transition is committed solely by a `python3 "$CORE" write-task` call that sets
 the new `status`; that write is the authoritative record.
 
-| From                                         | Evidence / trigger                                                                                                                 | Event                                          | To                      | Terminal? |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------- | --------- |
-| (none)                                       | kickoff (raw item -> plan phase; plan-ready -> implement)                                                                          | `kickoff`                                      | in-progress             | no        |
-| in-progress                                  | live `blocked` (the hint alone is not evidence: `fold_status` returns the last hint ever seen, with no timestamp)                  | `blocked`                                      | blocked                 | no        |
-| blocked                                      | live no longer blocked                                                                                                             | (recheck; `checkin` reports `unblocked`)       | in-progress             | no        |
-| in-progress (plan phase)                     | `confirm-plan` + private artifact hashes + current attempt                                                                         | `phase-advance` (launch implement, section 2a) | in-progress (implement) | no        |
-| in-progress/blocked (implement)              | correlated `done.json` `phase: implement` completed + git ahead                                                                    | `completed`                                    | completed               | no        |
-| in-progress (mech)                           | ledger `end` + `done.json` `paused` for the live launch                                                                            | `paused`                                       | in-progress             | no        |
-| in-progress (mech)                           | ledger `end` + `done.json` `failed` (branch not usable)                                                                            | `failed`                                       | failed                  | yes       |
-| in-progress/blocked                          | Stop hint + no done.json + no commits                                                                                              | `paused`                                       | in-progress             | no        |
-| in-progress/blocked                          | Stop hint + `outcome: failed` or errored, no usable branch                                                                         | `failed`                                       | failed                  | yes       |
-| in-progress/blocked/completed                | workspace+worktree gone, no completion                                                                                             | `abandoned`                                    | abandoned               | yes       |
-| completed                                    | human/orch dispatch (guard: not already dispatched for this `review_head_sha`)                                                     | `review-dispatched`                            | review-dispatched       | no        |
-| review-dispatched                            | exact review evidence at dispatched/live HEAD: `outcome: changes-requested`, blockers, or incomplete evidence (including deadline) | `changes-requested`                            | changes-requested       | no        |
-| review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                             | `reviewed`                                     | reviewed                | no        |
-| review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                 | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
-| changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                       | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | human merges; `/post-merge`                                                                                                        | `merged`                                       | merged                  | yes       |
+| From                                         | Evidence / trigger                                                                                                                                                                                     | Event                                          | To                      | Terminal? |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- | ----------------------- | --------- |
+| (none)                                       | kickoff (raw item -> plan phase; plan-ready -> implement)                                                                                                                                              | `kickoff`                                      | in-progress             | no        |
+| in-progress                                  | live `blocked` (the hint alone is not evidence: `fold_status` returns the last hint ever seen, with no timestamp)                                                                                      | `blocked`                                      | blocked                 | no        |
+| blocked                                      | live no longer blocked                                                                                                                                                                                 | (recheck; `checkin` reports `unblocked`)       | in-progress             | no        |
+| in-progress (plan phase)                     | `confirm-plan` + private artifact hashes + current attempt                                                                                                                                             | `phase-advance` (launch implement, section 2a) | in-progress (implement) | no        |
+| in-progress/blocked (implement)              | correlated `done.json` `phase: implement` completed + git ahead                                                                                                                                        | `completed`                                    | completed               | no        |
+| in-progress (mech)                           | ledger `end` + `done.json` `paused` for the live launch                                                                                                                                                | `paused`                                       | in-progress             | no        |
+| in-progress (mech)                           | ledger `end` + `done.json` `failed` (branch not usable)                                                                                                                                                | `failed`                                       | failed                  | yes       |
+| in-progress/blocked                          | Stop hint + no done.json + no commits                                                                                                                                                                  | `paused`                                       | in-progress             | no        |
+| in-progress/blocked                          | Stop hint + `outcome: failed` or errored, no usable branch                                                                                                                                             | `failed`                                       | failed                  | yes       |
+| in-progress/blocked/completed                | workspace+worktree gone, no completion                                                                                                                                                                 | `abandoned`                                    | abandoned               | yes       |
+| completed                                    | human/orch dispatch (guard: not already dispatched for this `review_head_sha`)                                                                                                                         | `review-dispatched`                            | review-dispatched       | no        |
+| review-dispatched                            | exact review evidence at dispatched/live HEAD: `outcome: changes-requested`, blockers, or incomplete evidence (including a sized-review-deadline stop, then the section 5 step 6 re-dispatch question) | `changes-requested`                            | changes-requested       | no        |
+| review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
+| review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
+| changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
+| reviewed                                     | human merges; `/post-merge`                                                                                                                                                                            | `merged`                                       | merged                  | yes       |
 
 `blocked` is a durable status here (the hint `blocked` drives it); there is
 no overlap between `failed` (errored, no usable branch) and `abandoned`

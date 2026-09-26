@@ -1,12 +1,15 @@
 """Hermetic handoff tests: subprocess CLI, private fixtures, no model calls."""
 
+import fcntl
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +18,15 @@ from unittest.mock import patch
 SCRIPT = Path(__file__).resolve().parents[1] / "handoff.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import handoff
+
+
+def tree(root: Path) -> dict:
+    """Map each path under root to its bytes (None for directories), skipping the archive lock."""
+    return {
+        str(path.relative_to(root)): None if path.is_dir() else path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.name != ".archive.lock"
+    }
 
 
 class HandoffTests(unittest.TestCase):
@@ -760,6 +772,165 @@ class HandoffTests(unittest.TestCase):
         for extra, pattern in cases:
             with self.assertRaisesRegex(ValueError, pattern):
                 handoff.validate_record({**record, **extra}, context, scope, "task-one", record_id)
+
+    def test_archive_names_are_never_task_ids(self):
+        for name in (handoff.ARCHIVE_DIR, handoff.ARCHIVE_LOCK):
+            self.assertIsNone(handoff.TASK_PATTERN.fullmatch(name))
+
+    def test_save_on_retired_task_is_refused_and_creates_nothing(self):
+        saved = self.save()
+        partition = Path(saved["record_path"]).parent.parent
+        archive = partition / ".archived"
+        archive.mkdir(mode=0o700)
+        (partition / "task-one").rename(archive / "task-one")
+        before = tree(archive)
+        refused = self.save(expect=1)
+        self.assertIn("retired", refused["error"])
+        self.assertIn("restore", refused["error"])
+        self.assertFalse((partition / "task-one").exists())
+        self.assertEqual(tree(archive), before)
+
+    def test_save_waits_for_the_archive_lock_then_sees_the_retirement(self):
+        saved = self.save()
+        partition = Path(saved["record_path"]).parent.parent
+        lock = os.open(partition / ".archive.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        process = subprocess.Popen(
+            [
+                sys.executable, str(SCRIPT), "save", "--repo", str(self.repo),
+                "--runtime", "codex", "--task", "task-one",
+                "--brief-file", str(self.brief),
+            ],
+            env=self.env, stdout=subprocess.PIPE, text=True,
+        )
+        time.sleep(2)
+        archive = partition / ".archived"
+        archive.mkdir(mode=0o700)
+        before = sorted(os.listdir(partition / "task-one"))
+        (partition / "task-one").rename(archive / "task-one")
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        output, _ = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 1, output)
+        self.assertIn("retired", json.loads(output)["error"])
+        self.assertEqual(sorted(os.listdir(archive / "task-one")), before)
+        self.assertFalse((partition / "task-one").exists())
+
+    def test_retire_moves_task_under_archive_byte_identical(self):
+        saved = self.save()
+        task_dir = Path(saved["record_path"]).parent
+        partition = task_dir.parent
+        before = tree(task_dir)
+        retired = self.run_cli("retire", "--task", "task-one")
+        self.assertEqual(retired["status"], "retired")
+        self.assertIn("scope", retired)
+        self.assertEqual(retired["task_id"], "task-one")
+        self.assertEqual(retired["record_id"], saved["record"]["record_id"])
+        self.assertEqual(retired["task_path"], str(partition / ".archived" / "task-one"))
+        self.assertFalse(task_dir.exists())
+        self.assertEqual(tree(partition / ".archived" / "task-one"), before)
+        self.assertEqual(stat.S_IMODE((partition / ".archived").stat().st_mode), 0o700)
+
+    def test_list_hides_retired_and_list_archived_shows_it(self):
+        saved = self.save("done-task")
+        self.save("live-task")
+        partition = Path(saved["record_path"]).parent.parent
+        self.assertEqual(self.run_cli("list", "--archived")["tasks"], [])
+        self.assertFalse((partition / ".archived").exists())
+        self.run_cli("retire", "--task", "done-task")
+        listed = self.run_cli("list")["tasks"]
+        self.assertEqual([task["task_id"] for task in listed], ["live-task"])
+        self.assertEqual(
+            self.run_cli("list", "--archived")["tasks"],
+            [
+                {
+                    "task_id": "done-task",
+                    "record_id": saved["record"]["record_id"],
+                    "created_at": saved["record"]["created_at"],
+                    "status": "retired",
+                    "role": None,
+                    "parent": None,
+                    "summary": "Scope: finish the regression fix.",
+                }
+            ],
+        )
+
+    def test_load_archived_reads_history_and_plain_load_refuses(self):
+        first = self.save()
+        self.brief.write_text("done: shipped it.\n")
+        second = self.save()
+        self.run_cli("retire", "--task", "task-one")
+        current = self.run_cli("load", "--task", "task-one", "--archived")
+        self.assertEqual(current["record"], second["record"])
+        older = self.run_cli(
+            "load", "--task", "task-one", "--archived",
+            "--record", first["record"]["record_id"],
+        )
+        self.assertEqual(older["record"], first["record"])
+        self.assertTrue(
+            older["record_path"].endswith(
+                f"/.archived/task-one/{first['record']['record_id']}.json"
+            )
+        )
+        refused = self.load(expect=1)
+        for word in ("retired", "--archived", "restore"):
+            self.assertIn(word, refused["error"])
+        verified = self.run_cli("verify", "--task", "task-one", expect=1)
+        self.assertIn("retired", verified["error"])
+
+    def test_restore_round_trip(self):
+        saved = self.save()
+        task_dir = Path(saved["record_path"]).parent
+        before = tree(task_dir)
+        self.run_cli("retire", "--task", "task-one")
+        restored = self.run_cli("restore", "--task", "task-one")
+        self.assertEqual(restored["status"], "ready")
+        self.assertEqual(restored["task_path"], str(task_dir))
+        self.assertEqual(tree(task_dir), before)
+        self.assertFalse((task_dir.parent / ".archived" / "task-one").exists())
+        listed = self.run_cli("list")["tasks"]
+        self.assertEqual(
+            [(task["task_id"], task["status"]) for task in listed],
+            [("task-one", "ready")],
+        )
+        self.assertEqual(self.load()["record"], saved["record"])
+
+    def test_retire_refusals_leave_the_store_unchanged(self):
+        saved = self.save("x")
+        partition = Path(saved["record_path"]).parent.parent
+        self.save("y")
+        self.save("z")
+        self.run_cli("retire", "--task", "z")
+        (partition / ".archived" / "x").mkdir()
+        (partition / ".archived" / "x" / "keep").write_text("keep\n")
+        (partition / "y" / "current.json").write_text("{}\n")
+        before = tree(partition)
+        missing = self.run_cli("retire", "--task", "ghost", expect=1)
+        self.assertIn("not saved", missing["error"])
+        again = self.run_cli("retire", "--task", "z", expect=1)
+        self.assertIn("retired", again["error"])
+        self.run_cli("retire", "--task", "x", expect=1)
+        self.run_cli("retire", "--task", "y", expect=1)
+        self.assertEqual(tree(partition), before)
+
+    def test_restore_refusals_leave_the_store_unchanged(self):
+        saved = self.save("a")
+        partition = Path(saved["record_path"]).parent.parent
+        self.run_cli("retire", "--task", "a")
+        missing = self.run_cli("restore", "--task", "ghost", expect=1)
+        self.assertIn("not retired", missing["error"])
+        shutil.copytree(partition / ".archived" / "a", partition / "a")
+        before = tree(partition)
+        live = self.run_cli("restore", "--task", "a", expect=1)
+        self.assertIn("already live", live["error"])
+        self.assertEqual(tree(partition), before)
+        shutil.rmtree(partition / "a")
+        (partition / "a").mkdir()
+        (partition / "a" / ".lock").touch()
+        before = tree(partition)
+        partial = self.run_cli("restore", "--task", "a", expect=1)
+        self.assertIn("partial", partial["error"])
+        self.assertEqual(tree(partition), before)
 
     def test_summary_is_first_non_blank_line_truncated(self):
         self.brief.write_text("\n\n" + ("x" * 100) + "\nsecond line\n")

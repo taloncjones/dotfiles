@@ -43,3 +43,13 @@ is the staging tier, not an archive.
   past a static deadline is re-sized or waited on, never interrupted and re-run.
 - (2026-09) After a review round, re-dispatch a fresh implement attempt before
   the repair worker emits: a superseded attempt row refuses its emit-done.
+- (2026-09) Re-read a PR body against the final head before posting it: wording
+  written mid-fix (record-only vs asserted, tip sha vs bench sha) drifts.
+- (2026-09) The commit guard rejects the bare word "claude" in a commit message:
+  write "substitute seat" or "work config" up front, not after a block.
+- (2026-09) A contract pinned before a long-lived branch ships goes stale when
+  main moves: after any main merge re-run the whole gate, never one check.
+- (2026-09) Re-fetch CI and re-read the head right before finalizing a review
+  report; a check still pending at round start can flip mid-round.
+- (2026-09) A reviewer of a new runner-local cache or marker dir checks that
+  the target's .gitignore covers it instead of calling it "untracked".

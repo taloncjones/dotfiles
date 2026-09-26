@@ -41,8 +41,8 @@ assert_grep "Superpowers uninstall removes the native Codex plugin" \
     grep -q '_codex_remove_plugin "superpowers@dotfiles-workflows"' "$FUNCS"
 assert_grep "install verification never greps CLI plugin listings" \
     sh -c "! grep -q 'claude plugins list' $FUNCS"
-assert_grep "ensure helper verifies installed_plugins.json" \
-    grep -q 'installed_plugins.json' "$FUNCS"
+assert_grep "retired-plugin uninstallers delegate to the shared sweep" \
+    sh -c "grep -qF '_claude_sweep_retired \"\$cfg_dir\" \"[ecc-uninstall]\" ecc@ecc' '$FUNCS' && grep -qF '_claude_sweep_retired \"\$cfg_dir\" \"[superpowers-uninstall]\"' '$FUNCS' && ! grep -q 'plugins uninstall ecc@ecc' '$FUNCS'"
 assert_grep "update() syncs via repo-sync.sh" \
     grep -q 'install/common/repo-sync.sh" "\$DOTFILEDIR"' "$FUNCS"
 # git pull appears legitimately elsewhere in the file (marketplace clone
@@ -61,6 +61,9 @@ fi
 
 REPO="$(pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/functions-test.XXXXXX")"
+# macOS TMPDIR ends in "/"; collapse the doubled slash so paths the sweep
+# prints (normalized by os.path.abspath) match the ones the cases grep for.
+TMP="$(cd "$TMP" && pwd)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/home"
 
@@ -111,14 +114,6 @@ echo "claude should not have been invoked" >&2
 exit 1
 EOF
 chmod +x "$TMP"/stubs/*/claude
-
-mkdir -p "$TMP/stubs/env-capture"
-cat >"$TMP/stubs/env-capture/claude" <<'EOF'
-#!/bin/sh
-printf '%s\n' "${CLAUDE_CONFIG_DIR-unset}" >>"$CLAUDE_ENV_TRACE"
-exit 0
-EOF
-chmod +x "$TMP/stubs/env-capture/claude"
 
 # spu: records cwd and args, and on `plugin uninstall --scope S` drops that
 # scope's superpowers record. SPU_MODE=fail makes every call fail;
@@ -256,40 +251,13 @@ run_spu_case() {
         source '$REPO/$FUNCS'
         path=('$TMP/stubs/spu' /usr/bin /bin)
         CLAUDE_WORK_CONFIG_DIR='$home/.claude-work'
+        DOTFILEDIR='$REPO'
         CODEX_WORKFLOW_MARKETPLACE_DIR='$home/codex-workflows'
         SUPERPOWERS_REPO_DIR='$home/sources/superpowers'
         _codex_remove_plugin() { return 0; }
         $snippet
     " >"$TMP/out" 2>&1
 }
-
-: >"$TMP/claude-env-trace"
-if CLAUDE_ENV_TRACE="$TMP/claude-env-trace" run_case env-capture '
-    export CLAUDE_ENV_TRACE="'$TMP'/claude-env-trace"
-    export CLAUDE_CONFIG_DIR="'$TMP'/inherited-work"
-    _claude_plugin_run "$HOME/.claude" plugins install ecc@ecc
-    _claude_plugin_run "'$TMP'/work-config" plugins install ecc@ecc
-' && [ "$(sed -n '1p' "$TMP/claude-env-trace")" = unset ] &&
-   [ "$(sed -n '2p' "$TMP/claude-env-trace")" = "$TMP/work-config" ]; then
-    pass "plugin lifecycle unsets native personal config and preserves work config"
-else
-    fail "plugin lifecycle unsets native personal config and preserves work config"
-fi
-
-# 5. _claude_plugin_installed ground truth: false without the record, true with it.
-CFG="$TMP/cfg5"; mkdir -p "$CFG"
-if run_case broken "_claude_plugin_installed '$CFG' sample@fixture"; then
-    fail "plugin_installed false when record missing"
-else
-    pass "plugin_installed false when record missing"
-fi
-mkdir -p "$CFG/plugins"
-printf '{"plugins": {"sample@fixture": [{"scope": "user"}]}}\n' >"$CFG/plugins/installed_plugins.json"
-if run_case broken "_claude_plugin_installed '$CFG' sample@fixture"; then
-    pass "plugin_installed true when record present"
-else
-    fail "plugin_installed true when record present"
-fi
 
 # 6a. Retired entry points survive `reload` in a long-running shell unless
 #     functions.zsh drops them explicitly (re-sourcing never undefines).
@@ -437,6 +405,68 @@ else
     fail "ecc-uninstall without a checkout lists candidates and moves nothing"
 fi
 
+# 6d. ecc-uninstall removes project-scope ECC records through the shared
+#     sweep; the old unscoped `plugins uninstall` could not reach them.
+mkdir -p "$TMP/stubs/eccm"
+cat >"$TMP/stubs/eccm/claude" <<'EOF'
+#!/bin/sh
+cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+printf '%s\n' "$*" >>"$ECCM_TRACE"
+[ "${ECCM_MODE:-ok}" = fail ] && exit 1
+[ "$1 $2 $3 $4" = "plugin marketplace remove ecc" ] || exit 0
+python3 - "$cfg/plugins" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+reg = json.load(open(os.path.join(d, "installed_plugins.json")))
+reg["plugins"].pop("ecc@ecc", None)
+json.dump(reg, open(os.path.join(d, "installed_plugins.json"), "w"))
+json.dump({}, open(os.path.join(d, "known_marketplaces.json"), "w"))
+PY
+EOF
+chmod +x "$TMP/stubs/eccm/claude"
+ECCM_HOME="$TMP/eccm-home"
+mkdir -p "$ECCM_HOME/.claude/plugins/cache/ecc"
+printf '{"version": 2, "plugins": {"ecc@ecc": [{"scope": "project", "projectPath": "%s/gone"}]}}\n' \
+    "$TMP" >"$ECCM_HOME/.claude/plugins/installed_plugins.json"
+printf '{"ecc": {}}\n' >"$ECCM_HOME/.claude/plugins/known_marketplaces.json"
+: >"$TMP/eccm-trace"
+if HOME="$ECCM_HOME" ECCM_TRACE="$TMP/eccm-trace" zsh -f -c "
+        path=(/usr/bin /bin)
+        source '$REPO/$FUNCS'
+        path=('$TMP/stubs/eccm' /usr/bin /bin)
+        DOTFILEDIR='$REPO'
+        ECC_REPO_DIR='$TMP/eccm-no-checkout'
+        CLAUDE_WORK_CONFIG_DIR='$TMP/eccm-no-work'
+        CODEX_WORKFLOW_MARKETPLACE_DIR='$TMP/eccm-codex'
+        _codex_remove_plugin() { return 0; }
+        _ecc_sweep_legacy_vendored() { return 0; }
+        ecc-uninstall" >"$TMP/out" 2>&1 &&
+   grep -qx 'plugin marketplace remove ecc' "$TMP/eccm-trace" &&
+   ! grep -q ecc@ecc "$ECCM_HOME/.claude/plugins/installed_plugins.json" &&
+   [ ! -e "$ECCM_HOME/.claude/plugins/cache/ecc" ]; then
+    pass "ecc-uninstall removes project-scope ECC records through the shared sweep"
+else
+    fail "ecc-uninstall removes project-scope ECC records through the shared sweep"
+fi
+printf '{"ecc": {}}\n' >"$ECCM_HOME/.claude/plugins/known_marketplaces.json"
+if HOME="$ECCM_HOME" ECCM_TRACE="$TMP/eccm-trace" ECCM_MODE=fail zsh -f -c "
+        path=(/usr/bin /bin)
+        source '$REPO/$FUNCS'
+        path=('$TMP/stubs/eccm' /usr/bin /bin)
+        DOTFILEDIR='$REPO'
+        ECC_REPO_DIR='$TMP/eccm-no-checkout'
+        CLAUDE_WORK_CONFIG_DIR='$TMP/eccm-no-work'
+        CODEX_WORKFLOW_MARKETPLACE_DIR='$TMP/eccm-codex'
+        _codex_remove_plugin() { return 0; }
+        _ecc_sweep_legacy_vendored() { return 0; }
+        ecc-uninstall" >"$TMP/out" 2>&1; then
+    fail "ecc-uninstall reports failure when the shared sweep fails"
+elif grep -qF '[X] ECC uninstall was incomplete' "$TMP/out"; then
+    pass "ecc-uninstall reports failure when the shared sweep fails"
+else
+    fail "ecc-uninstall reports failure when the shared sweep fails"
+fi
+
 # 7. Superpowers retirement.
 if run_case broken '
     for f in superpowers-install superpowers-update _codex_stage_superpowers_plugin _codex_install_superpowers_plugin _codex_update_superpowers_plugin; do
@@ -455,7 +485,7 @@ fi
 if run_case broken '
     function superpowers-uninstall { echo old; }
     source "'$REPO/$FUNCS'" >/dev/null 2>&1
-    [[ "${functions[superpowers-uninstall]}" == *_claude_plugin_records* ]]'; then
+    [[ "${functions[superpowers-uninstall]}" == *_claude_sweep_retired* ]]'; then
     pass "reload replaces an old superpowers-uninstall definition"
 else
     fail "reload replaces an old superpowers-uninstall definition"
@@ -471,12 +501,12 @@ printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}, 
 : >"$TMP/spu-trace"
 if run_spu_case "$SPU_HOME" superpowers-uninstall &&
    grep -qF "|plugin uninstall --scope user superpowers@claude-plugins-official" "$TMP/spu-trace" &&
-   grep -qF "$SPU_PROJ_REAL|plugin uninstall --scope local superpowers@claude-plugins-official" "$TMP/spu-trace" &&
+   ! grep -qF "$SPU_PROJ_REAL|" "$TMP/spu-trace" &&
    ! grep -q superpowers "$SPU_HOME/.claude/plugins/installed_plugins.json" &&
-   grep -qF "[OK] Superpowers uninstalled ($SPU_HOME/.claude)" "$TMP/out"; then
-    pass "superpowers-uninstall removes user and local records with matching scope and cwd"
+   grep -qF "[OK] Removed superpowers@claude-plugins-official from $SPU_HOME/.claude" "$TMP/out"; then
+    pass "superpowers-uninstall removes the user record by CLI and prunes the local record"
 else
-    fail "superpowers-uninstall removes user and local records with matching scope and cwd"
+    fail "superpowers-uninstall removes the user record by CLI and prunes the local record"
 fi
 if [ ! -e "$SPU_HOME/codex-workflows/plugins/superpowers" ] && [ ! -e "$SPU_HOME/sources/superpowers" ]; then
     pass "superpowers-uninstall removes the staged Codex copy and the source checkout"
@@ -489,7 +519,7 @@ mkdir -p "$SPU_FAILHOME/.claude/plugins"
 printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}]}}\n' \
     >"$SPU_FAILHOME/.claude/plugins/installed_plugins.json"
 if ! run_spu_case "$SPU_FAILHOME" superpowers-uninstall fail &&
-   ! grep -qF "[OK] Superpowers uninstalled" "$TMP/out"; then
+   ! grep -qF "[OK] Removed superpowers" "$TMP/out"; then
     pass "superpowers-uninstall fails without [OK] when the uninstall command fails"
 else
     fail "superpowers-uninstall fails without [OK] when the uninstall command fails"
@@ -500,7 +530,7 @@ mkdir -p "$SPU_CORRUPTHOME/.claude/plugins"
 printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "user"}]}}\n' \
     >"$SPU_CORRUPTHOME/.claude/plugins/installed_plugins.json"
 if ! run_spu_case "$SPU_CORRUPTHOME" superpowers-uninstall corrupt &&
-   ! grep -qF "[OK] Superpowers uninstalled" "$TMP/out"; then
+   ! grep -qF "[OK] Removed superpowers" "$TMP/out"; then
     pass "superpowers-uninstall fails when the registry is unreadable after uninstall"
 else
     fail "superpowers-uninstall fails when the registry is unreadable after uninstall"
@@ -521,23 +551,23 @@ SPU_EMPTYHOME="$TMP/spu-emptyhome"
 mkdir -p "$SPU_EMPTYHOME/.claude"
 : >"$TMP/spu-trace"
 if run_spu_case "$SPU_EMPTYHOME" superpowers-uninstall &&
-   [ ! -s "$TMP/spu-trace" ] &&
-   grep -qF "Superpowers not installed ($SPU_EMPTYHOME/.claude)" "$TMP/out"; then
-    pass "superpowers-uninstall with no registry file reports not installed and calls no CLI"
+   [ ! -s "$TMP/spu-trace" ]; then
+    pass "superpowers-uninstall with no registry file succeeds and calls no CLI"
 else
-    fail "superpowers-uninstall with no registry file reports not installed and calls no CLI"
+    fail "superpowers-uninstall with no registry file succeeds and calls no CLI"
 fi
 
 SPU_GONEHOME="$TMP/spu-gonehome"
 mkdir -p "$SPU_GONEHOME/.claude/plugins"
 printf '{"plugins": {"superpowers@claude-plugins-official": [{"scope": "local", "projectPath": "%s"}]}}\n' \
     "$TMP/spu-deleted-project" >"$SPU_GONEHOME/.claude/plugins/installed_plugins.json"
-if ! run_spu_case "$SPU_GONEHOME" superpowers-uninstall &&
-   grep -qF "missing project" "$TMP/out" &&
-   ! grep -qF "[OK] Superpowers uninstalled" "$TMP/out"; then
-    pass "superpowers-uninstall fails when a local record's projectPath is missing"
+: >"$TMP/spu-trace"
+if run_spu_case "$SPU_GONEHOME" superpowers-uninstall &&
+   [ ! -s "$TMP/spu-trace" ] &&
+   ! grep -q superpowers "$SPU_GONEHOME/.claude/plugins/installed_plugins.json"; then
+    pass "superpowers-uninstall prunes a local record whose projectPath is missing"
 else
-    fail "superpowers-uninstall fails when a local record's projectPath is missing"
+    fail "superpowers-uninstall prunes a local record whose projectPath is missing"
 fi
 
 SPU_BADHOME="$TMP/spu-badhome"
@@ -545,11 +575,11 @@ mkdir -p "$SPU_BADHOME/.claude/plugins"
 printf 'not json\n' >"$SPU_BADHOME/.claude/plugins/installed_plugins.json"
 : >"$TMP/spu-trace"
 if ! run_spu_case "$SPU_BADHOME" superpowers-uninstall &&
-   grep -qF "|plugin uninstall --scope user superpowers@claude-plugins-official" "$TMP/spu-trace" &&
+   [ ! -s "$TMP/spu-trace" ] &&
    grep -qF "unreadable plugin registry" "$TMP/out"; then
-    pass "superpowers-uninstall with an unreadable registry tries user scope and fails"
+    pass "superpowers-uninstall with an unreadable registry calls no CLI and fails"
 else
-    fail "superpowers-uninstall with an unreadable registry tries user scope and fails"
+    fail "superpowers-uninstall with an unreadable registry calls no CLI and fails"
 fi
 
 # 9. Uninstall must remove a present-but-disabled plugin instead of treating it
