@@ -28,9 +28,9 @@ An accepted record allows the stop; controller verification remains required
 before treating the task as completed.
 
 Refusal: exit 2 with three stderr lines -- the marker line, the exact
-emit-done / emit-review command to run, and a note to stop again. A fresh
-stop cycle (stop_hook_active false) is always refused, exactly once --
-this is a single nudge, not a counted budget.
+emit-done / emit-review command to run, and a note to stop again that
+ends with WAIT_HINT. A fresh stop cycle (stop_hook_active false) is always
+refused, exactly once -- this is a single nudge, not a counted budget.
 
 Anti-wedge release: stop_hook_active true means this hook already
 refused this same stop cycle once, so it releases unconditionally,
@@ -69,6 +69,13 @@ CORE_CMD = 'python3 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/herdr_orch_core.p
 # Assembled from two pieces so the literal never appears in this file: a
 # worker that prints the hook source must not add a transcript match.
 MARKER = "herdr-stop-gate" + ": blocked"
+# Repeated when a worker stops: the two turn-loss shapes the brief's ground
+# rules cover (a wait that ends the turn, a paused emit while a subagent runs).
+WAIT_HINT = (
+    "Still waiting on your own run? Keep the turn alive with a bounded "
+    "foreground until-loop on its log line instead of stopping. While a "
+    "subagent still runs, do not emit; stop again and the gate releases."
+)
 SESSION_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
 )
@@ -409,7 +416,10 @@ def refuse(command):
         "Run: " + (command or "do not publish; lifecycle identity is unverified"),
         file=sys.stderr,
     )
-    print("Then stop again; the gate releases on that attempt.", file=sys.stderr)
+    print(
+        "Then stop again; the gate releases on that attempt. " + WAIT_HINT,
+        file=sys.stderr,
+    )
     return 2
 
 

@@ -34,6 +34,7 @@ def main():
     reason = result["reason"]
     if result["command"]:
         reason += "; Run: " + result["command"]
+    reason += "; " + gate.WAIT_HINT
     print(json.dumps({"decision": "block", "reason": reason}))
     return 0
 
