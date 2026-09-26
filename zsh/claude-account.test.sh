@@ -536,20 +536,28 @@ run_case "director keeps work-account routing" \
 # --- herdr gh shim arming ---------------------------------------------------
 # claude() arms a subshell for the launch when HERDR_ENV=1: the gh shim first
 # on PATH and BASH_ENV at its anchor. The calling shell stays unarmed.
-mkdir -p "$TMP/armbin" "$TMP/pyonly"
+mkdir -p "$TMP/armbin" "$TMP/pyonly" "$TMP/othergh"
 ln -s "$(command -v python3)" "$TMP/pyonly/python3"
+# Ubuntu ships gh in /usr/bin; this puts a non-shim gh on every OS's fixture PATH.
+printf '#!/bin/sh\nexit 0\n' >"$TMP/othergh/gh"
+chmod +x "$TMP/othergh/gh"
 cat >"$TMP/armbin/claude" <<'EOF'
 #!/bin/sh
-printf '%s|%s\n' "$(command -v gh)" "${BASH_ENV:-}" > "$RECORD"
+found=$(command -v gh)
+case "$found" in
+    "$SHIM_GH") found=shim ;;
+    */othergh/gh) found=other ;;
+esac
+printf '%s|%s\n' "$found" "${BASH_ENV:-}" > "$RECORD"
 EOF
 chmod +x "$TMP/armbin/claude"
 SHIMS="$REPO/bin/herdr-shims"
 for herdr in 1 0; do
     : > "$TMP/rec"
     after=$(env -u BASH_ENV RECORD="$TMP/rec" HOME="$SBHOME" HERDR_ENV="$herdr" CLAUDE_PERSONAL_ONLY=1 \
-        PATH="$TMP/armbin:$TMP/pyonly:/usr/bin:/bin" \
+        PATH="$TMP/armbin:$TMP/pyonly:$TMP/othergh:/usr/bin:/bin" SHIM_GH="$SHIMS/gh" \
         zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && claude -p hi; print -r -- \"\$PATH\"" 2>/dev/null)
-    if [ "$herdr" = 1 ]; then want="$SHIMS/gh|$SHIMS/path.sh"; else want="|"; fi
+    if [ "$herdr" = 1 ]; then want="shim|$SHIMS/path.sh"; else want="other|"; fi
     case "$after" in
         *herdr-shims*) leaked=yes ;;
         *) leaked=no ;;
