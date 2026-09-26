@@ -107,8 +107,10 @@ for the provider's `launch_env` mapping.
      `--messaging-socket` pid AND is an ancestor of the claiming process is
      adopted under the new session id with a fence bump, instead of `BUSY`.
      This is the `/clear` case: the session id changes, the Claude process
-     does not. Launcher-tier Claude leases only; a pid claimed from another
-     process tree still gets `BUSY`. Never run `claim-owner` in the
+     does not. The record's `pid_start` must also match the claimant's
+     process start identity, so a recycled pid gets `BUSY`. Launcher-tier
+     Claude leases only; a pid claimed from another process tree still gets
+     `BUSY`. Never run `claim-owner` in the
      background: a background process started before `/clear` would pass the
      ancestry check under the old session id.
    - **On the initial claim only** (not on refresh), label THIS session's own
@@ -246,13 +248,17 @@ for the provider's `launch_env` mapping.
    `python3 "$CORE" watch --repo-slug <slug> --undelivered-only --exit-on-signal --since-epoch $EPOCH`
    with `Bash run_in_background` and note its task id. It prints nothing
    while pushes are delivered and a task is idle, exits with one `signal`
-   line when a completion record stays undelivered for 120 s, and exits with
+   line when a completion record stays undelivered for 120 s, or as soon as
+   a worker's `blocked` wake was dropped after this session's last check-in
+   (the next check-in row's `wake=<reason>` names why), and exits with
    one `heartbeat` line every `BACKSTOP_HEARTBEAT_SECS` (600 s) while a task
    is active and nothing is undelivered -- both exits are a wake, and the
    heartbeat one exists only so this session's next preflight refreshes its
    own ownership heartbeat before `WAKE_HEARTBEAT_STALE_SECS` (900 s) makes
    wake delivery start failing. Re-arm it on that wake turn and on any
-   preflight where this context has no live backstop task. If the socket is unset, arm the
+   preflight where this context has no live backstop task. A session whose
+   check-in prints `owner: stale-fence` does not re-arm the backstop.
+   If the socket is unset, arm the
    watch at the default cadence via the `Monitor` tool instead: if this
    session has no live watch for this repo, capture `EPOCH=$(date +%s)`
    FIRST, then start one via the `Monitor` tool --
@@ -297,7 +303,7 @@ Roll over when the human asks, or when a check-in prints
 `rollover-due used_pct=<n> threshold=<t>`. That line comes from the host's
 own context reading (the statusline records it per session; `config.json`
 `rollover_pct`, default 45, sets the threshold); never estimate the fill
-yourself and never write the record. On `rollover-due`, write that pass's
+yourself and never write the record. Check-in also deletes context records older than 10 minutes; they are inert. On `rollover-due`, write that pass's
 transitions, start no kickoff or dispatch in the same turn, then roll over.
 
 1. Finish or park the current action. Never roll over mid-kickoff or

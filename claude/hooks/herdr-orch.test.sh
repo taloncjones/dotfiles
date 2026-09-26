@@ -1147,6 +1147,158 @@ got = c.delivered_records(rd)
 assert got == {"PROJ-1.done.json": {(5, 9)}}, got
 PY
 
+check "wake_for_event: appends one wake.jsonl line per delivery attempt, marker first" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "workspaces"))
+c._sleep = lambda s: None
+c.post_wake = lambda *a, **k: "stale-heartbeat"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "blocked", now=10.0) == "stale-heartbeat"
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "blocked", now=20.0) == "sent"
+log = os.path.join(rd, "workspaces", "w1.wake.jsonl")
+lines = [json.loads(l) for l in open(log)]
+assert [(l["event"], l["reason"]) for l in lines] == [("blocked", "stale-heartbeat"), ("blocked", "sent")], lines
+assert all(l["v"] == 1 and isinstance(l["ts"], str) for l in lines), lines
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=30.0) is None
+assert len(open(log).readlines()) == 2, "a declined push writes no line"
+PY
+
+check "wake_for_event: an unwritable wake.jsonl changes neither the result nor the marker" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "workspaces", "w1.wake.jsonl"))
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "blocked", now=10.0) == "sent"
+m = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert m["last_delivery"] == {"event": "blocked", "reason": "sent", "ts": 10}, m
+PY
+
+check "dropped blocked wakes: filter, ack seeding, once-only" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "workspaces"))
+def marker(ws, v=2, **ld):
+    json.dump({"v": v, "records": {}, "last_push": {}, "last_delivery": ld},
+              open(os.path.join(rd, "workspaces", ws + ".wake.json"), "w"))
+marker("w1", event="blocked", reason="stale-heartbeat", ts=100)
+marker("w2", event="blocked", reason="sent", ts=100)
+marker("w3", event="stopped", reason="no-owner", ts=100)
+marker("w4", v=1, event="blocked", reason="no-owner", ts=100)
+marker("w5", event="blocked", reason="no-owner", ts="100")
+open(os.path.join(rd, "workspaces", "w6.wake.json"), "w").write("{not json")
+assert c.undelivered_blocks(rd) == {("w1.wake.json", 100)}, c.undelivered_blocks(rd)
+assert c.undelivered_blocks(os.path.join(rd, "missing")) == set()
+P = {("w1.wake.json", 100)}
+assert c.seed_dropped_blocks(P, set(P)) == P                        # acked by a check-in: seen
+assert c.seed_dropped_blocks(P, {("w1.wake.json", 99)}) == set()    # same ws, other drop: not seen
+assert c.seed_dropped_blocks(P, set()) == set()                     # not acked: not seen
+assert c.seed_dropped_blocks(P, None) == set()                      # no ack file: seed nothing
+seen = set()
+assert c.blocked_drop_tick(seen, P) is True
+assert c.blocked_drop_tick(seen, P) is False         # signalled once
+assert c.blocked_drop_tick(seen, set()) is False     # a later sent clears it
+assert c.blocked_drop_tick(seen, {("w1.wake.json", 160)}) is True
+assert c.blocked_drop_tick(seen, {("w1.wake.json", 160), ("w2.wake.json", 170)}) is True
+assert seen == {("w1.wake.json", 160), ("w2.wake.json", 170)}, seen
+assert c.read_drop_ack(rd) is None                                   # absent
+assert c.write_drop_ack(rd, {("w2.wake.json", 7), ("w1.wake.json", 100)}) is True
+assert json.load(open(os.path.join(rd, "drop-ack.json"))) == {
+    "v": 1, "acked": [["w1.wake.json", 100], ["w2.wake.json", 7]]}
+assert c.read_drop_ack(rd) == {("w1.wake.json", 100), ("w2.wake.json", 7)}
+for bad in ("{not json", {"v": 1, "acked": [["w1.wake.json", True]]}, {"v": 1, "acked": [["w1.wake.json", 1.5]]},
+            {"v": 2, "acked": []}, {"v": 1, "acked": "x"}, {"v": 1, "acked": [["w1.wake.json"]]}, [1]):
+    open(os.path.join(rd, "drop-ack.json"), "w").write(bad if isinstance(bad, str) else json.dumps(bad))
+    assert c.read_drop_ack(rd) is None, bad
+PY
+
+check "backstop_pass: a drop never clears record-pending state; a record signal does" <<PY
+$LOAD
+k = "/x/tasks/PROJ-1.done.json"
+st = {"pending": {}}; seen = set()
+assert c.backstop_pass(st, seen, {}, {k: (5, 9)}, {}, set(), 0.0, 120) is False
+assert k in st["pending"]
+drop = {("w1.wake.json", 50)}
+assert c.backstop_pass(st, seen, {k: (5, 9)}, {k: (5, 9)}, {}, drop, 50.0, 120) is True
+assert k in st["pending"], "drop-only signal must keep record-pending state"
+assert c.backstop_pass(st, seen, {k: (5, 9)}, {k: (5, 9)}, {}, drop, 60.0, 120) is False
+assert c.backstop_pass(st, seen, {k: (5, 9)}, {k: (5, 9)}, {}, drop, 120.0, 120) is True
+assert st["pending"] == {}, "record signal clears record-pending state"
+PY
+
+check "backstop: a drop followed only by refresh-owner still signals on the next start" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SLUG=github-com-org-watch-cafe0001
+F=$($CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid 1)
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/workspaces" "$RD/tasks"
+printf '{"v":1,"acked":[["w2.wake.json",1]]}' > "$RD/drop-ack.json"
+printf '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"blocked","reason":"stale-heartbeat","ts":%s}}' "$(( $(date +%s) - 5 ))" > "$RD/workspaces/w1.wake.json"
+$CLI refresh-owner --repo-slug "$SLUG" --session S --fence "$F"
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 > "$root/out" 2>&1 &
+W=$!
+i=0; while kill -0 "$W" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+if kill -0 "$W" 2>/dev/null; then kill "$W"; exit 1; fi
+test "$(cat "$root/out")" = signal
+SH
+
+check "checkin: acks the drops it read after its rows; stale-fence writes nothing" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"blocked","reason":"no-owner","ts":100}}' > "$RD/workspaces/w1.wake.json"
+if $CLI checkin --repo-slug slug-x --session S --fence 999 --agents-json "$root/a.json" --workspaces-json "$root/w.json" >/dev/null; then exit 1; fi
+test ! -e "$RD/drop-ack.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'changed: no'
+test "$(cat "$RD/drop-ack.json" | tr -d ' \n')" = '{"acked":[["w1.wake.json",100]],"v":1}' || \
+    test "$(cat "$RD/drop-ack.json" | tr -d ' \n')" = '{"v":1,"acked":[["w1.wake.json",100]]}'
+SH
+
+check "hook: two workspaces under one owner each deliver a blocked wake" <<PY
+$LOAD
+import socket, threading, random, shutil, time, subprocess
+root = tempfile.mkdtemp()
+slug = "github-com-org-repo-deadbeef"; rd = os.path.join(root, "herdr-orch", slug)
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+for ws, task, role in (("w1E", "PROJ-1", "mech"), ("w1F", "PROJ-2", "impl")):
+    json.dump({"task_id": task, "repo_slug": slug, "role": role},
+              open(os.path.join(rd, "workspaces", ws + ".json"), "w"))
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+got = []; stop = threading.Event()
+try:
+    path = sockdir + "/4242.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv.bind(path); srv.listen(8); srv.settimeout(0.1)
+    def acc():
+        while not stop.is_set():
+            try: conn, _ = srv.accept()
+            except socket.timeout: continue
+            except OSError: return
+            buf = b""
+            while not buf.endswith(b"\n"):
+                d = conn.recv(4096)
+                if not d: break
+                buf += d
+            got.append(json.loads(buf)["message"]["content"]); conn.close()
+    threading.Thread(target=acc, daemon=True).start()
+    json.dump({"session_id": "S", "host": "h", "pid": 4242, "heartbeat_ts": time.time(), "fence": 1,
+               "messaging_socket": path}, open(os.path.join(rd, "owner.json"), "w"))
+    blocked = b'{"hook_event_name":"Notification","notification_type":"permission_prompt"}'
+    for ws in ("w1F", "w1E"):
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=root, HERDR_ENV="1", HERDR_WORKSPACE_ID=ws,
+                   CLAUDE_CODE_MESSAGING_SOCKET=sockdir + "/5000.sock")
+        subprocess.run(["claude/hooks/herdr_worker_status.py"], input=blocked, env=env, capture_output=True)
+    end = time.monotonic() + 3
+    while len(got) < 2 and time.monotonic() < end: time.sleep(0.02)
+    wss = sorted(re.search(r"workspace=(\S+) event=blocked", g).group(1) for g in got)
+    assert wss == ["w1E", "w1F"], got
+    for ws in ("w1E", "w1F"):
+        m = json.load(open(os.path.join(rd, "workspaces", ws + ".wake.json")))
+        assert m["last_delivery"]["reason"] == "sent", (ws, m)
+finally:
+    stop.set(); shutil.rmtree(sockdir, ignore_errors=True)
+PY
+
 check "watch CLI: backstop flags validated" <<'SH'
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
@@ -9889,6 +10041,53 @@ printf '{not json' > "$RD/tasks/PROJ-1.done.json"
 out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
     --agents-json "$root/a.json" --workspaces-json "$root/w.json")
 printf '%s\n' "$out" | grep -qx 'unreadable-record PROJ-1.done.json'
+SH
+
+check "prune_context_records: age-only, bounded, no-follow, keeps the caller's session" <<PY
+$LOAD
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+assert c.prune_context_records(now=10000.0) == 0          # no directory yet
+d = str(c.context_dir()); os.makedirs(d)
+U = ["%08d-0000-4000-8000-%012d" % (i, i) for i in range(6)]
+def put(name, age):
+    p = os.path.join(d, name); open(p, "w").write("{}"); os.utime(p, (10000.0 - age, 10000.0 - age)); return p
+put(U[0] + ".json", 10)                 # fresh: kept
+put(U[1] + ".json", 601)                # stale: removed
+put(U[2] + ".json.123.tmp", 601)        # stale writer temp: removed
+put(U[3] + ".json", 5000)               # stale but keep: kept
+put("notes.json", 5000)                 # foreign: kept
+put("ABCDEF01-0000-4000-8000-000000000000.json", 5000)   # uppercase: kept
+outside = os.path.join(root, "target.json"); open(outside, "w").write("{}"); os.utime(outside, (1.0, 1.0))
+os.symlink(outside, os.path.join(d, U[5] + ".json"))    # symlink: kept, target untouched
+assert c.prune_context_records(now=10000.0, keep=U[3]) == 2
+assert sorted(os.listdir(d)) == sorted([U[0] + ".json", U[3] + ".json", "notes.json",
+    "ABCDEF01-0000-4000-8000-000000000000.json", U[5] + ".json"]), sorted(os.listdir(d))
+assert os.path.exists(outside)
+for i in range(3):
+    put("%08d-1111-4000-8000-%012d.json" % (i, i), 700)
+assert c.prune_context_records(now=10000.0, limit=2) == 2
+# U[3] sorts after the three new records and, without `keep` this call, is
+# itself still stale -- the second batch removes the one remaining new
+# record plus U[3].
+assert c.prune_context_records(now=10000.0, limit=2) == 2
+assert c.context_record_path(U[0]) == c.context_dir() / (U[0] + ".json")
+PY
+
+check "checkin: prunes stale context records without changing its output" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+before=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+CTX=$(python3 -c 'import importlib.util as u; s = u.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py"); c = u.module_from_spec(s); s.loader.exec_module(c); print(c.context_dir())')
+mkdir -p "$CTX"
+OLD="$CTX/00000000-0000-4000-8000-000000000000.json"
+printf '{}' > "$OLD"; touch -t 202001010000 "$OLD"
+after=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+test ! -e "$OLD"
+test "$before" = "$after"
 SH
 
 check "checkin: wake= column from the marker, read-only" <<'SH'

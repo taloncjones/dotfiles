@@ -52,9 +52,10 @@ by immutable path/hash pairs.
 
 ```
 STATE_ROOT/
-  context/<session_id>.json         # statusline-written host context fill ({v, session_id, used_pct, ts}); read by checkin
+  context/<session_id>.json         # statusline-written host context fill ({v, session_id, used_pct, ts}); read by checkin; stale records (older than CONTEXT_FRESH_SECS, 600 s) are pruned by checkin
   <repo_slug>/
     owner.json                        # compatibility mirror of shared owner
+    drop-ack.json                     # written only by checkin after its rows: {"v":1,"acked":[["<ws>.wake.json",<ts>],...]}, the dropped-blocked pairs it read; the backstop seeds exactly these as seen
     config.json                       # machine-local config
     task-lead-gate.json               # task-lead activation gate record; absence,
                                       # damage, or an identity mismatch reads as disabled
@@ -94,12 +95,16 @@ STATE_ROOT/
     workspaces/
       <HERDR_WORKSPACE_ID>.json               # reverse index (task/repo/role)
       <HERDR_WORKSPACE_ID>.events.jsonl       # per-workspace hint log
-      <HERDR_WORKSPACE_ID>.wake.json          # worker-status hook's wake marker: {"v":1,
+      <HERDR_WORKSPACE_ID>.wake.json          # worker-status hook's wake marker: {"v":2,
                                                # "records":{path:[mtime_ns,size]},
-                                               # "last_push":{event:epoch}}. Machine-local,
-                                               # written only by the hook. `records` advances
-                                               # only on a push, so a debounced record change
+                                               # "last_push":{event:epoch},
+                                               # "last_delivery":{"event","reason","ts"}}.
+                                               # Machine-local, written by the hook after
+                                               # each delivery attempt. `records` advances
+                                               # only on `sent`, so a debounced record change
                                                # is delayed, never dropped.
+      <HERDR_WORKSPACE_ID>.wake.jsonl         # one {"v":1,"ts","event","reason"} line per
+                                               # delivery attempt; diagnostic only, nothing reads it
 ```
 
 ## Identity
@@ -160,6 +165,7 @@ STATE_ROOT/
   "session_id": "<id>",
   "host": "<host>",
   "pid": 12345,
+  "pid_start": "ps:Thu Sep 25 10:00:00 2026",
   "heartbeat_ts": 1756300000.5,
   "fence": 3,
   "messaging_socket": "/tmp/cc-socks/12345.sock"
@@ -188,6 +194,10 @@ STATE_ROOT/
   socket basename when one is stored (the Claude process). Read by the
   worker hook (`post_wake`) to push a wake line; absent in older records
   and treated as `null`.
+- **Process start identity:** `pid_start` (from `process_start_id`:
+  `linux:<boot_id>:<starttime>` or `ps:<lstart>`) is written at claim.
+  Same-process adoption requires it to match; a record without it (written
+  before this field) still adopts by pid alone for one release.
 - Preflight claims if the file is absent or `heartbeat_ts` is stale (e.g.
   > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
   > director whose claim fails **yields** to read-only reporting and
