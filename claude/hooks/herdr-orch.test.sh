@@ -10188,5 +10188,21 @@ layout = open("claude/skills/herdr-orchestration/references/state-layout.md").re
 assert "wake.json" in layout and "last_push" in layout, "the wake marker is undocumented"
 PY
 
+check "brief template keeps the turn alive on long runs" <<'PY'
+import sys
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+mech = " ".join(t[t.index("## Mech brief variant"):t.index("## Reviewer brief variant")].split())
+for phrase in ("Keep the turn alive while your own run finishes", "bounded until-loop",
+               "never the process list", "EXIT $?", "overall deadline",
+               "A quiet log is not a stall", "stop the run first",
+               "--reason timeout"):
+    assert phrase in rules, phrase
+assert "ending your turn ends the run" in mech
+assert "runner_timeout" not in t
+assert "<cmd>" not in t
+assert t.count("\n") <= 441
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
