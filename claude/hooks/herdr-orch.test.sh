@@ -2578,6 +2578,50 @@ assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], o
 import shutil; shutil.rmtree(sb)
 PY
 
+check "docs pin director merge authority: 6a procedure, ship dispatch, manual-mode table, safety" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+if grep -q 'The director never merges, pushes, or opens a PR' "$S"; then exit 1; fi
+if grep -Fq 'machine-local `Bash(gh pr merge:*)`' "$S"; then exit 1; fi
+grep -q '^## 6a\. Director merge (personal repositories)' "$S"
+grep -Fq 'merge-authority --repo-slug' "$S"
+grep -Fq 'merge-ready --repo-slug' "$S"
+grep -Fq -- '--match-head-commit' "$S"
+grep -Fq 'co-review-audit head=' "$S"
+grep -Fq '"merged_by": "director"' "$S"
+grep -Fq '"merged_by": "observed"' "$S"
+grep -Fq '"merge_commit_sha"' "$S"
+grep -Fq 'before the stale-verdict rule' "$S"
+grep -Fq -- '--fence <fence> --all' "$S"
+grep -Fq 'git worktree list' "$S"
+grep -Fq 'teardown_blocked' "$S"
+grep -Fq 'ship_launch_id' "$S"
+grep -Fq 'herdr-ship-brief: stop-after-gate' "$S"
+grep -Fq 'herdr agent get' "$S"
+grep -Fq 'state `working`' "$S"
+grep -Fq 'handoff_state' "$S"
+grep -Fq '"result": "fail"' "$S"
+grep -Fq 'ship_launch_id: null' "$S"
+grep -Fq 'merge-refused' "$S"
+grep -Fq 'base-moved' "$S"
+grep -Fq 'changes-requested' "$S"
+grep -Fq 'Workers never carry merge authority' "$S"
+grep -Eq '^ *\| Action +\| Covering template rule +\| Prompt in manual mode +\| Auto mode +\| Recovery +\|' "$S"
+grep -Fq 'Bash(gh pr:*)' "$S"
+grep -Fq 'accepted prompt' "$S"
+grep -Fq 'ship_launch_id' "$R/state-layout.md"
+grep -Fq 'teardown_blocked' "$R/state-layout.md"
+grep -Fq '"merge_commit_sha"' "$R/state-layout.md"
+grep -Fq '"gate_report"' "$R/state-layout.md"
+grep -Fq '"reason"' "$R/state-layout.md"
+grep -Fq 'ship-<launch_id>/ship.json' "$R/state-layout.md"
+grep -Fq 'herdr-ship-brief: stop-after-gate' "$R/brief-template.md"
+grep -Fq 'report_sha256' "$R/brief-template.md"
+grep -Fq 'ship.json' "$R/brief-template.md"
+grep -Fq 'ship-<launch_id>' "$R/brief-template.md"
+grep -Fq 'expected_sha256' "$R/brief-template.md"
+grep -Fq 'CHANGES, INCOMPLETE' "$R/brief-template.md"
+SH
+
 check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state layout" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 P="claude/skills/post-merge/SKILL.md"

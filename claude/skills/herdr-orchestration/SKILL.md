@@ -137,18 +137,29 @@ for the provider's `launch_env` mapping.
      (`zsh/claude-account.zsh`), which runs `claude --agent director
 --settings '{"crossSessionInbound":"accept"}' --permission-mode manual`
      through the account-routing wrapper and refuses outside a herdr pane.
-     Unattended merges also need the machine-local `Bash(gh pr merge:*)`
-     allow rule in the project's `.claude/settings.local.json`; this repo
-     does not create it.
+     `director` refuses any permission mode other than manual or default.
      Auto mode is no longer the documented launch: its classifier refuses
      `gh pr merge`. Nothing in the director flow assumes a permission mode;
      the rollover hook runs in every mode, and a `rollover` Bash call may
      prompt in manual mode.
+
+     What the manual-mode director runs, and what prompts:
+
+     | Action                                                                                   | Covering template rule              | Prompt in manual mode | Auto mode                                     | Recovery                                                                                                                |
+     | ---------------------------------------------------------------------------------------- | ----------------------------------- | --------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+     | `gh pr view`, `gh pr comment`, `gh pr merge`                                             | `Bash(gh pr:*)`                     | no                    | classifier refuses `gh pr merge`              | launch with `director` (manual)                                                                                         |
+     | `gh repo view`, `gh api`                                                                 | `Bash(gh repo:*)`, `Bash(gh api:*)` | no                    | allowed                                       | none needed                                                                                                             |
+     | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready` | `Bash(python3:*)`                   | no                    | stalled plan completions and pins on approval | launch with `director` (manual)                                                                                         |
+     | `git worktree remove`                                                                    | `Bash(git worktree:*)`              | no                    | refused worktree removal                      | launch with `director` (manual)                                                                                         |
+     | `DOTFILES_ALLOW_GIT_META=1 git ...`, the `rm -rf` teardown fallback                      | none                                | accepted prompt       | refused                                       | approve the prompt, or finish `/post-merge` by hand                                                                     |
+     | a worker's edit of `claude/settings.json.tmpl` (workers run in auto mode)                | not applicable                      | not applicable        | accepted classifier denial                    | the worker reports `blocked:` with the denial text; the director surfaces it and a human approves the edit in that pane |
+
      The explicit `accept` is safe here because every inbound message is
      wake-only (Safety); a bypass-mode director without it has every
      hook wake held behind a dialog and dropped after `dialogExpiry`, and a
      `-p` director drops them after 5 minutes. Not added to
      `settings.json.tmpl` (it would apply to every session of the account).
+
    - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above supplies `$TODOS`; never borrow another runtime's personal installation path.
 4. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
@@ -1155,11 +1166,94 @@ create an automatic advisory-fix or full-review loop.
 
 Surface: "`<task_id>` review-change clean @ `<sha>`. Task-local review is
 complete; final co-review is still required before PR merge." `changes-requested`
-is not task-local readiness. Merge, `/ship`, `/post-merge` remain human actions;
-`/post-merge` sets `merged`.
+is not task-local readiness.
+
+Then run `python3 "$CORE" merge-authority --repo-slug <slug> --repo-path <task worktree>`.
+`human` (or a failed call): merge, `/ship` step 6 and `/post-merge` remain
+human actions, and `/post-merge` sets `merged`. `director`: dispatch a ship
+worker and merge through section 6a.
+
+**Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
+shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
+`--repo-json` files); its `handoff_state` is `none`, `stale` (the handoff's head
+is not the live head) or `current`. The ship agent is named exactly its
+launch id. It is live only when `herdr agent get <ship_launch_id>` finds it
+in state `working`; `idle`, `done` or not found (including a launch that
+never started) is not live, because agents stay present after their work
+ends. Before any dispatch, and whenever `handoff_state` is not `none`, close
+a pinned ship agent that is present but not live, as for review panes: send
+`esc`, then `/exit` to the named agent, then close that exact pane if it
+remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
+either kind of repository, only when the pinned agent is not live and (a)
+`handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
+`handoff_state` is `current` with verdict `APPROVE` and `merge-ready`
+failed with `base-moved` as its only non-`ci` reason. Never on a `current`
+non-APPROVE handoff (section 6a step 0 owns it). At dispatch, `write-task`
+the full record with the new `ship_launch_id`, then write the brief. Every
+ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
+its launch directory, and no merge authority.
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
+
+## 6a. Director merge (personal repositories)
+
+The merge steps run only where `merge-authority` prints `director`. The
+user's standing authorization (2026-09-22, reaffirmed 2026-09-23) is the
+merge go here; work repositories keep the human go.
+
+**Recovery first, before the stale-verdict rule, in every repository.** List
+tasks with the section 4 check-in call plus `--all`:
+`python3 "$CORE" checkin --repo-slug <slug> --session <id> --fence <fence> --all`
+(without `--all` it skips `merged`). Only the writes and teardown below are
+director-only; surfacing runs everywhere.
+
+1. A task `reviewed` whose PR is `MERGED` with `headRefOid` equal to
+   `review_head_sha`: here, `write-task` `merged` with `merge_check`
+   `"merged_by": "observed"` and run teardown (step 7). In a `human`
+   repository only surface it. A PR merged at another head is surfaced,
+   not recorded.
+2. A task `merged` whose worktree still appears in `git worktree list` and
+   whose record has no `teardown_blocked`: rerun teardown.
+
+**Merge, for a task `reviewed` whose `merge-ready` run reports
+`handoff_state: "current"`.** "Surface" means: report it in every
+check-in report while it holds, with no mutating retry.
+
+0. Current handoff verdict `CHANGES`: `write-task` `changes-requested`
+   (carrying every field; name the gate report in the note) and follow the
+   changes-requested repair path; the repair moves HEAD and the handoff
+   turns `stale`. `INCOMPLETE`: surface it. Only a human re-gate request
+   moves it on: then `write-task` the record with `ship_launch_id: null`
+   (every other field carried), and section 6 dispatches afresh.
+1. `APPROVE`: write `gh pr view <n> --json number,state,isDraft,mergeable,headRefOid,baseRefName,baseRefOid,statusCheckRollup`
+   and `gh repo view --json nameWithOwner,defaultBranchRef` to the
+   scratchpad, then
+   `python3 "$CORE" merge-ready --repo-slug <slug> --repo-path <task worktree> --task-id <id> --pr-json <pr.json> --repo-json <repo.json>`.
+   Exit 0 is the only ready. On exit 1 leave the task `reviewed` and act on
+   the reason codes: `base-moved` goes to section 6 ship dispatch (c); `ci`
+   pending and `not-mergeable` with `mergeable=UNKNOWN` wait for the next
+   check-in; every other code is surfaced. Any other exit or unparsable
+   output is not ready.
+2. Audit comment, exactly as ship step 5 with the handoff's `report_path`
+   and `expected_path`: dedupe on `co-review-audit head=<head>`; a failure
+   is reported, not a stop.
+3. `gh pr merge <n> --squash --match-head-commit <head_sha>`. On a refusal,
+   `write-task` the record with
+   `merge_check: {"base_main_sha": <merge-ready base_sha>, "branch_head_sha": <head_sha>, "result": "fail", "reason": "<gh error text>", "ts": "..."}`
+   and surface it. `merge-ready` reports `merge-refused` while that entry
+   matches the live head and base, so the merge is not resent; a human
+   clears it by writing `merge_check: null`, and a head or base move makes
+   it stale.
+4. `gh pr view <n> --json state,mergeCommit`; continue only on `MERGED`.
+5. `write-task` the full record (carry `contract_path`, `contract_sha256`,
+   `ship_launch_id`) with `status: merged` and
+   `merge_check: {"base_main_sha": <merge-ready base_sha>, "branch_head_sha": <head_sha>, "result": "pass", "ts": "...", "gate_report": <report_path>, "merge_commit_sha": <mergeCommit oid>, "merged_by": "director"}`.
+6. Close the task's live panes and its todo (todos skill).
+7. Teardown: run `/post-merge` for the PR in its director mode. A dirty
+   worktree stops it: `write-task` `teardown_blocked: "<reason>"` (carrying
+   every field) and surface it; a human finishes `/post-merge`. Lessons
+   distillation stays a human step.
 
 ## 7. Worker-created panes (self-managed)
 
@@ -1565,7 +1659,9 @@ the new `status`; that write is the authoritative record.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | human merges; `/post-merge`                                                                                                                                                                            | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` human: human merges; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` director: section 6a gates pass, PR confirmed `MERGED`                                                                                                                               | `merged` (`merged_by: director`)               | merged                  | yes       |
+| reviewed                                     | PR `MERGED` at `review_head_sha`, director repo (section 6a recovery, before the stale-verdict rule)                                                                                                   | `merged` (`merged_by: observed`)               | merged                  | yes       |
 
 `blocked` is a durable status here (the hint `blocked` drives it); there is
 no overlap between `failed` (errored, no usable branch) and `abandoned`
@@ -1625,8 +1721,10 @@ Rules (these are outward-facing writes, so treat them carefully):
   the turn summary. The marker is bounded three ways (minutes, write
   budget, this repo only) and every guarded attempt under it, and every
   refusal, is recorded in `tasks/orch-edits.jsonl`.
-- The director never merges, pushes, or opens a PR. Merge/`/ship`/
-  `/post-merge` remain explicit human actions.
+- The director never pushes or opens a PR; ship workers do. It merges only
+  through section 6a, in a repository where `merge-authority` prints
+  `director`. Elsewhere merge, `/ship` step 6 and `/post-merge` stay human
+  actions. Workers never carry merge authority.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
   nothing under it is ever git-tracked, and no marker is written into any
   worktree.

@@ -438,11 +438,17 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "contract_path": "claude/contracts/PROJ-123-contract.json",
   "contract_sha256": "<64hex>",
   "merge_check": null,
+  "ship_launch_id": null,
+  "teardown_blocked": null,
   "status": "kickoff|in-progress|blocked|completed|review-dispatched|changes-requested|reviewed|failed|abandoned|merged",
   "created": "...",
   "updated": "..."
 }
 ```
+
+`ship_launch_id` is the ship launch the director pinned at dispatch (only
+its handoff counts). `teardown_blocked` is the reason a director teardown
+stopped (a human clears it by finishing `/post-merge`).
 
 `workers` is a list, not a single field -- phase advancement (implement ->
 review) appends a new entry rather than overwriting.
@@ -584,6 +590,42 @@ Only `pass`/`fail`/`conflict` are ever recorded; infrastructure or integrity
 trouble writes nothing (retried next check-in). Any `merge_check` whose SHAs
 do not match live HEAD and current `origin/<default>` is stale -- ignored and
 re-run; it is nulled whenever `review_head_sha` is cleared.
+
+A director merge (herdr-orchestration section 6a) records `result: pass`
+with three more keys: `"gate_report"` (the handoff's `report_path`),
+`"merge_commit_sha"`, and `"merged_by"` (`director` or `observed`). A
+refused director merge records `result: fail` with `"reason"` (the gh error
+text); a human clears it with `null`.
+
+### `artifacts/<task_id>/ship-<launch_id>/ship.json` -- ship handoff
+
+Written by a herdr ship worker whose brief carries
+`herdr-ship-brief: stop-after-gate`, at path
+`STATE_ROOT/<slug>/artifacts/<task_id>/ship-<launch_id>/ship.json`, last
+and atomically (temp file, rename), for any terminal gate verdict:
+
+```json
+{
+  "task_id": "PROJ-123",
+  "launch_id": "ship-PROJ-123-20260925T000000Z",
+  "pr_number": 42,
+  "pr_url": "https://github.com/o/r/pull/42",
+  "head_sha": "<40hex>",
+  "base_ref": "main",
+  "base_sha": "<40hex>",
+  "tree_sha": "<40hex>",
+  "report_path": "<path under this launch dir>",
+  "report_sha256": "<64hex>",
+  "expected_path": "<path under this launch dir>",
+  "expected_sha256": "<64hex>",
+  "verdict": "APPROVE|CHANGES|INCOMPLETE",
+  "written_at": "..."
+}
+```
+
+A run that dies before a verdict writes none. The retained co-review
+`RUN_DIR` (report and expected identity) lives in the same launch
+directory.
 
 ### `tasks/<task_id>.done.json` -- worker-emitted completion record
 
