@@ -522,7 +522,7 @@ expect_rc "C1 graphql query from stdin is gated" 2 "$(payload_b s1 'gh api graph
 
 case_gate h4
 expect_rc "H4 prompt writes the pid map" 0 "$(payload_u s1 'thanks')"
-if [ "$(cat "$GATE"/pid-*.sid 2>/dev/null)" = s1 ] && [ "$(stat -f %Lp "$GATE"/pid-*.sid 2>/dev/null || stat -c %a "$GATE"/pid-*.sid)" = 600 ]; then
+if [ "$(cat "$GATE"/pid-*.sid 2>/dev/null)" = s1 ] && [ "$(python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$GATE"/pid-*.sid)" = 0o600 ]; then
     printf 'PASS  H4 pid map holds the session id, mode 0600\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  H4 pid map holds the session id, mode 0600\n' >&2; FAIL=$((FAIL + 1))
