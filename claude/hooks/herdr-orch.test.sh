@@ -10212,5 +10212,16 @@ for phrase in ("not a request to emit", "genuinely stopping short"):
     assert phrase in rules, phrase
 PY
 
+check "brief template bounds subagent hand-backs and self-opened monitors" <<'PY'
+import sys
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
+               "git diff --cached", "self-chosen whole-branch review",
+               "close them all before"):
+    assert phrase in rules, phrase
+assert t.count("\n") <= 441
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
