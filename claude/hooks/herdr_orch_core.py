@@ -1101,6 +1101,7 @@ def wake_for_event(rd, ws, task_id, event, own_socket="", now=None):
     base = advanced if reason == "sent" else {**prior, "v": 2}
     write_wake_marker(rd, ws, {**base, "last_delivery": {
         "event": event, "reason": reason, "ts": int(now)}})
+    append_wake_log(rd, ws, event, reason)
     return reason
 
 
@@ -1109,6 +1110,24 @@ _RECORD_SUFFIXES = (".done.json", ".review.json")
 
 def wake_marker_path(rd, ws) -> Path:
     return Path(rd) / "workspaces" / f"{ws}.wake.json"
+
+
+def wake_log_path(rd, ws) -> Path:
+    return Path(rd) / "workspaces" / f"{ws}.wake.jsonl"
+
+
+def append_wake_log(rd, ws, event, reason) -> bool:
+    """One diagnostic line per delivery attempt. Never raises. Nothing reads
+    it for a decision; the marker's last_delivery is the delivery record."""
+    if not valid_workspace_id(ws):
+        return False
+    rec = {"v": 1, "ts": now_iso(), "event": event, "reason": reason}
+    try:
+        append_payload(wake_log_path(rd, ws),
+                        (json.dumps(rec, separators=(",", ":")) + "\n").encode())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _empty_marker() -> dict:
@@ -2011,15 +2030,100 @@ def backstop_heartbeat_due(last_emit, now, heartbeat_secs, active) -> bool:
     return active and (now - last_emit) >= heartbeat_secs
 
 
+def undelivered_blocks(rd) -> set:
+    """{(marker name, last_delivery ts)} for every v2 marker whose last
+    delivery was a blocked push that did not send. Read-only."""
+    out = set()
+    d = Path(rd) / "workspaces"
+    try:
+        names = payload_names(d)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".wake.json") or not valid_workspace_id(name[: -len(".wake.json")]):
+            continue
+        try:
+            data = json.loads(read_payload_text(d / name))
+        except (OSError, ValueError):
+            continue
+        last = data.get("last_delivery") if isinstance(data, dict) and data.get("v") == 2 else None
+        if not isinstance(last, dict):
+            continue
+        ts = last.get("ts")
+        if last.get("event") == "blocked" and last.get("reason") != "sent" and type(ts) is int:
+            out.add((name, ts))
+    return out
+
+
+def drop_ack_path(rd) -> Path:
+    return Path(rd) / "drop-ack.json"
+
+
+def read_drop_ack(rd):
+    """The dropped-block pairs the last completed check-in read, or None when
+    the file is absent or invalid in any entry."""
+    try:
+        data = json.loads(read_payload_text(drop_ack_path(rd)))
+    except (OSError, ValueError):
+        return None
+    acked = data.get("acked") if isinstance(data, dict) and data.get("v") == 1 else None
+    if not isinstance(acked, list):
+        return None
+    out = set()
+    for pair in acked:
+        if not (isinstance(pair, list) and len(pair) == 2
+                and isinstance(pair[0], str) and type(pair[1]) is int):
+            return None
+        out.add((pair[0], pair[1]))
+    return out
+
+
+def write_drop_ack(rd, pairs) -> bool:
+    """Written only by checkin, after its rows. Never raises."""
+    try:
+        write_json_atomic(drop_ack_path(rd),
+                           {"v": 1, "acked": [list(p) for p in sorted(pairs)]})
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def seed_dropped_blocks(current, acked) -> set:
+    """Pairs a check-in already read start as seen; every other pair -- the
+    re-arm gap, a refresh-owner-only turn, a marker that landed mid-delivery
+    -- signals. Exact match, no time comparison. No ack seeds nothing."""
+    return set(current) & acked if acked is not None else set()
+
+
+def blocked_drop_tick(seen, current) -> bool:
+    """True iff current holds a pair not in seen. seen becomes current, so a
+    pair cleared by a later sent delivery drops out. Mutates seen."""
+    new = bool(current - seen)
+    seen.clear()
+    seen.update(current)
+    return new
+
+
+def backstop_pass(st, seen, prev, snap, delivered, blocks, now, grace_secs) -> bool:
+    """One backstop pass (pure; clock injected). Both checks always run.
+    Record-pending state is cleared only when a record itself signalled."""
+    undelivered = backstop_tick(st, prev, snap, delivered, now, grace_secs)
+    dropped = blocked_drop_tick(seen, blocks)
+    if undelivered:
+        st["pending"].clear()
+    return undelivered or dropped
+
+
 def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
                     heartbeat_secs=BACKSTOP_HEARTBEAT_SECS):
-    """Silent backstop: print `signal` for an undelivered completion record,
-    or `heartbeat` when nothing is undelivered but a task is still active --
-    the director has no other path to refresh its own ownership heartbeat
-    while idle, and wake delivery starts failing once that heartbeat is
-    stale."""
+    """Silent backstop: print `signal` for an undelivered completion record or
+    a dropped blocked wake, or `heartbeat` when nothing is undelivered but a
+    task is still active -- the director has no other path to refresh its
+    own ownership heartbeat while idle, and wake delivery starts failing once
+    that heartbeat is stale."""
     prev, _failed = watch_scan(rd, {}, BACKSTOP_DIRS)
     st = {"pending": {}}
+    seen = seed_dropped_blocks(undelivered_blocks(rd), read_drop_ack(rd))
     last_emit = time.monotonic()
     if since_epoch is not None:
         since_ns = int(since_epoch * 1e9)
@@ -2029,12 +2133,12 @@ def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
         time.sleep(interval)
         snap, _failed = watch_scan(rd, prev, BACKSTOP_DIRS)
         now = time.monotonic()
-        if backstop_tick(st, prev, snap, delivered_records(rd), now, grace_secs):
+        if backstop_pass(st, seen, prev, snap, delivered_records(rd),
+                          undelivered_blocks(rd), now, grace_secs):
             print("signal", flush=True)
             last_emit = now
             if exit_on_signal:
                 return 0
-            st["pending"].clear()
         elif (now - last_emit >= heartbeat_secs
               and backstop_heartbeat_due(last_emit, now, heartbeat_secs, heartbeat_active(rd))):
             print("heartbeat", flush=True)
@@ -5516,6 +5620,7 @@ def _main(argv=None) -> int:
         if not refresh_owner(rd, ns.session, ns.fence, ns.messaging_socket):
             print("owner: stale-fence")
             return 1
+        acked = undelivered_blocks(rd)
         poll, reason = _checkin_poll(ns)
         if poll is None:
             print(f"poll: failed ({reason})")
@@ -5559,6 +5664,7 @@ def _main(argv=None) -> int:
             print(f"rollover-due used_pct={due[0]} threshold={due[1]}")
             changed = True
         print(f"changed: {'yes' if changed else 'no'}")
+        write_drop_ack(rd, acked)
         return 0
     if ns.cmd == "review-deadlines":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
