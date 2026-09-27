@@ -566,7 +566,10 @@ phase; it never marks the task `completed` and never dispatches review.
    worker authored stays untracked and ignored; validate and pin it before
    implementation (Contract pinning, section 2). Final HEAD may differ from
    the launch's source HEAD; both are recorded for different checks.
-3. Reuse the task's branch/workspace after the plan worker is idle or exited.
+3. After `confirm-plan`, run
+   `python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <plan launch>`
+   so the planner exits and the root pane is back at a shell (the implement
+   launch requires one); then reuse the task's branch/workspace.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
    again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
    append a new strict attempt through
@@ -700,11 +703,31 @@ director's own `write-task`.
 Each `action` names the transition still to be written: `confirm-completion`,
 `confirm-plan`, `dispatch-review`, `confirm-review`, `changes-requested`,
 `stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
-`mech-ledger`, `paused`, `failed`. An action fires only while that transition
-is unrecorded, so a settled task reports `none` instead of re-reporting its
-evidence forever. Two non-task lines
+`mech-ledger`, `paused`, `failed`, `exit-idle-worker`. An action fires only
+while that transition is unrecorded, so a settled task reports `none`
+instead of re-reporting its evidence forever. Two non-task lines
 also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
 and `rollover-due ...` (section 1a).
+
+`exit-idle-worker` means a worker's agent is idle or done and its row is
+settled: plan confirmed, or exit already requested; review verdict
+recorded or retired; implementer approved; superseded; failed launch; or
+terminal task. It names housekeeping, not a status transition, and ranks
+after every other action.
+
+Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
+`not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
+means report it. `settle` never closes a workspace or a pane any plan,
+implement, repair or ship row used. It also keeps a pane open
+(`pane: kept-occupied`) while a non-shell process still has the foreground
+or process-info fails or comes back empty, even once its own agent is gone.
+After `/exit` is confirmed delivered (`agent_prompted`, `agent_prompt_stalled`
+or `timeout`) and the agent is still live, settle reads the pane and sends
+agent-bound keys only when Claude Code's background-work exit menu is
+actually showing.
+The director never runs `launch` while a `settle` or `sweep` for the same
+workspace is in flight, and starts neither during a launch: both read the
+pane and row set the other changes.
 
 `stale-review-reset` also fires for a `completed` task pinned at HEAD: a
 review dispatch interrupted between its `review_head_sha` write and its
@@ -968,7 +991,13 @@ exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
 recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
 exits 1. Rely on this verb, never re-derive the guard by hand.
 
-**Reviewer-dispatch preflight (one review agent at a time).** Reconcile live
+**Reviewer-dispatch preflight (one review agent at a time).** Run the
+adapter's `sweep` verb
+(`python3 "$DISPATCH" sweep --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree>`)
+for the task workspace first; it exits stale reviewers whose verdict is
+recorded or retired and closes their panes and dead reviewer shells,
+subject to the same kept-occupied and confirmed-exit-menu limits as
+`settle` above. Then confirm zero live review agents as before: reconcile live
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
 already running in it by its recorded agent and pane identity (do **not** `herdr
 workspace close`, which would tear down the shared task worktree). There must be
@@ -1193,6 +1222,11 @@ is not task-local readiness. Merge, `/ship`, `/post-merge` remain human actions;
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
+
+After `status: reviewed` is written, run
+`python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <implement launch>`:
+the implementer exits and the root pane stays. `exit_requested` makes that
+launch final: further work needs a fresh launch, never a reprompt.
 
 ## 7. Worker-created panes (self-managed)
 

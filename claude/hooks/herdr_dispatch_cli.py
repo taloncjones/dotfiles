@@ -14,11 +14,31 @@ from typing import Any
 
 import agent_runtime
 
+# A worker attempt can run well past an hour; a short TTL made settle/sweep
+# permanently unable to prove occupancy (and check-in nag forever) once a
+# long-lived worker's token aged out with nothing to refresh it.
+LAUNCH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
 
 def _dispatch_error(message: str) -> RuntimeError:
     from herdr_dispatch import DispatchError
 
     return DispatchError(message)
+
+
+def _error_code(text: str) -> str | None:
+    # A code is trustworthy only from an otherwise well-formed envelope
+    # ("id" present): an id-less body could be a malformed reply that
+    # happens to contain a recognizable code string.
+    try:
+        record = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(record, dict) or not isinstance(record.get("id"), str):
+        return None
+    error = record.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) and code else None
 
 
 def result_object(output: str, operation: str) -> dict[str, Any]:
@@ -29,17 +49,10 @@ def result_object(output: str, operation: str) -> dict[str, Any]:
         # over the str-conversion limit; RecursionError covers deeply nested
         # input. All are malformed replies, not caller faults.
         raise _dispatch_error(f"{operation} returned malformed JSON") from exc
-    if (
-        not isinstance(record, dict)
-        or not isinstance(record.get("id"), str)
-        or "error" in record
-    ):
-        # Carry herdr's error code when it sent one. Without it every envelope
-        # failure -- timeout, agent_prompt_stalled, agent_blocked -- flattens to
-        # one message, and a caller that records the reason records nothing.
-        error = record.get("error") if isinstance(record, dict) else None
-        code = error.get("code") if isinstance(error, dict) else None
-        if isinstance(code, str) and code:
+    has_id = isinstance(record, dict) and isinstance(record.get("id"), str)
+    if not has_id or "error" in record:
+        code = _error_code(output)
+        if code:
             raise _dispatch_error(f"{operation} did not report success: {code}")
         raise _dispatch_error(f"{operation} did not report success")
     result = record.get("result")
@@ -74,6 +87,12 @@ def run_herdr(
         raise _dispatch_error(f"Herdr command failed: {argv[0]} {argv[1]}") from exc
     if process.returncode != 0:
         detail = process.stderr.strip() or process.stdout.strip() or "no detail"
+        # herdr reports some failures (e.g. agent_not_found) as a structured
+        # envelope on stderr at a nonzero exit, not the exit-0 shape
+        # result_object parses -- extract the code the same way.
+        code = _error_code(detail)
+        if code:
+            raise _dispatch_error(f"Herdr {argv[0]} {argv[1]} did not report success: {code}")
         raise _dispatch_error(f"Herdr command failed: {detail}")
     return (
         result_object(process.stdout, f"Herdr {argv[0]} {argv[1]}")
@@ -187,6 +206,8 @@ def validate_agent(
     runtime: str,
     pane_id: str,
     expected_argv: list[str] | None = None,
+    *,
+    states: tuple[str, ...] = ("idle",),
 ) -> None:
     if result.get("type") not in ("agent_started", "agent_info"):
         raise _dispatch_error("agent readiness has an unexpected result type")
@@ -196,7 +217,7 @@ def validate_agent(
         record.get("name") != agent
         or record.get("agent") != runtime
         or record.get("pane_id") != pane_id
-        or record.get("agent_status") != "idle"
+        or record.get("agent_status") not in states
         or record.get("interactive_ready") is not True
         or record.get("launch_pending") is True
     ):
@@ -259,7 +280,7 @@ def metadata_argv(
         "--seq",
         str(sequence),
         "--ttl-ms",
-        "3600000",
+        str(LAUNCH_TOKEN_TTL_MS),
     ]
 
 
@@ -450,6 +471,16 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     reprompt.add_argument("--runtime", default="claude", choices=("claude", "codex"))
     reprompt.add_argument("--prompt-timeout-ms", type=int, default=120_000)
     reprompt.add_argument("--personal", action="store_true")
+    for verb in ("settle", "sweep"):
+        sub = commands.add_parser(verb)
+        flags = ["repo-slug", "task-id", "session", "workspace-id", "cwd"]
+        if verb == "settle":
+            flags.append("launch-id")
+        for flag in flags:
+            sub.add_argument(f"--{flag}", required=True)
+        sub.add_argument("--fence", required=True, type=int)
+        sub.add_argument("--runtime", default="claude", choices=("claude", "codex"))
+        sub.add_argument("--personal", action="store_true")
     return parser
 
 
@@ -504,6 +535,16 @@ def main(argv: list[str] | None = None) -> int:
                 prompt_timeout_ms=args.prompt_timeout_ms,
                 personal=args.personal,
             )
+        elif args.command in ("settle", "sweep"):
+            kwargs = dict(
+                repo_slug=args.repo_slug, task_id=args.task_id, session=args.session,
+                fence=args.fence, workspace_id=args.workspace_id, cwd=args.cwd,
+                runtime=args.runtime, personal=args.personal,
+            )
+            if args.command == "settle":
+                output = herdr_dispatch.settle(launch_id=args.launch_id, **kwargs)
+            else:
+                output = herdr_dispatch.sweep(**kwargs)
         else:
             output = herdr_dispatch.wake(
                 args.thread_id,
@@ -513,7 +554,9 @@ def main(argv: list[str] | None = None) -> int:
                 queue_validated=args.queue_validated,
             )
         print(json.dumps(output, sort_keys=True))
-        return 3 if output.get("status") in ("blocked", "unsupported") else 0
+        return (3 if output.get("status") in
+                ("blocked", "unsupported", "not-settled", "busy",
+                 "occupant-unverified", "exit-incomplete") else 0)
     except (
         herdr_dispatch.DispatchError,
         OSError,

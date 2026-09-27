@@ -129,11 +129,38 @@ if args[:2] == ["pane", "get"]:
         "terminal_id": "t1", "tab_id": "tab1", "focused": False,
         "agent_status": "idle", "revision": 1}}}))
 elif args[:2] == ["pane", "process-info"]:
+    if mode == "process-info-empty-foreground":
+        # herdr's real shape when process enumeration fails: a valid
+        # shell_pid but no foreground entries.
+        foreground = []
+    elif mode == "process-info-foreground-busy":
+        # A pid other than the pane's shell -- a user's vim or test run.
+        foreground = [{"pid": 202, "name": "vim", "cwd": cwd}]
+    else:
+        foreground = [{"pid": 101, "name": "zsh", "cwd": cwd}]
     print(json.dumps({"id": "fake", "result": {
         "type": "pane_process_info", "process_info": {
         "pane_id": pane, "shell_pid": 101,
-        "foreground_processes": [{"pid": 101, "name": "zsh", "cwd": cwd}]}}}))
+        "foreground_processes": foreground}}}))
 elif args[:2] == ["pane", "read"]:
+    if mode == "exit-background-prose":
+        print("A background task is currently running in this project.")
+        raise SystemExit(0)
+    if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply",
+                "exit-occupant-changed", "exit-malformed-success", "exit-coded-reply-no-id",
+                "exit-timeout-menu"):
+        if mode == "exit-occupant-changed":
+            # The row's agent exits and a replacement occupies the pane
+            # during this read -- simulates the race the pre-read snapshot
+            # cannot see.
+            apath = Path(os.environ["FAKE_AGENTS"])
+            agents = json.loads(apath.read_text())
+            for a in agents:
+                if a["pane_id"] == args[2]:
+                    a["name"] = "replacement-agent"
+            apath.write_text(json.dumps(agents))
+        print("Background tasks are still running\n1. Exit anyway\n2. Cancel")
+        raise SystemExit(0)
     count = Path(os.environ["FAKE_READ_COUNT"])
     current = int(count.read_text()) if count.exists() else 0
     count.write_text(str(current + 1))
@@ -155,9 +182,19 @@ elif args[:2] == ["pane", "read"]:
 elif args[:2] == ["pane", "run"]:
     command = args[3]
     Path(os.environ["FAKE_COMMAND_ECHO"]).write_text(command + "\n")
+    if mode == "source-fails" and command.startswith(". "):
+        print(json.dumps({"id": "cli:pane:run",
+                          "error": {"code": "pane_gone", "message": "pane closed"}}))
+        raise SystemExit(1)
     values = {}
     lines = []
-    for part in command.split("; "):
+    parts = command.split("; ")
+    if command.startswith(". "):
+        script = Path(shlex.split(command)[1])
+        text = script.read_text()
+        Path(os.environ["FAKE_PREP_COPY"]).write_text(text)
+        parts = text.splitlines()
+    for part in parts:
         words = shlex.split(part)
         if words[0] == "unset":
             if words[1] != "-f":
@@ -187,6 +224,13 @@ elif args[:2] == ["pane", "run"]:
     Path(os.environ["FAKE_ENV_OUTPUT"]).write_text("\n".join(lines) + "\n")
     # Native protocol 20 pane run acknowledges success with empty stdout.
 elif args[:2] == ["pane", "wait-output"]:
+    count_file = Path(os.environ["FAKE_WAIT_COUNT"])
+    waits = int(count_file.read_text()) if count_file.exists() else 0
+    count_file.write_text(str(waits + 1))
+    if mode == "dead-shell" or (mode == "slow-shell" and waits < 2):
+        print(json.dumps({"id": "cli:pane:wait-output",
+                          "error": {"code": "timeout", "message": "no match"}}))
+        raise SystemExit(1)
     text = Path(os.environ["FAKE_ENV_OUTPUT"]).read_text()
     match_text = args[args.index("--match") + 1]
     if mode == "shell-echo-before-output":
@@ -246,6 +290,14 @@ elif args[:2] == ["agent", "get"]:
             "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
             "focused": False, "revision": 4}}}))
         raise SystemExit(0)
+    if mode == "agent-done":
+        print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
+            "name": os.environ["FAKE_AGENT"], "pane_id": pane,
+            "agent": os.environ.get("FAKE_RUNTIME", "codex"),
+            "agent_status": "done", "interactive_ready": True,
+            "launch_pending": False, "terminal_id": "t1", "workspace_id": workspace,
+            "tab_id": "tab1", "focused": False, "revision": 5}}}))
+        raise SystemExit(0)
     print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
         "name": os.environ["FAKE_AGENT"], "pane_id": observed_pane,
         "agent": os.environ.get("FAKE_RUNTIME", "codex"),
@@ -254,6 +306,61 @@ elif args[:2] == ["agent", "get"]:
         "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
         "focused": False, "revision": 2}}}))
 elif args[:2] == ["agent", "prompt"]:
+    if len(args) > 3 and args[3] == "/exit":
+        if mode == "exit-blocked":
+            # herdr refuses to deliver /exit because the agent already has an
+            # unrelated prompt open; nothing was written, so the agent stays.
+            print(json.dumps({"id": "fake", "error": {"code": "agent_blocked"}}))
+            raise SystemExit(0)
+        if mode == "exit-transport-fail":
+            # A transport-level failure (herdr crashed/never ran): no JSON
+            # envelope at all, just a nonzero exit. /exit delivery is
+            # unconfirmed, unlike agent_prompt_stalled below.
+            print("herdr crashed", file=sys.stderr)
+            raise SystemExit(1)
+        if mode == "exit-malformed-reply":
+            # herdr exits 0 but the reply is not a recognized structured
+            # error (no "id", no "error.code", or plain garbage) -- delivery
+            # is just as unconfirmed as a transport failure.
+            print("not json")
+            raise SystemExit(0)
+        if mode == "exit-coded-reply-no-id":
+            # A recognized code (timeout) but no "id" -- structurally
+            # incomplete, unlike every genuine reply this fixture generates.
+            # result_object must not surface a code from a body this bare.
+            print(json.dumps({"error": {"code": "timeout"}}))
+            raise SystemExit(0)
+        if mode == "exit-malformed-success":
+            # herdr exits 0 with a well-formed envelope, but the result is
+            # not the agent_prompted shape that proves /exit was actually
+            # delivered -- structurally valid JSON, not proof of delivery.
+            print(json.dumps({"id": "fake", "result": {}}))
+            raise SystemExit(0)
+        if mode == "exit-timeout-menu":
+            # An id-bearing timeout envelope at exit 0, delivered while the
+            # pane shows the real exit menu -- the realistic route to it.
+            print(json.dumps({"id": "fake", "error": {"code": "timeout"}}))
+            raise SystemExit(0)
+        if mode == "exit-stalled-exit1":
+            # Live herdr writes this shape to stderr at a nonzero exit, not
+            # only the exit-0 envelope every other mode here simulates.
+            apath = Path(os.environ["FAKE_AGENTS"])
+            apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                         if a["name"] != args[2]]))
+            print(json.dumps({"id": "cli:agent:prompt",
+                              "error": {"code": "agent_prompt_stalled"}}),
+                  file=sys.stderr)
+            raise SystemExit(1)
+        if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed",
+                        "exit-background-prose"):
+            apath = Path(os.environ["FAKE_AGENTS"])
+            agents = json.loads(apath.read_text())
+            if mode == "exit-agent-reappears":
+                removed = next(a for a in agents if a["name"] == args[2])
+                Path(os.environ["FAKE_REMOVED_AGENT"]).write_text(json.dumps(removed))
+            apath.write_text(json.dumps([a for a in agents if a["name"] != args[2]]))
+        print(json.dumps({"id": "fake", "error": {"code": "agent_prompt_stalled"}}))
+        raise SystemExit(0)
     if mode in timeout_modes:
         # herdr reports a --wait timeout as an error envelope at exit 0.
         Path(os.environ["FAKE_PROMPT_SEEN"]).write_text("yes")
@@ -263,6 +370,12 @@ elif args[:2] == ["agent", "prompt"]:
         raise SystemExit(0)
     if mode == "prompt-reject":
         print(json.dumps({"error": "not_idle"}), file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "prompt-blocked-exit1":
+        # herdr refuses a submission at a nonzero exit with an id-bearing
+        # envelope on stderr, not only the exit-0 error shape.
+        print(json.dumps({"id": "cli:agent:prompt", "error": {"code": "agent_blocked"}}),
+              file=sys.stderr)
         raise SystemExit(1)
     if mode == "prompt-nonprompted":
         print(json.dumps({"id": "fake", "result": {"type": "agent_info"}}))
@@ -278,6 +391,48 @@ elif args[:2] == ["pane", "report-metadata"]:
         print(json.dumps({"error": "presentation_unsupported"}), file=sys.stderr)
         raise SystemExit(1)
     # Mutation success is established by the exit status; no result body is required.
+elif args[:2] == ["agent", "list"]:
+    agents = json.loads(Path(os.environ["FAKE_AGENTS"]).read_text())
+    if mode == "exit-agent-reappears":
+        # The row's agent is removed by the /exit reply above, then
+        # reappears on the settle re-check that follows _exit_agent's own
+        # verdict -- simulates a transient reappearance between snapshots.
+        count_path = Path(os.environ["FAKE_AGENT_LIST_COUNT"])
+        calls_so_far = int(count_path.read_text()) if count_path.exists() else 0
+        count_path.write_text(str(calls_so_far + 1))
+        removed_path = Path(os.environ["FAKE_REMOVED_AGENT"])
+        if calls_so_far + 1 >= 3 and removed_path.exists():
+            removed = json.loads(removed_path.read_text())
+            if not any(a["name"] == removed["name"] for a in agents):
+                agents = agents + [removed]
+    print(json.dumps({"id": "fake", "result": {"type": "agent_list", "agents": agents}}))
+elif args[:2] == ["pane", "list"]:
+    ws = args[args.index("--workspace") + 1]
+    panes = [p for p in json.loads(Path(os.environ["FAKE_PANES"]).read_text())
+             if p["workspace_id"] == ws]
+    print(json.dumps({"id": "fake", "result": {"type": "pane_list", "panes": panes}}))
+elif args[:2] == ["pane", "close"]:
+    path = Path(os.environ["FAKE_PANES"])
+    path.write_text(json.dumps([p for p in json.loads(path.read_text())
+                                if p["pane_id"] != args[2]]))
+    apath = Path(os.environ["FAKE_AGENTS"])
+    apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                 if a["pane_id"] != args[2]]))
+    print(json.dumps({"id": "fake", "result": {"type": "ok"}}))
+elif args[:2] == ["agent", "send-keys"]:
+    target = args[2]
+    apath = Path(os.environ["FAKE_AGENTS"])
+    agents = json.loads(apath.read_text())
+    if not any(a["name"] == target for a in agents):
+        # Live herdr 0.9.1 writes this to stderr at exit 1, not the exit-0
+        # envelope shape (verified against the installed CLI).
+        print(json.dumps({"id": "cli:agent:send-keys",
+                          "error": {"code": "agent_not_found",
+                                    "message": f"agent target {target} not found"}}),
+              file=sys.stderr)
+        raise SystemExit(1)
+    if mode in ("exit-menu", "exit-timeout-menu") and args[3:] == ["1", "enter"]:
+        apath.write_text(json.dumps([a for a in agents if a["name"] != target]))
 else:
     print(json.dumps({"error": "unexpected", "args": args}), file=sys.stderr)
     raise SystemExit(2)
@@ -362,6 +517,12 @@ class Fixture:
             "FAKE_AGENT": "impl-td-a",
             "FAKE_ENV_OUTPUT": str(self.root / "env-output"),
             "FAKE_COMMAND_ECHO": str(self.root / "command-echo"),
+            "FAKE_PREP_COPY": str(self.root / "prep-copy"),
+            "FAKE_WAIT_COUNT": str(self.root / "wait-count"),
+            "FAKE_AGENTS": str(self.root / "agents.json"),
+            "FAKE_PANES": str(self.root / "panes.json"),
+            "FAKE_REMOVED_AGENT": str(self.root / "removed-agent.json"),
+            "FAKE_AGENT_LIST_COUNT": str(self.root / "agent-list-count"),
         }
 
     def close(self):
@@ -413,6 +574,26 @@ class Fixture:
             prompt_timeout_ms=prompt_timeout_ms,
             **kwargs,
         )
+
+    def settle_state(self, workers, status, agents, panes, review=None):
+        task = json.loads(self.task_file.read_text())
+        task.update(status=status, workers=workers)
+        self.task_file.write_text(json.dumps(task))
+        if review is not None:
+            (self.rd / "tasks" / "td-a.review.json").write_text(json.dumps(review))
+        Path(self.env["FAKE_AGENTS"]).write_text(json.dumps(agents))
+        Path(self.env["FAKE_PANES"]).write_text(json.dumps(panes))
+
+    def settle(self, launch_id):
+        return herdr_dispatch.settle(
+            repo_slug=self.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", launch_id=launch_id, cwd=self.repo,
+            herdr_cli=str(self.bin), env=self.env)
+
+    def sweep(self):
+        return herdr_dispatch.sweep(
+            repo_slug=self.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", cwd=self.repo, herdr_cli=str(self.bin), env=self.env)
 
     def worker_records(self):
         return json.loads(self.task_file.read_text())["workers"]
@@ -678,13 +859,13 @@ def test_runtime_binding_precedes_start_and_records_selected_entry():
         expected = str(fixture.runtime_dir.resolve() / "codex")
         task = json.loads(fixture.task_file.read_text())
         assert task["workers"][-1]["runtime_binary"] == expected, task
-        commands = [call[3] for call in fixture.calls() if call[:2] == ["pane", "run"]]
-        assert any("command -v" in command and str(fixture.runtime_dir) in command for command in commands)
+        script = (fixture.root / "prep-copy").read_text()
+        assert "command -v" in script and str(fixture.runtime_dir) in script, script
     finally:
         fixture.close()
 
 
-def test_missing_or_mismatched_binary_refuses_before_attempt_and_start():
+def test_missing_or_mismatched_binary_refuses_before_start():
     for mode in ("missing", "wrong-runtime-binary"):
         fixture = Fixture()
         try:
@@ -698,7 +879,13 @@ def test_missing_or_mismatched_binary_refuses_before_attempt_and_start():
                 assert "runtime" in str(exc), exc
             else:
                 raise AssertionError("unverified executable accepted")
-            assert json.loads(fixture.task_file.read_text())["workers"] == []
+            rows = json.loads(fixture.task_file.read_text())["workers"]
+            if mode == "missing":
+                assert rows == [], rows
+            else:
+                assert [r["status"] for r in rows] == ["launch_failed"], rows
+                assert rows[0]["launch_failed_cause"].startswith(
+                    "pane-prep: environment-mismatch: "), rows
             assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
         finally:
             fixture.close()
@@ -709,8 +896,7 @@ def test_runtime_binding_arms_gh_shim_after_runtime_path():
     try:
         fixture.launch()
         shim = agent_runtime.GH_SHIM_DIR
-        command = next(call[3] for call in fixture.calls() if call[:2] == ["pane", "run"])
-        parts = command.split("; ")
+        parts = (fixture.root / "prep-copy").read_text().splitlines()
         runtime_path = next(i for i, part in enumerate(parts) if part.startswith("export PATH="))
         assert parts[runtime_path + 1] == f'export PATH={shlex.quote(str(shim))}:"$PATH"', parts
         assert parts[runtime_path + 2] == f'export BASH_ENV="${{BASH_ENV:-{shim}/path.sh}}"', parts
@@ -719,7 +905,7 @@ def test_runtime_binding_arms_gh_shim_after_runtime_path():
         fixture.close()
 
 
-def test_unarmed_gh_refuses_before_attempt_and_start():
+def test_unarmed_gh_refuses_before_start_and_records_the_failed_prep():
     fixture = Fixture()
     try:
         fixture.env["FAKE_HERDR_MODE"] = "unarmed-gh"
@@ -729,10 +915,644 @@ def test_unarmed_gh_refuses_before_attempt_and_start():
             assert "runtime executable" in str(exc), exc
         else:
             raise AssertionError("a pane whose gh is not the shim was accepted")
-        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        rows = json.loads(fixture.task_file.read_text())["workers"]
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith(
+            "pane-prep: environment-mismatch: "), rows
         assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
     finally:
         fixture.close()
+
+
+def test_pane_prep_waits_out_a_slow_shell():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "slow-shell"
+        result = fixture.launch()
+        assert result["status"] == "launched", result
+        waits = [c for c in fixture.calls() if c[:2] == ["pane", "wait-output"]]
+        assert len(waits) == 4, waits  # 2 timeouts + readiness + prep marker
+        runs = [c for c in fixture.calls() if c[:2] == ["pane", "run"]]
+        assert runs[0][3].startswith("printf "), runs[0]
+        assert runs[1][3].startswith(". "), runs[1]
+    finally:
+        fixture.close()
+
+
+def test_pane_prep_dead_shell_records_launch_failed_with_cause():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "dead-shell"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: shell-not-ready"), exc
+        else:
+            raise AssertionError("a shell that never answers must fail the launch")
+        rows = fixture.worker_records()
+        assert len(rows) == 1, rows
+        assert rows[0]["status"] == "launch_failed", rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: shell-not-ready"), rows
+        assert rows[0]["capture_before_sha256"] is None, rows
+        assert [c for c in fixture.calls() if c[:2] == ["agent", "start"]] == []
+        runs = [c for c in fixture.calls() if c[:2] == ["pane", "run"]]
+        assert len(runs) == 1, runs  # the prep script is never sourced
+    finally:
+        fixture.close()
+
+
+def test_pane_run_lines_stay_under_max_canon_and_script_is_removed():
+    fixture = Fixture()
+    try:
+        fixture.launch()
+        runs = [c for c in fixture.calls() if c[:2] == ["pane", "run"]]
+        assert runs, "prep must run"
+        for call in runs:
+            assert len(call[3].encode()) < 1024, (len(call[3].encode()), call[3][:80])
+        prep_dir = fixture.rd / "prep"
+        assert not prep_dir.exists() or list(prep_dir.iterdir()) == [], list(prep_dir.iterdir())
+        assert "HERDR_READY_" in (fixture.root / "prep-copy").read_text()
+    finally:
+        fixture.close()
+
+
+def test_pane_prep_script_write_failure_records_launch_failed():
+    fixture = Fixture()
+    try:
+        (fixture.rd / "prep").write_text("a file where the prep dir belongs")
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: script-write: "), exc
+        else:
+            raise AssertionError("an unwritable prep dir must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: script-write: "), rows
+        assert [c for c in fixture.calls() if c[:2] == ["agent", "start"]] == []
+    finally:
+        fixture.close()
+
+
+def test_pane_prep_source_line_failure_records_launch_failed():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "source-fails"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: script-source: "), exc
+        else:
+            raise AssertionError("a failed source line must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: script-source: "), rows
+        prep_dir = fixture.rd / "prep"
+        assert not prep_dir.exists() or list(prep_dir.iterdir()) == [], list(prep_dir.iterdir())
+        assert [c for c in fixture.calls() if c[:2] == ["agent", "start"]] == []
+    finally:
+        fixture.close()
+
+
+def test_pane_changed_during_prep_records_launch_failed():
+    fixture = Fixture()
+    original = herdr_dispatch._validate_pane
+    seen = []
+
+    def validate(*args):
+        seen.append(args)
+        if len(seen) > 1:
+            raise herdr_dispatch.DispatchError("pane cwd changed")
+        return original(*args)
+
+    try:
+        herdr_dispatch._validate_pane = validate
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == "pane-prep: pane-validate: pane cwd changed", exc
+        else:
+            raise AssertionError("a pane that changed during prep must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"] == "pane-prep: pane-validate: pane cwd changed", rows
+        assert len(seen) == 2, seen  # launch's own check, then prep's final check
+    finally:
+        herdr_dispatch._validate_pane = original
+        fixture.close()
+
+
+def test_pane_prep_cleanup_failure_never_masks_the_prep_failure():
+    fixture = Fixture()
+    original_unlink = Path.unlink
+
+    def unlink(self, *args, **kwargs):
+        if self.parent.name == "prep" and self.suffix == ".sh":
+            raise PermissionError("prep dir denies unlink")
+        return original_unlink(self, *args, **kwargs)
+
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "source-fails"
+        Path.unlink = unlink
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: script-source: "), exc
+        else:
+            raise AssertionError("a failed source line must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: script-source: "), rows
+    finally:
+        Path.unlink = original_unlink
+        fixture.close()
+
+
+def settle_row(phase, lid, pane, head):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": head, "agent": lid, "status": "launched"}
+
+
+def pane(pane_id, agent=None, status="unknown", launch_id=None):
+    tokens = {"launch_id": launch_id} if launch_id else None
+    return {"pane_id": pane_id, "workspace_id": "w1", "agent": agent,
+            "agent_status": status, "tokens": tokens}
+
+
+def test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["reason"] == "verdict-recorded", result
+        assert fx.worker_records()[1]["exit_requested"] == "verdict-recorded", fx.worker_records()
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+        assert ["pane", "close", "w1:p2"] in fx.calls()
+        exits = [c for c in fx.calls() if c[:2] == ["agent", "prompt"] and c[3] == "/exit"]
+        assert exits and "--until" not in exits[0], exits
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "process-info-empty-foreground"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "exited", result
+        assert result["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        # The row's agent is absent; only foreground process identity can
+        # tell a live user process (vim, a test run) from an idle shell.
+        fx.settle_state([impl, rev], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "process-info-foreground-busy"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "absent", result
+        assert result["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-blocked"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # With two panes, _pane_verdict alone would say "close"; only the
+        # still-live guard keeps this pane open.
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-agent-reappears"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # _exit_agent's own snapshot says "exited"; the freshest re-check
+        # before deciding pane fate must catch the reappearance.
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_background_exit_menu_regex_rejects_prose_without_the_numbered_option():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-background-prose"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # Prose mentioning a background task, with no "1. Exit anyway"
+        # option, must never be mistaken for the exit menu.
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_refuses_a_busy_agent_without_mutation():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "working"}],
+                        [pane("w1:p1"), pane("w1:p2", "claude", "working")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "busy", result
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"], ["pane", "send-keys"])]
+        assert mutating == [], mutating
+    finally:
+        fx.close()
+
+
+def test_settle_exits_a_plan_agent_and_keeps_its_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        # A retry after an interrupted exit: exit_requested alone authorizes it.
+        plan = dict(settle_row("plan", "P", "w1:p1", head), exit_requested="plan-confirmed")
+        fx.settle_state([plan], "in-progress",
+                        [{"name": "P", "pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "P"), pane("w1:p2")])
+        result = fx.settle("P")
+        assert result["reason"] == "exit-requested" and result["agent"] == "exited", result
+        assert result["pane"].startswith("kept"), result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]]
+    finally:
+        fx.close()
+
+
+def test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_menu():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "review-dispatched",
+                        [{"name": "I", "pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle"), pane("w1:p2", "claude", "working")])
+        assert fx.settle("I")["status"] == "not-settled"
+        assert [c for c in fx.calls() if c[:2] in (["agent", "list"], ["agent", "prompt"])] == []
+        fx.env["FAKE_HERDR_MODE"] = "exit-menu"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-blocked"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # The pane text matches the exit-menu prose, but herdr never wrote
+        # /exit (agent_blocked), so no raw keystroke may be sent.
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-transport-fail"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # A nonzero herdr exit (no JSON envelope at all) leaves /exit
+        # delivery unconfirmed, same as agent_blocked but without a
+        # structured error code; the raw-key fallback must not fire either.
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_on_a_malformed_exit_reply():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-malformed-reply"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # herdr exits 0 with an unparseable reply (no "id", no "error.code"):
+        # not a transport failure and not agent_blocked, but still no proof
+        # /exit was delivered, so it stays on the still-live side.
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_targets_send_keys_by_agent_name_never_a_replacement_occupant():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-occupant-changed"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # R exits and a replacement occupies w1:p2 during the pane read.
+        # send-keys targets "R" by name, so a differently named replacement
+        # never receives it; same-name reuse is excluded by serialization.
+        assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
+        assert not any(c[:2] == ["agent", "send-keys"] and c[2] != "R" for c in fx.calls()), fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "exited", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "settled", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_on_an_exit_reply_missing_its_id():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-coded-reply-no-id"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # herdr exits 0 with {"error": {"code": "timeout"}} and no "id" --
+        # every genuine fixture reply carries "id", so a coded reply missing
+        # it is not proof herdr processed the request.
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_on_a_malformed_exit_success():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-malformed-success"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # herdr exits 0 with {"id": "fake", "result": {}} -- well-formed
+        # JSON, but not the agent_prompted envelope that proves /exit was
+        # delivered; this must not authorize the raw-key fallback either.
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_treats_a_stalled_reply_at_a_nonzero_exit_as_delivered():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-stalled-exit1"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # Live herdr reports some /exit errors as an id-bearing envelope on
+        # stderr at a nonzero exit, not only the exit-0 shape; that must
+        # still count as delivered, not fall back to still-live.
+        assert result["agent"] == "exited", result
+        assert result["status"] == "settled", result
+    finally:
+        fx.close()
+
+
+def test_settle_sends_keys_immediately_after_the_exit_menu_read():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-menu"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        calls = fx.calls()
+        read_index = calls.index(["pane", "read", "w1:p2", "--source", "detection", "--lines", "20"])
+        send_index = calls.index(["agent", "send-keys", "R", "1", "enter"])
+        # No occupancy snapshot sits between the read and the send -- the
+        # agent-targeted call leaves no window for one to close.
+        assert send_index == read_index + 1, calls
+        assert result["agent"] == "exited" and result["pane"] == "kept-last-pane", result
+    finally:
+        fx.close()
+
+
+def test_settle_sends_keys_on_an_id_bearing_timeout_reply_with_the_menu_showing():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-timeout-menu"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # timeout is the realistic route to the menu: /exit likely times out
+        # while Claude Code is showing it, so this code must stay delivered.
+        assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
+        assert result["agent"] == "exited" and result["pane"] == "kept-last-pane", result
+    finally:
+        fx.close()
+
+
+def test_settle_refuses_an_unproven_occupant():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        idle_r = [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}]
+        # the pane's launch token names another attempt
+        fx.settle_state([impl, rev], "changes-requested", idle_r,
+                        [pane("w1:p1"), pane("w1:p2", "claude", "idle", "R-other")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        assert fx.settle("R")["status"] == "occupant-unverified"
+        # a later row names the same pane (a successor reserved, maybe not started)
+        later = settle_row("review", "R2", "w1:p2", head)
+        fx.settle_state([impl, rev, later], "review-dispatched", idle_r,
+                        [pane("w1:p1"), pane("w1:p2", "claude", "idle", "R")])
+        assert fx.settle("R")["status"] == "occupant-unverified"
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"], ["pane", "send-keys"])]
+        assert mutating == [], mutating
+        assert all("exit_requested" not in w for w in fx.worker_records()), fx.worker_records()
+    finally:
+        fx.close()
+
+
+def test_reprompt_refuses_a_row_whose_exit_was_requested():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        task = json.loads(fx.task_file.read_text())
+        task["workers"][-1]["exit_requested"] = "review-approved"
+        fx.task_file.write_text(json.dumps(task))
+        prompts_before = len(fx.prompt_calls())
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "exit was requested" in str(exc), exc
+        else:
+            raise AssertionError("an exit-requested launch must not be reprompted")
+        assert len(fx.prompt_calls()) == prompts_before, "nothing delivered"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target.get("reprompts", []) == [], target
+    finally:
+        fx.close()
+
+
+def test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        dead = dict(settle_row("review", "R1", "w1:p2", head), status="launch_failed")
+        fx.settle_state([impl, dead], "completed", [], [pane("w1:p1", "claude", "idle"), pane("w1:p2")])
+        result = fx.sweep()
+        assert result["status"] == "swept", result
+        assert ["pane", "close", "w1:p2"] in fx.calls(), fx.calls()
+        fx.settle_state([dead], "completed", [], [pane("w1:p2")])
+        result = fx.sweep()
+        assert result["rows"][0]["pane"] == "kept-last-pane", result
+    finally:
+        fx.close()
+
+
+def test_sweep_keeps_a_pane_a_repair_row_also_used():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        old = dict(settle_row("review", "R1", "w1:p3", head), status="launch_failed")
+        repair = settle_row("implement", "I2", "w1:p3", head)
+        # R2 is settled (failed launch), so only the foreign live agent X keeps its pane.
+        other = dict(settle_row("review", "R2", "w1:p2", head), status="launch_failed")
+        fx.settle_state([impl, old, repair, other], "review-dispatched",
+                        [{"name": "X", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1"), pane("w1:p2", "claude", "idle"), pane("w1:p3")])
+        result = fx.sweep()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        by_lid = {r["launch_id"]: r for r in result["rows"]}
+        assert by_lid["R1"]["pane"] == "kept-shared", result
+        assert by_lid["R2"]["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "prompt"]], "X is not R2's agent"
+    finally:
+        fx.close()
+
+
+def test_settle_and_sweep_cli_subcommands_reach_the_functions():
+    fx = Fixture()
+    try:
+        env = {k: v for k, v in fx.env.items() if k != "HERDR_ENV"}
+        for verb, extra in (("settle", ["--launch-id", "L"]), ("sweep", [])):
+            proc = subprocess.run(
+                [sys.executable, herdr_dispatch.__file__, verb, "--repo-slug", fx.slug,
+                 "--task-id", "td-a", "--session", "S", "--fence", "1",
+                 "--workspace-id", "w1", "--cwd", str(fx.repo), *extra],
+                capture_output=True, text=True, env=env)
+            assert proc.returncode == 2, (verb, proc.returncode, proc.stderr)
+            out = json.loads(proc.stdout)
+            assert out == {"status": "error",
+                           "error": f"{verb} requires a Herdr-managed environment"}, out
+    finally:
+        fx.close()
 
 
 def test_runtime_resolution_preserves_filesystem_parent_semantics():
@@ -783,13 +1603,16 @@ def test_runtime_binding_bypasses_aliases_functions_and_stale_hashes():
                 def run(_cli, argv, **kwargs):
                     nonlocal output
                     if argv[:2] == ["pane", "run"]:
+                        if not argv[3].startswith(". "):
+                            return ""  # the shell-readiness line
+                        body = Path(shlex.split(argv[3])[1]).read_text()
                         setup = (
                             f'{runtime}() {{ export CLAUDE_CONFIG_DIR=wrong; printf "WRAPPER\\n"; }}\n'
                             f"alias {runtime}='false'\n"
                             + (f"hash -p /bin/false {runtime}\n" if shell == "bash" else f"hash {runtime}=/bin/false\n")
                         )
                         process = subprocess.run(
-                            [shell_binary, "-f", "-c", setup + argv[3] + f"\n{runtime}\n"],
+                            [shell_binary, "-f", "-c", setup + body + f"\n{runtime}\n"],
                             env=fixture.env, text=True, capture_output=True, check=True,
                         )
                         output = process.stdout
@@ -803,7 +1626,8 @@ def test_runtime_binding_bypasses_aliases_functions_and_stale_hashes():
                 herdr_dispatch._bind_pane_environment(
                     "fake", "w1:p1", "w1", fixture.repo,
                     {"launch_env": {"CLAUDE_CONFIG_DIR": None}, "account_id": "personal"},
-                    fixture.env, runtime_binary=str(selected), runtime=runtime,
+                    fixture.env, prep_dir=fixture.rd / "prep",
+                    runtime_binary=str(selected), runtime=runtime,
                 )
                 assert "BINARY_ACCOUNT=unset" in output and "WRAPPER" not in output, output
             finally:
@@ -1261,6 +2085,26 @@ def test_agent_blocked_refusal_is_never_reconciled_even_if_agent_goes_working():
         fixture.close()
 
 
+def test_agent_blocked_at_a_nonzero_exit_is_never_reconciled():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-blocked-exit1"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).endswith(": agent_blocked"), exc
+        else:
+            raise AssertionError("a refused submission was reconciled")
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["status"] == "launch_failed", attempt
+        # Live herdr reports this refusal on stderr at a nonzero exit, not
+        # only the exit-0 error shape; the re-poll must still be skipped.
+        gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
+        assert len(gets) == 1, gets
+    finally:
+        fixture.close()
+
+
 def test_done_agent_after_a_prompt_failure_reconciles_to_launched():
     fixture = Fixture()
     try:
@@ -1392,9 +2236,11 @@ def test_target_shell_account_environment_is_applied_and_verified():
                 "account_id": "account-123",
             },
             fixture.env,
+            prep_dir=fixture.rd / "prep",
         )
         run = next(call for call in fixture.calls() if call[:2] == ["pane", "run"])
-        assert run[2] == "w1:p1" and "unset CLAUDE_CONFIG_DIR" in run[3], run
+        script = (fixture.root / "prep-copy").read_text()
+        assert run[2] == "w1:p1" and "unset CLAUDE_CONFIG_DIR" in script, (run, script)
         codex_home = fixture.root / "Codex Home"
         herdr_dispatch._bind_pane_environment(
             str(fixture.bin), "w1:p1", "w1", fixture.repo,
@@ -1408,15 +2254,16 @@ def test_target_shell_account_environment_is_applied_and_verified():
                 "account_id": "account-123",
             },
             fixture.env,
+            prep_dir=fixture.rd / "prep",
             personal=True,
         )
-        runs = [call for call in fixture.calls() if call[:2] == ["pane", "run"]]
-        assert f"export CODEX_HOME={shlex.quote(str(codex_home))}" in runs[-1][3], runs[-1]
-        assert "unset CLAUDE_CONFIG_DIR" in runs[-1][3], runs[-1]
-        assert "unset CLAUDE_PERSONAL_ONLY" in runs[-1][3], runs[-1]
-        assert "export WORKFLOW_PERSONAL_ACCOUNT=1" in runs[-1][3], runs[-1]
-        assert "export HERDR_PERSONAL=1" in runs[-1][3], runs[-1]
-        assert "export HERDR_ACCOUNT_ID=account-123" in runs[-1][3], runs[-1]
+        script = (fixture.root / "prep-copy").read_text()
+        assert f"export CODEX_HOME={shlex.quote(str(codex_home))}" in script, script
+        assert "unset CLAUDE_CONFIG_DIR" in script, script
+        assert "unset CLAUDE_PERSONAL_ONLY" in script, script
+        assert "export WORKFLOW_PERSONAL_ACCOUNT=1" in script, script
+        assert "export HERDR_PERSONAL=1" in script, script
+        assert "export HERDR_ACCOUNT_ID=account-123" in script, script
         fixture.env["FAKE_HERDR_MODE"] = "wrong-shell-env"
         try:
             herdr_dispatch._bind_pane_environment(
@@ -1429,6 +2276,7 @@ def test_target_shell_account_environment_is_applied_and_verified():
                     "account_id": "account-123",
                 },
                 fixture.env,
+                prep_dir=fixture.rd / "prep",
             )
         except herdr_dispatch.DispatchError as exc:
             assert "account environment" in str(exc), exc
@@ -1452,15 +2300,19 @@ def test_target_shell_environment_wait_ignores_command_echo():
                 "account_id": "account-123",
             },
             fixture.env,
+            prep_dir=fixture.rd / "prep",
             personal=True,
         )
         wait = next(
-            call for call in fixture.calls() if call[:2] == ["pane", "wait-output"]
+            call for call in fixture.calls()
+            if call[:2] == ["pane", "wait-output"]
+            and call[call.index("--match") + 1].startswith("HERDR_READY_")
         )
         marker = wait[wait.index("--match") + 1]
         command_echo = (fixture.root / "command-echo").read_text()
         assert marker.startswith("HERDR_READY_"), marker
         assert marker not in command_echo, command_echo
+        assert "HERDR_SHELL_" not in command_echo, command_echo
         assert wait[-2:] == ["--source", "recent-unwrapped"], wait
     finally:
         fixture.close()
@@ -1473,9 +2325,9 @@ def test_launch_persists_explicit_account_selection_metadata():
         attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
         assert attempt["personal"] is False, attempt
         assert attempt["account_id"], attempt
-        run = next(call for call in fixture.calls() if call[:2] == ["pane", "run"])
-        assert "export HERDR_PERSONAL=0" in run[3], run
-        assert f"export HERDR_ACCOUNT_ID={attempt['account_id']}" in run[3], run
+        script = (fixture.root / "prep-copy").read_text()
+        assert "export HERDR_PERSONAL=0" in script, script
+        assert f"export HERDR_ACCOUNT_ID={attempt['account_id']}" in script, script
     finally:
         fixture.close()
 
@@ -1508,7 +2360,7 @@ def test_metadata_update_carries_sequence_and_launch_token():
         "--seq",
         "1234",
         "--ttl-ms",
-        "3600000",
+        "2592000000",
     ], argv
 
 
@@ -1815,6 +2667,48 @@ def test_reprompt_requires_live_idle_agent():
         assert target["reprompts"][0]["status"] == "failed", target
     finally:
         fx.close()
+
+
+def test_reprompt_accepts_a_done_interactive_ready_agent():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        fx.env["FAKE_HERDR_MODE"] = "agent-done"
+        result = fx.reprompt(lid)
+        assert result["status"] == "reprompted", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "delivered", target
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_a_done_readiness_reply():
+    record = {"type": "agent_info", "agent": {
+        "name": "impl-td-a", "agent": "codex", "pane_id": "w1:p1",
+        "agent_status": "done", "interactive_ready": True, "launch_pending": False}}
+    try:
+        herdr_dispatch._validate_agent(record, "impl-td-a", "codex", "w1:p1")
+    except herdr_dispatch.DispatchError as exc:
+        assert "current attempt" in str(exc), exc
+    else:
+        raise AssertionError("launch readiness must stay strict idle")
+
+
+def test_validate_agent_states_keyword_widens_only_on_request():
+    record = {"type": "agent_info", "agent": {
+        "name": "a", "agent": "claude", "pane_id": "w1:p2",
+        "agent_status": "done", "interactive_ready": True, "launch_pending": False}}
+    herdr_dispatch._validate_agent(record, "a", "claude", "w1:p2",
+                                   states=herdr_dispatch.AGENT_STATES)
+    assert herdr_dispatch.AGENT_STATES is core.IDLE_AGENT_STATES
+    working = {**record, "agent": {**record["agent"], "agent_status": "working"}}
+    try:
+        herdr_dispatch._validate_agent(working, "a", "claude", "w1:p2",
+                                       states=herdr_dispatch.AGENT_STATES)
+    except herdr_dispatch.DispatchError:
+        pass
+    else:
+        raise AssertionError("a working agent is never ready")
 
 
 def test_reprompt_refuses_on_lost_fence_before_delivery():
@@ -2281,6 +3175,9 @@ for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
     ("reprompt requires a live idle agent", test_reprompt_requires_live_idle_agent),
+    ("reprompt accepts a done agent that is interactive-ready", test_reprompt_accepts_a_done_interactive_ready_agent),
+    ("launch still refuses a done readiness reply", test_launch_refuses_a_done_readiness_reply),
+    ("validate_agent widens states only when asked", test_validate_agent_states_keyword_widens_only_on_request),
     ("reprompt refuses on a lost fence before delivery", test_reprompt_refuses_on_lost_fence_before_delivery),
     ("reprompt refuses supersession before delivery", test_reprompt_supersession_before_delivery_refuses_without_delivery),
     ("reprompt spawn failure is retry-safe failed", test_reprompt_spawn_failure_is_retry_safe_failed),
@@ -2298,11 +3195,47 @@ for name, test in (
     ("result_object normalizes parse failures to DispatchError", test_result_object_normalizes_parse_failures_to_dispatch_error),
     ("reprompt CLI rejects a non-utf8 prompt file", test_reprompt_cli_rejects_non_utf8_prompt_file),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
+    ("pane prep waits out a slow shell before sourcing the prep", test_pane_prep_waits_out_a_slow_shell),
+    ("pane prep that never sees a prompt records launch_failed with its cause", test_pane_prep_dead_shell_records_launch_failed_with_cause),
+    ("pane run lines stay under MAX_CANON and the prep script is removed", test_pane_run_lines_stay_under_max_canon_and_script_is_removed),
+    ("pane prep script write failure records launch_failed", test_pane_prep_script_write_failure_records_launch_failed),
+    ("pane prep source line failure records launch_failed", test_pane_prep_source_line_failure_records_launch_failed),
+    ("pane changed during prep records launch_failed", test_pane_changed_during_prep_records_launch_failed),
+    ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
+    ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
+    ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
+    ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
+    ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),
+    ("settle keeps a pane when the agent reappears after exit reports exited", test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited),
+    ("background exit menu regex rejects prose without the numbered option", test_background_exit_menu_regex_rejects_prose_without_the_numbered_option),
+    ("settle refuses a busy agent without any mutation", test_settle_refuses_a_busy_agent_without_mutation),
+    ("settle exits a plan agent and keeps its pane", test_settle_exits_a_plan_agent_and_keeps_its_pane),
+    ("settle refuses an occupant it cannot prove is this attempt", test_settle_refuses_an_unproven_occupant),
+    ("reprompt refuses a launch whose exit was requested", test_reprompt_refuses_a_row_whose_exit_was_requested),
+    ("settle leaves an unsettled implementer untouched and answers the exit menu", test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_menu),
+    ("settle never sends keys when exit is blocked by an unrelated prompt", test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt),
+    ("settle never sends keys when exit delivery fails at the transport", test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport),
+    ("settle never sends keys on a malformed exit reply", test_settle_never_sends_keys_on_a_malformed_exit_reply),
+    ("settle targets send-keys by agent name, never a replacement occupant",
+     test_settle_targets_send_keys_by_agent_name_never_a_replacement_occupant),
+    ("settle never sends keys on an exit reply missing its id",
+     test_settle_never_sends_keys_on_an_exit_reply_missing_its_id),
+    ("settle never sends keys on a malformed exit success",
+     test_settle_never_sends_keys_on_a_malformed_exit_success),
+    ("settle treats a stalled reply at a nonzero exit as delivered",
+     test_settle_treats_a_stalled_reply_at_a_nonzero_exit_as_delivered),
+    ("settle sends keys immediately after the exit menu read",
+     test_settle_sends_keys_immediately_after_the_exit_menu_read),
+    ("settle sends keys on an id-bearing timeout reply with the menu showing",
+     test_settle_sends_keys_on_an_id_bearing_timeout_reply_with_the_menu_showing),
+    ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
+    ("sweep keeps a pane a repair row also used", test_sweep_keeps_a_pane_a_repair_row_also_used),
+    ("settle and sweep CLI subcommands reach the functions", test_settle_and_sweep_cli_subcommands_reach_the_functions),
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
-    ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_attempt_and_start),
+    ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_start),
     ("runtime binding arms the gh shim after the runtime PATH", test_runtime_binding_arms_gh_shim_after_runtime_path),
-    ("a pane whose gh is not the shim blocks before launch", test_unarmed_gh_refuses_before_attempt_and_start),
+    ("a pane whose gh is not the shim blocks before launch", test_unarmed_gh_refuses_before_start_and_records_the_failed_prep),
     ("real shells bypass stale runtime wrappers and hashes", test_runtime_binding_bypasses_aliases_functions_and_stale_hashes),
     ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
     ("Claude reviewer pane launch passes strict MCP config", test_claude_reviewer_pane_launch_passes_strict_mcp_config),
@@ -2324,6 +3257,7 @@ for name, test in (
     ("prompt-wait timeout on a dead agent still records launch_failed", test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed),
     ("a blocked agent after a prompt failure is never called launched", test_blocked_agent_after_a_prompt_failure_is_never_called_launched),
     ("an agent_blocked refusal is never reconciled", test_agent_blocked_refusal_is_never_reconciled_even_if_agent_goes_working),
+    ("agent_blocked at a nonzero exit is never reconciled", test_agent_blocked_at_a_nonzero_exit_is_never_reconciled),
     ("a done agent after a prompt failure reconciles to launched", test_done_agent_after_a_prompt_failure_reconciles_to_launched),
     ("late-ready records why the wait failed", test_late_ready_records_why_the_wait_failed),
     ("a failed re-poll surfaces the prompt error, not the poll's", test_failed_repoll_surfaces_the_prompt_error_not_the_polls),

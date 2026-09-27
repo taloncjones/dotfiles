@@ -10838,5 +10838,245 @@ layout = open("claude/skills/herdr-orchestration/references/state-layout.md").re
 assert "wake.json" in layout and "last_push" in layout, "the wake marker is undocumented"
 PY
 
+check "row_settlement: each settlement rule fires on its record state" <<'PY'
+import importlib.util, json, os, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+def row(phase, lid, pane="w1:p1", **kw):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": h, "agent": lid, **kw}
+def rs(task, i, review=None):
+    return c.row_settlement(task, i, done=None, review=review, head=h, payload_root=tempfile.mkdtemp())
+plan, impl, rev = row("plan", "P"), row("implement", "I"), row("review", "R", pane="w1:p2")
+assert rs({"status": "merged", "workers": [impl]}, 0) == "task-terminal"
+assert rs({"status": "in-progress", "workers": [row("review", "F", status="launch_failed")]}, 0) == "launch-failed"
+assert rs({"status": "review-dispatched", "workers": [impl, rev, row("review", "R2", pane="w1:p3")]}, 1) == "superseded"
+assert rs({"status": "changes-requested", "retired_review_launch_ids": ["R"], "workers": [impl, rev]}, 1) == "review-retired"
+record = {k: rev[k] for k in c.ATTEMPT_FIELDS}
+assert rs({"status": "in-progress", "workers": [impl, rev]}, 1, review=record) == "verdict-recorded"
+assert rs({"status": "in-progress", "workers": [dict(plan, exit_requested="plan-confirmed")]}, 0) == "exit-requested"
+assert rs({"status": "in-progress", "workers": [plan, impl]}, 0) is None  # no plan-advanced rule
+PY
+
+check "row_settlement: an implementer under review, a repair and a ship row stay unsettled" <<'PY'
+import importlib.util, os, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+def row(phase, lid, pane="w1:p1"):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": h, "agent": lid}
+def rs(task, i, review=None):
+    return c.row_settlement(task, i, done=None, review=review, head=h, payload_root=tempfile.mkdtemp())
+impl, rev = row("implement", "I"), row("review", "R", pane="w1:p2")
+assert rs({"status": "review-dispatched", "workers": [impl, rev]}, 0) is None
+assert rs({"status": "changes-requested", "workers": [impl, rev]}, 0) is None
+other = {k: rev[k] for k in c.ATTEMPT_FIELDS} | {"launch_id": "R-other"}
+assert rs({"status": "reviewed", "workers": [impl, rev]}, 1, review=other) is None
+ship = row("implement", "S", pane="w1:p3")
+assert rs({"status": "reviewed", "workers": [impl, rev, ship]}, 2) is None
+assert rs({"status": "reviewed", "workers": [impl, rev]}, 5) is None
+PY
+
+check "row_settlement: an unresolved reprompt blocks every rule" <<'PY'
+import importlib.util, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+base = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+        "pane_id": "w1:p1", "source_head_sha": h, "agent": "I"}
+for status in ("starting", "uncertain"):
+    row = dict(base, reprompts=[{"seq": 0, "status": status}])
+    assert c.row_settlement({"status": "merged", "workers": [row]}, 0, done=None, review=None,
+                            head=h, payload_root=tempfile.mkdtemp()) is None, status
+row = dict(base, exit_requested="review-approved", reprompts=[{"seq": 0, "status": "starting"}])
+assert c.row_settlement({"status": "reviewed", "workers": [row]}, 0, done=None, review=None,
+                        head=h, payload_root=tempfile.mkdtemp()) is None, "rule 0 outranks 0b"
+row = dict(base, reprompts=[{"seq": 0, "status": "delivered"}])
+assert c.row_settlement({"status": "merged", "workers": [row]}, 0, done=None, review=None,
+                        head=h, payload_root=tempfile.mkdtemp()) == "task-terminal"
+PY
+
+check "parse_poll keeps per-workspace agent names and panes" <<PY
+$LOAD
+agents = {"result": {"agents": [
+    {"workspace_id": "w2", "name": "impl-x", "pane_id": "w2:p1", "agent_status": "done"},
+    {"workspace_id": "w2", "name": "rev-x", "pane_id": "w2:p2", "agent_status": "working"}]}}
+spaces = {"result": {"workspaces": [{"workspace_id": "w2"}]}}
+poll = c.parse_poll(agents, spaces)
+assert poll["agents"]["w2"] == [
+    {"name": "impl-x", "pane_id": "w2:p1", "agent_status": "done"},
+    {"name": "rev-x", "pane_id": "w2:p2", "agent_status": "working"}], poll
+assert poll["live"]["w2"] == "working", poll
+PY
+
+check "checkin_facts: an idle settled worker reports exit-idle-worker" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+rev = {"phase": "review", "workspace_id": "w1", "runtime": "claude", "launch_id": "R",
+       "pane_id": "w1:p2", "source_head_sha": h, "agent": "rev-x"}
+impl = dict(rev, phase="implement", launch_id="I", pane_id="w1:p1", agent="impl-x")
+rec = {k: rev[k] for k in c.ATTEMPT_FIELDS}
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(dict(rec, task_id="PROJ-1", outcome="changes-requested")))
+task = {"v": 1, "task_id": "PROJ-1", "status": "changes-requested", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl, rev]}
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "rev-x", "pane_id": "w1:p2", "agent_status": "done"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is True, facts
+poll["agents"]["w1"][0]["agent_status"] = "working"
+assert c.checkin_facts(rd, task, poll, c.state_root().parent)["idle_settled"] is False
+PY
+
+check "checkin_facts: a poll without agents never reports exit-idle-worker" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+impl = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+        "pane_id": "w1:p1", "source_head_sha": h, "agent": "impl-x"}
+task = {"v": 1, "task_id": "PROJ-1", "status": "review-dispatched", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl]}
+facts = c.checkin_facts(rd, task, {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {}},
+                        c.state_root().parent)
+assert facts["idle_settled"] is False and facts["action"] != "exit-idle-worker", facts
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": "idle"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is False, "an implementer idle during its own review is expected"
+PY
+
+check "checkin_facts: a superseded row sharing name and pane never claims a live agent" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+impl_a = {"phase": "implement", "workspace_id": "w9", "runtime": "claude", "launch_id": "impl-a",
+          "pane_id": "w9:p1", "source_head_sha": h, "agent": "impl-x"}
+impl_b = {"phase": "implement", "workspace_id": "w9", "runtime": "claude", "launch_id": "impl-b",
+          "pane_id": "w9:p1", "source_head_sha": h, "agent": "impl-x"}
+rev_a = {"phase": "review", "workspace_id": "w9", "runtime": "claude", "launch_id": "rev-a",
+         "pane_id": "w9:p2", "source_head_sha": h, "agent": "rev-x"}
+task = {"v": 1, "task_id": "PROJ-1", "status": "review-dispatched", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl_a, impl_b, rev_a]}
+poll = {"live": {"w9": "working"}, "known": {"w9"}, "worktrees": {},
+        "agents": {"w9": [{"name": "impl-x", "pane_id": "w9:p1", "agent_status": "idle"},
+                          {"name": "rev-x", "pane_id": "w9:p2", "agent_status": "working"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is False, facts
+assert facts["action"] != "exit-idle-worker", facts["action"]
+PY
+
+check "checkin_action: exit-idle-worker ranks after every transition" <<PY
+$LOAD
+f = {"status": "in-progress", "poll_ok": True, "head": "a" * 40, "worktree_exists": True,
+     "idle_settled": True}
+assert c.checkin_action(f) == "exit-idle-worker", c.checkin_action(f)
+assert c.checkin_action(dict(f, done_outcome="failed")) == "failed"
+assert c.checkin_action(dict(f, reviewed=True)) == "confirm-review"
+assert c.checkin_action(dict(f, status="merged")) == "none"
+PY
+
+check "row_settlement: plan-confirmed and review-approved fire on their evidence" <<PY
+$LOAD
+import hashlib
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+H = "a" * 40
+def row(phase, lid, pane):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": H, "agent": lid}
+plan = row("plan", "P", "w1:p1")
+task = {"task_id": "PROJ-1", "status": "in-progress", "workers": [plan]}
+seen = []
+real = c.is_plan_completed
+# The frozen-artifact evidence is pinned by herdr_coordination_test.py
+# (is_plan_completed); this pins that rule 7 consults it with the row's workspace.
+c.is_plan_completed = lambda task, done, head, ws, pr: seen.append((done, head, ws, pr)) or True
+assert c.row_settlement(task, 0, done={"d": 1}, review=None, head=H, payload_root="/pr") == "plan-confirmed"
+assert seen == [({"d": 1}, H, "w1", "/pr")], seen
+c.is_plan_completed = lambda *a: False
+assert c.row_settlement(task, 0, done={"d": 1}, review=None, head=H, payload_root="/pr") is None
+c.is_plan_completed = real
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+impl, rev = row("implement", "I", "w1:p1"), row("review", "R", "w1:p2")
+review = {k: rev[k] for k in c.ATTEMPT_FIELDS} | {
+    "task_id": "PROJ-1", "outcome": "approved", "reviewed_head_sha": H,
+    "blocking_count": 0, "findings_ref": findings, "findings_sha256": digest}
+task = {"task_id": "PROJ-1", "status": "reviewed", "review_head_sha": H, "workers": [impl, rev]}
+assert c.row_settlement(task, 0, done=None, review=review, head=H, payload_root=root) == "review-approved"
+assert c.row_settlement(dict(task, status="changes-requested"), 0, done=None, review=review,
+                        head=H, payload_root=root) is None
+assert c.row_settlement(task, 0, done=None, review=review, head="b" * 40, payload_root=root) is None
+PY
+
+check "checkin_facts: a confirmed planner and an approved implementer are idle-settled; a foreign pane is not" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+wt = tempfile.mkdtemp()
+subprocess.run(["git", "-C", wt, "init", "-q"], check=True)
+subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+H = subprocess.check_output(["git", "-C", wt, "rev-parse", "HEAD"], text=True).strip()
+def row(phase, lid, pane, agent):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": H, "agent": agent}
+def poll(name, pane, status="idle"):
+    return {"live": {"w1": status}, "known": {"w1"}, "worktrees": {},
+            "agents": {"w1": [{"name": name, "pane_id": pane, "agent_status": status}]}}
+payload = c.state_root().parent
+plan = row("plan", "P", "w1:p1", "plan-x")
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": H,
+        "worktree": wt, "workers": [plan]}
+real = c.is_plan_completed
+c.is_plan_completed = lambda *a: True
+assert c.checkin_facts(rd, task, poll("plan-x", "w1:p1"), payload)["idle_settled"] is True
+assert c.checkin_facts(rd, task, poll("plan-x", "w1:p9"), payload)["idle_settled"] is False
+assert c.checkin_facts(rd, task, poll("other", "w1:p1"), payload)["idle_settled"] is False
+c.is_plan_completed = real
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+impl, rev = row("implement", "I", "w1:p1", "impl-x"), row("review", "R", "w1:p2", "rev-x")
+rec = {k: rev[k] for k in c.ATTEMPT_FIELDS} | {
+    "task_id": "PROJ-1", "outcome": "approved", "reviewed_head_sha": H,
+    "blocking_count": 0, "findings_ref": findings, "findings_sha256": digest}
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(rec))
+task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "review_head_sha": H, "base_sha": H,
+        "worktree": wt, "workers": [impl, rev]}
+assert c.checkin_facts(rd, task, poll("impl-x", "w1:p1"), payload)["idle_settled"] is True
+assert c.checkin_facts(rd, task, poll("impl-x", "w1:p1", "working"), payload)["idle_settled"] is False
+PY
+
+check "docs: section 4 and the event schema document exit-idle-worker" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+schema = open("claude/skills/herdr-orchestration/references/event-schema.md").read()
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+tick = chr(96)
+assert f"{tick}exit-idle-worker{tick}" in sec4, "section 4 lists the new action"
+assert f"{tick}exit-idle-worker{tick}" in schema, "event schema lists the new action"
+assert f"emits only the closed stdout vocabulary {tick}signal{tick} / {tick}heartbeat{tick}" in schema
+PY
+
+check "docs: the director settles workers, sweeps before review dispatch, and never overlaps launch" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+tick = chr(96)
+assert "settle --launch-id" in sec4, "section 4 names the settle verb"
+assert f"never runs {tick}launch{tick} while a {tick}settle{tick} or {tick}sweep{tick}" in sec4, "serialization rule"
+sec5 = skill.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
+assert " sweep " in sec5 or f"sweep{tick}" in sec5, "section 5 preflight runs sweep"
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

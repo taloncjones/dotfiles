@@ -3202,6 +3202,7 @@ def checkin_action(f) -> str:
         # Section 9 has no `paused` status, so there is no status gate to add.
         ("paused", f.get("done_outcome") == "paused"),
         ("failed", f.get("done_outcome") == "failed"),
+        ("exit-idle-worker", f.get("idle_settled")),
     )
     for name, fires in rules:
         if fires:
@@ -3229,7 +3230,7 @@ def parse_poll(agents, workspaces):
     w = workspaces.get("result", {}).get("workspaces") if isinstance(workspaces, dict) else None
     if not isinstance(a, list) or not isinstance(w, list):
         return None
-    live, known, worktrees = {}, set(), {}
+    live, known, worktrees, agents = {}, set(), {}, {}
     for row in w:
         if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
             continue
@@ -3245,7 +3246,9 @@ def parse_poll(agents, workspaces):
         known.add(ws)
         state = row.get("agent_status")
         live[ws] = state if isinstance(state, str) else "unknown"
-    return {"live": live, "known": known, "worktrees": worktrees}
+        agents.setdefault(ws, []).append(
+            {"name": row.get("name"), "pane_id": row.get("pane_id"), "agent_status": live[ws]})
+    return {"live": live, "known": known, "worktrees": worktrees, "agents": agents}
 
 
 def _git_ancestor(worktree, base, head) -> str:
@@ -3306,6 +3309,23 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         return rec
 
     done, review = _sidecar(".done.json"), _sidecar(".review.json")
+    poll_agents = poll.get("agents", {}) if isinstance(poll, dict) else {}
+    idle_settled = False
+    for index, row in enumerate(workers):
+        if not isinstance(row, dict) or not _nonempty_str(row.get("agent")):
+            continue
+        # A relaunch reuses the pane, so an older row of the same phase can
+        # otherwise claim the successor row's live agent (B1).
+        if any(isinstance(later, dict) and later.get("pane_id") == row.get("pane_id")
+               for later in workers[index + 1:]):
+            continue
+        idle = any(a.get("name") == row["agent"] and a.get("pane_id") == row.get("pane_id")
+                   and a.get("agent_status") in IDLE_AGENT_STATES
+                   for a in poll_agents.get(row.get("workspace_id"), []))
+        if idle and row_settlement(task, index, done=done, review=review, head=head,
+                                   payload_root=payload_root):
+            idle_settled = True
+            break
     impl_ws = phase_workspace(task, "implement")
     plan_ws = phase_workspace(task, "plan")
     rev_ws = phase_workspace(task, "review")
@@ -3376,6 +3396,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # stale record from a superseded attempt would fire forever; nothing
         # in the core deletes done.json on relaunch.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
+        "idle_settled": idle_settled,
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES
                          and attempt_matches(task, done, done_phase,
@@ -3478,6 +3499,56 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     return task.get("review_head_sha") == head_sha and (
         done.get("reviewed_head_sha") == head_sha
     )
+
+
+_TERMINAL_TASK = frozenset({"merged", "abandoned", "failed"})
+
+
+def row_settlement(task, index, *, done, review, head, payload_root):
+    """Why workers[index]'s agent may exit, or None while it may still have
+    work. Rules 0b-5 rest on facts that stay true once written; rules 7-8 read
+    mutable evidence and only ever authorize an agent exit, not a pane close."""
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    if not 0 <= index < len(workers) or not isinstance(workers[index], dict):
+        return None
+    row = workers[index]
+    phase = row.get("phase")
+    later = [w for w in workers[index + 1:] if isinstance(w, dict)]
+    reprompts = row.get("reprompts") if isinstance(row.get("reprompts"), list) else []
+    if any(isinstance(e, dict) and e.get("status") in ("starting", "uncertain")
+           for e in reprompts):
+        return None
+    if row.get("exit_requested"):
+        return "exit-requested"
+    status = task.get("status")
+    if status in _TERMINAL_TASK:
+        return "task-terminal"
+    if row.get("status") == "launch_failed":
+        return "launch-failed"
+    if any(w.get("phase") == phase for w in later):
+        return "superseded"
+    if phase == "review":
+        if row.get("launch_id") in (task.get(RETIRED_REVIEWS_KEY) or []):
+            return "review-retired"
+        if isinstance(review, dict) and all(
+                _nonempty_str(row.get(k)) and review.get(k) == row.get(k)
+                for k in ATTEMPT_FIELDS):
+            return "verdict-recorded"
+        return None
+    if phase == "plan":
+        if head and is_plan_completed(task, done, head, row.get("workspace_id"), payload_root):
+            return "plan-confirmed"
+        return None
+    if phase == "implement" and status == "reviewed":
+        reviews = [w for w in later if w.get("phase") == "review"]
+        if reviews and head and is_reviewed(task, review, head, reviews[-1].get("workspace_id")):
+            return "review-approved"
+    return None
+
+
+# herdr reports `done` for a finished turn in an unfocused workspace; it is as
+# promptable as `idle`.
+IDLE_AGENT_STATES = ("idle", "done")
 
 
 DESCENDANT_PHASES = ("plan", "implement", "review")
