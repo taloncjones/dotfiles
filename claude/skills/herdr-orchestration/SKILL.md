@@ -718,8 +718,10 @@ after every other action.
 Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
 means report it. `settle` never closes a workspace or a pane any plan,
-implement, repair or ship row used. The director never runs `launch` while a `settle` or `sweep` for the same workspace is in flight, and starts
-neither during a launch: both read the pane and row set the other changes.
+implement, repair or ship row used.
+The director never runs `launch` while a `settle` or `sweep` for the same
+workspace is in flight, and starts neither during a launch: both read the
+pane and row set the other changes.
 
 `stale-review-reset` also fires for a `completed` task pinned at HEAD: a
 review dispatch interrupted between its `review_head_sha` write and its
