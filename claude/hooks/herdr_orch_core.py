@@ -31,7 +31,7 @@ import herdr_coordination as coordination
 import herdr_envelope as envelope
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
-from workflow_context import account_scope, atomic_json_at, open_state_parent, repository_context
+from workflow_context import account_scope, atomic_bytes_at, atomic_json_at, open_state_parent, repository_context
 from workflow_context import git as context_git
 
 _PAYLOAD_SELECTION = contextvars.ContextVar("herdr_payload_selection", default=None)
@@ -789,6 +789,11 @@ def write_json_atomic(path, data) -> None:
         atomic_json_at(parent, name, data)
 
 
+def write_bytes_atomic(path, data) -> None:
+    with coordination.payload_parent(path, create=True) as (parent, name):
+        atomic_bytes_at(parent, name, data)
+
+
 def read_payload_bytes(path):
     """Read a regular payload file without following any parent or file link."""
     with coordination.payload_parent(path) as (parent, name):
@@ -870,7 +875,7 @@ def append_payload(path, data):
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("payload must be a regular file")
-            os.write(fd, data)
+            _write_fd_all(fd, data)
         finally:
             os.close(fd)
 

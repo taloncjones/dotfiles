@@ -5407,6 +5407,21 @@ if $CLI reset-task --repo-slug slug-x --task-id PROJ-1 --new-task-id PROJ-9 --se
 grep -q 'a reset opens with no retired review launches' "$ERRFILE"
 SH
 
+check "append_payload writes every byte through short writes" <<PY
+$LOAD
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+path = os.path.join(root, "short.log")
+real = os.write
+os.write = lambda fd, data: real(fd, bytes(data[:1]))
+try:
+    c.append_payload(path, b"hello journal\n")
+finally:
+    os.write = real
+got = open(path, "rb").read()
+assert got == b"hello journal\n", got
+PY
+
 check "null-attempt envelope: a malformed implement row counts as a dispatched attempt (emit + integrate)" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ev-malrow.git
 root=$(mktemp -d)

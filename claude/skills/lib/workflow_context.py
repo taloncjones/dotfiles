@@ -296,10 +296,10 @@ def _basename(name: str) -> str:
     return name
 
 
-def atomic_json_at(
-    parent_fd: int, name: str, data: dict, exclusive: bool = False
+def atomic_bytes_at(
+    parent_fd: int, name: str, data: bytes, exclusive: bool = False
 ) -> None:
-    """Atomically publish JSON in an open directory without closing its fd."""
+    """Atomically publish bytes in an open directory without closing its fd."""
     name = _basename(name)
     try:
         existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -309,9 +309,8 @@ def atomic_json_at(
         raise ValueError("state path is a symlink")
     descriptor, temporary = _open_temporary(parent_fd, name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(data, output, sort_keys=True, separators=(",", ":"))
-            output.write("\n")
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(data)
             output.flush()
             os.fsync(output.fileno())
         if exclusive:
@@ -330,6 +329,14 @@ def atomic_json_at(
             os.unlink(temporary, dir_fd=parent_fd)
         except FileNotFoundError:
             pass
+
+
+def atomic_json_at(
+    parent_fd: int, name: str, data: dict, exclusive: bool = False
+) -> None:
+    """Atomically publish JSON in an open directory without closing its fd."""
+    text = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+    atomic_bytes_at(parent_fd, name, text.encode("utf-8"), exclusive=exclusive)
 
 
 def atomic_json(path: str | Path, data: dict, exclusive: bool = False) -> None:
