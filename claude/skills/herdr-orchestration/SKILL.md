@@ -718,7 +718,13 @@ after every other action.
 Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
 means report it. `settle` never closes a workspace or a pane any plan,
-implement, repair or ship row used.
+implement, repair or ship row used. It also keeps a pane open
+(`pane: kept-occupied`) while a non-shell process still has the foreground
+or process-info fails or comes back empty, even once its own agent is gone.
+When `/exit` does not confirm within the pane, settle falls back to reading
+the pane for Claude Code's background-work exit menu and sending the
+agent-bound keystroke to accept it, but only once a confirmed
+`agent_prompt_stalled` or `timeout` reply proves `/exit` was delivered.
 The director never runs `launch` while a `settle` or `sweep` for the same
 workspace is in flight, and starts neither during a launch: both read the
 pane and row set the other changes.
@@ -989,8 +995,9 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 adapter's `sweep` verb
 (`python3 "$DISPATCH" sweep --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree>`)
 for the task workspace first; it exits stale reviewers whose verdict is
-recorded or retired and closes their panes and dead reviewer shells. Then
-confirm zero live review agents as before: reconcile live
+recorded or retired and closes their panes and dead reviewer shells,
+subject to the same kept-occupied and confirmed-exit-menu limits as
+`settle` above. Then confirm zero live review agents as before: reconcile live
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
 already running in it by its recorded agent and pane identity (do **not** `herdr
 workspace close`, which would tear down the shared task worktree). There must be
