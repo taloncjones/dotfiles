@@ -26,6 +26,21 @@ def _dispatch_error(message: str) -> RuntimeError:
     return DispatchError(message)
 
 
+def _error_code(text: str) -> str | None:
+    # A code is trustworthy only from an otherwise well-formed envelope
+    # ("id" present): an id-less body could be a malformed reply that
+    # happens to contain a recognizable code string.
+    try:
+        record = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(record, dict) or not isinstance(record.get("id"), str):
+        return None
+    error = record.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) and code else None
+
+
 def result_object(output: str, operation: str) -> dict[str, Any]:
     try:
         record = json.loads(output)
@@ -36,17 +51,8 @@ def result_object(output: str, operation: str) -> dict[str, Any]:
         raise _dispatch_error(f"{operation} returned malformed JSON") from exc
     has_id = isinstance(record, dict) and isinstance(record.get("id"), str)
     if not has_id or "error" in record:
-        # Carry herdr's error code when it sent one AND the envelope is
-        # otherwise well-formed (has "id"). A caller (co-review round 5's
-        # _EXIT_DELIVERED_CODES allowlist) trusts a specific code as proof
-        # herdr genuinely processed the request; surfacing a code from an
-        # envelope missing "id" would let a malformed reply masquerade as
-        # that proof. Without a code every envelope failure -- timeout,
-        # agent_prompt_stalled, agent_blocked -- flattens to one message, and
-        # a caller that records the reason records nothing.
-        error = record.get("error") if isinstance(record, dict) else None
-        code = error.get("code") if isinstance(error, dict) else None
-        if has_id and isinstance(code, str) and code:
+        code = _error_code(output)
+        if code:
             raise _dispatch_error(f"{operation} did not report success: {code}")
         raise _dispatch_error(f"{operation} did not report success")
     result = record.get("result")
@@ -81,6 +87,13 @@ def run_herdr(
         raise _dispatch_error(f"Herdr command failed: {argv[0]} {argv[1]}") from exc
     if process.returncode != 0:
         detail = process.stderr.strip() or process.stdout.strip() or "no detail"
+        # herdr reports some failures (e.g. agent_not_found) as a structured
+        # envelope on stderr at a nonzero exit, not the exit-0 error shape
+        # result_object parses -- extract the same way so callers get one
+        # consistent message format regardless of which shape herdr used.
+        code = _error_code(detail)
+        if code:
+            raise _dispatch_error(f"Herdr {argv[0]} {argv[1]} did not report success: {code}")
         raise _dispatch_error(f"Herdr command failed: {detail}")
     return (
         result_object(process.stdout, f"Herdr {argv[0]} {argv[1]}")

@@ -319,6 +319,13 @@ elif args[:2] == ["agent", "prompt"]:
             # envelope this malformed (co-review round 5: C-R5-1).
             print(json.dumps({"error": {"code": "timeout"}}))
             raise SystemExit(0)
+        if mode == "exit-malformed-success":
+            # herdr exits 0 with a well-formed envelope, but the result is
+            # not the agent_prompted shape that proves /exit was actually
+            # delivered -- structurally valid JSON, not proof of delivery
+            # (co-review round 6: C-R6-2).
+            print(json.dumps({"id": "fake", "result": {}}))
+            raise SystemExit(0)
         if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed"):
             apath = Path(os.environ["FAKE_AGENTS"])
             apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
@@ -365,11 +372,20 @@ elif args[:2] == ["pane", "close"]:
     apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
                                  if a["pane_id"] != args[2]]))
     print(json.dumps({"id": "fake", "result": {"type": "ok"}}))
-elif args[:2] == ["pane", "send-keys"]:
+elif args[:2] == ["agent", "send-keys"]:
+    target = args[2]
+    apath = Path(os.environ["FAKE_AGENTS"])
+    agents = json.loads(apath.read_text())
+    if not any(a["name"] == target for a in agents):
+        # Live herdr 0.9.1 writes this to stderr at exit 1, not the exit-0
+        # envelope shape (verified against the installed CLI).
+        print(json.dumps({"id": "cli:agent:send-keys",
+                          "error": {"code": "agent_not_found",
+                                    "message": f"agent target {target} not found"}}),
+              file=sys.stderr)
+        raise SystemExit(1)
     if mode == "exit-menu" and args[3:] == ["1", "enter"]:
-        apath = Path(os.environ["FAKE_AGENTS"])
-        apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
-                                     if a["pane_id"] != args[2]]))
+        apath.write_text(json.dumps([a for a in agents if a["name"] != target]))
 else:
     print(json.dumps({"error": "unexpected", "args": args}), file=sys.stderr)
     raise SystemExit(2)
@@ -1045,7 +1061,7 @@ def test_settle_refuses_a_busy_agent_without_mutation():
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
         assert result["status"] == "busy", result
-        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["pane", "send-keys"])]
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"])]
         assert mutating == [], mutating
     finally:
         fx.close()
@@ -1084,7 +1100,7 @@ def test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_m
                         [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        assert ["pane", "send-keys", "w1:p2", "1", "enter"] in fx.calls(), fx.calls()
+        assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
         assert result["agent"] == "exited" and result["pane"] == "closed", result
     finally:
         fx.close()
@@ -1103,7 +1119,7 @@ def test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt():
         result = fx.settle("R")
         # The pane text matches the exit-menu prose, but herdr never wrote
         # /exit (agent_blocked), so no raw keystroke may be sent (V-R2-1).
-        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
         assert result["pane"] == "kept-last-pane", result
@@ -1127,7 +1143,7 @@ def test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport():
         # unconfirmed, same as agent_blocked but without a structured error
         # code -- the raw-key fallback must not fire on this path either
         # (co-review round 3, the transport-failure variant of V-R2-1).
-        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
         assert result["pane"] == "kept-last-pane", result
@@ -1152,7 +1168,7 @@ def test_settle_never_sends_keys_on_a_malformed_exit_reply():
         # confirmation /exit was delivered. Only agent_prompt_stalled/timeout
         # confirm delivery; every other shape must stay on the still-live
         # side of the allowlist (co-review round 4).
-        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
         assert result["pane"] == "kept-last-pane", result
@@ -1161,7 +1177,7 @@ def test_settle_never_sends_keys_on_a_malformed_exit_reply():
         fx.close()
 
 
-def test_settle_never_sends_keys_to_an_occupant_that_replaced_the_row_agent():
+def test_settle_targets_send_keys_by_agent_name_never_a_replacement_occupant():
     fx = Fixture()
     try:
         head = core.repository_context(fx.repo)["head"]
@@ -1172,16 +1188,17 @@ def test_settle_never_sends_keys_to_an_occupant_that_replaced_the_row_agent():
                         [pane("w1:p2", "claude", "idle", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        # R exits and a replacement occupies w1:p2 during the pane read that
-        # captures the exit-menu text. The occupancy check that gates
-        # send-keys must use the snapshot taken AFTER that read, not the one
-        # taken before it, or the fallback sends keys to the replacement
-        # (co-review round 5: C-R5-2/B-R5-1).
-        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        # R exits and a replacement occupies w1:p2 during the pane read.
+        # send-keys targets the agent name "R", never the pane -- herdr
+        # resolves R by identity and reports agent_not_found now that R's
+        # name is gone, so the replacement can never receive the keystroke
+        # (co-review round 7: structural fix for C-R5-2/B-R5-1/C-R6-1/B-R6-1).
+        assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
+        assert not any(c[:2] == ["agent", "send-keys"] and c[2] != "R" for c in fx.calls()), fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
-        assert result["agent"] == "still-live", result
+        assert result["agent"] == "exited", result
         assert result["pane"] == "kept-last-pane", result
-        assert result["status"] == "exit-incomplete", result
+        assert result["status"] == "settled", result
     finally:
         fx.close()
 
@@ -1204,11 +1221,58 @@ def test_settle_never_sends_keys_on_an_exit_reply_missing_its_id():
         # must not surface the code for an envelope this incomplete, or the
         # allowlist trusts it the same as a genuine timeout (co-review round
         # 5: C-R5-1).
-        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
         assert result["pane"] == "kept-last-pane", result
         assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_on_a_malformed_exit_success():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-malformed-success"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # herdr exits 0 with {"id": "fake", "result": {}} -- well-formed
+        # JSON, but not the agent_prompted envelope that proves /exit was
+        # actually delivered. A success this unvalidated must not authorize
+        # the raw-key fallback any more than an unrecognized error code does
+        # (co-review round 6: C-R6-2).
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_sends_keys_immediately_after_the_exit_menu_read():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-menu"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        calls = fx.calls()
+        read_index = calls.index(["pane", "read", "w1:p2", "--source", "detection", "--lines", "20"])
+        send_index = calls.index(["agent", "send-keys", "R", "1", "enter"])
+        # No occupancy snapshot sits between the read and the send -- the
+        # agent-targeted call leaves no window for one to close.
+        assert send_index == read_index + 1, calls
+        assert result["agent"] == "exited" and result["pane"] == "kept-last-pane", result
     finally:
         fx.close()
 
@@ -1229,7 +1293,7 @@ def test_settle_refuses_an_unproven_occupant():
         fx.settle_state([impl, rev, later], "review-dispatched", idle_r,
                         [pane("w1:p1"), pane("w1:p2", "claude", "idle", "R")])
         assert fx.settle("R")["status"] == "occupant-unverified"
-        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["pane", "send-keys"])]
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"])]
         assert mutating == [], mutating
         assert all("exit_requested" not in w for w in fx.worker_records()), fx.worker_records()
     finally:
@@ -2950,10 +3014,14 @@ for name, test in (
     ("settle never sends keys when exit is blocked by an unrelated prompt", test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt),
     ("settle never sends keys when exit delivery fails at the transport", test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport),
     ("settle never sends keys on a malformed exit reply", test_settle_never_sends_keys_on_a_malformed_exit_reply),
-    ("settle never sends keys to an occupant that replaced the row agent",
-     test_settle_never_sends_keys_to_an_occupant_that_replaced_the_row_agent),
+    ("settle targets send-keys by agent name, never a replacement occupant",
+     test_settle_targets_send_keys_by_agent_name_never_a_replacement_occupant),
     ("settle never sends keys on an exit reply missing its id",
      test_settle_never_sends_keys_on_an_exit_reply_missing_its_id),
+    ("settle never sends keys on a malformed exit success",
+     test_settle_never_sends_keys_on_a_malformed_exit_success),
+    ("settle sends keys immediately after the exit menu read",
+     test_settle_sends_keys_immediately_after_the_exit_menu_read),
     ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
     ("sweep keeps a pane a repair row also used", test_sweep_keeps_a_pane_a_repair_row_also_used),
     ("settle and sweep CLI subcommands reach the functions", test_settle_and_sweep_cli_subcommands_reach_the_functions),

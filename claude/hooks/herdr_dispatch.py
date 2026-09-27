@@ -1461,13 +1461,20 @@ def _sidecar(rd: Path, task_id: str, suffix: str) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
-def _snapshot(herdr_cli, workspace_id, env):
+def _agents_snapshot(herdr_cli, env):
     agents = _run_herdr(herdr_cli, ["agent", "list"], env=env).get("agents")
+    if not isinstance(agents, list):
+        raise DispatchError("herdr agent or pane list is malformed")
+    return [a for a in agents if isinstance(a, dict)]
+
+
+def _snapshot(herdr_cli, workspace_id, env):
+    agents = _agents_snapshot(herdr_cli, env)
     panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
                        env=env).get("panes")
-    if not isinstance(agents, list) or not isinstance(panes, list):
+    if not isinstance(panes, list):
         raise DispatchError("herdr agent or pane list is malformed")
-    return ([a for a in agents if isinstance(a, dict)],
+    return (agents,
             [p for p in panes if isinstance(p, dict) and p.get("workspace_id") == workspace_id])
 
 
@@ -1479,26 +1486,21 @@ def _is_live(agents, row):
     return any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"]))
 
 
-# Delivery of /exit is confirmed only by one of these codes in herdr's own
-# structured reply -- both mean herdr accepted and forwarded the prompt, so
-# stale screen text genuinely belongs to this exit attempt. agent_prompt_stalled
-# is herdr's documented "accepted submission showing no activity" code
-# (SKILL.md); timeout is its wait-bound sibling. Every other outcome -- a
-# transport-level failure, a malformed/unparseable reply, a reply herdr
-# couldn't shape into a result object, or any other error code including
-# agent_blocked -- means delivery is unconfirmed (co-review round 4: rounds 2
-# and 3 each patched one specific unconfirmed shape with a denylist, which a
-# fresh reply shape kept slipping past; this allowlists the two confirmed
-# shapes instead so no new unconfirmed shape can reach the fallback).
+# /exit delivery is confirmed only by these two documented codes (SKILL.md);
+# every other outcome, including agent_blocked, is unconfirmed. An allowlist,
+# not a denylist, so a new unhandled reply shape fails closed by default.
 _EXIT_DELIVERED_PREFIX = "Herdr agent prompt did not report success: "
 _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 
 
 def _exit_agent(herdr_cli, row, workspace_id, env):
     try:
-        _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
+        result = _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
                                "--timeout", str(EXIT_WAIT_MS)],
                    env=env, timeout_secs=EXIT_WAIT_MS / 1000 + 5)
+        # A well-formed-but-wrong result (e.g. {"id": ..., "result": {}}) is
+        # not proof of delivery; only a genuine agent_prompted envelope is.
+        _prompt_state(result)
     except DispatchError as exc:
         message = str(exc)
         code = (message[len(_EXIT_DELIVERED_PREFIX):]
@@ -1510,17 +1512,17 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
         return "exited"
     text = _run_herdr(herdr_cli, ["pane", "read", row["pane_id"], "--source", "detection",
                                   "--lines", "20"], env=env, json_result=False)
-    # Re-snapshot after the read, immediately before deciding to send keys --
-    # not the snapshot taken before it. The row's agent can exit and be
-    # replaced in the pane during the read; sending keys against the
-    # pre-read occupant list would land them on the replacement (co-review
-    # round 5: C-R5-2/B-R5-1).
-    agents, _panes = _snapshot(herdr_cli, workspace_id, env)
-    occupants = _occupants(agents, row["pane_id"])
-    if (BACKGROUND_EXIT_MENU_RE.search(text) and len(occupants) == 1
-            and occupants[0].get("name") == row["agent"]):
-        _run_herdr(herdr_cli, ["pane", "send-keys", row["pane_id"], "1", "enter"],
-                   env=env, json_result=False)
+    if BACKGROUND_EXIT_MENU_RE.search(text):
+        # Target the agent by name, not the pane. herdr resolves TARGET at
+        # call time and refuses with agent_not_found if it is gone, so there
+        # is no occupant snapshot left to go stale between read and send.
+        try:
+            _run_herdr(herdr_cli, ["agent", "send-keys", row["agent"], "1", "enter"],
+                       env=env, json_result=False)
+        except DispatchError as exc:
+            if str(exc).endswith(": agent_not_found"):
+                return "exited"
+            raise
         agents, _panes = _snapshot(herdr_cli, workspace_id, env)
         if not _is_live(agents, row):
             return "exited"
