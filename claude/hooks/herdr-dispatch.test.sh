@@ -134,7 +134,18 @@ elif args[:2] == ["pane", "process-info"]:
         "pane_id": pane, "shell_pid": 101,
         "foreground_processes": [{"pid": 101, "name": "zsh", "cwd": cwd}]}}}))
 elif args[:2] == ["pane", "read"]:
-    if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply"):
+    if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply",
+                "exit-occupant-changed"):
+        if mode == "exit-occupant-changed":
+            # The row's agent exits and a replacement occupies the pane
+            # during this read -- simulates the race the pre-read snapshot
+            # cannot see (co-review round 5: C-R5-2/B-R5-1).
+            apath = Path(os.environ["FAKE_AGENTS"])
+            agents = json.loads(apath.read_text())
+            for a in agents:
+                if a["pane_id"] == args[2]:
+                    a["name"] = "replacement-agent"
+            apath.write_text(json.dumps(agents))
         print("Background tasks are still running\n1. Exit anyway\n2. Cancel")
         raise SystemExit(0)
     count = Path(os.environ["FAKE_READ_COUNT"])
@@ -301,7 +312,14 @@ elif args[:2] == ["agent", "prompt"]:
             # slipped past both the round-2 and round-3 denylists.
             print("not json")
             raise SystemExit(0)
-        if mode not in ("exit-menu", "exit-sticky"):
+        if mode == "exit-coded-reply-no-id":
+            # A recognized code (timeout) but no "id" -- structurally
+            # incomplete, unlike every genuine reply this fixture generates
+            # elsewhere. result_object must not let the code through for an
+            # envelope this malformed (co-review round 5: C-R5-1).
+            print(json.dumps({"error": {"code": "timeout"}}))
+            raise SystemExit(0)
+        if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed"):
             apath = Path(os.environ["FAKE_AGENTS"])
             apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
                                          if a["name"] != args[2]]))
@@ -1134,6 +1152,58 @@ def test_settle_never_sends_keys_on_a_malformed_exit_reply():
         # confirmation /exit was delivered. Only agent_prompt_stalled/timeout
         # confirm delivery; every other shape must stay on the still-live
         # side of the allowlist (co-review round 4).
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_to_an_occupant_that_replaced_the_row_agent():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-occupant-changed"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # R exits and a replacement occupies w1:p2 during the pane read that
+        # captures the exit-menu text. The occupancy check that gates
+        # send-keys must use the snapshot taken AFTER that read, not the one
+        # taken before it, or the fallback sends keys to the replacement
+        # (co-review round 5: C-R5-2/B-R5-1).
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_on_an_exit_reply_missing_its_id():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-coded-reply-no-id"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # herdr exits 0 with {"error": {"code": "timeout"}} and no "id" --
+        # a well-formed genuine reply always carries "id" (every other
+        # fixture-generated reply in this file does), so a coded reply
+        # missing it is not proof herdr processed the request. result_object
+        # must not surface the code for an envelope this incomplete, or the
+        # allowlist trusts it the same as a genuine timeout (co-review round
+        # 5: C-R5-1).
         assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
@@ -2880,6 +2950,10 @@ for name, test in (
     ("settle never sends keys when exit is blocked by an unrelated prompt", test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt),
     ("settle never sends keys when exit delivery fails at the transport", test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport),
     ("settle never sends keys on a malformed exit reply", test_settle_never_sends_keys_on_a_malformed_exit_reply),
+    ("settle never sends keys to an occupant that replaced the row agent",
+     test_settle_never_sends_keys_to_an_occupant_that_replaced_the_row_agent),
+    ("settle never sends keys on an exit reply missing its id",
+     test_settle_never_sends_keys_on_an_exit_reply_missing_its_id),
     ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
     ("sweep keeps a pane a repair row also used", test_sweep_keeps_a_pane_a_repair_row_also_used),
     ("settle and sweep CLI subcommands reach the functions", test_settle_and_sweep_cli_subcommands_reach_the_functions),

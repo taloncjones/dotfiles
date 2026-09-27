@@ -34,17 +34,19 @@ def result_object(output: str, operation: str) -> dict[str, Any]:
         # over the str-conversion limit; RecursionError covers deeply nested
         # input. All are malformed replies, not caller faults.
         raise _dispatch_error(f"{operation} returned malformed JSON") from exc
-    if (
-        not isinstance(record, dict)
-        or not isinstance(record.get("id"), str)
-        or "error" in record
-    ):
-        # Carry herdr's error code when it sent one. Without it every envelope
-        # failure -- timeout, agent_prompt_stalled, agent_blocked -- flattens to
-        # one message, and a caller that records the reason records nothing.
+    has_id = isinstance(record, dict) and isinstance(record.get("id"), str)
+    if not has_id or "error" in record:
+        # Carry herdr's error code when it sent one AND the envelope is
+        # otherwise well-formed (has "id"). A caller (co-review round 5's
+        # _EXIT_DELIVERED_CODES allowlist) trusts a specific code as proof
+        # herdr genuinely processed the request; surfacing a code from an
+        # envelope missing "id" would let a malformed reply masquerade as
+        # that proof. Without a code every envelope failure -- timeout,
+        # agent_prompt_stalled, agent_blocked -- flattens to one message, and
+        # a caller that records the reason records nothing.
         error = record.get("error") if isinstance(record, dict) else None
         code = error.get("code") if isinstance(error, dict) else None
-        if isinstance(code, str) and code:
+        if has_id and isinstance(code, str) and code:
             raise _dispatch_error(f"{operation} did not report success: {code}")
         raise _dispatch_error(f"{operation} did not report success")
     result = record.get("result")

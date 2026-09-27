@@ -1510,6 +1510,12 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
         return "exited"
     text = _run_herdr(herdr_cli, ["pane", "read", row["pane_id"], "--source", "detection",
                                   "--lines", "20"], env=env, json_result=False)
+    # Re-snapshot after the read, immediately before deciding to send keys --
+    # not the snapshot taken before it. The row's agent can exit and be
+    # replaced in the pane during the read; sending keys against the
+    # pre-read occupant list would land them on the replacement (co-review
+    # round 5: C-R5-2/B-R5-1).
+    agents, _panes = _snapshot(herdr_cli, workspace_id, env)
     occupants = _occupants(agents, row["pane_id"])
     if (BACKGROUND_EXIT_MENU_RE.search(text) and len(occupants) == 1
             and occupants[0].get("name") == row["agent"]):
