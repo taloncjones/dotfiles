@@ -320,22 +320,19 @@ elif args[:2] == ["agent", "prompt"]:
         if mode == "exit-malformed-reply":
             # herdr exits 0 but the reply is not a recognized structured
             # error (no "id", no "error.code", or plain garbage) -- delivery
-            # is just as unconfirmed as a transport failure, but this shape
-            # slipped past both the round-2 and round-3 denylists.
+            # is just as unconfirmed as a transport failure.
             print("not json")
             raise SystemExit(0)
         if mode == "exit-coded-reply-no-id":
             # A recognized code (timeout) but no "id" -- structurally
-            # incomplete, unlike every genuine reply this fixture generates
-            # elsewhere. result_object must not let the code through for an
-            # envelope this malformed (co-review round 5: C-R5-1).
+            # incomplete, unlike every genuine reply this fixture generates.
+            # result_object must not surface a code from a body this bare.
             print(json.dumps({"error": {"code": "timeout"}}))
             raise SystemExit(0)
         if mode == "exit-malformed-success":
             # herdr exits 0 with a well-formed envelope, but the result is
             # not the agent_prompted shape that proves /exit was actually
-            # delivered -- structurally valid JSON, not proof of delivery
-            # (co-review round 6: C-R6-2).
+            # delivered -- structurally valid JSON, not proof of delivery.
             print(json.dumps({"id": "fake", "result": {}}))
             raise SystemExit(0)
         if mode == "exit-stalled-exit1":
@@ -1264,7 +1261,7 @@ def test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt():
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
         # The pane text matches the exit-menu prose, but herdr never wrote
-        # /exit (agent_blocked), so no raw keystroke may be sent (V-R2-1).
+        # /exit (agent_blocked), so no raw keystroke may be sent.
         assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
@@ -1285,10 +1282,9 @@ def test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport():
                         [pane("w1:p2", "claude", "idle", "R")],
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
-        # A nonzero herdr exit (no JSON envelope at all) leaves /exit delivery
-        # unconfirmed, same as agent_blocked but without a structured error
-        # code -- the raw-key fallback must not fire on this path either
-        # (co-review round 3, the transport-failure variant of V-R2-1).
+        # A nonzero herdr exit (no JSON envelope at all) leaves /exit
+        # delivery unconfirmed, same as agent_blocked but without a
+        # structured error code; the raw-key fallback must not fire either.
         assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
@@ -1310,10 +1306,8 @@ def test_settle_never_sends_keys_on_a_malformed_exit_reply():
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
         # herdr exits 0 with an unparseable reply (no "id", no "error.code"):
-        # not a transport failure and not agent_blocked, but still no
-        # confirmation /exit was delivered. Only agent_prompt_stalled/timeout
-        # confirm delivery; every other shape must stay on the still-live
-        # side of the allowlist (co-review round 4).
+        # not a transport failure and not agent_blocked, but still no proof
+        # /exit was delivered, so it stays on the still-live side.
         assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
@@ -1335,11 +1329,8 @@ def test_settle_targets_send_keys_by_agent_name_never_a_replacement_occupant():
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
         # R exits and a replacement occupies w1:p2 during the pane read.
-        # send-keys targets the agent name "R", never the pane -- herdr
-        # resolves R by identity and reports agent_not_found now that R's
-        # name is gone, so a differently named replacement can never
-        # receive the keystroke. Same-name reuse is excluded by
-        # launch/settle serialization, not by this identity check.
+        # send-keys targets "R" by name, so a differently named replacement
+        # never receives it; same-name reuse is excluded by serialization.
         assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
         assert not any(c[:2] == ["agent", "send-keys"] and c[2] != "R" for c in fx.calls()), fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
@@ -1362,12 +1353,8 @@ def test_settle_never_sends_keys_on_an_exit_reply_missing_its_id():
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
         # herdr exits 0 with {"error": {"code": "timeout"}} and no "id" --
-        # a well-formed genuine reply always carries "id" (every other
-        # fixture-generated reply in this file does), so a coded reply
-        # missing it is not proof herdr processed the request. result_object
-        # must not surface the code for an envelope this incomplete, or the
-        # allowlist trusts it the same as a genuine timeout (co-review round
-        # 5: C-R5-1).
+        # every genuine fixture reply carries "id", so a coded reply missing
+        # it is not proof herdr processed the request.
         assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
@@ -1390,9 +1377,7 @@ def test_settle_never_sends_keys_on_a_malformed_exit_success():
         result = fx.settle("R")
         # herdr exits 0 with {"id": "fake", "result": {}} -- well-formed
         # JSON, but not the agent_prompted envelope that proves /exit was
-        # actually delivered. A success this unvalidated must not authorize
-        # the raw-key fallback any more than an unrecognized error code does
-        # (co-review round 6: C-R6-2).
+        # delivered; this must not authorize the raw-key fallback either.
         assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result

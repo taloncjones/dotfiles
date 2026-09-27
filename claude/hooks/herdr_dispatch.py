@@ -43,9 +43,9 @@ PANE_READY_ATTEMPTS = 3
 PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
 # Claude Code's /exit menu when background work is running; option 1 exits.
-# Requires the numbered "Exit anyway" option, not just the phrase, so ordinary
-# prose mentioning background work is never mistaken for the menu (co-review
-# V-3). Human-verify H1 in the spec: the live text is not pinned by a test.
+# Requires the numbered "Exit anyway" option, not just the phrase, so
+# ordinary prose mentioning background work is never mistaken for the menu.
+# Human-verify H1 in the spec: the live text is not pinned by a test.
 BACKGROUND_EXIT_MENU_RE = re.compile(
     r"background (?:tasks?|work|process(?:es)?)\s+(?:are|is)\s+still\s+running"
     r".{0,120}?1\.\s*exit\s+anyway",
@@ -1486,11 +1486,9 @@ def _is_live(agents, row):
     return any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"]))
 
 
-# /exit delivery is confirmed only by these two codes: agent_prompt_stalled
-# is SKILL.md's documented accepted-submission code, and timeout is only
-# documented as not itself a launch failure -- both mean herdr wrote the
-# input. Every other outcome, including agent_blocked, is unconfirmed. An
-# allowlist, not a denylist, so a new unhandled reply shape fails closed.
+# /exit delivery is confirmed only by these two SKILL.md codes: stalled is
+# the accepted-submission code, timeout is documented only as not itself a
+# failure. Everything else (incl. agent_blocked) fails closed by default.
 _EXIT_DELIVERED_PREFIX = "Herdr agent prompt did not report success: "
 _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 
@@ -1565,8 +1563,8 @@ def _pane_idle(herdr_cli, pane_id, env):
     if isinstance(shell_pid, bool) or not isinstance(shell_pid, int) or shell_pid < 1:
         return False
     # An empty list is `all([])`-vacuously "idle" but is also herdr's shape
-    # for a failed process inspection (co-review round 7: B-R7-1); a real
-    # idle shell reports itself as one foreground entry, never zero.
+    # for a failed process inspection; a real idle shell reports itself as
+    # one foreground entry, never zero.
     if not isinstance(foreground, list) or not foreground:
         return False
     return all(isinstance(item, dict) and item.get("pid") == shell_pid for item in foreground)
@@ -1612,17 +1610,17 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
         if _is_live(agents, row):
             # _exit_agent's own verdict can go stale between its last
             # snapshot and this one; trust the freshest read before deciding
-            # whether to close (co-review V-R2-2).
+            # whether to close.
             agent = "still-live"
     pane = _pane_verdict(task, row, agents, panes, reasons)
     if pane == "close" and agent == "still-live":
         # The agent never actually exited; _pane_verdict only checks the
         # occupant's registered name, not liveness, so keep the pane here
-        # rather than closing one whose agent is still working (V-2).
+        # rather than closing one whose agent is still working.
         pane = "kept-occupied"
     elif pane == "close" and not _pane_idle(herdr_cli, row["pane_id"], env):
         # No registered agent is live, but an untracked live process (the
-        # user's own shell command) could still occupy the pane (V-1).
+        # user's own shell command) could still occupy the pane.
         pane = "kept-occupied"
     elif pane == "close":
         _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)

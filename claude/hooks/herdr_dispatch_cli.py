@@ -16,7 +16,7 @@ import agent_runtime
 
 # A worker attempt can run well past an hour; a short TTL made settle/sweep
 # permanently unable to prove occupancy (and check-in nag forever) once a
-# long-lived worker's token aged out with nothing to refresh it (co-review V-4).
+# long-lived worker's token aged out with nothing to refresh it.
 LAUNCH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 
@@ -88,9 +88,8 @@ def run_herdr(
     if process.returncode != 0:
         detail = process.stderr.strip() or process.stdout.strip() or "no detail"
         # herdr reports some failures (e.g. agent_not_found) as a structured
-        # envelope on stderr at a nonzero exit, not the exit-0 error shape
-        # result_object parses -- extract the same way so callers get one
-        # consistent message format regardless of which shape herdr used.
+        # envelope on stderr at a nonzero exit, not the exit-0 shape
+        # result_object parses -- extract the code the same way.
         code = _error_code(detail)
         if code:
             raise _dispatch_error(f"Herdr {argv[0]} {argv[1]} did not report success: {code}")
