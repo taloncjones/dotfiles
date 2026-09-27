@@ -43,9 +43,8 @@ PANE_READY_ATTEMPTS = 3
 PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
 # Claude Code's /exit menu when background work is running; option 1 exits.
-# Requires the numbered "Exit anyway" option, not just the phrase, so
-# ordinary prose mentioning background work is never mistaken for the menu.
-# Human-verify H1 in the spec: the live text is not pinned by a test.
+# Requires the numbered option, not just the phrase, so prose is never
+# mistaken for the menu. Human-verify H1: the live text is untested.
 BACKGROUND_EXIT_MENU_RE = re.compile(
     r"background (?:tasks?|work|process(?:es)?)\s+(?:are|is)\s+still\s+running"
     r".{0,120}?1\.\s*exit\s+anyway",
@@ -1351,10 +1350,9 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     except (OSError, ValueError) as exc:
         raise DispatchError(f"reprompt could not record intent: {exc}") from exc
 
-    # Live-agent validation: idle or done, interactive-ready, on the
-    # recorded pane.
-    # Read-only herdr query; safe outside the fence. A failure here delivered
-    # nothing, so the recorded intent is marked failed (retry-safe), not orphaned.
+    # Live-agent validation: idle or done, interactive-ready, on the recorded
+    # pane. Read-only herdr query, safe outside the fence; a failure here
+    # delivered nothing, so intent is marked failed (retry-safe), not orphaned.
     try:
         current = _run_herdr(herdr_cli, ["agent", "get", agent], env=child_env,
                              json_result=True)
