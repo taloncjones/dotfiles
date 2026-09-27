@@ -134,6 +134,9 @@ elif args[:2] == ["pane", "process-info"]:
         "pane_id": pane, "shell_pid": 101,
         "foreground_processes": [{"pid": 101, "name": "zsh", "cwd": cwd}]}}}))
 elif args[:2] == ["pane", "read"]:
+    if mode == "exit-menu":
+        print("Background tasks are still running\n1. Exit anyway\n2. Cancel")
+        raise SystemExit(0)
     count = Path(os.environ["FAKE_READ_COUNT"])
     current = int(count.read_text()) if count.exists() else 0
     count.write_text(str(current + 1))
@@ -279,6 +282,13 @@ elif args[:2] == ["agent", "get"]:
         "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
         "focused": False, "revision": 2}}}))
 elif args[:2] == ["agent", "prompt"]:
+    if len(args) > 3 and args[3] == "/exit":
+        if mode not in ("exit-menu", "exit-sticky"):
+            apath = Path(os.environ["FAKE_AGENTS"])
+            apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                         if a["name"] != args[2]]))
+        print(json.dumps({"id": "fake", "error": {"code": "agent_prompt_stalled"}}))
+        raise SystemExit(0)
     if mode in timeout_modes:
         # herdr reports a --wait timeout as an error envelope at exit 0.
         Path(os.environ["FAKE_PROMPT_SEEN"]).write_text("yes")
@@ -303,6 +313,27 @@ elif args[:2] == ["pane", "report-metadata"]:
         print(json.dumps({"error": "presentation_unsupported"}), file=sys.stderr)
         raise SystemExit(1)
     # Mutation success is established by the exit status; no result body is required.
+elif args[:2] == ["agent", "list"]:
+    agents = json.loads(Path(os.environ["FAKE_AGENTS"]).read_text())
+    print(json.dumps({"id": "fake", "result": {"type": "agent_list", "agents": agents}}))
+elif args[:2] == ["pane", "list"]:
+    ws = args[args.index("--workspace") + 1]
+    panes = [p for p in json.loads(Path(os.environ["FAKE_PANES"]).read_text())
+             if p["workspace_id"] == ws]
+    print(json.dumps({"id": "fake", "result": {"type": "pane_list", "panes": panes}}))
+elif args[:2] == ["pane", "close"]:
+    path = Path(os.environ["FAKE_PANES"])
+    path.write_text(json.dumps([p for p in json.loads(path.read_text())
+                                if p["pane_id"] != args[2]]))
+    apath = Path(os.environ["FAKE_AGENTS"])
+    apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                 if a["pane_id"] != args[2]]))
+    print(json.dumps({"id": "fake", "result": {"type": "ok"}}))
+elif args[:2] == ["pane", "send-keys"]:
+    if mode == "exit-menu" and args[3:] == ["1", "enter"]:
+        apath = Path(os.environ["FAKE_AGENTS"])
+        apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                     if a["pane_id"] != args[2]]))
 else:
     print(json.dumps({"error": "unexpected", "args": args}), file=sys.stderr)
     raise SystemExit(2)
@@ -389,6 +420,8 @@ class Fixture:
             "FAKE_COMMAND_ECHO": str(self.root / "command-echo"),
             "FAKE_PREP_COPY": str(self.root / "prep-copy"),
             "FAKE_WAIT_COUNT": str(self.root / "wait-count"),
+            "FAKE_AGENTS": str(self.root / "agents.json"),
+            "FAKE_PANES": str(self.root / "panes.json"),
         }
 
     def close(self):
@@ -440,6 +473,26 @@ class Fixture:
             prompt_timeout_ms=prompt_timeout_ms,
             **kwargs,
         )
+
+    def settle_state(self, workers, status, agents, panes, review=None):
+        task = json.loads(self.task_file.read_text())
+        task.update(status=status, workers=workers)
+        self.task_file.write_text(json.dumps(task))
+        if review is not None:
+            (self.rd / "tasks" / "td-a.review.json").write_text(json.dumps(review))
+        Path(self.env["FAKE_AGENTS"]).write_text(json.dumps(agents))
+        Path(self.env["FAKE_PANES"]).write_text(json.dumps(panes))
+
+    def settle(self, launch_id):
+        return herdr_dispatch.settle(
+            repo_slug=self.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", launch_id=launch_id, cwd=self.repo,
+            herdr_cli=str(self.bin), env=self.env)
+
+    def sweep(self):
+        return herdr_dispatch.sweep(
+            repo_slug=self.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", cwd=self.repo, herdr_cli=str(self.bin), env=self.env)
 
     def worker_records(self):
         return json.loads(self.task_file.read_text())["workers"]
@@ -912,6 +965,194 @@ def test_pane_prep_cleanup_failure_never_masks_the_prep_failure():
     finally:
         Path.unlink = original_unlink
         fixture.close()
+
+
+def settle_row(phase, lid, pane, head):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": head, "agent": lid, "status": "launched"}
+
+
+def pane(pane_id, agent=None, status="unknown", launch_id=None):
+    tokens = {"launch_id": launch_id} if launch_id else None
+    return {"pane_id": pane_id, "workspace_id": "w1", "agent": agent,
+            "agent_status": status, "tokens": tokens}
+
+
+def test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["reason"] == "verdict-recorded", result
+        assert fx.worker_records()[1]["exit_requested"] == "verdict-recorded", fx.worker_records()
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+        assert ["pane", "close", "w1:p2"] in fx.calls()
+        exits = [c for c in fx.calls() if c[:2] == ["agent", "prompt"] and c[3] == "/exit"]
+        assert exits and "--until" not in exits[0], exits
+    finally:
+        fx.close()
+
+
+def test_settle_refuses_a_busy_agent_without_mutation():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "working"}],
+                        [pane("w1:p1"), pane("w1:p2", "claude", "working")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "busy", result
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["pane", "send-keys"])]
+        assert mutating == [], mutating
+    finally:
+        fx.close()
+
+
+def test_settle_exits_a_plan_agent_and_keeps_its_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        # A retry after an interrupted exit: exit_requested alone authorizes it.
+        plan = dict(settle_row("plan", "P", "w1:p1", head), exit_requested="plan-confirmed")
+        fx.settle_state([plan], "in-progress",
+                        [{"name": "P", "pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "P"), pane("w1:p2")])
+        result = fx.settle("P")
+        assert result["reason"] == "exit-requested" and result["agent"] == "exited", result
+        assert result["pane"].startswith("kept"), result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]]
+    finally:
+        fx.close()
+
+
+def test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_menu():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "review-dispatched",
+                        [{"name": "I", "pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle"), pane("w1:p2", "claude", "working")])
+        assert fx.settle("I")["status"] == "not-settled"
+        assert [c for c in fx.calls() if c[:2] in (["agent", "list"], ["agent", "prompt"])] == []
+        fx.env["FAKE_HERDR_MODE"] = "exit-menu"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert ["pane", "send-keys", "w1:p2", "1", "enter"] in fx.calls(), fx.calls()
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+    finally:
+        fx.close()
+
+
+def test_settle_refuses_an_unproven_occupant():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        idle_r = [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}]
+        # the pane's launch token names another attempt
+        fx.settle_state([impl, rev], "changes-requested", idle_r,
+                        [pane("w1:p1"), pane("w1:p2", "claude", "idle", "R-other")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        assert fx.settle("R")["status"] == "occupant-unverified"
+        # a later row names the same pane (a successor reserved, maybe not started)
+        later = settle_row("review", "R2", "w1:p2", head)
+        fx.settle_state([impl, rev, later], "review-dispatched", idle_r,
+                        [pane("w1:p1"), pane("w1:p2", "claude", "idle", "R")])
+        assert fx.settle("R")["status"] == "occupant-unverified"
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["pane", "send-keys"])]
+        assert mutating == [], mutating
+        assert all("exit_requested" not in w for w in fx.worker_records()), fx.worker_records()
+    finally:
+        fx.close()
+
+
+def test_reprompt_refuses_a_row_whose_exit_was_requested():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        task = json.loads(fx.task_file.read_text())
+        task["workers"][-1]["exit_requested"] = "review-approved"
+        fx.task_file.write_text(json.dumps(task))
+        prompts_before = len(fx.prompt_calls())
+        try:
+            fx.reprompt(lid)
+        except herdr_dispatch.DispatchError as exc:
+            assert "exit was requested" in str(exc), exc
+        else:
+            raise AssertionError("an exit-requested launch must not be reprompted")
+        assert len(fx.prompt_calls()) == prompts_before, "nothing delivered"
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target.get("reprompts", []) == [], target
+    finally:
+        fx.close()
+
+
+def test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        dead = dict(settle_row("review", "R1", "w1:p2", head), status="launch_failed")
+        fx.settle_state([impl, dead], "completed", [], [pane("w1:p1", "claude", "idle"), pane("w1:p2")])
+        result = fx.sweep()
+        assert result["status"] == "swept", result
+        assert ["pane", "close", "w1:p2"] in fx.calls(), fx.calls()
+        fx.settle_state([dead], "completed", [], [pane("w1:p2")])
+        result = fx.sweep()
+        assert result["rows"][0]["pane"] == "kept-last-pane", result
+    finally:
+        fx.close()
+
+
+def test_sweep_keeps_a_pane_a_repair_row_also_used():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        old = dict(settle_row("review", "R1", "w1:p3", head), status="launch_failed")
+        repair = settle_row("implement", "I2", "w1:p3", head)
+        # R2 is settled (failed launch), so only the foreign live agent X keeps its pane.
+        other = dict(settle_row("review", "R2", "w1:p2", head), status="launch_failed")
+        fx.settle_state([impl, old, repair, other], "review-dispatched",
+                        [{"name": "X", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1"), pane("w1:p2", "claude", "idle"), pane("w1:p3")])
+        result = fx.sweep()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        by_lid = {r["launch_id"]: r for r in result["rows"]}
+        assert by_lid["R1"]["pane"] == "kept-shared", result
+        assert by_lid["R2"]["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "prompt"]], "X is not R2's agent"
+    finally:
+        fx.close()
+
+
+def test_settle_and_sweep_cli_subcommands_reach_the_functions():
+    fx = Fixture()
+    try:
+        env = {k: v for k, v in fx.env.items() if k != "HERDR_ENV"}
+        for verb, extra in (("settle", ["--launch-id", "L"]), ("sweep", [])):
+            proc = subprocess.run(
+                [sys.executable, herdr_dispatch.__file__, verb, "--repo-slug", fx.slug,
+                 "--task-id", "td-a", "--session", "S", "--fence", "1",
+                 "--workspace-id", "w1", "--cwd", str(fx.repo), *extra],
+                capture_output=True, text=True, env=env)
+            assert proc.returncode == 2, (verb, proc.returncode, proc.stderr)
+            out = json.loads(proc.stdout)
+            assert out == {"status": "error",
+                           "error": f"{verb} requires a Herdr-managed environment"}, out
+    finally:
+        fx.close()
 
 
 def test_runtime_resolution_preserves_filesystem_parent_semantics():
@@ -2540,6 +2781,15 @@ for name, test in (
     ("pane prep source line failure records launch_failed", test_pane_prep_source_line_failure_records_launch_failed),
     ("pane changed during prep records launch_failed", test_pane_changed_during_prep_records_launch_failed),
     ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
+    ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
+    ("settle refuses a busy agent without any mutation", test_settle_refuses_a_busy_agent_without_mutation),
+    ("settle exits a plan agent and keeps its pane", test_settle_exits_a_plan_agent_and_keeps_its_pane),
+    ("settle refuses an occupant it cannot prove is this attempt", test_settle_refuses_an_unproven_occupant),
+    ("reprompt refuses a launch whose exit was requested", test_reprompt_refuses_a_row_whose_exit_was_requested),
+    ("settle leaves an unsettled implementer untouched and answers the exit menu", test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_menu),
+    ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
+    ("sweep keeps a pane a repair row also used", test_sweep_keeps_a_pane_a_repair_row_also_used),
+    ("settle and sweep CLI subcommands reach the functions", test_settle_and_sweep_cli_subcommands_reach_the_functions),
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
     ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_start),

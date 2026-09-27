@@ -452,6 +452,16 @@ def _dispatch_parser() -> argparse.ArgumentParser:
     reprompt.add_argument("--runtime", default="claude", choices=("claude", "codex"))
     reprompt.add_argument("--prompt-timeout-ms", type=int, default=120_000)
     reprompt.add_argument("--personal", action="store_true")
+    for verb in ("settle", "sweep"):
+        sub = commands.add_parser(verb)
+        flags = ["repo-slug", "task-id", "session", "workspace-id", "cwd"]
+        if verb == "settle":
+            flags.append("launch-id")
+        for flag in flags:
+            sub.add_argument(f"--{flag}", required=True)
+        sub.add_argument("--fence", required=True, type=int)
+        sub.add_argument("--runtime", default="claude", choices=("claude", "codex"))
+        sub.add_argument("--personal", action="store_true")
     return parser
 
 
@@ -506,6 +516,16 @@ def main(argv: list[str] | None = None) -> int:
                 prompt_timeout_ms=args.prompt_timeout_ms,
                 personal=args.personal,
             )
+        elif args.command in ("settle", "sweep"):
+            kwargs = dict(
+                repo_slug=args.repo_slug, task_id=args.task_id, session=args.session,
+                fence=args.fence, workspace_id=args.workspace_id, cwd=args.cwd,
+                runtime=args.runtime, personal=args.personal,
+            )
+            if args.command == "settle":
+                output = herdr_dispatch.settle(launch_id=args.launch_id, **kwargs)
+            else:
+                output = herdr_dispatch.sweep(**kwargs)
         else:
             output = herdr_dispatch.wake(
                 args.thread_id,
@@ -515,7 +535,9 @@ def main(argv: list[str] | None = None) -> int:
                 queue_validated=args.queue_validated,
             )
         print(json.dumps(output, sort_keys=True))
-        return 3 if output.get("status") in ("blocked", "unsupported") else 0
+        return (3 if output.get("status") in
+                ("blocked", "unsupported", "not-settled", "busy",
+                 "occupant-unverified", "exit-incomplete") else 0)
     except (
         herdr_dispatch.DispatchError,
         OSError,

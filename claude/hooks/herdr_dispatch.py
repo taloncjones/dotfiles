@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -40,6 +41,10 @@ AGENT_STATES = core.IDLE_AGENT_STATES
 PANE_READY_ATTEMPTS = 3
 # macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
 PANE_RUN_MAX_BYTES = 1023
+EXIT_WAIT_MS = 10_000
+# Claude Code's /exit menu when background work is running; option 1 exits.
+# Human-verify H1 in the spec: the live text is not pinned by a test.
+BACKGROUND_EXIT_MENU_RE = re.compile(r"background (?:task|work|process)", re.IGNORECASE)
 
 # Launch-time facts copied from the attempt dict onto a bound row by the first
 # enrichment. Record-level keys (task_id, repo_slug, worktree, branch) are
@@ -1308,6 +1313,9 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
             task = _read_task(task_path, task_id)
             _validate_task_context(task, repository, repo_slug)
             target = _find_current_target(task, launch_id, phase, workspace_id, runtime)
+            if target.get("exit_requested"):
+                raise DispatchError(
+                    "exit was requested for this launch; relaunch for further work")
             agent = target["agent"]
             pane_id = target["pane_id"]
             reprompts = list(target.get("reprompts", []))
@@ -1417,6 +1425,193 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     return {"status": result_status, "launch_id": launch_id, "phase": phase,
             "reprompt_seq": seq, "prompt_state": delivered["state"],
             "observation": REPROMPT_OBSERVATION}
+
+
+def _settle_context(repo_slug, task_id, workspace_id, cwd, runtime, personal, env, verb):
+    if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
+        raise DispatchError("invalid task or workspace identity")
+    if runtime not in ("claude", "codex"):
+        raise DispatchError("route runtime is unsupported")
+    child_env = dict(os.environ if env is None else env)
+    if child_env.get("HERDR_ENV") != "1":
+        raise DispatchError(f"{verb} requires a Herdr-managed environment")
+    try:
+        repository, scope = agent_runtime.execution_context(cwd, runtime, personal)
+    except agent_runtime.RouteError as exc:
+        raise DispatchError(str(exc)) from exc
+    if repo_slug != _expected_slug(repository, cwd):
+        raise DispatchError("repo slug does not match repository context")
+    return child_env, repository, scope, _payload_repo_dir(scope, repo_slug)
+
+
+def _sidecar(rd: Path, task_id: str, suffix: str) -> dict[str, Any] | None:
+    try:
+        record = json.loads(core.read_payload_text(rd / "tasks" / f"{task_id}{suffix}"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"settlement record is unreadable: {task_id}{suffix}") from exc
+    return record if isinstance(record, dict) else None
+
+
+def _snapshot(herdr_cli, workspace_id, env):
+    agents = _run_herdr(herdr_cli, ["agent", "list"], env=env).get("agents")
+    panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
+                       env=env).get("panes")
+    if not isinstance(agents, list) or not isinstance(panes, list):
+        raise DispatchError("herdr agent or pane list is malformed")
+    return ([a for a in agents if isinstance(a, dict)],
+            [p for p in panes if isinstance(p, dict) and p.get("workspace_id") == workspace_id])
+
+
+def _occupants(agents, pane_id):
+    return [a for a in agents if a.get("pane_id") == pane_id]
+
+
+def _is_live(agents, row):
+    return any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"]))
+
+
+def _exit_agent(herdr_cli, row, workspace_id, env):
+    try:
+        _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
+                               "--timeout", str(EXIT_WAIT_MS)],
+                   env=env, timeout_secs=EXIT_WAIT_MS / 1000 + 5)
+    except DispatchError:
+        pass  # agent_prompt_stalled is the normal reply from an agent that exits
+    agents, _panes = _snapshot(herdr_cli, workspace_id, env)
+    if not _is_live(agents, row):
+        return "exited"
+    text = _run_herdr(herdr_cli, ["pane", "read", row["pane_id"], "--source", "detection",
+                                  "--lines", "20"], env=env, json_result=False)
+    occupants = _occupants(agents, row["pane_id"])
+    if (BACKGROUND_EXIT_MENU_RE.search(text) and len(occupants) == 1
+            and occupants[0].get("name") == row["agent"]):
+        _run_herdr(herdr_cli, ["pane", "send-keys", row["pane_id"], "1", "enter"],
+                   env=env, json_result=False)
+        agents, _panes = _snapshot(herdr_cli, workspace_id, env)
+        if not _is_live(agents, row):
+            return "exited"
+    return "still-live"
+
+
+def _pane_verdict(task, row, agents, panes, reasons):
+    pane_id = row["pane_id"]
+    if pane_id not in [p.get("pane_id") for p in panes]:
+        return "absent"
+    if len(panes) < 2:
+        return "kept-last-pane"
+    sharing = [i for i, w in enumerate(task["workers"])
+               if isinstance(w, dict) and w.get("pane_id") == pane_id]
+    if any(task["workers"][i].get("phase") != "review" for i in sharing):
+        return "kept-shared"
+    if any(reasons(i) is None for i in sharing):
+        return "kept-unsettled"
+    if any(a.get("name") != row["agent"] for a in _occupants(agents, pane_id)):
+        return "kept-occupied"
+    return "close"
+
+
+def _occupant_proven(task, index, panes):
+    # The pane's launch token names this attempt, and no later row claims the
+    # pane: a successor may be reserved (row written) before its agent starts.
+    row = task["workers"][index]
+    entry = next((p for p in panes if p.get("pane_id") == row["pane_id"]), None)
+    tokens = entry.get("tokens") if entry else None
+    if not isinstance(tokens, dict) or tokens.get("launch_id") != row["launch_id"]:
+        return False
+    return not any(isinstance(w, dict) and w.get("pane_id") == row["pane_id"]
+                   for w in task["workers"][index + 1:])
+
+
+def _mark_exit_requested(task_path, task, index, reason):
+    # Persisted before /exit so an interrupted exit stays authorized (rule 0b).
+    task["workers"][index] = {**task["workers"][index], "exit_requested": reason}
+    core.write_json_atomic(task_path, task)
+
+
+def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env):
+    row = task["workers"][index]
+    reason = reasons(index)
+    base = {"launch_id": row.get("launch_id"), "reason": reason}
+    if reason is None or not _nonempty_str_row(row):
+        return {**base, "status": "not-settled"}
+    agents, panes = _snapshot(herdr_cli, workspace_id, env)
+    live = [a for a in _occupants(agents, row["pane_id"]) if a.get("name") == row["agent"]]
+    agent = "absent"
+    if live and live[0].get("agent_status") not in AGENT_STATES:
+        return {**base, "status": "busy", "agent": "busy", "pane": "untouched"}
+    if live:
+        if not _occupant_proven(task, index, panes):
+            return {**base, "status": "occupant-unverified", "agent": "live",
+                    "pane": "untouched"}
+        if not row.get("exit_requested"):
+            _mark_exit_requested(task_path, task, index, reason)
+        agent = _exit_agent(herdr_cli, row, workspace_id, env)
+        agents, panes = _snapshot(herdr_cli, workspace_id, env)
+    pane = _pane_verdict(task, row, agents, panes, reasons)
+    if pane == "close":
+        _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
+        pane = "closed"
+    status = "exit-incomplete" if agent == "still-live" and pane != "closed" else "settled"
+    return {**base, "status": status, "agent": agent, "pane": pane}
+
+
+def _nonempty_str_row(row):
+    return all(isinstance(row.get(k), str) and row[k] for k in ("agent", "pane_id"))
+
+
+def _settlement_reasons(task, rd, task_id, head):
+    done = _sidecar(rd, task_id, ".done.json")
+    review = _sidecar(rd, task_id, ".review.json")
+    payload_root = rd.parent.parent
+    return lambda i: core.row_settlement(task, i, done=done, review=review,
+                                         head=head, payload_root=payload_root)
+
+
+def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,
+           runtime="claude", herdr_cli="herdr", env=None, personal=False):
+    """Exit a settled worker row's idle agent and close its pane if review-only."""
+    child_env, repository, scope, rd = _settle_context(
+        repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "settle")
+    try:
+        with core.owner_transaction(rd, session, fence, context=repository, scope=scope,
+                                    expected_slug=repo_slug):
+            task_path = rd / "tasks" / f"{task_id}.json"
+            task = _read_task(task_path, task_id)
+            _validate_task_context(task, repository, repo_slug)
+            index = next((i for i, w in enumerate(task.get("workers", []))
+                          if isinstance(w, dict) and w.get("launch_id") == launch_id
+                          and w.get("workspace_id") == workspace_id), None)
+            if index is None:
+                raise DispatchError("no worker row for that launch in the workspace")
+            reasons = _settlement_reasons(task, rd, task_id, repository["head"])
+            return _settle_index(herdr_cli, task_path, task, index, reasons,
+                                 workspace_id, child_env)
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"settle could not hold the owner fence: {exc}") from exc
+
+
+def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
+          runtime="claude", herdr_cli="herdr", env=None, personal=False):
+    """Settle every review row of the task in one workspace, oldest first."""
+    child_env, repository, scope, rd = _settle_context(
+        repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "sweep")
+    try:
+        with core.owner_transaction(rd, session, fence, context=repository, scope=scope,
+                                    expected_slug=repo_slug):
+            task_path = rd / "tasks" / f"{task_id}.json"
+            task = _read_task(task_path, task_id)
+            _validate_task_context(task, repository, repo_slug)
+            reasons = _settlement_reasons(task, rd, task_id, repository["head"])
+            rows = [_settle_index(herdr_cli, task_path, task, i, reasons,
+                                  workspace_id, child_env)
+                    for i, w in enumerate(task.get("workers", []))
+                    if isinstance(w, dict) and w.get("phase") == "review"
+                    and w.get("workspace_id") == workspace_id]
+            return {"status": "swept", "rows": rows}
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"sweep could not hold the owner fence: {exc}") from exc
 
 
 def runtime_main(argv: list[str] | None = None) -> int:
