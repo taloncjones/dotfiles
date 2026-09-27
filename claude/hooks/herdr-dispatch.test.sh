@@ -147,7 +147,8 @@ elif args[:2] == ["pane", "read"]:
         print("A background task is currently running in this project.")
         raise SystemExit(0)
     if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply",
-                "exit-occupant-changed", "exit-malformed-success", "exit-coded-reply-no-id"):
+                "exit-occupant-changed", "exit-malformed-success", "exit-coded-reply-no-id",
+                "exit-timeout-menu"):
         if mode == "exit-occupant-changed":
             # The row's agent exits and a replacement occupies the pane
             # during this read -- simulates the race the pre-read snapshot
@@ -335,6 +336,11 @@ elif args[:2] == ["agent", "prompt"]:
             # delivered -- structurally valid JSON, not proof of delivery.
             print(json.dumps({"id": "fake", "result": {}}))
             raise SystemExit(0)
+        if mode == "exit-timeout-menu":
+            # An id-bearing timeout envelope at exit 0, delivered while the
+            # pane shows the real exit menu -- the realistic route to it.
+            print(json.dumps({"id": "fake", "error": {"code": "timeout"}}))
+            raise SystemExit(0)
         if mode == "exit-stalled-exit1":
             # Live herdr writes this shape to stderr at a nonzero exit, not
             # only the exit-0 envelope every other mode here simulates.
@@ -425,7 +431,7 @@ elif args[:2] == ["agent", "send-keys"]:
                                     "message": f"agent target {target} not found"}}),
               file=sys.stderr)
         raise SystemExit(1)
-    if mode == "exit-menu" and args[3:] == ["1", "enter"]:
+    if mode in ("exit-menu", "exit-timeout-menu") and args[3:] == ["1", "enter"]:
         apath.write_text(json.dumps([a for a in agents if a["name"] != target]))
 else:
     print(json.dumps({"error": "unexpected", "args": args}), file=sys.stderr)
@@ -1424,6 +1430,25 @@ def test_settle_sends_keys_immediately_after_the_exit_menu_read():
         # No occupancy snapshot sits between the read and the send -- the
         # agent-targeted call leaves no window for one to close.
         assert send_index == read_index + 1, calls
+        assert result["agent"] == "exited" and result["pane"] == "kept-last-pane", result
+    finally:
+        fx.close()
+
+
+def test_settle_sends_keys_on_an_id_bearing_timeout_reply_with_the_menu_showing():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-timeout-menu"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # timeout is the realistic route to the menu: /exit likely times out
+        # while Claude Code is showing it, so this code must stay delivered.
+        assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
         assert result["agent"] == "exited" and result["pane"] == "kept-last-pane", result
     finally:
         fx.close()
@@ -3201,6 +3226,8 @@ for name, test in (
      test_settle_treats_a_stalled_reply_at_a_nonzero_exit_as_delivered),
     ("settle sends keys immediately after the exit menu read",
      test_settle_sends_keys_immediately_after_the_exit_menu_read),
+    ("settle sends keys on an id-bearing timeout reply with the menu showing",
+     test_settle_sends_keys_on_an_id_bearing_timeout_reply_with_the_menu_showing),
     ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
     ("sweep keeps a pane a repair row also used", test_sweep_keeps_a_pane_a_repair_row_also_used),
     ("settle and sweep CLI subcommands reach the functions", test_settle_and_sweep_cli_subcommands_reach_the_functions),
