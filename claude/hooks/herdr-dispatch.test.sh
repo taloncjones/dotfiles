@@ -134,7 +134,7 @@ elif args[:2] == ["pane", "process-info"]:
         "pane_id": pane, "shell_pid": 101,
         "foreground_processes": [{"pid": 101, "name": "zsh", "cwd": cwd}]}}}))
 elif args[:2] == ["pane", "read"]:
-    if mode in ("exit-menu", "exit-blocked", "exit-transport-fail"):
+    if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply"):
         print("Background tasks are still running\n1. Exit anyway\n2. Cancel")
         raise SystemExit(0)
     count = Path(os.environ["FAKE_READ_COUNT"])
@@ -294,6 +294,13 @@ elif args[:2] == ["agent", "prompt"]:
             # unconfirmed, unlike agent_prompt_stalled below.
             print("herdr crashed", file=sys.stderr)
             raise SystemExit(1)
+        if mode == "exit-malformed-reply":
+            # herdr exits 0 but the reply is not a recognized structured
+            # error (no "id", no "error.code", or plain garbage) -- delivery
+            # is just as unconfirmed as a transport failure, but this shape
+            # slipped past both the round-2 and round-3 denylists.
+            print("not json")
+            raise SystemExit(0)
         if mode not in ("exit-menu", "exit-sticky"):
             apath = Path(os.environ["FAKE_AGENTS"])
             apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
@@ -1102,6 +1109,31 @@ def test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport():
         # unconfirmed, same as agent_blocked but without a structured error
         # code -- the raw-key fallback must not fire on this path either
         # (co-review round 3, the transport-failure variant of V-R2-1).
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_on_a_malformed_exit_reply():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-malformed-reply"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # herdr exits 0 with an unparseable reply (no "id", no "error.code"):
+        # not a transport failure and not agent_blocked, but still no
+        # confirmation /exit was delivered. Only agent_prompt_stalled/timeout
+        # confirm delivery; every other shape must stay on the still-live
+        # side of the allowlist (co-review round 4).
         assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
         assert result["agent"] == "still-live", result
@@ -2847,6 +2879,7 @@ for name, test in (
     ("settle leaves an unsettled implementer untouched and answers the exit menu", test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_menu),
     ("settle never sends keys when exit is blocked by an unrelated prompt", test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt),
     ("settle never sends keys when exit delivery fails at the transport", test_settle_never_sends_keys_when_exit_delivery_fails_at_the_transport),
+    ("settle never sends keys on a malformed exit reply", test_settle_never_sends_keys_on_a_malformed_exit_reply),
     ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
     ("sweep keeps a pane a repair row also used", test_sweep_keeps_a_pane_a_repair_row_also_used),
     ("settle and sweep CLI subcommands reach the functions", test_settle_and_sweep_cli_subcommands_reach_the_functions),

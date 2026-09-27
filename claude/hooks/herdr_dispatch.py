@@ -1479,25 +1479,31 @@ def _is_live(agents, row):
     return any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"]))
 
 
+# Delivery of /exit is confirmed only by one of these codes in herdr's own
+# structured reply -- both mean herdr accepted and forwarded the prompt, so
+# stale screen text genuinely belongs to this exit attempt. agent_prompt_stalled
+# is herdr's documented "accepted submission showing no activity" code
+# (SKILL.md); timeout is its wait-bound sibling. Every other outcome -- a
+# transport-level failure, a malformed/unparseable reply, a reply herdr
+# couldn't shape into a result object, or any other error code including
+# agent_blocked -- means delivery is unconfirmed (co-review round 4: rounds 2
+# and 3 each patched one specific unconfirmed shape with a denylist, which a
+# fresh reply shape kept slipping past; this allowlists the two confirmed
+# shapes instead so no new unconfirmed shape can reach the fallback).
+_EXIT_DELIVERED_PREFIX = "Herdr agent prompt did not report success: "
+_EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
+
+
 def _exit_agent(herdr_cli, row, workspace_id, env):
     try:
         _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
                                "--timeout", str(EXIT_WAIT_MS)],
                    env=env, timeout_secs=EXIT_WAIT_MS / 1000 + 5)
     except DispatchError as exc:
-        # A transport-level failure (subprocess spawn error, decode error, or
-        # a nonzero herdr exit -- run_herdr's "Herdr command failed: ..."
-        # message) means herdr never produced a structured reply, so /exit
-        # delivery is unconfirmed; falling through would read stale screen
-        # text and could send raw keys into an unrelated open prompt (co-review
-        # round 3, the transport-failure variant of V-R2-1). agent_blocked is
-        # a structured reply where herdr refused to deliver /exit because the
-        # agent already has an unrelated prompt open, wrote nothing, and short-
-        # circuits for the same reason (co-review V-R2-1). Any other structured
-        # reply (agent_prompt_stalled, a wait timeout) is the normal response
-        # from an agent that is in the middle of exiting.
         message = str(exc)
-        if message.startswith("Herdr command failed:") or message.endswith(": agent_blocked"):
+        code = (message[len(_EXIT_DELIVERED_PREFIX):]
+                if message.startswith(_EXIT_DELIVERED_PREFIX) else None)
+        if code not in _EXIT_DELIVERED_CODES:
             return "still-live"
     agents, _panes = _snapshot(herdr_cli, workspace_id, env)
     if not _is_live(agents, row):
