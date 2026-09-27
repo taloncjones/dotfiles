@@ -94,6 +94,7 @@ def _wait_marker(herdr_cli, pane_id, marker, timeout_ms, env) -> dict[str, Any]:
         ["pane", "wait-output", pane_id, "--match", marker,
          "--timeout", str(timeout_ms), "--source", "recent-unwrapped"],
         env=env,
+        timeout_secs=timeout_ms / 1000 + 5,
     )
     if (
         observed.get("type") != "output_matched"
