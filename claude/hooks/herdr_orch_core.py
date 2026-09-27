@@ -2904,6 +2904,71 @@ def resolve_task_workers(rec, prior, bound):
     return workers
 
 
+RETIRED_REVIEWS_KEY = "retired_review_launch_ids"
+
+
+def review_retired(task, done) -> bool:
+    """A review record from a launch the task retired never carries verdict
+    authority, whatever the task status. A present but malformed list
+    retires every record (fail closed)."""
+    if not isinstance(task, dict) or RETIRED_REVIEWS_KEY not in task:
+        return False
+    retired = task[RETIRED_REVIEWS_KEY]
+    if not isinstance(retired, list):
+        return True
+    return isinstance(done, dict) and done.get("launch_id") in retired
+
+
+def _latest_review_launch(workers):
+    rows = [w for w in workers if isinstance(w, dict) and w.get("phase") == "review"]
+    return rows[-1].get("launch_id") if rows else None
+
+
+def apply_retired_reviews(rec, prior, workers):
+    """Set rec's launcher retirement list (spec D2) in place.
+
+    Append-only against the prior record; an omitted key inherits it. A
+    change of a non-null review pin also retires the prior record's latest
+    review launch, so a reset or re-pin can never revive an abandoned
+    reviewer's verdict."""
+    prior_rec = prior if isinstance(prior, dict) else {}
+    if RETIRED_REVIEWS_KEY in prior_rec and not isinstance(prior_rec[RETIRED_REVIEWS_KEY], list):
+        # A malformed value retires every record (review_retired). Carry it
+        # verbatim, so no ordinary write can normalize it away.
+        malformed = prior_rec[RETIRED_REVIEWS_KEY]
+        _require(rec.get(RETIRED_REVIEWS_KEY, malformed) == malformed,
+                 "retired_review_launch_ids is append-only")
+        rec[RETIRED_REVIEWS_KEY] = malformed
+        return
+    inherited = prior_rec.get(RETIRED_REVIEWS_KEY, [])
+    supplied = rec.get(RETIRED_REVIEWS_KEY, inherited)
+    _require(isinstance(supplied, list) and supplied[: len(inherited)] == inherited,
+             "retired_review_launch_ids is append-only")
+    added = supplied[len(inherited):]
+    # Only string ids: launcher validation accepts a review row whose
+    # launch_id is any value, and an unhashable one must not crash a write.
+    review_ids = {w["launch_id"] for w in workers
+                  if isinstance(w, dict) and w.get("phase") == "review"
+                  and isinstance(w.get("launch_id"), str)}
+    for launch_id in added:
+        _require(isinstance(launch_id, str) and bool(SHELL_SAFE_RE.fullmatch(launch_id)),
+                 "retired launch ids must be shell-safe strings")
+        _require(launch_id in review_ids,
+                 "a retired launch id must name a review attempt")
+    _require(len(set(added)) == len(added) and not any(i in added for i in inherited),
+             "retired launch ids must be unique")
+    retired = list(supplied)
+    old_pin = prior_rec.get("review_head_sha")
+    if isinstance(old_pin, str) and old_pin and rec.get("review_head_sha") != old_pin:
+        prior_workers = prior_rec.get("workers")
+        latest = _latest_review_launch(prior_workers if isinstance(prior_workers, list) else [])
+        if isinstance(latest, str) and latest not in retired:
+            retired.append(latest)
+    rec.pop(RETIRED_REVIEWS_KEY, None)
+    if retired:
+        rec[RETIRED_REVIEWS_KEY] = retired
+
+
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
@@ -3250,7 +3315,8 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         and task.get("review_head_sha") == head
         and attempt_matches(task, review, "review", rev_ws)
         and review.get("reviewed_head_sha") == head
-        and _findings_evidence_ok(review))
+        and _findings_evidence_ok(review)
+        and not review_retired(task, review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
     review_at_head = bool(task.get("review_head_sha") and head
@@ -3390,6 +3456,8 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
     if not attempt_matches(task, done, "review", workspace):
+        return False
+    if review_retired(task, done):
         return False
     if done.get("task_id") != task.get("task_id"):
         return False
@@ -3933,6 +4001,11 @@ def _main(argv=None) -> int:
             # validate the workers list before publishing, so an omitted key
             # inherits prior dispatch history rather than asserting none.
             rec["workers"] = resolve_task_workers(rec, prior, bound)
+            if bound:
+                _require(RETIRED_REVIEWS_KEY not in rec,
+                         "retired_review_launch_ids is launcher-scope only")
+            else:
+                apply_retired_reviews(rec, prior, rec["workers"])
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
@@ -3948,6 +4021,8 @@ def _main(argv=None) -> int:
         )
         _require(rec.get("workers", []) == [],
                  "a reset opens with no dispatch history; append rows with write-task")
+        _require(RETIRED_REVIEWS_KEY not in rec,
+                 "a reset opens with no retired review launches")
         _require("reset_from" not in rec, "reset_from is set by the verb")
         with _fenced_scoped(ns) as (rd, base):
             tasks = base / "tasks"

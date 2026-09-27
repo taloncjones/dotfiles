@@ -1095,9 +1095,13 @@ helper from publishing.
      report the detached-process risk, leave the task `review-dispatched`,
      and do not relaunch, reset, or surface readiness until reconciliation;
      the next check-in repeats `review-overdue`. Once settled, re-read the
-     review record (a verdict that landed during the interrupt wins), and
-     only then use `$CORE write-task` to carry the full task record forward
-     with `status: changes-requested`, report `review incomplete: sized
+     review record (a verdict that landed during the interrupt wins: an
+     exact record for the stopped row is read as its verdict below and the
+     row is not retired). Only with no exact record, use `$CORE write-task`
+     to carry the full task record forward with `status: changes-requested`
+     and the stopped row's `launch_id` appended to
+     `retired_review_launch_ids` (a retired launch's verdict never
+     correlates, whatever lands later), report `review incomplete: sized
 review deadline, <launch_id>`, and never fabricate a review record,
      blocker count, or approval. A late sidecar cannot change that
      non-approved status.
@@ -1109,6 +1113,14 @@ review deadline, <launch_id>`, and never fabricate a review record,
      you report on a task that is `changes-requested` at an unchanged HEAD
      with no correlating record for its latest review row, until the human
      picks re-dispatch or the HEAD moves.
+
+   `write-task` also retires on its own: whenever a write changes a
+   non-null `review_head_sha` (a stale-verdict reset, an orphaned-pin reset,
+   or a re-pin), it appends the prior record's latest review launch to
+   `retired_review_launch_ids`. The list is append-only; carry it forward or
+   omit it, never shorten it. `write-task` does not refuse a pin change
+   while a review is live: it cannot see liveness, every reset above needs
+   the change, and the change itself retires the old launch.
 
    Otherwise read the reviewer's completion record.
 
