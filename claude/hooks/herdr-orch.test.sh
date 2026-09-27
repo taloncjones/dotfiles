@@ -10950,6 +10950,26 @@ facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
 assert facts["idle_settled"] is False, "an implementer idle during its own review is expected"
 PY
 
+check "checkin_facts: a superseded row sharing name and pane never claims a live agent" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+impl_a = {"phase": "implement", "workspace_id": "w9", "runtime": "claude", "launch_id": "impl-a",
+          "pane_id": "w9:p1", "source_head_sha": h, "agent": "impl-x"}
+impl_b = {"phase": "implement", "workspace_id": "w9", "runtime": "claude", "launch_id": "impl-b",
+          "pane_id": "w9:p1", "source_head_sha": h, "agent": "impl-x"}
+rev_a = {"phase": "review", "workspace_id": "w9", "runtime": "claude", "launch_id": "rev-a",
+         "pane_id": "w9:p2", "source_head_sha": h, "agent": "rev-x"}
+task = {"v": 1, "task_id": "PROJ-1", "status": "review-dispatched", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl_a, impl_b, rev_a]}
+poll = {"live": {"w9": "working"}, "known": {"w9"}, "worktrees": {},
+        "agents": {"w9": [{"name": "impl-x", "pane_id": "w9:p1", "agent_status": "idle"},
+                          {"name": "rev-x", "pane_id": "w9:p2", "agent_status": "working"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is False, facts
+assert facts["action"] != "exit-idle-worker", facts["action"]
+PY
+
 check "checkin_action: exit-idle-worker ranks after every transition" <<PY
 $LOAD
 f = {"status": "in-progress", "poll_ok": True, "head": "a" * 40, "worktree_exists": True,

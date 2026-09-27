@@ -3314,6 +3314,11 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     for index, row in enumerate(workers):
         if not isinstance(row, dict) or not _nonempty_str(row.get("agent")):
             continue
+        # A relaunch reuses the pane, so an older row of the same phase can
+        # otherwise claim the successor row's live agent (B1).
+        if any(isinstance(later, dict) and later.get("pane_id") == row.get("pane_id")
+               for later in workers[index + 1:]):
+            continue
         idle = any(a.get("name") == row["agent"] and a.get("pane_id") == row.get("pane_id")
                    and a.get("agent_status") in IDLE_AGENT_STATES
                    for a in poll_agents.get(row.get("workspace_id"), []))
