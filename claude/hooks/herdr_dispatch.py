@@ -37,6 +37,9 @@ class DispatchError(RuntimeError):
 PHASES = ("plan", "implement", "review", "think", "read", "mechanical")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
 AGENT_STATES = core.IDLE_AGENT_STATES
+PANE_READY_ATTEMPTS = 3
+# macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
+PANE_RUN_MAX_BYTES = 1023
 
 # Launch-time facts copied from the attempt dict onto a bound row by the first
 # enrichment. Record-level keys (task_id, repo_slug, worktree, branch) are
@@ -51,6 +54,7 @@ BOUND_LAUNCH_FACTS = (
     "capture_before_sha256",
     "account_id",
     "personal",
+    "launch_failed_cause",
 )
 CORE_CALL_TIMEOUT_SECS = 30
 
@@ -73,6 +77,46 @@ def _runtime_binary(runtime: str, env: dict[str, str]) -> str:
     return selected
 
 
+def _pane_run(herdr_cli: str, pane_id: str, line: str, env: dict[str, str]) -> None:
+    if len(line.encode()) > PANE_RUN_MAX_BYTES:
+        raise DispatchError("pane-prep: line-too-long")
+    _run_herdr(herdr_cli, ["pane", "run", pane_id, line], env=env, json_result=False)
+
+
+def _wait_marker(herdr_cli, pane_id, marker, timeout_ms, env) -> dict[str, Any]:
+    observed = _run_herdr(
+        herdr_cli,
+        ["pane", "wait-output", pane_id, "--match", marker,
+         "--timeout", str(timeout_ms), "--source", "recent-unwrapped"],
+        env=env,
+    )
+    if (
+        observed.get("type") != "output_matched"
+        or observed.get("pane_id") != pane_id
+        or observed.get("matched_line") != marker
+    ):
+        raise DispatchError("target pane account environment probe was not current")
+    return observed
+
+
+def _split_marker_line(marker: str) -> str:
+    # Printed in two halves so the command echo never contains the marker.
+    half = len(marker) // 2
+    return f"printf '%s%s\\n' {shlex.quote(marker[:half])} {shlex.quote(marker[half:])}"
+
+
+def _wait_for_shell(herdr_cli: str, pane_id: str, env: dict[str, str]) -> None:
+    marker = f"HERDR_SHELL_{uuid.uuid4().hex[:16]}"
+    _pane_run(herdr_cli, pane_id, _split_marker_line(marker), env)
+    for _ in range(PANE_READY_ATTEMPTS):
+        try:
+            _wait_marker(herdr_cli, pane_id, marker, 5000, env)
+            return
+        except DispatchError:
+            continue
+    raise DispatchError("pane-prep: shell-not-ready")
+
+
 def _bind_pane_environment(
     herdr_cli: str,
     pane_id: str,
@@ -81,6 +125,7 @@ def _bind_pane_environment(
     scope: dict,
     env: dict[str, str],
     *,
+    prep_dir: Path,
     personal: bool = False,
     runtime: str | None = None,
     runtime_binary: str | None = None,
@@ -149,53 +194,51 @@ def _bind_pane_environment(
             f"printf '{token}:RUNTIME_BINARY=%s\\n' \"$(command -v '{runtime}')\""
         )
         probes.append(f"printf '{token}:GH=%s\\n' \"$(command -v gh)\"")
-    ready_probe = (
-        "printf '%s%s\\n' "
-        f"{shlex.quote(ready_marker[:marker_split])} "
-        f"{shlex.quote(ready_marker[marker_split:])}"
-    )
-    _run_herdr(
-        herdr_cli,
-        ["pane", "run", pane_id, "; ".join([*assignments, *probes, ready_probe])],
-        env=env,
-        json_result=False,
-    )
-    observed = _run_herdr(
-        herdr_cli,
-        [
-            "pane",
-            "wait-output",
-            pane_id,
-            "--match",
-            ready_marker,
-            "--timeout",
-            "5000",
-            "--source",
-            "recent-unwrapped",
-        ],
-        env=env,
-    )
-    if (
-        observed.get("type") != "output_matched"
-        or observed.get("pane_id") != pane_id
-        or observed.get("matched_line") != ready_marker
-    ):
-        raise DispatchError("target pane account environment probe was not current")
-    read = observed.get("read") if isinstance(observed, dict) else None
-    text = read.get("text") if isinstance(read, dict) else None
-    expected = {
-        f"{token}:{key}={'__UNSET__' if value is None else value}"
-        for key, value in bindings.items()
-    }
-    expected.add(ready_marker)
-    if runtime_binary is not None:
-        expected.add(f"{token}:RUNTIME_BINARY={runtime_binary}")
-        expected.add(f"{token}:GH={agent_runtime.GH_SHIM_DIR / 'gh'}")
-    if not isinstance(text, str) or not expected.issubset(set(text.splitlines())):
-        raise DispatchError(
-            "target pane account environment or runtime executable could not be verified"
-        )
-    _validate_pane(herdr_cli, pane_id, workspace_id, cwd, env)
+    ready_probe = _split_marker_line(ready_marker)
+    stage = "shell-not-ready"
+    script = None
+    try:
+        _wait_for_shell(herdr_cli, pane_id, env)
+        stage = "script-write"
+        prep_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        script = prep_dir / f"{uuid.uuid4().hex}.sh"
+        fd = os.open(script, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write("\n".join([*assignments, *probes, ready_probe]) + "\n")
+        stage = "script-source"
+        _pane_run(herdr_cli, pane_id, f". {shlex.quote(str(script))}", env)
+        stage = "environment-probe"
+        observed = _wait_marker(herdr_cli, pane_id, ready_marker, 10_000, env)
+        stage = "script-cleanup"
+        script.unlink(missing_ok=True)
+        script = None
+        stage = "environment-mismatch"
+        read = observed.get("read") if isinstance(observed, dict) else None
+        text = read.get("text") if isinstance(read, dict) else None
+        expected = {
+            f"{token}:{key}={'__UNSET__' if value is None else value}"
+            for key, value in bindings.items()
+        }
+        expected.add(ready_marker)
+        if runtime_binary is not None:
+            expected.add(f"{token}:RUNTIME_BINARY={runtime_binary}")
+            expected.add(f"{token}:GH={agent_runtime.GH_SHIM_DIR / 'gh'}")
+        if not isinstance(text, str) or not expected.issubset(set(text.splitlines())):
+            raise DispatchError(
+                "target pane account environment or runtime executable could not be verified"
+            )
+        stage = "pane-validate"
+        _validate_pane(herdr_cli, pane_id, workspace_id, cwd, env)
+    except (DispatchError, OSError) as exc:
+        if script is not None:
+            try:
+                script.unlink(missing_ok=True)
+            except OSError:
+                pass  # a cleanup error must not replace the prep failure being reported
+        if str(exc).startswith("pane-prep: "):
+            raise
+        # The caller records any pane-prep failure as a launch_failed row.
+        raise DispatchError(f"pane-prep: {stage}: {exc}") from exc
 
 
 def _expected_slug(repository: dict, cwd: str | os.PathLike[str]) -> str:
@@ -709,25 +752,6 @@ def launch(
     agent_runtime._apply_launch_environment(child_env, scope)
     runtime_binary = _runtime_binary(runtime, child_env)
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
-    _bind_pane_environment(
-        herdr_cli,
-        pane_id,
-        workspace_id,
-        cwd,
-        scope,
-        child_env,
-        personal=personal,
-        runtime=runtime,
-        runtime_binary=runtime_binary,
-    )
-
-    pre_capture = _run_herdr(
-        herdr_cli,
-        ["pane", "read", pane_id, "--source", "detection", "--lines", "200"],
-        env=child_env,
-        json_result=False,
-    )
-    assert isinstance(pre_capture, str)
     launch_id = f"{agent}-{uuid.uuid4().hex[:12]}"
     started_ns = time.time_ns()
     attempt = {
@@ -748,13 +772,35 @@ def launch(
         "difficulty_confirmed": route.get("difficulty_confirmed"),
         "status": "starting",
         "started_ns": started_ns,
-        "capture_before_sha256": hashlib.sha256(pre_capture.encode()).hexdigest(),
+        "capture_before_sha256": None,
         "account_id": scope["account_id"],
         "personal": personal,
         "repo_slug": repo_slug,
         "worktree": repository["root"],
         "branch": repository["branch"],
+        "launch_failed_cause": None,
     }
+    try:
+        _bind_pane_environment(
+            herdr_cli, pane_id, workspace_id, cwd, scope, child_env,
+            prep_dir=rd / "prep", personal=personal,
+            runtime=runtime, runtime_binary=runtime_binary,
+        )
+    except DispatchError as exc:
+        if str(exc).startswith("pane-prep: "):
+            # Status and cause in one write, so no row is failed without a cause.
+            records.reserve({**attempt, "status": "launch_failed",
+                             "launch_failed_cause": str(exc)[:200]})
+        raise
+
+    pre_capture = _run_herdr(
+        herdr_cli,
+        ["pane", "read", pane_id, "--source", "detection", "--lines", "200"],
+        env=child_env,
+        json_result=False,
+    )
+    assert isinstance(pre_capture, str)
+    attempt["capture_before_sha256"] = hashlib.sha256(pre_capture.encode()).hexdigest()
     task = records.reserve(attempt)
 
     try:

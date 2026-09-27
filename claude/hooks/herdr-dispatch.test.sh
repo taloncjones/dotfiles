@@ -155,9 +155,19 @@ elif args[:2] == ["pane", "read"]:
 elif args[:2] == ["pane", "run"]:
     command = args[3]
     Path(os.environ["FAKE_COMMAND_ECHO"]).write_text(command + "\n")
+    if mode == "source-fails" and command.startswith(". "):
+        print(json.dumps({"id": "cli:pane:run",
+                          "error": {"code": "pane_gone", "message": "pane closed"}}))
+        raise SystemExit(1)
     values = {}
     lines = []
-    for part in command.split("; "):
+    parts = command.split("; ")
+    if command.startswith(". "):
+        script = Path(shlex.split(command)[1])
+        text = script.read_text()
+        Path(os.environ["FAKE_PREP_COPY"]).write_text(text)
+        parts = text.splitlines()
+    for part in parts:
         words = shlex.split(part)
         if words[0] == "unset":
             if words[1] != "-f":
@@ -187,6 +197,13 @@ elif args[:2] == ["pane", "run"]:
     Path(os.environ["FAKE_ENV_OUTPUT"]).write_text("\n".join(lines) + "\n")
     # Native protocol 20 pane run acknowledges success with empty stdout.
 elif args[:2] == ["pane", "wait-output"]:
+    count_file = Path(os.environ["FAKE_WAIT_COUNT"])
+    waits = int(count_file.read_text()) if count_file.exists() else 0
+    count_file.write_text(str(waits + 1))
+    if mode == "dead-shell" or (mode == "slow-shell" and waits < 2):
+        print(json.dumps({"id": "cli:pane:wait-output",
+                          "error": {"code": "timeout", "message": "no match"}}))
+        raise SystemExit(1)
     text = Path(os.environ["FAKE_ENV_OUTPUT"]).read_text()
     match_text = args[args.index("--match") + 1]
     if mode == "shell-echo-before-output":
@@ -370,6 +387,8 @@ class Fixture:
             "FAKE_AGENT": "impl-td-a",
             "FAKE_ENV_OUTPUT": str(self.root / "env-output"),
             "FAKE_COMMAND_ECHO": str(self.root / "command-echo"),
+            "FAKE_PREP_COPY": str(self.root / "prep-copy"),
+            "FAKE_WAIT_COUNT": str(self.root / "wait-count"),
         }
 
     def close(self):
@@ -686,13 +705,13 @@ def test_runtime_binding_precedes_start_and_records_selected_entry():
         expected = str(fixture.runtime_dir.resolve() / "codex")
         task = json.loads(fixture.task_file.read_text())
         assert task["workers"][-1]["runtime_binary"] == expected, task
-        commands = [call[3] for call in fixture.calls() if call[:2] == ["pane", "run"]]
-        assert any("command -v" in command and str(fixture.runtime_dir) in command for command in commands)
+        script = (fixture.root / "prep-copy").read_text()
+        assert "command -v" in script and str(fixture.runtime_dir) in script, script
     finally:
         fixture.close()
 
 
-def test_missing_or_mismatched_binary_refuses_before_attempt_and_start():
+def test_missing_or_mismatched_binary_refuses_before_start():
     for mode in ("missing", "wrong-runtime-binary"):
         fixture = Fixture()
         try:
@@ -706,7 +725,13 @@ def test_missing_or_mismatched_binary_refuses_before_attempt_and_start():
                 assert "runtime" in str(exc), exc
             else:
                 raise AssertionError("unverified executable accepted")
-            assert json.loads(fixture.task_file.read_text())["workers"] == []
+            rows = json.loads(fixture.task_file.read_text())["workers"]
+            if mode == "missing":
+                assert rows == [], rows
+            else:
+                assert [r["status"] for r in rows] == ["launch_failed"], rows
+                assert rows[0]["launch_failed_cause"].startswith(
+                    "pane-prep: environment-mismatch: "), rows
             assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
         finally:
             fixture.close()
@@ -717,8 +742,7 @@ def test_runtime_binding_arms_gh_shim_after_runtime_path():
     try:
         fixture.launch()
         shim = agent_runtime.GH_SHIM_DIR
-        command = next(call[3] for call in fixture.calls() if call[:2] == ["pane", "run"])
-        parts = command.split("; ")
+        parts = (fixture.root / "prep-copy").read_text().splitlines()
         runtime_path = next(i for i, part in enumerate(parts) if part.startswith("export PATH="))
         assert parts[runtime_path + 1] == f'export PATH={shlex.quote(str(shim))}:"$PATH"', parts
         assert parts[runtime_path + 2] == f'export BASH_ENV="${{BASH_ENV:-{shim}/path.sh}}"', parts
@@ -727,7 +751,7 @@ def test_runtime_binding_arms_gh_shim_after_runtime_path():
         fixture.close()
 
 
-def test_unarmed_gh_refuses_before_attempt_and_start():
+def test_unarmed_gh_refuses_before_start_and_records_the_failed_prep():
     fixture = Fixture()
     try:
         fixture.env["FAKE_HERDR_MODE"] = "unarmed-gh"
@@ -737,9 +761,156 @@ def test_unarmed_gh_refuses_before_attempt_and_start():
             assert "runtime executable" in str(exc), exc
         else:
             raise AssertionError("a pane whose gh is not the shim was accepted")
-        assert json.loads(fixture.task_file.read_text())["workers"] == []
+        rows = json.loads(fixture.task_file.read_text())["workers"]
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith(
+            "pane-prep: environment-mismatch: "), rows
         assert not any(call[:2] == ["agent", "start"] for call in fixture.calls())
     finally:
+        fixture.close()
+
+
+def test_pane_prep_waits_out_a_slow_shell():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "slow-shell"
+        result = fixture.launch()
+        assert result["status"] == "launched", result
+        waits = [c for c in fixture.calls() if c[:2] == ["pane", "wait-output"]]
+        assert len(waits) == 4, waits  # 2 timeouts + readiness + prep marker
+        runs = [c for c in fixture.calls() if c[:2] == ["pane", "run"]]
+        assert runs[0][3].startswith("printf "), runs[0]
+        assert runs[1][3].startswith(". "), runs[1]
+    finally:
+        fixture.close()
+
+
+def test_pane_prep_dead_shell_records_launch_failed_with_cause():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "dead-shell"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: shell-not-ready"), exc
+        else:
+            raise AssertionError("a shell that never answers must fail the launch")
+        rows = fixture.worker_records()
+        assert len(rows) == 1, rows
+        assert rows[0]["status"] == "launch_failed", rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: shell-not-ready"), rows
+        assert rows[0]["capture_before_sha256"] is None, rows
+        assert [c for c in fixture.calls() if c[:2] == ["agent", "start"]] == []
+        runs = [c for c in fixture.calls() if c[:2] == ["pane", "run"]]
+        assert len(runs) == 1, runs  # the prep script is never sourced
+    finally:
+        fixture.close()
+
+
+def test_pane_run_lines_stay_under_max_canon_and_script_is_removed():
+    fixture = Fixture()
+    try:
+        fixture.launch()
+        runs = [c for c in fixture.calls() if c[:2] == ["pane", "run"]]
+        assert runs, "prep must run"
+        for call in runs:
+            assert len(call[3].encode()) < 1024, (len(call[3].encode()), call[3][:80])
+        prep_dir = fixture.rd / "prep"
+        assert not prep_dir.exists() or list(prep_dir.iterdir()) == [], list(prep_dir.iterdir())
+        assert "HERDR_READY_" in (fixture.root / "prep-copy").read_text()
+    finally:
+        fixture.close()
+
+
+def test_pane_prep_script_write_failure_records_launch_failed():
+    fixture = Fixture()
+    try:
+        (fixture.rd / "prep").write_text("a file where the prep dir belongs")
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: script-write: "), exc
+        else:
+            raise AssertionError("an unwritable prep dir must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: script-write: "), rows
+        assert [c for c in fixture.calls() if c[:2] == ["agent", "start"]] == []
+    finally:
+        fixture.close()
+
+
+def test_pane_prep_source_line_failure_records_launch_failed():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "source-fails"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: script-source: "), exc
+        else:
+            raise AssertionError("a failed source line must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: script-source: "), rows
+        prep_dir = fixture.rd / "prep"
+        assert not prep_dir.exists() or list(prep_dir.iterdir()) == [], list(prep_dir.iterdir())
+        assert [c for c in fixture.calls() if c[:2] == ["agent", "start"]] == []
+    finally:
+        fixture.close()
+
+
+def test_pane_changed_during_prep_records_launch_failed():
+    fixture = Fixture()
+    original = herdr_dispatch._validate_pane
+    seen = []
+
+    def validate(*args):
+        seen.append(args)
+        if len(seen) > 1:
+            raise herdr_dispatch.DispatchError("pane cwd changed")
+        return original(*args)
+
+    try:
+        herdr_dispatch._validate_pane = validate
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == "pane-prep: pane-validate: pane cwd changed", exc
+        else:
+            raise AssertionError("a pane that changed during prep must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"] == "pane-prep: pane-validate: pane cwd changed", rows
+        assert len(seen) == 2, seen  # launch's own check, then prep's final check
+    finally:
+        herdr_dispatch._validate_pane = original
+        fixture.close()
+
+
+def test_pane_prep_cleanup_failure_never_masks_the_prep_failure():
+    fixture = Fixture()
+    original_unlink = Path.unlink
+
+    def unlink(self, *args, **kwargs):
+        if self.parent.name == "prep" and self.suffix == ".sh":
+            raise PermissionError("prep dir denies unlink")
+        return original_unlink(self, *args, **kwargs)
+
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "source-fails"
+        Path.unlink = unlink
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).startswith("pane-prep: script-source: "), exc
+        else:
+            raise AssertionError("a failed source line must fail the launch")
+        rows = fixture.worker_records()
+        assert [r["status"] for r in rows] == ["launch_failed"], rows
+        assert rows[0]["launch_failed_cause"].startswith("pane-prep: script-source: "), rows
+    finally:
+        Path.unlink = original_unlink
         fixture.close()
 
 
@@ -791,13 +962,16 @@ def test_runtime_binding_bypasses_aliases_functions_and_stale_hashes():
                 def run(_cli, argv, **kwargs):
                     nonlocal output
                     if argv[:2] == ["pane", "run"]:
+                        if not argv[3].startswith(". "):
+                            return ""  # the shell-readiness line
+                        body = Path(shlex.split(argv[3])[1]).read_text()
                         setup = (
                             f'{runtime}() {{ export CLAUDE_CONFIG_DIR=wrong; printf "WRAPPER\\n"; }}\n'
                             f"alias {runtime}='false'\n"
                             + (f"hash -p /bin/false {runtime}\n" if shell == "bash" else f"hash {runtime}=/bin/false\n")
                         )
                         process = subprocess.run(
-                            [shell_binary, "-f", "-c", setup + argv[3] + f"\n{runtime}\n"],
+                            [shell_binary, "-f", "-c", setup + body + f"\n{runtime}\n"],
                             env=fixture.env, text=True, capture_output=True, check=True,
                         )
                         output = process.stdout
@@ -811,7 +985,8 @@ def test_runtime_binding_bypasses_aliases_functions_and_stale_hashes():
                 herdr_dispatch._bind_pane_environment(
                     "fake", "w1:p1", "w1", fixture.repo,
                     {"launch_env": {"CLAUDE_CONFIG_DIR": None}, "account_id": "personal"},
-                    fixture.env, runtime_binary=str(selected), runtime=runtime,
+                    fixture.env, prep_dir=fixture.rd / "prep",
+                    runtime_binary=str(selected), runtime=runtime,
                 )
                 assert "BINARY_ACCOUNT=unset" in output and "WRAPPER" not in output, output
             finally:
@@ -1400,9 +1575,11 @@ def test_target_shell_account_environment_is_applied_and_verified():
                 "account_id": "account-123",
             },
             fixture.env,
+            prep_dir=fixture.rd / "prep",
         )
         run = next(call for call in fixture.calls() if call[:2] == ["pane", "run"])
-        assert run[2] == "w1:p1" and "unset CLAUDE_CONFIG_DIR" in run[3], run
+        script = (fixture.root / "prep-copy").read_text()
+        assert run[2] == "w1:p1" and "unset CLAUDE_CONFIG_DIR" in script, (run, script)
         codex_home = fixture.root / "Codex Home"
         herdr_dispatch._bind_pane_environment(
             str(fixture.bin), "w1:p1", "w1", fixture.repo,
@@ -1416,15 +1593,16 @@ def test_target_shell_account_environment_is_applied_and_verified():
                 "account_id": "account-123",
             },
             fixture.env,
+            prep_dir=fixture.rd / "prep",
             personal=True,
         )
-        runs = [call for call in fixture.calls() if call[:2] == ["pane", "run"]]
-        assert f"export CODEX_HOME={shlex.quote(str(codex_home))}" in runs[-1][3], runs[-1]
-        assert "unset CLAUDE_CONFIG_DIR" in runs[-1][3], runs[-1]
-        assert "unset CLAUDE_PERSONAL_ONLY" in runs[-1][3], runs[-1]
-        assert "export WORKFLOW_PERSONAL_ACCOUNT=1" in runs[-1][3], runs[-1]
-        assert "export HERDR_PERSONAL=1" in runs[-1][3], runs[-1]
-        assert "export HERDR_ACCOUNT_ID=account-123" in runs[-1][3], runs[-1]
+        script = (fixture.root / "prep-copy").read_text()
+        assert f"export CODEX_HOME={shlex.quote(str(codex_home))}" in script, script
+        assert "unset CLAUDE_CONFIG_DIR" in script, script
+        assert "unset CLAUDE_PERSONAL_ONLY" in script, script
+        assert "export WORKFLOW_PERSONAL_ACCOUNT=1" in script, script
+        assert "export HERDR_PERSONAL=1" in script, script
+        assert "export HERDR_ACCOUNT_ID=account-123" in script, script
         fixture.env["FAKE_HERDR_MODE"] = "wrong-shell-env"
         try:
             herdr_dispatch._bind_pane_environment(
@@ -1437,6 +1615,7 @@ def test_target_shell_account_environment_is_applied_and_verified():
                     "account_id": "account-123",
                 },
                 fixture.env,
+                prep_dir=fixture.rd / "prep",
             )
         except herdr_dispatch.DispatchError as exc:
             assert "account environment" in str(exc), exc
@@ -1460,10 +1639,13 @@ def test_target_shell_environment_wait_ignores_command_echo():
                 "account_id": "account-123",
             },
             fixture.env,
+            prep_dir=fixture.rd / "prep",
             personal=True,
         )
         wait = next(
-            call for call in fixture.calls() if call[:2] == ["pane", "wait-output"]
+            call for call in fixture.calls()
+            if call[:2] == ["pane", "wait-output"]
+            and call[call.index("--match") + 1].startswith("HERDR_READY_")
         )
         marker = wait[wait.index("--match") + 1]
         command_echo = (fixture.root / "command-echo").read_text()
@@ -1481,9 +1663,9 @@ def test_launch_persists_explicit_account_selection_metadata():
         attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
         assert attempt["personal"] is False, attempt
         assert attempt["account_id"], attempt
-        run = next(call for call in fixture.calls() if call[:2] == ["pane", "run"])
-        assert "export HERDR_PERSONAL=0" in run[3], run
-        assert f"export HERDR_ACCOUNT_ID={attempt['account_id']}" in run[3], run
+        script = (fixture.root / "prep-copy").read_text()
+        assert "export HERDR_PERSONAL=0" in script, script
+        assert f"export HERDR_ACCOUNT_ID={attempt['account_id']}" in script, script
     finally:
         fixture.close()
 
@@ -2351,11 +2533,18 @@ for name, test in (
     ("result_object normalizes parse failures to DispatchError", test_result_object_normalizes_parse_failures_to_dispatch_error),
     ("reprompt CLI rejects a non-utf8 prompt file", test_reprompt_cli_rejects_non_utf8_prompt_file),
     ("reprompt CLI subcommand reaches the function", test_reprompt_cli_subcommand_reaches_the_function),
+    ("pane prep waits out a slow shell before sourcing the prep", test_pane_prep_waits_out_a_slow_shell),
+    ("pane prep that never sees a prompt records launch_failed with its cause", test_pane_prep_dead_shell_records_launch_failed_with_cause),
+    ("pane run lines stay under MAX_CANON and the prep script is removed", test_pane_run_lines_stay_under_max_canon_and_script_is_removed),
+    ("pane prep script write failure records launch_failed", test_pane_prep_script_write_failure_records_launch_failed),
+    ("pane prep source line failure records launch_failed", test_pane_prep_source_line_failure_records_launch_failed),
+    ("pane changed during prep records launch_failed", test_pane_changed_during_prep_records_launch_failed),
+    ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
     ("runtime resolution respects symlink parent traversal", test_runtime_resolution_preserves_filesystem_parent_semantics),
     ("runtime binding records selected executable before start", test_runtime_binding_precedes_start_and_records_selected_entry),
-    ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_attempt_and_start),
+    ("missing or mismatched runtime blocks before launch", test_missing_or_mismatched_binary_refuses_before_start),
     ("runtime binding arms the gh shim after the runtime PATH", test_runtime_binding_arms_gh_shim_after_runtime_path),
-    ("a pane whose gh is not the shim blocks before launch", test_unarmed_gh_refuses_before_attempt_and_start),
+    ("a pane whose gh is not the shim blocks before launch", test_unarmed_gh_refuses_before_start_and_records_the_failed_prep),
     ("real shells bypass stale runtime wrappers and hashes", test_runtime_binding_bypasses_aliases_functions_and_stale_hashes),
     ("personal pane launch disables the Atlassian plugin", test_launch_records_attempt_before_native_start),
     ("Claude reviewer pane launch passes strict MCP config", test_claude_reviewer_pane_launch_passes_strict_mcp_config),
