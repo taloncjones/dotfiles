@@ -3480,6 +3480,11 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     )
 
 
+# herdr reports `done` for a finished turn in an unfocused workspace; it is as
+# promptable as `idle`.
+IDLE_AGENT_STATES = ("idle", "done")
+
+
 DESCENDANT_PHASES = ("plan", "implement", "review")
 _SETTLE_SUFFIX = {"plan": ".done.json", "implement": ".done.json",
                   "review": ".review.json"}

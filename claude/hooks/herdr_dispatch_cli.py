@@ -187,6 +187,8 @@ def validate_agent(
     runtime: str,
     pane_id: str,
     expected_argv: list[str] | None = None,
+    *,
+    states: tuple[str, ...] = ("idle",),
 ) -> None:
     if result.get("type") not in ("agent_started", "agent_info"):
         raise _dispatch_error("agent readiness has an unexpected result type")
@@ -196,7 +198,7 @@ def validate_agent(
         record.get("name") != agent
         or record.get("agent") != runtime
         or record.get("pane_id") != pane_id
-        or record.get("agent_status") != "idle"
+        or record.get("agent_status") not in states
         or record.get("interactive_ready") is not True
         or record.get("launch_pending") is True
     ):

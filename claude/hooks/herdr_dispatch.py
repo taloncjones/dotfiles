@@ -36,7 +36,7 @@ class DispatchError(RuntimeError):
 
 PHASES = ("plan", "implement", "review", "think", "read", "mechanical")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
-AGENT_STATES = ("idle", "done")
+AGENT_STATES = core.IDLE_AGENT_STATES
 
 # Launch-time facts copied from the attempt dict onto a bound row by the first
 # enrichment. Record-level keys (task_id, repo_slug, worktree, branch) are
@@ -339,9 +339,9 @@ def _write_attempt(
 def _live_agent_status(result: Any, agent: str, runtime: str, pane_id: str) -> str | None:
     """Read agent_status from an `agent get` reply, or None if it is not ours.
 
-    Deliberately not `_validate_agent`: that helper requires idle and
-    interactive-ready, which is the pre-launch contract and the exact inverse of
-    what a post-prompt reconciliation has to accept.
+    Deliberately not `_validate_agent`: that helper requires an idle (or, for
+    reprompt, done) interactive-ready agent, which is the pre-launch contract
+    and the exact inverse of what a post-prompt reconciliation has to accept.
     """
     if not isinstance(result, dict) or result.get("type") not in (
         "agent_info",
@@ -1290,14 +1290,15 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     except (OSError, ValueError) as exc:
         raise DispatchError(f"reprompt could not record intent: {exc}") from exc
 
-    # Live-agent validation: idle + interactive-ready on the recorded pane.
+    # Live-agent validation: idle or done, interactive-ready, on the
+    # recorded pane.
     # Read-only herdr query; safe outside the fence. A failure here delivered
     # nothing, so the recorded intent is marked failed (retry-safe), not orphaned.
     try:
         current = _run_herdr(herdr_cli, ["agent", "get", agent], env=child_env,
                              json_result=True)
         assert isinstance(current, dict)
-        _validate_agent(current, agent, runtime, pane_id)
+        _validate_agent(current, agent, runtime, pane_id, states=AGENT_STATES)
     except (DispatchError, OSError, ValueError) as exc:
         # Readiness probe failed (validation, transport, or a decode/parse
         # error). Nothing was delivered, so mark the intent failed (retry-safe)

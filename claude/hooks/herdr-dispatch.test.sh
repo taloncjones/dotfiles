@@ -246,6 +246,14 @@ elif args[:2] == ["agent", "get"]:
             "terminal_id": "t1", "workspace_id": workspace, "tab_id": "tab1",
             "focused": False, "revision": 4}}}))
         raise SystemExit(0)
+    if mode == "agent-done":
+        print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
+            "name": os.environ["FAKE_AGENT"], "pane_id": pane,
+            "agent": os.environ.get("FAKE_RUNTIME", "codex"),
+            "agent_status": "done", "interactive_ready": True,
+            "launch_pending": False, "terminal_id": "t1", "workspace_id": workspace,
+            "tab_id": "tab1", "focused": False, "revision": 5}}}))
+        raise SystemExit(0)
     print(json.dumps({"id": "fake", "result": {"type": "agent_info", "agent": {
         "name": os.environ["FAKE_AGENT"], "pane_id": observed_pane,
         "agent": os.environ.get("FAKE_RUNTIME", "codex"),
@@ -1817,6 +1825,48 @@ def test_reprompt_requires_live_idle_agent():
         fx.close()
 
 
+def test_reprompt_accepts_a_done_interactive_ready_agent():
+    fx = Fixture()
+    try:
+        lid = fx.launch()["launch_id"]
+        fx.env["FAKE_HERDR_MODE"] = "agent-done"
+        result = fx.reprompt(lid)
+        assert result["status"] == "reprompted", result
+        target = [w for w in fx.worker_records() if w["launch_id"] == lid][0]
+        assert target["reprompts"][0]["status"] == "delivered", target
+    finally:
+        fx.close()
+
+
+def test_launch_refuses_a_done_readiness_reply():
+    record = {"type": "agent_info", "agent": {
+        "name": "impl-td-a", "agent": "codex", "pane_id": "w1:p1",
+        "agent_status": "done", "interactive_ready": True, "launch_pending": False}}
+    try:
+        herdr_dispatch._validate_agent(record, "impl-td-a", "codex", "w1:p1")
+    except herdr_dispatch.DispatchError as exc:
+        assert "current attempt" in str(exc), exc
+    else:
+        raise AssertionError("launch readiness must stay strict idle")
+
+
+def test_validate_agent_states_keyword_widens_only_on_request():
+    record = {"type": "agent_info", "agent": {
+        "name": "a", "agent": "claude", "pane_id": "w1:p2",
+        "agent_status": "done", "interactive_ready": True, "launch_pending": False}}
+    herdr_dispatch._validate_agent(record, "a", "claude", "w1:p2",
+                                   states=herdr_dispatch.AGENT_STATES)
+    assert herdr_dispatch.AGENT_STATES is core.IDLE_AGENT_STATES
+    working = {**record, "agent": {**record["agent"], "agent_status": "working"}}
+    try:
+        herdr_dispatch._validate_agent(working, "a", "claude", "w1:p2",
+                                       states=herdr_dispatch.AGENT_STATES)
+    except herdr_dispatch.DispatchError:
+        pass
+    else:
+        raise AssertionError("a working agent is never ready")
+
+
 def test_reprompt_refuses_on_lost_fence_before_delivery():
     fx = Fixture()
     try:
@@ -2281,6 +2331,9 @@ for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
     ("reprompt requires a live idle agent", test_reprompt_requires_live_idle_agent),
+    ("reprompt accepts a done agent that is interactive-ready", test_reprompt_accepts_a_done_interactive_ready_agent),
+    ("launch still refuses a done readiness reply", test_launch_refuses_a_done_readiness_reply),
+    ("validate_agent widens states only when asked", test_validate_agent_states_keyword_widens_only_on_request),
     ("reprompt refuses on a lost fence before delivery", test_reprompt_refuses_on_lost_fence_before_delivery),
     ("reprompt refuses supersession before delivery", test_reprompt_supersession_before_delivery_refuses_without_delivery),
     ("reprompt spawn failure is retry-safe failed", test_reprompt_spawn_failure_is_retry_safe_failed),
