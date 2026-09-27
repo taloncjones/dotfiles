@@ -131,8 +131,11 @@ if args[:2] == ["pane", "get"]:
 elif args[:2] == ["pane", "process-info"]:
     if mode == "process-info-empty-foreground":
         # herdr's real shape when process enumeration fails: a valid
-        # shell_pid but no foreground entries (co-review round 7: B-R7-1).
+        # shell_pid but no foreground entries.
         foreground = []
+    elif mode == "process-info-foreground-busy":
+        # A pid other than the pane's shell -- a user's vim or test run.
+        foreground = [{"pid": 202, "name": "vim", "cwd": cwd}]
     else:
         foreground = [{"pid": 101, "name": "zsh", "cwd": cwd}]
     print(json.dumps({"id": "fake", "result": {
@@ -140,12 +143,15 @@ elif args[:2] == ["pane", "process-info"]:
         "pane_id": pane, "shell_pid": 101,
         "foreground_processes": foreground}}}))
 elif args[:2] == ["pane", "read"]:
+    if mode == "exit-background-prose":
+        print("A background task is currently running in this project.")
+        raise SystemExit(0)
     if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply",
-                "exit-occupant-changed"):
+                "exit-occupant-changed", "exit-malformed-success", "exit-coded-reply-no-id"):
         if mode == "exit-occupant-changed":
             # The row's agent exits and a replacement occupies the pane
             # during this read -- simulates the race the pre-read snapshot
-            # cannot see (co-review round 5: C-R5-2/B-R5-1).
+            # cannot see.
             apath = Path(os.environ["FAKE_AGENTS"])
             agents = json.loads(apath.read_text())
             for a in agents:
@@ -332,10 +338,14 @@ elif args[:2] == ["agent", "prompt"]:
             # (co-review round 6: C-R6-2).
             print(json.dumps({"id": "fake", "result": {}}))
             raise SystemExit(0)
-        if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed"):
+        if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed",
+                        "exit-background-prose"):
             apath = Path(os.environ["FAKE_AGENTS"])
-            apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
-                                         if a["name"] != args[2]]))
+            agents = json.loads(apath.read_text())
+            if mode == "exit-agent-reappears":
+                removed = next(a for a in agents if a["name"] == args[2])
+                Path(os.environ["FAKE_REMOVED_AGENT"]).write_text(json.dumps(removed))
+            apath.write_text(json.dumps([a for a in agents if a["name"] != args[2]]))
         print(json.dumps({"id": "fake", "error": {"code": "agent_prompt_stalled"}}))
         raise SystemExit(0)
     if mode in timeout_modes:
@@ -364,6 +374,18 @@ elif args[:2] == ["pane", "report-metadata"]:
     # Mutation success is established by the exit status; no result body is required.
 elif args[:2] == ["agent", "list"]:
     agents = json.loads(Path(os.environ["FAKE_AGENTS"]).read_text())
+    if mode == "exit-agent-reappears":
+        # The row's agent is removed by the /exit reply above, then
+        # reappears on the settle re-check that follows _exit_agent's own
+        # verdict -- simulates a transient reappearance between snapshots.
+        count_path = Path(os.environ["FAKE_AGENT_LIST_COUNT"])
+        calls_so_far = int(count_path.read_text()) if count_path.exists() else 0
+        count_path.write_text(str(calls_so_far + 1))
+        removed_path = Path(os.environ["FAKE_REMOVED_AGENT"])
+        if calls_so_far + 1 >= 3 and removed_path.exists():
+            removed = json.loads(removed_path.read_text())
+            if not any(a["name"] == removed["name"] for a in agents):
+                agents = agents + [removed]
     print(json.dumps({"id": "fake", "result": {"type": "agent_list", "agents": agents}}))
 elif args[:2] == ["pane", "list"]:
     ws = args[args.index("--workspace") + 1]
@@ -480,6 +502,8 @@ class Fixture:
             "FAKE_WAIT_COUNT": str(self.root / "wait-count"),
             "FAKE_AGENTS": str(self.root / "agents.json"),
             "FAKE_PANES": str(self.root / "panes.json"),
+            "FAKE_REMOVED_AGENT": str(self.root / "removed-agent.json"),
+            "FAKE_AGENT_LIST_COUNT": str(self.root / "agent-list-count"),
         }
 
     def close(self):
@@ -1070,6 +1094,88 @@ def test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes()
         assert result["status"] == "settled" and result["agent"] == "exited", result
         assert result["pane"] == "kept-occupied", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        # The row's agent is absent; only foreground process identity can
+        # tell a live user process (vim, a test run) from an idle shell.
+        fx.settle_state([impl, rev], "changes-requested", [],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "process-info-foreground-busy"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "absent", result
+        assert result["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-blocked"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # With two panes, _pane_verdict alone would say "close"; only the
+        # still-live guard keeps this pane open.
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-agent-reappears"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # _exit_agent's own snapshot says "exited"; the freshest re-check
+        # before deciding pane fate must catch the reappearance.
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_background_exit_menu_regex_rejects_prose_without_the_numbered_option():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-background-prose"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # Prose mentioning a background task, with no "1. Exit anyway"
+        # option, must never be mistaken for the exit menu.
+        assert not [c for c in fx.calls() if c[:2] == ["agent", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["status"] == "exit-incomplete", result
     finally:
         fx.close()
 
@@ -3031,6 +3137,10 @@ for name, test in (
     ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
     ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
     ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
+    ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
+    ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),
+    ("settle keeps a pane when the agent reappears after exit reports exited", test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited),
+    ("background exit menu regex rejects prose without the numbered option", test_background_exit_menu_regex_rejects_prose_without_the_numbered_option),
     ("settle refuses a busy agent without any mutation", test_settle_refuses_a_busy_agent_without_mutation),
     ("settle exits a plan agent and keeps its pane", test_settle_exits_a_plan_agent_and_keeps_its_pane),
     ("settle refuses an occupant it cannot prove is this attempt", test_settle_refuses_an_unproven_occupant),
