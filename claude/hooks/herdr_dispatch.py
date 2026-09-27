@@ -1486,9 +1486,11 @@ def _is_live(agents, row):
     return any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"]))
 
 
-# /exit delivery is confirmed only by these two documented codes (SKILL.md);
-# every other outcome, including agent_blocked, is unconfirmed. An allowlist,
-# not a denylist, so a new unhandled reply shape fails closed by default.
+# /exit delivery is confirmed only by these two codes: agent_prompt_stalled
+# is SKILL.md's documented accepted-submission code, and timeout is only
+# documented as not itself a launch failure -- both mean herdr wrote the
+# input. Every other outcome, including agent_blocked, is unconfirmed. An
+# allowlist, not a denylist, so a new unhandled reply shape fails closed.
 _EXIT_DELIVERED_PREFIX = "Herdr agent prompt did not report success: "
 _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 

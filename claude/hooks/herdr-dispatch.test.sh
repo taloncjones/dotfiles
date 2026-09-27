@@ -338,6 +338,16 @@ elif args[:2] == ["agent", "prompt"]:
             # (co-review round 6: C-R6-2).
             print(json.dumps({"id": "fake", "result": {}}))
             raise SystemExit(0)
+        if mode == "exit-stalled-exit1":
+            # Live herdr writes this shape to stderr at a nonzero exit, not
+            # only the exit-0 envelope every other mode here simulates.
+            apath = Path(os.environ["FAKE_AGENTS"])
+            apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                         if a["name"] != args[2]]))
+            print(json.dumps({"id": "cli:agent:prompt",
+                              "error": {"code": "agent_prompt_stalled"}}),
+                  file=sys.stderr)
+            raise SystemExit(1)
         if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed",
                         "exit-background-prose"):
             apath = Path(os.environ["FAKE_AGENTS"])
@@ -357,6 +367,12 @@ elif args[:2] == ["agent", "prompt"]:
         raise SystemExit(0)
     if mode == "prompt-reject":
         print(json.dumps({"error": "not_idle"}), file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "prompt-blocked-exit1":
+        # herdr refuses a submission at a nonzero exit with an id-bearing
+        # envelope on stderr, not only the exit-0 error shape.
+        print(json.dumps({"id": "cli:agent:prompt", "error": {"code": "agent_blocked"}}),
+              file=sys.stderr)
         raise SystemExit(1)
     if mode == "prompt-nonprompted":
         print(json.dumps({"id": "fake", "result": {"type": "agent_info"}}))
@@ -1191,7 +1207,7 @@ def test_settle_refuses_a_busy_agent_without_mutation():
                         review={k: rev[k] for k in core.ATTEMPT_FIELDS})
         result = fx.settle("R")
         assert result["status"] == "busy", result
-        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"])]
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"], ["pane", "send-keys"])]
         assert mutating == [], mutating
     finally:
         fx.close()
@@ -1321,8 +1337,9 @@ def test_settle_targets_send_keys_by_agent_name_never_a_replacement_occupant():
         # R exits and a replacement occupies w1:p2 during the pane read.
         # send-keys targets the agent name "R", never the pane -- herdr
         # resolves R by identity and reports agent_not_found now that R's
-        # name is gone, so the replacement can never receive the keystroke
-        # (co-review round 7: structural fix for C-R5-2/B-R5-1/C-R6-1/B-R6-1).
+        # name is gone, so a differently named replacement can never
+        # receive the keystroke. Same-name reuse is excluded by
+        # launch/settle serialization, not by this identity check.
         assert ["agent", "send-keys", "R", "1", "enter"] in fx.calls(), fx.calls()
         assert not any(c[:2] == ["agent", "send-keys"] and c[2] != "R" for c in fx.calls()), fx.calls()
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
@@ -1385,6 +1402,26 @@ def test_settle_never_sends_keys_on_a_malformed_exit_success():
         fx.close()
 
 
+def test_settle_treats_a_stalled_reply_at_a_nonzero_exit_as_delivered():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-stalled-exit1"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # Live herdr reports some /exit errors as an id-bearing envelope on
+        # stderr at a nonzero exit, not only the exit-0 shape; that must
+        # still count as delivered, not fall back to still-live.
+        assert result["agent"] == "exited", result
+        assert result["status"] == "settled", result
+    finally:
+        fx.close()
+
+
 def test_settle_sends_keys_immediately_after_the_exit_menu_read():
     fx = Fixture()
     try:
@@ -1423,7 +1460,7 @@ def test_settle_refuses_an_unproven_occupant():
         fx.settle_state([impl, rev, later], "review-dispatched", idle_r,
                         [pane("w1:p1"), pane("w1:p2", "claude", "idle", "R")])
         assert fx.settle("R")["status"] == "occupant-unverified"
-        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"])]
+        mutating = [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"], ["agent", "send-keys"], ["pane", "send-keys"])]
         assert mutating == [], mutating
         assert all("exit_requested" not in w for w in fx.worker_records()), fx.worker_records()
     finally:
@@ -2032,6 +2069,26 @@ def test_agent_blocked_refusal_is_never_reconciled_even_if_agent_goes_working():
         # The agent reports `working` here. Only herdr's error code proves the
         # submission was refused before any input was written, so the re-poll
         # must be skipped entirely rather than trusting the observed state.
+        gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
+        assert len(gets) == 1, gets
+    finally:
+        fixture.close()
+
+
+def test_agent_blocked_at_a_nonzero_exit_is_never_reconciled():
+    fixture = Fixture()
+    try:
+        fixture.env["FAKE_HERDR_MODE"] = "prompt-blocked-exit1"
+        try:
+            fixture.launch()
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc).endswith(": agent_blocked"), exc
+        else:
+            raise AssertionError("a refused submission was reconciled")
+        attempt = json.loads(fixture.task_file.read_text())["workers"][-1]
+        assert attempt["status"] == "launch_failed", attempt
+        # Live herdr reports this refusal on stderr at a nonzero exit, not
+        # only the exit-0 error shape; the re-poll must still be skipped.
         gets = [c for c in fixture.calls() if c[:2] == ["agent", "get"]]
         assert len(gets) == 1, gets
     finally:
@@ -3155,6 +3212,8 @@ for name, test in (
      test_settle_never_sends_keys_on_an_exit_reply_missing_its_id),
     ("settle never sends keys on a malformed exit success",
      test_settle_never_sends_keys_on_a_malformed_exit_success),
+    ("settle treats a stalled reply at a nonzero exit as delivered",
+     test_settle_treats_a_stalled_reply_at_a_nonzero_exit_as_delivered),
     ("settle sends keys immediately after the exit menu read",
      test_settle_sends_keys_immediately_after_the_exit_menu_read),
     ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
@@ -3186,6 +3245,7 @@ for name, test in (
     ("prompt-wait timeout on a dead agent still records launch_failed", test_prompt_wait_timeout_on_a_dead_agent_still_records_launch_failed),
     ("a blocked agent after a prompt failure is never called launched", test_blocked_agent_after_a_prompt_failure_is_never_called_launched),
     ("an agent_blocked refusal is never reconciled", test_agent_blocked_refusal_is_never_reconciled_even_if_agent_goes_working),
+    ("agent_blocked at a nonzero exit is never reconciled", test_agent_blocked_at_a_nonzero_exit_is_never_reconciled),
     ("a done agent after a prompt failure reconciles to launched", test_done_agent_after_a_prompt_failure_reconciles_to_launched),
     ("late-ready records why the wait failed", test_late_ready_records_why_the_wait_failed),
     ("a failed re-poll surfaces the prompt error, not the poll's", test_failed_repoll_surfaces_the_prompt_error_not_the_polls),
