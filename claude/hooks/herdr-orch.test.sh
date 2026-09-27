@@ -5373,6 +5373,139 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-r
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 SH
 
+check "CLI write-task --binding and reset-task refuse retired_review_launch_ids" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr9.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}],"retired_review_launch_ids":["L2"]}' \
+   2>"$ERRFILE"; then exit 1; fi
+grep -q 'retired_review_launch_ids is launcher-scope only' "$ERRFILE"
+# launcher reset-task opens a record with no rows, so no retired launches.
+# Fresh coordination root too: the prior phase already bound LF_SLUG to a
+# canonical identity there, and an unbound legacy claim for a different slug
+# in that same registry reads as an ambiguous identity.
+HERDR_COORDINATION_ROOT=$(mktemp -d); export HERDR_COORDINATION_ROOT
+root2=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root2"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"completed"}'
+if $CLI reset-task --repo-slug slug-x --task-id PROJ-1 --new-task-id PROJ-9 --session S \
+   --fence "$F" --json '{"task_id":"PROJ-9","retired_review_launch_ids":["L1"]}' \
+   2>"$ERRFILE"; then exit 1; fi
+grep -q 'a reset opens with no retired review launches' "$ERRFILE"
+SH
+
+check "emit-review journal: a torn final segment is dropped and the identical re-emit succeeds" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr7.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+emit() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$BASE" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
+   --reviewer-session R1
+}
+emit
+journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
+cp "$journal" "$root/first"
+# interrupt: a torn append leaves a strict prefix of an entry with no newline
+# (a multi-byte character cut in half, so the split must happen before decode)
+python3 -c 'import sys; open(sys.argv[1], "ab").write(b"{\"reviewed_head_sha\":\"\xc3")' "$journal"
+# resume: the identical re-emit succeeds and republishes complete lines only
+emit
+python3 -c '
+import json, sys
+data = open(sys.argv[1], "rb").read()
+first = open(sys.argv[2], "rb").read()
+assert data.endswith(b"\n"), data
+assert data.startswith(first), (data, first)
+lines = data.split(b"\n")[:-1]
+assert len(lines) == 2, lines
+for line in lines:
+    json.loads(line)
+assert json.loads(lines[-1])["outcome"] == "approved"
+' "$journal" "$root/first"
+SH
+
+check "emit-review journal: after a torn tail, a rejection at H still blocks approved@H after an H2 detour" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr8.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+H2=$(printf 'c%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+ROW_H='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}'
+ROW_H2='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}'
+wt() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$1"'","workers":['"$2"']}'
+}
+emit() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome "$2" --reviewed-head-sha "$1" --reviewed-base-sha "$BASE" --blocking-count "$3" \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$1" \
+   --reviewer-session R1
+}
+wt "$H" "$ROW_H"
+emit "$H" changes-requested 2
+journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
+printf '{"reviewed_head_sha":"%s' "$H2" >> "$journal"   # torn append
+wt "$H2" "$ROW_H,$ROW_H2"
+emit "$H2" approved 0          # repairs the tail; base exits 2 here
+wt "$H" "$ROW_H,$ROW_H2,$ROW_H"
+if emit "$H" approved 0 2>"$ERRFILE"; then exit 1; fi
+grep -q 'a same-revision review verdict cannot be replaced' "$ERRFILE"
+SH
+
+check "append_payload writes every byte through short writes" <<PY
+$LOAD
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+path = os.path.join(root, "short.log")
+real = os.write
+os.write = lambda fd, data: real(fd, bytes(data[:1]))
+try:
+    c.append_payload(path, b"hello journal\n")
+finally:
+    os.write = real
+got = open(path, "rb").read()
+assert got == b"hello journal\n", got
+PY
+
 check "null-attempt envelope: a malformed implement row counts as a dispatched attempt (emit + integrate)" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ev-malrow.git
 root=$(mktemp -d)
@@ -9834,6 +9967,301 @@ for st in ("review-dispatched", "reviewed", "changes-requested"):
     got = c.checkin_action({**base, "status": st, "review_at_head": True})
     assert got == "none", (st, got)
 assert c.checkin_action({**base, "status": "changes-requested"}) == "confirm-completion"
+PY
+
+check "checkin_action: an orphaned review pin asks for the stale-review reset" <<PY
+$LOAD
+base = dict(status="completed", poll_ok=True, live="idle", worktree_exists=True,
+            head="a" * 40, completed=True, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, review_at_head=True,
+            review_pin_orphaned=True, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+# A late verdict at the orphaned pin never outranks the reset.
+assert c.checkin_action(base) == "stale-review-reset", c.checkin_action(base)
+quiet = {**base, "review_pin_orphaned": False, "reviewed": False,
+         "review_correlates": False}
+assert c.checkin_action(quiet) == "none", c.checkin_action(quiet)
+PY
+
+check "checkin_facts: a dispatch interrupted after its head pin resumes through the reset" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "x"); base = g("rev-parse", "HEAD")
+g("commit", "--allow-empty", "-q", "-m", "y"); head = g("rev-parse", "HEAD")
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+impl = {"phase": "implement", "workspace_id": "w3", "runtime": "claude",
+        "launch_id": "I1", "pane_id": "pane1", "source_head_sha": base}
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+# interrupted after the pin write: nothing reserved
+task = {"v": 1, "task_id": "PROJ-1", "status": "completed", "base_sha": base,
+        "review_head_sha": head, "worktree": wt, "workers": [impl]}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["review_pin_orphaned"] is True, facts
+assert facts["action"] == "stale-review-reset", facts
+assert c.should_dispatch_review(task, head) is False
+# resume: the director's reset write clears the pin
+reset = dict(task, review_head_sha=None)
+facts = c.checkin_facts(rd, reset, poll, c.state_root().parent)
+assert facts["action"] == "dispatch-review", facts
+assert c.should_dispatch_review(reset, head) is True
+# interrupted after an accepted launch L2 whose review-dispatched write was
+# lost, and L2's approval lands: still the reset, never confirm-review
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L2", "pane_id": "pane2", "source_head_sha": head}
+late = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=head,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(late))
+facts = c.checkin_facts(rd, dict(task, workers=[impl, row]), poll, c.state_root().parent)
+assert facts["action"] == "stale-review-reset", facts
+PY
+
+check "checkin: an orphaned review pin reports stale-review-reset, then dispatch-review after the reset" <<'SH'
+root=$(mktemp -d); wt=$(mktemp -d)
+FIX="python3 claude/hooks/herdr_legacy_fixture.py"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+git -C "$wt" init -q
+git -C "$wt" -c user.email=t@t -c user.name=t commit --allow-empty -q -m x
+head=$(git -C "$wt" rev-parse HEAD)
+f=$(CLAUDE_CONFIG_DIR="$root" $FIX claim-owner --repo-slug slug-x --session S --host h --pid 1)
+pinned='{"task_id":"PROJ-1","base_sha":"'"$head"'","status":"completed","review_head_sha":"'"$head"'","worktree":"'"$wt"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$pinned"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 .* action=stale-review-reset ' || exit 1
+printf '%s\n' "$out" | grep -q '^changed: yes' || exit 1
+if CLAUDE_CONFIG_DIR="$root" $FIX should-dispatch-review --repo-slug slug-x \
+    --task-id PROJ-1 --head-sha "$head"; then exit 1; fi
+reset='{"task_id":"PROJ-1","base_sha":"'"$head"'","status":"completed","review_head_sha":null,"worktree":"'"$wt"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$reset"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 .* action=dispatch-review ' || exit 1
+CLAUDE_CONFIG_DIR="$root" $FIX should-dispatch-review --repo-slug slug-x \
+    --task-id PROJ-1 --head-sha "$head"
+SH
+
+check "is_reviewed: a retired review launch never verifies" <<PY
+$LOAD
+import hashlib
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+H = "a" * 40
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L1", "pane_id": "pane1", "source_head_sha": H}
+task = {"task_id": "PROJ-1", "status": "changes-requested", "review_head_sha": H,
+        "workers": [row]}
+done = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=H,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+assert c.is_reviewed(task, done, H, "w3") is True
+assert c.is_reviewed(dict(task, retired_review_launch_ids=["L1"]), done, H, "w3") is False
+assert c.is_reviewed(dict(task, retired_review_launch_ids=["L0"]), done, H, "w3") is True
+# a present but malformed list retires everything (fail closed)
+assert c.is_reviewed(dict(task, retired_review_launch_ids="L1"), done, H, "w3") is False
+PY
+
+check "checkin: a late approval after a sized-deadline stop never proposes confirm-review" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "x"); base = g("rev-parse", "HEAD")
+g("commit", "--allow-empty", "-q", "-m", "y"); head = g("rev-parse", "HEAD")
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+fix = [sys.executable, "claude/hooks/herdr_legacy_fixture.py"]
+def cli(*a):
+    return subprocess.run([*fix, *a], capture_output=True, text=True)
+fence = cli("claim-owner", "--repo-slug", "slug-x", "--session", "S", "--host", "h",
+            "--pid", "1").stdout.strip()
+def write(rec):
+    p = cli("write-task", "--repo-slug", "slug-x", "--task-id", "PROJ-1", "--session", "S",
+            "--fence", fence, "--json", json.dumps(rec))
+    assert p.returncode == 0, p.stderr
+def stored():
+    return json.load(open(os.path.join(rd, "tasks", "PROJ-1.json")))
+def confirm():
+    return cli("confirm-review", "--repo-slug", "slug-x", "--task-id", "PROJ-1",
+               "--workspace", "w3", "--head-sha", head).returncode
+def action():
+    return c.checkin_facts(rd, stored(), poll, c.state_root().parent)["action"]
+def approve(row):
+    rec = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=head,
+               blocking_count=0, findings_ref=findings, findings_sha256=digest)
+    open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(rec))
+def reject(row):
+    rec = dict(row, task_id="PROJ-1", outcome="changes-requested", reviewed_head_sha=head,
+               blocking_count=1, findings_ref=findings, findings_sha256=digest)
+    open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(rec))
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+impl = {"phase": "implement", "workspace_id": "w3", "runtime": "claude",
+        "launch_id": "I1", "pane_id": "pane1", "source_head_sha": base}
+L1 = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+      "launch_id": "L1", "pane_id": "pane2", "source_head_sha": head}
+live = {"task_id": "PROJ-1", "status": "review-dispatched", "base_sha": base,
+        "review_head_sha": head, "worktree": wt, "workers": [impl, L1]}
+write(live)
+# restart before the retirement write: no record, then a verdict that landed wins
+assert action() == "none" and confirm() == 1
+approve(L1)
+assert action() == "confirm-review" and confirm() == 0
+os.remove(os.path.join(rd, "tasks", "PROJ-1.review.json"))
+# deadline stop with no exact record: changes-requested + L1 retired
+write(dict(live, status="changes-requested", retired_review_launch_ids=["L1"]))
+approve(L1)  # the stopped reviewer's late approval
+facts = c.checkin_facts(rd, stored(), poll, c.state_root().parent)
+assert facts["reviewed"] is False and facts["review_correlates"] is False, facts
+assert facts["action"] != "confirm-review", facts
+assert confirm() == 1
+write(dict(live, status="changes-requested"))  # key omitted: carried forward
+assert stored()["retired_review_launch_ids"] == ["L1"], stored()
+assert confirm() == 1
+# under a status where a correlating verdict would act, a retired one does not
+write(dict(live))  # review-dispatched, pin unchanged, key carried forward
+reject(L1)
+unretired = {k: v for k, v in stored().items() if k != "retired_review_launch_ids"}
+assert c.checkin_facts(rd, unretired, poll, c.state_root().parent)["action"] == "changes-requested"
+facts = c.checkin_facts(rd, stored(), poll, c.state_root().parent)
+assert facts["review_correlates"] is False and facts["action"] == "none", facts
+# "Re-dispatch": reset, re-pin, fresh row L2 accepted; its approval confirms
+write(dict(live, status="completed", review_head_sha=None))
+L2 = dict(L1, launch_id="L2", pane_id="pane3")
+write(dict(live, workers=[impl, L1, L2]))
+approve(L2)
+assert action() == "confirm-review" and confirm() == 0
+PY
+
+check "CLI write-task: retired_review_launch_ids is append-only and grows on a pin change" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+H=$(printf 'a%.0s' $(seq 1 40))
+R1='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L1","pane_id":"p1","source_head_sha":"'"$H"'"}'
+R2='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"p2","source_head_sha":"'"$H"'"}'
+rec="$root/herdr-orch/slug-x/tasks/PROJ-1.json"
+retired() { python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("retired_review_launch_ids")))' "$rec"; }
+w() { $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" --json "$1"; }
+w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+test "$(retired)" = "null"
+# explicit append (deadline stop keeps the pin)
+w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1"]}'
+test "$(retired)" = '["L1"]'
+# omitted key inherits
+w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+test "$(retired)" = '["L1"]'
+# shorter list refused
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":[]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired_review_launch_ids is append-only' "$ERRFILE"
+# a new id must name a review row
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1","nope"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'a retired launch id must name a review attempt' "$ERRFILE"
+# duplicates refused
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1","L1"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired launch ids must be unique' "$ERRFILE"
+# non-shell-safe refused
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1","a b"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired launch ids must be shell-safe strings' "$ERRFILE"
+# re-dispatch at H: fresh row L2; a pin change H -> null retires the latest review row
+w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"']}'
+test "$(retired)" = '["L1"]'
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":null,"workers":['"$R1"','"$R2"']}'
+test "$(retired)" = '["L1", "L2"]'
+# a later write that omits the key after the automatic append keeps both
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"']}'
+test "$(retired)" = '["L1", "L2"]'
+# explicit extension of a nonempty list; a reordered list is refused with exit 2
+R3='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L3","pane_id":"p3","source_head_sha":"'"$H"'"}'
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"','"$R3"'],"retired_review_launch_ids":["L1","L2","L3"]}'
+test "$(retired)" = '["L1", "L2", "L3"]'
+rc=0; w '{"task_id":"PROJ-1","status":"completed","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"','"$R3"'],"retired_review_launch_ids":["L2","L1","L3"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired_review_launch_ids is append-only' "$ERRFILE"
+# a malformed stored value (it retires everything) survives an omitted-key write
+w3() { $CLI write-task --repo-slug slug-x --task-id PROJ-3 --session S --fence "$F" --json "$1"; }
+rec3="$root/herdr-orch/slug-x/tasks/PROJ-3.json"
+w3 '{"task_id":"PROJ-3","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["retired_review_launch_ids"]="L1"; json.dump(d, open(p, "w"))' "$rec3"
+w3 '{"task_id":"PROJ-3","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["retired_review_launch_ids"] == "L1"' "$rec3"
+rc=0; w3 '{"task_id":"PROJ-3","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+# a review row whose launch_id is not a string never crashes a write
+w4() { $CLI write-task --repo-slug slug-x --task-id PROJ-4 --session S --fence "$F" --json "$1"; }
+w4 '{"task_id":"PROJ-4","status":"completed","review_head_sha":"'"$H"'","workers":[{"phase":"review","launch_id":[]}]}'
+w4 '{"task_id":"PROJ-4","status":"changes-requested","review_head_sha":"'"$H"'"}'
+w4 '{"task_id":"PROJ-4","status":"completed","review_head_sha":null}'
+python3 -c 'import json,sys; assert "retired_review_launch_ids" not in json.load(open(sys.argv[1]))' \
+  "$root/herdr-orch/slug-x/tasks/PROJ-4.json"
+# a pin change with no review row appends nothing
+$CLI write-task --repo-slug slug-x --task-id PROJ-2 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-2","status":"completed","review_head_sha":"'"$H"'","workers":[]}'
+$CLI write-task --repo-slug slug-x --task-id PROJ-2 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-2","status":"completed","review_head_sha":null,"workers":[]}'
+python3 -c 'import json,sys; assert "retired_review_launch_ids" not in json.load(open(sys.argv[1]))' \
+  "$root/herdr-orch/slug-x/tasks/PROJ-2.json"
+SH
+
+check "CLI confirm-review: a re-pin before the replacement reservation keeps the old launch retired" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+H = "a" * 40
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+fix = [sys.executable, "claude/hooks/herdr_legacy_fixture.py"]
+def cli(*a):
+    return subprocess.run([*fix, *a], capture_output=True, text=True)
+fence = cli("claim-owner", "--repo-slug", "slug-x", "--session", "S", "--host", "h",
+            "--pid", "1").stdout.strip()
+def write(rec):
+    p = cli("write-task", "--repo-slug", "slug-x", "--task-id", "PROJ-2", "--session", "S",
+            "--fence", fence, "--json", json.dumps(rec))
+    assert p.returncode == 0, p.stderr
+def confirm():
+    return cli("confirm-review", "--repo-slug", "slug-x", "--task-id", "PROJ-2",
+               "--workspace", "w3", "--head-sha", H).returncode
+L3 = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+      "launch_id": "L3", "pane_id": "pane3", "source_head_sha": H}
+pinned = {"task_id": "PROJ-2", "status": "completed", "base_sha": "b" * 40,
+          "review_head_sha": H, "workers": [L3]}
+write(pinned)
+late = dict(L3, task_id="PROJ-2", outcome="approved", reviewed_head_sha=H,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+tasks = os.path.join(root, "slug-x", "tasks")
+open(os.path.join(tasks, "PROJ-2.review.json"), "w").write(json.dumps(late))
+assert confirm() == 0  # unretired: the reset below must retire it
+write(dict(pinned, review_head_sha=None))  # D1 reset
+assert json.load(open(os.path.join(tasks, "PROJ-2.json")))["retired_review_launch_ids"] == ["L3"]
+write(pinned)  # re-pin before any new reservation; key omitted
+assert json.load(open(os.path.join(tasks, "PROJ-2.json")))["retired_review_launch_ids"] == ["L3"]
+assert confirm() == 1
 PY
 
 check "checkin_facts: a repair worker's paused record after a review row reaches the director" <<PY

@@ -356,6 +356,35 @@ class WorkflowContextTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             workflow_context.atomic_json(linked / "state.json", {"safe": True})
 
+    def test_atomic_json_at_bytes_match_json_dumps(self):
+        target = self.tmp / "state" / "record.json"
+        data = {"b": [1, "é"], "a": None}
+
+        workflow_context.atomic_json(target, data)
+
+        expected = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+        self.assertEqual(target.read_bytes(), expected.encode("utf-8"))
+
+    def test_atomic_bytes_at_publishes_raw_bytes_and_rejects_symlinks(self):
+        target = self.tmp / "state" / "journal.jsonl"
+        parent, name = workflow_context.open_state_parent(target, create=True)
+        try:
+            workflow_context.atomic_bytes_at(parent, name, b"raw\x00bytes\n")
+        finally:
+            os.close(parent)
+        self.assertEqual(target.read_bytes(), b"raw\x00bytes\n")
+
+        (self.tmp / "state" / "link").symlink_to(target)
+        parent, name = workflow_context.open_state_parent(
+            self.tmp / "state" / "link", create=True
+        )
+        try:
+            with self.assertRaises(ValueError):
+                workflow_context.atomic_bytes_at(parent, name, b"x")
+        finally:
+            os.close(parent)
+        self.assertEqual(target.read_bytes(), b"raw\x00bytes\n")
+
     def test_open_state_parent_does_not_create_missing_directories(self):
         target = self.tmp / "missing" / "state.json"
 

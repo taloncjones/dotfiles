@@ -31,7 +31,7 @@ import herdr_coordination as coordination
 import herdr_envelope as envelope
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
-from workflow_context import account_scope, atomic_json_at, open_state_parent, repository_context
+from workflow_context import account_scope, atomic_bytes_at, atomic_json_at, open_state_parent, repository_context
 from workflow_context import git as context_git
 
 _PAYLOAD_SELECTION = contextvars.ContextVar("herdr_payload_selection", default=None)
@@ -789,6 +789,11 @@ def write_json_atomic(path, data) -> None:
         atomic_json_at(parent, name, data)
 
 
+def write_bytes_atomic(path, data) -> None:
+    with coordination.payload_parent(path, create=True) as (parent, name):
+        atomic_bytes_at(parent, name, data)
+
+
 def read_payload_bytes(path):
     """Read a regular payload file without following any parent or file link."""
     with coordination.payload_parent(path) as (parent, name):
@@ -870,7 +875,7 @@ def append_payload(path, data):
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("payload must be a regular file")
-            os.write(fd, data)
+            _write_fd_all(fd, data)
         finally:
             os.close(fd)
 
@@ -2904,6 +2909,71 @@ def resolve_task_workers(rec, prior, bound):
     return workers
 
 
+RETIRED_REVIEWS_KEY = "retired_review_launch_ids"
+
+
+def review_retired(task, done) -> bool:
+    """A review record from a launch the task retired never carries verdict
+    authority, whatever the task status. A present but malformed list
+    retires every record (fail closed)."""
+    if not isinstance(task, dict) or RETIRED_REVIEWS_KEY not in task:
+        return False
+    retired = task[RETIRED_REVIEWS_KEY]
+    if not isinstance(retired, list):
+        return True
+    return isinstance(done, dict) and done.get("launch_id") in retired
+
+
+def _latest_review_launch(workers):
+    rows = [w for w in workers if isinstance(w, dict) and w.get("phase") == "review"]
+    return rows[-1].get("launch_id") if rows else None
+
+
+def apply_retired_reviews(rec, prior, workers):
+    """Set rec's launcher retirement list (spec D2) in place.
+
+    Append-only against the prior record; an omitted key inherits it. A
+    change of a non-null review pin also retires the prior record's latest
+    review launch, so a reset or re-pin can never revive an abandoned
+    reviewer's verdict."""
+    prior_rec = prior if isinstance(prior, dict) else {}
+    if RETIRED_REVIEWS_KEY in prior_rec and not isinstance(prior_rec[RETIRED_REVIEWS_KEY], list):
+        # A malformed value retires every record (review_retired). Carry it
+        # verbatim, so no ordinary write can normalize it away.
+        malformed = prior_rec[RETIRED_REVIEWS_KEY]
+        _require(rec.get(RETIRED_REVIEWS_KEY, malformed) == malformed,
+                 "retired_review_launch_ids is append-only")
+        rec[RETIRED_REVIEWS_KEY] = malformed
+        return
+    inherited = prior_rec.get(RETIRED_REVIEWS_KEY, [])
+    supplied = rec.get(RETIRED_REVIEWS_KEY, inherited)
+    _require(isinstance(supplied, list) and supplied[: len(inherited)] == inherited,
+             "retired_review_launch_ids is append-only")
+    added = supplied[len(inherited):]
+    # Only string ids: launcher validation accepts a review row whose
+    # launch_id is any value, and an unhashable one must not crash a write.
+    review_ids = {w["launch_id"] for w in workers
+                  if isinstance(w, dict) and w.get("phase") == "review"
+                  and isinstance(w.get("launch_id"), str)}
+    for launch_id in added:
+        _require(isinstance(launch_id, str) and bool(SHELL_SAFE_RE.fullmatch(launch_id)),
+                 "retired launch ids must be shell-safe strings")
+        _require(launch_id in review_ids,
+                 "a retired launch id must name a review attempt")
+    _require(len(set(added)) == len(added) and not any(i in added for i in inherited),
+             "retired launch ids must be unique")
+    retired = list(supplied)
+    old_pin = prior_rec.get("review_head_sha")
+    if isinstance(old_pin, str) and old_pin and rec.get("review_head_sha") != old_pin:
+        prior_workers = prior_rec.get("workers")
+        latest = _latest_review_launch(prior_workers if isinstance(prior_workers, list) else [])
+        if isinstance(latest, str) and latest not in retired:
+            retired.append(latest)
+    rec.pop(RETIRED_REVIEWS_KEY, None)
+    if retired:
+        rec[RETIRED_REVIEWS_KEY] = retired
+
+
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
@@ -3115,7 +3185,8 @@ def checkin_action(f) -> str:
                                 and not f.get("completed")),
         ("blocked", f.get("live") == "blocked" and status != "blocked"),
         ("unblocked", status == "blocked" and f.get("live") != "blocked"),
-        ("stale-review-reset", status in _REVIEW_STATES and f.get("review_stale")),
+        ("stale-review-reset", (status in _REVIEW_STATES and f.get("review_stale"))
+                               or f.get("review_pin_orphaned")),
         ("confirm-review", f.get("reviewed") and status != "reviewed"),
         ("changes-requested", f.get("review_correlates") and not f.get("reviewed")
                               and status != "changes-requested"),
@@ -3249,11 +3320,15 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         and task.get("review_head_sha") == head
         and attempt_matches(task, review, "review", rev_ws)
         and review.get("reviewed_head_sha") == head
-        and _findings_evidence_ok(review))
+        and _findings_evidence_ok(review)
+        and not review_retired(task, review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
+    # Section 5 writes review-dispatched only once a launch is accepted, so a
+    # completed task pinned at HEAD is a dispatch interrupted after its pin.
+    review_pin_orphaned = status == "completed" and review_at_head
     done_phase = done.get("phase") if done else None
     mech_unsettled = bool(latest.get("role") == "mech"
                           and status not in CHECKIN_TERMINAL
@@ -3291,6 +3366,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         "completed": completed, "plan_completed": plan_completed,
         "reviewed": reviewed, "review_correlates": review_correlates,
         "review_stale": review_stale, "review_at_head": review_at_head,
+        "review_pin_orphaned": review_pin_orphaned,
         "dispatch_review": bool(head and should_dispatch_review(task, head)),
         "mech_unsettled": mech_unsettled,
         "plan_advanced": any(isinstance(w, dict) and w.get("phase") == "implement"
@@ -3385,6 +3461,8 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
     if not attempt_matches(task, done, "review", workspace):
+        return False
+    if review_retired(task, done):
         return False
     if done.get("task_id") != task.get("task_id"):
         return False
@@ -3928,6 +4006,11 @@ def _main(argv=None) -> int:
             # validate the workers list before publishing, so an omitted key
             # inherits prior dispatch history rather than asserting none.
             rec["workers"] = resolve_task_workers(rec, prior, bound)
+            if bound:
+                _require(RETIRED_REVIEWS_KEY not in rec,
+                         "retired_review_launch_ids is launcher-scope only")
+            else:
+                apply_retired_reviews(rec, prior, rec["workers"])
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
@@ -3943,6 +4026,8 @@ def _main(argv=None) -> int:
         )
         _require(rec.get("workers", []) == [],
                  "a reset opens with no dispatch history; append rows with write-task")
+        _require(RETIRED_REVIEWS_KEY not in rec,
+                 "a reset opens with no retired review launches")
         _require("reset_from" not in rec, "reset_from is set by the verb")
         with _fenced_scoped(ns) as (rd, base):
             tasks = base / "tasks"
@@ -4554,8 +4639,8 @@ def _main(argv=None) -> int:
                     # The latest-record check above only remembers the last
                     # verdict; this scan remembers all of them, so a rejection at
                     # H cannot be laundered by dispatching H2 and returning to H.
-                    # Append-only and never pruned in this slice; 4.9 teardown
-                    # owns the journal's lifecycle.
+                    # Republished atomically on every emit; teardown `--prune`
+                    # deletes it only on a terminal binding.
                     entry = {
                         "reviewed_head_sha": done["reviewed_head_sha"],
                         "outcome": done["outcome"],
@@ -4570,12 +4655,21 @@ def _main(argv=None) -> int:
                                  "review_base_sha")
                     journal = base / "tasks" / f"{ns.task_id}.review-log.jsonl"
                     try:
-                        raw_journal = read_payload_text(journal)
+                        raw_journal = read_payload_bytes(journal)
                     except FileNotFoundError:
-                        raw_journal = ""
+                        raw_journal = b""
                     except (OSError, ValueError):
                         _require(False, "review journal is unreadable")
-                    for line in raw_journal.splitlines():
+                    # Every entry is written whole with its newline, so a final
+                    # segment without one is a torn append, never a whole entry:
+                    # drop it and republish only the complete lines (spec D3).
+                    complete, newline, _torn = raw_journal.rpartition(b"\n")
+                    kept = complete + newline
+                    try:
+                        kept_text = kept.decode("utf-8")
+                    except UnicodeDecodeError:
+                        _require(False, "review journal is unreadable")
+                    for line in kept_text.splitlines():
                         if not line.strip():
                             continue
                         try:
@@ -4593,9 +4687,9 @@ def _main(argv=None) -> int:
                                      "replaced; re-dispatch the review at a new head")
                     _require(_valid_review_journal_entry(entry),
                              "review emit does not form a valid journal entry")
-                    append_payload(
+                    write_bytes_atomic(
                         journal,
-                        (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
+                        kept + (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
                     )
                 write_json_atomic(out, done)
         else:

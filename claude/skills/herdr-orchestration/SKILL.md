@@ -706,6 +706,15 @@ evidence forever. Two non-task lines
 also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
 and `rollover-due ...` (section 1a).
 
+`stale-review-reset` also fires for a `completed` task pinned at HEAD: a
+review dispatch interrupted between its `review_head_sha` write and its
+`review-dispatched` write (nothing reserved, a launch not accepted, or an
+accepted launch whose status write was lost). The remedy is the same
+stale-verdict reset: `write-task` the full record with `review_head_sha:
+null` and the status unchanged. That write retires the latest review
+launch (`retired_review_launch_ids`), and the next check-in reports
+`dispatch-review`, which re-runs section 5 from its preflight.
+
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
 TURN. No polling while idle, no periodic "still waiting" check-ins, no
@@ -1007,7 +1016,9 @@ helper from publishing.
    block any result whose `ready` field remains false. Set the
    workspace index to `role: review`; preserve implementation completion and
    record `review_head_sha`. Set `review-dispatched` only when dispatch is
-   accepted. A failed attempt is visible and retryable. The active coordinator reads the review's `sized review deadline` from
+   accepted. Finish this dispatch through its `review-dispatched` write before
+   running any check-in pass; a check-in between the pin and that write
+   reports `stale-review-reset` for your own dispatch. A failed attempt is visible and retryable. The active coordinator reads the review's `sized review deadline` from
    `review-deadlines`: `deadline_secs` is the floor (900 s) plus the pinned
    contract's summed `timeout_secs` plus 20 s per changed file, capped at the
    ceiling (3600 s), and is the ceiling whenever an input cannot be read;
@@ -1084,9 +1095,13 @@ helper from publishing.
      report the detached-process risk, leave the task `review-dispatched`,
      and do not relaunch, reset, or surface readiness until reconciliation;
      the next check-in repeats `review-overdue`. Once settled, re-read the
-     review record (a verdict that landed during the interrupt wins), and
-     only then use `$CORE write-task` to carry the full task record forward
-     with `status: changes-requested`, report `review incomplete: sized
+     review record (a verdict that landed during the interrupt wins: an
+     exact record for the stopped row is read as its verdict below and the
+     row is not retired). Only with no exact record, use `$CORE write-task`
+     to carry the full task record forward with `status: changes-requested`
+     and the stopped row's `launch_id` appended to
+     `retired_review_launch_ids` (a retired launch's verdict never
+     correlates, whatever lands later), report `review incomplete: sized
 review deadline, <launch_id>`, and never fabricate a review record,
      blocker count, or approval. A late sidecar cannot change that
      non-approved status.
@@ -1098,6 +1113,14 @@ review deadline, <launch_id>`, and never fabricate a review record,
      you report on a task that is `changes-requested` at an unchanged HEAD
      with no correlating record for its latest review row, until the human
      picks re-dispatch or the HEAD moves.
+
+   `write-task` also retires on its own: whenever a write changes a
+   non-null `review_head_sha` (a stale-verdict reset, an orphaned-pin reset,
+   or a re-pin), it appends the prior record's latest review launch to
+   `retired_review_launch_ids`. The list is append-only; carry it forward or
+   omit it, never shorten it. `write-task` does not refuse a pin change
+   while a review is live: it cannot see liveness, every reset above needs
+   the change, and the change itself retires the old launch.
 
    Otherwise read the reviewer's completion record.
 

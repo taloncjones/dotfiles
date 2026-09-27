@@ -445,6 +445,7 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   ],
   "review_head_sha": null,
   "review_outcome": null,
+  "retired_review_launch_ids": [],
   "contract_path": "claude/contracts/PROJ-123-contract.json",
   "contract_sha256": "<64hex>",
   "merge_check": null,
@@ -456,6 +457,16 @@ rows are introduced only by `reserve-dispatch` and mutated only by
 
 `workers` is a list, not a single field -- phase advancement (implement ->
 review) appends a new entry rather than overwriting.
+
+`retired_review_launch_ids` (launcher scope only) lists review launch ids
+whose verdicts never correlate: `is_reviewed` and the check-in's
+`review_correlates` skip a record whose `launch_id` is listed, and a
+present non-list value retires every record. `write-task` owns it: an
+omitted key inherits the prior list, a supplied list must start with the
+prior list (append-only), and each new id must name a `phase: review` row.
+A write that changes a non-null `review_head_sha` retires the latest
+review launch on its own. The director adds the stopped launch at a
+sized-deadline stop. Bound `write-task` and `reset-task` refuse the key.
 
 The examples above include legacy rows. Every new native dispatch has
 `launch_id`, `phase`, `runtime`, `workspace_id`, `pane_id`, and
