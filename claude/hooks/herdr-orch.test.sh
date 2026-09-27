@@ -11047,5 +11047,16 @@ assert f"{tick}exit-idle-worker{tick}" in schema, "event schema lists the new ac
 assert f"emits only the closed stdout vocabulary {tick}signal{tick} / {tick}heartbeat{tick}" in schema
 PY
 
+check "docs: the director settles workers, sweeps before review dispatch, and never overlaps launch" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+tick = chr(96)
+assert "settle --launch-id" in sec4, "section 4 names the settle verb"
+assert f"never runs {tick}launch{tick} while a {tick}settle{tick} or {tick}sweep{tick}" in sec4, "serialization rule"
+sec5 = skill.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
+assert " sweep " in sec5 or f"sweep{tick}" in sec5, "section 5 preflight runs sweep"
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
