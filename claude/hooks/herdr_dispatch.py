@@ -1484,8 +1484,15 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
         _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
                                "--timeout", str(EXIT_WAIT_MS)],
                    env=env, timeout_secs=EXIT_WAIT_MS / 1000 + 5)
-    except DispatchError:
-        pass  # agent_prompt_stalled is the normal reply from an agent that exits
+    except DispatchError as exc:
+        # agent_blocked is herdr refusing to deliver /exit because the agent
+        # already has an unrelated prompt open; herdr wrote nothing, so
+        # falling through to read the screen and send raw keys would answer
+        # that unrelated prompt instead of confirming an exit (co-review
+        # V-R2-1). Any other failure (agent_prompt_stalled, a timeout) is the
+        # normal reply from an agent that is in the middle of exiting.
+        if str(exc).endswith(": agent_blocked"):
+            return "still-live"
     agents, _panes = _snapshot(herdr_cli, workspace_id, env)
     if not _is_live(agents, row):
         return "exited"
@@ -1581,6 +1588,11 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
             _mark_exit_requested(task_path, task, index, reason)
         agent = _exit_agent(herdr_cli, row, workspace_id, env)
         agents, panes = _snapshot(herdr_cli, workspace_id, env)
+        if _is_live(agents, row):
+            # _exit_agent's own verdict can go stale between its last
+            # snapshot and this one; trust the freshest read before deciding
+            # whether to close (co-review V-R2-2).
+            agent = "still-live"
     pane = _pane_verdict(task, row, agents, panes, reasons)
     if pane == "close" and agent == "still-live":
         # The agent never actually exited; _pane_verdict only checks the

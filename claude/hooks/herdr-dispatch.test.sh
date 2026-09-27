@@ -134,7 +134,7 @@ elif args[:2] == ["pane", "process-info"]:
         "pane_id": pane, "shell_pid": 101,
         "foreground_processes": [{"pid": 101, "name": "zsh", "cwd": cwd}]}}}))
 elif args[:2] == ["pane", "read"]:
-    if mode == "exit-menu":
+    if mode in ("exit-menu", "exit-blocked"):
         print("Background tasks are still running\n1. Exit anyway\n2. Cancel")
         raise SystemExit(0)
     count = Path(os.environ["FAKE_READ_COUNT"])
@@ -283,6 +283,11 @@ elif args[:2] == ["agent", "get"]:
         "focused": False, "revision": 2}}}))
 elif args[:2] == ["agent", "prompt"]:
     if len(args) > 3 and args[3] == "/exit":
+        if mode == "exit-blocked":
+            # herdr refuses to deliver /exit because the agent already has an
+            # unrelated prompt open; nothing was written, so the agent stays.
+            print(json.dumps({"id": "fake", "error": {"code": "agent_blocked"}}))
+            raise SystemExit(0)
         if mode not in ("exit-menu", "exit-sticky"):
             apath = Path(os.environ["FAKE_AGENTS"])
             apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
@@ -1050,6 +1055,28 @@ def test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_m
         result = fx.settle("R")
         assert ["pane", "send-keys", "w1:p2", "1", "enter"] in fx.calls(), fx.calls()
         assert result["agent"] == "exited" and result["pane"] == "closed", result
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        rev = settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-blocked"
+        fx.settle_state([rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # The pane text matches the exit-menu prose, but herdr never wrote
+        # /exit (agent_blocked), so no raw keystroke may be sent (V-R2-1).
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "send-keys"]], fx.calls()
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-last-pane", result
+        assert result["status"] == "exit-incomplete", result
     finally:
         fx.close()
 
@@ -2788,6 +2815,7 @@ for name, test in (
     ("settle refuses an occupant it cannot prove is this attempt", test_settle_refuses_an_unproven_occupant),
     ("reprompt refuses a launch whose exit was requested", test_reprompt_refuses_a_row_whose_exit_was_requested),
     ("settle leaves an unsettled implementer untouched and answers the exit menu", test_settle_leaves_an_unsettled_implementer_untouched_and_answers_the_exit_menu),
+    ("settle never sends keys when exit is blocked by an unrelated prompt", test_settle_never_sends_keys_when_exit_is_blocked_by_an_unrelated_prompt),
     ("sweep closes a dead reviewer shell and never the last pane", test_sweep_closes_a_dead_reviewer_shell_and_never_the_last_pane),
     ("sweep keeps a pane a repair row also used", test_sweep_keeps_a_pane_a_repair_row_also_used),
     ("settle and sweep CLI subcommands reach the functions", test_settle_and_sweep_cli_subcommands_reach_the_functions),
