@@ -1892,6 +1892,7 @@ def test_target_shell_environment_wait_ignores_command_echo():
         command_echo = (fixture.root / "command-echo").read_text()
         assert marker.startswith("HERDR_READY_"), marker
         assert marker not in command_echo, command_echo
+        assert "HERDR_SHELL_" not in command_echo, command_echo
         assert wait[-2:] == ["--source", "recent-unwrapped"], wait
     finally:
         fixture.close()
