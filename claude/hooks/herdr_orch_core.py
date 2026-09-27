@@ -3115,7 +3115,8 @@ def checkin_action(f) -> str:
                                 and not f.get("completed")),
         ("blocked", f.get("live") == "blocked" and status != "blocked"),
         ("unblocked", status == "blocked" and f.get("live") != "blocked"),
-        ("stale-review-reset", status in _REVIEW_STATES and f.get("review_stale")),
+        ("stale-review-reset", (status in _REVIEW_STATES and f.get("review_stale"))
+                               or f.get("review_pin_orphaned")),
         ("confirm-review", f.get("reviewed") and status != "reviewed"),
         ("changes-requested", f.get("review_correlates") and not f.get("reviewed")
                               and status != "changes-requested"),
@@ -3254,6 +3255,9 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                         and task["review_head_sha"] != head)
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
+    # Section 5 writes review-dispatched only once a launch is accepted, so a
+    # completed task pinned at HEAD is a dispatch interrupted after its pin.
+    review_pin_orphaned = status == "completed" and review_at_head
     done_phase = done.get("phase") if done else None
     mech_unsettled = bool(latest.get("role") == "mech"
                           and status not in CHECKIN_TERMINAL
@@ -3291,6 +3295,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         "completed": completed, "plan_completed": plan_completed,
         "reviewed": reviewed, "review_correlates": review_correlates,
         "review_stale": review_stale, "review_at_head": review_at_head,
+        "review_pin_orphaned": review_pin_orphaned,
         "dispatch_review": bool(head and should_dispatch_review(task, head)),
         "mech_unsettled": mech_unsettled,
         "plan_advanced": any(isinstance(w, dict) and w.get("phase") == "implement"

@@ -9836,6 +9836,93 @@ for st in ("review-dispatched", "reviewed", "changes-requested"):
 assert c.checkin_action({**base, "status": "changes-requested"}) == "confirm-completion"
 PY
 
+check "checkin_action: an orphaned review pin asks for the stale-review reset" <<PY
+$LOAD
+base = dict(status="completed", poll_ok=True, live="idle", worktree_exists=True,
+            head="a" * 40, completed=True, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, review_at_head=True,
+            review_pin_orphaned=True, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+# A late verdict at the orphaned pin never outranks the reset.
+assert c.checkin_action(base) == "stale-review-reset", c.checkin_action(base)
+quiet = {**base, "review_pin_orphaned": False, "reviewed": False,
+         "review_correlates": False}
+assert c.checkin_action(quiet) == "none", c.checkin_action(quiet)
+PY
+
+check "checkin_facts: a dispatch interrupted after its head pin resumes through the reset" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "x"); base = g("rev-parse", "HEAD")
+g("commit", "--allow-empty", "-q", "-m", "y"); head = g("rev-parse", "HEAD")
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+impl = {"phase": "implement", "workspace_id": "w3", "runtime": "claude",
+        "launch_id": "I1", "pane_id": "pane1", "source_head_sha": base}
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+# interrupted after the pin write: nothing reserved
+task = {"v": 1, "task_id": "PROJ-1", "status": "completed", "base_sha": base,
+        "review_head_sha": head, "worktree": wt, "workers": [impl]}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["review_pin_orphaned"] is True, facts
+assert facts["action"] == "stale-review-reset", facts
+assert c.should_dispatch_review(task, head) is False
+# resume: the director's reset write clears the pin
+reset = dict(task, review_head_sha=None)
+facts = c.checkin_facts(rd, reset, poll, c.state_root().parent)
+assert facts["action"] == "dispatch-review", facts
+assert c.should_dispatch_review(reset, head) is True
+# interrupted after an accepted launch L2 whose review-dispatched write was
+# lost, and L2's approval lands: still the reset, never confirm-review
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L2", "pane_id": "pane2", "source_head_sha": head}
+late = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=head,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(late))
+facts = c.checkin_facts(rd, dict(task, workers=[impl, row]), poll, c.state_root().parent)
+assert facts["action"] == "stale-review-reset", facts
+PY
+
+check "checkin: an orphaned review pin reports stale-review-reset, then dispatch-review after the reset" <<'SH'
+root=$(mktemp -d); wt=$(mktemp -d)
+FIX="python3 claude/hooks/herdr_legacy_fixture.py"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+git -C "$wt" init -q
+git -C "$wt" -c user.email=t@t -c user.name=t commit --allow-empty -q -m x
+head=$(git -C "$wt" rev-parse HEAD)
+f=$(CLAUDE_CONFIG_DIR="$root" $FIX claim-owner --repo-slug slug-x --session S --host h --pid 1)
+pinned='{"task_id":"PROJ-1","base_sha":"'"$head"'","status":"completed","review_head_sha":"'"$head"'","worktree":"'"$wt"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$pinned"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 .* action=stale-review-reset ' || exit 1
+printf '%s\n' "$out" | grep -q '^changed: yes' || exit 1
+if CLAUDE_CONFIG_DIR="$root" $FIX should-dispatch-review --repo-slug slug-x \
+    --task-id PROJ-1 --head-sha "$head"; then exit 1; fi
+reset='{"task_id":"PROJ-1","base_sha":"'"$head"'","status":"completed","review_head_sha":null,"worktree":"'"$wt"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$reset"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 .* action=dispatch-review ' || exit 1
+CLAUDE_CONFIG_DIR="$root" $FIX should-dispatch-review --repo-slug slug-x \
+    --task-id PROJ-1 --head-sha "$head"
+SH
+
 check "checkin_facts: a repair worker's paused record after a review row reaches the director" <<PY
 $LOAD
 rd = tempfile.mkdtemp()

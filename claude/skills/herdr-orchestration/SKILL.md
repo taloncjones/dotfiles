@@ -706,6 +706,15 @@ evidence forever. Two non-task lines
 also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
 and `rollover-due ...` (section 1a).
 
+`stale-review-reset` also fires for a `completed` task pinned at HEAD: a
+review dispatch interrupted between its `review_head_sha` write and its
+`review-dispatched` write (nothing reserved, a launch not accepted, or an
+accepted launch whose status write was lost). The remedy is the same
+stale-verdict reset: `write-task` the full record with `review_head_sha:
+null` and the status unchanged. That write retires the latest review
+launch (`retired_review_launch_ids`), and the next check-in reports
+`dispatch-review`, which re-runs section 5 from its preflight.
+
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
 TURN. No polling while idle, no periodic "still waiting" check-ins, no
@@ -1007,7 +1016,9 @@ helper from publishing.
    block any result whose `ready` field remains false. Set the
    workspace index to `role: review`; preserve implementation completion and
    record `review_head_sha`. Set `review-dispatched` only when dispatch is
-   accepted. A failed attempt is visible and retryable. The active coordinator reads the review's `sized review deadline` from
+   accepted. Finish this dispatch through its `review-dispatched` write before
+   running any check-in pass; a check-in between the pin and that write
+   reports `stale-review-reset` for your own dispatch. A failed attempt is visible and retryable. The active coordinator reads the review's `sized review deadline` from
    `review-deadlines`: `deadline_secs` is the floor (900 s) plus the pinned
    contract's summed `timeout_secs` plus 20 s per changed file, capped at the
    ceiling (3600 s), and is the ceiling whenever an input cannot be read;
