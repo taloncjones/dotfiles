@@ -700,11 +700,17 @@ director's own `write-task`.
 Each `action` names the transition still to be written: `confirm-completion`,
 `confirm-plan`, `dispatch-review`, `confirm-review`, `changes-requested`,
 `stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
-`mech-ledger`, `paused`, `failed`. An action fires only while that transition
-is unrecorded, so a settled task reports `none` instead of re-reporting its
-evidence forever. Two non-task lines
+`mech-ledger`, `paused`, `failed`, `exit-idle-worker`. An action fires only
+while that transition is unrecorded, so a settled task reports `none`
+instead of re-reporting its evidence forever. Two non-task lines
 also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
 and `rollover-due ...` (section 1a).
+
+`exit-idle-worker` means a worker's agent is idle or done and its row is
+settled: plan confirmed, or exit already requested; review verdict
+recorded or retired; implementer approved; superseded; failed launch; or
+terminal task. It names housekeeping, not a status transition, and ranks
+after every other action.
 
 `stale-review-reset` also fires for a `completed` task pinned at HEAD: a
 review dispatch interrupted between its `review_head_sha` write and its

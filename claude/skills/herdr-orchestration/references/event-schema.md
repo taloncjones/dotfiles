@@ -36,6 +36,16 @@ The `$CORE watch` subcommand (director wake, SKILL.md section 1 step 6)
 emits only the closed stdout vocabulary `signal` / `heartbeat` and never
 appends events.
 
+## Check-in actions
+
+`checkin` prints one row per task with an `action` field. Values:
+`confirm-completion`, `confirm-plan`, `dispatch-review`, `confirm-review`,
+`changes-requested`, `stale-review-reset`, `blocked`, `unblocked`,
+`abandoned-candidate`, `mech-ledger`, `paused`, `failed`,
+`exit-idle-worker`, `unknown`, `none`. `exit-idle-worker` ranks last and
+names housekeeping, not a status transition; it appends no event and does
+not change the watch vocabulary.
+
 `tasks/<task_id>.spend.jsonl` (the mech spend ledger, written by `$CORE
 run-mech`) is watched like the completion sidecars so an append wakes the
 director; its lines are ledger records, not events, and are folded only
