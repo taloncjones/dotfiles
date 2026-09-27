@@ -721,10 +721,10 @@ means report it. `settle` never closes a workspace or a pane any plan,
 implement, repair or ship row used. It also keeps a pane open
 (`pane: kept-occupied`) while a non-shell process still has the foreground
 or process-info fails or comes back empty, even once its own agent is gone.
-When `/exit` does not confirm within the pane, settle falls back to reading
-the pane for Claude Code's background-work exit menu and sending the
-agent-bound keystroke to accept it, but only once a confirmed
-`agent_prompt_stalled` or `timeout` reply proves `/exit` was delivered.
+After `/exit` is confirmed delivered (`agent_prompted`, `agent_prompt_stalled`
+or `timeout`) and the agent is still live, settle reads the pane and sends
+agent-bound keys only when Claude Code's background-work exit menu is
+actually showing.
 The director never runs `launch` while a `settle` or `sweep` for the same
 workspace is in flight, and starts neither during a launch: both read the
 pane and row set the other changes.
