@@ -129,10 +129,16 @@ if args[:2] == ["pane", "get"]:
         "terminal_id": "t1", "tab_id": "tab1", "focused": False,
         "agent_status": "idle", "revision": 1}}}))
 elif args[:2] == ["pane", "process-info"]:
+    if mode == "process-info-empty-foreground":
+        # herdr's real shape when process enumeration fails: a valid
+        # shell_pid but no foreground entries (co-review round 7: B-R7-1).
+        foreground = []
+    else:
+        foreground = [{"pid": 101, "name": "zsh", "cwd": cwd}]
     print(json.dumps({"id": "fake", "result": {
         "type": "pane_process_info", "process_info": {
         "pane_id": pane, "shell_pid": 101,
-        "foreground_processes": [{"pid": 101, "name": "zsh", "cwd": cwd}]}}}))
+        "foreground_processes": foreground}}}))
 elif args[:2] == ["pane", "read"]:
     if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply",
                 "exit-occupant-changed"):
@@ -1046,6 +1052,24 @@ def test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane():
         assert ["pane", "close", "w1:p2"] in fx.calls()
         exits = [c for c in fx.calls() if c[:2] == ["agent", "prompt"] and c[3] == "/exit"]
         assert exits and "--until" not in exits[0], exits
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "process-info-empty-foreground"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "exited", result
+        assert result["pane"] == "kept-occupied", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
     finally:
         fx.close()
 
@@ -3006,6 +3030,7 @@ for name, test in (
     ("pane changed during prep records launch_failed", test_pane_changed_during_prep_records_launch_failed),
     ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
     ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
+    ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
     ("settle refuses a busy agent without any mutation", test_settle_refuses_a_busy_agent_without_mutation),
     ("settle exits a plan agent and keeps its pane", test_settle_exits_a_plan_agent_and_keeps_its_pane),
     ("settle refuses an occupant it cannot prove is this attempt", test_settle_refuses_an_unproven_occupant),

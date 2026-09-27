@@ -1566,7 +1566,10 @@ def _pane_idle(herdr_cli, pane_id, env):
     foreground = info.get("foreground_processes")
     if isinstance(shell_pid, bool) or not isinstance(shell_pid, int) or shell_pid < 1:
         return False
-    if not isinstance(foreground, list):
+    # An empty list is `all([])`-vacuously "idle" but is also herdr's shape
+    # for a failed process inspection (co-review round 7: B-R7-1); a real
+    # idle shell reports itself as one foreground entry, never zero.
+    if not isinstance(foreground, list) or not foreground:
         return False
     return all(isinstance(item, dict) and item.get("pid") == shell_pid for item in foreground)
 
