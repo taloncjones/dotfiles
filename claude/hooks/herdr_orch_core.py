@@ -4639,8 +4639,8 @@ def _main(argv=None) -> int:
                     # The latest-record check above only remembers the last
                     # verdict; this scan remembers all of them, so a rejection at
                     # H cannot be laundered by dispatching H2 and returning to H.
-                    # Append-only and never pruned in this slice; 4.9 teardown
-                    # owns the journal's lifecycle.
+                    # Republished atomically on every emit; teardown `--prune`
+                    # deletes it only on a terminal binding.
                     entry = {
                         "reviewed_head_sha": done["reviewed_head_sha"],
                         "outcome": done["outcome"],
@@ -4655,12 +4655,21 @@ def _main(argv=None) -> int:
                                  "review_base_sha")
                     journal = base / "tasks" / f"{ns.task_id}.review-log.jsonl"
                     try:
-                        raw_journal = read_payload_text(journal)
+                        raw_journal = read_payload_bytes(journal)
                     except FileNotFoundError:
-                        raw_journal = ""
+                        raw_journal = b""
                     except (OSError, ValueError):
                         _require(False, "review journal is unreadable")
-                    for line in raw_journal.splitlines():
+                    # Every entry is written whole with its newline, so a final
+                    # segment without one is a torn append, never a whole entry:
+                    # drop it and republish only the complete lines (spec D3).
+                    complete, newline, _torn = raw_journal.rpartition(b"\n")
+                    kept = complete + newline
+                    try:
+                        kept_text = kept.decode("utf-8")
+                    except UnicodeDecodeError:
+                        _require(False, "review journal is unreadable")
+                    for line in kept_text.splitlines():
                         if not line.strip():
                             continue
                         try:
@@ -4678,9 +4687,9 @@ def _main(argv=None) -> int:
                                      "replaced; re-dispatch the review at a new head")
                     _require(_valid_review_journal_entry(entry),
                              "review emit does not form a valid journal entry")
-                    append_payload(
+                    write_bytes_atomic(
                         journal,
-                        (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
+                        kept + (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
                     )
                 write_json_atomic(out, done)
         else:

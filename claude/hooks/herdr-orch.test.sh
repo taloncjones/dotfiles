@@ -5407,6 +5407,90 @@ if $CLI reset-task --repo-slug slug-x --task-id PROJ-1 --new-task-id PROJ-9 --se
 grep -q 'a reset opens with no retired review launches' "$ERRFILE"
 SH
 
+check "emit-review journal: a torn final segment is dropped and the identical re-emit succeeds" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr7.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+emit() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$BASE" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
+   --reviewer-session R1
+}
+emit
+journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
+cp "$journal" "$root/first"
+# interrupt: a torn append leaves a strict prefix of an entry with no newline
+# (a multi-byte character cut in half, so the split must happen before decode)
+python3 -c 'import sys; open(sys.argv[1], "ab").write(b"{\"reviewed_head_sha\":\"\xc3")' "$journal"
+# resume: the identical re-emit succeeds and republishes complete lines only
+emit
+python3 -c '
+import json, sys
+data = open(sys.argv[1], "rb").read()
+first = open(sys.argv[2], "rb").read()
+assert data.endswith(b"\n"), data
+assert data.startswith(first), (data, first)
+lines = data.split(b"\n")[:-1]
+assert len(lines) == 2, lines
+for line in lines:
+    json.loads(line)
+assert json.loads(lines[-1])["outcome"] == "approved"
+' "$journal" "$root/first"
+SH
+
+check "emit-review journal: after a torn tail, a rejection at H still blocks approved@H after an H2 detour" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr8.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+H2=$(printf 'c%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+ROW_H='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}'
+ROW_H2='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}'
+wt() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$1"'","workers":['"$2"']}'
+}
+emit() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome "$2" --reviewed-head-sha "$1" --reviewed-base-sha "$BASE" --blocking-count "$3" \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$1" \
+   --reviewer-session R1
+}
+wt "$H" "$ROW_H"
+emit "$H" changes-requested 2
+journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
+printf '{"reviewed_head_sha":"%s' "$H2" >> "$journal"   # torn append
+wt "$H2" "$ROW_H,$ROW_H2"
+emit "$H2" approved 0          # repairs the tail; base exits 2 here
+wt "$H" "$ROW_H,$ROW_H2,$ROW_H"
+if emit "$H" approved 0 2>"$ERRFILE"; then exit 1; fi
+grep -q 'a same-revision review verdict cannot be replaced' "$ERRFILE"
+SH
+
 check "append_payload writes every byte through short writes" <<PY
 $LOAD
 os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
