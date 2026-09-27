@@ -14,6 +14,11 @@ from typing import Any
 
 import agent_runtime
 
+# A worker attempt can run well past an hour; a short TTL made settle/sweep
+# permanently unable to prove occupancy (and check-in nag forever) once a
+# long-lived worker's token aged out with nothing to refresh it (co-review V-4).
+LAUNCH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
 
 def _dispatch_error(message: str) -> RuntimeError:
     from herdr_dispatch import DispatchError
@@ -261,7 +266,7 @@ def metadata_argv(
         "--seq",
         str(sequence),
         "--ttl-ms",
-        "3600000",
+        str(LAUNCH_TOKEN_TTL_MS),
     ]
 
 

@@ -43,8 +43,14 @@ PANE_READY_ATTEMPTS = 3
 PANE_RUN_MAX_BYTES = 1023
 EXIT_WAIT_MS = 10_000
 # Claude Code's /exit menu when background work is running; option 1 exits.
-# Human-verify H1 in the spec: the live text is not pinned by a test.
-BACKGROUND_EXIT_MENU_RE = re.compile(r"background (?:task|work|process)", re.IGNORECASE)
+# Requires the numbered "Exit anyway" option, not just the phrase, so ordinary
+# prose mentioning background work is never mistaken for the menu (co-review
+# V-3). Human-verify H1 in the spec: the live text is not pinned by a test.
+BACKGROUND_EXIT_MENU_RE = re.compile(
+    r"background (?:tasks?|work|process(?:es)?)\s+(?:are|is)\s+still\s+running"
+    r".{0,120}?1\.\s*exit\s+anyway",
+    re.IGNORECASE | re.DOTALL,
+)
 
 # Launch-time facts copied from the attempt dict onto a bound row by the first
 # enrichment. Record-level keys (task_id, repo_slug, worktree, branch) are
@@ -1513,6 +1519,31 @@ def _pane_verdict(task, row, agents, panes, reasons):
     return "close"
 
 
+def _pane_idle(herdr_cli, pane_id, env):
+    """True only when the pane's foreground process is its own shell.
+
+    _pane_verdict only checks registered herdr agents, so a pane whose row
+    agent is absent (or just exited) could still be running an unrelated
+    live process -- a user's vim, a test run. Mirrors validate_pane's launch
+    check so settle/sweep never close a pane out from under live work
+    (co-review V-1, V-2).
+    """
+    try:
+        result = _run_herdr(herdr_cli, ["pane", "process-info", "--pane", pane_id], env=env)
+    except DispatchError:
+        return False
+    info = result.get("process_info") if isinstance(result, dict) else None
+    if not isinstance(info, dict):
+        return False
+    shell_pid = info.get("shell_pid")
+    foreground = info.get("foreground_processes")
+    if isinstance(shell_pid, bool) or not isinstance(shell_pid, int) or shell_pid < 1:
+        return False
+    if not isinstance(foreground, list):
+        return False
+    return all(isinstance(item, dict) and item.get("pid") == shell_pid for item in foreground)
+
+
 def _occupant_proven(task, index, panes):
     # The pane's launch token names this attempt, and no later row claims the
     # pane: a successor may be reserved (row written) before its agent starts.
@@ -1551,7 +1582,16 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
         agent = _exit_agent(herdr_cli, row, workspace_id, env)
         agents, panes = _snapshot(herdr_cli, workspace_id, env)
     pane = _pane_verdict(task, row, agents, panes, reasons)
-    if pane == "close":
+    if pane == "close" and agent == "still-live":
+        # The agent never actually exited; _pane_verdict only checks the
+        # occupant's registered name, not liveness, so close it here first
+        # rather than closing a pane whose agent is still working (V-2).
+        pane = "kept-occupied"
+    elif pane == "close" and not _pane_idle(herdr_cli, row["pane_id"], env):
+        # No registered agent is live, but an untracked live process (the
+        # user's own shell command) could still occupy the pane (V-1).
+        pane = "kept-occupied"
+    elif pane == "close":
         _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
         pane = "closed"
     status = "exit-incomplete" if agent == "still-live" and pane != "closed" else "settled"

@@ -1940,7 +1940,7 @@ def test_metadata_update_carries_sequence_and_launch_token():
         "--seq",
         "1234",
         "--ttl-ms",
-        "3600000",
+        "2592000000",
     ], argv
 
 
