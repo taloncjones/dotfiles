@@ -1547,13 +1547,9 @@ def _pane_verdict(task, row, agents, panes, reasons):
 
 
 def _pane_idle(herdr_cli, pane_id, env):
-    """True only when the pane's foreground process is its own shell.
+    """True only when the pane's foreground pid equals its shell pid.
 
-    _pane_verdict only checks registered herdr agents, so a pane whose row
-    agent is absent (or just exited) could still be running an unrelated
-    live process -- a user's vim, a test run. Mirrors validate_pane's launch
-    check so settle/sweep never close a pane out from under live work
-    (co-review V-1, V-2).
+    An empty or failed process inspection is unverified, not idle.
     """
     try:
         result = _run_herdr(herdr_cli, ["pane", "process-info", "--pane", pane_id], env=env)
@@ -1619,8 +1615,8 @@ def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env)
     pane = _pane_verdict(task, row, agents, panes, reasons)
     if pane == "close" and agent == "still-live":
         # The agent never actually exited; _pane_verdict only checks the
-        # occupant's registered name, not liveness, so close it here first
-        # rather than closing a pane whose agent is still working (V-2).
+        # occupant's registered name, not liveness, so keep the pane here
+        # rather than closing one whose agent is still working (V-2).
         pane = "kept-occupied"
     elif pane == "close" and not _pane_idle(herdr_cli, row["pane_id"], env):
         # No registered agent is live, but an untracked live process (the
