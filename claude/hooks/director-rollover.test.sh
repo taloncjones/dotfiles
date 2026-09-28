@@ -1126,7 +1126,7 @@ assert c.current_input(screen(num_footer)) == "", num_footer
 ' "$REPO_ROOT" "$FX/footers.json"
 SH
 
-check "hook: executable, python3 shebang, registered on clear|compact" <<'SH'
+check "hook: executable, python3 shebang, registered on startup|resume|clear|compact" <<'SH'
 test -x "$REPO_ROOT/claude/hooks/director_rollover.py"
 head -n 1 "$REPO_ROOT/claude/hooks/director_rollover.py" | grep -qxF '#!/usr/bin/env python3'
 python3 - <<'PY'
@@ -1134,7 +1134,7 @@ import json, os
 t = json.load(open(os.environ["REPO_ROOT"] + "/claude/settings.json.tmpl"))
 hits = [e for e in t["hooks"]["SessionStart"]
         if any(h.get("command") == "~/.claude/hooks/director_rollover.py" for h in e["hooks"])]
-assert len(hits) == 1 and hits[0]["matcher"] == "clear|compact", hits
+assert len(hits) == 1 and hits[0]["matcher"] == "startup|resume|clear|compact", hits
 PY
 SH
 
