@@ -2573,6 +2573,8 @@ assert ask(slug(work), work)["authority"] == "human"
 assert ask(slug(work), work, "--personal")["authority"] == "human"
 assert ask(slug(work), work, extra_env={"WORKFLOW_PERSONAL_ACCOUNT": "1"})["authority"] == "human"
 assert ask(slug(work, {"CLAUDE_PERSONAL_ONLY": "1"}), work,
+           extra_env={"CLAUDE_PERSONAL_ONLY": "1"})["authority"] == "human"
+assert ask(slug(personal, {"CLAUDE_PERSONAL_ONLY": "1"}), personal,
            extra_env={"CLAUDE_PERSONAL_ONLY": "1"})["authority"] == "director"
 mismatch = ask("not-the-slug", personal)
 assert mismatch["authority"] == "human" and mismatch["reason"], mismatch
