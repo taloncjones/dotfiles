@@ -179,16 +179,32 @@ after the step 4 confirmation.
    `todos.sh new`. For the rules edit: re-read `agent-lessons.md`
    immediately before editing (a concurrent session may have moved it);
    dedupe by rule text; confirm the post-edit file still meets the cap.
-   Preconditions when committing in the dotfiles main checkout: on `main`,
-   `git fetch origin main` and confirm `main` == `origin/main` (a
-   just-merged PR often leaves local main behind), and `git status` clean
-   at `claude/rules/`. Commit with an explicit pathspec so unrelated
-   staged files never ride along:
-   `git commit -m "claude: Add agent lesson: <slug>" -- claude/rules/personal/agent-lessons.md`.
-   Running in another repo: apply the same edit in the dotfiles main
-   checkout. Any failed precondition, edit conflict, or partial state ->
-   do not commit; file a dotfiles todo carrying the exact proposed
-   line(s) instead.
+   Never commit on `main` and never edit in the main checkout: lessons
+   land through a PR. Batch every approved lesson from this run into one
+   branch and one PR. Runbook (run from the dotfiles repo, any repo's
+   lessons use the dotfiles repo here):
+   1. `git fetch origin main`, then create a temporary worktree from the
+      fresh remote tip on a new branch, under the session scratchpad or
+      `$TMPDIR`:
+      `git worktree add -b talon/agent-lesson-<slug> "$TMPDIR/agent-lesson-<slug>" origin/main`.
+   2. In that worktree, re-read and edit
+      `claude/rules/personal/agent-lessons.md` (dedupe, cap check as
+      above). Confirm `git status` shows only that file.
+   3. Commit with an explicit pathspec so nothing else rides along. Use
+      a scope prefix and avoid assistant brand words in the summary:
+      `git commit -m "claude: Record agent lesson: <slug>" -- claude/rules/personal/agent-lessons.md`.
+   4. Push with an explicit refspec:
+      `git push -u origin talon/agent-lesson-<slug>:talon/agent-lesson-<slug>`.
+   5. Open a non-draft PR against `main` with `gh pr create`; the body
+      names each added lesson line and gives a one-line test plan. The
+      PR merge stays the owner's action and the co-review gate applies.
+   6. Remove the temporary worktree
+      (`git worktree remove "$TMPDIR/agent-lesson-<slug>"`); the local
+      branch may stay until the PR merges. Local `main` must still equal
+      `origin/main`.
+      Any failed precondition, edit conflict, push or PR failure, or partial
+      state -> do not leave commits on `main`; remove the temporary worktree
+      and file a dotfiles todo carrying the exact proposed line(s) instead.
 
 ## Notes
 
