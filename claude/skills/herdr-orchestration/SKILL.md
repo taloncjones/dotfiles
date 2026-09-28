@@ -1265,7 +1265,9 @@ launch final: further work needs a fresh launch, never a reprompt.
 
 ## 6a. Director merge (personal repositories)
 
-The merge steps run only where `merge-authority` prints `director`. The
+A personal repository is a checkout whose path or canonical owner is under
+`~/Git/personal`. The merge steps run only where `merge-authority` prints
+`director`. The
 user's standing authorization (2026-09-22, reaffirmed 2026-09-23) is the
 merge go here; work repositories keep the human go.
 
