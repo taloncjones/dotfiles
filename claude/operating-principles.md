@@ -42,7 +42,7 @@ Standing engineering discipline for all sessions, all repos.
   review means "ready to merge -- confirm", not approval. Exception: a
   standing merge order for a named personal repo lets the director merge on
   a complete co-review APPROVE plus green CI, re-checked live at the moment
-  of merging; work repos keep the human go.
+  of merging (herdr-orchestration section 6a); work repos keep the human go.
 - Approvals do not bundle: a reply naming one action approves only that action,
   and every outward post (PR comment, ticket, message) needs its own explicit go.
 - Before accumulating work on a file -- or dispatching a subagent to one -- confirm it is
