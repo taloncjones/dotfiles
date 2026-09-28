@@ -71,7 +71,8 @@ def load_core():
 
 
 def pane_unarmed() -> bool:
-    """True when the first `gh` on this hook's PATH is not the herdr shim."""
+    """True when the first `gh` on this hook's PATH is not the herdr shim
+    (pr_post_guard.shim_armed, which wraps is_shim)."""
     sys.path.insert(0, str(HOOKS))
     import pr_post_guard
     return not pr_post_guard.shim_armed()
