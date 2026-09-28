@@ -92,10 +92,17 @@ for the provider's `launch_env` mapping.
 
 1. Assert `HERDR_ENV=1` is set in the environment; if not, stop -- this skill
    only runs inside a Herdr-managed session.
-2. Compute `repo_slug` from `git remote get-url origin` (see
+2. Assert the pane is armed: the first `gh` on PATH must be the herdr shim
+   (`bin/herdr-shims/gh`). An unarmed pane predates the `claude()`/`director()`
+   arming logic or survived a stale `reload`; `pr_post_guard.py` fails closed
+   on every `gh`-mentioning Bash call from it, including read-only queries.
+   On an unarmed pane, stop -- run no claim, dispatch, or PR-CLI call -- and
+   relaunch: `/exit`, then `exec zsh -l` to drop the stale shell, then
+   `director` to relaunch armed.
+3. Compute `repo_slug` from `git remote get-url origin` (see
    references/state-layout.md for the normalization rule); ensure
    `STATE_ROOT/<repo_slug>/` exists.
-3. Claim/refresh ownership:
+4. Claim/refresh ownership:
    - `python3 "$CORE" claim-owner --repo-path <repo_root> --runtime <claude|codex> --repo-slug <slug> --session <id> --host <host> --pid <pid> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
      -> prints a `fence` token on success, or `BUSY` (exit 1) if another
      session holds a live claim. On `BUSY`, yield to read-only status/triage
@@ -152,10 +159,10 @@ for the provider's `launch_env` mapping.
      `-p` director drops them after 5 minutes. Not added to
      `settings.json.tmpl` (it would apply to every session of the account).
    - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above supplies `$TODOS`; never borrow another runtime's personal installation path.
-4. Load and validate `config.json` (schema in references/state-layout.md).
+5. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
-5. **Selected-runtime readiness (owner only, after config validation).**
+6. **Selected-runtime readiness (owner only, after config validation).**
    New native Claude and Codex dispatches use the selected runtime's resolver:
    `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|plan_reviewer|development_reviewer|read_only|mechanical|think> --risk <normal|critical>`.
    Step-to-worker defaults and the two effort-raising axes are in
@@ -240,7 +247,7 @@ for the provider's `launch_env` mapping.
      `config.json`'s `effort` block -- never a separate `resolve-model` call
      per role at dispatch time.
 
-6. **Arm the standing wake watch (owner only; a `BUSY` non-owner never
+7. **Arm the standing wake watch (owner only; a `BUSY` non-owner never
    arms).** If `CLAUDE_CODE_MESSAGING_SOCKET` is set (the hook push is the
    wake path), run only the silent backstop: capture `EPOCH=$(date +%s)`
    FIRST, stop any Monitor-based watch this session still has (including one

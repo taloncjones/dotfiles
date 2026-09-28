@@ -38,6 +38,14 @@ WARNING = (
     "Run the herdr-orchestration section-1 preflight; if it reports BUSY, stop\n"
     "and ask the human (takeover is a human decision)."
 )
+UNARMED_WARNING = (
+    "[WARNING] herdr director unarmed: `gh` on this pane's PATH is not the\n"
+    "herdr gh shim, so pr_post_guard.py will fail closed on every gh-mentioning\n"
+    "Bash call, including read-only queries. This pane's claude()/director()\n"
+    "shell predates the arming logic, or a plain `reload` left it stale.\n"
+    "Run /exit, then `exec zsh -l` to drop this shell, then relaunch with\n"
+    "`director`."
+)
 AUTO_RESUME = 'auto-resume: a "resume director" line will arrive in this pane when it is idle.'
 RESUME_LINE = "resume director"
 RESUME_POLL_SECS = 1
@@ -54,6 +62,15 @@ def load_core():
     sys.path.insert(0, str(HOOKS))
     import herdr_orch_core as core
     return core
+
+
+def pane_unarmed() -> bool:
+    """True when the first `gh` on this hook's PATH -- the same base every
+    Bash call in this session inherits -- is not the herdr shim."""
+    sys.path.insert(0, str(HOOKS))
+    import pr_post_guard
+    found = shutil.which("gh")
+    return found is None or not pr_post_guard.is_shim(found)
 
 
 def spawn_resume_helper(info, session, cwd) -> bool:
@@ -87,9 +104,13 @@ def main() -> int:
         return 0
     if payload.get("hook_event_name") != "SessionStart":
         return 0
+    is_director = os.environ.get("HERDR_ENV") == "1" and payload.get("agent_type") == "director"
+    if is_director and pane_unarmed():
+        emit(UNARMED_WARNING)
+        return 0
     if payload.get("source") not in ("clear", "compact"):
         return 0
-    if os.environ.get("HERDR_ENV") != "1" or payload.get("agent_type") != "director":
+    if not is_director:
         return 0
     session = payload.get("session_id")
     cwd = payload.get("cwd")

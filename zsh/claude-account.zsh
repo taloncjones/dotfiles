@@ -109,7 +109,14 @@ function dotfiles_gh_shim_wanted() {
 function claude() {    # claude() will launch Claude Code with the work account inside ~/Git/work, personal elsewhere. Pass --personal to force the personal account. ex: $ claude --personal
     emulate -L zsh
     if dotfiles_gh_shim_wanted; then
-        ( dotfiles_arm_gh_shim; claude "$@" )
+        (
+            dotfiles_arm_gh_shim
+            if [[ "${commands[gh]:-}" != "$DOTFILES_GH_SHIM_HOME/gh" ]]; then
+                print -u2 "[X] claude: gh shim failed to arm -- refusing an unarmed launch. Run 'exec zsh -l' to drop this stale shell, then relaunch."
+                exit 2
+            fi
+            claude "$@"
+        )
         return $?
     fi
     local use_personal=0 arg cfg scope kind target="$PWD" take_cd=0 parse_cd=1
