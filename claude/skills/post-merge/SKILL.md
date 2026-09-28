@@ -187,11 +187,13 @@ after the step 4 confirmation.
    (`~/Git/personal/dotfiles`); when running in another repo, anchor every
    main-checkout command (fetch, worktree add and remove, branch deletes,
    remote delete, the ahead-of-origin check) with
-   `git -C ~/Git/personal/dotfiles`. Slug: kebab-case, at most 40
+   `git -C ~/Git/personal/dotfiles`, and the PR create with
+   `--repo taloncjones/dotfiles`. Slug: kebab-case, at most 40
    characters, no assistant brand words; the first lesson's slug, with
-   `-and-more` appended when several lessons are batched. Path rule:
-   create the directory in its own call, then paste the literal path it printed, verbatim, into every later
-   command. The git guard denies a variable path.
+   `-and-more` appended when several lessons are batched. Path rule: the
+   git guard denies a variable path, so run `mktemp -d` alone in its own
+   call and paste the literal path it printed, verbatim, into every later
+   command.
    1. `git -C ~/Git/personal/dotfiles fetch origin main`. When the
       checkout is on main, confirm
       `git -C ~/Git/personal/dotfiles rev-list --count origin/main..main`
@@ -210,7 +212,7 @@ after the step 4 confirmation.
       worktree (the session scratchpad); an untracked file inside it
       blocks the removal in the next step. One line per added lesson,
       then one test-plan line. Open a non-draft PR:
-      `gh pr create --head talon/agent-lesson-<slug> --base main --title "claude: Record agent lessons (<YYYY-MM-DD>)" --body-file <body file>`
+      `gh pr create --repo taloncjones/dotfiles --head talon/agent-lesson-<slug> --base main --title "claude: Record agent lessons (<YYYY-MM-DD>)" --body-file <body file>`
       The shim does not gate `pr create`; the step-4 confirmation is the
       go for it. The PR merge stays the owner's action and the co-review
       gate applies.
@@ -220,8 +222,15 @@ after the step 4 confirmation.
       checkout is on main, confirm
       `git -C ~/Git/personal/dotfiles rev-list --count origin/main..main`
       prints 0.
-      Any failed precondition, edit conflict, push or PR failure, or
-      partial state -> do not leave commits on `main`. After
+      Once `gh pr create` has printed a PR URL, a failed cleanup (a
+      refused `worktree remove`, an ahead-of-origin count other than 0)
+      is reported and a todo filed; never roll back, since deleting the
+      remote branch closes the PR.
+      Before a PR exists, any failed precondition, edit conflict, push
+      failure, or `gh pr create` failure -> do not leave commits on
+      `main`. When `gh pr create` errored, first run
+      `gh pr list --repo taloncjones/dotfiles --head talon/agent-lesson-<slug>`;
+      if it lists a PR, treat it as created and skip the fallback. After
       `git worktree add` succeeded, run
       `git -C ~/Git/personal/dotfiles worktree remove --force <wt>` (the
       literal path; a dirty tree refuses a plain remove) and
