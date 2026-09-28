@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""SessionStart hook: re-establish a herdr director's lease after /clear or
-compaction, in place, and orient the fresh context.
+"""SessionStart hook: warn an unarmed director pane, and re-establish a herdr
+director's lease after /clear or compaction, in place.
 
 /clear gives the director a new session id but keeps its process, pid, and
 messaging socket (probed live 2026-09-22), so the core's resume-owner verb
@@ -13,6 +13,12 @@ After a /clear it also starts a detached `resume-helper` that types one
 `resume director` line into the pane once the fresh context is idle, so a
 rollover needs no keystroke. The helper holds no authority of its own: it
 sends only while the canonical lease is the one this hook claimed.
+
+An unarmed pane (first `gh` on PATH is not the herdr shim) gets the
+UNARMED_WARNING on any source (startup|resume|clear|compact) and returns before
+the lease gate on purpose: the lease work is moot until the pane is relaunched.
+The warning is scoped to agent_type director; other unarmed sessions get
+pr_post_guard's own denial. Only `gh` is probed, matching pr_post_guard.
 
 Always exits 0. A failure after the gates prints the WARNING block so the
 director re-runs its preflight instead of acting unfenced.
@@ -65,12 +71,10 @@ def load_core():
 
 
 def pane_unarmed() -> bool:
-    """True when the first `gh` on this hook's PATH -- the same base every
-    Bash call in this session inherits -- is not the herdr shim."""
+    """True when the first `gh` on this hook's PATH is not the herdr shim."""
     sys.path.insert(0, str(HOOKS))
     import pr_post_guard
-    found = shutil.which("gh")
-    return found is None or not pr_post_guard.is_shim(found)
+    return not pr_post_guard.shim_armed()
 
 
 def spawn_resume_helper(info, session, cwd) -> bool:
@@ -105,9 +109,14 @@ def main() -> int:
     if payload.get("hook_event_name") != "SessionStart":
         return 0
     is_director = os.environ.get("HERDR_ENV") == "1" and payload.get("agent_type") == "director"
-    if is_director and pane_unarmed():
-        emit(UNARMED_WARNING)
-        return 0
+    if is_director:
+        try:
+            unarmed = pane_unarmed()
+        except Exception:  # noqa: BLE001 -- the hook must exit 0 on any import failure
+            unarmed = False
+        if unarmed:
+            emit(UNARMED_WARNING)
+            return 0
     if payload.get("source") not in ("clear", "compact"):
         return 0
     if not is_director:

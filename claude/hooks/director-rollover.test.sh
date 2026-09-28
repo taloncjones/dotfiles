@@ -710,6 +710,14 @@ out=$(printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":
 test -z "$out"
 SH
 
+check "hook: pr_post_guard import failure exits 0 silently -- case unarmed" <<'SH'
+mkdir -p "$FX/noguard"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/noguard/"
+out=$(printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | HERDR_ENV=1 python3 "$FX/noguard/director_rollover.py")
+test -z "$out"
+SH
+
 check "resume-helper: idle pane at the INFO block with an empty input -> one resume line" <<'SH'
 cat > "$FX/bin/herdr" <<'STUB'
 #!/bin/sh

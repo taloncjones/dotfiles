@@ -378,7 +378,7 @@ restoring an older one.
 ### `capabilities.json` -- legacy Claude strong-model availability
 
 Machine-local, per `repo_slug`, written by `write-capabilities` at preflight
-(section 1 step 5) and flipped downward by `disable-model` (section 8
+(section 1 step 6) and flipped downward by `disable-model` (section 8
 verify-after-launch). Never committed.
 
 ```json

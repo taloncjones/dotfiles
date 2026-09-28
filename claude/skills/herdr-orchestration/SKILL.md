@@ -352,20 +352,20 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
   worker directly (only after the contract pinning steps at the end of this
   section; a plan-ready item without a validated on-disk contract is treated as raw),
   using `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  with `--config-json "$ROUTE_CONFIG"` (step 6 snippet) and the native adapter
   (section 8). An unready route blocks this dispatch.
 - **Fast-path item** -- a repo todo, never a Jira key, handoff, or mech
   kickoff, that passes the fast-path maturity check below: dispatch an
   `implement` worker directly with no plan worker, using
   `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), the native adapter
+  with `--config-json "$ROUTE_CONFIG"` (step 6 snippet), the native adapter
   (section 8), the Fast-path implement brief variant
   (references/brief-template.md), and the Contract pinning steps at the end
   of this section.
 - **Raw item** -- the fallback: any other todo or handoff with no spec/plan:
   dispatch a `plan`
   worker using `python3 "$RUNTIME" route --runtime <claude|codex> --role planner --risk normal`
-  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  with `--config-json "$ROUTE_CONFIG"` (step 6 snippet) and the native adapter
   first. It runs the repo's brainstorm -> spec ->
   independent spec review -> plan -> independent plan review pipeline;
   Claude uses the Codex review skills and Codex uses the Claude review skills.
@@ -578,7 +578,7 @@ phase; it never marks the task `completed` and never dispatches review.
    so the planner exits and the root pane is back at a shell (the implement
    launch requires one); then reuse the task's branch/workspace.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-   again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
+   again with `--config-json "$ROUTE_CONFIG"` (step 6 snippet), require readiness,
    append a new strict attempt through
    the adapter, update the display role, and give the worker the exact frozen
    plan paths and hashes. Status remains `in-progress`.
@@ -695,7 +695,7 @@ creates a task/worktree/agent/index/record off an escalation's answer.
 `python3 "$CORE" checkin --repo-slug <slug> --session <id> --fence <fence> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
 
 It refreshes the ownership heartbeat itself, so a wake turn runs it IN PLACE
-OF preflight step 3's `refresh-owner` and skips the dashboard regeneration,
+OF preflight step 4's `refresh-owner` and skips the dashboard regeneration,
 which is a kickoff-time concern. It polls `herdr agent list` / `herdr
 workspace list`, correlates each task's records, reads HEAD and ancestry, and
 prints one line per non-terminal task plus a final `changed:` line. It mutates
@@ -1044,7 +1044,7 @@ helper from publishing.
    it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
    repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
    applies to every `worktree create`/`open`, no exceptions.)
-3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional --config-json "$ROUTE_CONFIG"` (step 5 snippet), then reserve and launch a
+3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional --config-json "$ROUTE_CONFIG"` (step 6 snippet), then reserve and launch a
    fresh review attempt through the adapter. This derives
    `development_reviewer` (Claude Sonnet/high or Codex Sol/high) from the
    selected runtime. `--provisional` is permitted only when availability or
@@ -1312,7 +1312,7 @@ do not pass its Claude-only aliases to Codex.
 
 One snapshot per dispatch: use `route --runtime <claude|codex> --role
 <planner|implementation|reviewer|plan_reviewer|read_only|mechanical|think> --risk
-<normal|critical> --config-json "$ROUTE_CONFIG"` (step 5 snippet) and optional
+<normal|critical> --config-json "$ROUTE_CONFIG"` (step 6 snippet) and optional
 explicit policy/capability files. Inspect the
 returned readiness, availability reason, model, and effort before launch.
 Catalog presence is not proof that the selected account can run a model.
