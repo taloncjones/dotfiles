@@ -218,6 +218,12 @@ class ShipSkillText(unittest.TestCase):
                        "gh pr comment", "self-classifies", "--full"):
             self.assertIn(needle, SHIP)
 
+    def test_ship_stops_after_the_gate_under_a_herdr_brief(self):
+        for needle in ("herdr-ship-brief: stop-after-gate", "ship.json",
+                       "explicit merge confirmation", "step 6 confirmation"):
+            self.assertIn(needle, SHIP)
+        self.assertNotIn("step-5 confirmation", SHIP)
+
 
 if __name__ == "__main__":
     unittest.main()

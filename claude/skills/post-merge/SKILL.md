@@ -15,6 +15,14 @@ Run this once a PR is merged. It does the teardown and Jira hygiene that a merge
 leaves behind. Everything is **propose-confirm-apply**: gather state, show the
 plan, get a yes, then act. Never destroy or transition before confirmation.
 
+**Director mode.** Invoked by the herdr director from herdr-orchestration
+section 6a in a personal repository, the user's standing authorization is
+the Step 2 confirmation. Steps 0-3 run; Step 4 runs only when a Jira key
+exists; Step 5 is skipped and reported as
+"lessons distillation pending (human)". A dirty worktree stops teardown
+instead of asking; the director
+records it and a human finishes this skill.
+
 ## Target resolution
 
 - If a PR number/URL was passed, use it.

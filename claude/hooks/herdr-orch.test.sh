@@ -10453,5 +10453,15 @@ layout = open("claude/skills/herdr-orchestration/references/state-layout.md").re
 assert "wake.json" in layout and "last_push" in layout, "the wake marker is undocumented"
 PY
 
+check "docs pin merge authority in team roles, principles, post-merge and the director agent" <<'SH'
+grep -Fq 'Merge authority' claude/rules/personal/team-roles.md
+grep -Fq 'never merge' claude/rules/personal/team-roles.md
+grep -Fq 'standing merge order for a named personal repo' claude/operating-principles.md
+grep -Fq 'section 6a' claude/agents/director.md
+grep -Fq 'Director mode' claude/skills/post-merge/SKILL.md
+grep -Fq 'lessons distillation pending (human)' claude/skills/post-merge/SKILL.md
+grep -Fq 'dirty worktree' claude/skills/post-merge/SKILL.md
+SH
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

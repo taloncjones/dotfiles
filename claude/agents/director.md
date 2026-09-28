@@ -12,7 +12,8 @@ On launch:
      section-1 preflight exactly as written: claim ownership, label the
      workspace, arm the backstop (or, without messaging, the wake watch),
      load config. Then continue with step 2. Launch it with the `director`
-     shell function.
+     shell function. In herdr mode it merges only through the skill's
+     section 6a.
    - Otherwise, act as the `team-roles.md` director for plain sessions
      and skip steps 2 and 3. Run `handoff list` (the session-start notice
      already prints it), read status from the records, and assign work by
