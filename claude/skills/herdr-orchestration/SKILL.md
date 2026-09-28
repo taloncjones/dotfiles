@@ -107,8 +107,10 @@ for the provider's `launch_env` mapping.
      `--messaging-socket` pid AND is an ancestor of the claiming process is
      adopted under the new session id with a fence bump, instead of `BUSY`.
      This is the `/clear` case: the session id changes, the Claude process
-     does not. Launcher-tier Claude leases only; a pid claimed from another
-     process tree still gets `BUSY`. Never run `claim-owner` in the
+     does not. The record's `pid_start` must also match the claimant's
+     process start identity, so a recycled pid gets `BUSY`. Launcher-tier
+     Claude leases only; a pid claimed from another process tree still gets
+     `BUSY`. Never run `claim-owner` in the
      background: a background process started before `/clear` would pass the
      ancestry check under the old session id.
    - **On the initial claim only** (not on refresh), label THIS session's own
@@ -257,13 +259,17 @@ for the provider's `launch_env` mapping.
    `python3 "$CORE" watch --repo-slug <slug> --undelivered-only --exit-on-signal --since-epoch $EPOCH`
    with `Bash run_in_background` and note its task id. It prints nothing
    while pushes are delivered and a task is idle, exits with one `signal`
-   line when a completion record stays undelivered for 120 s, and exits with
+   line when a completion record stays undelivered for 120 s, or as soon as
+   a worker's `blocked` wake was dropped after this session's last check-in
+   (the next check-in row's `wake=<reason>` names why), and exits with
    one `heartbeat` line every `BACKSTOP_HEARTBEAT_SECS` (600 s) while a task
    is active and nothing is undelivered -- both exits are a wake, and the
    heartbeat one exists only so this session's next preflight refreshes its
    own ownership heartbeat before `WAKE_HEARTBEAT_STALE_SECS` (900 s) makes
    wake delivery start failing. Re-arm it on that wake turn and on any
-   preflight where this context has no live backstop task. If the socket is unset, arm the
+   preflight where this context has no live backstop task. A session whose
+   check-in prints `owner: stale-fence` does not re-arm the backstop.
+   If the socket is unset, arm the
    watch at the default cadence via the `Monitor` tool instead: if this
    session has no live watch for this repo, capture `EPOCH=$(date +%s)`
    FIRST, then start one via the `Monitor` tool --
@@ -308,7 +314,7 @@ Roll over when the human asks, or when a check-in prints
 `rollover-due used_pct=<n> threshold=<t>`. That line comes from the host's
 own context reading (the statusline records it per session; `config.json`
 `rollover_pct`, default 45, sets the threshold); never estimate the fill
-yourself and never write the record. On `rollover-due`, write that pass's
+yourself and never write the record. Check-in also deletes context records older than 10 minutes; they are inert. On `rollover-due`, write that pass's
 transitions, start no kickoff or dispatch in the same turn, then roll over.
 
 1. Finish or park the current action. Never roll over mid-kickoff or
@@ -571,7 +577,10 @@ phase; it never marks the task `completed` and never dispatches review.
    worker authored stays untracked and ignored; validate and pin it before
    implementation (Contract pinning, section 2). Final HEAD may differ from
    the launch's source HEAD; both are recorded for different checks.
-3. Reuse the task's branch/workspace after the plan worker is idle or exited.
+3. After `confirm-plan`, run
+   `python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <plan launch>`
+   so the planner exits and the root pane is back at a shell (the implement
+   launch requires one); then reuse the task's branch/workspace.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
    again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
    append a new strict attempt through
@@ -705,11 +714,40 @@ director's own `write-task`.
 Each `action` names the transition still to be written: `confirm-completion`,
 `confirm-plan`, `dispatch-review`, `confirm-review`, `changes-requested`,
 `stale-review-reset`, `blocked`, `unblocked`, `abandoned-candidate`,
-`mech-ledger`, `paused`, `failed`. An action fires only while that transition
-is unrecorded, so a settled task reports `none` instead of re-reporting its
-evidence forever. Two non-task lines
+`mech-ledger`, `paused`, `failed`, `exit-idle-worker`. An action fires only
+while that transition is unrecorded, so a settled task reports `none`
+instead of re-reporting its evidence forever. Two non-task lines
 also set `changed: yes`: `review-overdue <task> ...` (section 5 step 6)
 and `rollover-due ...` (section 1a).
+
+`exit-idle-worker` means a worker's agent is idle or done and its row is
+settled: plan confirmed, or exit already requested; review verdict
+recorded or retired; implementer approved; superseded; failed launch; or
+terminal task. It names housekeeping, not a status transition, and ranks
+after every other action.
+
+Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
+`not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
+means report it. `settle` never closes a workspace or a pane any plan,
+implement, repair or ship row used. It also keeps a pane open
+(`pane: kept-occupied`) while a non-shell process still has the foreground
+or process-info fails or comes back empty, even once its own agent is gone.
+After `/exit` is confirmed delivered (`agent_prompted`, `agent_prompt_stalled`
+or `timeout`) and the agent is still live, settle reads the pane and sends
+agent-bound keys only when Claude Code's background-work exit menu is
+actually showing.
+The director never runs `launch` while a `settle` or `sweep` for the same
+workspace is in flight, and starts neither during a launch: both read the
+pane and row set the other changes.
+
+`stale-review-reset` also fires for a `completed` task pinned at HEAD: a
+review dispatch interrupted between its `review_head_sha` write and its
+`review-dispatched` write (nothing reserved, a launch not accepted, or an
+accepted launch whose status write was lost). The remedy is the same
+stale-verdict reset: `write-task` the full record with `review_head_sha:
+null` and the status unchanged. That write retires the latest review
+launch (`retired_review_launch_ids`), and the next check-in reports
+`dispatch-review`, which re-runs section 5 from its preflight.
 
 **Prompt and pause.** When a human decision is needed, ask ONCE with
 `AskUserQuestion` -- labeled options, recommendation first -- and then END THE
@@ -719,6 +757,10 @@ cache read. A hook wake or the next human message resumes it. A question in
 prose is not a substitute; the prompt is what raises the notification on the
 user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
+
+An outward-posting action (PR comment, review, reply, body edit, Jira
+comment) is never an `AskUserQuestion` option, recommended or not: ask in
+prose for the typed go and end the turn.
 
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
@@ -960,7 +1002,13 @@ exits 0 (`<sha>` is live HEAD via `git rev-parse HEAD`) -- it compares the
 recorded `review_head_sha` against the HEAD passed in; a stale/matching HEAD
 exits 1. Rely on this verb, never re-derive the guard by hand.
 
-**Reviewer-dispatch preflight (one review agent at a time).** Reconcile live
+**Reviewer-dispatch preflight (one review agent at a time).** Run the
+adapter's `sweep` verb
+(`python3 "$DISPATCH" sweep --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree>`)
+for the task workspace first; it exits stale reviewers whose verdict is
+recorded or retired and closes their panes and dead reviewer shells,
+subject to the same kept-occupied and confirmed-exit-menu limits as
+`settle` above. Then confirm zero live review agents as before: reconcile live
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
 already running in it by its recorded agent and pane identity (do **not** `herdr
 workspace close`, which would tear down the shared task worktree). There must be
@@ -1008,7 +1056,9 @@ helper from publishing.
    block any result whose `ready` field remains false. Set the
    workspace index to `role: review`; preserve implementation completion and
    record `review_head_sha`. Set `review-dispatched` only when dispatch is
-   accepted. A failed attempt is visible and retryable. The active coordinator reads the review's `sized review deadline` from
+   accepted. Finish this dispatch through its `review-dispatched` write before
+   running any check-in pass; a check-in between the pin and that write
+   reports `stale-review-reset` for your own dispatch. A failed attempt is visible and retryable. The active coordinator reads the review's `sized review deadline` from
    `review-deadlines`: `deadline_secs` is the floor (900 s) plus the pinned
    contract's summed `timeout_secs` plus 20 s per changed file, capped at the
    ceiling (3600 s), and is the ceiling whenever an input cannot be read;
@@ -1085,9 +1135,13 @@ helper from publishing.
      report the detached-process risk, leave the task `review-dispatched`,
      and do not relaunch, reset, or surface readiness until reconciliation;
      the next check-in repeats `review-overdue`. Once settled, re-read the
-     review record (a verdict that landed during the interrupt wins), and
-     only then use `$CORE write-task` to carry the full task record forward
-     with `status: changes-requested`, report `review incomplete: sized
+     review record (a verdict that landed during the interrupt wins: an
+     exact record for the stopped row is read as its verdict below and the
+     row is not retired). Only with no exact record, use `$CORE write-task`
+     to carry the full task record forward with `status: changes-requested`
+     and the stopped row's `launch_id` appended to
+     `retired_review_launch_ids` (a retired launch's verdict never
+     correlates, whatever lands later), report `review incomplete: sized
 review deadline, <launch_id>`, and never fabricate a review record,
      blocker count, or approval. A late sidecar cannot change that
      non-approved status.
@@ -1099,6 +1153,14 @@ review deadline, <launch_id>`, and never fabricate a review record,
      you report on a task that is `changes-requested` at an unchanged HEAD
      with no correlating record for its latest review row, until the human
      picks re-dispatch or the HEAD moves.
+
+   `write-task` also retires on its own: whenever a write changes a
+   non-null `review_head_sha` (a stale-verdict reset, an orphaned-pin reset,
+   or a re-pin), it appends the prior record's latest review launch to
+   `retired_review_launch_ids`. The list is append-only; carry it forward or
+   omit it, never shorten it. `write-task` does not refuse a pin change
+   while a review is live: it cannot see liveness, every reset above needs
+   the change, and the change itself retires the old launch.
 
    Otherwise read the reviewer's completion record.
 
@@ -1195,6 +1257,11 @@ its launch directory, and no merge authority.
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
+
+After `status: reviewed` is written, run
+`python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <implement launch>`:
+the implementer exits and the root pane stays. `exit_requested` makes that
+launch final: further work needs a fresh launch, never a reprompt.
 
 ## 6a. Director merge (personal repositories)
 
@@ -1725,6 +1792,14 @@ Rules (these are outward-facing writes, so treat them carefully):
   through section 6a, in a repository where `merge-authority` prints
   `director`. Elsewhere merge, `/ship` step 6 and `/post-merge` stay human
   actions. Workers never carry merge authority.
+- The only agent post on a PR is the newest co-review marker, posted by the
+  director only after the owner types `post it` as the whole message
+  (co-review Publish). No replies to reviewers -- draft them. PR body edits
+  need `edit the pr body`. Enforced in herdr agent sessions by the gh shim
+  (`bin/herdr-shims/gh`, `claude/hooks/gh_post_shim.py`), which gates the
+  final argv at exec time, with `claude/hooks/pr_post_guard.py` as the
+  typed-go source and second layer. Never send `gh` to another pane with
+  `herdr pane run`: that shell has no shim, and the hook refuses it.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
   nothing under it is ever git-tracked, and no marker is written into any
   worktree.

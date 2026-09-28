@@ -1147,6 +1147,158 @@ got = c.delivered_records(rd)
 assert got == {"PROJ-1.done.json": {(5, 9)}}, got
 PY
 
+check "wake_for_event: appends one wake.jsonl line per delivery attempt, marker first" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "workspaces"))
+c._sleep = lambda s: None
+c.post_wake = lambda *a, **k: "stale-heartbeat"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "blocked", now=10.0) == "stale-heartbeat"
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "blocked", now=20.0) == "sent"
+log = os.path.join(rd, "workspaces", "w1.wake.jsonl")
+lines = [json.loads(l) for l in open(log)]
+assert [(l["event"], l["reason"]) for l in lines] == [("blocked", "stale-heartbeat"), ("blocked", "sent")], lines
+assert all(l["v"] == 1 and isinstance(l["ts"], str) for l in lines), lines
+assert c.wake_for_event(rd, "w1", "PROJ-1", "stopped", now=30.0) is None
+assert len(open(log).readlines()) == 2, "a declined push writes no line"
+PY
+
+check "wake_for_event: an unwritable wake.jsonl changes neither the result nor the marker" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "workspaces", "w1.wake.jsonl"))
+c.post_wake = lambda *a, **k: "sent"
+assert c.wake_for_event(rd, "w1", "PROJ-1", "blocked", now=10.0) == "sent"
+m = json.load(open(os.path.join(rd, "workspaces", "w1.wake.json")))
+assert m["last_delivery"] == {"event": "blocked", "reason": "sent", "ts": 10}, m
+PY
+
+check "dropped blocked wakes: filter, ack seeding, once-only" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "workspaces"))
+def marker(ws, v=2, **ld):
+    json.dump({"v": v, "records": {}, "last_push": {}, "last_delivery": ld},
+              open(os.path.join(rd, "workspaces", ws + ".wake.json"), "w"))
+marker("w1", event="blocked", reason="stale-heartbeat", ts=100)
+marker("w2", event="blocked", reason="sent", ts=100)
+marker("w3", event="stopped", reason="no-owner", ts=100)
+marker("w4", v=1, event="blocked", reason="no-owner", ts=100)
+marker("w5", event="blocked", reason="no-owner", ts="100")
+open(os.path.join(rd, "workspaces", "w6.wake.json"), "w").write("{not json")
+assert c.undelivered_blocks(rd) == {("w1.wake.json", 100)}, c.undelivered_blocks(rd)
+assert c.undelivered_blocks(os.path.join(rd, "missing")) == set()
+P = {("w1.wake.json", 100)}
+assert c.seed_dropped_blocks(P, set(P)) == P                        # acked by a check-in: seen
+assert c.seed_dropped_blocks(P, {("w1.wake.json", 99)}) == set()    # same ws, other drop: not seen
+assert c.seed_dropped_blocks(P, set()) == set()                     # not acked: not seen
+assert c.seed_dropped_blocks(P, None) == set()                      # no ack file: seed nothing
+seen = set()
+assert c.blocked_drop_tick(seen, P) is True
+assert c.blocked_drop_tick(seen, P) is False         # signalled once
+assert c.blocked_drop_tick(seen, set()) is False     # a later sent clears it
+assert c.blocked_drop_tick(seen, {("w1.wake.json", 160)}) is True
+assert c.blocked_drop_tick(seen, {("w1.wake.json", 160), ("w2.wake.json", 170)}) is True
+assert seen == {("w1.wake.json", 160), ("w2.wake.json", 170)}, seen
+assert c.read_drop_ack(rd) is None                                   # absent
+assert c.write_drop_ack(rd, {("w2.wake.json", 7), ("w1.wake.json", 100)}) is True
+assert json.load(open(os.path.join(rd, "drop-ack.json"))) == {
+    "v": 1, "acked": [["w1.wake.json", 100], ["w2.wake.json", 7]]}
+assert c.read_drop_ack(rd) == {("w1.wake.json", 100), ("w2.wake.json", 7)}
+for bad in ("{not json", {"v": 1, "acked": [["w1.wake.json", True]]}, {"v": 1, "acked": [["w1.wake.json", 1.5]]},
+            {"v": 2, "acked": []}, {"v": 1, "acked": "x"}, {"v": 1, "acked": [["w1.wake.json"]]}, [1]):
+    open(os.path.join(rd, "drop-ack.json"), "w").write(bad if isinstance(bad, str) else json.dumps(bad))
+    assert c.read_drop_ack(rd) is None, bad
+PY
+
+check "backstop_pass: a drop never clears record-pending state; a record signal does" <<PY
+$LOAD
+k = "/x/tasks/PROJ-1.done.json"
+st = {"pending": {}}; seen = set()
+assert c.backstop_pass(st, seen, {}, {k: (5, 9)}, {}, set(), 0.0, 120) is False
+assert k in st["pending"]
+drop = {("w1.wake.json", 50)}
+assert c.backstop_pass(st, seen, {k: (5, 9)}, {k: (5, 9)}, {}, drop, 50.0, 120) is True
+assert k in st["pending"], "drop-only signal must keep record-pending state"
+assert c.backstop_pass(st, seen, {k: (5, 9)}, {k: (5, 9)}, {}, drop, 60.0, 120) is False
+assert c.backstop_pass(st, seen, {k: (5, 9)}, {k: (5, 9)}, {}, drop, 120.0, 120) is True
+assert st["pending"] == {}, "record signal clears record-pending state"
+PY
+
+check "backstop: a drop followed only by refresh-owner still signals on the next start" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+SLUG=github-com-org-watch-cafe0001
+F=$($CLI claim-owner --repo-slug "$SLUG" --session S --host h --pid 1)
+RD="$root/herdr-orch/$SLUG"; mkdir -p "$RD/workspaces" "$RD/tasks"
+printf '{"v":1,"acked":[["w2.wake.json",1]]}' > "$RD/drop-ack.json"
+printf '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"blocked","reason":"stale-heartbeat","ts":%s}}' "$(( $(date +%s) - 5 ))" > "$RD/workspaces/w1.wake.json"
+$CLI refresh-owner --repo-slug "$SLUG" --session S --fence "$F"
+$CLI watch --repo-slug "$SLUG" --undelivered-only --exit-on-signal --interval 1 > "$root/out" 2>&1 &
+W=$!
+i=0; while kill -0 "$W" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+if kill -0 "$W" 2>/dev/null; then kill "$W"; exit 1; fi
+test "$(cat "$root/out")" = signal
+SH
+
+check "checkin: acks the drops it read after its rows; stale-fence writes nothing" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+printf '{"v":2,"records":{},"last_push":{},"last_delivery":{"event":"blocked","reason":"no-owner","ts":100}}' > "$RD/workspaces/w1.wake.json"
+if $CLI checkin --repo-slug slug-x --session S --fence 999 --agents-json "$root/a.json" --workspaces-json "$root/w.json" >/dev/null; then exit 1; fi
+test ! -e "$RD/drop-ack.json"
+out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -qx 'changed: no'
+test "$(cat "$RD/drop-ack.json" | tr -d ' \n')" = '{"acked":[["w1.wake.json",100]],"v":1}' || \
+    test "$(cat "$RD/drop-ack.json" | tr -d ' \n')" = '{"v":1,"acked":[["w1.wake.json",100]]}'
+SH
+
+check "hook: two workspaces under one owner each deliver a blocked wake" <<PY
+$LOAD
+import socket, threading, random, shutil, time, subprocess
+root = tempfile.mkdtemp()
+slug = "github-com-org-repo-deadbeef"; rd = os.path.join(root, "herdr-orch", slug)
+os.makedirs(os.path.join(rd, "workspaces")); os.makedirs(os.path.join(rd, "tasks"))
+for ws, task, role in (("w1E", "PROJ-1", "mech"), ("w1F", "PROJ-2", "impl")):
+    json.dump({"task_id": task, "repo_slug": slug, "role": role},
+              open(os.path.join(rd, "workspaces", ws + ".json"), "w"))
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+got = []; stop = threading.Event()
+try:
+    path = sockdir + "/4242.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv.bind(path); srv.listen(8); srv.settimeout(0.1)
+    def acc():
+        while not stop.is_set():
+            try: conn, _ = srv.accept()
+            except socket.timeout: continue
+            except OSError: return
+            buf = b""
+            while not buf.endswith(b"\n"):
+                d = conn.recv(4096)
+                if not d: break
+                buf += d
+            got.append(json.loads(buf)["message"]["content"]); conn.close()
+    threading.Thread(target=acc, daemon=True).start()
+    json.dump({"session_id": "S", "host": "h", "pid": 4242, "heartbeat_ts": time.time(), "fence": 1,
+               "messaging_socket": path}, open(os.path.join(rd, "owner.json"), "w"))
+    blocked = b'{"hook_event_name":"Notification","notification_type":"permission_prompt"}'
+    for ws in ("w1F", "w1E"):
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=root, HERDR_ENV="1", HERDR_WORKSPACE_ID=ws,
+                   CLAUDE_CODE_MESSAGING_SOCKET=sockdir + "/5000.sock")
+        subprocess.run(["claude/hooks/herdr_worker_status.py"], input=blocked, env=env, capture_output=True)
+    end = time.monotonic() + 3
+    while len(got) < 2 and time.monotonic() < end: time.sleep(0.02)
+    wss = sorted(re.search(r"workspace=(\S+) event=blocked", g).group(1) for g in got)
+    assert wss == ["w1E", "w1F"], got
+    for ws in ("w1E", "w1F"):
+        m = json.load(open(os.path.join(rd, "workspaces", ws + ".wake.json")))
+        assert m["last_delivery"]["reason"] == "sent", (ws, m)
+finally:
+    stop.set(); shutil.rmtree(sockdir, ignore_errors=True)
+PY
+
 check "watch CLI: backstop flags validated" <<'SH'
 CLI="python3 claude/hooks/herdr_legacy_fixture.py"
 root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
@@ -2047,6 +2199,29 @@ finally:
     c._PAYLOAD_SELECTION.reset(token)
 seen = open(env_dump).read().strip()
 assert seen == "w1:p1|w1:t1|1|w1", seen
+PY
+SH
+
+check "run_headless arms the gh shim for a herdr child" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-hl2.git
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+export FAKE_CLAUDE_LOG="$root/log"
+export FAKE_CLAUDE_HOOK='printf "%s|%s\n" "${PATH%%:*}" "${BASH_ENV:-UNSET}" > "$FAKE_CLAUDE_LOG.env"'
+env -u BASH_ENV HERDR_ENV=1 PATH="$FAKE_CLAUDE_DIR:$PATH" python3 - "$LF_REPO" <<'PY'
+import os
+import sys
+sys.path.insert(0, "claude/hooks")
+import agent_runtime
+import herdr_orch_core as c
+repo = sys.argv[1]
+env_dump = os.environ["FAKE_CLAUDE_LOG"] + ".env"
+token = c._PAYLOAD_SELECTION.set(None)
+try:
+    c.run_headless(["claude", "-p"], repo, "hello", 30)
+finally:
+    c._PAYLOAD_SELECTION.reset(token)
+seen = open(env_dump).read().strip()
+assert seen == f"{agent_runtime.GH_SHIM_DIR}|{agent_runtime.GH_SHIM_ANCHOR}", seen
 PY
 SH
 
@@ -5462,6 +5637,139 @@ if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-r
    --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
    --reviewer-session R1 2>/dev/null; then exit 1; fi
 SH
+
+check "CLI write-task --binding and reset-task refuse retired_review_launch_ids" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr9.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+if CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}],"retired_review_launch_ids":["L2"]}' \
+   2>"$ERRFILE"; then exit 1; fi
+grep -q 'retired_review_launch_ids is launcher-scope only' "$ERRFILE"
+# launcher reset-task opens a record with no rows, so no retired launches.
+# Fresh coordination root too: the prior phase already bound LF_SLUG to a
+# canonical identity there, and an unbound legacy claim for a different slug
+# in that same registry reads as an ambiguous identity.
+HERDR_COORDINATION_ROOT=$(mktemp -d); export HERDR_COORDINATION_ROOT
+root2=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root2"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+$CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-1","status":"completed"}'
+if $CLI reset-task --repo-slug slug-x --task-id PROJ-1 --new-task-id PROJ-9 --session S \
+   --fence "$F" --json '{"task_id":"PROJ-9","retired_review_launch_ids":["L1"]}' \
+   2>"$ERRFILE"; then exit 1; fi
+grep -q 'a reset opens with no retired review launches' "$ERRFILE"
+SH
+
+check "emit-review journal: a torn final segment is dropped and the identical re-emit succeeds" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr7.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$H"'","workers":[{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}]}'
+emit() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome approved --reviewed-head-sha "$H" --reviewed-base-sha "$BASE" --blocking-count 0 \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$H" \
+   --reviewer-session R1
+}
+emit
+journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
+cp "$journal" "$root/first"
+# interrupt: a torn append leaves a strict prefix of an entry with no newline
+# (a multi-byte character cut in half, so the split must happen before decode)
+python3 -c 'import sys; open(sys.argv[1], "ab").write(b"{\"reviewed_head_sha\":\"\xc3")' "$journal"
+# resume: the identical re-emit succeeds and republishes complete lines only
+emit
+python3 -c '
+import json, sys
+data = open(sys.argv[1], "rb").read()
+first = open(sys.argv[2], "rb").read()
+assert data.endswith(b"\n"), data
+assert data.startswith(first), (data, first)
+lines = data.split(b"\n")[:-1]
+assert len(lines) == 2, lines
+for line in lines:
+    json.loads(line)
+assert json.loads(lines[-1])["outcome"] == "approved"
+' "$journal" "$root/first"
+SH
+
+check "emit-review journal: after a torn tail, a rejection at H still blocks approved@H after an H2 detour" <<'SH'
+. "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-jr8.git
+root=$(mktemp -d)
+f=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --session L1 --host h --pid 1)
+bid=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py issue-binding \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session L1 --fence "$f" --task-id td-x \
+   --workspace-root "$LF_WS" --expected-session S1)
+lf=$(CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py claim-owner \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --session S1 --host h --pid 2 --control-tier lead \
+   --workspace-root "$LF_WS" --binding "$bid")
+H=$(printf 'a%.0s' $(seq 1 40))
+H2=$(printf 'c%.0s' $(seq 1 40))
+BASE=$(printf 'b%.0s' $(seq 1 40))
+ROW_H='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H"'"}'
+ROW_H2='{"role":"review","launch_id":"L2","phase":"review","runtime":"claude","workspace_id":"w2","pane_id":"pane2","source_head_sha":"'"$H2"'"}'
+wt() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py write-task \
+   --repo-slug "$LF_SLUG" --session S1 --fence "$lf" --binding "$bid" --task-id td-x \
+   --json '{"task_id":"td-x","base_sha":"'"$BASE"'","review_head_sha":"'"$1"'","workers":['"$2"']}'
+}
+emit() {
+  CLAUDE_CONFIG_DIR="$root" python3 claude/hooks/herdr_legacy_fixture.py emit-review \
+   --repo-slug "$LF_SLUG" --repo-path "$LF_REPO" --binding "$bid" --task-id td-x --workspace w2 \
+   --agent rev-td-x --outcome "$2" --reviewed-head-sha "$1" --reviewed-base-sha "$BASE" --blocking-count "$3" \
+   --runtime claude --launch-id L2 --pane-id pane2 --source-head-sha "$1" \
+   --reviewer-session R1
+}
+wt "$H" "$ROW_H"
+emit "$H" changes-requested 2
+journal="$root/herdr-orch/$LF_SLUG/leads/$bid/tasks/td-x.review-log.jsonl"
+printf '{"reviewed_head_sha":"%s' "$H2" >> "$journal"   # torn append
+wt "$H2" "$ROW_H,$ROW_H2"
+emit "$H2" approved 0          # repairs the tail; base exits 2 here
+wt "$H" "$ROW_H,$ROW_H2,$ROW_H"
+if emit "$H" approved 0 2>"$ERRFILE"; then exit 1; fi
+grep -q 'a same-revision review verdict cannot be replaced' "$ERRFILE"
+SH
+
+check "append_payload writes every byte through short writes" <<PY
+$LOAD
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+path = os.path.join(root, "short.log")
+real = os.write
+os.write = lambda fd, data: real(fd, bytes(data[:1]))
+try:
+    c.append_payload(path, b"hello journal\n")
+finally:
+    os.write = real
+got = open(path, "rb").read()
+assert got == b"hello journal\n", got
+PY
 
 check "null-attempt envelope: a malformed implement row counts as a dispatched attempt (emit + integrate)" <<'SH'
 . "$LEAD_FIXTURE_HELPER"; lead_fixture https://example.com/repo-ev-malrow.git
@@ -9926,6 +10234,301 @@ for st in ("review-dispatched", "reviewed", "changes-requested"):
 assert c.checkin_action({**base, "status": "changes-requested"}) == "confirm-completion"
 PY
 
+check "checkin_action: an orphaned review pin asks for the stale-review reset" <<PY
+$LOAD
+base = dict(status="completed", poll_ok=True, live="idle", worktree_exists=True,
+            head="a" * 40, completed=True, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, review_at_head=True,
+            review_pin_orphaned=True, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+# A late verdict at the orphaned pin never outranks the reset.
+assert c.checkin_action(base) == "stale-review-reset", c.checkin_action(base)
+quiet = {**base, "review_pin_orphaned": False, "reviewed": False,
+         "review_correlates": False}
+assert c.checkin_action(quiet) == "none", c.checkin_action(quiet)
+PY
+
+check "checkin_facts: a dispatch interrupted after its head pin resumes through the reset" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "x"); base = g("rev-parse", "HEAD")
+g("commit", "--allow-empty", "-q", "-m", "y"); head = g("rev-parse", "HEAD")
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+impl = {"phase": "implement", "workspace_id": "w3", "runtime": "claude",
+        "launch_id": "I1", "pane_id": "pane1", "source_head_sha": base}
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+# interrupted after the pin write: nothing reserved
+task = {"v": 1, "task_id": "PROJ-1", "status": "completed", "base_sha": base,
+        "review_head_sha": head, "worktree": wt, "workers": [impl]}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["review_pin_orphaned"] is True, facts
+assert facts["action"] == "stale-review-reset", facts
+assert c.should_dispatch_review(task, head) is False
+# resume: the director's reset write clears the pin
+reset = dict(task, review_head_sha=None)
+facts = c.checkin_facts(rd, reset, poll, c.state_root().parent)
+assert facts["action"] == "dispatch-review", facts
+assert c.should_dispatch_review(reset, head) is True
+# interrupted after an accepted launch L2 whose review-dispatched write was
+# lost, and L2's approval lands: still the reset, never confirm-review
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L2", "pane_id": "pane2", "source_head_sha": head}
+late = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=head,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(late))
+facts = c.checkin_facts(rd, dict(task, workers=[impl, row]), poll, c.state_root().parent)
+assert facts["action"] == "stale-review-reset", facts
+PY
+
+check "checkin: an orphaned review pin reports stale-review-reset, then dispatch-review after the reset" <<'SH'
+root=$(mktemp -d); wt=$(mktemp -d)
+FIX="python3 claude/hooks/herdr_legacy_fixture.py"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+git -C "$wt" init -q
+git -C "$wt" -c user.email=t@t -c user.name=t commit --allow-empty -q -m x
+head=$(git -C "$wt" rev-parse HEAD)
+f=$(CLAUDE_CONFIG_DIR="$root" $FIX claim-owner --repo-slug slug-x --session S --host h --pid 1)
+pinned='{"task_id":"PROJ-1","base_sha":"'"$head"'","status":"completed","review_head_sha":"'"$head"'","worktree":"'"$wt"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$pinned"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 .* action=stale-review-reset ' || exit 1
+printf '%s\n' "$out" | grep -q '^changed: yes' || exit 1
+if CLAUDE_CONFIG_DIR="$root" $FIX should-dispatch-review --repo-slug slug-x \
+    --task-id PROJ-1 --head-sha "$head"; then exit 1; fi
+reset='{"task_id":"PROJ-1","base_sha":"'"$head"'","status":"completed","review_head_sha":null,"worktree":"'"$wt"'","workers":[]}'
+CLAUDE_CONFIG_DIR="$root" $FIX write-task --repo-slug slug-x --task-id PROJ-1 \
+    --session S --fence "$f" --json "$reset"
+out=$(CLAUDE_CONFIG_DIR="$root" $FIX checkin --repo-slug slug-x --session S --fence "$f" \
+    --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+printf '%s\n' "$out" | grep -q '^PROJ-1 .* action=dispatch-review ' || exit 1
+CLAUDE_CONFIG_DIR="$root" $FIX should-dispatch-review --repo-slug slug-x \
+    --task-id PROJ-1 --head-sha "$head"
+SH
+
+check "is_reviewed: a retired review launch never verifies" <<PY
+$LOAD
+import hashlib
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+H = "a" * 40
+row = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+       "launch_id": "L1", "pane_id": "pane1", "source_head_sha": H}
+task = {"task_id": "PROJ-1", "status": "changes-requested", "review_head_sha": H,
+        "workers": [row]}
+done = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=H,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+assert c.is_reviewed(task, done, H, "w3") is True
+assert c.is_reviewed(dict(task, retired_review_launch_ids=["L1"]), done, H, "w3") is False
+assert c.is_reviewed(dict(task, retired_review_launch_ids=["L0"]), done, H, "w3") is True
+# a present but malformed list retires everything (fail closed)
+assert c.is_reviewed(dict(task, retired_review_launch_ids="L1"), done, H, "w3") is False
+PY
+
+check "checkin: a late approval after a sized-deadline stop never proposes confirm-review" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = os.path.join(root, "slug-x")
+os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
+wt = tempfile.mkdtemp()
+genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+def g(*a):
+    return subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                          check=True, env=genv, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", wt], check=True, env=genv)
+g("commit", "--allow-empty", "-q", "-m", "x"); base = g("rev-parse", "HEAD")
+g("commit", "--allow-empty", "-q", "-m", "y"); head = g("rev-parse", "HEAD")
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+fix = [sys.executable, "claude/hooks/herdr_legacy_fixture.py"]
+def cli(*a):
+    return subprocess.run([*fix, *a], capture_output=True, text=True)
+fence = cli("claim-owner", "--repo-slug", "slug-x", "--session", "S", "--host", "h",
+            "--pid", "1").stdout.strip()
+def write(rec):
+    p = cli("write-task", "--repo-slug", "slug-x", "--task-id", "PROJ-1", "--session", "S",
+            "--fence", fence, "--json", json.dumps(rec))
+    assert p.returncode == 0, p.stderr
+def stored():
+    return json.load(open(os.path.join(rd, "tasks", "PROJ-1.json")))
+def confirm():
+    return cli("confirm-review", "--repo-slug", "slug-x", "--task-id", "PROJ-1",
+               "--workspace", "w3", "--head-sha", head).returncode
+def action():
+    return c.checkin_facts(rd, stored(), poll, c.state_root().parent)["action"]
+def approve(row):
+    rec = dict(row, task_id="PROJ-1", outcome="approved", reviewed_head_sha=head,
+               blocking_count=0, findings_ref=findings, findings_sha256=digest)
+    open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(rec))
+def reject(row):
+    rec = dict(row, task_id="PROJ-1", outcome="changes-requested", reviewed_head_sha=head,
+               blocking_count=1, findings_ref=findings, findings_sha256=digest)
+    open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(rec))
+poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
+impl = {"phase": "implement", "workspace_id": "w3", "runtime": "claude",
+        "launch_id": "I1", "pane_id": "pane1", "source_head_sha": base}
+L1 = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+      "launch_id": "L1", "pane_id": "pane2", "source_head_sha": head}
+live = {"task_id": "PROJ-1", "status": "review-dispatched", "base_sha": base,
+        "review_head_sha": head, "worktree": wt, "workers": [impl, L1]}
+write(live)
+# restart before the retirement write: no record, then a verdict that landed wins
+assert action() == "none" and confirm() == 1
+approve(L1)
+assert action() == "confirm-review" and confirm() == 0
+os.remove(os.path.join(rd, "tasks", "PROJ-1.review.json"))
+# deadline stop with no exact record: changes-requested + L1 retired
+write(dict(live, status="changes-requested", retired_review_launch_ids=["L1"]))
+approve(L1)  # the stopped reviewer's late approval
+facts = c.checkin_facts(rd, stored(), poll, c.state_root().parent)
+assert facts["reviewed"] is False and facts["review_correlates"] is False, facts
+assert facts["action"] != "confirm-review", facts
+assert confirm() == 1
+write(dict(live, status="changes-requested"))  # key omitted: carried forward
+assert stored()["retired_review_launch_ids"] == ["L1"], stored()
+assert confirm() == 1
+# under a status where a correlating verdict would act, a retired one does not
+write(dict(live))  # review-dispatched, pin unchanged, key carried forward
+reject(L1)
+unretired = {k: v for k, v in stored().items() if k != "retired_review_launch_ids"}
+assert c.checkin_facts(rd, unretired, poll, c.state_root().parent)["action"] == "changes-requested"
+facts = c.checkin_facts(rd, stored(), poll, c.state_root().parent)
+assert facts["review_correlates"] is False and facts["action"] == "none", facts
+# "Re-dispatch": reset, re-pin, fresh row L2 accepted; its approval confirms
+write(dict(live, status="completed", review_head_sha=None))
+L2 = dict(L1, launch_id="L2", pane_id="pane3")
+write(dict(live, workers=[impl, L1, L2]))
+approve(L2)
+assert action() == "confirm-review" and confirm() == 0
+PY
+
+check "CLI write-task: retired_review_launch_ids is append-only and grows on a pin change" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+H=$(printf 'a%.0s' $(seq 1 40))
+R1='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L1","pane_id":"p1","source_head_sha":"'"$H"'"}'
+R2='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L2","pane_id":"p2","source_head_sha":"'"$H"'"}'
+rec="$root/herdr-orch/slug-x/tasks/PROJ-1.json"
+retired() { python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])).get("retired_review_launch_ids")))' "$rec"; }
+w() { $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" --json "$1"; }
+w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+test "$(retired)" = "null"
+# explicit append (deadline stop keeps the pin)
+w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1"]}'
+test "$(retired)" = '["L1"]'
+# omitted key inherits
+w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+test "$(retired)" = '["L1"]'
+# shorter list refused
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":[]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired_review_launch_ids is append-only' "$ERRFILE"
+# a new id must name a review row
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1","nope"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'a retired launch id must name a review attempt' "$ERRFILE"
+# duplicates refused
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1","L1"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired launch ids must be unique' "$ERRFILE"
+# non-shell-safe refused
+rc=0; w '{"task_id":"PROJ-1","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1","a b"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired launch ids must be shell-safe strings' "$ERRFILE"
+# re-dispatch at H: fresh row L2; a pin change H -> null retires the latest review row
+w '{"task_id":"PROJ-1","status":"review-dispatched","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"']}'
+test "$(retired)" = '["L1"]'
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":null,"workers":['"$R1"','"$R2"']}'
+test "$(retired)" = '["L1", "L2"]'
+# a later write that omits the key after the automatic append keeps both
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"']}'
+test "$(retired)" = '["L1", "L2"]'
+# explicit extension of a nonempty list; a reordered list is refused with exit 2
+R3='{"phase":"review","workspace_id":"w3","runtime":"claude","launch_id":"L3","pane_id":"p3","source_head_sha":"'"$H"'"}'
+w '{"task_id":"PROJ-1","status":"completed","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"','"$R3"'],"retired_review_launch_ids":["L1","L2","L3"]}'
+test "$(retired)" = '["L1", "L2", "L3"]'
+rc=0; w '{"task_id":"PROJ-1","status":"completed","review_head_sha":"'"$H"'","workers":['"$R1"','"$R2"','"$R3"'],"retired_review_launch_ids":["L2","L1","L3"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+grep -q 'retired_review_launch_ids is append-only' "$ERRFILE"
+# a malformed stored value (it retires everything) survives an omitted-key write
+w3() { $CLI write-task --repo-slug slug-x --task-id PROJ-3 --session S --fence "$F" --json "$1"; }
+rec3="$root/herdr-orch/slug-x/tasks/PROJ-3.json"
+w3 '{"task_id":"PROJ-3","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["retired_review_launch_ids"]="L1"; json.dump(d, open(p, "w"))' "$rec3"
+w3 '{"task_id":"PROJ-3","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"']}'
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["retired_review_launch_ids"] == "L1"' "$rec3"
+rc=0; w3 '{"task_id":"PROJ-3","status":"changes-requested","review_head_sha":"'"$H"'","workers":['"$R1"'],"retired_review_launch_ids":["L1"]}' 2>"$ERRFILE" && exit 1 || rc=$?; test "$rc" -eq 2
+# a review row whose launch_id is not a string never crashes a write
+w4() { $CLI write-task --repo-slug slug-x --task-id PROJ-4 --session S --fence "$F" --json "$1"; }
+w4 '{"task_id":"PROJ-4","status":"completed","review_head_sha":"'"$H"'","workers":[{"phase":"review","launch_id":[]}]}'
+w4 '{"task_id":"PROJ-4","status":"changes-requested","review_head_sha":"'"$H"'"}'
+w4 '{"task_id":"PROJ-4","status":"completed","review_head_sha":null}'
+python3 -c 'import json,sys; assert "retired_review_launch_ids" not in json.load(open(sys.argv[1]))' \
+  "$root/herdr-orch/slug-x/tasks/PROJ-4.json"
+# a pin change with no review row appends nothing
+$CLI write-task --repo-slug slug-x --task-id PROJ-2 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-2","status":"completed","review_head_sha":"'"$H"'","workers":[]}'
+$CLI write-task --repo-slug slug-x --task-id PROJ-2 --session S --fence "$F" \
+  --json '{"task_id":"PROJ-2","status":"completed","review_head_sha":null,"workers":[]}'
+python3 -c 'import json,sys; assert "retired_review_launch_ids" not in json.load(open(sys.argv[1]))' \
+  "$root/herdr-orch/slug-x/tasks/PROJ-2.json"
+SH
+
+check "CLI confirm-review: a re-pin before the replacement reservation keeps the old launch retired" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+H = "a" * 40
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+fix = [sys.executable, "claude/hooks/herdr_legacy_fixture.py"]
+def cli(*a):
+    return subprocess.run([*fix, *a], capture_output=True, text=True)
+fence = cli("claim-owner", "--repo-slug", "slug-x", "--session", "S", "--host", "h",
+            "--pid", "1").stdout.strip()
+def write(rec):
+    p = cli("write-task", "--repo-slug", "slug-x", "--task-id", "PROJ-2", "--session", "S",
+            "--fence", fence, "--json", json.dumps(rec))
+    assert p.returncode == 0, p.stderr
+def confirm():
+    return cli("confirm-review", "--repo-slug", "slug-x", "--task-id", "PROJ-2",
+               "--workspace", "w3", "--head-sha", H).returncode
+L3 = {"phase": "review", "workspace_id": "w3", "runtime": "claude",
+      "launch_id": "L3", "pane_id": "pane3", "source_head_sha": H}
+pinned = {"task_id": "PROJ-2", "status": "completed", "base_sha": "b" * 40,
+          "review_head_sha": H, "workers": [L3]}
+write(pinned)
+late = dict(L3, task_id="PROJ-2", outcome="approved", reviewed_head_sha=H,
+            blocking_count=0, findings_ref=findings, findings_sha256=digest)
+tasks = os.path.join(root, "slug-x", "tasks")
+open(os.path.join(tasks, "PROJ-2.review.json"), "w").write(json.dumps(late))
+assert confirm() == 0  # unretired: the reset below must retire it
+write(dict(pinned, review_head_sha=None))  # D1 reset
+assert json.load(open(os.path.join(tasks, "PROJ-2.json")))["retired_review_launch_ids"] == ["L3"]
+write(pinned)  # re-pin before any new reservation; key omitted
+assert json.load(open(os.path.join(tasks, "PROJ-2.json")))["retired_review_launch_ids"] == ["L3"]
+assert confirm() == 1
+PY
+
 check "checkin_facts: a repair worker's paused record after a review row reaches the director" <<PY
 $LOAD
 rd = tempfile.mkdtemp()
@@ -10131,6 +10734,53 @@ printf '{not json' > "$RD/tasks/PROJ-1.done.json"
 out=$($CLI checkin --repo-slug slug-x --session S --fence "$F" \
     --agents-json "$root/a.json" --workspaces-json "$root/w.json")
 printf '%s\n' "$out" | grep -qx 'unreadable-record PROJ-1.done.json'
+SH
+
+check "prune_context_records: age-only, bounded, no-follow, keeps the caller's session" <<PY
+$LOAD
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+assert c.prune_context_records(now=10000.0) == 0          # no directory yet
+d = str(c.context_dir()); os.makedirs(d)
+U = ["%08d-0000-4000-8000-%012d" % (i, i) for i in range(6)]
+def put(name, age):
+    p = os.path.join(d, name); open(p, "w").write("{}"); os.utime(p, (10000.0 - age, 10000.0 - age)); return p
+put(U[0] + ".json", 10)                 # fresh: kept
+put(U[1] + ".json", 601)                # stale: removed
+put(U[2] + ".json.123.tmp", 601)        # stale writer temp: removed
+put(U[3] + ".json", 5000)               # stale but keep: kept
+put("notes.json", 5000)                 # foreign: kept
+put("ABCDEF01-0000-4000-8000-000000000000.json", 5000)   # uppercase: kept
+outside = os.path.join(root, "target.json"); open(outside, "w").write("{}"); os.utime(outside, (1.0, 1.0))
+os.symlink(outside, os.path.join(d, U[5] + ".json"))    # symlink: kept, target untouched
+assert c.prune_context_records(now=10000.0, keep=U[3]) == 2
+assert sorted(os.listdir(d)) == sorted([U[0] + ".json", U[3] + ".json", "notes.json",
+    "ABCDEF01-0000-4000-8000-000000000000.json", U[5] + ".json"]), sorted(os.listdir(d))
+assert os.path.exists(outside)
+for i in range(3):
+    put("%08d-1111-4000-8000-%012d.json" % (i, i), 700)
+assert c.prune_context_records(now=10000.0, limit=2) == 2
+# U[3] sorts after the three new records and, without `keep` this call, is
+# itself still stale -- the second batch removes the one remaining new
+# record plus U[3].
+assert c.prune_context_records(now=10000.0, limit=2) == 2
+assert c.context_record_path(U[0]) == c.context_dir() / (U[0] + ".json")
+PY
+
+check "checkin: prunes stale context records without changing its output" <<'SH'
+root=$(mktemp -d); export CLAUDE_CONFIG_DIR="$root"
+CLI="python3 claude/hooks/herdr_legacy_fixture.py"
+F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
+RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
+printf '{"result":{"agents":[]}}' > "$root/a.json"
+printf '{"result":{"workspaces":[]}}' > "$root/w.json"
+before=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+CTX=$(python3 -c 'import importlib.util as u; s = u.spec_from_file_location("c", "claude/hooks/herdr_orch_core.py"); c = u.module_from_spec(s); s.loader.exec_module(c); print(c.context_dir())')
+mkdir -p "$CTX"
+OLD="$CTX/00000000-0000-4000-8000-000000000000.json"
+printf '{}' > "$OLD"; touch -t 202001010000 "$OLD"
+after=$($CLI checkin --repo-slug slug-x --session S --fence "$F" --agents-json "$root/a.json" --workspaces-json "$root/w.json")
+test ! -e "$OLD"
+test "$before" = "$after"
 SH
 
 check "checkin: wake= column from the marker, read-only" <<'SH'
@@ -10462,6 +11112,246 @@ grep -Fq 'Director mode' claude/skills/post-merge/SKILL.md
 grep -Fq 'lessons distillation pending (human)' claude/skills/post-merge/SKILL.md
 grep -Fq 'dirty worktree' claude/skills/post-merge/SKILL.md
 SH
+
+check "row_settlement: each settlement rule fires on its record state" <<'PY'
+import importlib.util, json, os, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+def row(phase, lid, pane="w1:p1", **kw):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": h, "agent": lid, **kw}
+def rs(task, i, review=None):
+    return c.row_settlement(task, i, done=None, review=review, head=h, payload_root=tempfile.mkdtemp())
+plan, impl, rev = row("plan", "P"), row("implement", "I"), row("review", "R", pane="w1:p2")
+assert rs({"status": "merged", "workers": [impl]}, 0) == "task-terminal"
+assert rs({"status": "in-progress", "workers": [row("review", "F", status="launch_failed")]}, 0) == "launch-failed"
+assert rs({"status": "review-dispatched", "workers": [impl, rev, row("review", "R2", pane="w1:p3")]}, 1) == "superseded"
+assert rs({"status": "changes-requested", "retired_review_launch_ids": ["R"], "workers": [impl, rev]}, 1) == "review-retired"
+record = {k: rev[k] for k in c.ATTEMPT_FIELDS}
+assert rs({"status": "in-progress", "workers": [impl, rev]}, 1, review=record) == "verdict-recorded"
+assert rs({"status": "in-progress", "workers": [dict(plan, exit_requested="plan-confirmed")]}, 0) == "exit-requested"
+assert rs({"status": "in-progress", "workers": [plan, impl]}, 0) is None  # no plan-advanced rule
+PY
+
+check "row_settlement: an implementer under review, a repair and a ship row stay unsettled" <<'PY'
+import importlib.util, os, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+def row(phase, lid, pane="w1:p1"):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": h, "agent": lid}
+def rs(task, i, review=None):
+    return c.row_settlement(task, i, done=None, review=review, head=h, payload_root=tempfile.mkdtemp())
+impl, rev = row("implement", "I"), row("review", "R", pane="w1:p2")
+assert rs({"status": "review-dispatched", "workers": [impl, rev]}, 0) is None
+assert rs({"status": "changes-requested", "workers": [impl, rev]}, 0) is None
+other = {k: rev[k] for k in c.ATTEMPT_FIELDS} | {"launch_id": "R-other"}
+assert rs({"status": "reviewed", "workers": [impl, rev]}, 1, review=other) is None
+ship = row("implement", "S", pane="w1:p3")
+assert rs({"status": "reviewed", "workers": [impl, rev, ship]}, 2) is None
+assert rs({"status": "reviewed", "workers": [impl, rev]}, 5) is None
+PY
+
+check "row_settlement: an unresolved reprompt blocks every rule" <<'PY'
+import importlib.util, sys, tempfile
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+base = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+        "pane_id": "w1:p1", "source_head_sha": h, "agent": "I"}
+for status in ("starting", "uncertain"):
+    row = dict(base, reprompts=[{"seq": 0, "status": status}])
+    assert c.row_settlement({"status": "merged", "workers": [row]}, 0, done=None, review=None,
+                            head=h, payload_root=tempfile.mkdtemp()) is None, status
+row = dict(base, exit_requested="review-approved", reprompts=[{"seq": 0, "status": "starting"}])
+assert c.row_settlement({"status": "reviewed", "workers": [row]}, 0, done=None, review=None,
+                        head=h, payload_root=tempfile.mkdtemp()) is None, "rule 0 outranks 0b"
+row = dict(base, reprompts=[{"seq": 0, "status": "delivered"}])
+assert c.row_settlement({"status": "merged", "workers": [row]}, 0, done=None, review=None,
+                        head=h, payload_root=tempfile.mkdtemp()) == "task-terminal"
+PY
+
+check "parse_poll keeps per-workspace agent names and panes" <<PY
+$LOAD
+agents = {"result": {"agents": [
+    {"workspace_id": "w2", "name": "impl-x", "pane_id": "w2:p1", "agent_status": "done"},
+    {"workspace_id": "w2", "name": "rev-x", "pane_id": "w2:p2", "agent_status": "working"}]}}
+spaces = {"result": {"workspaces": [{"workspace_id": "w2"}]}}
+poll = c.parse_poll(agents, spaces)
+assert poll["agents"]["w2"] == [
+    {"name": "impl-x", "pane_id": "w2:p1", "agent_status": "done"},
+    {"name": "rev-x", "pane_id": "w2:p2", "agent_status": "working"}], poll
+assert poll["live"]["w2"] == "working", poll
+PY
+
+check "checkin_facts: an idle settled worker reports exit-idle-worker" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+rev = {"phase": "review", "workspace_id": "w1", "runtime": "claude", "launch_id": "R",
+       "pane_id": "w1:p2", "source_head_sha": h, "agent": "rev-x"}
+impl = dict(rev, phase="implement", launch_id="I", pane_id="w1:p1", agent="impl-x")
+rec = {k: rev[k] for k in c.ATTEMPT_FIELDS}
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(dict(rec, task_id="PROJ-1", outcome="changes-requested")))
+task = {"v": 1, "task_id": "PROJ-1", "status": "changes-requested", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl, rev]}
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "rev-x", "pane_id": "w1:p2", "agent_status": "done"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is True, facts
+poll["agents"]["w1"][0]["agent_status"] = "working"
+assert c.checkin_facts(rd, task, poll, c.state_root().parent)["idle_settled"] is False
+PY
+
+check "checkin_facts: a poll without agents never reports exit-idle-worker" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+impl = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+        "pane_id": "w1:p1", "source_head_sha": h, "agent": "impl-x"}
+task = {"v": 1, "task_id": "PROJ-1", "status": "review-dispatched", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl]}
+facts = c.checkin_facts(rd, task, {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {}},
+                        c.state_root().parent)
+assert facts["idle_settled"] is False and facts["action"] != "exit-idle-worker", facts
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": "impl-x", "pane_id": "w1:p1", "agent_status": "idle"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is False, "an implementer idle during its own review is expected"
+PY
+
+check "checkin_facts: a superseded row sharing name and pane never claims a live agent" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+impl_a = {"phase": "implement", "workspace_id": "w9", "runtime": "claude", "launch_id": "impl-a",
+          "pane_id": "w9:p1", "source_head_sha": h, "agent": "impl-x"}
+impl_b = {"phase": "implement", "workspace_id": "w9", "runtime": "claude", "launch_id": "impl-b",
+          "pane_id": "w9:p1", "source_head_sha": h, "agent": "impl-x"}
+rev_a = {"phase": "review", "workspace_id": "w9", "runtime": "claude", "launch_id": "rev-a",
+         "pane_id": "w9:p2", "source_head_sha": h, "agent": "rev-x"}
+task = {"v": 1, "task_id": "PROJ-1", "status": "review-dispatched", "base_sha": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl_a, impl_b, rev_a]}
+poll = {"live": {"w9": "working"}, "known": {"w9"}, "worktrees": {},
+        "agents": {"w9": [{"name": "impl-x", "pane_id": "w9:p1", "agent_status": "idle"},
+                          {"name": "rev-x", "pane_id": "w9:p2", "agent_status": "working"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is False, facts
+assert facts["action"] != "exit-idle-worker", facts["action"]
+PY
+
+check "checkin_action: exit-idle-worker ranks after every transition" <<PY
+$LOAD
+f = {"status": "in-progress", "poll_ok": True, "head": "a" * 40, "worktree_exists": True,
+     "idle_settled": True}
+assert c.checkin_action(f) == "exit-idle-worker", c.checkin_action(f)
+assert c.checkin_action(dict(f, done_outcome="failed")) == "failed"
+assert c.checkin_action(dict(f, reviewed=True)) == "confirm-review"
+assert c.checkin_action(dict(f, status="merged")) == "none"
+PY
+
+check "row_settlement: plan-confirmed and review-approved fire on their evidence" <<PY
+$LOAD
+import hashlib
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+H = "a" * 40
+def row(phase, lid, pane):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": H, "agent": lid}
+plan = row("plan", "P", "w1:p1")
+task = {"task_id": "PROJ-1", "status": "in-progress", "workers": [plan]}
+seen = []
+real = c.is_plan_completed
+# The frozen-artifact evidence is pinned by herdr_coordination_test.py
+# (is_plan_completed); this pins that rule 7 consults it with the row's workspace.
+c.is_plan_completed = lambda task, done, head, ws, pr: seen.append((done, head, ws, pr)) or True
+assert c.row_settlement(task, 0, done={"d": 1}, review=None, head=H, payload_root="/pr") == "plan-confirmed"
+assert seen == [({"d": 1}, H, "w1", "/pr")], seen
+c.is_plan_completed = lambda *a: False
+assert c.row_settlement(task, 0, done={"d": 1}, review=None, head=H, payload_root="/pr") is None
+c.is_plan_completed = real
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+impl, rev = row("implement", "I", "w1:p1"), row("review", "R", "w1:p2")
+review = {k: rev[k] for k in c.ATTEMPT_FIELDS} | {
+    "task_id": "PROJ-1", "outcome": "approved", "reviewed_head_sha": H,
+    "blocking_count": 0, "findings_ref": findings, "findings_sha256": digest}
+task = {"task_id": "PROJ-1", "status": "reviewed", "review_head_sha": H, "workers": [impl, rev]}
+assert c.row_settlement(task, 0, done=None, review=review, head=H, payload_root=root) == "review-approved"
+assert c.row_settlement(dict(task, status="changes-requested"), 0, done=None, review=review,
+                        head=H, payload_root=root) is None
+assert c.row_settlement(task, 0, done=None, review=review, head="b" * 40, payload_root=root) is None
+PY
+
+check "checkin_facts: a confirmed planner and an approved implementer are idle-settled; a foreign pane is not" <<PY
+$LOAD
+import hashlib, subprocess
+os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
+root = str(c.state_root()); os.makedirs(root, exist_ok=True)
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+wt = tempfile.mkdtemp()
+subprocess.run(["git", "-C", wt, "init", "-q"], check=True)
+subprocess.run(["git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+H = subprocess.check_output(["git", "-C", wt, "rev-parse", "HEAD"], text=True).strip()
+def row(phase, lid, pane, agent):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": H, "agent": agent}
+def poll(name, pane, status="idle"):
+    return {"live": {"w1": status}, "known": {"w1"}, "worktrees": {},
+            "agents": {"w1": [{"name": name, "pane_id": pane, "agent_status": status}]}}
+payload = c.state_root().parent
+plan = row("plan", "P", "w1:p1", "plan-x")
+task = {"v": 1, "task_id": "PROJ-1", "status": "in-progress", "base_sha": H,
+        "worktree": wt, "workers": [plan]}
+real = c.is_plan_completed
+c.is_plan_completed = lambda *a: True
+assert c.checkin_facts(rd, task, poll("plan-x", "w1:p1"), payload)["idle_settled"] is True
+assert c.checkin_facts(rd, task, poll("plan-x", "w1:p9"), payload)["idle_settled"] is False
+assert c.checkin_facts(rd, task, poll("other", "w1:p1"), payload)["idle_settled"] is False
+c.is_plan_completed = real
+findings = os.path.join(root, "findings.md")
+open(findings, "w").write("No findings. Inspected: fixture.\n")
+digest = hashlib.sha256(open(findings, "rb").read()).hexdigest()
+impl, rev = row("implement", "I", "w1:p1", "impl-x"), row("review", "R", "w1:p2", "rev-x")
+rec = {k: rev[k] for k in c.ATTEMPT_FIELDS} | {
+    "task_id": "PROJ-1", "outcome": "approved", "reviewed_head_sha": H,
+    "blocking_count": 0, "findings_ref": findings, "findings_sha256": digest}
+open(os.path.join(rd, "tasks", "PROJ-1.review.json"), "w").write(json.dumps(rec))
+task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "review_head_sha": H, "base_sha": H,
+        "worktree": wt, "workers": [impl, rev]}
+assert c.checkin_facts(rd, task, poll("impl-x", "w1:p1"), payload)["idle_settled"] is True
+assert c.checkin_facts(rd, task, poll("impl-x", "w1:p1", "working"), payload)["idle_settled"] is False
+PY
+
+check "docs: section 4 and the event schema document exit-idle-worker" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+schema = open("claude/skills/herdr-orchestration/references/event-schema.md").read()
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+tick = chr(96)
+assert f"{tick}exit-idle-worker{tick}" in sec4, "section 4 lists the new action"
+assert f"{tick}exit-idle-worker{tick}" in schema, "event schema lists the new action"
+assert f"emits only the closed stdout vocabulary {tick}signal{tick} / {tick}heartbeat{tick}" in schema
+PY
+
+check "docs: the director settles workers, sweeps before review dispatch, and never overlaps launch" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+sec4 = skill.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+tick = chr(96)
+assert "settle --launch-id" in sec4, "section 4 names the settle verb"
+assert f"never runs {tick}launch{tick} while a {tick}settle{tick} or {tick}sweep{tick}" in sec4, "serialization rule"
+sec5 = skill.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
+assert " sweep " in sec5 or f"sweep{tick}" in sec5, "section 5 preflight runs sweep"
+PY
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

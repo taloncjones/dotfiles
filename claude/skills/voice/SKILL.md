@@ -45,6 +45,9 @@ objects). Exit `0` nothing to change, `1` rewrite proposed, `2` error.
 4. Apply with the printed command (`gh pr edit ...`, the MCP update call,
    or paste the after block). For `code-comment`, apply the line
    replacements with Edit, one line at a time.
+   In a herdr session each `gh pr edit` apply (title or body)
+   needs its own typed `edit the pr body` first; a title plus body apply
+   needs two.
 5. `unchanged`: say so in one line and post the original.
 6. Exit `2` with `invariant violated`: Codex dropped a URL, ticket key,
    code span, or protected line. Do not hand-merge; re-run once, then

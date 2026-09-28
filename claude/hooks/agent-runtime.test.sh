@@ -591,6 +591,8 @@ def test_native_argv_mappings_are_exact():
         "gpt-5.6-terra",
         "-c",
         'model_reasoning_effort="medium"',
+        "-c",
+        f'shell_environment_policy.set.BASH_ENV="{runtime.GH_SHIM_ANCHOR}"',
         "-C",
         "/tmp/work tree",
         "--sandbox",
@@ -609,6 +611,8 @@ def test_native_argv_mappings_are_exact():
         "gpt-5.6-terra",
         "-c",
         'model_reasoning_effort="medium"',
+        "-c",
+        f'shell_environment_policy.set.BASH_ENV="{runtime.GH_SHIM_ANCHOR}"',
         "-C",
         "/tmp/work tree",
         "--sandbox",
@@ -816,6 +820,20 @@ def test_bounded_run_passes_strict_mcp_config_for_reviewer():
         ], call
 
 
+def test_arm_gh_shim_puts_the_shim_first_in_herdr_only():
+    shim = str(runtime.GH_SHIM_DIR)
+    env = {"HERDR_ENV": "1", "PATH": f"/a:{shim}:/b"}
+    runtime.arm_gh_shim(env)
+    assert env["PATH"] == f"{shim}:/a:/b", env
+    assert env["BASH_ENV"] == str(runtime.GH_SHIM_ANCHOR), env
+    kept = {"HERDR_ENV": "1", "PATH": "/a", "BASH_ENV": "/mine.sh"}
+    runtime.arm_gh_shim(kept)
+    assert kept == {"HERDR_ENV": "1", "PATH": f"{shim}:/a", "BASH_ENV": "/mine.sh"}, kept
+    plain = {"PATH": "/a"}
+    runtime.arm_gh_shim(plain)
+    assert plain == {"PATH": "/a"}, plain
+
+
 def test_personal_repository_codex_argv_disables_atlassian_plugin():
     route = runtime.resolve_route(
         "codex", "implementation", capabilities=codex_capabilities()
@@ -834,6 +852,8 @@ def test_personal_repository_codex_argv_disables_atlassian_plugin():
         'model_reasoning_effort="medium"',
         "-c",
         'plugins."atlassian@claude-plugins-official".enabled=false',
+        "-c",
+        f'shell_environment_policy.set.BASH_ENV="{runtime.GH_SHIM_ANCHOR}"',
         "-C",
         "/tmp/personal-repository",
         "--sandbox",
@@ -1545,6 +1565,34 @@ def test_run_bounded_strips_pane_identity_from_the_child():
         call = json.loads(log.read_text())
         assert call["HERDR_PANE_ID"] == "UNSET" and call["HERDR_TAB_ID"] == "UNSET", call
         assert call["HERDR_ENV"] == "1" and call["HERDR_WORKSPACE_ID"] == "w1", call
+
+
+def test_run_bounded_arms_the_gh_shim_for_a_herdr_child():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bindir = root / "bin"
+        bindir.mkdir()
+        repo = root / "repo"
+        init_repo(repo)
+        log = root / "log.json"
+        executable(
+            bindir / "claude",
+            "python3 - \"$@\" <<'STUB'\n"
+            "import json,os,sys\n"
+            "json.dump({'first':os.environ['PATH'].split(':')[0],'bash_env':os.environ.get('BASH_ENV','UNSET')},open(os.environ['RUN_LOG'],'w'))\n"
+            "print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'ok',"
+            "'num_turns':1,'total_cost_usd':0.1,'modelUsage':{'claude-fable-5':{}}}))\n"
+            "STUB\n",
+        )
+        route = runtime.resolve_route(
+            "claude", "planner", capabilities={"models": {"opus": model()}}
+        )
+        env = dict(os.environ)
+        env.pop("BASH_ENV", None)
+        env.update({"PATH": f"{bindir}:{env['PATH']}", "RUN_LOG": str(log), "HERDR_ENV": "1"})
+        runtime.run_bounded(route, "prompt", repo, "workspace-write", timeout_secs=5, env=env)
+        seen = json.loads(log.read_text())
+        assert seen == {"first": str(runtime.GH_SHIM_DIR), "bash_env": str(runtime.GH_SHIM_ANCHOR)}, seen
 
 
 def test_run_bounded_marks_the_child_as_bounded():
@@ -2721,6 +2769,8 @@ for name, test in (
     ("full boot roles and Codex keep MCP servers", test_full_boot_roles_and_codex_keep_mcp_servers),
     ("bounded reviewer run passes strict MCP config", test_bounded_run_passes_strict_mcp_config_for_reviewer),
     ("personal Codex argv requires valid scope", test_personal_repository_codex_argv_disables_atlassian_plugin),
+    ("herdr children get the gh shim first on PATH", test_arm_gh_shim_puts_the_shim_first_in_herdr_only),
+    ("run_bounded arms the gh shim for a herdr child", test_run_bounded_arms_the_gh_shim_for_a_herdr_child),
     ("Codex lifecycle roots require workspace-write", test_codex_lifecycle_roots_require_workspace_write),
     ("Codex JSONL reports tokens and unknown observations", test_codex_result_reports_tokens_and_unknown_observations),
     ("Codex JSONL joins multiple agent messages", test_codex_result_joins_multiple_agent_messages),

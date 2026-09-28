@@ -54,7 +54,8 @@ def _ci_reasons(payload: object, no_ci: object) -> list[str]:
             reasons.append("CI check run head does not match payload")
         if status != "COMPLETED":
             reasons.append("CI check run is pending")
-        elif conclusion != "SUCCESS":
+        elif conclusion not in ("SUCCESS", "SKIPPED"):
+            # path-filtered jobs report COMPLETED/SKIPPED, not a failure
             reasons.append(f"CI check run conclusion is {conclusion!r}")
     for context in contexts:
         if not isinstance(context, dict):

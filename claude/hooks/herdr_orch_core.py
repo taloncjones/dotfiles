@@ -32,7 +32,7 @@ import herdr_coordination as coordination
 import herdr_envelope as envelope
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "lib"))
-from workflow_context import account_scope, atomic_json_at, open_state_parent, repository_context
+from workflow_context import account_scope, atomic_bytes_at, atomic_json_at, open_state_parent, repository_context
 from workflow_context import git as context_git
 
 _PAYLOAD_SELECTION = contextvars.ContextVar("herdr_payload_selection", default=None)
@@ -790,6 +790,11 @@ def write_json_atomic(path, data) -> None:
         atomic_json_at(parent, name, data)
 
 
+def write_bytes_atomic(path, data) -> None:
+    with coordination.payload_parent(path, create=True) as (parent, name):
+        atomic_bytes_at(parent, name, data)
+
+
 def read_payload_bytes(path):
     """Read a regular payload file without following any parent or file link."""
     with coordination.payload_parent(path) as (parent, name):
@@ -871,7 +876,7 @@ def append_payload(path, data):
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise ValueError("payload must be a regular file")
-            os.write(fd, data)
+            _write_fd_all(fd, data)
         finally:
             os.close(fd)
 
@@ -905,12 +910,16 @@ ROLLOVER_PCT_DEFAULT = 45
 _CONTEXT_SESSION_RE = re.compile(r"[A-Za-z0-9-]{1,64}\Z")
 
 
-def context_record_path(session):
-    """Where statusline.js records a session's host-reported context fill.
-    Same base as state_root() without a payload selection, which is the
-    formula the statusline uses."""
+def context_dir():
+    """Where statusline.js records host-reported context fill. Same base as
+    state_root() without a payload selection, which is the formula the
+    statusline uses."""
     base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home().resolve() / ".claude")
-    return coordination.payload_path(base) / "herdr-orch" / "context" / f"{session}.json"
+    return coordination.payload_path(base) / "herdr-orch" / "context"
+
+
+def context_record_path(session):
+    return context_dir() / f"{session}.json"
 
 
 def rollover_due(rd, session, now=None):
@@ -938,6 +947,40 @@ def rollover_due(rd, session, now=None):
     if not isinstance(pct, int) or isinstance(pct, bool) or not 10 <= pct <= 95:
         pct = ROLLOVER_PCT_DEFAULT
     return (used, pct) if used >= pct else None
+
+
+CONTEXT_PRUNE_LIMIT = 64
+_CONTEXT_FILE_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json(\.[0-9]+\.tmp)?\Z")
+
+
+def prune_context_records(now=None, keep=None, limit=CONTEXT_PRUNE_LIMIT) -> int:
+    """Unlink context records and orphaned writer temp files older than
+    CONTEXT_FRESH_SECS. A stale record is already inert for rollover_due, so
+    removal changes no decision. Bounded, no-follow, never raises."""
+    now = time.time() if now is None else now
+    d = context_dir()
+    try:
+        names = sorted(payload_names(d))
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        if removed >= limit:
+            break
+        m = _CONTEXT_FILE_RE.fullmatch(name)
+        if not m or m.group(1) == keep:
+            continue
+        try:
+            with coordination.payload_parent(d / name) as (parent, base):
+                st = os.stat(base, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode) or st.st_mtime >= now - CONTEXT_FRESH_SECS:
+                    continue
+                os.unlink(base, dir_fd=parent)
+        except (OSError, ValueError):
+            continue
+        removed += 1
+    return removed
 
 
 def read_capabilities(rd, session_id):
@@ -1102,6 +1145,7 @@ def wake_for_event(rd, ws, task_id, event, own_socket="", now=None):
     base = advanced if reason == "sent" else {**prior, "v": 2}
     write_wake_marker(rd, ws, {**base, "last_delivery": {
         "event": event, "reason": reason, "ts": int(now)}})
+    append_wake_log(rd, ws, event, reason)
     return reason
 
 
@@ -1110,6 +1154,24 @@ _RECORD_SUFFIXES = (".done.json", ".review.json")
 
 def wake_marker_path(rd, ws) -> Path:
     return Path(rd) / "workspaces" / f"{ws}.wake.json"
+
+
+def wake_log_path(rd, ws) -> Path:
+    return Path(rd) / "workspaces" / f"{ws}.wake.jsonl"
+
+
+def append_wake_log(rd, ws, event, reason) -> bool:
+    """One diagnostic line per delivery attempt. Never raises. Nothing reads
+    it for a decision; the marker's last_delivery is the delivery record."""
+    if not valid_workspace_id(ws):
+        return False
+    rec = {"v": 1, "ts": now_iso(), "event": event, "reason": reason}
+    try:
+        append_payload(wake_log_path(rd, ws),
+                        (json.dumps(rec, separators=(",", ":")) + "\n").encode())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _empty_marker() -> dict:
@@ -1660,6 +1722,7 @@ def run_headless(argv, cwd, stdin_text, timeout_secs):
     child_env = _selected_headless_environment(cwd)
     if child_env is None:
         child_env = dict(os.environ)
+    agent_runtime.arm_gh_shim(child_env)
     subtype, result, exit_code, stdout = "unparseable", None, None, ""
     try:
         proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
@@ -2012,15 +2075,100 @@ def backstop_heartbeat_due(last_emit, now, heartbeat_secs, active) -> bool:
     return active and (now - last_emit) >= heartbeat_secs
 
 
+def undelivered_blocks(rd) -> set:
+    """{(marker name, last_delivery ts)} for every v2 marker whose last
+    delivery was a blocked push that did not send. Read-only."""
+    out = set()
+    d = Path(rd) / "workspaces"
+    try:
+        names = payload_names(d)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".wake.json") or not valid_workspace_id(name[: -len(".wake.json")]):
+            continue
+        try:
+            data = json.loads(read_payload_text(d / name))
+        except (OSError, ValueError):
+            continue
+        last = data.get("last_delivery") if isinstance(data, dict) and data.get("v") == 2 else None
+        if not isinstance(last, dict):
+            continue
+        ts = last.get("ts")
+        if last.get("event") == "blocked" and last.get("reason") != "sent" and type(ts) is int:
+            out.add((name, ts))
+    return out
+
+
+def drop_ack_path(rd) -> Path:
+    return Path(rd) / "drop-ack.json"
+
+
+def read_drop_ack(rd):
+    """The dropped-block pairs the last completed check-in read, or None when
+    the file is absent or invalid in any entry."""
+    try:
+        data = json.loads(read_payload_text(drop_ack_path(rd)))
+    except (OSError, ValueError):
+        return None
+    acked = data.get("acked") if isinstance(data, dict) and data.get("v") == 1 else None
+    if not isinstance(acked, list):
+        return None
+    out = set()
+    for pair in acked:
+        if not (isinstance(pair, list) and len(pair) == 2
+                and isinstance(pair[0], str) and type(pair[1]) is int):
+            return None
+        out.add((pair[0], pair[1]))
+    return out
+
+
+def write_drop_ack(rd, pairs) -> bool:
+    """Written only by checkin, after its rows. Never raises."""
+    try:
+        write_json_atomic(drop_ack_path(rd),
+                           {"v": 1, "acked": [list(p) for p in sorted(pairs)]})
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def seed_dropped_blocks(current, acked) -> set:
+    """Pairs a check-in already read start as seen; every other pair -- the
+    re-arm gap, a refresh-owner-only turn, a marker that landed mid-delivery
+    -- signals. Exact match, no time comparison. No ack seeds nothing."""
+    return set(current) & acked if acked is not None else set()
+
+
+def blocked_drop_tick(seen, current) -> bool:
+    """True iff current holds a pair not in seen. seen becomes current, so a
+    pair cleared by a later sent delivery drops out. Mutates seen."""
+    new = bool(current - seen)
+    seen.clear()
+    seen.update(current)
+    return new
+
+
+def backstop_pass(st, seen, prev, snap, delivered, blocks, now, grace_secs) -> bool:
+    """One backstop pass (pure; clock injected). Both checks always run.
+    Record-pending state is cleared only when a record itself signalled."""
+    undelivered = backstop_tick(st, prev, snap, delivered, now, grace_secs)
+    dropped = blocked_drop_tick(seen, blocks)
+    if undelivered:
+        st["pending"].clear()
+    return undelivered or dropped
+
+
 def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
                     heartbeat_secs=BACKSTOP_HEARTBEAT_SECS):
-    """Silent backstop: print `signal` for an undelivered completion record,
-    or `heartbeat` when nothing is undelivered but a task is still active --
-    the director has no other path to refresh its own ownership heartbeat
-    while idle, and wake delivery starts failing once that heartbeat is
-    stale."""
+    """Silent backstop: print `signal` for an undelivered completion record or
+    a dropped blocked wake, or `heartbeat` when nothing is undelivered but a
+    task is still active -- the director has no other path to refresh its
+    own ownership heartbeat while idle, and wake delivery starts failing once
+    that heartbeat is stale."""
     prev, _failed = watch_scan(rd, {}, BACKSTOP_DIRS)
     st = {"pending": {}}
+    seen = seed_dropped_blocks(undelivered_blocks(rd), read_drop_ack(rd))
     last_emit = time.monotonic()
     if since_epoch is not None:
         since_ns = int(since_epoch * 1e9)
@@ -2030,12 +2178,12 @@ def _backstop_loop(rd, interval, grace_secs, exit_on_signal, since_epoch,
         time.sleep(interval)
         snap, _failed = watch_scan(rd, prev, BACKSTOP_DIRS)
         now = time.monotonic()
-        if backstop_tick(st, prev, snap, delivered_records(rd), now, grace_secs):
+        if backstop_pass(st, seen, prev, snap, delivered_records(rd),
+                          undelivered_blocks(rd), now, grace_secs):
             print("signal", flush=True)
             last_emit = now
             if exit_on_signal:
                 return 0
-            st["pending"].clear()
         elif (now - last_emit >= heartbeat_secs
               and backstop_heartbeat_due(last_emit, now, heartbeat_secs, heartbeat_active(rd))):
             print("heartbeat", flush=True)
@@ -2105,14 +2253,16 @@ class NotLeaseHolder(ValueError):
     """resume-owner's precondition failed: this process holds no lease."""
 
 
-def _resume_eligible(cur, require_pid, adopt_pid, account_id) -> bool:
+def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) -> bool:
     """True when the shared owner record cur is this Claude process's own
-    launcher lease: same pid (proven an ancestor), account, runtime, tier.
-    Freshness is not required; a stale lease that passes is ours."""
+    launcher lease: same pid (proven an ancestor) and start identity when the
+    record carries one, account, runtime, tier. Freshness is not required."""
     return (
         cur is not None
         and cur.get("pid") == require_pid
         and adopt_pid == require_pid
+        and ("pid_start" not in cur
+             or (isinstance(adopt_start, str) and cur["pid_start"] == adopt_start))
         and cur.get("account_id") == account_id
         and cur.get("runtime", "claude") == "claude"
         and cur.get("thread_id") is None
@@ -2134,6 +2284,10 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
         raise ValueError("require_pid is launcher-only")
     adopt_pid = (sock_pid if control_tier == "launcher" and reason == "ok"
                  and _is_ancestor(sock_pid) else None)
+    recorded_pid = sock_pid if reason == "ok" else pid
+    pid_start = (coordination.process_start_id(recorded_pid)
+                 if control_tier == "launcher" else None)
+    adopt_start = pid_start if adopt_pid is not None else None
     if control_tier == "launcher":
         if workspace_root is not None or binding_id is not None:
             raise ValueError("workspace_root/binding are only valid for a lead claim")
@@ -2255,11 +2409,12 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                 write_json_atomic(mirror, dict(lease, messaging_socket=sock))
             return fence
         if require_pid is not None and not _resume_eligible(
-            tx.current, require_pid, adopt_pid, tx.account_id
+            tx.current, require_pid, adopt_pid, tx.account_id, adopt_start
         ):
             raise NotLeaseHolder("no lease held by this process")
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
-                         runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid)
+                         runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid,
+                         pid_start=pid_start, adopt_start=adopt_start)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
@@ -2755,6 +2910,71 @@ def resolve_task_workers(rec, prior, bound):
     return workers
 
 
+RETIRED_REVIEWS_KEY = "retired_review_launch_ids"
+
+
+def review_retired(task, done) -> bool:
+    """A review record from a launch the task retired never carries verdict
+    authority, whatever the task status. A present but malformed list
+    retires every record (fail closed)."""
+    if not isinstance(task, dict) or RETIRED_REVIEWS_KEY not in task:
+        return False
+    retired = task[RETIRED_REVIEWS_KEY]
+    if not isinstance(retired, list):
+        return True
+    return isinstance(done, dict) and done.get("launch_id") in retired
+
+
+def _latest_review_launch(workers):
+    rows = [w for w in workers if isinstance(w, dict) and w.get("phase") == "review"]
+    return rows[-1].get("launch_id") if rows else None
+
+
+def apply_retired_reviews(rec, prior, workers):
+    """Set rec's launcher retirement list (spec D2) in place.
+
+    Append-only against the prior record; an omitted key inherits it. A
+    change of a non-null review pin also retires the prior record's latest
+    review launch, so a reset or re-pin can never revive an abandoned
+    reviewer's verdict."""
+    prior_rec = prior if isinstance(prior, dict) else {}
+    if RETIRED_REVIEWS_KEY in prior_rec and not isinstance(prior_rec[RETIRED_REVIEWS_KEY], list):
+        # A malformed value retires every record (review_retired). Carry it
+        # verbatim, so no ordinary write can normalize it away.
+        malformed = prior_rec[RETIRED_REVIEWS_KEY]
+        _require(rec.get(RETIRED_REVIEWS_KEY, malformed) == malformed,
+                 "retired_review_launch_ids is append-only")
+        rec[RETIRED_REVIEWS_KEY] = malformed
+        return
+    inherited = prior_rec.get(RETIRED_REVIEWS_KEY, [])
+    supplied = rec.get(RETIRED_REVIEWS_KEY, inherited)
+    _require(isinstance(supplied, list) and supplied[: len(inherited)] == inherited,
+             "retired_review_launch_ids is append-only")
+    added = supplied[len(inherited):]
+    # Only string ids: launcher validation accepts a review row whose
+    # launch_id is any value, and an unhashable one must not crash a write.
+    review_ids = {w["launch_id"] for w in workers
+                  if isinstance(w, dict) and w.get("phase") == "review"
+                  and isinstance(w.get("launch_id"), str)}
+    for launch_id in added:
+        _require(isinstance(launch_id, str) and bool(SHELL_SAFE_RE.fullmatch(launch_id)),
+                 "retired launch ids must be shell-safe strings")
+        _require(launch_id in review_ids,
+                 "a retired launch id must name a review attempt")
+    _require(len(set(added)) == len(added) and not any(i in added for i in inherited),
+             "retired launch ids must be unique")
+    retired = list(supplied)
+    old_pin = prior_rec.get("review_head_sha")
+    if isinstance(old_pin, str) and old_pin and rec.get("review_head_sha") != old_pin:
+        prior_workers = prior_rec.get("workers")
+        latest = _latest_review_launch(prior_workers if isinstance(prior_workers, list) else [])
+        if isinstance(latest, str) and latest not in retired:
+            retired.append(latest)
+    rec.pop(RETIRED_REVIEWS_KEY, None)
+    if retired:
+        rec[RETIRED_REVIEWS_KEY] = retired
+
+
 def is_completed(task, done, live_head_sha, workspace) -> bool:
     if not isinstance(task, dict) or not isinstance(done, dict):
         return False
@@ -2966,7 +3186,8 @@ def checkin_action(f) -> str:
                                 and not f.get("completed")),
         ("blocked", f.get("live") == "blocked" and status != "blocked"),
         ("unblocked", status == "blocked" and f.get("live") != "blocked"),
-        ("stale-review-reset", status in _REVIEW_STATES and f.get("review_stale")),
+        ("stale-review-reset", (status in _REVIEW_STATES and f.get("review_stale"))
+                               or f.get("review_pin_orphaned")),
         ("confirm-review", f.get("reviewed") and status != "reviewed"),
         ("changes-requested", f.get("review_correlates") and not f.get("reviewed")
                               and status != "changes-requested"),
@@ -2982,6 +3203,7 @@ def checkin_action(f) -> str:
         # Section 9 has no `paused` status, so there is no status gate to add.
         ("paused", f.get("done_outcome") == "paused"),
         ("failed", f.get("done_outcome") == "failed"),
+        ("exit-idle-worker", f.get("idle_settled")),
     )
     for name, fires in rules:
         if fires:
@@ -3009,7 +3231,7 @@ def parse_poll(agents, workspaces):
     w = workspaces.get("result", {}).get("workspaces") if isinstance(workspaces, dict) else None
     if not isinstance(a, list) or not isinstance(w, list):
         return None
-    live, known, worktrees = {}, set(), {}
+    live, known, worktrees, agents = {}, set(), {}, {}
     for row in w:
         if not isinstance(row, dict) or not valid_workspace_id(row.get("workspace_id")):
             continue
@@ -3025,7 +3247,9 @@ def parse_poll(agents, workspaces):
         known.add(ws)
         state = row.get("agent_status")
         live[ws] = state if isinstance(state, str) else "unknown"
-    return {"live": live, "known": known, "worktrees": worktrees}
+        agents.setdefault(ws, []).append(
+            {"name": row.get("name"), "pane_id": row.get("pane_id"), "agent_status": live[ws]})
+    return {"live": live, "known": known, "worktrees": worktrees, "agents": agents}
 
 
 def _git_ancestor(worktree, base, head) -> str:
@@ -3086,6 +3310,23 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         return rec
 
     done, review = _sidecar(".done.json"), _sidecar(".review.json")
+    poll_agents = poll.get("agents", {}) if isinstance(poll, dict) else {}
+    idle_settled = False
+    for index, row in enumerate(workers):
+        if not isinstance(row, dict) or not _nonempty_str(row.get("agent")):
+            continue
+        # A relaunch reuses the pane, so an older row of the same phase can
+        # otherwise claim the successor row's live agent (B1).
+        if any(isinstance(later, dict) and later.get("pane_id") == row.get("pane_id")
+               for later in workers[index + 1:]):
+            continue
+        idle = any(a.get("name") == row["agent"] and a.get("pane_id") == row.get("pane_id")
+                   and a.get("agent_status") in IDLE_AGENT_STATES
+                   for a in poll_agents.get(row.get("workspace_id"), []))
+        if idle and row_settlement(task, index, done=done, review=review, head=head,
+                                   payload_root=payload_root):
+            idle_settled = True
+            break
     impl_ws = phase_workspace(task, "implement")
     plan_ws = phase_workspace(task, "plan")
     rev_ws = phase_workspace(task, "review")
@@ -3100,11 +3341,15 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         and task.get("review_head_sha") == head
         and attempt_matches(task, review, "review", rev_ws)
         and review.get("reviewed_head_sha") == head
-        and _findings_evidence_ok(review))
+        and _findings_evidence_ok(review)
+        and not review_retired(task, review))
     review_stale = bool(task.get("review_head_sha") and head
                         and task["review_head_sha"] != head)
     review_at_head = bool(task.get("review_head_sha") and head
                           and task["review_head_sha"] == head)
+    # Section 5 writes review-dispatched only once a launch is accepted, so a
+    # completed task pinned at HEAD is a dispatch interrupted after its pin.
+    review_pin_orphaned = status == "completed" and review_at_head
     done_phase = done.get("phase") if done else None
     mech_unsettled = bool(latest.get("role") == "mech"
                           and status not in CHECKIN_TERMINAL
@@ -3142,6 +3387,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         "completed": completed, "plan_completed": plan_completed,
         "reviewed": reviewed, "review_correlates": review_correlates,
         "review_stale": review_stale, "review_at_head": review_at_head,
+        "review_pin_orphaned": review_pin_orphaned,
         "dispatch_review": bool(head and should_dispatch_review(task, head)),
         "mech_unsettled": mech_unsettled,
         "plan_advanced": any(isinstance(w, dict) and w.get("phase") == "implement"
@@ -3151,6 +3397,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # stale record from a superseded attempt would fire forever; nothing
         # in the core deletes done.json on relaunch.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
+        "idle_settled": idle_settled,
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES
                          and attempt_matches(task, done, done_phase,
@@ -3237,6 +3484,8 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
         return False
     if not attempt_matches(task, done, "review", workspace):
         return False
+    if review_retired(task, done):
+        return False
     if done.get("task_id") != task.get("task_id"):
         return False
     # Provenance: only the workspace the orchestrator dispatched for review.
@@ -3251,6 +3500,56 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
     return task.get("review_head_sha") == head_sha and (
         done.get("reviewed_head_sha") == head_sha
     )
+
+
+_TERMINAL_TASK = frozenset({"merged", "abandoned", "failed"})
+
+
+def row_settlement(task, index, *, done, review, head, payload_root):
+    """Why workers[index]'s agent may exit, or None while it may still have
+    work. Rules 0b-5 rest on facts that stay true once written; rules 7-8 read
+    mutable evidence and only ever authorize an agent exit, not a pane close."""
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    if not 0 <= index < len(workers) or not isinstance(workers[index], dict):
+        return None
+    row = workers[index]
+    phase = row.get("phase")
+    later = [w for w in workers[index + 1:] if isinstance(w, dict)]
+    reprompts = row.get("reprompts") if isinstance(row.get("reprompts"), list) else []
+    if any(isinstance(e, dict) and e.get("status") in ("starting", "uncertain")
+           for e in reprompts):
+        return None
+    if row.get("exit_requested"):
+        return "exit-requested"
+    status = task.get("status")
+    if status in _TERMINAL_TASK:
+        return "task-terminal"
+    if row.get("status") == "launch_failed":
+        return "launch-failed"
+    if any(w.get("phase") == phase for w in later):
+        return "superseded"
+    if phase == "review":
+        if row.get("launch_id") in (task.get(RETIRED_REVIEWS_KEY) or []):
+            return "review-retired"
+        if isinstance(review, dict) and all(
+                _nonempty_str(row.get(k)) and review.get(k) == row.get(k)
+                for k in ATTEMPT_FIELDS):
+            return "verdict-recorded"
+        return None
+    if phase == "plan":
+        if head and is_plan_completed(task, done, head, row.get("workspace_id"), payload_root):
+            return "plan-confirmed"
+        return None
+    if phase == "implement" and status == "reviewed":
+        reviews = [w for w in later if w.get("phase") == "review"]
+        if reviews and head and is_reviewed(task, review, head, reviews[-1].get("workspace_id")):
+            return "review-approved"
+    return None
+
+
+# herdr reports `done` for a finished turn in an unfocused workspace; it is as
+# promptable as `idle`.
+IDLE_AGENT_STATES = ("idle", "done")
 
 
 DESCENDANT_PHASES = ("plan", "implement", "review")
@@ -3964,6 +4263,11 @@ def _main(argv=None) -> int:
             # validate the workers list before publishing, so an omitted key
             # inherits prior dispatch history rather than asserting none.
             rec["workers"] = resolve_task_workers(rec, prior, bound)
+            if bound:
+                _require(RETIRED_REVIEWS_KEY not in rec,
+                         "retired_review_launch_ids is launcher-scope only")
+            else:
+                apply_retired_reviews(rec, prior, rec["workers"])
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
@@ -3979,6 +4283,8 @@ def _main(argv=None) -> int:
         )
         _require(rec.get("workers", []) == [],
                  "a reset opens with no dispatch history; append rows with write-task")
+        _require(RETIRED_REVIEWS_KEY not in rec,
+                 "a reset opens with no retired review launches")
         _require("reset_from" not in rec, "reset_from is set by the verb")
         with _fenced_scoped(ns) as (rd, base):
             tasks = base / "tasks"
@@ -4590,8 +4896,8 @@ def _main(argv=None) -> int:
                     # The latest-record check above only remembers the last
                     # verdict; this scan remembers all of them, so a rejection at
                     # H cannot be laundered by dispatching H2 and returning to H.
-                    # Append-only and never pruned in this slice; 4.9 teardown
-                    # owns the journal's lifecycle.
+                    # Republished atomically on every emit; teardown `--prune`
+                    # deletes it only on a terminal binding.
                     entry = {
                         "reviewed_head_sha": done["reviewed_head_sha"],
                         "outcome": done["outcome"],
@@ -4606,12 +4912,21 @@ def _main(argv=None) -> int:
                                  "review_base_sha")
                     journal = base / "tasks" / f"{ns.task_id}.review-log.jsonl"
                     try:
-                        raw_journal = read_payload_text(journal)
+                        raw_journal = read_payload_bytes(journal)
                     except FileNotFoundError:
-                        raw_journal = ""
+                        raw_journal = b""
                     except (OSError, ValueError):
                         _require(False, "review journal is unreadable")
-                    for line in raw_journal.splitlines():
+                    # Every entry is written whole with its newline, so a final
+                    # segment without one is a torn append, never a whole entry:
+                    # drop it and republish only the complete lines (spec D3).
+                    complete, newline, _torn = raw_journal.rpartition(b"\n")
+                    kept = complete + newline
+                    try:
+                        kept_text = kept.decode("utf-8")
+                    except UnicodeDecodeError:
+                        _require(False, "review journal is unreadable")
+                    for line in kept_text.splitlines():
                         if not line.strip():
                             continue
                         try:
@@ -4629,9 +4944,9 @@ def _main(argv=None) -> int:
                                      "replaced; re-dispatch the review at a new head")
                     _require(_valid_review_journal_entry(entry),
                              "review emit does not form a valid journal entry")
-                    append_payload(
+                    write_bytes_atomic(
                         journal,
-                        (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
+                        kept + (json.dumps(entry, separators=(",", ":")) + "\n").encode(),
                     )
                 write_json_atomic(out, done)
         else:
@@ -5702,6 +6017,8 @@ def _main(argv=None) -> int:
         if not refresh_owner(rd, ns.session, ns.fence, ns.messaging_socket):
             print("owner: stale-fence")
             return 1
+        acked = undelivered_blocks(rd)
+        prune_context_records(keep=ns.session)
         poll, reason = _checkin_poll(ns)
         if poll is None:
             print(f"poll: failed ({reason})")
@@ -5745,6 +6062,7 @@ def _main(argv=None) -> int:
             print(f"rollover-due used_pct={due[0]} threshold={due[1]}")
             changed = True
         print(f"changed: {'yes' if changed else 'no'}")
+        write_drop_ack(rd, acked)
         return 0
     if ns.cmd == "review-deadlines":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
