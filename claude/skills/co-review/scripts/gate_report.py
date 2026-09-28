@@ -65,12 +65,41 @@ def _load_change_class():
     return _load_sibling("change_class")
 
 
+def _load_runner():
+    # The skill always ships beside claude/hooks; REVIEW_ROOT requires both.
+    path = Path(__file__).resolve().parents[3] / "hooks" / "agent_runtime.py"
+    spec = importlib.util.spec_from_file_location("co_review_agent_runtime", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _nonempty(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
 def _sha(value: object) -> bool:
     return isinstance(value, str) and bool(_SHA_RE.fullmatch(value))
+
+
+def _seat_content_ok(content: bytes, artifact: str, name: str, reasons: list[str]) -> None:
+    """Refuse a failed runner result or a usage-limit refusal; .json means runner JSON."""
+    refusal = _load_runner().usage_limit_refusal
+    if not artifact.endswith(".json"):
+        if refusal(content.decode("utf-8", errors="replace")):
+            reasons.append(f"seat {name} result is a usage-limit refusal")
+        return
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict) or not {"runtime", "status"} <= payload.keys():
+        reasons.append(f"seat {name} artifact is not runner JSON")
+        return
+    if payload["status"] != "success":
+        reasons.append(f"seat {name} runner status is not success")
+    if refusal(payload.get("result")):
+        reasons.append(f"seat {name} result is a usage-limit refusal")
 
 
 def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> None:
@@ -96,6 +125,7 @@ def _artifact_ok(entry: object, root: Path, name: str, reasons: list[str]) -> No
         reasons.append(f"seat {name} artifact is empty")
     if hashlib.sha256(content).hexdigest() != expected:
         reasons.append(f"seat {name} artifact digest does not match")
+    _seat_content_ok(content, artifact, name, reasons)
 
 
 def _substitute_cause(seat: dict, root: Path) -> tuple[str | None, Path | None]:
@@ -484,6 +514,11 @@ def schema() -> dict:
             "manifest.source.source_tree": "expected.tree",
             "snapshot.codex_tree": "report.reviewed_tree",
         },
+        "seat_artifact_must_show": (
+            "a .json seat artifact is runner JSON with runtime and status keys "
+            "and status success; no seat artifact, runner result or native "
+            "text, may open with a usage-limit refusal notice"
+        ),
         "codex_substitute": {
             "seats": {k: list(v) for k, v in _CODEX_SEATS.items()},
             "reasons": list(_SUBSTITUTE_REASONS),
