@@ -941,13 +941,21 @@ PY
         # template-owned key (reasserted wholesale on every update), so live
         # permissions must equal the template's. A mismatch means the machine
         # missed an update and may silently retain retired broad grants.
-        if SETTINGS_PATH="$settings_dir/settings.json" python3 - <<'PY'
+        # Machines reconcile from main, so compare against origin/main's
+        # template; fall back to the checkout's when that ref is unavailable.
+        if perm_tmpl=$(git show origin/main:claude/settings.json.tmpl 2>/dev/null); then
+            perm_src=origin/main
+        else
+            perm_tmpl=$(cat claude/settings.json.tmpl)
+            perm_src=checkout
+        fi
+        if SETTINGS_PATH="$settings_dir/settings.json" PERM_TMPL="$perm_tmpl" python3 - <<'PY'
 import json
 import os
 import sys
 
 live = json.load(open(os.environ["SETTINGS_PATH"])).get("permissions") or {}
-tmpl = json.load(open("claude/settings.json.tmpl")).get("permissions") or {}
+tmpl = json.loads(os.environ["PERM_TMPL"]).get("permissions") or {}
 if live == tmpl:
     sys.exit(0)
 for key in sorted(set(live) | set(tmpl)):
@@ -964,10 +972,10 @@ for key in sorted(set(live) | set(tmpl)):
 sys.exit(1)
 PY
         then
-            printf 'PASS  settings: %s permissions match template\n' "$settings_dir"
+            printf 'PASS  settings: %s permissions match %s template\n' "$settings_dir" "$perm_src"
             PASS=$((PASS + 1))
         else
-            printf 'FAIL  settings: %s permissions drifted (update reconciles: template rules reassert, live-only grants are DROPPED -- commit intentional grants to the template)\n' "$settings_dir" >&2
+            printf 'FAIL  settings: %s permissions drifted from %s template (update reconciles: template rules reassert, live-only grants are DROPPED -- commit intentional grants to the template)\n' "$settings_dir" "$perm_src" >&2
             FAIL=$((FAIL + 1))
         fi
 
