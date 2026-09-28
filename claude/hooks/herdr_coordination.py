@@ -13,6 +13,7 @@ import math
 import os
 import re
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -256,6 +257,39 @@ def _valid_workspace_root(value):
     )
 
 
+def _valid_pid_start(value):
+    return isinstance(value, str) and 0 < len(value) <= 128
+
+
+def process_start_id(pid):
+    """A string naming one process lifetime, so a recycled pid never matches
+    the process that wrote a lease. None when it cannot be read or is
+    not a valid pid_start."""
+    if type(pid) is not int or pid < 1:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            fields = f.read().rsplit(b")", 1)[1].split()
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            boot = f.read().strip()
+        # Field 22 (starttime); fields after the ")" start at field 3.
+        ident = f"linux:{boot}:{int(fields[19])}"
+        return ident if _valid_pid_start(ident) else None
+    except (OSError, IndexError, ValueError):
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=5, check=False,
+                              env=dict(os.environ, LC_ALL="C", TZ="UTC"))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = " ".join(out.stdout.split())
+    if out.returncode != 0 or not text:
+        return None
+    ident = "ps:" + text
+    return ident if _valid_pid_start(ident) else None
+
+
 def lead_lease_key(workspace_root):
     return hashlib.sha256(workspace_root.encode()).hexdigest()[:16]
 
@@ -281,6 +315,7 @@ def _valid_owner(value):
         and value["heartbeat_ts"] >= 0
         and value.get("runtime", "claude") in ("claude", "codex")
         and (value.get("thread_id") is None or isinstance(value["thread_id"], str))
+        and ("pid_start" not in value or _valid_pid_start(value["pid_start"]))
         and (value.get("runtime") != "codex" or bool(value.get("thread_id")))
         and (value.get("account_id") is None or isinstance(value["account_id"], str))
         and value.get("control_tier", "launcher") in ("launcher", "lead")
@@ -370,7 +405,7 @@ def _owner_metadata(value):
         key: value[key]
         for key in ("session_id", "host", "pid", "fence", "heartbeat_ts")
     }
-    return dict(
+    meta = dict(
         result,
         runtime=value.get("runtime", "claude"),
         thread_id=value.get("thread_id"),
@@ -378,6 +413,9 @@ def _owner_metadata(value):
         control_tier=value.get("control_tier", "launcher"),
         workspace_root=value.get("workspace_root"),
     )
+    if "pid_start" in value:
+        meta["pid_start"] = value["pid_start"]
+    return meta
 
 
 def _observation(value):
@@ -709,6 +747,8 @@ class OwnerTransaction:
         control_tier="launcher",
         workspace_root=None,
         adopt_pid=None,
+        pid_start=None,
+        adopt_start=None,
     ):
         if (
             not isinstance(session, str)
@@ -747,7 +787,7 @@ class OwnerTransaction:
                 or old.get("thread_id") != thread_id
                 or old.get("account_id") != self.account_id
             )
-            and not self._adoptable(old, adopt_pid, runtime, thread_id)
+            and not self._adoptable(old, adopt_pid, runtime, thread_id, adopt_start)
         ):
             return None
         fence = (
@@ -778,15 +818,20 @@ class OwnerTransaction:
             "control_tier": "launcher",
             "workspace_root": None,
         }
+        if _valid_pid_start(pid_start):
+            self.current["pid_start"] = pid_start
         self._owner_write(self.current)
         return fence
 
-    def _adoptable(self, old, adopt_pid, runtime, thread_id):
+    def _adoptable(self, old, adopt_pid, runtime, thread_id, adopt_start=None):
         # A fresh lease held by the same Claude process under an older session
-        # id (after /clear). The caller proves process identity (ancestry).
+        # id (after /clear). The caller proves process identity (ancestry) and
+        # its start identity; a record without pid_start predates it (legacy).
         return (
             type(adopt_pid) is int
             and old.get("pid") == adopt_pid
+            and ("pid_start" not in old
+                 or (isinstance(adopt_start, str) and old["pid_start"] == adopt_start))
             and runtime == "claude"
             and old.get("runtime", "claude") == "claude"
             and old.get("thread_id") == thread_id

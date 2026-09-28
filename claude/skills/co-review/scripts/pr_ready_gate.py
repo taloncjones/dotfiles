@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime, timezone
 
 MARKER_RE = re.compile(
@@ -208,6 +209,68 @@ def select_marker(
     return markers[0]
 
 
+def _first_top_level_line(body: str) -> str:
+    for raw in _top_level_lines(body):
+        if raw.strip(" \t"):
+            return raw.rstrip(" \t")
+    return ""
+
+
+def _flatten(comments):
+    if not isinstance(comments, list):
+        raise GateInputError("comments must be a JSON array")
+    out = []
+    for item in comments:
+        out.extend(item if isinstance(item, list) else [item])
+    return out
+
+
+def superseded_marker_ids(comments, author: str, expect_line: str) -> list[int]:
+    """Ids of `author`'s older own-PR marker comments; fail closed unless
+    the newest one is the marker just posted."""
+    candidates = []
+    for entry in _flatten(comments):
+        if not isinstance(entry, dict):
+            raise GateInputError("comment must be an object")
+        user = entry.get("user")
+        if not isinstance(user, dict):
+            raise GateInputError("comment user must be an object")
+        if user.get("login") != author:
+            continue
+        first = _first_top_level_line(str(entry.get("body") or ""))
+        if not first.startswith(MARKER_PREFIX):
+            continue
+        created = _parse_instant(entry.get("created_at"))
+        cid = entry.get("id")
+        if created is None or not isinstance(cid, int) or isinstance(cid, bool):
+            raise GateInputError("marker comment has bad created_at or id")
+        candidates.append((created, cid, first))
+    if not candidates:
+        raise GateInputError("no marker comment by this author")
+    candidates.sort()
+    newest = candidates[-1]
+    if newest[2] != expect_line.rstrip(" \t"):
+        raise GateInputError("newest marker is not the posted one")
+    return [cid for _created, cid, _first in candidates[:-1]]
+
+
+def _supersede_main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="pr_ready_gate.py supersede")
+    ap.add_argument("--comments", required=True)
+    ap.add_argument("--author", required=True)
+    ap.add_argument("--expect-marker", dest="expect_marker", required=True)
+    args = ap.parse_args(argv)
+    try:
+        with open(args.comments, encoding="utf-8") as handle:
+            comments = json.load(handle)
+        ids = superseded_marker_ids(comments, args.author, args.expect_marker)
+    except (OSError, ValueError, GateInputError) as error:
+        print(f"pr_ready_gate supersede: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(ids))
+    return 0
+
+
 def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):
     """Compatibility tuple: comment history no longer grants readiness."""
     try:
@@ -228,6 +291,9 @@ def decide(comments, trusted_authors, head_oid, resolved_base, base_ref):
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["supersede"]:
+        return _supersede_main(argv[1:])
     ap = argparse.ArgumentParser(prog="pr_ready_gate.py")
     ap.add_argument(
         "--comments", required=True, help="JSON array of {author,created_at,id,body}"

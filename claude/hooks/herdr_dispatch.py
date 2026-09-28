@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -36,7 +37,19 @@ class DispatchError(RuntimeError):
 
 PHASES = ("plan", "implement", "review", "think", "read", "mechanical")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
-AGENT_STATES = ("idle", "done")
+AGENT_STATES = core.IDLE_AGENT_STATES
+PANE_READY_ATTEMPTS = 3
+# macOS MAX_CANON: a longer line pasted into a canonical-mode tty is truncated.
+PANE_RUN_MAX_BYTES = 1023
+EXIT_WAIT_MS = 10_000
+# Claude Code's /exit menu when background work is running; option 1 exits.
+# Requires the numbered option, not just the phrase, so prose is never
+# mistaken for the menu. Human-verify H1: the live text is untested.
+BACKGROUND_EXIT_MENU_RE = re.compile(
+    r"background (?:tasks?|work|process(?:es)?)\s+(?:are|is)\s+still\s+running"
+    r".{0,120}?1\.\s*exit\s+anyway",
+    re.IGNORECASE | re.DOTALL,
+)
 
 # Launch-time facts copied from the attempt dict onto a bound row by the first
 # enrichment. Record-level keys (task_id, repo_slug, worktree, branch) are
@@ -51,6 +64,7 @@ BOUND_LAUNCH_FACTS = (
     "capture_before_sha256",
     "account_id",
     "personal",
+    "launch_failed_cause",
 )
 CORE_CALL_TIMEOUT_SECS = 30
 
@@ -73,6 +87,47 @@ def _runtime_binary(runtime: str, env: dict[str, str]) -> str:
     return selected
 
 
+def _pane_run(herdr_cli: str, pane_id: str, line: str, env: dict[str, str]) -> None:
+    if len(line.encode()) > PANE_RUN_MAX_BYTES:
+        raise DispatchError("pane-prep: line-too-long")
+    _run_herdr(herdr_cli, ["pane", "run", pane_id, line], env=env, json_result=False)
+
+
+def _wait_marker(herdr_cli, pane_id, marker, timeout_ms, env) -> dict[str, Any]:
+    observed = _run_herdr(
+        herdr_cli,
+        ["pane", "wait-output", pane_id, "--match", marker,
+         "--timeout", str(timeout_ms), "--source", "recent-unwrapped"],
+        env=env,
+        timeout_secs=timeout_ms / 1000 + 5,
+    )
+    if (
+        observed.get("type") != "output_matched"
+        or observed.get("pane_id") != pane_id
+        or observed.get("matched_line") != marker
+    ):
+        raise DispatchError("target pane account environment probe was not current")
+    return observed
+
+
+def _split_marker_line(marker: str) -> str:
+    # Printed in two halves so the command echo never contains the marker.
+    half = len(marker) // 2
+    return f"printf '%s%s\\n' {shlex.quote(marker[:half])} {shlex.quote(marker[half:])}"
+
+
+def _wait_for_shell(herdr_cli: str, pane_id: str, env: dict[str, str]) -> None:
+    marker = f"HERDR_SHELL_{uuid.uuid4().hex[:16]}"
+    _pane_run(herdr_cli, pane_id, _split_marker_line(marker), env)
+    for _ in range(PANE_READY_ATTEMPTS):
+        try:
+            _wait_marker(herdr_cli, pane_id, marker, 5000, env)
+            return
+        except DispatchError:
+            continue
+    raise DispatchError("pane-prep: shell-not-ready")
+
+
 def _bind_pane_environment(
     herdr_cli: str,
     pane_id: str,
@@ -81,6 +136,7 @@ def _bind_pane_environment(
     scope: dict,
     env: dict[str, str],
     *,
+    prep_dir: Path,
     personal: bool = False,
     runtime: str | None = None,
     runtime_binary: str | None = None,
@@ -138,58 +194,62 @@ def _bind_pane_environment(
                 f"unset -f '{runtime}' 2>/dev/null || :",
                 f"unalias '{runtime}' 2>/dev/null || :",
                 f'export PATH={shlex.quote(str(Path(runtime_binary).parent))}:"$PATH"',
+                # The gh shim goes in front of the runtime dir, which can hold
+                # the real gh (agent_runtime.arm_gh_shim, gh_post_shim.py).
+                f'export PATH={shlex.quote(str(agent_runtime.GH_SHIM_DIR))}:"$PATH"',
+                f'export BASH_ENV="${{BASH_ENV:-{agent_runtime.GH_SHIM_ANCHOR}}}"',
                 "hash -r",
             ]
         )
         probes.append(
             f"printf '{token}:RUNTIME_BINARY=%s\\n' \"$(command -v '{runtime}')\""
         )
-    ready_probe = (
-        "printf '%s%s\\n' "
-        f"{shlex.quote(ready_marker[:marker_split])} "
-        f"{shlex.quote(ready_marker[marker_split:])}"
-    )
-    _run_herdr(
-        herdr_cli,
-        ["pane", "run", pane_id, "; ".join([*assignments, *probes, ready_probe])],
-        env=env,
-        json_result=False,
-    )
-    observed = _run_herdr(
-        herdr_cli,
-        [
-            "pane",
-            "wait-output",
-            pane_id,
-            "--match",
-            ready_marker,
-            "--timeout",
-            "5000",
-            "--source",
-            "recent-unwrapped",
-        ],
-        env=env,
-    )
-    if (
-        observed.get("type") != "output_matched"
-        or observed.get("pane_id") != pane_id
-        or observed.get("matched_line") != ready_marker
-    ):
-        raise DispatchError("target pane account environment probe was not current")
-    read = observed.get("read") if isinstance(observed, dict) else None
-    text = read.get("text") if isinstance(read, dict) else None
-    expected = {
-        f"{token}:{key}={'__UNSET__' if value is None else value}"
-        for key, value in bindings.items()
-    }
-    expected.add(ready_marker)
-    if runtime_binary is not None:
-        expected.add(f"{token}:RUNTIME_BINARY={runtime_binary}")
-    if not isinstance(text, str) or not expected.issubset(set(text.splitlines())):
-        raise DispatchError(
-            "target pane account environment or runtime executable could not be verified"
-        )
-    _validate_pane(herdr_cli, pane_id, workspace_id, cwd, env)
+        probes.append(f"printf '{token}:GH=%s\\n' \"$(command -v gh)\"")
+    ready_probe = _split_marker_line(ready_marker)
+    stage = "shell-not-ready"
+    script = None
+    try:
+        _wait_for_shell(herdr_cli, pane_id, env)
+        stage = "script-write"
+        prep_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        script = prep_dir / f"{uuid.uuid4().hex}.sh"
+        fd = os.open(script, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write("\n".join([*assignments, *probes, ready_probe]) + "\n")
+        stage = "script-source"
+        _pane_run(herdr_cli, pane_id, f". {shlex.quote(str(script))}", env)
+        stage = "environment-probe"
+        observed = _wait_marker(herdr_cli, pane_id, ready_marker, 10_000, env)
+        stage = "script-cleanup"
+        script.unlink(missing_ok=True)
+        script = None
+        stage = "environment-mismatch"
+        read = observed.get("read") if isinstance(observed, dict) else None
+        text = read.get("text") if isinstance(read, dict) else None
+        expected = {
+            f"{token}:{key}={'__UNSET__' if value is None else value}"
+            for key, value in bindings.items()
+        }
+        expected.add(ready_marker)
+        if runtime_binary is not None:
+            expected.add(f"{token}:RUNTIME_BINARY={runtime_binary}")
+            expected.add(f"{token}:GH={agent_runtime.GH_SHIM_DIR / 'gh'}")
+        if not isinstance(text, str) or not expected.issubset(set(text.splitlines())):
+            raise DispatchError(
+                "target pane account environment or runtime executable could not be verified"
+            )
+        stage = "pane-validate"
+        _validate_pane(herdr_cli, pane_id, workspace_id, cwd, env)
+    except (DispatchError, OSError) as exc:
+        if script is not None:
+            try:
+                script.unlink(missing_ok=True)
+            except OSError:
+                pass  # a cleanup error must not replace the prep failure being reported
+        if str(exc).startswith("pane-prep: "):
+            raise
+        # The caller records any pane-prep failure as a launch_failed row.
+        raise DispatchError(f"pane-prep: {stage}: {exc}") from exc
 
 
 def _expected_slug(repository: dict, cwd: str | os.PathLike[str]) -> str:
@@ -333,9 +393,9 @@ def _write_attempt(
 def _live_agent_status(result: Any, agent: str, runtime: str, pane_id: str) -> str | None:
     """Read agent_status from an `agent get` reply, or None if it is not ours.
 
-    Deliberately not `_validate_agent`: that helper requires idle and
-    interactive-ready, which is the pre-launch contract and the exact inverse of
-    what a post-prompt reconciliation has to accept.
+    Deliberately not `_validate_agent`: that helper requires an idle (or, for
+    reprompt, done) interactive-ready agent, which is the pre-launch contract
+    and the exact inverse of what a post-prompt reconciliation has to accept.
     """
     if not isinstance(result, dict) or result.get("type") not in (
         "agent_info",
@@ -703,25 +763,6 @@ def launch(
     agent_runtime._apply_launch_environment(child_env, scope)
     runtime_binary = _runtime_binary(runtime, child_env)
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
-    _bind_pane_environment(
-        herdr_cli,
-        pane_id,
-        workspace_id,
-        cwd,
-        scope,
-        child_env,
-        personal=personal,
-        runtime=runtime,
-        runtime_binary=runtime_binary,
-    )
-
-    pre_capture = _run_herdr(
-        herdr_cli,
-        ["pane", "read", pane_id, "--source", "detection", "--lines", "200"],
-        env=child_env,
-        json_result=False,
-    )
-    assert isinstance(pre_capture, str)
     launch_id = f"{agent}-{uuid.uuid4().hex[:12]}"
     started_ns = time.time_ns()
     attempt = {
@@ -742,13 +783,35 @@ def launch(
         "difficulty_confirmed": route.get("difficulty_confirmed"),
         "status": "starting",
         "started_ns": started_ns,
-        "capture_before_sha256": hashlib.sha256(pre_capture.encode()).hexdigest(),
+        "capture_before_sha256": None,
         "account_id": scope["account_id"],
         "personal": personal,
         "repo_slug": repo_slug,
         "worktree": repository["root"],
         "branch": repository["branch"],
+        "launch_failed_cause": None,
     }
+    try:
+        _bind_pane_environment(
+            herdr_cli, pane_id, workspace_id, cwd, scope, child_env,
+            prep_dir=rd / "prep", personal=personal,
+            runtime=runtime, runtime_binary=runtime_binary,
+        )
+    except DispatchError as exc:
+        if str(exc).startswith("pane-prep: "):
+            # Status and cause in one write, so no row is failed without a cause.
+            records.reserve({**attempt, "status": "launch_failed",
+                             "launch_failed_cause": str(exc)[:200]})
+        raise
+
+    pre_capture = _run_herdr(
+        herdr_cli,
+        ["pane", "read", pane_id, "--source", "detection", "--lines", "200"],
+        env=child_env,
+        json_result=False,
+    )
+    assert isinstance(pre_capture, str)
+    attempt["capture_before_sha256"] = hashlib.sha256(pre_capture.encode()).hexdigest()
     task = records.reserve(attempt)
 
     try:
@@ -1256,6 +1319,9 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
             task = _read_task(task_path, task_id)
             _validate_task_context(task, repository, repo_slug)
             target = _find_current_target(task, launch_id, phase, workspace_id, runtime)
+            if target.get("exit_requested"):
+                raise DispatchError(
+                    "exit was requested for this launch; relaunch for further work")
             agent = target["agent"]
             pane_id = target["pane_id"]
             reprompts = list(target.get("reprompts", []))
@@ -1284,14 +1350,14 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     except (OSError, ValueError) as exc:
         raise DispatchError(f"reprompt could not record intent: {exc}") from exc
 
-    # Live-agent validation: idle + interactive-ready on the recorded pane.
-    # Read-only herdr query; safe outside the fence. A failure here delivered
-    # nothing, so the recorded intent is marked failed (retry-safe), not orphaned.
+    # Live-agent validation: idle or done, interactive-ready, on the recorded
+    # pane. Read-only herdr query, safe outside the fence; a failure here
+    # delivered nothing, so intent is marked failed (retry-safe), not orphaned.
     try:
         current = _run_herdr(herdr_cli, ["agent", "get", agent], env=child_env,
                              json_result=True)
         assert isinstance(current, dict)
-        _validate_agent(current, agent, runtime, pane_id)
+        _validate_agent(current, agent, runtime, pane_id, states=AGENT_STATES)
     except (DispatchError, OSError, ValueError) as exc:
         # Readiness probe failed (validation, transport, or a decode/parse
         # error). Nothing was delivered, so mark the intent failed (retry-safe)
@@ -1364,6 +1430,258 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
     return {"status": result_status, "launch_id": launch_id, "phase": phase,
             "reprompt_seq": seq, "prompt_state": delivered["state"],
             "observation": REPROMPT_OBSERVATION}
+
+
+def _settle_context(repo_slug, task_id, workspace_id, cwd, runtime, personal, env, verb):
+    if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
+        raise DispatchError("invalid task or workspace identity")
+    if runtime not in ("claude", "codex"):
+        raise DispatchError("route runtime is unsupported")
+    child_env = dict(os.environ if env is None else env)
+    if child_env.get("HERDR_ENV") != "1":
+        raise DispatchError(f"{verb} requires a Herdr-managed environment")
+    try:
+        repository, scope = agent_runtime.execution_context(cwd, runtime, personal)
+    except agent_runtime.RouteError as exc:
+        raise DispatchError(str(exc)) from exc
+    if repo_slug != _expected_slug(repository, cwd):
+        raise DispatchError("repo slug does not match repository context")
+    return child_env, repository, scope, _payload_repo_dir(scope, repo_slug)
+
+
+def _sidecar(rd: Path, task_id: str, suffix: str) -> dict[str, Any] | None:
+    try:
+        record = json.loads(core.read_payload_text(rd / "tasks" / f"{task_id}{suffix}"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"settlement record is unreadable: {task_id}{suffix}") from exc
+    return record if isinstance(record, dict) else None
+
+
+def _agents_snapshot(herdr_cli, env):
+    agents = _run_herdr(herdr_cli, ["agent", "list"], env=env).get("agents")
+    if not isinstance(agents, list):
+        raise DispatchError("herdr agent or pane list is malformed")
+    return [a for a in agents if isinstance(a, dict)]
+
+
+def _snapshot(herdr_cli, workspace_id, env):
+    agents = _agents_snapshot(herdr_cli, env)
+    panes = _run_herdr(herdr_cli, ["pane", "list", "--workspace", workspace_id],
+                       env=env).get("panes")
+    if not isinstance(panes, list):
+        raise DispatchError("herdr agent or pane list is malformed")
+    return (agents,
+            [p for p in panes if isinstance(p, dict) and p.get("workspace_id") == workspace_id])
+
+
+def _occupants(agents, pane_id):
+    return [a for a in agents if a.get("pane_id") == pane_id]
+
+
+def _is_live(agents, row):
+    return any(a.get("name") == row["agent"] for a in _occupants(agents, row["pane_id"]))
+
+
+# /exit delivery is confirmed only by these two SKILL.md codes: stalled is
+# the accepted-submission code, timeout is documented only as not itself a
+# failure. Everything else (incl. agent_blocked) fails closed by default.
+_EXIT_DELIVERED_PREFIX = "Herdr agent prompt did not report success: "
+_EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
+
+
+def _exit_agent(herdr_cli, row, workspace_id, env):
+    try:
+        result = _run_herdr(herdr_cli, ["agent", "prompt", row["agent"], "/exit", "--wait",
+                               "--timeout", str(EXIT_WAIT_MS)],
+                   env=env, timeout_secs=EXIT_WAIT_MS / 1000 + 5)
+        # A well-formed-but-wrong result (e.g. {"id": ..., "result": {}}) is
+        # not proof of delivery; only a genuine agent_prompted envelope is.
+        _prompt_state(result)
+    except DispatchError as exc:
+        message = str(exc)
+        code = (message[len(_EXIT_DELIVERED_PREFIX):]
+                if message.startswith(_EXIT_DELIVERED_PREFIX) else None)
+        if code not in _EXIT_DELIVERED_CODES:
+            return "still-live"
+    agents, _panes = _snapshot(herdr_cli, workspace_id, env)
+    if not _is_live(agents, row):
+        return "exited"
+    text = _run_herdr(herdr_cli, ["pane", "read", row["pane_id"], "--source", "detection",
+                                  "--lines", "20"], env=env, json_result=False)
+    if BACKGROUND_EXIT_MENU_RE.search(text):
+        # Target the agent by name, not the pane. herdr resolves TARGET at
+        # call time and refuses with agent_not_found if it is gone, so there
+        # is no occupant snapshot left to go stale between read and send.
+        try:
+            _run_herdr(herdr_cli, ["agent", "send-keys", row["agent"], "1", "enter"],
+                       env=env, json_result=False)
+        except DispatchError as exc:
+            if str(exc).endswith(": agent_not_found"):
+                return "exited"
+            raise
+        agents, _panes = _snapshot(herdr_cli, workspace_id, env)
+        if not _is_live(agents, row):
+            return "exited"
+    return "still-live"
+
+
+def _pane_verdict(task, row, agents, panes, reasons):
+    pane_id = row["pane_id"]
+    if pane_id not in [p.get("pane_id") for p in panes]:
+        return "absent"
+    if len(panes) < 2:
+        return "kept-last-pane"
+    sharing = [i for i, w in enumerate(task["workers"])
+               if isinstance(w, dict) and w.get("pane_id") == pane_id]
+    if any(task["workers"][i].get("phase") != "review" for i in sharing):
+        return "kept-shared"
+    if any(reasons(i) is None for i in sharing):
+        return "kept-unsettled"
+    if any(a.get("name") != row["agent"] for a in _occupants(agents, pane_id)):
+        return "kept-occupied"
+    return "close"
+
+
+def _pane_idle(herdr_cli, pane_id, env):
+    """True only when the pane's foreground pid equals its shell pid.
+
+    An empty or failed process inspection is unverified, not idle.
+    """
+    try:
+        result = _run_herdr(herdr_cli, ["pane", "process-info", "--pane", pane_id], env=env)
+    except DispatchError:
+        return False
+    info = result.get("process_info") if isinstance(result, dict) else None
+    if not isinstance(info, dict):
+        return False
+    shell_pid = info.get("shell_pid")
+    foreground = info.get("foreground_processes")
+    if isinstance(shell_pid, bool) or not isinstance(shell_pid, int) or shell_pid < 1:
+        return False
+    # An empty list is `all([])`-vacuously "idle" but is also herdr's shape
+    # for a failed process inspection; a real idle shell reports itself as
+    # one foreground entry, never zero.
+    if not isinstance(foreground, list) or not foreground:
+        return False
+    return all(isinstance(item, dict) and item.get("pid") == shell_pid for item in foreground)
+
+
+def _occupant_proven(task, index, panes):
+    # The pane's launch token names this attempt, and no later row claims the
+    # pane: a successor may be reserved (row written) before its agent starts.
+    row = task["workers"][index]
+    entry = next((p for p in panes if p.get("pane_id") == row["pane_id"]), None)
+    tokens = entry.get("tokens") if entry else None
+    if not isinstance(tokens, dict) or tokens.get("launch_id") != row["launch_id"]:
+        return False
+    return not any(isinstance(w, dict) and w.get("pane_id") == row["pane_id"]
+                   for w in task["workers"][index + 1:])
+
+
+def _mark_exit_requested(task_path, task, index, reason):
+    # Persisted before /exit so an interrupted exit stays authorized (rule 0b).
+    task["workers"][index] = {**task["workers"][index], "exit_requested": reason}
+    core.write_json_atomic(task_path, task)
+
+
+def _settle_index(herdr_cli, task_path, task, index, reasons, workspace_id, env):
+    row = task["workers"][index]
+    reason = reasons(index)
+    base = {"launch_id": row.get("launch_id"), "reason": reason}
+    if reason is None or not _nonempty_str_row(row):
+        return {**base, "status": "not-settled"}
+    agents, panes = _snapshot(herdr_cli, workspace_id, env)
+    live = [a for a in _occupants(agents, row["pane_id"]) if a.get("name") == row["agent"]]
+    agent = "absent"
+    if live and live[0].get("agent_status") not in AGENT_STATES:
+        return {**base, "status": "busy", "agent": "busy", "pane": "untouched"}
+    if live:
+        if not _occupant_proven(task, index, panes):
+            return {**base, "status": "occupant-unverified", "agent": "live",
+                    "pane": "untouched"}
+        if not row.get("exit_requested"):
+            _mark_exit_requested(task_path, task, index, reason)
+        agent = _exit_agent(herdr_cli, row, workspace_id, env)
+        agents, panes = _snapshot(herdr_cli, workspace_id, env)
+        if _is_live(agents, row):
+            # _exit_agent's own verdict can go stale between its last
+            # snapshot and this one; trust the freshest read before deciding
+            # whether to close.
+            agent = "still-live"
+    pane = _pane_verdict(task, row, agents, panes, reasons)
+    if pane == "close" and agent == "still-live":
+        # The agent never actually exited; _pane_verdict only checks the
+        # occupant's registered name, not liveness, so keep the pane here
+        # rather than closing one whose agent is still working.
+        pane = "kept-occupied"
+    elif pane == "close" and not _pane_idle(herdr_cli, row["pane_id"], env):
+        # No registered agent is live, but an untracked live process (the
+        # user's own shell command) could still occupy the pane.
+        pane = "kept-occupied"
+    elif pane == "close":
+        _run_herdr(herdr_cli, ["pane", "close", row["pane_id"]], env=env)
+        pane = "closed"
+    status = "exit-incomplete" if agent == "still-live" and pane != "closed" else "settled"
+    return {**base, "status": status, "agent": agent, "pane": pane}
+
+
+def _nonempty_str_row(row):
+    return all(isinstance(row.get(k), str) and row[k] for k in ("agent", "pane_id"))
+
+
+def _settlement_reasons(task, rd, task_id, head):
+    done = _sidecar(rd, task_id, ".done.json")
+    review = _sidecar(rd, task_id, ".review.json")
+    payload_root = rd.parent.parent
+    return lambda i: core.row_settlement(task, i, done=done, review=review,
+                                         head=head, payload_root=payload_root)
+
+
+def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,
+           runtime="claude", herdr_cli="herdr", env=None, personal=False):
+    """Exit a settled worker row's idle agent and close its pane if review-only."""
+    child_env, repository, scope, rd = _settle_context(
+        repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "settle")
+    try:
+        with core.owner_transaction(rd, session, fence, context=repository, scope=scope,
+                                    expected_slug=repo_slug):
+            task_path = rd / "tasks" / f"{task_id}.json"
+            task = _read_task(task_path, task_id)
+            _validate_task_context(task, repository, repo_slug)
+            index = next((i for i, w in enumerate(task.get("workers", []))
+                          if isinstance(w, dict) and w.get("launch_id") == launch_id
+                          and w.get("workspace_id") == workspace_id), None)
+            if index is None:
+                raise DispatchError("no worker row for that launch in the workspace")
+            reasons = _settlement_reasons(task, rd, task_id, repository["head"])
+            return _settle_index(herdr_cli, task_path, task, index, reasons,
+                                 workspace_id, child_env)
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"settle could not hold the owner fence: {exc}") from exc
+
+
+def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
+          runtime="claude", herdr_cli="herdr", env=None, personal=False):
+    """Settle every review row of the task in one workspace, oldest first."""
+    child_env, repository, scope, rd = _settle_context(
+        repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "sweep")
+    try:
+        with core.owner_transaction(rd, session, fence, context=repository, scope=scope,
+                                    expected_slug=repo_slug):
+            task_path = rd / "tasks" / f"{task_id}.json"
+            task = _read_task(task_path, task_id)
+            _validate_task_context(task, repository, repo_slug)
+            reasons = _settlement_reasons(task, rd, task_id, repository["head"])
+            rows = [_settle_index(herdr_cli, task_path, task, i, reasons,
+                                  workspace_id, child_env)
+                    for i, w in enumerate(task.get("workers", []))
+                    if isinstance(w, dict) and w.get("phase") == "review"
+                    and w.get("workspace_id") == workspace_id]
+            return {"status": "swept", "rows": rows}
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"sweep could not hold the owner fence: {exc}") from exc
 
 
 def runtime_main(argv: list[str] | None = None) -> int:
