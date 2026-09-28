@@ -36,7 +36,7 @@ deliberately, use the skill's section 1a.
 In herdr mode the director edits no repo files itself, but it runs the skill's
 ship step once a task's review is confirmed: push the task branch, open the
 PR, run the `co-review` gate. The `ship.merge` config value (`auto` or
-`human`, defaulting from the account kind: personal auto, work human) decides
+`human`, defaulting from the repo location: `personal_repository` auto, else human) decides
 the merge: `auto` squash-merges with `--match-head-commit` after an APPROVE;
 `human` reports the PR for the owner's confirm. It never posts a comment,
 review, reply, or body edit.

@@ -341,11 +341,14 @@ config error.
 section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
 "merge": "auto"}}`. `push` and `pr` are booleans defaulting to true; `merge`
 is `"auto"` (squash-merge on a co-review APPROVE) or `"human"` (report for
-the owner's confirm). When the block or `merge` is absent, `merge` derives
-from the account kind that `claude/skills/lib/workflow_context.py
-account-scope --cwd <repo> --runtime claude` reports as `kind`: `personal`
--> `"auto"`, `work` -> `"human"`. A malformed block (non-object, unknown key,
-non-boolean `push`/`pr`, other `merge` value) makes the director fall back to
+the owner's confirm). When the block or `merge` is absent, `merge` is
+`"auto"` when `claude/skills/lib/workflow_context.py account-scope --cwd
+<repo> --runtime claude` reports `personal_repository` true (repo under the
+personal root), and `"human"` otherwise (work repo, repo outside both roots,
+or `account-scope` unavailable). `kind` is not used: it follows the running
+account, not the repo. `push: false` or `pr: false` makes the director report
+the branch as reviewed and leave push and PR to the owner. A malformed block
+(non-object, unknown key, non-boolean `push`/`pr`, other `merge` value) makes the director fall back to
 `merge: "human"` and report the config error.
 
 ### `task-lead-gate.json`
@@ -460,6 +463,7 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "contract_path": "claude/contracts/PROJ-123-contract.json",
   "contract_sha256": "<64hex>",
   "merge_check": null,
+  "pr_number": null,
   "status": "kickoff|in-progress|blocked|completed|review-dispatched|changes-requested|reviewed|failed|abandoned|merged",
   "created": "...",
   "updated": "..."

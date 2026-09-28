@@ -17,7 +17,8 @@ A Claude-led per-repo director over Herdr. It turns a designated work item into 
 briefed worker in a worktree-backed workspace, tracks the worker through a
 hook-fed event log plus worker-emitted completion records, and -- once it
 confirms real completion -- dispatches an independent reviewer before handing
-back to the human for merge. One standing Claude director per repo.
+back to the human (or through the ship step, per `ship.merge`). One standing
+Claude director per repo.
 
 Naming: the user-facing role name is **director**. Durable schema and CLI
 literals keep their historical values and never change: the ownership tier
@@ -1097,8 +1098,9 @@ helper from publishing.
    (`<n>` = count of actual blocking findings; incomplete or missing review
    evidence emits `changes-requested` with `<n>` possibly zero and never emits
    `approved`), then the review agent goes idle and hands back --
-   it does NOT run `/handoff`; `emit-review` is its only signal. Review agent
-   and director never push or open PRs. The verdict lands in
+   it does NOT run `/handoff`; `emit-review` is its only signal.
+   In the review phase the review agent and director never push or open PRs.
+   The verdict lands in
    `tasks/<task_id>.review.json`, separate from the impl `.done.json`.
 
 6. At every coordinator check-in while `review-dispatched`, enforce the bound
@@ -1220,21 +1222,40 @@ complete; final co-review is still required before PR merge." `changes-requested
 is not task-local readiness. Then run the ship step below; `/post-merge` sets
 `merged`.
 
-**Ship step.** Resolve `ship` from `config.json` (`references/state-layout.md`;
-absent -> `merge` derives from the account kind). When `ship.push` and
-`ship.pr` are true, after `confirm-review` passes:
+**Ship step.** Resolve `ship` from `config.json` (`references/state-layout.md`).
+When `ship` is absent, `merge` is `"auto"` if `account-scope` reports
+`personal_repository` true, else `"human"` (work repo, repo outside both roots,
+or `account-scope` unavailable). Take `<owner/repo>` from
+`git -C <worktree> remote get-url origin`; `gh` takes no `-C`, so pass
+`--repo <owner/repo>`. When `ship.push` is false, or `ship.pr` is false (with `push` true or not), run none of the steps below: report
+the branch as reviewed and leave push and PR to the owner. Otherwise, after
+`confirm-review` passes:
 
 1. Push: `git -C <worktree> push -u origin <branch>:<branch>` (explicit
    refspec, never a bare push).
-2. Write the PR body to a file with Write, then open a non-draft PR:
-   `gh pr create --base <default> --head <branch> --title <plain-language outcome> --body-file <file>`
-   (`<default>` is `default_base` without `origin/`). Record the number with
-   `write-task` as `pr_number`.
-3. Run the `co-review` gate on the PR, in a fresh subagent or itself. On
-   CHANGES, dispatch a repair on the PR branch and re-gate the new head.
-4. On APPROVE with `merge: "auto"`: run the ship skill's step-4 recheck, then
-   `gh pr merge --squash --match-head-commit <expected-head>` and `/post-merge`.
-   With `merge: "human"`: report the PR as ready for the owner's confirm.
+2. When `pr_number` is already on the task record (or
+   `gh pr list --repo <owner/repo> --head <branch>` returns one), skip create,
+   keep that number and continue at step 3. Otherwise write the PR body with
+   Write to `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/pr-body.md`
+   (outside every git work tree), following the `/pr` conventions (description,
+   test plan, Jira link), then open a non-draft PR:
+   `gh pr create --repo <owner/repo> --base <default> --head <branch> --title <plain-language outcome> --body-file <file>`
+   (`<default>` is `default_base` without `origin/`). Write the full task
+   record with `write-task`, adding `pr_number`.
+3. Run the `co-review` gate on the PR in a fresh subagent that is given the
+   whole gate through the merge decision, so the step-4 recheck runs in the
+   same workflow that ran co-review. On CHANGES, dispatch a repair on the PR
+   branch and re-gate the new head.
+4. On APPROVE with `merge: "auto"`: run the ship skill's step-4 recheck (PR not
+   draft, mergeable, CI green, live PR head equal to the `head` in the
+   co-review expected-identity file), then
+   `gh pr merge --repo <owner/repo> --squash --match-head-commit <expected-head>`
+   and `/post-merge`. `<expected-head>` is that verified `head`, never a fresh
+   `git rev-parse HEAD`. With `merge: "human"`: park the PR and report it as
+   ready for the owner's confirm; nothing merges.
+
+The director skips the ship skill's step 5 (audit comment) and step 6 (human
+merge gate): posts are never automated, and the config decides the merge.
 
 Marker posts still need the typed `post it`. No PR comment, review, reply, or
 body edit is automated.
@@ -1651,7 +1672,7 @@ the new `status`; that write is the authoritative record.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | human merges; `/post-merge`                                                                                                                                                                            | `merged`                                       | merged                  | yes       |
+| reviewed                                     | ship step: `merge: "auto"` merges after APPROVE, `"human"` parks the PR for the owner; `/post-merge`                                                                                                                                                                            | `merged`                                       | merged                  | yes       |
 
 `blocked` is a durable status here (the hint `blocked` drives it); there is
 no overlap between `failed` (errored, no usable branch) and `abandoned`
