@@ -16,8 +16,11 @@ import agent_runtime
 
 # A worker attempt can run well past an hour; a short TTL made settle/sweep
 # permanently unable to prove occupancy (and check-in nag forever) once a
-# long-lived worker's token aged out with nothing to refresh it.
-LAUNCH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
+# long-lived worker's token aged out with nothing to refresh it. herdr
+# 0.9.1 rejects a ttl_ms above 86400000, so this is capped at herdr's
+# 24-hour maximum; metadata_argv resends it on every update, refreshing
+# the token for a worker that outlives one day.
+LAUNCH_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 
 
 def _dispatch_error(message: str) -> RuntimeError:
