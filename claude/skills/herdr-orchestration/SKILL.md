@@ -1217,8 +1217,27 @@ create an automatic advisory-fix or full-review loop.
 
 Surface: "`<task_id>` review-change clean @ `<sha>`. Task-local review is
 complete; final co-review is still required before PR merge." `changes-requested`
-is not task-local readiness. Merge, `/ship`, `/post-merge` remain human actions;
-`/post-merge` sets `merged`.
+is not task-local readiness. Then run the ship step below; `/post-merge` sets
+`merged`.
+
+**Ship step.** Resolve `ship` from `config.json` (`references/state-layout.md`;
+absent -> `merge` derives from the account kind). When `ship.push` and
+`ship.pr` are true, after `confirm-review` passes:
+
+1. Push: `git -C <worktree> push -u origin <branch>:<branch>` (explicit
+   refspec, never a bare push).
+2. Write the PR body to a file with Write, then open a non-draft PR:
+   `gh pr create --base <default> --head <branch> --title <plain-language outcome> --body-file <file>`
+   (`<default>` is `default_base` without `origin/`). Record the number with
+   `write-task` as `pr_number`.
+3. Run the `co-review` gate on the PR, in a fresh subagent or itself. On
+   CHANGES, dispatch a repair on the PR branch and re-gate the new head.
+4. On APPROVE with `merge: "auto"`: run the ship skill's step-4 recheck, then
+   `gh pr merge --squash --match-head-commit <expected-head>` and `/post-merge`.
+   With `merge: "human"`: report the PR as ready for the owner's confirm.
+
+Marker posts still need the typed `post it`. No PR comment, review, reply, or
+body edit is automated.
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
@@ -1692,8 +1711,9 @@ Rules (these are outward-facing writes, so treat them carefully):
   the turn summary. The marker is bounded three ways (minutes, write
   budget, this repo only) and every guarded attempt under it, and every
   refusal, is recorded in `tasks/orch-edits.jsonl`.
-- The director never merges, pushes, or opens a PR. Merge/`/ship`/
-  `/post-merge` remain explicit human actions.
+- The director never posts a comment, review, reply, or body edit. Pushes,
+  PR creation, and (with `merge: "auto"`) merges are the documented ship step
+  in section 6; workers still never push or open a PR.
 - The only agent post on a PR is the newest co-review marker, posted by the
   director only after the owner types `post it` as the whole message
   (co-review Publish). No replies to reviewers -- draft them. PR body edits

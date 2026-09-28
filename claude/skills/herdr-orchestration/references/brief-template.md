@@ -401,5 +401,7 @@ task. Each still carries `<lessons-step>`:
   The ship worker writes that section in the same write as the rest of `ship.md`.
   When a `ship.md` already exists, it must
   carry forward that report's `## Lessons` lines into the new one.
+  Push, PR creation, and merge are the director's ship step (`ship` block in
+  `config.json`); a ship brief does not hand them to the worker.
   The director does not harvest a ship report at check-in; `/post-merge`
   step 1 reads it.

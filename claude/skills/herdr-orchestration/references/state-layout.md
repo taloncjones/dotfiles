@@ -337,6 +337,17 @@ malformed block (non-object, unknown key, or a `max_files` that is not a
 positive int) makes the director treat every todo as raw and report the
 config error.
 
+`ship` is optional and read only by the director's ship step (SKILL.md
+section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
+"merge": "auto"}}`. `push` and `pr` are booleans defaulting to true; `merge`
+is `"auto"` (squash-merge on a co-review APPROVE) or `"human"` (report for
+the owner's confirm). When the block or `merge` is absent, `merge` derives
+from the account kind that `claude/skills/lib/workflow_context.py
+account-scope --cwd <repo> --runtime claude` reports as `kind`: `personal`
+-> `"auto"`, `work` -> `"human"`. A malformed block (non-object, unknown key,
+non-boolean `push`/`pr`, other `merge` value) makes the director fall back to
+`merge: "human"` and report the config error.
+
 ### `task-lead-gate.json`
 
 The task-lead activation gate record. The intended writer is
