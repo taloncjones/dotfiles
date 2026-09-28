@@ -181,30 +181,42 @@ after the step 4 confirmation.
    dedupe by rule text; confirm the post-edit file still meets the cap.
    Never commit on `main` and never edit in the main checkout: lessons
    land through a PR. Batch every approved lesson from this run into one
-   branch and one PR. Runbook (run from the dotfiles repo, any repo's
-   lessons use the dotfiles repo here):
-   1. `git fetch origin main`, then create a temporary worktree from the
-      fresh remote tip on a new branch, under the session scratchpad or
-      `$TMPDIR`:
-      `git worktree add -b talon/agent-lesson-<slug> "$TMPDIR/agent-lesson-<slug>" origin/main`.
-   2. In that worktree, re-read and edit
-      `claude/rules/personal/agent-lessons.md` (dedupe, cap check as
-      above). Confirm `git status` shows only that file.
+   branch and one PR. Run from the dotfiles main checkout
+   (`~/Git/personal/dotfiles`); when running in another repo, use
+   `git -C ~/Git/personal/dotfiles` for the fetch and worktree add. Slug:
+   the first lesson's slug, with `-and-more` appended when several
+   lessons are batched. Path rule: create the directory in its own call,
+   then paste the literal path it printed, verbatim, into every later
+   command. The git guard denies a variable path.
+   1. `git fetch origin main`. Confirm no local commits ahead of
+      origin/main. Run `mktemp -d` alone and note the printed path as
+      `<wt>`. Then:
+      `git worktree add -b talon/agent-lesson-<slug> <wt> origin/main`.
+   2. Re-read and edit `<wt>/claude/rules/personal/agent-lessons.md`
+      (dedupe, cap check as above). Confirm
+      `git -C <wt> status --short` shows only that file.
    3. Commit with an explicit pathspec so nothing else rides along. Use
       a scope prefix and avoid assistant brand words in the summary:
-      `git commit -m "claude: Record agent lesson: <slug>" -- claude/rules/personal/agent-lessons.md`.
+      `git -C <wt> commit -m "claude: Record agent lesson: <slug>" -- claude/rules/personal/agent-lessons.md`.
    4. Push with an explicit refspec:
-      `git push -u origin talon/agent-lesson-<slug>:talon/agent-lesson-<slug>`.
-   5. Open a non-draft PR against `main` with `gh pr create`; the body
-      names each added lesson line and gives a one-line test plan. The
-      PR merge stays the owner's action and the co-review gate applies.
-   6. Remove the temporary worktree
-      (`git worktree remove "$TMPDIR/agent-lesson-<slug>"`); the local
-      branch may stay until the PR merges. Local `main` must still equal
-      `origin/main`.
-      Any failed precondition, edit conflict, push or PR failure, or partial
-      state -> do not leave commits on `main`; remove the temporary worktree
-      and file a dotfiles todo carrying the exact proposed line(s) instead.
+      `git -C <wt> push -u origin talon/agent-lesson-<slug>:talon/agent-lesson-<slug>`.
+   5. Write the PR body to a file with the Write tool: one line per added
+      lesson, then one test-plan line. Open a non-draft PR with
+      `gh pr create --head talon/agent-lesson-<slug> --base main --title "claude: Add agent
+      lessons (<YYYY-MM-DD>)" --body-file <body file>`, title on one line.
+      Inside herdr this call needs the typed `post it` go and the shim;
+      the step-4 confirmation does not mint it. Outside herdr it is a
+      plain call. The PR merge stays the owner's action and the
+      co-review gate applies.
+   6. Remove the temporary worktree: `git worktree remove <wt>` (the
+      literal path). The local branch may stay until the PR merges.
+      Local `main` must have no commits ahead of `origin/main`.
+      Any failed precondition, edit conflict, push or PR failure, or
+      partial state -> do not leave commits on `main`. Remove the
+      temporary worktree by its literal path, and if the push happened,
+      delete the local branch and the pushed remote branch so a retry can
+      recreate `talon/agent-lesson-<slug>`. Then file a dotfiles todo
+      carrying the exact proposed line(s).
 
 ## Notes
 
