@@ -901,10 +901,15 @@ if jget "$CFG/settings.json" "'Skill(review-change)' in d['permissions']['allow'
 else
     fail "link path grants review-change skill permission"
 fi
-if jget "$CFG/settings.json" "all(d['permissions']['allow'].count(r) == 1 for r in ['Bash(bash claude/hooks/*.test.sh*)', 'Bash(bash install/*.test.sh*)', 'Bash(bash bin/*.test.sh*)', 'Bash(bin/dotfiles-tests:*)', 'Bash(env -u WORKFLOW_PERSONAL_ACCOUNT bash claude/hooks/*.test.sh*)', 'Bash(env -u WORKFLOW_PERSONAL_ACCOUNT bash install/*.test.sh*)', 'Bash(env -u WORKFLOW_PERSONAL_ACCOUNT bash bin/*.test.sh*)'])"; then
-    pass "link path grants the repo test-suite allow rules"
+if jget "$CFG/settings.json" "d['permissions']['allow'].count('Bash(bin/dotfiles-tests:*)') == 1"; then
+    pass "link path grants the repo test-runner allow rule"
 else
-    fail "link path grants the repo test-suite allow rules"
+    fail "link path grants the repo test-runner allow rule"
+fi
+if jget "$CFG/settings.json" "not [r for r in d['permissions']['allow'] if 'test.sh' in r and '*' in r and r.index('*') < r.index('test.sh')]"; then
+    pass "link path has no wildcard before a test script name"
+else
+    fail "link path has no wildcard before a test script name"
 fi
 if jget "$CFG/settings.json" "d['permissions']['deny'] == [] and 'Bash(rm:*)' not in d['permissions']['ask']"; then
     pass "link path drops the rm ask rule and deny floor"

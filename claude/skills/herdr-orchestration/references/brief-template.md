@@ -88,11 +88,12 @@ native child agents under the user's delegation policy, not Claude Workflow.
   stop, and a background notification does not hold the turn open. Run a
   command in the foreground when it fits in one Bash call (up to 600000 ms).
   For a longer run, set an overall deadline before launch (30 minutes unless
-  the task names a longer one), make a fresh log for it with `mktemp` under
-  the session scratchpad, launch `{ CMD; echo "EXIT $?"; } >"$log" 2>&1` with
-  `run_in_background`, keep the returned task id, and wait in the foreground,
-  inside one Bash call, on the `EXIT` line with a bounded until-loop:
-  `until grep -q '^EXIT ' "$log" || [ $SECONDS -ge 540 ]; do sleep 10; done`.
+  the task names a longer one), pick a literal log path under the session
+  scratchpad, launch `{ CMD; rc=$?; printf '\nEXIT %s\n' "$rc"; } >LOG 2>&1`
+  with `run_in_background` (LOG is that literal path, never a shell variable),
+  keep the returned task id, and wait in the foreground, inside one Bash call
+  whose timeout you raise above the loop, on the `EXIT` line with a bounded
+  until-loop: `until grep -q '^EXIT ' LOG || [ $SECONDS -ge 540 ]; do sleep 10; done`.
   Match the log line, never the process list. A quiet log is not a stall:
   re-arm the wait until the `EXIT` line appears or the deadline passes, and
   relaunch only a run that is safe to repeat (a suite, a lint, a read-only

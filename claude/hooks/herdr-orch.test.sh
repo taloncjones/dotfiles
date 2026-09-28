@@ -10844,7 +10844,7 @@ t = open("claude/skills/herdr-orchestration/references/brief-template.md").read(
 rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
 mech = " ".join(t[t.index("## Mech brief variant"):t.index("## Reviewer brief variant")].split())
 for phrase in ("Keep the turn alive while your own run finishes", "bounded until-loop",
-               "never the process list", "EXIT $?", "overall deadline",
+               "never the process list", "overall deadline",
                "A quiet log is not a stall", "stop the run first",
                "--reason timeout"):
     assert phrase in rules, phrase
@@ -10852,6 +10852,26 @@ assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
 assert t.count("\n") <= 441
+assert 'echo "EXIT $?"' not in t
+PY
+
+check "brief wait recipe detects a finished run whatever its output ends with" <<'PY'
+import os, re, subprocess, tempfile
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+wrapper = re.search(r"`(\{ CMD; .*? >LOG 2>&1)`", rules).group(1)
+matcher = re.search(r"`until (grep -q '\^EXIT ' LOG) \|\|", rules).group(1)
+tmp = tempfile.mkdtemp()
+for name, cmd, code in (("printf done", "printf done", "0"),
+                        ("printf partial; false", "printf partial; false", "1")):
+    log = os.path.join(tmp, "run.log")
+    if os.path.exists(log):
+        os.remove(log)
+    sh = wrapper.replace("CMD", cmd).replace("LOG", log)
+    subprocess.run(["bash", "-c", sh], check=True)
+    m = subprocess.run(["bash", "-c", matcher.replace("LOG", log)])
+    assert m.returncode == 0, "%s: sentinel not matched: %r" % (name, open(log).read())
+    assert ("EXIT " + code) in open(log).read().splitlines(), name
 PY
 
 check "brief template treats a stop-gate nudge as no reason to emit" <<'PY'
