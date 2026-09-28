@@ -53,3 +53,11 @@ is the staging tier, not an archive.
   report; a check still pending at round start can flip mid-round.
 - (2026-09) A reviewer of a new runner-local cache or marker dir checks that
   the target's .gitignore covers it instead of calling it "untracked".
+- (2026-09) A third patch to the same hand-rolled parser or classifier is a
+  redesign signal: switch to deny-unless-classified instead of a fourth repro.
+- (2026-09) A deny-by-default classifier is only as strong as its trigger scan:
+  probe the pre-filter with quote splits, escapes and command substitution.
+- (2026-09) Guards classify the whole Bash payload, heredocs included: write
+  text naming gh or an assistant brand with Write/Edit, never a Bash heredoc.
+- (2026-09) At review, run the whole-repo suite once as well as the touched-file
+  suites; a scoped run cannot see a collision outside the diff's own files.
