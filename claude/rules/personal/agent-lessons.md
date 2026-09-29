@@ -53,3 +53,5 @@ is the staging tier, not an archive.
   report; a check still pending at round start can flip mid-round.
 - (2026-09) A reviewer of a new runner-local cache or marker dir checks that
   the target's .gitignore covers it instead of calling it "untracked".
+- (2026-09) An auto-mode session cannot change its own permission mode or post
+  gate: the classifier refuses it from the session and its workers; edit from manual.
