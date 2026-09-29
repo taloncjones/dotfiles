@@ -142,13 +142,13 @@ expect_rc "P1 first post allowed" 0 "$(payload_b s1 'gh pr comment 5 --body-file
 expect_rc "P1 second post passes the hook (the shim spends the go)" 0 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
 expect_file "P1 hook claims nothing" "$GATE/s1.post-used" absent
 : >"$GATE/s1.post-used"
-expect_rc "P1c post denied once the shim has spent the go" 2 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
+expect_rc "P1c post still allowed after a shim claim file (no per-post spend)" 0 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
 
 case_gate p2
 expect_rc "P2 mint" 0 "$(payload_u s1 'post it')"
-expect_rc "P2 next prompt clears the go" 0 "$(payload_u s1 'thanks')"
-expect_file "P2 marker removed" "$GATE/s1.json" absent
-expect_rc "P2 post denied" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
+expect_rc "P2 next prompt keeps an unexpired go" 0 "$(payload_u s1 'thanks')"
+expect_file "P2 marker kept" "$GATE/s1.json" present
+expect_rc "P2 post still allowed" 0 "$(payload_b s1 'gh pr comment 5 --body x')"
 
 case_gate p3
 expect_rc "P3 mint under s1" 0 "$(payload_u s1 'post it')"
@@ -161,7 +161,7 @@ expect_rc "P4 expired marker denies" 2 "$(payload_b s1 'gh pr comment 5 --body x
 
 case_gate p5
 expect_rc "P5 mint" 0 "$(payload_u s1 'post it')"
-expect_rc "P5 chained double post in one command denied" 2 "$(payload_b s1 'gh pr comment 5 --body a && gh pr comment 5 --body b')"
+expect_rc "P5 chained double post in one command allowed under one go" 0 "$(payload_b s1 'gh pr comment 5 --body a && gh pr comment 5 --body b')"
 
 # --- D: supersede deletes need the post go, but not their own claim ------
 
@@ -179,26 +179,26 @@ expect_rc "D3 mint" 0 "$(payload_u s1 'post it')"
 expect_rc "D3 post" 0 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
 expect_rc "D3 loop delete allowed" 0 "$(payload_b s1 'for id in 1 2; do gh api -X DELETE repos/o/r/issues/comments/$id; done')"
 
-# --- B: a body edit needs its own go, not the post go ---------------------
+# --- B: any go covers body edits and posts alike -------------------------
 
 case_gate b1
 expect_rc "B1 mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "B1 body edit denied under a post go" 2 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
+expect_rc "B1 body edit allowed under a post go" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
 
 case_gate b2
 expect_rc "B2 mint body" 0 "$(payload_u s1 'edit the pr body')"
 expect_rc "B2 first edit allowed" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
 expect_rc "B2 second edit passes the hook (the shim spends the go)" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
 : >"$GATE/s1.body-used"
-expect_rc "B2c edit denied once the shim has spent the go" 2 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
+expect_rc "B2c edit still allowed after a shim claim file (no per-edit spend)" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
 
 case_gate b3
 expect_rc "B3 mint body" 0 "$(payload_u s1 'edit the pr body')"
-expect_rc "B3 post denied under a body go" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
+expect_rc "B3 post allowed under a body go" 0 "$(payload_b s1 'gh pr comment 5 --body x')"
 
 case_gate b4
 expect_rc "B4 mint body" 0 "$(payload_u s1 'edit the pr body')"
-expect_rc "B4 chained double body edit in one command denied" 2 "$(payload_b s1 'gh pr edit 5 --body-file a.md ; gh pr edit 5 --body-file b.md')"
+expect_rc "B4 chained double body edit in one command allowed under one go" 0 "$(payload_b s1 'gh pr edit 5 --body-file a.md ; gh pr edit 5 --body-file b.md')"
 
 # --- R: reads and non-posting gh calls are always allowed -----------------
 
@@ -619,7 +619,7 @@ expect_file "M3 old marker pruned" "$GATE/old.json" absent
 
 # --- P: personal repositories post without a go -------------------------
 
-case_gate p1
+case_gate pp1
 NOSHIM_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'herdr-shims' | paste -sd: -)
 P1_PAYLOAD=$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 1 --body x')
 printf '%s' "$P1_PAYLOAD" | PATH="$NOSHIM_PATH" python3 "$HOOK" >"$FIX/out" 2>"$FIX/err"
