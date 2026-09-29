@@ -146,11 +146,12 @@ for the provider's `launch_env` mapping.
 
      Auto mode's server-side classifier intercepts two kinds of action.
      It refuses `gh pr merge`, `gh workflow run`, `gh pr comment` and
-     `gh pr ready` unless the project's `.claude/settings.local.json`
-     allows them (`Bash(gh pr merge:*)`, `Bash(gh workflow run:*)`,
-     `Bash(gh pr comment:*)`, `Bash(gh pr ready:*)`; machine-local, never
-     in the template), so the owner keeps those rules in every repository
-     the director runs in. And it refuses any edit that loosens the
+     `gh pr ready` unless an allow rule covers them. The four rules
+     (`Bash(gh pr merge:*)`, `Bash(gh workflow run:*)`,
+     `Bash(gh pr comment:*)`, `Bash(gh pr ready:*)`) live in
+     `claude/settings.json.tmpl`, so `update --ai` carries them into every
+     account's `settings.json`; the post gate hook still runs on each of
+     them. And it refuses any edit that loosens the
      director's own guardrails (this skill's launch and posting rules, the
      post gate, the `director` function's permission mode), from the
      director and from every worker it launches, which also run in auto
@@ -161,7 +162,7 @@ for the provider's `launch_env` mapping.
 
      | Action                                                                                   | Covering template rule              | Prompt in manual mode | Auto mode                                     | Recovery                                                                                                                |
      | ---------------------------------------------------------------------------------------- | ----------------------------------- | --------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-     | `gh pr view`, `gh pr comment`, `gh pr merge`                                             | `Bash(gh pr:*)`                     | no                    | allowed with the local allow rules above; refused without them | add the allow rules to `.claude/settings.local.json`                                                                    |
+     | `gh pr view`, `gh pr comment`, `gh pr merge`                                             | `Bash(gh pr:*)`                     | no                    | allowed by the template allow rules; refused without them      | run `update --ai` to reconcile the rules into settings.json                                                             |
      | `gh repo view`, `gh api`                                                                 | `Bash(gh repo:*)`, `Bash(gh api:*)` | no                    | allowed                                       | none needed                                                                                                             |
      | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready` | `Bash(python3:*)`                   | no                    | allowed; an occasional refusal is reported    | rerun the verb from a manual-mode session                                                                               |
      | `git worktree remove`                                                                    | `Bash(git worktree:*)`              | no                    | allowed                                       | none needed                                                                                                             |
