@@ -10210,6 +10210,28 @@ assert c.checkin_action({**cr, "status": "changes-requested"}) == "none"
 assert c.checkin_action({**base, "review_stale": True}) == "stale-review-reset"
 PY
 
+check "checkin: a reviewed task asks for the ship step until the director parks it" <<PY
+$LOAD
+task = {"status": "reviewed", "review_head_sha": "a" * 40, "ship_parked_head": None}
+assert c.ship_pending(task) is True
+# Parked at the reviewed head: the director asked or surfaced a stop, so the
+# wake-driven check-in may end with changed: no.
+assert c.ship_pending({**task, "ship_parked_head": "a" * 40}) is False
+# A new review head un-parks it.
+assert c.ship_pending({**task, "ship_parked_head": "b" * 40}) is True
+assert c.ship_pending({**task, "status": "review-dispatched"}) is False
+assert c.ship_pending({**task, "review_head_sha": None}) is False
+base = dict(status="reviewed", poll_ok=True, live="idle", worktree_exists=True,
+            head="a" * 40, completed=False, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None,
+            ship_pending=True)
+assert c.checkin_action(base) == "ship", c.checkin_action(base)
+assert c.checkin_action({**base, "review_stale": True}) == "stale-review-reset"
+assert c.checkin_action({**base, "idle_settled": True}) == "exit-idle-worker"
+assert c.checkin_action({**base, "ship_pending": False}) == "none"
+PY
+
 check "checkin_action: a terminal status never produces work" <<PY
 $LOAD
 base = dict(status="merged", poll_ok=True, live="absent", worktree_exists=False,
@@ -10583,7 +10605,8 @@ $LOAD
 rd = tempfile.mkdtemp()
 os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
 task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": "b" * 40,
-        "review_head_sha": "a" * 40, "worktree": os.path.join(rd, "gone"),
+        "review_head_sha": "a" * 40, "ship_parked_head": "a" * 40,
+        "worktree": os.path.join(rd, "gone"),
         "workers": [{"phase": "review", "workspace_id": "w3", "runtime": "claude"}]}
 poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
 facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
@@ -10854,7 +10877,7 @@ F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
 BASE=$(printf 'b%.0s' $(seq 1 40))
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-    --json '{"task_id":"PROJ-1","status":"reviewed","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude"}]}'
+    --json '{"task_id":"PROJ-1","status":"reviewed","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","ship_parked_head":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude"}]}'
 printf '{"route":"x"}' > "$RD/tasks/PROJ-1.route.json"
 printf '{"status":"review-dispatched","workers":[{"phase":"review","runtime":"claude","launch_id":"L","workspace_id":"w3","pane_id":"p","source_head_sha":"'"$BASE"'","started_ns":1}]}' > "$RD/tasks/PROJ-1.repair2.route.json"
 printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"idle"}]}}' > "$root/a.json"

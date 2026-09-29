@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import agent_runtime
@@ -1095,6 +1096,46 @@ def test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane():
         assert ["pane", "close", "w1:p2"] in fx.calls()
         exits = [c for c in fx.calls() if c[:2] == ["agent", "prompt"] and c[3] == "/exit"]
         assert exits and "--until" not in exits[0], exits
+    finally:
+        fx.close()
+
+
+def test_settle_exits_an_idle_ship_worker_once_its_report_exists():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = dict(settle_row("implement", "S", "w1:p3", head), started_ns=time.time_ns() - 10**9)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": "S", "pane_id": "w1:p3", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", "S")])
+        (fx.rd / "tasks" / "td-a.ship.md").write_text("ship report\n")
+        result = fx.settle("S")
+        assert result["status"] == "settled" and result["reason"] == "ship-report", result
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+        assert ["pane", "close", "w1:p3"] in fx.calls()
+        assert ["pane", "close", "w1:p1"] not in fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_leaves_a_ship_worker_without_a_report():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = dict(settle_row("implement", "S", "w1:p3", head), started_ns=time.time_ns())
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": "S", "pane_id": "w1:p3", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p3", "claude", "idle", "S")])
+        assert fx.settle("S")["status"] == "not-settled"
+        # A report from an earlier ship run predates this row and does not count.
+        report = fx.rd / "tasks" / "td-a.ship.md"
+        report.write_text("old report\n")
+        os.utime(report, ns=(ship["started_ns"] - 10**9, ship["started_ns"] - 10**9))
+        assert fx.settle("S")["status"] == "not-settled"
+        assert not any(c[:2] == ["pane", "close"] for c in fx.calls()), fx.calls()
     finally:
         fx.close()
 
@@ -3204,6 +3245,8 @@ for name, test in (
     ("pane changed during prep records launch_failed", test_pane_changed_during_prep_records_launch_failed),
     ("pane prep cleanup failure never masks the prep failure", test_pane_prep_cleanup_failure_never_masks_the_prep_failure),
     ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
+    ("settle exits an idle ship worker once its report exists", test_settle_exits_an_idle_ship_worker_once_its_report_exists),
+    ("settle leaves a ship worker without a report", test_settle_leaves_a_ship_worker_without_a_report),
     ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
     ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
     ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),

@@ -3204,11 +3204,23 @@ def checkin_action(f) -> str:
         ("paused", f.get("done_outcome") == "paused"),
         ("failed", f.get("done_outcome") == "failed"),
         ("exit-idle-worker", f.get("idle_settled")),
+        ("ship", f.get("ship_pending")),
     )
     for name, fires in rules:
         if fires:
             return name
     return "none"
+
+
+def ship_pending(task) -> bool:
+    """A reviewed task the director has not parked at its reviewed head.
+
+    Parking (`ship_parked_head`) records that the director asked the owner or
+    surfaced a stop; until then every check-in reaches the section 6 ship step.
+    """
+    head = task.get("review_head_sha")
+    return bool(task.get("status") == "reviewed" and head
+                and task.get("ship_parked_head") != head)
 
 
 def phase_workspace(task, phase):
@@ -3324,7 +3336,8 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                    and a.get("agent_status") in IDLE_AGENT_STATES
                    for a in poll_agents.get(row.get("workspace_id"), []))
         if idle and row_settlement(task, index, done=done, review=review, head=head,
-                                   payload_root=payload_root):
+                                   payload_root=payload_root,
+                                   ship_report=ship_report_ns(rd, tid)):
             idle_settled = True
             break
     impl_ws = phase_workspace(task, "implement")
@@ -3398,6 +3411,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         # in the core deletes done.json on relaunch.
         "unreadable": unreadable, "unverifiable": unverifiable, "wake": wake,
         "idle_settled": idle_settled,
+        "ship_pending": ship_pending(task),
         "done_outcome": (done.get("outcome")
                          if done and latest and done_phase in DESCENDANT_PHASES
                          and attempt_matches(task, done, done_phase,
@@ -3505,7 +3519,16 @@ def is_reviewed(task, done, head_sha, workspace) -> bool:
 _TERMINAL_TASK = frozenset({"merged", "abandoned", "failed"})
 
 
-def row_settlement(task, index, *, done, review, head, payload_root):
+def ship_report_ns(rd, task_id):
+    """mtime of tasks/<task_id>.ship.md, or None when it is not a regular file."""
+    try:
+        st = (Path(rd) / "tasks" / f"{task_id}.ship.md").lstat()
+    except OSError:
+        return None
+    return st.st_mtime_ns if stat.S_ISREG(st.st_mode) else None
+
+
+def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None):
     """Why workers[index]'s agent may exit, or None while it may still have
     work. Rules 0b-5 rest on facts that stay true once written; rules 7-8 read
     mutable evidence and only ever authorize an agent exit, not a pane close."""
@@ -3540,6 +3563,12 @@ def row_settlement(task, index, *, done, review, head, payload_root):
         if head and is_plan_completed(task, done, head, row.get("workspace_id"), payload_root):
             return "plan-confirmed"
         return None
+    # Ship and repair workers report through ship.md and never emit-done; a
+    # report older than the row belongs to an earlier run.
+    started = row.get("started_ns")
+    if (phase == "implement" and ship_report is not None
+            and type(started) is int and ship_report >= started):
+        return "ship-report"
     if phase == "implement" and status == "reviewed":
         reviews = [w for w in later if w.get("phase") == "review"]
         if reviews and head and is_reviewed(task, review, head, reviews[-1].get("workspace_id")):
