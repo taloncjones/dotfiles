@@ -99,11 +99,22 @@ fi
 fresh_gate
 mkdir -p "$HOME/Git/personal/repo"
 git init -q "$HOME/Git/personal/repo"
+git -C "$HOME/Git/personal/repo" remote add origin https://github.com/me/repo.git
 (cd "$HOME/Git/personal/repo" && gh pr comment 5 --body x >/dev/null 2>&1); rc=$?
 if [ "$rc" = 0 ] && [ "$(cat "$FAKE_LOG")" = "pr comment 5 --body x" ]; then
     pass "S1b personal repository posts without a go"
 else
     fail "S1b personal repository posts without a go (rc=$rc log=$(cat "$FAKE_LOG"))"
+fi
+
+fresh_gate
+(cd "$HOME/Git/personal/repo" && gh pr comment 5 -R work-org/repo --body x >/dev/null 2>&1); rc1=$?
+(cd "$HOME/Git/personal/repo" && GH_REPO=work-org/repo gh pr comment 5 --body x >/dev/null 2>&1); rc2=$?
+(cd "$HOME/Git/personal/repo" && gh pr comment 5 -R me/repo --body x >/dev/null 2>&1); rc3=$?
+if [ "$rc1$rc2$rc3" = 110 ] && [ "$(cat "$FAKE_LOG")" = "pr comment 5 -R me/repo --body x" ]; then
+    pass "S1c personal cwd posting to a work repo needs a go; its own origin needs none"
+else
+    fail "S1c personal cwd target keying (rc=$rc1$rc2$rc3 log=$(cat "$FAKE_LOG"))"
 fi
 
 fresh_gate
