@@ -299,6 +299,15 @@
         ]
       },
       {
+        "matcher": "startup|clear|compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/herdr_pending_notice.py"
+          }
+        ]
+      },
+      {
         "matcher": "clear|compact",
         "hooks": [
           {

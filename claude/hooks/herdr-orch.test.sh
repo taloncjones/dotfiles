@@ -1626,6 +1626,18 @@ finally:
 sys.exit(0)
 PY
 
+check "heartbeat_reason: the wake guard's freshness table" <<PY
+$LOAD
+now = 1_000_000.0
+assert c.heartbeat_reason(now, now) == "ok"
+assert c.heartbeat_reason(now - 900, now) == "ok"
+assert c.heartbeat_reason(now - 901, now) == "stale-heartbeat"
+assert c.heartbeat_reason(now + 300, now) == "ok"
+assert c.heartbeat_reason(now + 301, now) == "future-heartbeat"
+for bad in (True, None, "x", float("nan"), float("inf")):
+    assert c.heartbeat_reason(bad, now) == "bad-heartbeat", bad
+PY
+
 check "post_wake guards: each bad owner/state returns its reason and sends nothing" <<PY
 $LOAD
 import socket,random,shutil,time,math
@@ -10241,6 +10253,149 @@ base = dict(status="merged", poll_ok=True, live="absent", worktree_exists=False,
 for terminal in ("merged", "failed", "abandoned"):
     got = c.checkin_action({**base, "status": terminal})
     assert got == "none", "%s -> %s" % (terminal, got)
+PY
+
+check "pending_action: skips the poll rules and otherwise matches checkin_action" <<PY
+$LOAD
+assert c.POLL_RULES == frozenset({"unknown", "abandoned-candidate", "blocked",
+                                  "unblocked", "exit-idle-worker"})
+base = dict(status="in-progress", poll_ok=True, live="working", worktree_exists=True,
+            head="a" * 40, completed=False, plan_completed=False, reviewed=False,
+            review_correlates=False, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None)
+off = {**base, "poll_ok": False, "live": "unknown"}
+assert c.checkin_action(off) == "unknown"
+assert c.pending_action(off) == "none"
+assert c.pending_action({**off, "completed": True}) == "confirm-completion"
+assert c.pending_action({**off, "status": "blocked"}) == "none"
+assert c.pending_action({**off, "status": "blocked", "completed": True}) == "confirm-completion"
+assert c.pending_action({**off, "head": None, "status": "reviewed",
+                         "ship_pending": True}) == "ship"
+assert c.pending_action({**off, "idle_settled": True}) == "none"
+assert c.pending_action({**off, "live": "absent", "worktree_exists": False}) == "none"
+assert c.pending_action({**off, "status": "merged", "completed": True}) == "none"
+for extra in ({"completed": True}, {"plan_completed": True}, {"mech_unsettled": True},
+              {"done_outcome": "paused"}, {"done_outcome": "failed"},
+              {"status": "completed", "dispatch_review": True},
+              {"status": "reviewed", "ship_pending": True}):
+    assert c.pending_action({**base, **extra}) == c.checkin_action({**base, **extra}), extra
+PY
+
+check "pending: lists poll-independent actions oldest first and writes nothing" <<PY
+$LOAD
+import subprocess, time
+root = tempfile.mkdtemp()
+rd = os.path.join(root, "herdr-orch", "slug-x")
+os.makedirs(os.path.join(rd, "tasks"))
+def put(name, rec):
+    with open(os.path.join(rd, "tasks", name), "w") as fh:
+        json.dump(rec, fh)
+put("t-new.json", {"task_id": "t-new", "status": "reviewed", "review_head_sha": "a" * 40})
+put("t-new.review.json", {"ts": "2026-09-20T10:00:00Z"})
+# Unpadded: strptime accepts it, and as a string it would sort after 09-20.
+put("t-new.done.json", {"ts": "2026-9-30T10:00:00Z"})
+put("t-old.json", {"task_id": "t-old", "status": "reviewed", "review_head_sha": "b" * 40})
+put("t-old.review.json", {"ts": "2026-09-07T10:00:00Z"})
+put("t-old.done.json", {"ts": "2026-09-05T10:00:00Z"})
+put("t-gone.json", {"task_id": "t-gone", "status": "reviewed", "review_head_sha": "c" * 40,
+                    "worktree": os.path.join(root, "no-such-worktree"),
+                    "updated": "2026-09-10T00:00:00Z"})
+put("t-bare.json", {"task_id": "t-bare", "status": "reviewed", "review_head_sha": "d" * 40,
+                    "updated": "2026-9-1T00:00:00Z"})
+put("t-parked.json", {"task_id": "t-parked", "status": "reviewed", "review_head_sha": "e" * 40,
+                      "ship_parked_head": "e" * 40})
+put("t-idle.json", {"task_id": "t-idle", "status": "in-progress"})
+put("t-merged.json", {"task_id": "t-merged", "status": "merged", "review_head_sha": "f" * 40})
+put("t-merged.review.json", {"ts": "2026-09-01T10:00:00Z"})
+put("t-weird.json", {"task_id": "../evil", "status": "reviewed", "review_head_sha": "9" * 40})
+with open(os.path.join(rd, "owner.json"), "w") as fh:
+    json.dump({"heartbeat_ts": time.time() - 1000}, fh)
+def snap():
+    out = []
+    for base, dirs, files in os.walk(root):
+        for name in dirs + files:
+            st = os.lstat(os.path.join(base, name))
+            out.append((os.path.join(base, name), st.st_size, st.st_mtime_ns))
+    return sorted(out)
+before = snap()
+r = subprocess.run([sys.executable, "claude/hooks/herdr_orch_core.py", "pending",
+                    "--repo-slug", "slug-x"], env=dict(os.environ, CLAUDE_CONFIG_DIR=root),
+                   capture_output=True, text=True)
+assert r.returncode == 0, r.stderr
+assert snap() == before, "pending wrote under the state root"
+out = json.loads(r.stdout)
+assert out["repo_slug"] == "slug-x" and out["lease"] == "stale", out
+got = [(t["task_id"], t["status"], t["action"], t["since"]) for t in out["tasks"]]
+assert got == [("t-old", "reviewed", "ship", "2026-09-07T10:00:00Z"),
+               ("t-gone", "reviewed", "ship", "2026-09-10T00:00:00Z"),
+               ("t-new", "reviewed", "ship", "2026-09-20T10:00:00Z"),
+               ("t-bare", "reviewed", "ship", None)], got
+PY
+
+check "pending: owner_lease reads the owner mirror and never creates the repo dir" <<PY
+$LOAD
+import time
+root = tempfile.mkdtemp()
+rd = os.path.join(root, "herdr-orch", "slug-x")
+now = time.time()
+assert c.owner_lease(rd, now) == "absent"
+assert not os.path.exists(rd), "owner_lease created the repo dir"
+os.makedirs(rd)
+of = os.path.join(rd, "owner.json")
+assert c.owner_lease(rd, now) == "absent"
+def hb(value):
+    with open(of, "w") as fh:
+        fh.write(json.dumps({"heartbeat_ts": value}))
+hb(now - 10); assert c.owner_lease(rd, now) == "live"
+hb(now - 1000); assert c.owner_lease(rd, now) == "stale"
+hb(now + 600); assert c.owner_lease(rd, now) == "stale"
+hb("x"); assert c.owner_lease(rd, now) == "stale"
+with open(of, "w") as fh:
+    fh.write("{not json")
+assert c.owner_lease(rd, now) == "unreadable"
+with open(of, "w") as fh:
+    fh.write("[1]")
+assert c.owner_lease(rd, now) == "unreadable"
+other = os.path.join(root, "herdr-orch", "slug-y")
+assert c.pending_report(other, now) == {"repo_slug": "slug-y", "lease": "absent", "tasks": []}
+assert not os.path.exists(other), "pending_report created the repo dir"
+PY
+
+check "pending: an invalid slug exits 2, and a stat-dirty worktree index is never rewritten" <<PY
+$LOAD
+import subprocess, time
+r = subprocess.run([sys.executable, "claude/hooks/herdr_orch_core.py", "pending",
+                    "--repo-slug", "../x"], capture_output=True, text=True)
+assert r.returncode == 2 and r.stdout.strip() == "", (r.returncode, r.stdout)
+root = tempfile.mkdtemp()
+wt = os.path.join(root, "wt")
+os.makedirs(wt)
+def git(*args):
+    subprocess.run(["git", "-C", wt, "-c", "user.name=f", "-c", "user.email=f@example.invalid",
+                    "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
+git("init", "-q", "-b", "trunk")
+with open(os.path.join(wt, "f"), "w") as fh:
+    fh.write("a\n")
+git("add", "f")
+git("commit", "-qm", "f")
+rd = os.path.join(root, "herdr-orch", "slug-x")
+os.makedirs(os.path.join(rd, "tasks"))
+with open(os.path.join(rd, "tasks", "t-wt.json"), "w") as fh:
+    json.dump({"task_id": "t-wt", "status": "in-progress", "worktree": wt}, fh)
+later = time.time() + 30
+os.utime(os.path.join(wt, "f"), (later, later))
+index = os.path.join(wt, ".git", "index")
+def index_state():
+    with open(index, "rb") as fh:
+        return (fh.read(), os.stat(index).st_mtime_ns)
+before = index_state()
+r = subprocess.run([sys.executable, "claude/hooks/herdr_orch_core.py", "pending",
+                    "--repo-slug", "slug-x"], env=dict(os.environ, CLAUDE_CONFIG_DIR=root),
+                   capture_output=True, text=True)
+assert r.returncode == 0, r.stderr
+assert index_state() == before, "pending rewrote the worktree index"
+subprocess.run(["git", "-C", wt, "status", "--porcelain"], check=True, capture_output=True)
+assert index_state() != before, "control: plain git status left the index alone"
 PY
 
 check "checkin_action: confirm-completion is suppressed only at the recorded review head" <<PY
