@@ -941,13 +941,21 @@ PY
         # template-owned key (reasserted wholesale on every update), so live
         # permissions must equal the template's. A mismatch means the machine
         # missed an update and may silently retain retired broad grants.
-        if SETTINGS_PATH="$settings_dir/settings.json" python3 - <<'PY'
+        # Machines reconcile from main, so compare against origin/main's
+        # template; fall back to the checkout's when that ref is unavailable.
+        if perm_tmpl=$(git show origin/main:claude/settings.json.tmpl 2>/dev/null); then
+            perm_src=origin/main
+        else
+            perm_tmpl=$(cat claude/settings.json.tmpl)
+            perm_src=checkout
+        fi
+        if SETTINGS_PATH="$settings_dir/settings.json" PERM_TMPL="$perm_tmpl" python3 - <<'PY'
 import json
 import os
 import sys
 
 live = json.load(open(os.environ["SETTINGS_PATH"])).get("permissions") or {}
-tmpl = json.load(open("claude/settings.json.tmpl")).get("permissions") or {}
+tmpl = json.loads(os.environ["PERM_TMPL"]).get("permissions") or {}
 if live == tmpl:
     sys.exit(0)
 for key in sorted(set(live) | set(tmpl)):
@@ -964,10 +972,10 @@ for key in sorted(set(live) | set(tmpl)):
 sys.exit(1)
 PY
         then
-            printf 'PASS  settings: %s permissions match template\n' "$settings_dir"
+            printf 'PASS  settings: %s permissions match %s template\n' "$settings_dir" "$perm_src"
             PASS=$((PASS + 1))
         else
-            printf 'FAIL  settings: %s permissions drifted (update reconciles: template rules reassert, live-only grants are DROPPED -- commit intentional grants to the template)\n' "$settings_dir" >&2
+            printf 'FAIL  settings: %s permissions drifted from %s template (update reconciles: template rules reassert, live-only grants are DROPPED -- commit intentional grants to the template)\n' "$settings_dir" "$perm_src" >&2
             FAIL=$((FAIL + 1))
         fi
 
@@ -1026,6 +1034,9 @@ if markers!="nofile":
 PY
 }
 
+# Line 3 of every refusal: the stop-again note plus herdr_stop_gate.WAIT_HINT.
+GATE_LINE3='Then stop again; the gate releases on that attempt. Still waiting on your own run? Keep the turn alive with a bounded foreground until-loop on its log line instead of stopping. While a subagent still runs, do not emit; stop again and the gate releases.'
+
 # gate_case LABEL EXPECT WS ROLE REC MARKERS PAYLOAD [NAME=VALUE ...]
 #   EXPECT  allow | block-N (refusal number N) | release-<text on stdout>
 #   Trailing NAME=VALUE pairs override the environment (HERDR_ENV= unsets
@@ -1048,7 +1059,7 @@ gate_case() {
         block-*)
             [ "$rc" = 2 ] && [ ! -s "$gd/out" ] && [ "$(wc -l <"$gd/err" | tr -d ' ')" = 3 ] \
                 && head -n 1 "$gd/err" | grep -q "^herdr-stop-gate: blocked -- emit-done (or emit-review) before stopping; the orchestrator only recognizes the record\.$" \
-                && sed -n 3p "$gd/err" | grep -q '^Then stop again; the gate releases on that attempt\.$' \
+                && sed -n 3p "$gd/err" | grep -Fxq "$GATE_LINE3" \
                 && ok=1 ;;
         release-*)
             [ "$rc" = 0 ] && [ ! -s "$gd/err" ] && grep -q 'herdr-stop-gate: released' "$gd/out" \

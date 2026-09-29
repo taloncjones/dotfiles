@@ -5,6 +5,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -776,6 +777,32 @@ def _nonnegative_number(value: Any) -> int | float | None:
     return value
 
 
+# A usage-limit refusal can arrive as an ordinary completion whose text is
+# the limit notice. Anchored at the start so a review that quotes it passes.
+USAGE_LIMIT_RE = re.compile(
+    r"\s*(?:you(?:'|\u2019)ve (?:hit|reached) your (?:[\w-]+ ){0,3}limit\b"
+    r"|claude(?: ai)? usage limit reached"
+    r"|(?:5-hour|session|weekly|daily|opus|usage) limit reached)",
+    re.IGNORECASE,
+)
+
+
+def usage_limit_refusal(text: Any) -> bool:
+    return isinstance(text, str) and USAGE_LIMIT_RE.match(text) is not None
+
+
+def _fail_usage_limit(parsed: dict[str, Any]) -> dict[str, Any]:
+    text = parsed["result"]
+    if not usage_limit_refusal(text):
+        return parsed
+    return {
+        **parsed,
+        "status": "error",
+        "result": None,
+        "errors": [*parsed["errors"], text.strip()],
+    }
+
+
 def _codex_error(record: dict[str, Any]) -> str:
     error = record.get("error")
     if isinstance(error, dict) and isinstance(error.get("message"), str):
@@ -827,7 +854,7 @@ def parse_runtime_result(runtime: str, output: str) -> dict[str, Any]:
         observed_model = None
         if isinstance(model_usage, dict) and len(model_usage) == 1:
             observed_model = next(iter(model_usage))
-        return {
+        return _fail_usage_limit({
             "runtime": "claude",
             "status": "error" if is_error else "success",
             "subtype": record.get("subtype"),
@@ -846,7 +873,7 @@ def parse_runtime_result(runtime: str, output: str) -> dict[str, Any]:
             "observation": "model-usage-only"
             if observed_model
             else "missing-runtime-metadata",
-        }
+        })
 
     errors = [
         _codex_error(record)
@@ -885,7 +912,7 @@ def parse_runtime_result(runtime: str, output: str) -> dict[str, Any]:
         if record.get("type") == "thread.started"
         and isinstance(record.get("thread_id"), str)
     ]
-    return {
+    return _fail_usage_limit({
         "runtime": "codex",
         "status": status,
         "result": "\n\n".join(messages) if messages else None,
@@ -897,7 +924,7 @@ def parse_runtime_result(runtime: str, output: str) -> dict[str, Any]:
         "observed_model": None,
         "observed_effort": None,
         "observation": "unavailable-from-codex-jsonl",
-    }
+    })
 
 
 def _as_text(value: Any) -> str:

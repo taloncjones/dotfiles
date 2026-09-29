@@ -241,6 +241,14 @@ coverage evidence or gap, and a verdict. A runtime result is an artifact only wh
 returns a genuine successful completion; preserve requested and observed route
 metadata from that result.
 
+The runner reports a usage-limit refusal (a result that opens with a notice
+such as "You've hit your session limit") as `status: error`, with the notice
+in `errors` and a null `result`, so its probe fails the probe check. The
+evaluator re-reads every seat artifact: a `.json` artifact must be runner
+JSON whose `status` is `success`, and no seat artifact may be a usage-limit
+refusal. A limit-refused seat is not retried, because the limit holds until
+its reset; the gate is `INCOMPLETE`.
+
 ```bash
 RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 grep -q '^## Classes' "$RUBRIC" || exit 2

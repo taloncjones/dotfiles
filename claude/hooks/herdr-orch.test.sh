@@ -11115,6 +11115,61 @@ grep -Fq 'lessons distillation pending (human)' claude/skills/post-merge/SKILL.m
 grep -Fq 'dirty worktree' claude/skills/post-merge/SKILL.md
 SH
 
+check "brief template keeps the turn alive on long runs" <<'PY'
+import sys
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+mech = " ".join(t[t.index("## Mech brief variant"):t.index("## Reviewer brief variant")].split())
+for phrase in ("Keep the turn alive while your own run finishes", "bounded until-loop",
+               "never the process list", "overall deadline",
+               "A quiet log is not a stall", "stop the run first",
+               "--reason timeout"):
+    assert phrase in rules, phrase
+assert "ending your turn ends the run" in mech
+assert "runner_timeout" not in t
+assert "<cmd>" not in t
+assert t.count("\n") <= 445
+assert 'echo "EXIT $?"' not in t
+PY
+
+check "brief wait recipe detects a finished run whatever its output ends with" <<'PY'
+import os, re, subprocess, tempfile
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+wrapper = re.search(r"`(\{ CMD; .*? >LOG 2>&1)`", rules).group(1)
+matcher = re.search(r"`until (grep -q '\^EXIT ' LOG) \|\|", rules).group(1)
+tmp = tempfile.mkdtemp()
+for name, cmd, code in (("printf done", "printf done", "0"),
+                        ("printf partial; false", "printf partial; false", "1")):
+    log = os.path.join(tmp, "run.log")
+    if os.path.exists(log):
+        os.remove(log)
+    sh = wrapper.replace("CMD", cmd).replace("LOG", log)
+    subprocess.run(["bash", "-c", sh], check=True)
+    m = subprocess.run(["bash", "-c", matcher.replace("LOG", log)])
+    assert m.returncode == 0, "%s: sentinel not matched: %r" % (name, open(log).read())
+    assert ("EXIT " + code) in open(log).read().splitlines(), name
+PY
+
+check "brief template treats a stop-gate nudge as no reason to emit" <<'PY'
+import sys
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+for phrase in ("not a request to emit", "genuinely stopping short"):
+    assert phrase in rules, phrase
+PY
+
+check "brief template bounds subagent hand-backs and self-opened monitors" <<'PY'
+import sys
+t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
+rules = " ".join(t[t.index("## Ground rules"):t.index("## Plan-phase brief variant")].split())
+for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
+               "git diff --cached", "self-chosen whole-branch review",
+               "close them all before"):
+    assert phrase in rules, phrase
+assert t.count("\n") <= 445
+PY
+
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
 import importlib.util, json, os, sys, tempfile
 sys.path.insert(0, "claude/hooks")
