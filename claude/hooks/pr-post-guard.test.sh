@@ -93,7 +93,7 @@ expect_file() {
     fi
 }
 
-# --- G: the go must be a whole message -----------------------------------
+# --- G: the go is a phrase anywhere in a typed prompt ---------------------
 
 case_gate g1
 expect_rc "G1 prompt post it" 0 "$(payload_u s1 'post it')"
@@ -108,6 +108,23 @@ expect_rc "G2 post denied" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
 case_gate g3
 expect_rc "G3 negated prompt is not a go" 0 "$(payload_u s1 'do not post it yet')"
 expect_rc "G3 post denied" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
+
+case_gate g3b
+expect_rc "G3b post all inside a sentence is a go" 0 "$(payload_u s1 'looks fine, ok post all')"
+expect_file "G3b marker written" "$GATE/s1.json" present
+expect_rc "G3b post allowed" 0 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
+
+case_gate g3c
+expect_rc "G3c Post it mid-sentence is a go" 0 "$(payload_u s1 'Merge order is fine. Post it and continue.')"
+expect_file "G3c marker written" "$GATE/s1.json" present
+
+case_gate g3d
+expect_rc "G3d edit the pr body mid-sentence is a body go" 0 "$(payload_u s1 'then edit the pr body with the new counts')"
+expect_rc "G3d body edit allowed" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
+
+case_gate g3e
+expect_rc "G3e postit without a boundary is not a go" 0 "$(payload_u s1 'compostit')"
+expect_file "G3e no marker minted" "$GATE/s1.json" absent
 
 case_gate g4
 brief='Summary line one.
@@ -315,7 +332,7 @@ expect_rc "V5 ANSI-C \$'...' quoting is denied outright, no go" 2 "$(payload_b s
 expect_rc "V5 mint post" 0 "$(payload_u s1 'post it')"
 expect_rc "V5 ANSI-C quoted post passes after a typed go" 0 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
 
-# --- U: an unclassifiable gh call is denied outright, no go covers it ------
+# --- U: a gh call outside the read and gated tables is a plain write ------
 
 case_gate u1
 expect_rc "U1 unknown gh subcommand passes the hook (the shim denies it)" 0 "$(payload_b s1 'gh foo bar')"
@@ -514,7 +531,7 @@ expect_class "PA1 clustered -iX DELETE is a delete" delete api -iX DELETE repos/
 expect_class "PA2 clustered -if field is a post" post api -ifbody=x repos/o/r/issues/1/comments
 expect_class "PA3 clustered -iF graphql query file is a post" post api graphql -iF query=@m.graphql
 expect_class "PA4 -X=GET is a read" read api -X=GET repos/o/r/issues/1
-expect_class "PA5 an unknown short flag is unknown" unknown api -Z repos/o/r/issues/1
+expect_class "PA5 an unknown short flag is a plain write" write api -Z repos/o/r/issues/1
 expect_class "PA6 a value flag takes a dash-led next arg; fields still post" post api -t -iXGET repos/o/r/issues/1/comments -f body=hi
 expect_class "PA7 -q taking -iXGET keeps the DELETE" delete api -X DELETE -q -iXGET repos/o/r/issues/comments/1
 expect_class "PA8 plain -X DELETE is still a delete" delete api -X DELETE repos/o/r/issues/comments/1

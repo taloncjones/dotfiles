@@ -15,10 +15,11 @@ post needs its own explicit go").
 Gate: decides only when HERDR_ENV=1; every other session exits 0 untouched
 (no file I/O). Two events, one script, dispatched on hook_event_name:
 
-- UserPromptSubmit mints a one-turn, one-session go ONLY from a prompt
-  whose whole normalized text is "post it" or "edit the pr body" -- never
-  from an AskUserQuestion answer (a tool result, not a typed prompt) and
-  never from a multiple-choice option string. The go expires in 600s.
+- UserPromptSubmit mints a one-turn, one-session go from a typed prompt
+  that says "post it", "post all" or "edit the pr body" anywhere as a
+  phrase (word-bounded, any case, not negated) -- never from an
+  AskUserQuestion answer (a tool result, not a typed prompt) and never
+  from a multiple-choice option string. The go expires in 600s.
 - PreToolUse Bash is the early second layer. The primary gate is the gh
   shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv
   after the shell has resolved quoting and substitution -- four review
@@ -58,7 +59,11 @@ import rm_guard
 
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
-GO = {"post it": "post", "edit the pr body": "body"}
+GO = {"post it": "post", "post all": "post", "edit the pr body": "body"}
+# A go phrase anywhere in the prompt; "do not post it", "don't post it" and
+# a backticked mention (a pasted brief) are not a go, nor is an echoed
+# option string such as "(Recommended)".
+GO_RE = re.compile(r"(?<!\bnot )(?<!n't )(?<!`)\b(post it|post all|edit the pr body)\b(?!`)", re.IGNORECASE)
 TTL = 600
 PRUNE_AGE = 86400
 SID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -127,6 +132,14 @@ def personal_repository(cwd: str) -> bool:
 def normalize(prompt: str) -> str:
     text = prompt.strip().lower()
     return text[:-1].rstrip() if text[-1:] in (".", "!") else text
+
+
+def go_kind(prompt: str) -> str | None:
+    """The go kind a typed prompt carries, or None."""
+    if "(recommended)" in prompt.lower():
+        return None
+    hit = GO_RE.search(prompt)
+    return GO[hit.group(1).lower()] if hit else None
 
 
 def drop_heredoc_bodies(command: str) -> str:
@@ -300,7 +313,7 @@ def parse_api(args: list[str]) -> tuple[str | None, str | None, str | None, bool
 def classify_api(args: list[str]) -> str:
     normalized = normalize_api_args(args)
     if normalized is None:
-        return "unknown"
+        return "write"
     method, path, _host, has_field = parse_api(normalized)
     if path == "graphql":
         if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
@@ -310,24 +323,24 @@ def classify_api(args: list[str]) -> str:
     if method == "GET":
         return "read"
     if path is None:
-        return "unknown"
+        return "write"
     if method == "DELETE":
-        return "delete" if DELETE_PATH.search(path) else "unknown"
+        return "delete" if DELETE_PATH.search(path) else "write"
     if POST_PATH.search(path):
         return "post"
     if BODY_PATH.search(path):
         return "body"
-    return "unknown"
+    return "write"
 
 
 def classify_gh(args: list[str]) -> str:
     """Classify one `gh` invocation's own argv (after the `gh` token) as
-    "read", "write" (a known non-comment write), "post"/"body"/"delete"
-    (gated, needs its typed go), or "unknown" (denied outright)."""
+    "read", "write" (any non-comment write; allowed without a go), or
+    "post"/"body"/"delete" (gated, needs its typed go). Nothing is denied
+    outright: the gate covers posted text, not repository writes."""
     if args[-1:] in (["-h"], ["--help"]) and (len(args) < 2 or not args[-2].startswith("-")):
-        # Help on a known command; `--body --help` still posts "--help", and
-        # an alias or extension stays unknown.
-        return "read" if len(args) < 2 or classify_gh(args[:-1]) != "unknown" else "unknown"
+        # Help on any command; `--body --help` still posts "--help".
+        return "read"
     if args[:1] and args[0] in READ_COMMANDS:
         return "read"
     i = 0
@@ -346,12 +359,12 @@ def classify_gh(args: list[str]) -> str:
     if sub in (("pr", "close"), ("issue", "close")):
         if any(t in ("-c", "--comment") or t.startswith("--comment=") for t in rest):
             return "post"
-        return "unknown"
+        return "write"
     if sub in (("pr", "comment"), ("pr", "review"), ("issue", "comment")):
         return "post"
     if sub == ("pr", "edit"):
         return "body"
-    return "unknown"
+    return "write"
 
 
 def resolved_kind(sub: str) -> tuple[str | None, str | None]:
@@ -566,8 +579,8 @@ def spend_go(kinds: list[str], sid: str, directory: Path) -> str | None:
 def _denial(kind: str) -> str:
     return (
         f"Blocked: this looks like a PR/issue {kind} without a typed go.\n"
-        "Ask the owner to type `post it` (or `edit the pr body`) as the "
-        "whole message; a multiple-choice answer is not a go."
+        "Ask the owner to say `post it` or `post all` (or `edit the pr body`) "
+        "in a message; a multiple-choice answer is not a go."
     )
 
 
@@ -662,7 +675,7 @@ def handle_prompt(payload: dict, directory: Path, now: float) -> None:
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         return
-    kind = GO.get(normalize(prompt))
+    kind = go_kind(prompt)
     if kind is None:
         return
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
