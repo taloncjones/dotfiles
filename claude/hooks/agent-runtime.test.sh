@@ -1032,6 +1032,82 @@ def test_result_errors_and_malformed_output_fail_closed():
     assert claude["observed_effort"] is None, claude
 
 
+LIMIT_NOTICE = "You\u2019ve hit your session limit \u00b7 resets 3pm (America/Los_Angeles)"
+
+
+def test_usage_limit_refusal_matches_only_leading_notices():
+    hits = [
+        LIMIT_NOTICE,
+        "You've hit your session limit",
+        "You've hit your weekly limit \u00b7 resets Oct 2",
+        "You've hit your Opus limit",
+        "You've hit your usage limit. Upgrade to Pro or try again in 2 days.",
+        "Claude AI usage limit reached|1717000000",
+        "  \nUsage limit reached",
+        "5-hour limit reached \u2219 resets 3pm",
+    ]
+    misses = [
+        "# Co-review final gate\n\nThe runner mishandles \"You've hit your session limit\".",
+        "I'll inspect the frozen change. You've hit your session limit is the lesson.",
+        "APPROVE",
+        "",
+        None,
+        {"k": 1},
+        "You've hit your stride; no limit here at all but the word limit appears later",
+    ]
+    for text in hits:
+        assert runtime.usage_limit_refusal(text) is True, text
+    for text in misses:
+        assert runtime.usage_limit_refusal(text) is False, text
+
+
+def test_claude_success_shaped_limit_refusal_is_error():
+    row = {"type": "result", "subtype": "success", "is_error": False,
+           "result": LIMIT_NOTICE, "num_turns": 1,
+           "modelUsage": {"claude-opus-5-5": {}}}
+    result = runtime.parse_runtime_result("claude", json.dumps(row))
+    assert result["status"] == "error", result
+    assert result["result"] is None, result
+    assert result["errors"] == [LIMIT_NOTICE], result
+
+
+def test_claude_error_limit_refusal_nulls_result():
+    row = {"type": "result", "subtype": "success", "is_error": True,
+           "result": LIMIT_NOTICE, "num_turns": 1,
+           "modelUsage": {"claude-opus-5-5": {}}}
+    result = runtime.parse_runtime_result("claude", json.dumps(row))
+    assert result["status"] == "error", result
+    assert result["result"] is None, result
+    assert result["errors"] == [LIMIT_NOTICE], result
+
+
+def test_codex_limit_refusal_is_error():
+    notice = "You've hit your usage limit. Upgrade to Pro or try again in 2 days."
+    output = "\n".join(json.dumps(row) for row in (
+        {"type": "thread.started", "thread_id": "t1"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": notice}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+    ))
+    result = runtime.parse_runtime_result("codex", output)
+    assert result["status"] == "error", result
+    assert result["result"] is None, result
+    assert result["errors"] == [notice], result
+
+
+def test_quoted_limit_notice_stays_success():
+    text = "# Co-review final gate\n\nThe seat quoted \"You've hit your session limit\" as evidence."
+    row = {"type": "result", "subtype": "success", "is_error": False,
+           "result": text, "num_turns": 3, "modelUsage": {"claude-opus-5-5": {}}}
+    claude = runtime.parse_runtime_result("claude", json.dumps(row))
+    assert claude["status"] == "success" and claude["result"] == text, claude
+    output = "\n".join(json.dumps(row) for row in (
+        {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+        {"type": "turn.completed", "usage": {}},
+    ))
+    codex = runtime.parse_runtime_result("codex", output)
+    assert codex["status"] == "success" and codex["result"] == text, codex
+
+
 def executable(path, body):
     path.write_text("#!/bin/sh\n" + body)
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -2775,6 +2851,11 @@ for name, test in (
     ("Codex JSONL reports tokens and unknown observations", test_codex_result_reports_tokens_and_unknown_observations),
     ("Codex JSONL joins multiple agent messages", test_codex_result_joins_multiple_agent_messages),
     ("error and malformed runtime output fail closed", test_result_errors_and_malformed_output_fail_closed),
+    ("usage limit refusal matches only leading notices", test_usage_limit_refusal_matches_only_leading_notices),
+    ("claude success-shaped limit refusal is error", test_claude_success_shaped_limit_refusal_is_error),
+    ("claude error limit refusal nulls result", test_claude_error_limit_refusal_nulls_result),
+    ("codex limit refusal is error", test_codex_limit_refusal_is_error),
+    ("quoted limit notice stays success", test_quoted_limit_notice_stays_success),
     ("bounded run uses argv and native personal Claude env", test_run_uses_argv_and_unsets_default_claude_config),
     ("run_bounded strips the pane identity from the child", test_run_bounded_strips_pane_identity_from_the_child),
     ("run_bounded marks the child as bounded", test_run_bounded_marks_the_child_as_bounded),
