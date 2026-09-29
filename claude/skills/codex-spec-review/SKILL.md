@@ -149,6 +149,32 @@ full-document prompt above with `ROUND` set to this call's number (it
 renders as `Round $ROUND of $SPEC_MAX_ROUNDS` via the `${ROUND:-1}`
 substitution); that call still counts toward the cap.
 
+### Substitute a failed Codex round
+
+This is an explicit operator decision, made only when this round's own
+Codex call fails and its runner JSON records a quota, auth, or
+availability failure. Any other incomplete call (timeout, empty,
+malformed, no verdict) blocks the caller as before, unchanged; a
+substitute never fires automatically for any other failure. A runner
+JSON whose result already carries a verdict (APPROVE or CHANGES, with
+findings) is a completed round: the substitute never applies to it, even
+if the same JSON also lists a quota, auth, or availability error. Rerun the
+same round's prompt once, unchanged, on a fresh Claude process instead
+of Codex:
+
+```bash
+uv run --no-project python "$RUNNER" run \
+  --runtime claude --role reviewer --risk normal --provisional \
+  --cwd "$REPO" --sandbox read-only --timeout-secs 600 \
+  --prompt-file "$PROMPT_FILE"
+```
+
+Record the substitution in the round's revision-history row: the failed
+Codex call's own failure and the substitute call's own Claude route, as
+two facts in that row. The substitute call is this round's one call -- it
+counts toward `SPEC_MAX_ROUNDS`, the same as the call it replaces, never a
+free extra round.
+
 Use `--risk critical` only for explicit critical risk. For a Codex-led review,
 use the current session or a supported native child; never invoke another Codex
 CLI review recursively. Verify findings against the frozen document, retain

@@ -11,6 +11,8 @@ REPO = Path(__file__).resolve().parents[5]
 CO_REVIEW = (REPO / "claude/skills/co-review/SKILL.md").read_text(encoding="utf-8")
 MIRROR = (REPO / "codex/skills/co-review/SKILL.md").read_text(encoding="utf-8")
 SHIP = (REPO / "claude/skills/ship/SKILL.md").read_text(encoding="utf-8")
+SPEC_REVIEW = (REPO / "claude/skills/codex-spec-review/SKILL.md").read_text(encoding="utf-8")
+PLAN_REVIEW = (REPO / "claude/skills/codex-plan-review/SKILL.md").read_text(encoding="utf-8")
 
 
 def _extract_block(text, contains_needle):
@@ -216,6 +218,26 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertEqual(MIRROR.count("--timeout-secs 1200"), 2)
         self.assertNotIn("--timeout-secs 600", MIRROR)
         self.assertNotIn("600-second", MIRROR)
+
+
+class CodexReviewGatesSkillText(unittest.TestCase):
+    def test_spec_review_documents_the_substitute_round(self):
+        self.assertIn("### Substitute a failed Codex round", SPEC_REVIEW)
+        for needle in ("quota, auth, or", "availability failure",
+                       "never fires automatically for any other failure",
+                       "is a completed round: the substitute never applies to it",
+                       "--runtime claude --role reviewer",
+                       "counts toward `SPEC_MAX_ROUNDS`"):
+            self.assertIn(needle, SPEC_REVIEW)
+
+    def test_plan_review_documents_the_substitute_round(self):
+        self.assertIn("### Substitute a failed Codex round", PLAN_REVIEW)
+        for needle in ("quota, auth, or", "availability failure",
+                       "never fires automatically for any other failure",
+                       "is a completed round: the substitute never applies to it",
+                       "--runtime claude --step plan-review",
+                       "counts toward `PLAN_MAX_ROUNDS`"):
+            self.assertIn(needle, PLAN_REVIEW)
 
 
 class ShipSkillText(unittest.TestCase):

@@ -50,7 +50,7 @@ chmod +x "$T/fake/gh"
 printf '. "%s"\n' "$SHIMS/path.sh" >"$T/zdot/.zprofile"
 printf 'gh pr comment 5 --body x\n' >"$T/work/post.sh"
 
-unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN FAKE_STDIN FAKE_OUT FAKE_RC
+unset CLAUDE_PERSONAL_ONLY GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN FAKE_STDIN FAKE_OUT FAKE_RC
 # A stray real gh could neither authenticate nor reach github.com.
 export HOME="$T/home" GH_CONFIG_DIR="$T/ghc" GH_HOST=gh-shim-test.invalid ZDOTDIR="$T/zdot"
 export BASH_ENV="$SHIMS/path.sh"
@@ -97,6 +97,27 @@ else
 fi
 
 fresh_gate
+mkdir -p "$HOME/Git/personal/repo"
+git init -q "$HOME/Git/personal/repo"
+git -C "$HOME/Git/personal/repo" remote add origin https://github.com/me/repo.git
+(cd "$HOME/Git/personal/repo" && gh pr comment 5 --body x >/dev/null 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(cat "$FAKE_LOG")" = "pr comment 5 --body x" ]; then
+    pass "S1b personal repository posts without a go"
+else
+    fail "S1b personal repository posts without a go (rc=$rc log=$(cat "$FAKE_LOG"))"
+fi
+
+fresh_gate
+(cd "$HOME/Git/personal/repo" && gh pr comment 5 -R work-org/repo --body x >/dev/null 2>&1); rc1=$?
+(cd "$HOME/Git/personal/repo" && GH_REPO=work-org/repo gh pr comment 5 --body x >/dev/null 2>&1); rc2=$?
+(cd "$HOME/Git/personal/repo" && gh pr comment 5 -R me/repo --body x >/dev/null 2>&1); rc3=$?
+if [ "$rc1$rc2$rc3" = 110 ] && [ "$(cat "$FAKE_LOG")" = "pr comment 5 -R me/repo --body x" ]; then
+    pass "S1c personal cwd posting to a work repo needs a go; its own origin needs none"
+else
+    fail "S1c personal cwd target keying (rc=$rc1$rc2$rc3 log=$(cat "$FAKE_LOG"))"
+fi
+
+fresh_gate
 mint "post it"
 printf 'body-from-stdin' | FAKE_STDIN="$T/stdin" gh pr comment 5 --body-file - >/dev/null 2>&1
 if [ "$(cat "$T/stdin" 2>/dev/null)" = body-from-stdin ]; then
@@ -109,10 +130,10 @@ fresh_gate
 mint "post it"
 gh repo delete o/r --yes >/dev/null 2>"$T/err"; rc1=$?
 gh extension install o/gh-x >/dev/null 2>>"$T/err"; rc2=$?
-if [ "$rc1" = 1 ] && [ "$rc2" = 1 ] && [ "$(log_lines)" = 0 ] && grep -q 'gh shim' "$T/err"; then
-    pass "S3 unknown subcommands are denied even with a go"
+if [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && [ "$(log_lines)" = 2 ]; then
+    pass "S3 subcommands outside the tables pass through as plain writes"
 else
-    fail "S3 unknown subcommands are denied even with a go (rc=$rc1/$rc2 log=$(log_lines))"
+    fail "S3 subcommands outside the tables pass through (rc=$rc1/$rc2 log=$(log_lines))"
 fi
 
 fresh_gate
@@ -259,10 +280,10 @@ gh alias set c 'pr comment' >/dev/null 2>&1; rc3=$?
 gh c 5 --body x >/dev/null 2>&1; rc4=$?
 gh c 5 --help >/dev/null 2>&1; rc6=$?
 gh status >/dev/null 2>&1; rc5=$?
-if [ "$rc1$rc2$rc3$rc4$rc6$rc5" = 111110 ] && [ "$(cat "$FAKE_LOG")" = status ]; then
-    pass "S12 graphql from a file or stdin is gated; aliases stay unknown"
+if [ "$rc1$rc2$rc3$rc4$rc6$rc5" = 110000 ] && [ "$(log_lines)" = 4 ]; then
+    pass "S12 graphql from a file or stdin is gated; aliases pass as plain writes"
 else
-    fail "S12 graphql and aliases (rc=$rc1$rc2$rc3$rc4$rc5 log=$(cat "$FAKE_LOG"))"
+    fail "S12 graphql and aliases (rc=$rc1$rc2$rc3$rc4$rc6$rc5 log=$(cat "$FAKE_LOG"))"
 fi
 
 fresh_gate

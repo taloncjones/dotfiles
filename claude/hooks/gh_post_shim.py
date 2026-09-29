@@ -93,10 +93,8 @@ def own_marker(target: str, args: list[str]) -> bool:
 
 
 def gate(args: list[str]) -> str | None:
-    kind, denial = pr_post_guard.resolved_kind(pr_post_guard.classify_gh(args))
-    if denial:
-        return f"Blocked: {denial}."
-    if not kind:
+    kind = pr_post_guard.classify_gh(args)
+    if kind not in ("post", "body", "delete") or pr_post_guard.exempt_from_go(args, os.getcwd()):
         return None
     sid = pr_post_guard.shim_session_id()
     directory = pr_post_guard.gate_dir()
