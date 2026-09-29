@@ -35,7 +35,7 @@ class DispatchError(RuntimeError):
     """A dispatch precondition or current-attempt check failed."""
 
 
-PHASES = ("plan", "implement", "review", "think", "read", "mechanical")
+PHASES = ("plan", "implement", "review", "think", "read", "mechanical", "ship")
 WAKE_EVENTS = ("stopped", "blocked", "review-stopped", "completed")
 AGENT_STATES = core.IDLE_AGENT_STATES
 PANE_READY_ATTEMPTS = 3
@@ -593,6 +593,17 @@ def _check_bound_launch(record: dict[str, Any], task_id: str, repository: dict) 
         raise DispatchError("binding workspace does not match the launch worktree")
 
 
+def _attempt_context(prompt: str, attempt: dict[str, Any]) -> str:
+    return (
+        f"{prompt.rstrip()}\n\nLifecycle attempt context:\n"
+        "This adapter block is authoritative over conflicting lifecycle fields in the task "
+        "text. The reserved attempt is "
+        f"launch_id={attempt['launch_id']} phase={attempt['phase']} "
+        f"runtime={attempt['runtime']} workspace_id={attempt['workspace_id']} "
+        f"pane_id={attempt['pane_id']} source_head_sha={attempt['source_head_sha']}. "
+    )
+
+
 def _lifecycle_prompt(
     prompt: str,
     attempt: dict[str, Any],
@@ -603,6 +614,14 @@ def _lifecycle_prompt(
     approval_mediated: bool,
     binding: str | None = None,
 ) -> str:
+    if attempt["phase"] == "ship":
+        launch_dir = core.ship_launch_dir(base, attempt["task_id"], attempt["launch_id"])
+        return (
+            f"{_attempt_context(prompt, attempt)}"
+            "A ship attempt publishes no emit record and runs no core emitter. "
+            f"Its result is {(launch_dir / 'ship.json').resolve()}, written last as the "
+            "brief directs; the director reads it by this launch_id."
+        )
     suffix = "review" if attempt["phase"] == "review" else "done"
     result = (base / "tasks" / f"{attempt['task_id']}.{suffix}.json").resolve()
     emitter = Path(core.__file__).resolve()
@@ -643,12 +662,7 @@ def _lifecycle_prompt(
     elif binding is not None:
         command += ["--reviewed-base-sha", task["base_sha"]]
     context = (
-        f"{prompt.rstrip()}\n\nLifecycle attempt context:\n"
-        "This adapter block is authoritative over conflicting lifecycle fields in the task "
-        "text. The reserved attempt is "
-        f"launch_id={attempt['launch_id']} phase={attempt['phase']} "
-        f"runtime={attempt['runtime']} workspace_id={attempt['workspace_id']} "
-        f"pane_id={attempt['pane_id']} source_head_sha={attempt['source_head_sha']}. "
+        f"{_attempt_context(prompt, attempt)}"
         f"Publish the final result only with this emitter identity: {shlex.join(command)}. "
         f"Supply only its required outcome and final-result fields. The emitter writes {result} "
         f"and its lock under {coordination}."
@@ -692,7 +706,7 @@ def launch(
 ) -> dict[str, Any]:
     """Launch into an explicit existing shell pane and record strict provenance."""
     if phase not in PHASES:
-        raise DispatchError(f"unsupported phase: {phase}")
+        raise DispatchError(f"unsupported phase: {phase} (expected one of: {', '.join(PHASES)})")
     if binding is not None and phase not in core.DESCENDANT_PHASES:
         raise DispatchError("a binding-scoped launch supports only plan, implement, or review")
     if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
@@ -701,6 +715,10 @@ def launch(
         raise DispatchError("prompt must be non-empty text")
     if route.get("runtime") not in ("claude", "codex"):
         raise DispatchError("route runtime is unsupported")
+    if phase == "ship" and (route["runtime"] != "claude" or sandbox != "read-only"):
+        raise DispatchError("a ship launch requires the claude runtime and the read-only sandbox")
+    if phase == "ship" and not core.valid_task_id(agent):
+        raise DispatchError("a ship agent name must be a plain id")
     if route.get("ready") is not True:
         raise DispatchError("route is not ready")
     if route.get("difficulty") is not None and route.get("difficulty_confirmed") is not True:
@@ -764,6 +782,9 @@ def launch(
     runtime_binary = _runtime_binary(runtime, child_env)
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
     launch_id = f"{agent}-{uuid.uuid4().hex[:12]}"
+    if phase == "ship":
+        # SKILL.md section 6 checks a ship agent's liveness by its launch id.
+        agent = launch_id
     started_ns = time.time_ns()
     attempt = {
         "launch_id": launch_id,
@@ -1272,7 +1293,9 @@ def reprompt(*, repo_slug, task_id, session, fence, workspace_id, launch_id,
              env=None, prompt_timeout_ms=120_000, personal=False):
     """Append a follow-up turn to a named, still-live dispatched worker."""
     if phase not in PHASES:
-        raise DispatchError(f"unsupported phase: {phase}")
+        raise DispatchError(f"unsupported phase: {phase} (expected one of: {', '.join(PHASES)})")
+    if phase == "ship":
+        raise DispatchError("a ship launch is never reprompted; dispatch a fresh ship launch")
     if not core.valid_task_id(task_id) or not core.valid_workspace_id(workspace_id):
         raise DispatchError("invalid task or workspace identity")
     if not isinstance(launch_id, str) or not launch_id:

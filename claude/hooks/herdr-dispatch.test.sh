@@ -77,6 +77,14 @@ def codex_route():
     )
 
 
+def ship_route():
+    return agent_runtime.resolve_route(
+        "claude",
+        "reviewer",
+        capabilities={"models": {"opus": {"status": "available", "efforts": ["high"]}}},
+    )
+
+
 def claude_route():
     return agent_runtime.resolve_route(
         "claude",
@@ -1798,6 +1806,113 @@ def test_read_only_codex_launch_does_not_claim_lifecycle_writes():
         fixture.close()
 
 
+def test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json():
+    fixture = Fixture()
+    original_uuid4 = herdr_dispatch.uuid.uuid4
+    try:
+        herdr_dispatch.uuid.uuid4 = lambda: herdr_dispatch.uuid.UUID(int=0)
+        launch_id = "ship-td-a-000000000000"
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = launch_id
+        result = herdr_dispatch.launch(
+            repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", pane_id="w1:p1", phase="ship", agent="ship-td-a",
+            route=ship_route(), cwd=fixture.repo, sandbox="read-only",
+            prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+            start_timeout_ms=4000, prompt_timeout_ms=1000,
+        )
+        row = fixture.worker_records()[-1]
+        assert result["launch_id"] == launch_id, result
+        assert row["phase"] == "ship" and row["status"] == "launched", row
+        assert row["agent"] == row["launch_id"] == launch_id, row
+        start = next(c for c in fixture.calls() if c[:2] == ["agent", "start"])
+        assert start[2] == launch_id, start
+        prompt = next(c for c in fixture.calls() if c[:2] == ["agent", "prompt"])[3]
+        ship_json = (fixture.rd / "artifacts" / "td-a" / f"ship-{launch_id}" / "ship.json").resolve()
+        assert str(ship_json) in prompt, prompt
+        assert f"launch_id={launch_id} phase=ship" in prompt, prompt
+        for absent in ("emit-done", "emit-review", "herdr_orch_core.py"):
+            assert absent not in prompt, (absent, prompt)
+    finally:
+        herdr_dispatch.uuid.uuid4 = original_uuid4
+        fixture.close()
+
+
+def test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent():
+    fixture = Fixture()
+    try:
+        route_message = "a ship launch requires the claude runtime and the read-only sandbox"
+        cases = (
+            ("workspace-write", ship_route(), "ship-td-a", route_message),
+            ("read-only", codex_route(), "ship-td-a", route_message),
+            ("read-only", ship_route(), "ship/td-a", "a ship agent name must be a plain id"),
+        )
+        for sandbox, route, agent, message in cases:
+            try:
+                herdr_dispatch.launch(
+                    repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+                    workspace_id="w1", pane_id="w1:p1", phase="ship", agent=agent,
+                    route=route, cwd=fixture.repo, sandbox=sandbox,
+                    prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+                    start_timeout_ms=4000, prompt_timeout_ms=1000,
+                )
+            except herdr_dispatch.DispatchError as exc:
+                assert str(exc) == message, (sandbox, agent, exc)
+            else:
+                raise AssertionError(f"ship launch accepted: {sandbox} {agent}")
+        assert fixture.worker_records() == [], fixture.worker_records()
+        assert fixture.calls() == [], fixture.calls()
+    finally:
+        fixture.close()
+
+
+def test_unknown_phase_is_refused_with_the_supported_list():
+    fixture = Fixture()
+    try:
+        prompt_file = fixture.root / "prompt.md"
+        prompt_file.write_text("brief\n")
+        process = subprocess.run(
+            [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), "launch",
+             "--repo-slug", fixture.slug, "--task-id", "td-a", "--session", "S",
+             "--workspace-id", "w1", "--pane-id", "w1:p1", "--phase", "deploy",
+             "--agent", "x-td-a", "--route-json", json.dumps(ship_route()),
+             "--cwd", str(fixture.repo), "--sandbox", "read-only",
+             "--prompt-file", str(prompt_file), "--fence", "1"],
+            capture_output=True, text=True, check=False, env=fixture.env,
+        )
+        assert process.returncode == 2, process
+        assert json.loads(process.stdout) == {
+            "status": "error",
+            "error": "unsupported phase: deploy (expected one of: plan, implement, "
+                     "review, think, read, mechanical, ship)",
+        }, process.stdout
+        assert fixture.worker_records() == [], fixture.worker_records()
+        assert fixture.calls() == [], fixture.calls()
+    finally:
+        fixture.close()
+
+
+def test_reprompt_refuses_a_ship_launch():
+    fixture = Fixture()
+    try:
+        before = fixture.task_file.read_text()
+        try:
+            herdr_dispatch.reprompt(
+                repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+                workspace_id="w1", launch_id="ship-td-a-000000000000", phase="ship",
+                cwd=fixture.repo, prompt="continue", runtime="claude",
+                herdr_cli=str(fixture.bin), env=fixture.env, prompt_timeout_ms=1000,
+            )
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == "a ship launch is never reprompted; dispatch a fresh ship launch", exc
+        else:
+            raise AssertionError("a ship reprompt was accepted")
+        assert fixture.task_file.read_text() == before
+        assert fixture.calls() == [], fixture.calls()
+    finally:
+        fixture.close()
+
+
 def test_bound_prompt_carries_binding_emitter_and_review_fields():
     fixture = LeadFixture()
     try:
@@ -3286,6 +3401,10 @@ for name, test in (
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
+    ("a ship launch names its agent after its launch id and points at ship.json", test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json),
+    ("a ship launch refuses a writable sandbox, a Codex runtime or an odd agent", test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent),
+    ("an unknown phase is refused with the supported list", test_unknown_phase_is_refused_with_the_supported_list),
+    ("reprompt refuses a ship launch", test_reprompt_refuses_a_ship_launch),
     ("bound prompt carries the binding emitter and review fields", test_bound_prompt_carries_binding_emitter_and_review_fields),
     ("wrong pane worktree rejects before mutation", test_wrong_worktree_rejects_before_attempt_or_start),
     ("invalid task base SHA rejects before mutation", test_invalid_task_base_sha_rejects_before_attempt_or_start),
