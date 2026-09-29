@@ -1232,10 +1232,59 @@ Surface: "`<task_id>` review-change clean @ `<sha>`. Task-local review is
 complete; final co-review is still required before PR merge." `changes-requested`
 is not task-local readiness.
 
-Then run `python3 "$CORE" merge-authority --repo-slug <slug> --repo-path <task worktree>`.
-`human` (or a failed call): merge, `/ship` step 6 and `/post-merge` remain
-human actions, and `/post-merge` sets `merged`. `director`: dispatch a ship
-worker and merge through section 6a.
+**Ship step.** Every check-in line with `action=ship` (section 4) runs this
+step for that task, so a wake-driven check-in reaches the merge without a
+human prompt. The action stops once the director parks the task: it writes
+`ship_parked_head: <review_head_sha>` (every other field carried) whenever
+it asks the owner, surfaces a stop, or waits on the owner. A new reviewed
+head un-parks it.
+
+Run `python3 "$CORE" merge-authority --repo-slug <slug> --repo-path <task worktree>`:
+`director` means a personal repository, `human` (or a failed call) a work
+repository. Resolve `ship` from `config.json` (`references/state-layout.md`).
+When `ship` or its `merge` is absent, `merge` is `"auto"` if `account-scope`
+reports `personal_repository` true, else `"human"`. `merge: "auto"` takes
+effect only where `merge-authority` prints `director`; everywhere else the
+director asks once before merging. Take `<owner/repo>` from
+`git -C <worktree> remote get-url origin`; `gh` takes no `-C`, so pass
+`--repo <owner/repo>`. When `ship.push` or `ship.pr` is false, report the
+branch as reviewed, park the task, and run none of the steps below.
+Otherwise, after `confirm-review` passes:
+
+1. Push: `git -C <worktree> push -u origin <branch>:<branch>` (explicit
+   refspec, never a bare push).
+2. When `pr_number` is already on the task record (or
+   `gh pr list --repo <owner/repo> --head <branch>` returns one), skip create
+   and keep that number. Otherwise write the PR body with Write to
+   `<account_payload>/herdr-orch/<slug>/artifacts/<task_id>/pr-body.md`
+   (outside every git work tree), following the `/pr` conventions
+   (description, test plan, Jira link), then open a non-draft PR:
+   `gh pr create --repo <owner/repo> --base <default> --head <branch> --title <plain-language outcome> --body-file <file>`
+   (`<default>` is `default_base` without `origin/`). Write the full task
+   record with `write-task`, adding `pr_number`.
+3. Gate: ship dispatch below. A ship worker runs `co-review` and hands back
+   `ship.json`.
+4. Merge: section 6a, in both kinds of repository.
+
+The director runs every `gh` read and non-post write itself (`pr view`,
+`pr checks`, `pr ready`, `pr create`, `workflow run`, `run watch`,
+`run view`, `run download`). It never hands a `gh` command to the owner.
+When the gh shim, a hook, or the permission classifier refuses one, it says
+which one refused and what it tried, once, and continues with everything
+else.
+
+**Merge-main-only commits keep the verdict.** A head whose only new commits
+since the gated head merge main, where both checks are empty, keeps the
+prior co-review verdict; do not dispatch a new gate round:
+
+```bash
+git -C <worktree> rev-list --no-merges <reviewed_head>..HEAD
+git -C <worktree> diff --name-only <reviewed_head> HEAD -- $(git -C <worktree> diff --name-only "$(git -C <worktree> merge-base origin/<default> <reviewed_head>)" <reviewed_head>)
+```
+
+`merge-ready` still pins the gated head and reports `head-moved` for it, so
+the director merges that head only after one prose ask, as in a work
+repository.
 
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
@@ -1252,7 +1301,12 @@ either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
 `handoff_state` is `current` with verdict `APPROVE` and `merge-ready`
 failed with `base-moved` as its only non-`ci` reason. Never on a `current`
-non-APPROVE handoff (section 6a step 0 owns it). At dispatch, `write-task`
+non-APPROVE handoff (section 6a step 0 owns it). Rule (a) with a
+`ship_launch_id` already set means that run stopped before writing
+`ship.json`: relaunch at most once per reviewed head. Relaunch only when
+`ship_relaunch_head` differs from `review_head_sha`, and write
+`ship_relaunch_head: <review_head_sha>` with the new launch. Otherwise
+report the stopped run, park the task, and stop. At dispatch, `write-task`
 the full record with the new `ship_launch_id`, then write the brief. Every
 ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
 its launch directory, and no merge authority.
