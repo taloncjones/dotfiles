@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Gate agent-posted GitHub PR/issue writes behind a typed owner go.
 
+The gate applies to work repositories. A personal repository (a checkout or
+canonical owner under ~/Git/personal, per workflow_context.account_scope)
+posts without a go: the owner is the only contributor there (2026-09-28).
+
 Incident 2026-09-23: on rw-bess #2444 a co-review/herdr flow posted one
 marker comment per round and replied to a human reviewer; on this repo's
 PR #170 the director posted the co-review verdict after a multiple-choice
@@ -38,6 +42,7 @@ state, raw HTTP with the token, and Codex sessions are accepted residuals.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -50,6 +55,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rm_guard
+
+CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
 GO = {"post it": "post", "edit the pr body": "body"}
 TTL = 600
@@ -103,6 +110,18 @@ KNOWN_WRITES = {
     ("pr", "merge"),   # claude/skills/ship/SKILL.md
     ("pr", "ready"), ("pr", "checkout"), ("repo", "clone"), ("run", "rerun"),
 }
+
+
+def personal_repository(cwd: str) -> bool:
+    """True when `cwd` is in a personal repository; any lookup error is False
+    so the gate stays on."""
+    try:
+        spec = importlib.util.spec_from_file_location("dotfiles_workflow_context", CONTEXT_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return bool(module.account_scope(cwd, "claude")["personal_repository"])
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def normalize(prompt: str) -> str:
@@ -515,7 +534,7 @@ def claim(path: Path) -> bool:
 def check_go(kinds: list[str], sid: str, directory: Path, now: float) -> str | None:
     """Denial text for the first kind in `kinds` its typed go does not cover,
     or None. Reads only: the gh shim spends the go (spend_go) at exec."""
-    if not kinds:
+    if not kinds or personal_repository(os.getcwd()):
         return None
     counts = Counter(kinds)
     # One go covers exactly one post and one body write.
@@ -536,6 +555,8 @@ def check_go(kinds: list[str], sid: str, directory: Path, now: float) -> str | N
 
 def spend_go(kinds: list[str], sid: str, directory: Path) -> str | None:
     """Claim each post/body go in `kinds`; denial text if one is spent."""
+    if personal_repository(os.getcwd()):
+        return None
     for kind in kinds:
         if kind != "delete" and not claim(directory / f"{sid}.{kind}-used"):
             return _denial(kind)
@@ -663,6 +684,9 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
         return None
     sid = payload.get("session_id")
     if not isinstance(sid, str):
+        return None
+    cwd = payload.get("cwd")
+    if personal_repository(cwd if isinstance(cwd, str) and cwd else os.getcwd()):
         return None
     if not shim_armed():
         # No shim behind this session: any `gh` could reach the real one.

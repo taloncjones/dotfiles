@@ -50,7 +50,7 @@ chmod +x "$T/fake/gh"
 printf '. "%s"\n' "$SHIMS/path.sh" >"$T/zdot/.zprofile"
 printf 'gh pr comment 5 --body x\n' >"$T/work/post.sh"
 
-unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN FAKE_STDIN FAKE_OUT FAKE_RC
+unset CLAUDE_PERSONAL_ONLY GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN FAKE_STDIN FAKE_OUT FAKE_RC
 # A stray real gh could neither authenticate nor reach github.com.
 export HOME="$T/home" GH_CONFIG_DIR="$T/ghc" GH_HOST=gh-shim-test.invalid ZDOTDIR="$T/zdot"
 export BASH_ENV="$SHIMS/path.sh"
@@ -94,6 +94,16 @@ if [ "$rc" = 3 ] && [ "$(cat "$T/out")" = hello ] && [ "$(cat "$FAKE_LOG")" = "p
     pass "S1 read passes argv, stdout and exit status through"
 else
     fail "S1 read passes argv, stdout and exit status through (rc=$rc out=$(cat "$T/out") log=$(cat "$FAKE_LOG"))"
+fi
+
+fresh_gate
+mkdir -p "$HOME/Git/personal/repo"
+git init -q "$HOME/Git/personal/repo"
+(cd "$HOME/Git/personal/repo" && gh pr comment 5 --body x >/dev/null 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(cat "$FAKE_LOG")" = "pr comment 5 --body x" ]; then
+    pass "S1b personal repository posts without a go"
+else
+    fail "S1b personal repository posts without a go (rc=$rc log=$(cat "$FAKE_LOG"))"
 fi
 
 fresh_gate

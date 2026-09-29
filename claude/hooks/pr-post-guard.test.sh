@@ -18,6 +18,15 @@ FIX=$(mktemp -d /tmp/pr-post-guard.XXXXXX)
 trap 'rm -rf "$FIX"' EXIT
 
 export HERDR_ENV=1
+# The gate is a work-repo rule: run from a fixture home so the result does
+# not depend on the machine, with payload cwd outside ~/Git/personal.
+mkdir -p "$FIX/home/work" "$FIX/home/Git/personal/repo"
+git init -q "$FIX/home/Git/personal/repo"
+HOME="$FIX/home"
+export HOME
+unset CLAUDE_PERSONAL_ONLY
+WORK_CWD="$FIX/home/work"
+PERSONAL_CWD="$FIX/home/Git/personal/repo"
 # The hook honors a go only when `gh` on its PATH is the shim that spends it.
 PATH="$(pwd)/bin/herdr-shims:$PATH"
 export PATH
@@ -41,11 +50,12 @@ PY
 
 # payload_b SID COMMAND -> PreToolUse Bash JSON on stdout
 payload_b() {
-    PB_SID="$1" PB_CMD="$2" python3 - <<'PY'
+    PB_SID="$1" PB_CMD="$2" PB_CWD="${PB_CWD:-$WORK_CWD}" python3 - <<'PY'
 import json, os
 print(json.dumps({
     "hook_event_name": "PreToolUse",
     "session_id": os.environ["PB_SID"],
+    "cwd": os.environ["PB_CWD"],
     "tool_name": "Bash",
     "tool_input": {"command": os.environ["PB_CMD"]},
 }))
@@ -588,6 +598,23 @@ os.utime(p, (old, old))
 " "$GATE/old.json"
 expect_rc "M3 mint again prunes old files" 0 "$(payload_u s1 'post it')"
 expect_file "M3 old marker pruned" "$GATE/old.json" absent
+
+# --- P: personal repositories post without a go -------------------------
+
+case_gate p1
+NOSHIM_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'herdr-shims' | paste -sd: -)
+P1_PAYLOAD=$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 1 --body x')
+printf '%s' "$P1_PAYLOAD" | PATH="$NOSHIM_PATH" python3 "$HOOK" >"$FIX/out" 2>"$FIX/err"
+p1rc=$?
+if [ "$p1rc" = 0 ]; then
+    printf 'PASS  P1 personal unarmed comment passes\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  P1 personal unarmed comment (rc=%s)\n' "$p1rc" >&2; FAIL=$((FAIL + 1))
+fi
+expect_rc "P2 personal armed pr comment no go" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 1 --body x')"
+expect_rc "P3 personal armed pr edit body no go" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr edit 1 --body x')"
+expect_rc "P4 work armed pr comment no go" 2 "$(payload_b s1 'gh pr comment 1 --body x')"
+expect_rc "P5 work armed pr edit body no go" 2 "$(payload_b s1 'gh pr edit 1 --body x')"
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
