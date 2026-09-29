@@ -1884,9 +1884,9 @@ Rules (these are outward-facing writes, so treat them carefully):
   gh <args>`, show the draft and hash, and wait for `post it`, `post all`
   or `post <hash>`; after posting, print `[INFO] posted reply on #n`. If an
   approved post fails, let the Bash call return, read the PR, and
-  re-register only when the text is absent, telling the owner a duplicate
-  is possible. It never replies to a human reviewer's thread on its own
-  initiative. Enforced in herdr agent sessions by the gh shim
+  re-register only when the text is absent, telling the owner that a
+  duplicate is possible. It never replies to a human reviewer's thread on
+  its own initiative. Enforced in herdr agent sessions by the gh shim
   (`bin/herdr-shims/gh`, `claude/hooks/gh_post_shim.py`), which reads the
   PR author once per session and spends one approved draft per gated call
   -- every other `gh` write (`workflow run`, `run download`, `pr merge`,
