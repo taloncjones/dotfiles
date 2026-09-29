@@ -2755,7 +2755,7 @@ assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], o
 import shutil; shutil.rmtree(sb)
 PY
 
-check "docs pin director merge authority: 6a procedure, ship dispatch, manual-mode table, safety" <<'SH'
+check "docs pin director merge authority: 6a procedure, ship dispatch, launch table, safety" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 if grep -q 'The director never merges, pushes, or opens a PR' "$S"; then exit 1; fi
 if grep -Fq 'machine-local `Bash(gh pr merge:*)`' "$S"; then exit 1; fi
@@ -11151,7 +11151,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 445
+assert t.count("\n") <= 447
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -11190,7 +11190,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 445
+assert t.count("\n") <= 447
 PY
 
 check "row_settlement: each settlement rule fires on its record state" <<'PY'

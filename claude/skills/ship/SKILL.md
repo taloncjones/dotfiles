@@ -63,7 +63,12 @@ target base. Stop if either identity is unavailable or mismatched.
    A changed identity, failed evaluation, absent active files, or session interruption
    invalidates approval and stops this workflow. A fresh review needs the
    caller authorization described above; historical PR comments never resume
-   this step.
+   this step. One exception: a head whose only new commits since the gated
+   head merge the base branch, with an empty diff over the branch's own
+   files (the git check under "Merge-main-only commits keep the verdict" in
+   the herdr-orchestration skill, section 6), keeps the verdict; redo this
+   step's live recheck against the new head and continue without a new
+   round.
 
 5. **Audit comment.** Only in this same uninterrupted workflow, right after
    step 4 passes (an interrupted workflow stops under the existing step 3/4

@@ -342,7 +342,7 @@ Before asking for the go, read the PR's comments once (the `gh api
 --paginate --slurp` call below, run before `gh pr comment`) and compute
 `round` from it.
 
-The go: ask in prose, "Type `post it` to post the marker." End the turn.
+The go: ask in prose, "Say `post it` to post the marker." End the turn.
 Posting is never an `AskUserQuestion` option, recommended or not. The go is
 a typed user message with a sentence that says `post it` or `post all` as a
 phrase (any case), with no `not`, `n't`, `never` or `no` before the phrase

@@ -34,13 +34,15 @@ line instead of re-running the launch steps above. On a `[WARNING]` block,
 or when no block appears, run the section-1 preflight. To roll over
 deliberately, use the skill's section 1a.
 
-In herdr mode the director edits no repo files itself, but it runs the skill's
-ship step once a task's review is confirmed: push the task branch, open the
-PR, run the `co-review` gate. The `ship.merge` config value (`auto` or
-`human`, defaulting from the repo location: `personal_repository` auto, else human) decides
-the merge: `auto` squash-merges with `--match-head-commit` after an APPROVE;
-`human` reports the PR for the owner's confirm. It never posts a comment,
-review, reply, or body edit.
+In herdr mode the director edits repo files only under the skill's
+allow-edit marker, and it runs the skill's ship step once a task's review is
+confirmed: push the task branch, open the PR, run the `co-review` gate, then
+merge (section 6a) with `--match-head-commit` after an APPROVE: without
+asking in a personal repository, after one prose ask in a work repository.
+It runs every `gh` read and non-post write itself and never hands a `gh`
+command to the owner. It posts PR comments and body edits the same way: no
+ask in a personal repository, the owner's `post it` in a work repository.
+It never replies to a human reviewer's thread on its own initiative.
 
 In herdr mode the skill file is the single source of procedure. Never
 restate or adapt its steps from memory; follow the loaded skill text.

@@ -522,23 +522,11 @@ if [ "$rc" = 2 ] && [ ! -s "$rec" ] && grep -q 'HERDR_ENV is not 1' "$TMP/err"; 
 else
     fail "director refuses outside a herdr pane (rc=$rc)"
 fi
-run_case "director adds manual permission mode by default" \
-    "$SBHOME/elsewhere" "HERDR_ENV=1 director" "UNSET" "$PREFIX --permission-mode manual"
-director_refuses() {
-    label="$1" args="$2"
-    rec="$TMP/rec"; : >"$rec"
-    RECORD="$rec" HOME="$SBHOME" PATH="$TMP/bin:$PATH" \
-        zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && HERDR_ENV=1 director $args" >/dev/null 2>"$TMP/err"
-    rc=$?
-    if [ "$rc" = 2 ] && [ ! -s "$rec" ] && grep -q 'only manual or default permission mode' "$TMP/err"; then
-        pass "$label"
-    else
-        fail "$label (rc=$rc)"
-    fi
-}
-director_refuses "director refuses bypassPermissions" "--permission-mode bypassPermissions"
-director_refuses "director refuses --permission-mode=auto" "--permission-mode=auto"
-director_refuses "director refuses --dangerously-skip-permissions" "--dangerously-skip-permissions"
+run_case "director adds auto permission mode by default" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director" "UNSET" "$PREFIX --permission-mode auto"
+run_case "director passes --permission-mode manual through" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode manual" \
+    "UNSET" "$PREFIX --permission-mode manual"
 run_case "director passes --permission-mode default through" \
     "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode default" \
     "UNSET" "$PREFIX --permission-mode default"

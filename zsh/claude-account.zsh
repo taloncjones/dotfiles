@@ -152,32 +152,16 @@ function claude() {    # claude() will launch Claude Code with the work account 
     fi
 }
 
-function director() {    # director() launches the herdr director with inbound messaging and manual permissions through claude(). ex: $ director
+function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(). ex: $ director
     emulate -L zsh
     if [[ "${HERDR_ENV:-}" != 1 ]]; then
         echo "[X] director: run inside a herdr pane (HERDR_ENV is not 1)." >&2
         return 2
     fi
-    # Auto mode's classifier refuses the merge path, and bypass modes drop the
-    # prompts the section 1 table relies on; only manual and default remain.
-    local arg refused= expect_mode=0
-    local -a mode=(--permission-mode manual)
+    local arg
+    local -a mode=(--permission-mode auto)
     for arg in "$@"; do
-        if (( expect_mode )); then
-            expect_mode=0
-            [[ "$arg" == manual || "$arg" == default ]] || refused="$arg"
-            continue
-        fi
-        case "$arg" in
-            --permission-mode) mode=(); expect_mode=1 ;;
-            --permission-mode=manual|--permission-mode=default) mode=() ;;
-            --permission-mode=*|--dangerously-skip-permissions|--allow-dangerously-skip-permissions) refused="$arg" ;;
-        esac
+        [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
     done
-    (( expect_mode )) && refused="--permission-mode"
-    if [[ -n "$refused" ]]; then
-        echo "[X] director: only manual or default permission mode is supported; auto mode's classifier blocks the merge path." >&2
-        return 2
-    fi
     claude --agent director --settings '{"crossSessionInbound":"accept"}' "${mode[@]}" "$@"
 }

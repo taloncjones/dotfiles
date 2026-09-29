@@ -138,24 +138,35 @@ for the provider's `launch_env` mapping.
      an unusable value stores `null` with one `[WARNING]` and ownership still
      succeeds. Launch with the `director` shell function
      (`zsh/claude-account.zsh`), which runs `claude --agent director
---settings '{"crossSessionInbound":"accept"}' --permission-mode manual`
+--settings '{"crossSessionInbound":"accept"}' --permission-mode auto`
      through the account-routing wrapper and refuses outside a herdr pane.
-     `director` refuses any permission mode other than manual or default.
-     Auto mode is no longer the documented launch: its classifier refuses
-     `gh pr merge`. Nothing in the director flow assumes a permission mode;
-     the rollover hook runs in every mode, and a `rollover` Bash call may
-     prompt in manual mode.
+     Auto mode is the documented launch; an explicit `--permission-mode`
+     argument overrides it. Nothing in the director flow assumes a
+     permission mode; the rollover hook runs in every mode.
 
-     What the manual-mode director runs, and what prompts:
+     Auto mode's server-side classifier intercepts two kinds of action.
+     It refuses `gh pr merge`, `gh workflow run`, `gh pr comment` and
+     `gh pr ready` unless the project's `.claude/settings.local.json`
+     allows them (`Bash(gh pr merge:*)`, `Bash(gh workflow run:*)`,
+     `Bash(gh pr comment:*)`, `Bash(gh pr ready:*)`; machine-local, never
+     in the template), so the owner keeps those rules in every repository
+     the director runs in. And it refuses any edit that loosens the
+     director's own guardrails (this skill's launch and posting rules, the
+     post gate, the `director` function's permission mode), from the
+     director and from every worker it launches, which also run in auto
+     mode. Those edits run from a manual-mode session
+     (`director --permission-mode manual`).
+
+     What the director runs, and what the classifier does with it:
 
      | Action                                                                                   | Covering template rule              | Prompt in manual mode | Auto mode                                     | Recovery                                                                                                                |
      | ---------------------------------------------------------------------------------------- | ----------------------------------- | --------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-     | `gh pr view`, `gh pr comment`, `gh pr merge`                                             | `Bash(gh pr:*)`                     | no                    | classifier refuses `gh pr merge`              | launch with `director` (manual)                                                                                         |
+     | `gh pr view`, `gh pr comment`, `gh pr merge`                                             | `Bash(gh pr:*)`                     | no                    | allowed with the local allow rules above; refused without them | add the allow rules to `.claude/settings.local.json`                                                                    |
      | `gh repo view`, `gh api`                                                                 | `Bash(gh repo:*)`, `Bash(gh api:*)` | no                    | allowed                                       | none needed                                                                                                             |
-     | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready` | `Bash(python3:*)`                   | no                    | stalled plan completions and pins on approval | launch with `director` (manual)                                                                                         |
-     | `git worktree remove`                                                                    | `Bash(git worktree:*)`              | no                    | refused worktree removal                      | launch with `director` (manual)                                                                                         |
-     | `DOTFILES_ALLOW_GIT_META=1 git ...`, the `rm -rf` teardown fallback                      | none                                | accepted prompt       | refused                                       | approve the prompt, or finish `/post-merge` by hand                                                                     |
-     | a worker's edit of `claude/settings.json.tmpl` (workers run in auto mode)                | not applicable                      | not applicable        | accepted classifier denial                    | the worker reports `blocked:` with the denial text; the director surfaces it and a human approves the edit in that pane |
+     | core verbs: `write-task` contract pins, `confirm-plan`, `merge-authority`, `merge-ready` | `Bash(python3:*)`                   | no                    | allowed; an occasional refusal is reported    | rerun the verb from a manual-mode session                                                                               |
+     | `git worktree remove`                                                                    | `Bash(git worktree:*)`              | no                    | allowed                                       | none needed                                                                                                             |
+     | `DOTFILES_ALLOW_GIT_META=1 git ...`, the `rm -rf` teardown fallback                      | none                                | accepted prompt       | refused                                       | finish `/post-merge` by hand                                                                                            |
+     | an edit to this skill's launch or posting rules, the post gate, or the `director` permission mode (director or worker) | not applicable | accepted prompt | refused as self-modification | make the edit from a manual-mode session; a worker reports `blocked:` with the denial text                             |
 
      The explicit `accept` is safe here because every inbound message is
      wake-only (Safety); a bypass-mode director without it has every
@@ -1322,10 +1333,11 @@ launch final: further work needs a fresh launch, never a reprompt.
 ## 6a. Director merge (personal repositories)
 
 A personal repository is a checkout whose path or canonical owner is under
-`~/Git/personal`. The merge steps run only where `merge-authority` prints
-`director`. The
-user's standing authorization (2026-09-22, reaffirmed 2026-09-23) is the
-merge go here; work repositories keep the human go.
+`~/Git/personal`. Where `merge-authority` prints `director`, the user's
+standing authorization (2026-09-22, reaffirmed 2026-09-29) is the merge go
+and the steps below run without asking. In a work repository the director
+asks once in prose ("merge #<n> at <head>?") and runs the same steps on a
+yes; the yes covers that head only, and a moved head asks again.
 
 **Recovery first, before the stale-verdict rule, in every repository.** List
 tasks with the section 4 check-in call plus `--all`:
@@ -1375,10 +1387,14 @@ check-in report while it holds, with no mutating retry.
    `ship_launch_id`) with `status: merged` and
    `merge_check: {"base_main_sha": <merge-ready base_sha>, "branch_head_sha": <head_sha>, "result": "pass", "ts": "...", "gate_report": <report_path>, "merge_commit_sha": <mergeCommit oid>, "merged_by": "director"}`.
 6. Close the task's live panes and its todo (todos skill).
-7. Teardown: run `/post-merge` for the PR in its director mode. A dirty
-   worktree stops it: `write-task` `teardown_blocked: "<reason>"` (carrying
-   every field) and surface it; a human finishes `/post-merge`. Lessons
-   distillation stays a human step.
+7. Teardown: run `/post-merge` for the PR in its director mode. Before it
+   deletes anything, `git -C <worktree> rev-parse HEAD` must equal the
+   merged PR's `headRefOid` (or be an ancestor of `origin/<default>`); a
+   later, unpublished commit stops it with `teardown_blocked: "head-moved"`
+   and the branch is kept. A dirty worktree stops it the same way:
+   `write-task` `teardown_blocked: "<reason>"` (carrying every field) and
+   surface it; a human finishes `/post-merge`. Lessons distillation stays a
+   human step.
 
 ## 7. Worker-created panes (self-managed)
 
@@ -1784,7 +1800,7 @@ the new `status`; that write is the authoritative record.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | `merge-authority` human: human merges; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
 | reviewed                                     | `merge-authority` director: section 6a gates pass, PR confirmed `MERGED`                                                                                                                               | `merged` (`merged_by: director`)               | merged                  | yes       |
 | reviewed                                     | PR `MERGED` at `review_head_sha`, director repo (section 6a recovery, before the stale-verdict rule)                                                                                                   | `merged` (`merged_by: observed`)               | merged                  | yes       |
 
@@ -1846,14 +1862,18 @@ Rules (these are outward-facing writes, so treat them carefully):
   the turn summary. The marker is bounded three ways (minutes, write
   budget, this repo only) and every guarded attempt under it, and every
   refusal, is recorded in `tasks/orch-edits.jsonl`.
-- The director never pushes or opens a PR; ship workers do. It merges only
-  through section 6a, in a repository where `merge-authority` prints
-  `director`. Elsewhere merge, `/ship` step 6 and `/post-merge` stay human
+- The director pushes the task branch and opens its PR in the section 6
+  ship step, runs every `gh` read and non-post write itself, and never
+  hands a `gh` command to the owner. It merges through section 6a: without
+  asking where `merge-authority` prints `director`, after one prose ask
+  elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
   actions. Workers never carry merge authority.
-- The only agent post on a PR is the newest co-review marker, posted by the
-  director only after the owner says `post it` or `post all` in a message
-  (co-review Publish; a personal repository needs no go). No replies to
-  reviewers -- draft them. PR body edits need `edit the pr body`. Enforced
+- The director posts to a PR (a co-review marker, bench evidence, a status
+  note, a body edit) without asking in a personal repository, and in a
+  work repository only after the owner says `post it` or `post all` in a
+  message, once per post (co-review Publish; `edit the pr body` for a body
+  edit). It never replies to a human reviewer's thread on its own
+  initiative: it drafts the reply and asks. Enforced
   in herdr agent sessions by the gh shim (`bin/herdr-shims/gh`,
   `claude/hooks/gh_post_shim.py`), which gates only posted text at exec
   time -- every other `gh` write (`workflow run`, `run download`, `pr
