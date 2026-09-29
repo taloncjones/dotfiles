@@ -572,5 +572,18 @@ for herdr in 1 0; do
     fi
 done
 
+# If arming silently fails to put the shim first on PATH, claude() must
+# refuse the unarmed launch instead of running claude anyway.
+: > "$TMP/rec"
+err="$(env -u BASH_ENV RECORD="$TMP/rec" HOME="$SBHOME" HERDR_ENV=1 CLAUDE_PERSONAL_ONLY=1 \
+    PATH="$TMP/armbin:$TMP/pyonly:$TMP/othergh:/usr/bin:/bin" SHIM_GH="$SHIMS/gh" \
+    zsh -c "cd '$SBHOME/elsewhere' && source '$REPO/$ACCT' && function dotfiles_arm_gh_shim() { :; }; claude -p hi" 2>&1 >/dev/null)"
+rc=$?
+if [ "$rc" = 2 ] && [ ! -s "$TMP/rec" ] && case "$err" in *unarmed*) true;; *) false;; esac; then
+    pass "claude refuses an unarmed launch when arming does not put the shim first on PATH"
+else
+    fail "claude refuses an unarmed launch when arming does not put the shim first on PATH (rc=$rc err='$err')"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

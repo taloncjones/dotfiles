@@ -2514,9 +2514,9 @@ def rollover_info(slug, session, fence, watch) -> str:
                   f'kill $(python3 "$CORE" watch-pids --repo-slug {slug} '
                   '--messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET")']
     elif wstate == "none":
-        lines.append("watch: none found; arm it per herdr-orchestration section 1 step 6")
+        lines.append("watch: none found; arm it per herdr-orchestration section 1 step 7")
     else:
-        lines.append("watch: unknown (ps failed); arm it per herdr-orchestration section 1 step 6")
+        lines.append("watch: unknown (ps failed); arm it per herdr-orchestration section 1 step 7")
     lines += [f"Next: load the herdr-orchestration skill. Use fence {fence} and session {session}.",
               "Skip the initial-claim-only steps (workspace label, dashboard --open) and run",
               "a section-4 check-in before any dispatch."]
