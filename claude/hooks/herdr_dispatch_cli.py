@@ -14,10 +14,10 @@ from typing import Any
 
 import agent_runtime
 
-# A worker attempt can run well past an hour; a short TTL made settle/sweep
-# permanently unable to prove occupancy (and check-in nag forever) once a
-# long-lived worker's token aged out with nothing to refresh it.
-LAUNCH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000
+# herdr 0.9.1 rejects a ttl_ms above 86400000. The token is sent only at
+# launch, so a worker that runs past 24 h loses its occupancy proof; a
+# refresh path is a follow-up.
+LAUNCH_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 
 
 def _dispatch_error(message: str) -> RuntimeError:
