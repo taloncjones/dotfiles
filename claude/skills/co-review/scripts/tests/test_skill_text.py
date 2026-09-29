@@ -48,6 +48,12 @@ class CoReviewSkillText(unittest.TestCase):
             self.assertIn("finder", text)
             self.assertNotIn("first three", text)
 
+    def test_both_entrypoints_state_the_usage_limit_rule(self):
+        for text in (CO_REVIEW, MIRROR):
+            self.assertIn("usage-limit refusal", text)
+            self.assertIn("not retried", text)
+        self.assertIn("<seat>.native.md", MIRROR)
+
     def test_co_review_gates_the_finder_dispatch_on_class(self):
         for needle in ('if [ "$CLASS" != "light" ]; then',
                        "Light tier: only the codex reviewer seat. Full tier: also claude and breaker."):

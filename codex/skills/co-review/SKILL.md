@@ -243,8 +243,17 @@ Full tier: wait for Claude, Codex, and breaker to complete and collect their
 actual native or runner results before continuing. The coordinator uses
 `wait_agent` for each native handle and a 1200-second deadline; it uses
 `interrupt_agent` only after a deadline. A failed, timed-out, empty, or
-malformed completion stops as incomplete. Store each successful completion as
-its named report-relative artifact and record its digest.
+malformed completion stops as incomplete. Store each successful native completion as
+the report-relative `<seat>.native.md` and record its digest; a runner seat
+keeps its `.json` runner response.
+
+The runner reports a usage-limit refusal (a result that opens with a notice
+such as "You've hit your session limit") as `status: error`, with the notice
+in `errors` and a null `result`, so its probe fails the probe check. The
+evaluator re-reads every seat artifact: a `.json` artifact must be runner
+JSON whose `status` is `success`, and no seat artifact may be a usage-limit
+refusal. A limit-refused seat is not retried, because the limit holds until
+its reset; the gate is `INCOMPLETE`.
 
 Light tier: wait for the `codex` seat only, under the same deadline and
 incomplete rules.

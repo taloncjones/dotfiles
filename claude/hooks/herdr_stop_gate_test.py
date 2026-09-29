@@ -1,6 +1,8 @@
 """Focused strict-attempt and native Stop output tests; no live state."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -315,6 +317,34 @@ class StopGateTests(unittest.TestCase):
         )
         self.assertEqual(process.returncode, 0)
         self.assertEqual(json.loads(process.stdout)["decision"], "block")
+
+    def test_refusal_third_line_carries_wait_hint(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status = gate.refuse("CMD")
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(status, 2)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[1], "Run: CMD")
+        self.assertEqual(
+            lines[2],
+            "Then stop again; the gate releases on that attempt. " + gate.WAIT_HINT,
+        )
+
+    def test_wrapper_block_reason_carries_wait_hint(self):
+        wrapper = HOOKS.parents[1] / "codex" / "hooks" / "herdr_stop_gate.py"
+        process = subprocess.run(
+            [sys.executable, str(wrapper)],
+            input=json.dumps(self._payload()),
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+        self.assertEqual(process.returncode, 0)
+        output = json.loads(process.stdout)
+        self.assertEqual(output["decision"], "block")
+        self.assertTrue(output["reason"].endswith("; " + gate.WAIT_HINT))
 
     def test_explicit_personal_selection_is_pinned_without_auth_mutation(self):
         self.worktree = self.root / "Git" / "work" / "personal-project"

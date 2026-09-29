@@ -23,6 +23,7 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 QUOTA_ATTEMPT = {"runtime": "codex", "status": "error", "result": None,
                  "errors": ["You've hit your usage limit."]}
+LIMIT_NOTICE = "You've hit your session limit \u00b7 resets 3pm"
 AXES = (
     "ownership_authority",
     "dependency_boundaries",
@@ -585,6 +586,82 @@ class GateReportTests(unittest.TestCase):
         self.assertEqual(
             shape["codex_substitute"]["reasons"], ["quota", "auth", "unavailable"]
         )
+
+    def test_lesson_shape_limit_seat_is_incomplete(self):
+        body = json.dumps({"runtime": "claude", "status": "error",
+                           "result": LIMIT_NOTICE, "errors": []})
+        self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(
+            sorted(r for r in result["reasons"] if r.startswith("seat codex")),
+            ["seat codex result is a usage-limit refusal",
+             "seat codex runner status is not success"],
+        )
+
+    def test_failed_runner_seat_is_incomplete(self):
+        body = json.dumps({"runtime": "codex", "status": "error",
+                           "result": None, "errors": ["boom"]})
+        self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(
+            [r for r in result["reasons"] if r.startswith("seat codex")],
+            ["seat codex runner status is not success"],
+        )
+
+    def test_success_shaped_limit_seat_is_incomplete(self):
+        body = json.dumps({"runtime": "codex", "status": "success",
+                           "result": "You've hit your usage limit.", "errors": []})
+        self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(
+            [r for r in result["reasons"] if r.startswith("seat codex")],
+            ["seat codex result is a usage-limit refusal"],
+        )
+
+    def test_native_limit_seat_is_incomplete(self):
+        self.report["seats"]["codex"].update(
+            self._write("codex.native.md", LIMIT_NOTICE + "\n"))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(
+            [r for r in result["reasons"] if r.startswith("seat codex")],
+            ["seat codex result is a usage-limit refusal"],
+        )
+
+    def test_truncated_runner_seat_is_incomplete(self):
+        self.report["seats"]["codex"].update(
+            self._write("codex.runtime.json", '{"runtime": "codex", "status": "succ'))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(
+            [r for r in result["reasons"] if r.startswith("seat codex")],
+            ["seat codex artifact is not runner JSON"],
+        )
+
+    def test_runner_seat_without_keys_is_incomplete(self):
+        body = json.dumps({"result": "# Review\n\nAPPROVE"})
+        self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "INCOMPLETE")
+        self.assertEqual(
+            [r for r in result["reasons"] if r.startswith("seat codex")],
+            ["seat codex artifact is not runner JSON"],
+        )
+
+    def test_runner_seat_quoting_notice_approves(self):
+        body = json.dumps({"runtime": "codex", "status": "success",
+                           "result": f"# Review\n\nQuoted: {LIMIT_NOTICE}",
+                           "errors": []})
+        self.report["seats"]["codex"].update(self._write("codex.runtime.json", body))
+        self.assertEqual(self.verdict()["verdict"], "APPROVE")
+
+    def test_schema_states_seat_artifact_rule(self):
+        text = gate.schema()["seat_artifact_must_show"]
+        self.assertIn(".json", text)
+        self.assertIn("usage-limit", text)
 
     def test_valid_report_approves(self):
         result = self.verdict()

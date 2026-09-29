@@ -2360,8 +2360,9 @@ def test_metadata_update_carries_sequence_and_launch_token():
         "--seq",
         "1234",
         "--ttl-ms",
-        "2592000000",
+        "86400000",
     ], argv
+    assert int(argv[argv.index("--ttl-ms") + 1]) <= 86400000, argv
 
 
 def test_inspect_rejects_stale_result_and_accepts_current_attempt():
