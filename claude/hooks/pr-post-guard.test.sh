@@ -18,6 +18,15 @@ FIX=$(mktemp -d /tmp/pr-post-guard.XXXXXX)
 trap 'rm -rf "$FIX"' EXIT
 
 export HERDR_ENV=1
+# The gate is a work-repo rule: run from a fixture home so the result does
+# not depend on the machine, with payload cwd outside ~/Git/personal.
+mkdir -p "$FIX/home/work" "$FIX/home/Git/personal/repo"
+git init -q "$FIX/home/Git/personal/repo"
+HOME="$FIX/home"
+export HOME
+unset CLAUDE_PERSONAL_ONLY
+WORK_CWD="$FIX/home/work"
+PERSONAL_CWD="$FIX/home/Git/personal/repo"
 # The hook honors a go only when `gh` on its PATH is the shim that spends it.
 PATH="$(pwd)/bin/herdr-shims:$PATH"
 export PATH
@@ -41,11 +50,12 @@ PY
 
 # payload_b SID COMMAND -> PreToolUse Bash JSON on stdout
 payload_b() {
-    PB_SID="$1" PB_CMD="$2" python3 - <<'PY'
+    PB_SID="$1" PB_CMD="$2" PB_CWD="${PB_CWD:-$WORK_CWD}" python3 - <<'PY'
 import json, os
 print(json.dumps({
     "hook_event_name": "PreToolUse",
     "session_id": os.environ["PB_SID"],
+    "cwd": os.environ["PB_CWD"],
     "tool_name": "Bash",
     "tool_input": {"command": os.environ["PB_CMD"]},
 }))
@@ -83,7 +93,7 @@ expect_file() {
     fi
 }
 
-# --- G: the go must be a whole message -----------------------------------
+# --- G: the go is a phrase anywhere in a typed prompt ---------------------
 
 case_gate g1
 expect_rc "G1 prompt post it" 0 "$(payload_u s1 'post it')"
@@ -98,6 +108,23 @@ expect_rc "G2 post denied" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
 case_gate g3
 expect_rc "G3 negated prompt is not a go" 0 "$(payload_u s1 'do not post it yet')"
 expect_rc "G3 post denied" 2 "$(payload_b s1 'gh pr comment 5 --body x')"
+
+case_gate g3b
+expect_rc "G3b post all inside a sentence is a go" 0 "$(payload_u s1 'looks fine, ok post all')"
+expect_file "G3b marker written" "$GATE/s1.json" present
+expect_rc "G3b post allowed" 0 "$(payload_b s1 'gh pr comment 5 --body-file m.md')"
+
+case_gate g3c
+expect_rc "G3c Post it mid-sentence is a go" 0 "$(payload_u s1 'Merge order is fine. Post it and continue.')"
+expect_file "G3c marker written" "$GATE/s1.json" present
+
+case_gate g3d
+expect_rc "G3d edit the pr body mid-sentence is a body go" 0 "$(payload_u s1 'then edit the pr body with the new counts')"
+expect_rc "G3d body edit allowed" 0 "$(payload_b s1 'gh pr edit 5 --body-file b.md')"
+
+case_gate g3e
+expect_rc "G3e postit without a boundary is not a go" 0 "$(payload_u s1 'compostit')"
+expect_file "G3e no marker minted" "$GATE/s1.json" absent
 
 case_gate g4
 brief='Summary line one.
@@ -305,7 +332,7 @@ expect_rc "V5 ANSI-C \$'...' quoting is denied outright, no go" 2 "$(payload_b s
 expect_rc "V5 mint post" 0 "$(payload_u s1 'post it')"
 expect_rc "V5 ANSI-C quoted post passes after a typed go" 0 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
 
-# --- U: an unclassifiable gh call is denied outright, no go covers it ------
+# --- U: a gh call outside the read and gated tables is a plain write ------
 
 case_gate u1
 expect_rc "U1 unknown gh subcommand passes the hook (the shim denies it)" 0 "$(payload_b s1 'gh foo bar')"
@@ -504,7 +531,7 @@ expect_class "PA1 clustered -iX DELETE is a delete" delete api -iX DELETE repos/
 expect_class "PA2 clustered -if field is a post" post api -ifbody=x repos/o/r/issues/1/comments
 expect_class "PA3 clustered -iF graphql query file is a post" post api graphql -iF query=@m.graphql
 expect_class "PA4 -X=GET is a read" read api -X=GET repos/o/r/issues/1
-expect_class "PA5 an unknown short flag is unknown" unknown api -Z repos/o/r/issues/1
+expect_class "PA5 an unknown short flag is a plain write" write api -Z repos/o/r/issues/1
 expect_class "PA6 a value flag takes a dash-led next arg; fields still post" post api -t -iXGET repos/o/r/issues/1/comments -f body=hi
 expect_class "PA7 -q taking -iXGET keeps the DELETE" delete api -X DELETE -q -iXGET repos/o/r/issues/comments/1
 expect_class "PA8 plain -X DELETE is still a delete" delete api -X DELETE repos/o/r/issues/comments/1
@@ -588,6 +615,23 @@ os.utime(p, (old, old))
 " "$GATE/old.json"
 expect_rc "M3 mint again prunes old files" 0 "$(payload_u s1 'post it')"
 expect_file "M3 old marker pruned" "$GATE/old.json" absent
+
+# --- P: personal repositories post without a go -------------------------
+
+case_gate p1
+NOSHIM_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'herdr-shims' | paste -sd: -)
+P1_PAYLOAD=$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 1 --body x')
+printf '%s' "$P1_PAYLOAD" | PATH="$NOSHIM_PATH" python3 "$HOOK" >"$FIX/out" 2>"$FIX/err"
+p1rc=$?
+if [ "$p1rc" = 0 ]; then
+    printf 'PASS  P1 personal unarmed comment passes\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  P1 personal unarmed comment (rc=%s)\n' "$p1rc" >&2; FAIL=$((FAIL + 1))
+fi
+expect_rc "P2 personal armed pr comment no go" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 1 --body x')"
+expect_rc "P3 personal armed pr edit body no go" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr edit 1 --body x')"
+expect_rc "P4 work armed pr comment no go" 2 "$(payload_b s1 'gh pr comment 1 --body x')"
+expect_rc "P5 work armed pr edit body no go" 2 "$(payload_b s1 'gh pr edit 1 --body x')"
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

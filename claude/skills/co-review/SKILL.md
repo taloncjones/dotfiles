@@ -406,11 +406,11 @@ Before asking for the go, read the PR's comments once (the `gh api
 --paginate --slurp` call below, run before `gh pr comment`) and compute
 `round` from it.
 
-The go: ask in prose, "Type `post it` to post the marker." End the turn.
+The go: ask in prose, "Say `post it` to post the marker." End the turn.
 Posting is never an `AskUserQuestion` option, recommended or not. The go is
-a user message whose whole text is `post it`, ignoring case, surrounding
-space, and one trailing `.` or `!`. Anything else, including any
-`AskUserQuestion` answer, is no.
+a typed user message that says `post it` or `post all` anywhere as a phrase
+(any case, not negated). An `AskUserQuestion` answer is never a go. A
+personal repository needs no go at all.
 
 On the go:
 
@@ -431,6 +431,5 @@ supersede step reruns.
 Never reply to, resolve, or react to a reviewer thread. Draft any reply in
 chat for the owner to post themselves.
 
-Never edit the PR title or body unless the owner types the whole message
-`edit the pr body` (same normalization as the posting go); that go covers
-one edit.
+Never edit the PR title or body unless the owner says `edit the pr body`
+(same phrase rule as the posting go); that go covers one edit.
