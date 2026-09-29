@@ -42,7 +42,7 @@ bin scripts are symlinked into `~/bin` by install/common/link.sh.
 | Command                                                             | What it is   | What it does                                                                                                                                                               |
 | ------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `update`                                                            | zsh function | `cd $DOTFILEDIR` -> `git pull` -> `tldr --update` -> `bash install/install.sh` -> cd back                                                                                  |
-| `reload`                                                            | alias        | `source ~/.zshrc` (aliases.zsh:20)                                                                                                                                         |
+| `reload`                                                            | alias        | `exec zsh -l` (aliases.zsh:22)                                                                                                                                             |
 | `ecc-uninstall`                                                     | zsh function | Sweep ECC leftovers (plugin, repo clone, metadata, cache stamp); the only surviving ECC-named function -- `ecc-install`/`ecc-update` are retired (2026-09)                 |
 | the Superpowers uninstaller (see "Post-merge operator steps" below) | zsh function | Uninstall Superpowers from both config dirs and Codex, scope-aware; the only surviving Superpowers-named function -- its install/update entry points are retired (2026-09) |
 | `dotfiles-repair`                                                   | bin script   | Pull, re-link, verify settings.json, flag compromised GSD, verify final state                                                                                              |
@@ -63,7 +63,7 @@ idempotent; symlinks are `ln -sf`/`ln -sfn` re-created each run.
 
 ```bash
 update          # full refresh: repo + links + plugins + CLIs
-reload          # re-source ~/.zshrc after config edits (no install)
+reload          # replace the shell with a fresh login zsh (no install)
 ```
 
 Notes:
@@ -106,8 +106,8 @@ still has a retired plugin installed:
 
 ```bash
 update --ai            # 1. removes retired plugin registrations and their settings keys
-reload                  # 2. new shell: `update` runs in a subprocess and
-                         #    never redefines the calling shell's functions
+reload                  # 2. execs a fresh login zsh: run this line alone,
+                         #    not pasted as one block with the lines after it
 superpowers-uninstall   # 3. remove Superpowers from Claude, Codex and disk
 ```
 

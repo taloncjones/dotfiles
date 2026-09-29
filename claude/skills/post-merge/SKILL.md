@@ -182,21 +182,72 @@ after the step 4 confirmation.
    rule to drop or merge; for any prune candidate (dated 6+ calendar
    months back), prune / keep-and-redate / file a graduation todo (moving
    a rule into operating-principles.md is its own edit — never done inline
-   here). Decline = no writes of any kind, step over.
+   here). State that apply pushes `talon/agent-lesson-<slug>` and opens a
+   PR; this one confirmation covers both, inside herdr or not. Decline =
+   no writes of any kind, step over.
 5. **Apply (all approved writes):** file approved todos via
    `todos.sh new`. For the rules edit: re-read `agent-lessons.md`
    immediately before editing (a concurrent session may have moved it);
    dedupe by rule text; confirm the post-edit file still meets the cap.
-   Preconditions when committing in the dotfiles main checkout: on `main`,
-   `git fetch origin main` and confirm `main` == `origin/main` (a
-   just-merged PR often leaves local main behind), and `git status` clean
-   at `claude/rules/`. Commit with an explicit pathspec so unrelated
-   staged files never ride along:
-   `git commit -m "claude: Add agent lesson: <slug>" -- claude/rules/personal/agent-lessons.md`.
-   Running in another repo: apply the same edit in the dotfiles main
-   checkout. Any failed precondition, edit conflict, or partial state ->
-   do not commit; file a dotfiles todo carrying the exact proposed
-   line(s) instead.
+   Never commit on `main` and never edit in the main checkout: lessons
+   land through a PR. Batch every approved lesson from this run into one
+   branch and one PR. Run from the dotfiles main checkout
+   (`~/Git/personal/dotfiles`); when running in another repo, anchor every
+   main-checkout command (fetch, worktree add and remove, branch deletes,
+   remote delete, the ahead-of-origin check) with
+   `git -C ~/Git/personal/dotfiles`, and the PR create with
+   `--repo taloncjones/dotfiles`. Slug: kebab-case, at most 40
+   characters, no assistant brand words; the first lesson's slug, with
+   `-and-more` appended when several lessons are batched. Path rule: the
+   git guard denies a variable path, so run `mktemp -d` alone in its own
+   call and paste the literal path it printed, verbatim, into every later
+   command.
+   1. `git -C ~/Git/personal/dotfiles fetch origin main`. When the
+      checkout is on main, confirm
+      `git -C ~/Git/personal/dotfiles rev-list --count origin/main..main`
+      prints 0. Run `mktemp -d` alone and note the printed path as
+      `<wt>`. Then:
+      `git -C ~/Git/personal/dotfiles worktree add -b talon/agent-lesson-<slug> <wt> origin/main`.
+   2. Re-read and edit `<wt>/claude/rules/personal/agent-lessons.md`
+      (dedupe, cap check as above). Confirm
+      `git -C <wt> status --short` shows only that file.
+   3. Commit with an explicit pathspec so nothing else rides along. Use
+      a scope prefix and avoid assistant brand words in the summary:
+      `git -C <wt> commit -m "claude: Record agent lesson: <slug>" -- claude/rules/personal/agent-lessons.md`.
+   4. Push with an explicit refspec:
+      `git -C <wt> push -u origin talon/agent-lesson-<slug>:talon/agent-lesson-<slug>`.
+   5. Write the PR body with the Write tool to a file outside the
+      worktree (the session scratchpad); an untracked file inside it
+      blocks the removal in the next step. One line per added lesson,
+      then one test-plan line. Open a non-draft PR:
+      `gh pr create --repo taloncjones/dotfiles --head talon/agent-lesson-<slug> --base main --title "claude: Record agent lessons (<YYYY-MM-DD>)" --body-file <body file>`
+      The shim does not gate `pr create`; the step-4 confirmation is the
+      go for it. The PR merge stays the owner's action and the co-review
+      gate applies.
+   6. Remove the temporary worktree:
+      `git -C ~/Git/personal/dotfiles worktree remove <wt>` (the literal
+      path). The local branch may stay until the PR merges. When the
+      checkout is on main, confirm
+      `git -C ~/Git/personal/dotfiles rev-list --count origin/main..main`
+      prints 0.
+      Once `gh pr create` has printed a PR URL, a failed cleanup (a
+      refused `worktree remove`, an ahead-of-origin count other than 0)
+      is reported and a todo filed; never roll back, since deleting the
+      remote branch closes the PR.
+      Before a PR exists, any failed precondition, edit conflict, push
+      failure, or `gh pr create` failure -> do not leave commits on
+      `main`. When `gh pr create` errored, first run
+      `gh pr list --repo taloncjones/dotfiles --head talon/agent-lesson-<slug>`;
+      if it lists a PR, treat it as created and skip the fallback. After
+      `git worktree add` succeeded, run
+      `git -C ~/Git/personal/dotfiles worktree remove --force <wt>` (the
+      literal path; a dirty tree refuses a plain remove) and
+      `git -C ~/Git/personal/dotfiles branch -D talon/agent-lesson-<slug>`;
+      delete the remote branch only when the push happened:
+      `git -C ~/Git/personal/dotfiles push origin --delete talon/agent-lesson-<slug>`.
+      When `git worktree add` itself fails, `rmdir` the literal mktemp
+      path instead. Then file a dotfiles todo carrying the exact proposed
+      line(s).
 
 ## Notes
 

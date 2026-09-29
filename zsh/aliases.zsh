@@ -17,7 +17,9 @@ function aliaslist() {
 }
 
 # reload current configuration
-alias reload="source ~/.zshrc"
+# exec, not source: .zshrc never re-reads .zshenv, so a plain `source` keeps
+# stale functions (e.g. an unarmed claude()) alive across a reload.
+alias reload="exec zsh -l"
 
 # Print each PATH entry on a separate line
 alias path='echo -e ${PATH//:/\\n}'

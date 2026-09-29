@@ -636,7 +636,7 @@ expect_file "M3 old marker pruned" "$GATE/old.json" absent
 
 # --- P: personal repositories post without a go -------------------------
 
-case_gate p1
+case_gate pp1
 NOSHIM_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v 'herdr-shims' | paste -sd: -)
 P1_PAYLOAD=$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 1 --body x')
 printf '%s' "$P1_PAYLOAD" | PATH="$NOSHIM_PATH" python3 "$HOOK" >"$FIX/out" 2>"$FIX/err"
