@@ -77,6 +77,14 @@ def codex_route():
     )
 
 
+def ship_route():
+    return agent_runtime.resolve_route(
+        "claude",
+        "reviewer",
+        capabilities={"models": {"opus": {"status": "available", "efforts": ["high"]}}},
+    )
+
+
 def claude_route():
     return agent_runtime.resolve_route(
         "claude",
@@ -1140,6 +1148,131 @@ def test_settle_leaves_a_ship_worker_without_a_report():
         fx.close()
 
 
+def test_settle_exits_an_idle_ship_agent_once_its_handoff_is_recorded():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+        assert fx.worker_records()[2]["exit_requested"] == "handoff-recorded", fx.worker_records()
+        assert ["pane", "close", "w1:p3"] in fx.calls()
+        assert ["pane", "close", "w1:p1"] not in fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_leaves_a_ship_agent_without_a_handoff():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        before = fx.task_file.read_text()
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "not-settled" and result["reason"] is None, result
+        assert fx.task_file.read_text() == before
+        assert not [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"])], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_handoff_it_read_even_if_the_file_is_then_deleted():
+    fx = Fixture()
+    original = core.ship_handoff_launches
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+
+        def read_then_delete(rd, task_id, task):
+            found = original(rd, task_id, task)
+            (launch_dir / "ship.json").unlink()
+            return found
+
+        core.ship_handoff_launches = read_then_delete
+        result = fx.settle(ship["launch_id"])
+        assert not (launch_dir / "ship.json").exists()
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert fx.worker_records()[2]["exit_requested"] == "handoff-recorded", fx.worker_records()
+    finally:
+        core.ship_handoff_launches = original
+        fx.close()
+
+
+def test_sweep_settles_review_and_ship_rows():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"},
+                         {"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R"),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.sweep()
+        rows = [(r["launch_id"], r["reason"], r["pane"]) for r in result["rows"]]
+        assert rows == [("R", "verdict-recorded", "closed"),
+                        (ship["launch_id"], "handoff-recorded", "closed")], result
+        assert ["pane", "close", "w1:p1"] not in fx.calls()
+    finally:
+        fx.close()
+
+
+def test_sweep_keeps_a_ship_pane_a_repair_row_also_used():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        repair = settle_row("implement", "I2", "w1:p3", head)
+        fx.settle_state([impl, ship, repair], "changes-requested", [],
+                        [pane("w1:p1"), pane("w1:p2"), pane("w1:p3")])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "CHANGES"}))
+        result = fx.sweep()
+        by_lid = {r["launch_id"]: r for r in result["rows"]}
+        assert by_lid[ship["launch_id"]]["reason"] == "handoff-recorded", result
+        assert by_lid[ship["launch_id"]]["pane"] == "kept-shared", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
 def test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes():
     fx = Fixture()
     try:
@@ -1794,6 +1927,113 @@ def test_read_only_codex_launch_does_not_claim_lifecycle_writes():
             assert value in prompt[3], (value, prompt)
         assert result["completion_authoritative"] is False, result
         assert result["strict_ready"] is False, result
+    finally:
+        fixture.close()
+
+
+def test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json():
+    fixture = Fixture()
+    original_uuid4 = herdr_dispatch.uuid.uuid4
+    try:
+        herdr_dispatch.uuid.uuid4 = lambda: herdr_dispatch.uuid.UUID(int=0)
+        launch_id = "ship-td-a-000000000000"
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = launch_id
+        result = herdr_dispatch.launch(
+            repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", pane_id="w1:p1", phase="ship", agent="ship-td-a",
+            route=ship_route(), cwd=fixture.repo, sandbox="read-only",
+            prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+            start_timeout_ms=4000, prompt_timeout_ms=1000,
+        )
+        row = fixture.worker_records()[-1]
+        assert result["launch_id"] == launch_id, result
+        assert row["phase"] == "ship" and row["status"] == "launched", row
+        assert row["agent"] == row["launch_id"] == launch_id, row
+        start = next(c for c in fixture.calls() if c[:2] == ["agent", "start"])
+        assert start[2] == launch_id, start
+        prompt = next(c for c in fixture.calls() if c[:2] == ["agent", "prompt"])[3]
+        ship_json = (fixture.rd / "artifacts" / "td-a" / f"ship-{launch_id}" / "ship.json").resolve()
+        assert str(ship_json) in prompt, prompt
+        assert f"launch_id={launch_id} phase=ship" in prompt, prompt
+        for absent in ("emit-done", "emit-review", "herdr_orch_core.py"):
+            assert absent not in prompt, (absent, prompt)
+    finally:
+        herdr_dispatch.uuid.uuid4 = original_uuid4
+        fixture.close()
+
+
+def test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent():
+    fixture = Fixture()
+    try:
+        route_message = "a ship launch requires the claude runtime and the read-only sandbox"
+        cases = (
+            ("workspace-write", ship_route(), "ship-td-a", route_message),
+            ("read-only", codex_route(), "ship-td-a", route_message),
+            ("read-only", ship_route(), "ship/td-a", "a ship agent name must be a plain id"),
+        )
+        for sandbox, route, agent, message in cases:
+            try:
+                herdr_dispatch.launch(
+                    repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+                    workspace_id="w1", pane_id="w1:p1", phase="ship", agent=agent,
+                    route=route, cwd=fixture.repo, sandbox=sandbox,
+                    prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+                    start_timeout_ms=4000, prompt_timeout_ms=1000,
+                )
+            except herdr_dispatch.DispatchError as exc:
+                assert str(exc) == message, (sandbox, agent, exc)
+            else:
+                raise AssertionError(f"ship launch accepted: {sandbox} {agent}")
+        assert fixture.worker_records() == [], fixture.worker_records()
+        assert fixture.calls() == [], fixture.calls()
+    finally:
+        fixture.close()
+
+
+def test_unknown_phase_is_refused_with_the_supported_list():
+    fixture = Fixture()
+    try:
+        prompt_file = fixture.root / "prompt.md"
+        prompt_file.write_text("brief\n")
+        process = subprocess.run(
+            [sys.executable, str(Path(herdr_dispatch.__file__).resolve()), "launch",
+             "--repo-slug", fixture.slug, "--task-id", "td-a", "--session", "S",
+             "--workspace-id", "w1", "--pane-id", "w1:p1", "--phase", "deploy",
+             "--agent", "x-td-a", "--route-json", json.dumps(ship_route()),
+             "--cwd", str(fixture.repo), "--sandbox", "read-only",
+             "--prompt-file", str(prompt_file), "--fence", "1"],
+            capture_output=True, text=True, check=False, env=fixture.env,
+        )
+        assert process.returncode == 2, process
+        assert json.loads(process.stdout) == {
+            "status": "error",
+            "error": "unsupported phase: deploy (expected one of: plan, implement, "
+                     "review, think, read, mechanical, ship)",
+        }, process.stdout
+        assert fixture.worker_records() == [], fixture.worker_records()
+        assert fixture.calls() == [], fixture.calls()
+    finally:
+        fixture.close()
+
+
+def test_reprompt_refuses_a_ship_launch():
+    fixture = Fixture()
+    try:
+        before = fixture.task_file.read_text()
+        try:
+            herdr_dispatch.reprompt(
+                repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+                workspace_id="w1", launch_id="ship-td-a-000000000000", phase="ship",
+                cwd=fixture.repo, prompt="continue", runtime="claude",
+                herdr_cli=str(fixture.bin), env=fixture.env, prompt_timeout_ms=1000,
+            )
+        except herdr_dispatch.DispatchError as exc:
+            assert str(exc) == "a ship launch is never reprompted; dispatch a fresh ship launch", exc
+        else:
+            raise AssertionError("a ship reprompt was accepted")
+        assert fixture.task_file.read_text() == before
+        assert fixture.calls() == [], fixture.calls()
     finally:
         fixture.close()
 
@@ -3247,6 +3487,11 @@ for name, test in (
     ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
     ("settle exits an idle ship worker once its report exists", test_settle_exits_an_idle_ship_worker_once_its_report_exists),
     ("settle leaves a ship worker without a report", test_settle_leaves_a_ship_worker_without_a_report),
+    ("settle exits an idle ship agent once its handoff is recorded", test_settle_exits_an_idle_ship_agent_once_its_handoff_is_recorded),
+    ("settle leaves a ship agent without a handoff", test_settle_leaves_a_ship_agent_without_a_handoff),
+    ("settle keeps a handoff it read even if the file is then deleted", test_settle_keeps_a_handoff_it_read_even_if_the_file_is_then_deleted),
+    ("sweep settles review and ship rows", test_sweep_settles_review_and_ship_rows),
+    ("sweep keeps a ship pane a repair row also used", test_sweep_keeps_a_ship_pane_a_repair_row_also_used),
     ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
     ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
     ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),
@@ -3286,6 +3531,10 @@ for name, test in (
     ("prompt content stays argv-literal and wait is a hint", test_prompt_is_literal_argv_and_wait_is_only_a_hint),
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
+    ("a ship launch names its agent after its launch id and points at ship.json", test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json),
+    ("a ship launch refuses a writable sandbox, a Codex runtime or an odd agent", test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent),
+    ("an unknown phase is refused with the supported list", test_unknown_phase_is_refused_with_the_supported_list),
+    ("reprompt refuses a ship launch", test_reprompt_refuses_a_ship_launch),
     ("bound prompt carries the binding emitter and review fields", test_bound_prompt_carries_binding_emitter_and_review_fields),
     ("wrong pane worktree rejects before mutation", test_wrong_worktree_rejects_before_attempt_or_start),
     ("invalid task base SHA rejects before mutation", test_invalid_task_base_sha_rejects_before_attempt_or_start),

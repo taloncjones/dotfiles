@@ -742,14 +742,15 @@ and `rollover-due ...` (section 1a).
 
 `exit-idle-worker` means a worker's agent is idle or done and its row is
 settled: plan confirmed, or exit already requested; review verdict
-recorded or retired; implementer approved; superseded; failed launch; or
-terminal task. It names housekeeping, not a status transition, and ranks
+recorded or retired; ship handoff recorded (`handoff-recorded`);
+implementer approved; superseded; failed launch; or terminal task. It names housekeeping, not a status transition, and ranks
 after every other action.
 
 Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
 means report it. `settle` never closes a workspace or a pane any plan,
-implement, repair or ship row used. It also keeps a pane open
+implement or repair row used; a pane that only review and ship rows used
+closes once each of those rows is settled. It also keeps a pane open
 (`pane: kept-occupied`) while a non-shell process still has the foreground
 or process-info fails or comes back empty, even once its own agent is gone.
 After `/exit` is confirmed delivered (`agent_prompted`, `agent_prompt_stalled`
@@ -1026,7 +1027,8 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 adapter's `sweep` verb
 (`python3 "$DISPATCH" sweep --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree>`)
 for the task workspace first; it exits stale reviewers whose verdict is
-recorded or retired and closes their panes and dead reviewer shells,
+recorded or retired and ship workers whose handoff is recorded, and closes
+their panes and dead reviewer shells,
 subject to the same kept-occupied and confirmed-exit-menu limits as
 `settle` above. Then confirm zero live review agents as before: reconcile live
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
@@ -1323,12 +1325,30 @@ failed with `base-moved` as its only non-`ci` reason. Never on a `current`
 non-APPROVE handoff (section 6a step 0 owns it). Rule (a) with a
 `ship_launch_id` already set means that run stopped before writing
 `ship.json`: relaunch at most once per reviewed head. Relaunch only when
-`ship_relaunch_head` differs from `review_head_sha`, and write
-`ship_relaunch_head: <review_head_sha>` with the new launch. Otherwise
-report the stopped run, park the task, and stop. At dispatch, `write-task`
-the full record with the new `ship_launch_id`, then write the brief. Every
+`ship_relaunch_head` differs from `review_head_sha`,
+and before launching `write-task` `ship_relaunch_head: <review_head_sha>`
+(every other field carried), so the budget is spent before any worker
+can start and an interrupted relaunch parks the task. Otherwise report
+the stopped run, park the task, and stop. To dispatch, write the brief,
+then launch through the adapter:
+`python3 "$DISPATCH" launch --phase ship --sandbox read-only --agent ship-<task prefix> --route-json <route> ...`
+(the same fields as any launch; resolve the route with
+`route --runtime claude --role reviewer`). The adapter refuses any other
+runtime or sandbox, starts the herdr agent under the returned
+`launch_id`, and tells the worker its launch directory. Right after it
+returns, `write-task` the full record with `ship_launch_id: <launch_id>`.
+Decide from the pin alone: a ship row the pin does not name has no
+authority and is never adopted. A ship launch is never reprompted;
+further gate work is a fresh launch. Every
 ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
 its launch directory, and no merge authority.
+
+Once its `ship.json` is written, the idle ship agent settles as
+`handoff-recorded`: run
+`python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <ship_launch_id>`,
+which exits it and closes its pane under the same limits as section 4.
+The manual `esc`, `/exit`, exact-pane-close path above stays for a pinned
+agent with no handoff.
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
