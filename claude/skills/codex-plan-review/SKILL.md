@@ -143,7 +143,10 @@ This is an explicit operator decision, made only when this round's own
 Codex call fails and its runner JSON records a quota, auth, or
 availability failure. Any other incomplete call (timeout, empty,
 malformed, no verdict) blocks the caller as before, unchanged; a
-substitute never fires automatically for any other failure. Rerun the
+substitute never fires automatically for any other failure. A runner
+JSON whose result already carries a verdict (APPROVE or CHANGES, with
+findings) is a completed round: the substitute never applies to it, even
+if the same JSON also lists a quota, auth, or availability error. Rerun the
 same round's prompt once, unchanged, on a fresh Claude process instead
 of Codex:
 

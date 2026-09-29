@@ -225,6 +225,7 @@ class CodexReviewGatesSkillText(unittest.TestCase):
         self.assertIn("### Substitute a failed Codex round", SPEC_REVIEW)
         for needle in ("quota, auth, or", "availability failure",
                        "never fires automatically for any other failure",
+                       "is a completed round: the substitute never applies to it",
                        "--runtime claude --role reviewer",
                        "counts toward `SPEC_MAX_ROUNDS`"):
             self.assertIn(needle, SPEC_REVIEW)
@@ -233,6 +234,7 @@ class CodexReviewGatesSkillText(unittest.TestCase):
         self.assertIn("### Substitute a failed Codex round", PLAN_REVIEW)
         for needle in ("quota, auth, or", "availability failure",
                        "never fires automatically for any other failure",
+                       "is a completed round: the substitute never applies to it",
                        "--runtime claude --step plan-review",
                        "counts toward `PLAN_MAX_ROUNDS`"):
             self.assertIn(needle, PLAN_REVIEW)
