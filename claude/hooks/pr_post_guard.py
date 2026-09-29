@@ -45,12 +45,15 @@ state, raw HTTP with the token, and Codex sessions are accepted residuals.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -160,16 +163,17 @@ def personal_owner(owner: str, cwd: str) -> bool:
     return bool(hit) and hit.group(1).lower() == owner.lower()
 
 
-def target_repo(args: list[str]) -> str | None:
-    """`owner` of the repository a gh call writes to: the api path's
-    repos/<owner>/<name> segment, else -R/--repo, else GH_REPO. None means the
-    cwd's repository."""
+def target_slug(args: list[str]) -> str | None:
+    """Repository a gh call writes to, as given (`[HOST/]owner/name`): the
+    api path's repos/<owner>/<name>, else -R/--repo, else GH_REPO. None
+    means the cwd's repository."""
     slug = None
     i, _verb = subcommand_index(args)
     if i < len(args) and args[i] == "api":
-        path = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])[1]
+        _method, path, host, _field = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])
         hit = re.match(r"repos/([^/{]+)/([^/{]+)", path or "")
-        slug = f"{hit.group(1)}/{hit.group(2)}" if hit else None
+        prefix = f"{host}/" if host else ""
+        slug = f"{prefix}{hit.group(1)}/{hit.group(2)}" if hit else None
     for j, tok in enumerate(args):
         if slug:
             break
@@ -179,11 +183,83 @@ def target_repo(args: list[str]) -> str | None:
             slug = tok.split("=", 1)[1]
         elif tok.startswith("-R") and len(tok) > 2 and not tok.startswith("--"):
             slug = tok[2:]
-    slug = slug or os.environ.get("GH_REPO")
+    return slug or os.environ.get("GH_REPO") or None
+
+
+def target_repo(args: list[str]) -> str | None:
+    """`owner` of the repository a gh call writes to; None means the cwd's."""
+    slug = target_slug(args)
     if not slug:
         return None
     parts = slug.split("/")
     return parts[-2] if len(parts) >= 2 else slug
+
+
+def git_output(cwd: str, *args: str) -> str:
+    """Stdout of a local git command in `cwd`, or "" on any failure."""
+    try:
+        done = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout if done.returncode == 0 else ""
+
+
+def target_context(args: list[str], cwd: str) -> dict:
+    """What decides where a gh call lands (spec R3): the remotes entry pins
+    the repository and host gh resolves from git, with no network."""
+    return {
+        "cwd": os.path.realpath(cwd),
+        "gh_repo": os.environ.get("GH_REPO", ""),
+        "gh_host": os.environ.get("GH_HOST", ""),
+        "slug": target_slug(args) or "",
+        "remotes": git_output(cwd, "config", "--get-regexp", r"^remote\."),
+    }
+
+
+def _digest(record: dict) -> str:
+    return hashlib.sha256(json.dumps(record, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def repo_key(args: list[str], cwd: str) -> str:
+    return _digest(target_context(args, cwd))[:16]
+
+
+def draft_files(args: list[str]) -> list[str]:
+    """Files a gh call reads its text from: body files, then typed `@path`
+    fields and --input for gh api."""
+    i, j = subcommand_index(args)
+    if i < len(args) and args[i] == "api":
+        api = normalize_api_args(args[i + 1:]) or args[i + 1:]
+        paths = [value[1:] for typed, _key, value in api_fields(api) if typed and value.startswith("@")]
+        path = input_path(api)
+        return paths + ([path] if path is not None else [])
+    sub = tuple(args[k] for k in (i, j) if k < len(args))
+    if sub in BODY_FILE_SUBCOMMANDS:
+        path = flag_value(args[j + 1:], ("-F", "--body-file"))
+        return [path] if path is not None else []
+    return []
+
+
+def draft_hash(args: list[str], cwd: str) -> str | None:
+    """8-hex id binding a gh call's argv, the bytes it reads and where it
+    lands (spec R7); None when its text comes from stdin or cannot be read."""
+    if post_body(args, cwd)[0] == "unreadable":
+        return None
+    digests = []
+    for path in draft_files(args):
+        if path in ("-", ""):
+            return None
+        try:
+            with open(os.path.join(cwd, path), "rb") as handle:
+                digests.append(hashlib.sha256(handle.read()).hexdigest())
+        except OSError:
+            return None
+    return _digest({
+        "argv": list(args),
+        "context": target_context(args, cwd),
+        "branch": git_output(cwd, "rev-parse", "--abbrev-ref", "HEAD").strip(),
+        "files": digests,
+    })[:8]
 
 
 def exempt_from_go(args: list[str], cwd: str) -> bool:
@@ -714,7 +790,7 @@ def gate_dir() -> Path:
     return Path(xdg) / "dotfiles" / "post-gate"
 
 
-def _read_json(path: Path):
+def read_json(path: Path):
     try:
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
@@ -725,12 +801,122 @@ def _read_json(path: Path):
 def _unlink(path: Path) -> None:
     try:
         path.unlink()
-    except FileNotFoundError:
+    except OSError:
         pass
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """Replace `path` with `text` (mode 0600), whole or not at all."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temp, path)
+    except OSError:
+        _unlink(temp)
+        raise
+
+
+DRAFT_COMMAND = "python3 ~/.claude/hooks/pr_post_guard.py draft -- gh"
+
+
+def draft_path(directory: Path, sid: str, digest: str, state: str) -> Path:
+    """A draft's one file; the suffix is its state (pending, approved,
+    dismissed, spent) and every change of state is one rename."""
+    return directory / f"{sid}.draft-{digest}.{state}"
+
+
+def drafts(directory: Path, sid: str, state: str) -> list[Path]:
+    try:
+        return sorted(directory.glob(f"{sid}.draft-*.{state}"))
+    except OSError:
+        return []
+
+
+def _move(src: Path, dst: Path) -> bool:
+    try:
+        os.rename(src, dst)
+    except OSError:
+        return False
+    return True
+
+
+def _move_fresh(src: Path, dst: Path) -> bool:
+    """Rename, then restart the prune clock: rename keeps the registration mtime."""
+    if not _move(src, dst):
+        return False
+    try:
+        os.utime(dst)
+    except OSError:
+        pass
+    return True
+
+
+def current_batch(directory: Path, sid: str) -> str:
+    try:
+        text = (directory / f"{sid}.batch").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "initial"
+    return text or "initial"
+
+
+def close_batch(directory: Path, sid: str) -> str:
+    """Start a new batch and return the one this prompt closes: `post it`
+    and `post all` reach only drafts shown in the closing batch."""
+    closing = current_batch(directory, sid)
+    write_atomic(directory / f"{sid}.batch", secrets.token_hex(8))
+    return closing
+
+
+def register_draft(directory: Path, sid: str, digest: str, args: list[str], now: float) -> bool:
+    """Record a draft as shown (pending); False when it is already approved."""
+    if draft_path(directory, sid, digest, "approved").exists():
+        return False
+    record = {"v": 2, "batch": current_batch(directory, sid), "created": now, "argv": list(args)}
+    write_atomic(draft_path(directory, sid, digest, "pending"), json.dumps(record))
+    _unlink(draft_path(directory, sid, digest, "dismissed"))
+    return True
+
+
+def approve_drafts(directory: Path, sid: str, requests: set[str], closing: str) -> None:
+    """Apply one prompt's go requests, then dismiss every draft still pending."""
+    batch = []
+    for path in drafts(directory, sid, "pending"):
+        record = read_json(path)
+        if isinstance(record, dict) and record.get("batch") == closing:
+            created = record.get("created")
+            ok = isinstance(created, (int, float)) and not isinstance(created, bool)
+            batch.append((created if ok else 0, path))
+    if "all" in requests:
+        chosen = [path for _created, path in batch]
+    elif "it" in requests and batch:
+        chosen = [max(batch)[1]]
+    else:
+        chosen = []
+    for path in chosen:
+        _move_fresh(path, path.with_suffix(".approved"))
+    for digest in requests - {"it", "all"}:
+        approved = draft_path(directory, sid, digest, "approved")
+        if not _move_fresh(draft_path(directory, sid, digest, "pending"), approved):
+            _move_fresh(draft_path(directory, sid, digest, "dismissed"), approved)
+    for path in drafts(directory, sid, "pending"):
+        _move(path, path.with_suffix(".dismissed"))
+
+
+def spend_draft(directory: Path, sid: str, digest: str) -> bool:
+    """Claim an approved draft for one exec; the rename has a single winner."""
+    spent = draft_path(directory, sid, digest, "spent")
+    return _move_fresh(draft_path(directory, sid, digest, "approved"), spent)
+
+
+def approved_count(directory: Path, sid: str) -> int:
+    return len(drafts(directory, sid, "approved"))
+
+
 def marker_kind(directory: Path, sid: str, now: float) -> str | None:
-    data = _read_json(directory / f"{sid}.json")
+    data = read_json(directory / f"{sid}.json")
     if not isinstance(data, dict):
         return None
     kind = data.get("kind")
@@ -852,21 +1038,12 @@ def prune(directory: Path, now: float) -> None:
 
 def write_pid_map(directory: Path, sid: str) -> None:
     """Record which session this Claude process (the hook's parent) is on,
-    so the shim can find the go after a /clear changes the session id.
-    Written whole or not at all; a failure only costs the /clear fallback."""
-    target = directory / f"pid-{os.getppid()}.sid"
-    temp = directory / f".pid-{os.getppid()}.{os.getpid()}.tmp"
+    so the shim can find its drafts after a /clear changes the session id.
+    A failure only costs the /clear fallback."""
     try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(sid)
-        os.replace(temp, target)
+        write_atomic(directory / f"pid-{os.getppid()}.sid", sid)
     except OSError:
-        try:
-            temp.unlink()
-        except OSError:
-            pass
+        pass
 
 
 def handle_prompt(payload: dict, directory: Path, now: float) -> None:
@@ -951,7 +1128,39 @@ def main() -> int:
     return 0
 
 
+def draft_main(argv: list[str]) -> int:
+    """`draft -- gh <args>`: record a gated gh call as shown to the owner and
+    print its hash and text for the chat."""
+    args = argv[1:] if argv[:1] == ["--"] else list(argv)
+    if args[:1] == ["gh"]:
+        args = args[1:]
+    if not args:
+        print(f"usage: {DRAFT_COMMAND} <args>", file=sys.stderr)
+        return 2
+    sid = shim_session_id()
+    if not sid:
+        print("draft: no Claude session id (CLAUDE_CODE_SESSION_ID); drafts are per session", file=sys.stderr)
+        return 1
+    cwd = os.getcwd()
+    digest = draft_hash(args, cwd)
+    if digest is None:
+        print("draft: pass the text with --body, -f body=... or a readable file, not stdin or an editor", file=sys.stderr)
+        return 1
+    if not register_draft(gate_dir(), sid, digest, args, time.time()):
+        print(f"draft {digest} already approved")
+        return 0
+    print(f"draft {digest}: gh {shlex.join(args)}")
+    text = post_body(args, cwd)[1]
+    if text:
+        print(text)
+    if draft_path(gate_dir(), sid, digest, "spent").exists():
+        print(f"[WARNING] draft {digest} already ran once; read the PR first: a duplicate is possible")
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["draft"]:
+        sys.exit(draft_main(sys.argv[2:]))
     try:
         sys.exit(main())
     except Exception:  # noqa: BLE001 -- fail open: a crashed guard never blocks work

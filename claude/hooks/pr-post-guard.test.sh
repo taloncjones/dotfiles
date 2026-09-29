@@ -31,6 +31,11 @@ PERSONAL_CWD="$FIX/home/Git/personal/repo"
 # The hook honors a go only when `gh` on its PATH is the shim that spends it.
 PATH="$(pwd)/bin/herdr-shims:$PATH"
 export PATH
+# Drafts bind to a session: never inherit the live pane's session or pid.
+# Drafts bind to a session: never inherit the live pane's session or pid.
+CLAUDE_CODE_SESSION_ID=s1
+export CLAUDE_CODE_SESSION_ID
+unset CLAUDE_PID
 
 case_gate() {
     GATE="$FIX/gate-$1"
@@ -719,6 +724,146 @@ expect_py "GR5 a backticked post it is not a go" "" 'print(",".join(sorted(g.go_
 expect_py "PB1 a stdin body file is unreadable" "unreadable None" 'print(*g.post_body(["pr", "comment", "5", "--body-file", "-"], "."))'
 expect_py "PB2 a --body value is the text" "text hi" 'print(*g.post_body(["pr", "comment", "5", "-b", "hi"], "."))'
 expect_py "PB3 a gh api body field is the text" "text x" 'print(*g.post_body(["api", "repos/o/r/issues/5/comments", "-f", "body=x"], "."))'
+
+# --- DH/DR/DS: draft hash, registration and state files ---------------------
+
+DH1_OUT=$(HOOK="$HOOK" FIX="$FIX" python3 - <<'PY'
+import os, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.environ["HOOK"]))
+import pr_post_guard as g
+d = os.path.join(os.environ["FIX"], "dh1")
+os.makedirs(d)
+subprocess.run(["git", "init", "-q", d], check=True)
+subprocess.run(["git", "-C", d, "remote", "add", "origin", "https://github.com/o/r.git"], check=True)
+with open(os.path.join(d, "r.md"), "w") as f:
+    f.write("reply one")
+argv = ["pr", "review", "5", "-c", "-F", "r.md"]
+first = g.draft_hash(argv, d)
+same = first == g.draft_hash(argv, d)
+with open(os.path.join(d, "r.md"), "w") as f:
+    f.write("reply two")
+byte = first != g.draft_hash(argv, d)
+with open(os.path.join(d, "r.md"), "w") as f:
+    f.write("reply one")
+token = first != g.draft_hash(["pr", "review", "6", "-c", "-F", "r.md"], d)
+os.environ["GH_REPO"] = "o/other"
+repo = first != g.draft_hash(argv, d)
+del os.environ["GH_REPO"]
+subprocess.run(["git", "-C", d, "remote", "set-url", "origin", "https://github.com/x/r.git"], check=True)
+origin = first != g.draft_hash(argv, d)
+print(len(first), same, byte, token, repo, origin)
+PY
+)
+if [ "$DH1_OUT" = "8 True True True True True" ]; then
+    printf 'PASS  DH1 draft_hash is stable and binds body bytes, argv, GH_REPO and origin\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DH1 draft_hash binding (got %s)\n' "$DH1_OUT" >&2; FAIL=$((FAIL + 1))
+fi
+
+expect_py "DH2 a stdin or editor body has no draft hash" "None None" 'print(g.draft_hash(["pr", "comment", "5", "--body-file", "-"], "."), g.draft_hash(["pr", "comment", "5", "-e"], "."))'
+
+case_gate dr1
+python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>"$FIX/err"; rc=$?
+h=$(sed -n '1s/^draft \([0-9a-f]\{8\}\): gh pr review 5 -c -b hi$/\1/p' "$FIX/out")
+if [ "$rc" = 0 ] && [ -n "$h" ] && [ "$(sed -n 2p "$FIX/out")" = hi ] \
+    && python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(0 if r["batch"] == "initial" and r["v"] == 2 else 1)' "$GATE/s1.draft-$h.pending"; then
+    printf 'PASS  DR1 draft prints its hash and body and records a pending draft\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DR1 draft registration (rc=%s out=%s err=%s)\n' "$rc" "$(cat "$FIX/out")" "$(cat "$FIX/err")" >&2; FAIL=$((FAIL + 1))
+fi
+mv "$GATE/s1.draft-$h.pending" "$GATE/s1.draft-$h.approved"
+python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>&1
+if [ "$(cat "$FIX/out")" = "draft $h already approved" ] && [ ! -e "$GATE/s1.draft-$h.pending" ] && [ -e "$GATE/s1.draft-$h.approved" ]; then
+    printf 'PASS  DR2 re-showing an approved draft leaves the approval alone\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DR2 re-showing an approved draft (out=%s)\n' "$(cat "$FIX/out")" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate dr3
+python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>&1
+h=$(sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p' "$FIX/out")
+mv "$GATE/s1.draft-$h.pending" "$GATE/s1.draft-$h.dismissed"
+python3 "$HOOK" draft -- gh pr review 5 -c -b hi >/dev/null 2>&1
+if [ -e "$GATE/s1.draft-$h.pending" ] && [ ! -e "$GATE/s1.draft-$h.dismissed" ]; then
+    printf 'PASS  DR3 re-showing a dismissed draft makes it pending again\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DR3 re-showing a dismissed draft\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate dr4
+env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID python3 "$HOOK" draft -- gh pr review 5 -c -b hi >/dev/null 2>&1; rc=$?
+if [ "$rc" = 1 ] && [ ! -e "$GATE" ]; then
+    printf 'PASS  DR4 draft without a session id refuses\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DR4 draft without a session id (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate dr5
+printf 'x' | python3 "$HOOK" draft -- gh pr comment 5 --body-file - >/dev/null 2>&1; rc=$?
+if [ "$rc" = 1 ] && [ ! -e "$GATE" ]; then
+    printf 'PASS  DR5 draft of a stdin body refuses\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DR5 draft of a stdin body (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate dr6
+mkdir -p "$GATE"
+printf 'b1' >"$GATE/s1.batch"
+python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>&1
+h=$(sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p' "$FIX/out")
+if python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["batch"] == "b1" else 1)' "$GATE/s1.draft-$h.pending"; then
+    printf 'PASS  DR6 a draft is stamped with the current batch\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DR6 batch stamp\n' >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate dr7
+python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>&1
+h=$(sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p' "$FIX/out")
+mv "$GATE/s1.draft-$h.pending" "$GATE/s1.draft-$h.spent"
+python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>&1
+if grep -q "^\[WARNING\] draft $h already ran once; read the PR first: a duplicate is possible$" "$FIX/out" && [ -e "$GATE/s1.draft-$h.pending" ]; then
+    printf 'PASS  DR7 re-showing a spent draft warns that a duplicate is possible\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DR7 duplicate warning (out=%s)\n' "$(cat "$FIX/out")" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate ds1
+DS1_OUT=$(HOOK="$HOOK" GATE="$GATE" python3 - <<'PY'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.path.dirname(os.environ["HOOK"]))
+import pr_post_guard as g
+d = Path(os.environ["GATE"])
+d.mkdir()
+(d / "s1.draft-aaaaaaaa.pending").write_text(json.dumps({"v": 2, "batch": "x", "created": 1, "argv": []}))
+(d / "s1.draft-bbbbbbbb.pending").write_text(json.dumps({"v": 2, "batch": "y", "created": 2, "argv": []}))
+g.approve_drafts(d, "s1", {"all"}, "x")
+print(sorted(p.name for p in d.iterdir()))
+PY
+)
+if [ "$DS1_OUT" = "['s1.draft-aaaaaaaa.approved', 's1.draft-bbbbbbbb.dismissed']" ]; then
+    printf 'PASS  DS1 post all approves only the closing batch and dismisses the rest\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  DS1 batch-scoped approval (got %s)\n' "$DS1_OUT" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate ds2
+mkdir -p "$GATE"
+: >"$GATE/s1.draft-cccccccc.approved"
+expect_py "DS2 an approved draft spends exactly once" "True False" "from pathlib import Path; d = Path('$GATE'); print(g.spend_draft(d, 's1', 'cccccccc'), g.spend_draft(d, 's1', 'cccccccc'))"
+
+case_gate ds3
+mkdir -p "$GATE"
+: >"$GATE/s1.draft-eeeeeeee.approved"
+python3 -c 'import os, sys, time; old = time.time() - 2 * 86400; os.utime(sys.argv[1], (old, old))' "$GATE/s1.draft-eeeeeeee.approved"
+expect_py "DS3 a late spend survives the next prune" "True True" "import time; from pathlib import Path; d = Path('$GATE'); ok = g.spend_draft(d, 's1', 'eeeeeeee'); g.prune(d, time.time()); print(ok, (d / 's1.draft-eeeeeeee.spent').exists())"
+
+case_gate ds4
+mkdir -p "$GATE"
+printf '{"v":2,"batch":"initial","created":1,"argv":[]}' >"$GATE/s1.draft-ffffffff.pending"
+python3 -c 'import os, sys, time; old = time.time() - 2 * 86400; os.utime(sys.argv[1], (old, old))' "$GATE/s1.draft-ffffffff.pending"
+expect_py "DS4 an old draft approved now survives the next prune" "True" "import time; from pathlib import Path; d = Path('$GATE'); g.approve_drafts(d, 's1', {'ffffffff'}, 'x'); g.prune(d, time.time()); print((d / 's1.draft-ffffffff.approved').exists())"
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
