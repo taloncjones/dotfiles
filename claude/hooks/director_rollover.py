@@ -142,8 +142,18 @@ def resume_helper(argv) -> int:
         with core.owner_transaction(rd) as tx:
             return dict(tx.current or {})
 
+    last_reason = ["lock-wait"]
+
     def poll():
         """(ready, pane text, reason) for one observation of the pane."""
+        ready, text, reason = observe()
+        if reason == "poll-error" and expired():
+            # A call cut short by the send deadline says nothing about herdr.
+            return ready, text, last_reason[0]
+        last_reason[0] = reason
+        return ready, text, reason
+
+    def observe():
         try:
             listed = run_herdr(exe, ["agent", "list"], env=env, timeout_secs=budget())
             rows = listed.get("agents") if isinstance(listed, dict) else None
