@@ -1,37 +1,35 @@
 #!/usr/bin/env python3
-"""Gate agent-posted GitHub PR/issue writes behind a typed owner go.
+"""Gate agent-posted GitHub PR/issue writes by audience.
 
 The gate applies to work repositories. A post whose target is a personal
 repository (the -R/--repo, GH_REPO or api-path repository, else the cwd's
 checkout under ~/Git/personal per workflow_context.account_scope) needs no
 go: the owner is the only contributor there (2026-09-28).
 
-Incident 2026-09-23: on rw-bess #2444 a co-review/herdr flow posted one
-marker comment per round and replied to a human reviewer; on this repo's
-PR #170 the director posted the co-review verdict after a multiple-choice
-AskUserQuestion answer. Neither was owner approval -- see co-review's
-"Publish (optional)" section and operating-principles.md ("every outward
-post needs its own explicit go").
+Incident 2026-09-23: on rw-bess #2444 a co-review/herdr flow replied to a
+human reviewer; on this repo's PR #170 the director posted after a
+multiple-choice answer. Design 2026-09-29 (spec
+2026-09-29-audience-posting-policy-design.md): maintenance and green
+evidence on a PR this account authored post freely; text aimed at a person
+needs the owner's go for that exact draft.
 
 Gate: decides only when HERDR_ENV=1; every other session exits 0 untouched
-(no file I/O). Two events, one script, dispatched on hook_event_name:
+(no file I/O). Two events, one script, dispatched on hook_event_name, plus a
+`draft` CLI:
 
-- UserPromptSubmit mints a one-turn, one-session go from a typed prompt
-  that has a sentence saying "post it", "post all" or "edit the pr body"
-  as a phrase (word-bounded, any case, no not/n't/never/no before it, not
-  a question) -- never from an
-  AskUserQuestion answer (a tool result, not a typed prompt) and never
-  from a multiple-choice option string. The go expires in 600s.
+- `draft -- gh <args>` records a gated call as shown (pending), keyed by a
+  hash of its argv, the bytes it reads and where it lands.
+- UserPromptSubmit closes the session's batch, then turns a typed `post it`
+  (latest draft of the closing batch), `post all` (every draft of it) or
+  `post <hash>` into approved drafts and dismisses the rest -- never from an
+  AskUserQuestion answer or a multiple-choice option string.
 - PreToolUse Bash is the early second layer. The primary gate is the gh
-  shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv
-  after the shell has resolved quoting and substitution -- four review
-  rounds each hid a write from this text classifier (if/while prefixes,
-  comments, punctuation gluing, line continuations, backticks, `g\\h`,
-  `bash -lc`). This hook denies a gated kind it can see without a go, or
-  when the shim is not armed to spend the go; it only checks the go, the
-  shim spends it. It denies, best effort, two routes around the shim: a
-  path-qualified `gh`, and a login flag on a shell the PATH anchor does
-  not re-run in. Anything it cannot parse passes; the shim decides it.
+  shim (bin/herdr-shims/gh -> gh_post_shim.py), which sees the final argv,
+  reads the PR author, decides the audience and spends one approved draft
+  per gated call. This hook denies a Bash call holding more reply calls
+  than approved drafts, a path-qualified `gh`, and a login flag on a shell
+  the PATH anchor does not re-run in. Anything it cannot parse passes; the
+  shim decides it.
 
 Override: none. Fixing a false positive means narrowing the classifier,
 not bypassing it.
@@ -56,7 +54,6 @@ import shutil
 import subprocess
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -66,8 +63,6 @@ from pr_ready_gate import MARKER_PREFIX, MARKER_RE
 
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
-GO = {"post it": "post", "post all": "post", "edit the pr body": "body"}
-GO_PHRASE_RE = re.compile(r"(?<!`)\b(post it|post all|edit the pr body)\b(?!`)", re.IGNORECASE)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 NEGATION_RE = re.compile(r"\b(not|never|no)\b|n't", re.IGNORECASE)
 GO_REQUEST_RE = re.compile(r"(?<!`)\bpost (it|all|[0-9a-fA-F]{8})\b(?!`)", re.IGNORECASE)
@@ -78,7 +73,6 @@ MENTION_RE = re.compile(r"(?<![\w./@`])@[A-Za-z0-9]")
 LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 BODY_FILE_SUBCOMMANDS = {("pr", "comment"), ("issue", "comment"), ("pr", "edit"), ("pr", "review")}
 CLOSE_SUBCOMMANDS = {("pr", "close"), ("issue", "close")}
-TTL = 600
 PRUNE_AGE = 86400
 SID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 SHIM_MARK = b"gh_post_shim.py"
@@ -99,8 +93,25 @@ GH_WORD_RE = re.compile(r"\bgh\b")
 PANE_GH_RE = re.compile(r"(?<![\w.-])gh(?![\w.-])")
 SHELL_QUOTING_RE = re.compile(r"[\\'\"`]")
 DELETE_PATH = re.compile(r"(issues|pulls)/comments/[^/\s]+$")
-POST_PATH = re.compile(r"(issues|pulls)/(\d+/)?comments|pulls/\d+/reviews|/reactions$|/replies$")
 BODY_PATH = re.compile(r"(issues|pulls)/\d+$")
+# Text aimed at a person whatever the PR: review comments, replies,
+# reactions, and edits of an existing comment.
+REPLY_PATH = re.compile(r"/replies$|pulls/\d+/comments$|pulls/\d+/reviews|/reactions$")
+COMMENT_PATH = re.compile(r"(issues|pulls)/comments/\d+$")
+ISSUE_COMMENT_PATH = re.compile(r"issues/\d+/comments$")
+# Value flags of the gh subcommands whose target PR the shim reads (gh 2.94.0).
+PR_VALUE_FLAGS = {
+    ("pr", "comment"): {"-b", "--body", "-F", "--body-file"},
+    ("issue", "comment"): {"-b", "--body", "-F", "--body-file"},
+    ("pr", "review"): {"-b", "--body", "-F", "--body-file"},
+    ("pr", "close"): {"-c", "--comment"},
+    ("issue", "close"): {"-c", "--comment", "-r", "--reason", "--duplicate-of"},
+    ("pr", "edit"): {
+        "-b", "--body", "-F", "--body-file", "-t", "--title", "-B", "--base", "-m", "--milestone",
+        "--add-assignee", "--add-label", "--add-project", "--add-reviewer",
+        "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer",
+    },
+}
 FIELD_FLAGS = ("-f", "-F", "--raw-field", "--field", "--input")
 # gh api flags whose value is the next argument (gh 2.94.0 --help).
 VALUE_FLAGS = FIELD_FLAGS + (
@@ -269,23 +280,9 @@ def exempt_from_go(args: list[str], cwd: str) -> bool:
     return personal_repository(cwd) if owner is None else personal_owner(owner, cwd)
 
 
-def go_kind(prompt: str) -> str | None:
-    """The go kind a typed prompt carries, or None. A sentence is a go when it
-    holds the phrase with no negation before it and does not end in `?`."""
-    if "(recommended)" in prompt.lower():
-        return None
-    for sentence in SENTENCE_SPLIT_RE.split(prompt):
-        if sentence.rstrip().endswith("?"):
-            continue
-        for hit in GO_PHRASE_RE.finditer(sentence):
-            if not NEGATION_RE.search(sentence[:hit.start()]):
-                return GO[hit.group(1).lower()]
-    return None
-
-
 def go_request(prompt: str) -> set[str]:
     """Go requests in a typed prompt: "it", "all" and lowercase draft hashes.
-    Same sentence rules as go_kind: no negation before it, no closing `?`."""
+    A sentence counts when it has no negation before the phrase and no closing `?`."""
     found: set[str] = set()
     if "(recommended)" in prompt.lower():
         return found
@@ -354,6 +351,72 @@ def input_path(args: list[str]) -> str | None:
         if tok.startswith("--input="):
             return tok.split("=", 1)[1]
     return None
+
+
+def pr_target(args: list[str]) -> tuple[str | None, str | None]:
+    """(selector, slug) of the PR a post or body call writes to; a None
+    selector is the current branch, a None slug the cwd's repository."""
+    i, j = subcommand_index(args)
+    slug = target_slug(args)
+    if i < len(args) and args[i] == "api":
+        path = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])[1] or ""
+        hit = re.search(r"(?:issues|pulls)/(\d+)", path)
+        return (hit.group(1) if hit else None), slug
+    sub = tuple(args[k] for k in (i, j) if k < len(args))
+    values = PR_VALUE_FLAGS.get(sub, set()) | {"-R", "--repo"}
+    k = j + 1
+    while k < len(args):
+        tok = args[k]
+        if tok == "--":
+            return (args[k + 1] if k + 1 < len(args) else None), slug
+        if tok in values:
+            k += 2
+            continue
+        if not tok.startswith("-"):
+            return tok, slug
+        k += 1
+    return None, slug
+
+
+def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
+    state, text = body
+    if kind == "reply":
+        return "a reply to a person (review, thread reply, reaction or comment edit)"
+    if state == "unreadable":
+        return "a body the shim cannot read (stdin, an editor or a missing file)"
+    if not own:
+        return "a write to a PR this account did not author"
+    if state == "none":
+        return "a comment with no body"
+    if mentions_person(text):
+        return "a body that @mentions someone"
+    return "a non-APPROVE co-review marker"
+
+
+def gated_denial(reason: str, args: list[str]) -> str:
+    return (
+        f"Blocked: {reason} needs the owner's go.\n"
+        f"Register it with `{DRAFT_COMMAND} {shlex.join(args)}`, show the printed "
+        "draft and hash in chat, and wait for `post it`, `post all` or `post <hash>`; "
+        "a multiple-choice answer is not a go."
+    )
+
+
+def check_replies(kinds: list[str], sid: str, directory: Path) -> str | None:
+    """Early layer: a Bash call may hold at most as many reply calls as the
+    session has approved drafts. The shim binds each one at exec."""
+    wanted = kinds.count("reply")
+    if not wanted:
+        return None
+    if SID_RE.match(sid) and approved_count(directory, sid) >= wanted:
+        return None
+    return (
+        "Blocked: a PR review, thread reply, reaction or comment edit needs an "
+        "approved draft for each call.\n"
+        f"Register each with `{DRAFT_COMMAND} <args>`, show the drafts and hashes in "
+        "chat, and wait for `post it`, `post all` or `post <hash>`; a "
+        "multiple-choice answer is not a go."
+    )
 
 
 def api_body(args: list[str], cwd: str) -> tuple[str, str | None]:
@@ -598,7 +661,7 @@ def classify_api(args: list[str]) -> str:
         path = re.split(r"[?#]", path, maxsplit=1)[0]
     if path == "graphql":
         if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
-            return "post"
+            return "reply"
         return "read"
     method = method or ("POST" if has_field else "GET")
     if method == "GET":
@@ -607,7 +670,11 @@ def classify_api(args: list[str]) -> str:
         return "write"
     if method == "DELETE":
         return "delete" if DELETE_PATH.search(path) else "write"
-    if POST_PATH.search(path):
+    if REPLY_PATH.search(path) or COMMENT_PATH.search(path):
+        return "reply"
+    if any(key == "in_reply_to" for _typed, key, _value in api_fields(normalized)):
+        return "reply"
+    if ISSUE_COMMENT_PATH.search(path):
         return "post"
     if BODY_PATH.search(path):
         return "body"
@@ -629,10 +696,7 @@ def subcommand_index(args: list[str]) -> tuple[int, int]:
 
 
 def classify_gh(args: list[str]) -> str:
-    """Classify one `gh` invocation's own argv (after the `gh` token) as
-    "read", "write" (any non-comment write; allowed without a go), or
-    "post"/"body"/"delete" (gated, needs its typed go). Nothing is denied
-    outright: the gate covers posted text, not repository writes."""
+    """Classify one gh invocation's argv (after the gh token): "read", "write" (never gated), "post" and "body" (gated unless the PR is this account's own, decided by the shim), "reply" (text aimed at a person, always gated in a work repo), or "delete" (own co-review marker only)."""
     if args[-1:] in (["-h"], ["--help"]) and (len(args) < 2 or not args[-2].startswith("-")):
         # Help on any command; `--body --help` still posts "--help".
         return "read"
@@ -649,10 +713,15 @@ def classify_gh(args: list[str]) -> str:
         return "read"
     if sub in KNOWN_WRITES:
         return "write"
-    if sub in (("pr", "close"), ("issue", "close")):
-        if any(CLOSE_COMMENT_RE.match(t) for t in rest):
-            return "post"
-        return "write"
+    if sub in CLOSE_SUBCOMMANDS:
+        return "post" if any(CLOSE_COMMENT_RE.match(t) for t in rest) else "write"
+    if sub == ("pr", "review"):
+        return "reply"
+    if sub in (("pr", "comment"), ("issue", "comment")):
+        return "post"
+    if sub == ("pr", "edit"):
+        return "body"
+    return "write"
     if sub in (("pr", "comment"), ("pr", "review"), ("issue", "comment")):
         return "post"
     if sub == ("pr", "edit"):
@@ -739,7 +808,7 @@ def herdr_pane_text_mentions_gh(seg: list[str]) -> bool:
 def classify(command: str, depth: int = 0, cwd: str = "") -> tuple[list[str], list[str]]:
     """Return (gated_kinds, denials) for `command`. The gh shim is the
     primary gate and sees the final argv; this is the early second layer.
-    `gated_kinds` need a typed go (a post to a personal repository, judged
+    `gated_kinds` are the post, body, reply and delete calls outside personal repositories (a post to a personal repository, judged
     against `cwd`, is left out). `denials` are the routes that skip the
     shim (a path-qualified gh, a login shell the anchor misses, gh sent to
     another pane) and no go covers them. Anything this cannot parse or classify passes: the shim
@@ -768,7 +837,7 @@ def classify(command: str, depth: int = 0, cwd: str = "") -> tuple[list[str], li
         head = rm_guard.basename(run[0]) if run else None
         if head == "gh":
             kind = classify_gh(run[1:])
-            if kind in ("post", "body", "delete") and not exempt_from_go(run[1:], cwd):
+            if kind in ("post", "body", "reply", "delete") and not exempt_from_go(run[1:], cwd):
                 kinds.append(kind)
         elif (head in rm_guard.SHELL_WRAPPERS or head == "eval") and depth == 0:
             script = (
@@ -915,66 +984,6 @@ def approved_count(directory: Path, sid: str) -> int:
     return len(drafts(directory, sid, "approved"))
 
 
-def marker_kind(directory: Path, sid: str, now: float) -> str | None:
-    data = read_json(directory / f"{sid}.json")
-    if not isinstance(data, dict):
-        return None
-    kind = data.get("kind")
-    expires = data.get("expires_epoch")
-    if kind not in ("post", "body") or not isinstance(expires, (int, float)):
-        return None
-    if expires <= now:
-        return None
-    return kind
-
-
-def claim(path: Path) -> bool:
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return False
-    os.close(fd)
-    return True
-
-
-def check_go(kinds: list[str], sid: str, directory: Path, now: float) -> str | None:
-    """Denial text for the first kind in `kinds` its typed go does not cover,
-    or None. Reads only: the gh shim spends the go (spend_go) at exec."""
-    if not kinds:
-        return None
-    counts = Counter(kinds)
-    # One go covers exactly one post and one body write.
-    for kind in ("post", "body"):
-        if counts[kind] > 1:
-            return _denial(kind)
-    if not SID_RE.match(sid):
-        return _denial(kinds[0])
-    marker = marker_kind(directory, sid, now)
-    for kind in counts:
-        needed = "post" if kind == "delete" else kind
-        if marker != needed:
-            return _denial(kind)
-        if kind != "delete" and (directory / f"{sid}.{kind}-used").exists():
-            return _denial(kind)
-    return None
-
-
-def spend_go(kinds: list[str], sid: str, directory: Path) -> str | None:
-    """Claim each post/body go in `kinds`; denial text if one is spent."""
-    for kind in kinds:
-        if kind != "delete" and not claim(directory / f"{sid}.{kind}-used"):
-            return _denial(kind)
-    return None
-
-
-def _denial(kind: str) -> str:
-    return (
-        f"Blocked: this looks like a PR/issue {kind} without a typed go.\n"
-        "Ask the owner to say `post it` or `post all` (or `edit the pr body`) "
-        "in a message; a multiple-choice answer is not a go."
-    )
-
-
 def _unclassified_denial(reason: str) -> str:
     return (
         f"Blocked: {reason}.\n"
@@ -1050,21 +1059,16 @@ def handle_prompt(payload: dict, directory: Path, now: float) -> None:
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SID_RE.match(sid):
         return
-    _unlink(directory / f"{sid}.json")
-    _unlink(directory / f"{sid}.post-used")
-    _unlink(directory / f"{sid}.body-used")
+    try:
+        closing = close_batch(directory, sid)
+    except OSError:
+        return  # no batch boundary, so this prompt approves nothing
+    for legacy in ("json", "post-used", "body-used"):
+        _unlink(directory / f"{sid}.{legacy}")
     write_pid_map(directory, sid)
     prompt = payload.get("prompt")
-    if not isinstance(prompt, str):
-        return
-    kind = go_kind(prompt)
-    if kind is None:
-        return
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    marker_path = directory / f"{sid}.json"
-    fd = os.open(marker_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump({"v": 1, "kind": kind, "expires_epoch": now + TTL}, handle)
+    requests = go_request(prompt) if isinstance(prompt, str) else set()
+    approve_drafts(directory, sid, requests, closing)
     prune(directory, now)
 
 
@@ -1101,7 +1105,7 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
         return None  # fail open: the gh shim still gates at exec
     if denials:
         return _unclassified_denial(denials[0])
-    return check_go(kinds, sid, directory, now)
+    return check_replies(kinds, sid, directory)
 
 
 def main() -> int:
