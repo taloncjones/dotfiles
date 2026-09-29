@@ -16,8 +16,8 @@ function aliaslist() {
     echo "$list" | sort -u -d -s
 }
 
-# reload current configuration
-alias reload="source ~/.zshrc"
+# reload current configuration; .zshenv carries claude-account.zsh (director, claude)
+alias reload="source ~/.zshenv && source ~/.zshrc"
 
 # Print each PATH entry on a separate line
 alias path='echo -e ${PATH//:/\\n}'
