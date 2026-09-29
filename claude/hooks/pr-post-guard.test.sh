@@ -679,5 +679,46 @@ expect_rc "T1 personal cwd, api path to its own origin needs none" 0 "$(PB_CWD="
 expect_rc "T1 personal cwd, no target needs none" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 5 --body x')"
 expect_rc "T1 work cwd, -R to the personal login still needs a go" 2 "$(payload_b s1 'gh pr comment 5 -R me/repo --body x')"
 
+# --- AU/MN/GR/PB: pure helpers the gh shim decides with --------------------
+
+# expect_py LABEL WANT CODE -> stdout of CODE run with pr_post_guard as g
+expect_py() {
+    label="$1"; want="$2"; code="$3"
+    got=$(python3 -c "import sys; sys.path.insert(0, sys.argv[1]); import pr_post_guard as g; $code" "$(dirname "$HOOK")" 2>&1)
+    if [ "$got" = "$want" ]; then
+        printf 'PASS  %s\n' "$label"; PASS=$((PASS + 1))
+    else
+        printf 'FAIL  %s (want %s got %s)\n' "$label" "$want" "$got" >&2; FAIL=$((FAIL + 1))
+    fi
+}
+
+expect_py "AU1 a reply is gated even on an own PR" gated 'print(g.audience("reply", True, ("text", "hi")))'
+expect_py "AU2 a comment on another author PR is gated" gated 'print(g.audience("post", False, ("text", "hi")))'
+expect_py "AU3 an own-PR edit with no body is maintenance" maintenance 'print(g.audience("body", True, ("none", None)))'
+expect_py "AU4 an own-PR edit with an unreadable body is gated" gated 'print(g.audience("body", True, ("unreadable", None)))'
+expect_py "AU5 an own-PR edit that mentions someone is gated" gated 'print(g.audience("body", True, ("text", "see @rev")))'
+expect_py "AU6 an own-PR body edit is maintenance" maintenance 'print(g.audience("body", True, ("text", "new counts")))'
+expect_py "AU7 an own-PR comment with no body is gated" gated 'print(g.audience("post", True, ("none", None)))'
+expect_py "AU8 an APPROVE marker on an own PR is green" green 'print(g.audience("post", True, ("text", "<!-- co-review: sha=" + "a" * 40 + " base=" + "b" * 40 + " base_ref=main verdict=APPROVE round=1 -->\nVerdict: APPROVE")))'
+expect_py "AU9 a CHANGES marker on an own PR is gated" gated 'print(g.audience("post", True, ("text", "<!-- co-review: sha=" + "a" * 40 + " base=" + "b" * 40 + " base_ref=main verdict=CHANGES round=2 -->\nVerdict: CHANGES")))'
+expect_py "AU10 a truncated marker on an own PR is gated" gated 'print(g.audience("post", True, ("text", "<!-- co-review: sha=abc")))'
+expect_py "AU11 a free comment on an own PR is own-comment" own-comment 'print(g.audience("post", True, ("text", "bench: 12/12 passed")))'
+
+expect_py "MN1 an at-login mentions a person" True 'print(g.mentions_person("thanks @rev"))'
+expect_py "MN2 an email address does not" False 'print(g.mentions_person("mail a@b.com"))'
+expect_py "MN3 an inline code span does not" False 'print(g.mentions_person("use `@dataclass` here"))'
+expect_py "MN4 a fenced code block does not" False 'print(g.mentions_person("```\n@x\n```\nok"))'
+expect_py "MN5 a parenthesised mention does" True 'print(g.mentions_person("(@rev)"))'
+
+expect_py "GR1 post it" it 'print(",".join(sorted(g.go_request("post it"))))'
+expect_py "GR2 post all and a hash in one prompt" 1a2b3c4d,all 'print(",".join(sorted(g.go_request("post all and post 1A2B3C4D"))))'
+expect_py "GR3 edit the pr body is not a go" "" 'print(",".join(sorted(g.go_request("then edit the pr body"))))'
+expect_py "GR4 a negated post all is not a go" "" 'print(",".join(sorted(g.go_request("never post all"))))'
+expect_py "GR5 a backticked post it is not a go" "" 'print(",".join(sorted(g.go_request("Type `post it` now."))))'
+
+expect_py "PB1 a stdin body file is unreadable" "unreadable None" 'print(*g.post_body(["pr", "comment", "5", "--body-file", "-"], "."))'
+expect_py "PB2 a --body value is the text" "text hi" 'print(*g.post_body(["pr", "comment", "5", "-b", "hi"], "."))'
+expect_py "PB3 a gh api body field is the text" "text x" 'print(*g.post_body(["api", "repos/o/r/issues/5/comments", "-f", "body=x"], "."))'
+
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

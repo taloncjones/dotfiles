@@ -58,6 +58,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rm_guard
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "co-review" / "scripts"))
+from pr_ready_gate import MARKER_PREFIX, MARKER_RE
 
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
@@ -65,6 +67,14 @@ GO = {"post it": "post", "post all": "post", "edit the pr body": "body"}
 GO_PHRASE_RE = re.compile(r"(?<!`)\b(post it|post all|edit the pr body)\b(?!`)", re.IGNORECASE)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 NEGATION_RE = re.compile(r"\b(not|never|no)\b|n't", re.IGNORECASE)
+GO_REQUEST_RE = re.compile(r"(?<!`)\bpost (it|all|[0-9a-fA-F]{8})\b(?!`)", re.IGNORECASE)
+# GitHub sends no notification for a mention inside code.
+FENCED_CODE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[ \t]*$|\Z)", re.MULTILINE | re.DOTALL)
+CODE_SPAN_RE = re.compile(r"(`+).+?\1", re.DOTALL)
+MENTION_RE = re.compile(r"(?<![\w./@`])@[A-Za-z0-9]")
+LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+BODY_FILE_SUBCOMMANDS = {("pr", "comment"), ("issue", "comment"), ("pr", "edit"), ("pr", "review")}
+CLOSE_SUBCOMMANDS = {("pr", "close"), ("issue", "close")}
 TTL = 600
 PRUNE_AGE = 86400
 SID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -195,6 +205,144 @@ def go_kind(prompt: str) -> str | None:
             if not NEGATION_RE.search(sentence[:hit.start()]):
                 return GO[hit.group(1).lower()]
     return None
+
+
+def go_request(prompt: str) -> set[str]:
+    """Go requests in a typed prompt: "it", "all" and lowercase draft hashes.
+    Same sentence rules as go_kind: no negation before it, no closing `?`."""
+    found: set[str] = set()
+    if "(recommended)" in prompt.lower():
+        return found
+    for sentence in SENTENCE_SPLIT_RE.split(prompt):
+        if sentence.rstrip().endswith("?"):
+            continue
+        for hit in GO_REQUEST_RE.finditer(sentence):
+            if not NEGATION_RE.search(sentence[:hit.start()]):
+                found.add(hit.group(1).lower())
+    return found
+
+
+def flag_value(args: list[str], names: tuple[str, ...]) -> str | None:
+    """Last value given to one of `names`: `--x v`, `--x=v`, `-x v` or `-xv`."""
+    value, k = None, 0
+    while k < len(args):
+        tok = args[k]
+        for name in names:
+            if tok == name and k + 1 < len(args):
+                value = args[k + 1]
+                k += 1
+                break
+            if name.startswith("--") and tok.startswith(name + "="):
+                value = tok[len(name) + 1:]
+                break
+            if not name.startswith("--") and tok.startswith(name) and len(tok) > 2 and not tok.startswith("--"):
+                value = tok[2:].removeprefix("=")
+                break
+        k += 1
+    return value
+
+
+def read_text(path: str, cwd: str) -> tuple[str, str | None]:
+    """("text", contents) of a UTF-8 file; stdin or a failed read is unreadable."""
+    if path in ("-", ""):
+        return "unreadable", None
+    try:
+        with open(os.path.join(cwd, path), "rb") as handle:
+            return "text", handle.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "unreadable", None
+
+
+def api_fields(args: list[str]) -> list[tuple[bool, str, str]]:
+    """(typed, key, value) of each field in a normalized `gh api` argv;
+    typed fields (-F/--field) read `@path` values from a file."""
+    fields, i = [], 0
+    while i < len(args):
+        tok = args[i]
+        if tok in ("-f", "-F", "--raw-field", "--field") and i + 1 < len(args):
+            typed, raw, i = tok in ("-F", "--field"), args[i + 1], i + 2
+        elif tok.startswith(("--raw-field=", "--field=")):
+            typed, raw, i = tok.startswith("--field="), tok.split("=", 1)[1], i + 1
+        else:
+            i += 1
+            continue
+        key, _, value = raw.partition("=")
+        fields.append((typed, key, value))
+    return fields
+
+
+def input_path(args: list[str]) -> str | None:
+    for i, tok in enumerate(args):
+        if tok == "--input" and i + 1 < len(args):
+            return args[i + 1]
+        if tok.startswith("--input="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def api_body(args: list[str], cwd: str) -> tuple[str, str | None]:
+    for typed, key, value in api_fields(args):
+        if key == "body":
+            return read_text(value[1:], cwd) if typed and value.startswith("@") else ("text", value)
+    path = input_path(args)
+    if path is None:
+        return "none", None
+    state, raw = read_text(path, cwd)
+    if state != "text":
+        return state, None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return "unreadable", None
+    body = data.get("body") if isinstance(data, dict) else None
+    return ("text", body) if isinstance(body, str) else ("none", None)
+
+
+def post_body(args: list[str], cwd: str) -> tuple[str, str | None]:
+    """(state, text) a post or body call sends. State is "none" (no body
+    argument), "text", or "unreadable" (stdin, an editor, a bad file)."""
+    i, j = subcommand_index(args)
+    if i < len(args) and args[i] == "api":
+        return api_body(normalize_api_args(args[i + 1:]) or args[i + 1:], cwd)
+    sub = tuple(args[k] for k in (i, j) if k < len(args))
+    rest = args[j + 1:]
+    if sub in CLOSE_SUBCOMMANDS:
+        text = flag_value(rest, ("-c", "--comment"))
+        return ("none", None) if text is None else ("text", text)
+    if sub not in BODY_FILE_SUBCOMMANDS:
+        return "none", None
+    if any(t in ("-e", "--editor", "-w", "--web") for t in rest):
+        return "unreadable", None
+    path = flag_value(rest, ("-F", "--body-file"))
+    if path is not None:
+        return read_text(path, cwd)
+    text = flag_value(rest, ("-b", "--body"))
+    return ("none", None) if text is None else ("text", text)
+
+
+def mentions_person(text: str) -> bool:
+    """An `@login` outside fenced code and inline code spans."""
+    text = CODE_SPAN_RE.sub("", FENCED_CODE_RE.sub("", text))
+    return MENTION_RE.search(text) is not None
+
+
+def audience(kind: str, own: bool, body: tuple[str, str | None]) -> str:
+    """"maintenance", "green", "own-comment" or "gated" for a post, body or
+    reply call (spec R2): only gated needs the owner's go in a work repo."""
+    state, text = body
+    if kind == "reply" or not own or state == "unreadable":
+        return "gated"
+    if state == "none":
+        return "maintenance" if kind == "body" else "gated"
+    if mentions_person(text):
+        return "gated"
+    if kind == "body":
+        return "maintenance"
+    first = LINE_BREAK_RE.split(text, maxsplit=1)[0].rstrip(" \t")
+    if first.startswith(MARKER_PREFIX):
+        hit = MARKER_RE.match(first)
+        return "green" if hit and hit.group("verdict") == "APPROVE" else "gated"
+    return "own-comment"
 
 
 def drop_heredoc_bodies(command: str) -> str:
