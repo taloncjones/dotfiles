@@ -1148,6 +1148,131 @@ def test_settle_leaves_a_ship_worker_without_a_report():
         fx.close()
 
 
+def test_settle_exits_an_idle_ship_agent_once_its_handoff_is_recorded():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert result["agent"] == "exited" and result["pane"] == "closed", result
+        assert fx.worker_records()[2]["exit_requested"] == "handoff-recorded", fx.worker_records()
+        assert ["pane", "close", "w1:p3"] in fx.calls()
+        assert ["pane", "close", "w1:p1"] not in fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_leaves_a_ship_agent_without_a_handoff():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        before = fx.task_file.read_text()
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "not-settled" and result["reason"] is None, result
+        assert fx.task_file.read_text() == before
+        assert not [c for c in fx.calls() if c[:2] in (["agent", "prompt"], ["pane", "close"])], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_handoff_it_read_even_if_the_file_is_then_deleted():
+    fx = Fixture()
+    original = core.ship_handoff_launches
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+
+        def read_then_delete(rd, task_id, task):
+            found = original(rd, task_id, task)
+            (launch_dir / "ship.json").unlink()
+            return found
+
+        core.ship_handoff_launches = read_then_delete
+        result = fx.settle(ship["launch_id"])
+        assert not (launch_dir / "ship.json").exists()
+        assert result["status"] == "settled" and result["reason"] == "handoff-recorded", result
+        assert fx.worker_records()[2]["exit_requested"] == "handoff-recorded", fx.worker_records()
+    finally:
+        core.ship_handoff_launches = original
+        fx.close()
+
+
+def test_sweep_settles_review_and_ship_rows():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"},
+                         {"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R"),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
+        result = fx.sweep()
+        rows = [(r["launch_id"], r["reason"], r["pane"]) for r in result["rows"]]
+        assert rows == [("R", "verdict-recorded", "closed"),
+                        (ship["launch_id"], "handoff-recorded", "closed")], result
+        assert ["pane", "close", "w1:p1"] not in fx.calls()
+    finally:
+        fx.close()
+
+
+def test_sweep_keeps_a_ship_pane_a_repair_row_also_used():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl = settle_row("implement", "I", "w1:p1", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        repair = settle_row("implement", "I2", "w1:p3", head)
+        fx.settle_state([impl, ship, repair], "changes-requested", [],
+                        [pane("w1:p1"), pane("w1:p2"), pane("w1:p3")])
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(
+            json.dumps({"launch_id": ship["launch_id"], "verdict": "CHANGES"}))
+        result = fx.sweep()
+        by_lid = {r["launch_id"]: r for r in result["rows"]}
+        assert by_lid[ship["launch_id"]]["reason"] == "handoff-recorded", result
+        assert by_lid[ship["launch_id"]]["pane"] == "kept-shared", result
+        assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
 def test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes():
     fx = Fixture()
     try:
@@ -3362,6 +3487,11 @@ for name, test in (
     ("settle exits an idle reviewer with a recorded verdict and closes its pane", test_settle_exits_an_idle_reviewer_with_a_verdict_and_closes_its_pane),
     ("settle exits an idle ship worker once its report exists", test_settle_exits_an_idle_ship_worker_once_its_report_exists),
     ("settle leaves a ship worker without a report", test_settle_leaves_a_ship_worker_without_a_report),
+    ("settle exits an idle ship agent once its handoff is recorded", test_settle_exits_an_idle_ship_agent_once_its_handoff_is_recorded),
+    ("settle leaves a ship agent without a handoff", test_settle_leaves_a_ship_agent_without_a_handoff),
+    ("settle keeps a handoff it read even if the file is then deleted", test_settle_keeps_a_handoff_it_read_even_if_the_file_is_then_deleted),
+    ("sweep settles review and ship rows", test_sweep_settles_review_and_ship_rows),
+    ("sweep keeps a ship pane a repair row also used", test_sweep_keeps_a_ship_pane_a_repair_row_also_used),
     ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
     ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
     ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),
