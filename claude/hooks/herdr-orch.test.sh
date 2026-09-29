@@ -11410,5 +11410,27 @@ sec5 = skill.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
 assert " sweep " in sec5 or f"sweep{tick}" in sec5, "section 5 preflight runs sweep"
 PY
 
+check "docs: the director ship step is config-driven and the old never-push sentence is gone" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+layout = open("claude/skills/herdr-orchestration/references/state-layout.md").read()
+director = open("claude/agents/director.md").read()
+assert '"ship"' in layout, "state-layout documents the ship block"
+assert "gh pr create" in skill, "SKILL.md names the PR create line"
+assert "match-head-commit" in skill, "SKILL.md pins the merge to the head"
+assert "match-head-commit" in director, "director.md names the head pin"
+assert "never merges, pushes, or opens a PR" not in skill, "old sentence removed"
+assert len(re.findall(r"herdr-capabilities:", skill)) == 1, "one capability marker"
+ship = skill.split("**Ship step.**", 1)[1].split("Marker posts still need", 1)[0]
+assert "personal_repository" in ship, "SKILL.md ship step derives merge from personal_repository"
+assert "personal_repository" in layout, "state-layout derives merge from personal_repository"
+assert "back to the human for merge" not in skill, "stale hand-back text removed"
+assert "human merges; `/post-merge`" not in skill, "stale reviewed-row text removed"
+assert "In the review phase the review agent and director never push or open PRs" in skill, "review-phase scope added"
+assert "human merge gate" not in open("claude/skills/herdr-orchestration/references/dispatch-mechanism.md").read(), "dispatch-mechanism stale text removed"
+assert "pr_number" in ship and "gh pr list" in ship, "ship step is re-entrant"
+assert "--repo <owner/repo>" in ship, "gh lines name the repo"
+PY
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

@@ -17,7 +17,8 @@ A Claude-led per-repo director over Herdr. It turns a designated work item into 
 briefed worker in a worktree-backed workspace, tracks the worker through a
 hook-fed event log plus worker-emitted completion records, and -- once it
 confirms real completion -- dispatches an independent reviewer before handing
-back to the human for merge. One standing Claude director per repo.
+back to the human (or through the ship step, per `ship.merge`). One standing
+Claude director per repo.
 
 Naming: the user-facing role name is **director**. Durable schema and CLI
 literals keep their historical values and never change: the ownership tier
@@ -1108,8 +1109,9 @@ helper from publishing.
    (`<n>` = count of actual blocking findings; incomplete or missing review
    evidence emits `changes-requested` with `<n>` possibly zero and never emits
    `approved`), then the review agent goes idle and hands back --
-   it does NOT run `/handoff`; `emit-review` is its only signal. Review agent
-   and director never push or open PRs. The verdict lands in
+   it does NOT run `/handoff`; `emit-review` is its only signal.
+   In the review phase the review agent and director never push or open PRs.
+   The verdict lands in
    `tasks/<task_id>.review.json`, separate from the impl `.done.json`.
 
 6. At every coordinator check-in while `review-dispatched`, enforce the bound
