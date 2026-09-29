@@ -3324,6 +3324,7 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
     done, review = _sidecar(".done.json"), _sidecar(".review.json")
     poll_agents = poll.get("agents", {}) if isinstance(poll, dict) else {}
     idle_settled = False
+    ship_handoffs = ship_handoff_launches(rd, tid, task)
     for index, row in enumerate(workers):
         if not isinstance(row, dict) or not _nonempty_str(row.get("agent")):
             continue
@@ -3337,7 +3338,8 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
                    for a in poll_agents.get(row.get("workspace_id"), []))
         if idle and row_settlement(task, index, done=done, review=review, head=head,
                                    payload_root=payload_root,
-                                   ship_report=ship_report_ns(rd, tid)):
+                                   ship_report=ship_report_ns(rd, tid),
+                                   ship_handoffs=ship_handoffs):
             idle_settled = True
             break
     impl_ws = phase_workspace(task, "implement")
@@ -3528,10 +3530,45 @@ def ship_report_ns(rd, task_id):
     return st.st_mtime_ns if stat.S_ISREG(st.st_mode) else None
 
 
-def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None):
+def ship_launch_dir(rd, task_id, launch):
+    """artifacts/<task_id>/ship-<launch>, or None unless launch is a plain id inside it."""
+    if not isinstance(launch, str) or not valid_task_id(launch):
+        return None
+    root = Path(rd) / "artifacts" / task_id
+    launch_dir = root / f"ship-{launch}"
+    return launch_dir if contained(launch_dir, root) else None
+
+
+def read_ship_handoff(launch_dir, launch):
+    """The ship.json object naming launch, read without following links, or None."""
+    try:
+        loaded = json.loads(read_payload_text(Path(launch_dir) / "ship.json"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) and loaded.get("launch_id") == launch else None
+
+
+def ship_handoff_launches(rd, task_id, task):
+    """Launch ids of the task's ship rows whose own ship.json is recorded."""
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    found = set()
+    for row in workers:
+        if not isinstance(row, dict) or row.get("phase") != "ship":
+            continue
+        launch = row.get("launch_id")
+        launch_dir = ship_launch_dir(rd, task_id, launch)
+        if launch_dir is not None and read_ship_handoff(launch_dir, launch) is not None:
+            found.add(launch)
+    return frozenset(found)
+
+
+def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
+                   ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
     work. Rules 0b-5 rest on facts that stay true once written; rules 7-8 read
-    mutable evidence and only ever authorize an agent exit, not a pane close."""
+    mutable evidence and only ever authorize an agent exit, not a pane close.
+    The ship rule reads a write-once ship.json snapshot and may authorize a
+    pane close: settle persists it as exit_requested (rule 0b) before /exit."""
     workers = task.get("workers") if isinstance(task.get("workers"), list) else []
     if not 0 <= index < len(workers) or not isinstance(workers[index], dict):
         return None
@@ -3551,6 +3588,9 @@ def row_settlement(task, index, *, done, review, head, payload_root, ship_report
         return "launch-failed"
     if any(w.get("phase") == phase for w in later):
         return "superseded"
+    if phase == "ship":
+        launch = row.get("launch_id")
+        return "handoff-recorded" if isinstance(launch, str) and launch in ship_handoffs else None
     if phase == "review":
         if row.get("launch_id") in (task.get(RETIRED_REVIEWS_KEY) or []):
             return "review-retired"
@@ -3866,18 +3906,10 @@ def merge_ready(rd, repo_slug, task_id, pr, repo, runtime="claude", personal=Fal
     # dispatch rule (section 6) reads it from this one run.
     # A launch id is path material: it must be a plain id inside this task's
     # artifacts, and ship.json is read without following links.
-    launch_dir = rd / "artifacts" / task_id / f"ship-{launch}" if launch else None
-    if launch_dir is not None and not (valid_task_id(launch) and contained(launch_dir, rd / "artifacts" / task_id)):
+    launch_dir = ship_launch_dir(rd, task_id, launch)
+    if launch and launch_dir is None:
         fail("handoff", f"invalid ship_launch_id {launch!r}")
-        launch_dir = None
-    handoff = None
-    if launch_dir is not None:
-        try:
-            loaded = json.loads(read_payload_text(launch_dir / "ship.json"))
-        except (OSError, ValueError):
-            loaded = None
-        if isinstance(loaded, dict) and loaded.get("launch_id") == launch:
-            handoff = loaded
+    handoff = read_ship_handoff(launch_dir, launch) if launch_dir is not None else None
     if handoff is not None:
         out["handoff_verdict"] = handoff.get("verdict")
         current = live_head is not None and handoff.get("head_sha") == live_head == head
