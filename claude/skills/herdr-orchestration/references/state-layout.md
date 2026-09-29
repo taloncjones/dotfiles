@@ -337,6 +337,20 @@ malformed block (non-object, unknown key, or a `max_files` that is not a
 positive int) makes the director treat every todo as raw and report the
 config error.
 
+`ship` is optional and read only by the director's ship step (SKILL.md
+section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
+"merge": "auto"}}`. `push` and `pr` are booleans defaulting to true; `merge`
+is `"auto"` (squash-merge on a co-review APPROVE) or `"human"` (report for
+the owner's confirm). When the block or `merge` is absent, `merge` is
+`"auto"` when `claude/skills/lib/workflow_context.py account-scope --cwd
+<repo> --runtime claude` reports `personal_repository` true (repo under the
+personal root), and `"human"` otherwise (work repo, repo outside both roots,
+or `account-scope` unavailable). `kind` is not used: it follows the running
+account, not the repo. `push: false` or `pr: false` makes the director report
+the branch as reviewed and leave push and PR to the owner. A malformed block
+(non-object, unknown key, non-boolean `push`/`pr`, other `merge` value) makes the director fall back to
+`merge: "human"` and report the config error.
+
 ### `task-lead-gate.json`
 
 The task-lead activation gate record. The intended writer is
@@ -449,11 +463,18 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "contract_path": "claude/contracts/PROJ-123-contract.json",
   "contract_sha256": "<64hex>",
   "merge_check": null,
+  "ship_launch_id": null,
+  "teardown_blocked": null,
+  "pr_number": null,
   "status": "kickoff|in-progress|blocked|completed|review-dispatched|changes-requested|reviewed|failed|abandoned|merged",
   "created": "...",
   "updated": "..."
 }
 ```
+
+`ship_launch_id` is the ship launch the director pinned at dispatch (only
+its handoff counts). `teardown_blocked` is the reason a director teardown
+stopped (a human clears it by finishing `/post-merge`).
 
 `workers` is a list, not a single field -- phase advancement (implement ->
 review) appends a new entry rather than overwriting.
@@ -605,6 +626,42 @@ Only `pass`/`fail`/`conflict` are ever recorded; infrastructure or integrity
 trouble writes nothing (retried next check-in). Any `merge_check` whose SHAs
 do not match live HEAD and current `origin/<default>` is stale -- ignored and
 re-run; it is nulled whenever `review_head_sha` is cleared.
+
+A director merge (herdr-orchestration section 6a) records `result: pass`
+with three more keys: `"gate_report"` (the handoff's `report_path`),
+`"merge_commit_sha"`, and `"merged_by"` (`director` or `observed`). A
+refused director merge records `result: fail` with `"reason"` (the gh error
+text); a human clears it with `null`.
+
+### `artifacts/<task_id>/ship-<launch_id>/ship.json` -- ship handoff
+
+Written by a herdr ship worker whose brief carries
+`herdr-ship-brief: stop-after-gate`, at path
+`STATE_ROOT/<slug>/artifacts/<task_id>/ship-<launch_id>/ship.json`, last
+and atomically (temp file, rename), for any terminal gate verdict:
+
+```json
+{
+  "task_id": "PROJ-123",
+  "launch_id": "ship-PROJ-123-20260925T000000Z",
+  "pr_number": 42,
+  "pr_url": "https://github.com/o/r/pull/42",
+  "head_sha": "<40hex>",
+  "base_ref": "main",
+  "base_sha": "<40hex>",
+  "tree_sha": "<40hex>",
+  "report_path": "<path under this launch dir>",
+  "report_sha256": "<64hex>",
+  "expected_path": "<path under this launch dir>",
+  "expected_sha256": "<64hex>",
+  "verdict": "APPROVE|CHANGES|INCOMPLETE",
+  "written_at": "..."
+}
+```
+
+A run that dies before a verdict writes none. The retained co-review
+`RUN_DIR` (report and expected identity) lives in the same launch
+directory.
 
 ### `tasks/<task_id>.done.json` -- worker-emitted completion record
 

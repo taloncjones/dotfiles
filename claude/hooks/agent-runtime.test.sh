@@ -883,6 +883,45 @@ def test_personal_repository_codex_argv_disables_atlassian_plugin():
     )
 
 
+def test_personal_only_env_disables_atlassian_plugin_outside_personal_repo():
+    route = runtime.resolve_route(
+        "codex", "implementation", capabilities=codex_capabilities()
+    )
+    original = os.environ.get("CLAUDE_PERSONAL_ONLY")
+    try:
+        os.environ["CLAUDE_PERSONAL_ONLY"] = "1"
+        argv = runtime.launch_argv(
+            route,
+            "/tmp/repository",
+            "workspace-write",
+            scope={"personal_repository": False},
+        )
+    finally:
+        if original is None:
+            os.environ.pop("CLAUDE_PERSONAL_ONLY", None)
+        else:
+            os.environ["CLAUDE_PERSONAL_ONLY"] = original
+    assert (
+        'plugins."atlassian@claude-plugins-official".enabled=false' in argv
+    ), argv
+
+    original = os.environ.get("CLAUDE_PERSONAL_ONLY")
+    try:
+        os.environ.pop("CLAUDE_PERSONAL_ONLY", None)
+        argv = runtime.launch_argv(
+            route,
+            "/tmp/repository",
+            "workspace-write",
+            scope={"personal_repository": False},
+        )
+    finally:
+        if original is not None:
+            os.environ["CLAUDE_PERSONAL_ONLY"] = original
+    assert (
+        'plugins."atlassian@claude-plugins-official".enabled=false' not in argv
+    ), argv
+
+
 def test_codex_lifecycle_roots_require_workspace_write():
     base_route = runtime.resolve_route(
         "codex", "reviewer", capabilities=codex_capabilities()
@@ -2846,6 +2885,10 @@ for name, test in (
     ("bounded reviewer run passes strict MCP config", test_bounded_run_passes_strict_mcp_config_for_reviewer),
     ("personal Codex argv requires valid scope", test_personal_repository_codex_argv_disables_atlassian_plugin),
     ("herdr children get the gh shim first on PATH", test_arm_gh_shim_puts_the_shim_first_in_herdr_only),
+    (
+        "CLAUDE_PERSONAL_ONLY disables Atlassian outside personal repos",
+        test_personal_only_env_disables_atlassian_plugin_outside_personal_repo,
+    ),
     ("run_bounded arms the gh shim for a herdr child", test_run_bounded_arms_the_gh_shim_for_a_herdr_child),
     ("Codex lifecycle roots require workspace-write", test_codex_lifecycle_roots_require_workspace_write),
     ("Codex JSONL reports tokens and unknown observations", test_codex_result_reports_tokens_and_unknown_observations),

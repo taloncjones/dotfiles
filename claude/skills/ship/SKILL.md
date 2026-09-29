@@ -63,7 +63,12 @@ target base. Stop if either identity is unavailable or mismatched.
    A changed identity, failed evaluation, absent active files, or session interruption
    invalidates approval and stops this workflow. A fresh review needs the
    caller authorization described above; historical PR comments never resume
-   this step.
+   this step. One exception: a head whose only new commits since the gated
+   head merge the base branch, with an empty diff over the branch's own
+   files (the git check under "Merge-main-only commits keep the verdict" in
+   the herdr-orchestration skill, section 6), keeps the verdict; redo this
+   step's live recheck against the new head and continue without a new
+   round.
 
 5. **Audit comment.** Only in this same uninterrupted workflow, right after
    step 4 passes (an interrupted workflow stops under the existing step 3/4
@@ -83,10 +88,14 @@ target base. Stop if either identity is unavailable or mismatched.
    missing audit comment does not block the merge step; report it. This is
    the standing authorization for the post (roadmap, 2026-09-23).
 
-6. **Merge gate (human).** Present the findings disposition, test results, CI
-   state, version change, and active evaluator result. Ask for explicit merge
-   confirmation. Required human approvals remain separate from evaluator
-   approval. On confirmation, squash merge with
+6. **Merge gate.** A run whose brief contains the line
+   `herdr-ship-brief: stop-after-gate` ends after step 4: it skips steps 5-7,
+   writes the `ship.json` handoff the brief names, and never merges; the
+   herdr director merges in a personal repository and a human merges in a
+   work repository. Every other run presents the findings disposition,
+   test results, CI state, version change, and active evaluator result, and
+   asks for explicit merge confirmation. Required human approvals remain
+   separate from evaluator approval. On confirmation, squash merge with
    `gh pr merge --squash --match-head-commit <expected-head>` so the server
    refuses a moved head.
 
@@ -96,7 +105,7 @@ target base. Stop if either identity is unavailable or mismatched.
 
 - Stop on a failed test, red or pending required CI, merge conflict, missing
   active report, missing human approval, or evaluator failure.
-- `ship` authorizes the delivery workflow. The explicit step-5 confirmation
+- `ship` authorizes the delivery workflow. The explicit step 6 confirmation
   authorizes the merge.
 - Command-mode redesign, PR metadata automation, and `/ready` removal remain
   deferred to the separate shipping-workflow change.

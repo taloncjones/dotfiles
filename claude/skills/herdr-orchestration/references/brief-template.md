@@ -432,5 +432,16 @@ task. Each still carries `<lessons-step>`:
   The ship worker writes that section in the same write as the rest of `ship.md`.
   When a `ship.md` already exists, it must
   carry forward that report's `## Lessons` lines into the new one.
+  Push, PR creation, and merge are the director's ship step (`ship` block in
+  `config.json`); a ship brief does not hand them to the worker.
   The director does not harvest a ship report at check-in; `/post-merge`
   step 1 reads it.
+- A ship brief carries the exact line `herdr-ship-brief: stop-after-gate`
+  and its launch directory `STATE_ROOT/<slug>/artifacts/<task_id>/ship-<launch_id>/`.
+  The worker keeps co-review's `RUN_DIR` in that directory, runs ship steps
+  1-4, never posts the audit comment and never merges. On any terminal gate
+  verdict (APPROVE, CHANGES, INCOMPLETE) it writes `ship.json` there last,
+  through a temp file and rename: `task_id`, `launch_id`, `pr_number`,
+  `pr_url`, `head_sha`, `base_ref`, `base_sha`, `tree_sha`, `report_path`,
+  `report_sha256`, `expected_path`, `expected_sha256`, `verdict`,
+  `written_at`. A run that dies before a verdict writes none.

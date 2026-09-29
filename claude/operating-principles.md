@@ -39,7 +39,10 @@ Standing engineering discipline for all sessions, all repos.
   commit applies its inverse to the current head, preserving later changes.
 - Merging needs a fresh human go with the final state visible. A prior "merge once
   things pass" does not survive to the moment of merging; CI-green plus model
-  review means "ready to merge -- confirm", not approval.
+  review means "ready to merge -- confirm", not approval. Exception: a
+  standing merge order for a named personal repo lets the director merge on
+  a complete co-review APPROVE plus green CI, re-checked live at the moment
+  of merging (herdr-orchestration section 6a); work repos keep the human go.
 - Approvals do not bundle: a reply naming one action approves only that action,
   and every outward post (PR comment, ticket, message) needs its own explicit go.
 - Before accumulating work on a file -- or dispatching a subagent to one -- confirm it is

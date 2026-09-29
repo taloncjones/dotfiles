@@ -152,14 +152,14 @@ function claude() {    # claude() will launch Claude Code with the work account 
     fi
 }
 
-function director() {    # director() launches the herdr director with inbound messaging and manual permissions through claude(). ex: $ director
+function director() {    # director() launches the herdr director with inbound messaging and auto permissions through claude(). ex: $ director
     emulate -L zsh
     if [[ "${HERDR_ENV:-}" != 1 ]]; then
         echo "[X] director: run inside a herdr pane (HERDR_ENV is not 1)." >&2
         return 2
     fi
     local arg
-    local -a mode=(--permission-mode manual)
+    local -a mode=(--permission-mode auto)
     for arg in "$@"; do
         [[ "$arg" == --permission-mode || "$arg" == --permission-mode=* ]] && mode=()
     done

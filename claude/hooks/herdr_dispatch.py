@@ -1535,7 +1535,12 @@ def _pane_verdict(task, row, agents, panes, reasons):
         return "kept-last-pane"
     sharing = [i for i, w in enumerate(task["workers"])
                if isinstance(w, dict) and w.get("pane_id") == pane_id]
-    if any(task["workers"][i].get("phase") != "review" for i in sharing):
+    # The first row's pane is the workspace root; a repair may still follow.
+    if pane_id == task["workers"][0].get("pane_id"):
+        return "kept-shared"
+    if any(task["workers"][i].get("phase") != "review"
+           and "ship-report" not in (reasons(i), task["workers"][i].get("exit_requested"))
+           for i in sharing):
         return "kept-shared"
     if any(reasons(i) is None for i in sharing):
         return "kept-unsettled"
@@ -1635,8 +1640,10 @@ def _settlement_reasons(task, rd, task_id, head):
     done = _sidecar(rd, task_id, ".done.json")
     review = _sidecar(rd, task_id, ".review.json")
     payload_root = rd.parent.parent
+    ship_report = core.ship_report_ns(rd, task_id)
     return lambda i: core.row_settlement(task, i, done=done, review=review,
-                                         head=head, payload_root=payload_root)
+                                         head=head, payload_root=payload_root,
+                                         ship_report=ship_report)
 
 
 def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,

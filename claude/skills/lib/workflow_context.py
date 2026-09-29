@@ -116,7 +116,11 @@ def repository_context(cwd: str | Path) -> dict:
 
 
 def _claude_policy(cwd: str | Path, *, personal: bool) -> tuple[str, Path, dict, bool]:
-    """Return account policy and whether repository ownership is personal."""
+    """Return account policy and whether repository ownership is personal by path.
+
+    The fourth value is True only when the checkout or a canonical owner
+    resolves under ~/Git/personal; CLAUDE_PERSONAL_ONLY=1 alone never sets it.
+    """
     home = _resolved(os.environ.get("HOME", str(Path.home())))
     personal_root = _resolved(home / "Git" / "personal")
     work_root = _resolved(os.environ.get("CLAUDE_WORK_TREE", home / "Git" / "work"))
@@ -131,18 +135,16 @@ def _claude_policy(cwd: str | Path, *, personal: bool) -> tuple[str, Path, dict,
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         raise ValueError("Git context is unavailable") from exc
     checkout = _resolved(context["root"] if context is not None else cwd)
-    if os.environ.get("CLAUDE_PERSONAL_ONLY") == "1" or _inside(
-        checkout, personal_root
-    ):
-        return "personal", personal_config, {"CLAUDE_CONFIG_DIR": None}, True
-
     owners = (
         tuple(_resolved(context[key]) for key in ("root", "primary_root", "common_dir"))
         if context is not None and context["primary_known"]
         else (checkout,)
     )
-    if any(_inside(owner, personal_root) for owner in owners):
-        return "personal", personal_config, {"CLAUDE_CONFIG_DIR": None}, True
+    path_personal = _inside(checkout, personal_root) or any(
+        _inside(owner, personal_root) for owner in owners
+    )
+    if os.environ.get("CLAUDE_PERSONAL_ONLY") == "1" or path_personal:
+        return "personal", personal_config, {"CLAUDE_CONFIG_DIR": None}, path_personal
 
     # A scoped personal account does not turn a work repository into a personal
     # repository. Keep plugin policy independent from a quota/account override.

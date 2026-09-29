@@ -522,14 +522,17 @@ if [ "$rc" = 2 ] && [ ! -s "$rec" ] && grep -q 'HERDR_ENV is not 1' "$TMP/err"; 
 else
     fail "director refuses outside a herdr pane (rc=$rc)"
 fi
-run_case "director adds manual permission mode by default" \
-    "$SBHOME/elsewhere" "HERDR_ENV=1 director" "UNSET" "$PREFIX --permission-mode manual"
-run_case "director passes a caller permission mode through" \
-    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode bypassPermissions" \
-    "UNSET" "$PREFIX --permission-mode bypassPermissions"
-run_case "director passes --permission-mode=value through" \
-    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode=auto" \
-    "UNSET" "$PREFIX --permission-mode=auto"
+run_case "director adds auto permission mode by default" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director" "UNSET" "$PREFIX --permission-mode auto"
+run_case "director passes --permission-mode manual through" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode manual" \
+    "UNSET" "$PREFIX --permission-mode manual"
+run_case "director passes --permission-mode default through" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode default" \
+    "UNSET" "$PREFIX --permission-mode default"
+run_case "director passes --permission-mode=default through" \
+    "$SBHOME/elsewhere" "HERDR_ENV=1 director --permission-mode=default" \
+    "UNSET" "$PREFIX --permission-mode=default"
 run_case "director keeps work-account routing" \
     "$SBHOME/Git/work/proj" "HERDR_ENV=1 director" "$SBHOME/.claude-work"
 

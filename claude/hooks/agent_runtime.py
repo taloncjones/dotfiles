@@ -664,6 +664,11 @@ def launch_argv(
         raise RouteError(f"unsupported launch mode: {mode}")
     selected_cwd = _checked_cwd(cwd)
     personal_repository = _personal_repository(scope)
+    # The machine-wide personal-only policy disables Atlassian regardless of
+    # repository, matching the interactive path in zsh/codex-account.zsh.
+    disable_atlassian = (
+        personal_repository or os.environ.get("CLAUDE_PERSONAL_ONLY") == "1"
+    )
 
     if runtime == "codex":
         add_dirs = _codex_add_dirs(route, selected_cwd)
@@ -688,7 +693,7 @@ def launch_argv(
                         "-c",
                         'plugins."atlassian@claude-plugins-official".enabled=false',
                     ]
-                    if personal_repository
+                    if disable_atlassian
                     else []
                 ),
                 # Codex passes only core variables to its shells. PATH carries

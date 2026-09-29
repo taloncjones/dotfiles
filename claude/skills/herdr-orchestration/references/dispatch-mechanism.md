@@ -35,11 +35,11 @@ as `resolve_route` already treats overrides. Dispatch pipeline steps through
 
 | Mechanism     | Use for                                              | Shape                                                                    |
 | ------------- | ---------------------------------------------------- | ------------------------------------------------------------------------ |
-| Herd worker   | A durable, PR-sized slice                            | Worktree-backed, cross-session, human merge gate                         |
+| Herd worker   | A durable, PR-sized slice                            | Worktree-backed, cross-session, ship step / owner merge                     |
 | Workflow tool | In-session parallel fan-out of independent sub-tasks | Tiered (fable/opus judges, sonnet workers), Claude-only, per-task review |
 
 - Reach for a Herd worker when the unit is a shippable PR that needs worktree
-  isolation, cross-session durability, and a human merge gate.
+  isolation, cross-session durability, and the ship step's merge decision.
 - Reach for the Workflow tool for independent sub-tasks WITHIN an already-planned
   slice. It sits behind its own opt-in/size gate; workers edit in isolated
   worktrees respecting the orch/edit guards. A Workflow does NOT re-run

@@ -48,3 +48,8 @@ role.
   or a decision it cannot make.
 - Completion is a report, not authorization. The lead checks the diff and
   tests before believing it.
+- Merge authority: in a personal repository (a checkout whose path or
+  canonical owner is under `~/Git/personal`) the herdr director merges a
+  finished PR after review-change APPROVE, co-review APPROVE at the live
+  head, and green CI, through herdr-orchestration section 6a. In a work
+  repository a human merges. Leads, workers, and reviewers never merge.

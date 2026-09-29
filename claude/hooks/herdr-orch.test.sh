@@ -2532,6 +2532,273 @@ grep -q 'think/' "$R/event-schema.md"
 grep -q 'models.think\|"think": \["fable", "opus"\]' "$R/state-layout.md"
 SH
 
+check "merge-authority: personal repos and linked worktrees get director; work, overrides and errors get human" <<'PY'
+import json, os, subprocess, sys, tempfile
+from pathlib import Path
+sb = Path(tempfile.mkdtemp())
+env = {k: v for k, v in os.environ.items() if k not in (
+    "CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
+    "CLAUDE_WORK_TREE", "CLAUDE_WORK_CONFIG_DIR") and not k.startswith("GIT_")}
+env["HOME"] = str(sb)
+def git(*a):
+    subprocess.run(["git", *a], check=True, capture_output=True, env=env)
+def repo(path):
+    path.mkdir(parents=True)
+    git("init", "-q", str(path))
+    git("-C", str(path), "-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-q", "--allow-empty", "-m", "init")
+    return path
+personal = repo(sb / "Git" / "personal" / "p")
+work = repo(sb / "Git" / "work" / "w")
+linked = sb / "elsewhere" / "wt"
+git("-C", str(personal), "worktree", "add", "-q", str(linked), "-b", "topic")
+def slug(path, extra_env=None):
+    code = ("import sys; sys.path.insert(0, 'claude/hooks'); sys.path.insert(0, 'claude/skills/lib');"
+            "import herdr_orch_core as c, workflow_context as w;"
+            "print(c._context_slug(w.repository_context(sys.argv[1])))")
+    return subprocess.run([sys.executable, "-c", code, str(path)], check=True,
+                          capture_output=True, text=True, env={**env, **(extra_env or {})}).stdout.strip()
+def ask(slug_value, path, *flags, extra_env=None):
+    argv = [sys.executable, "claude/hooks/herdr_orch_core.py", "merge-authority", "--repo-slug", slug_value]
+    if path is not None:
+        argv += ["--repo-path", str(path)]
+    out = subprocess.run(argv + list(flags), capture_output=True, text=True,
+                         env={**env, **(extra_env or {})})
+    assert out.returncode == 0, (argv, out.returncode, out.stderr)
+    return json.loads(out.stdout)
+before = sorted(str(p) for p in sb.rglob("*"))
+assert ask(slug(personal), personal)["authority"] == "director"
+assert ask(slug(linked), linked)["authority"] == "director"
+assert ask(slug(work), work)["authority"] == "human"
+assert ask(slug(work), work, "--personal")["authority"] == "human"
+assert ask(slug(work), work, extra_env={"WORKFLOW_PERSONAL_ACCOUNT": "1"})["authority"] == "human"
+assert ask(slug(work, {"CLAUDE_PERSONAL_ONLY": "1"}), work,
+           extra_env={"CLAUDE_PERSONAL_ONLY": "1"})["authority"] == "human"
+assert ask(slug(personal, {"CLAUDE_PERSONAL_ONLY": "1"}), personal,
+           extra_env={"CLAUDE_PERSONAL_ONLY": "1"})["authority"] == "director"
+mismatch = ask("not-the-slug", personal)
+assert mismatch["authority"] == "human" and mismatch["reason"], mismatch
+missing = ask(slug(personal), None)
+assert missing["authority"] == "human" and missing["reason"], missing
+gone = ask(slug(personal), sb / "nope")
+assert gone["authority"] == "human" and gone["reason"], gone
+assert sorted(str(p) for p in sb.rglob("*")) == before, "merge-authority wrote files"
+PY
+
+check "merge-ready: good handoff is ready; every single broken precondition names its code" <<'PY'
+import contextlib, copy, hashlib, io, json, os, subprocess, sys, tempfile
+from pathlib import Path
+for k in ("CLAUDE_PERSONAL_ONLY", "WORKFLOW_PERSONAL_ACCOUNT", "CLAUDE_CONFIG_DIR",
+          "CLAUDE_WORK_TREE", "CLAUDE_WORK_CONFIG_DIR"):
+    os.environ.pop(k, None)
+for k in [k for k in os.environ if k.startswith("GIT_")]:
+    os.environ.pop(k)
+sb = Path(tempfile.mkdtemp()); os.environ["HOME"] = str(sb)
+sys.path[:0] = ["claude/hooks", "claude/skills/lib", "claude/skills/co-review/scripts/tests"]
+import herdr_orch_core as c, workflow_context as w, test_gate_report as tg
+
+def git(cwd, *a):
+    return subprocess.run(["git", "-C", str(cwd), *a], check=True,
+                          capture_output=True, text=True).stdout.strip()
+def commit(cwd, msg):
+    git(cwd, "-c", "user.name=t", "-c", "user.email=t@example.com",
+        "commit", "-q", "--allow-empty", "-m", msg)
+def make_repo(path):
+    path.mkdir(parents=True)
+    git(path, "init", "-q"); commit(path, "init")
+    return path
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+def build(repo, tid="td-merge", launch="ship-a1"):
+    slug = c._context_slug(w.repository_context(str(repo)))
+    head = git(repo, "rev-parse", "HEAD"); tree = git(repo, "rev-parse", "HEAD^{tree}")
+    c.select_payload(type("NS", (), {"repo_slug": slug, "repo_path": str(repo),
+                                      "runtime": "claude", "personal": False})())
+    rd = c.repo_dir(slug); c._PAYLOAD_SELECTION.set(None)
+    ld = rd / "artifacts" / tid / f"ship-{launch}"; ld.mkdir(parents=True)
+    t = tg.GateReportTests(); t.setUp(); t.root = ld
+    rep = t._report(); exp = dict(t.expected)
+    ci = json.loads((ld / "ci.json").read_text()); ci["head"] = head
+    (ld / "ci.json").write_text(json.dumps(ci))
+    rep["preconditions"]["ci"]["sha256"] = sha(ld / "ci.json")
+    for obj in (rep, exp):
+        obj.update(head=head, tree=tree, repository="o/r", pr_number=7, base="b" * 40, base_ref="main")
+    rep["reviewed_tree"] = tree
+    rep["preconditions"].update(head=head, tree=tree)
+    (ld / "report.json").write_text(json.dumps(rep)); (ld / "expected.json").write_text(json.dumps(exp))
+    hand = {"task_id": tid, "launch_id": launch, "pr_number": 7, "pr_url": "u", "head_sha": head,
+            "base_ref": "main", "base_sha": "b" * 40, "tree_sha": tree,
+            "report_path": str(ld / "report.json"), "report_sha256": sha(ld / "report.json"),
+            "expected_path": str(ld / "expected.json"), "expected_sha256": sha(ld / "expected.json"),
+            "verdict": "APPROVE", "written_at": "t"}
+    (ld / "ship.json").write_text(json.dumps(hand))
+    (rd / "tasks").mkdir(parents=True, exist_ok=True)
+    task = {"task_id": tid, "status": "reviewed", "review_head_sha": head,
+            "ship_launch_id": launch, "worktree": str(repo), "branch": "topic",
+            "merge_check": None}
+    (rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
+    pr = {"number": 7, "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
+          "headRefOid": head, "baseRefName": "main", "baseRefOid": "b" * 40,
+          "statusCheckRollup": [{"__typename": "CheckRun", "name": "tests",
+                                 "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+    rp = {"nameWithOwner": "o/r", "defaultBranchRef": {"name": "main"}}
+    return slug, rd, tid, ld, task, pr, rp
+
+def run(repo, slug, tid, pr, rp):
+    pf = sb / "pr.json"; pf.write_text(json.dumps(pr))
+    rf = sb / "repo.json"; rf.write_text(json.dumps(rp))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = c.main(["merge-ready", "--repo-slug", slug, "--repo-path", str(repo),
+                     "--task-id", tid, "--pr-json", str(pf), "--repo-json", str(rf)])
+    return rc, json.loads(buf.getvalue())
+
+personal = make_repo(sb / "Git" / "personal" / "p")
+slug, rd, tid, ld, task, pr, rp = build(personal)
+# A superseded launch's handoff must not matter.
+other = ld.parent / "ship-old"; other.mkdir()
+(other / "ship.json").write_text(json.dumps({"launch_id": "old", "verdict": "CHANGES"}))
+before = sorted(str(p) for p in rd.rglob("*"))
+rc, out = run(personal, slug, tid, pr, rp)
+assert rc == 0 and out["ready"] is True, out
+assert out["handoff_state"] == "current" and out["handoff_verdict"] == "APPROVE", out
+assert sorted(str(p) for p in rd.rglob("*")) == before, "merge-ready wrote files"
+
+def expect(code, *, state=None, task_edit=None, pr_edit=None, rp_edit=None, file_edit=None, hand_edit=None):
+    tf = rd / "tasks" / f"{tid}.json"; hf = ld / "ship.json"
+    saved = {p: p.read_bytes() for p in (tf, hf, ld / "report.json", ld / "claude.txt")}
+    try:
+        t2 = copy.deepcopy(task); p2 = copy.deepcopy(pr); r2 = copy.deepcopy(rp)
+        if task_edit: task_edit(t2)
+        tf.write_text(json.dumps(t2))
+        if hand_edit:
+            h = json.loads(hf.read_text()); hand_edit(h); hf.write_text(json.dumps(h))
+        if pr_edit: pr_edit(p2)
+        if rp_edit: rp_edit(r2)
+        if file_edit: file_edit()
+        rc, out = run(personal, slug, tid, p2, r2)
+        codes = [r["code"] for r in out["reasons"]]
+        assert rc == 1 and out["ready"] is False and code in codes, (code, rc, out)
+        assert state is None or out["handoff_state"] == state, (state, out)
+        return out
+    finally:
+        for p, b in saved.items():
+            p.write_bytes(b)
+
+expect("task-state", task_edit=lambda t: t.update(status="completed"))
+expect("task-state", state="none", task_edit=lambda t: t.update(ship_launch_id=None))
+# Pinning the superseded launch reads its own CHANGES handoff (no head_sha): stale.
+expect("handoff", state="stale", task_edit=lambda t: t.update(ship_launch_id="old"))
+expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="never-launched"))
+expect("handoff", state="current", hand_edit=lambda h: h.update(verdict="CHANGES"))
+expect("handoff", hand_edit=lambda h: h.update(report_path=str(sb / "report.json")))
+expect("hash", file_edit=lambda: (ld / "report.json").write_text("{}"))
+expect("handoff", state="stale", task_edit=lambda t: t.update(review_head_sha="c" * 40))
+expect("head-moved", pr_edit=lambda p: p.update(headRefOid="c" * 40))
+expect("base-moved", pr_edit=lambda p: p.update(baseRefOid="d" * 40))
+expect("identity", rp_edit=lambda r: r.update(defaultBranchRef={"name": "dev"}))
+expect("identity", rp_edit=lambda r: r.update(nameWithOwner="x/y"))
+expect("pr-state", pr_edit=lambda p: p.update(isDraft=True))
+expect("pr-state", pr_edit=lambda p: p.update(state="MERGED"))
+expect("not-mergeable", pr_edit=lambda p: p.update(mergeable="CONFLICTING"))
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[]))
+expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(status="IN_PROGRESS", conclusion=None))
+expect("ci", pr_edit=lambda p: p["statusCheckRollup"][0].update(conclusion="FAILURE"))
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "StatusContext", "context": "x", "state": "PENDING"}]))
+expect("ci", pr_edit=lambda p: p.update(statusCheckRollup=[{"__typename": "Mystery"}]))
+expect("gate", file_edit=lambda: (ld / "claude.txt").write_text("tampered\n"))
+out = expect("handoff", state="none", task_edit=lambda t: t.update(ship_launch_id="../../x"))
+assert any("invalid ship_launch_id" in r["detail"] for r in out["reasons"]), out
+# Tree mismatch: expected tree differs while every head field agrees.
+def bad_tree():
+    e = json.loads((ld / "expected.json").read_text()); e["tree"] = "e" * 40
+    (ld / "expected.json").write_text(json.dumps(e))
+    h = json.loads((ld / "ship.json").read_text()); h["expected_sha256"] = sha(ld / "expected.json")
+    (ld / "ship.json").write_text(json.dumps(h))
+saved_expected = (ld / "expected.json").read_bytes()
+expect("identity", file_edit=bad_tree)
+(ld / "expected.json").write_bytes(saved_expected)
+# Before a PR exists the director passes {} for both gh inputs; currency still reports.
+rc, out = run(personal, slug, tid, {}, {})
+assert rc == 1 and out["handoff_state"] == "current", out
+head0 = task["review_head_sha"]
+expect("merge-refused", task_edit=lambda t: t.update(merge_check={
+    "result": "fail", "reason": "protected", "branch_head_sha": head0,
+    "base_main_sha": "b" * 40, "ts": "t"}))
+# The same refusal at an older head is stale and does not block.
+t_old = dict(task, merge_check={"result": "fail", "reason": "protected",
+                                "branch_head_sha": "c" * 40, "base_main_sha": "b" * 40, "ts": "t"})
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(t_old))
+rc, out = run(personal, slug, tid, pr, rp)
+assert rc == 0 and out["ready"] is True, out
+(rd / "tasks" / f"{tid}.json").write_text(json.dumps(task))
+# Live HEAD alone moves (task, handoff and PR still at the old head).
+commit(personal, "drift")
+out = expect("head-moved", state="stale")
+git(personal, "reset", "-q", "--hard", "HEAD~1")
+assert sorted(str(p) for p in rd.rglob("*")) == before, "merge-ready wrote files"
+# A CHANGES handoff at the old head, task re-reviewed at a new head: stale.
+commit(personal, "repair")
+new = git(personal, "rev-parse", "HEAD")
+out = expect("handoff", state="stale",
+             task_edit=lambda t: t.update(review_head_sha=new),
+             hand_edit=lambda h: h.update(verdict="CHANGES"),
+             pr_edit=lambda p: p.update(headRefOid=new))
+assert out["handoff_verdict"] == "CHANGES", out
+git(personal, "reset", "-q", "--hard", "HEAD~1")
+# Work repository: the identical fixture outside ~/Git/personal.
+work = make_repo(sb / "Git" / "work" / "w")
+wslug, wrd, wtid, wld, wtask, wpr, wrp = build(work)
+rc, out = run(work, wslug, wtid, wpr, wrp)
+assert rc == 1 and "not-director-repo" in [r["code"] for r in out["reasons"]], out
+import shutil; shutil.rmtree(sb)
+PY
+
+check "docs pin director merge authority: 6a procedure, ship dispatch, launch table, safety" <<'SH'
+S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
+if grep -q 'The director never merges, pushes, or opens a PR' "$S"; then exit 1; fi
+if grep -Fq 'machine-local `Bash(gh pr merge:*)`' "$S"; then exit 1; fi
+grep -q '^## 6a\. Director merge (personal repositories)' "$S"
+grep -Fq 'merge-authority --repo-slug' "$S"
+grep -Fq 'merge-ready --repo-slug' "$S"
+grep -Fq -- '--match-head-commit' "$S"
+grep -Fq 'co-review-audit head=' "$S"
+grep -Fq '"merged_by": "director"' "$S"
+grep -Fq '"merged_by": "observed"' "$S"
+grep -Fq '"merge_commit_sha"' "$S"
+grep -Fq 'before the stale-verdict rule' "$S"
+grep -Fq -- '--fence <fence> --all' "$S"
+grep -Fq 'git worktree list' "$S"
+grep -Fq 'teardown_blocked' "$S"
+grep -Fq 'ship_launch_id' "$S"
+grep -Fq 'herdr-ship-brief: stop-after-gate' "$S"
+grep -Fq 'herdr agent get' "$S"
+grep -Fq 'state `working`' "$S"
+grep -Fq 'handoff_state' "$S"
+grep -Fq '"result": "fail"' "$S"
+grep -Fq 'ship_launch_id: null' "$S"
+grep -Fq 'merge-refused' "$S"
+grep -Fq 'base-moved' "$S"
+grep -Fq 'changes-requested' "$S"
+grep -Fq 'Workers never carry merge authority' "$S"
+grep -Eq '^ *\| Action +\| Covering template rule +\| Prompt in manual mode +\| Auto mode +\| Recovery +\|' "$S"
+grep -Fq 'Bash(gh pr:*)' "$S"
+grep -Fq 'accepted prompt' "$S"
+grep -Fq 'ship_launch_id' "$R/state-layout.md"
+grep -Fq 'teardown_blocked' "$R/state-layout.md"
+grep -Fq '"merge_commit_sha"' "$R/state-layout.md"
+grep -Fq '"gate_report"' "$R/state-layout.md"
+grep -Fq '"reason"' "$R/state-layout.md"
+grep -Fq 'ship-<launch_id>/ship.json' "$R/state-layout.md"
+grep -Fq 'herdr-ship-brief: stop-after-gate' "$R/brief-template.md"
+grep -Fq 'report_sha256' "$R/brief-template.md"
+grep -Fq 'ship.json' "$R/brief-template.md"
+grep -Fq 'ship-<launch_id>' "$R/brief-template.md"
+grep -Fq 'expected_sha256' "$R/brief-template.md"
+grep -Fq 'CHANGES, INCOMPLETE' "$R/brief-template.md"
+SH
+
 check "docs pin the lesson harvest in briefs, check-ins, post-merge, and state layout" <<'SH'
 S="claude/skills/herdr-orchestration/SKILL.md"; R="claude/skills/herdr-orchestration/references"
 P="claude/skills/post-merge/SKILL.md"
@@ -9943,6 +10210,28 @@ assert c.checkin_action({**cr, "status": "changes-requested"}) == "none"
 assert c.checkin_action({**base, "review_stale": True}) == "stale-review-reset"
 PY
 
+check "checkin: a reviewed task asks for the ship step until the director parks it" <<PY
+$LOAD
+task = {"status": "reviewed", "review_head_sha": "a" * 40, "ship_parked_head": None}
+assert c.ship_pending(task) is True
+# Parked at the reviewed head: the director asked or surfaced a stop, so the
+# wake-driven check-in may end with changed: no.
+assert c.ship_pending({**task, "ship_parked_head": "a" * 40}) is False
+# A new review head un-parks it.
+assert c.ship_pending({**task, "ship_parked_head": "b" * 40}) is True
+assert c.ship_pending({**task, "status": "review-dispatched"}) is False
+assert c.ship_pending({**task, "review_head_sha": None}) is False
+base = dict(status="reviewed", poll_ok=True, live="idle", worktree_exists=True,
+            head="a" * 40, completed=False, plan_completed=False, reviewed=True,
+            review_correlates=True, review_stale=False, dispatch_review=False,
+            mech_unsettled=False, plan_advanced=False, done_outcome=None,
+            ship_pending=True)
+assert c.checkin_action(base) == "ship", c.checkin_action(base)
+assert c.checkin_action({**base, "review_stale": True}) == "stale-review-reset"
+assert c.checkin_action({**base, "idle_settled": True}) == "exit-idle-worker"
+assert c.checkin_action({**base, "ship_pending": False}) == "none"
+PY
+
 check "checkin_action: a terminal status never produces work" <<PY
 $LOAD
 base = dict(status="merged", poll_ok=True, live="absent", worktree_exists=False,
@@ -10316,7 +10605,8 @@ $LOAD
 rd = tempfile.mkdtemp()
 os.makedirs(os.path.join(rd, "tasks")); os.makedirs(os.path.join(rd, "workspaces"))
 task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": "b" * 40,
-        "review_head_sha": "a" * 40, "worktree": os.path.join(rd, "gone"),
+        "review_head_sha": "a" * 40, "ship_parked_head": "a" * 40,
+        "worktree": os.path.join(rd, "gone"),
         "workers": [{"phase": "review", "workspace_id": "w3", "runtime": "claude"}]}
 poll = {"live": {"w3": "idle"}, "known": {"w3"}, "worktrees": {}}
 facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
@@ -10587,7 +10877,7 @@ F=$($CLI claim-owner --repo-slug slug-x --session S --host h --pid 1)
 RD="$root/herdr-orch/slug-x"; mkdir -p "$RD/tasks" "$RD/workspaces"
 BASE=$(printf 'b%.0s' $(seq 1 40))
 $CLI write-task --repo-slug slug-x --task-id PROJ-1 --session S --fence "$F" \
-    --json '{"task_id":"PROJ-1","status":"reviewed","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude"}]}'
+    --json '{"task_id":"PROJ-1","status":"reviewed","base_sha":"'"$BASE"'","review_head_sha":"'"$BASE"'","ship_parked_head":"'"$BASE"'","worktree":"'"$root"'/gone","workers":[{"phase":"review","workspace_id":"w3","runtime":"claude"}]}'
 printf '{"route":"x"}' > "$RD/tasks/PROJ-1.route.json"
 printf '{"status":"review-dispatched","workers":[{"phase":"review","runtime":"claude","launch_id":"L","workspace_id":"w3","pane_id":"p","source_head_sha":"'"$BASE"'","started_ns":1}]}' > "$RD/tasks/PROJ-1.repair2.route.json"
 printf '{"result":{"agents":[{"workspace_id":"w3","agent_status":"idle"}]}}' > "$root/a.json"
@@ -10838,6 +11128,16 @@ layout = open("claude/skills/herdr-orchestration/references/state-layout.md").re
 assert "wake.json" in layout and "last_push" in layout, "the wake marker is undocumented"
 PY
 
+check "docs pin merge authority in team roles, principles, post-merge and the director agent" <<'SH'
+grep -Fq 'Merge authority' claude/rules/personal/team-roles.md
+grep -Fq 'never merge' claude/rules/personal/team-roles.md
+grep -Fq 'standing merge order for a named personal repo' claude/operating-principles.md
+grep -Fq 'section 6a' claude/agents/director.md
+grep -Fq 'Director mode' claude/skills/post-merge/SKILL.md
+grep -Fq 'lessons distillation pending (human)' claude/skills/post-merge/SKILL.md
+grep -Fq 'dirty worktree' claude/skills/post-merge/SKILL.md
+SH
+
 check "brief template keeps the turn alive on long runs" <<'PY'
 import sys
 t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
@@ -10851,7 +11151,7 @@ for phrase in ("Keep the turn alive while your own run finishes", "bounded until
 assert "ending your turn ends the run" in mech
 assert "runner_timeout" not in t
 assert "<cmd>" not in t
-assert t.count("\n") <= 441
+assert t.count("\n") <= 447
 assert 'echo "EXIT $?"' not in t
 PY
 
@@ -10890,7 +11190,7 @@ for phrase in ("finished without a hand-back report", "<base_sha>..HEAD",
                "git diff --cached", "self-chosen whole-branch review",
                "close them all before"):
     assert phrase in rules, phrase
-assert t.count("\n") <= 441
+assert t.count("\n") <= 447
 PY
 
 check "row_settlement: each settlement rule fires on its record state" <<'PY'
@@ -11131,6 +11431,28 @@ assert "settle --launch-id" in sec4, "section 4 names the settle verb"
 assert f"never runs {tick}launch{tick} while a {tick}settle{tick} or {tick}sweep{tick}" in sec4, "serialization rule"
 sec5 = skill.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
 assert " sweep " in sec5 or f"sweep{tick}" in sec5, "section 5 preflight runs sweep"
+PY
+
+check "docs: the director ship step is config-driven and the old never-push sentence is gone" <<'PY'
+import re
+skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
+layout = open("claude/skills/herdr-orchestration/references/state-layout.md").read()
+director = open("claude/agents/director.md").read()
+assert '"ship"' in layout, "state-layout documents the ship block"
+assert "gh pr create" in skill, "SKILL.md names the PR create line"
+assert "match-head-commit" in skill, "SKILL.md pins the merge to the head"
+assert "match-head-commit" in director, "director.md names the head pin"
+assert "never merges, pushes, or opens a PR" not in skill, "old sentence removed"
+assert len(re.findall(r"herdr-capabilities:", skill)) == 1, "one capability marker"
+ship = skill.split("**Ship step.**", 1)[1].split("Marker posts still need", 1)[0]
+assert "personal_repository" in ship, "SKILL.md ship step derives merge from personal_repository"
+assert "personal_repository" in layout, "state-layout derives merge from personal_repository"
+assert "back to the human for merge" not in skill, "stale hand-back text removed"
+assert "human merges; `/post-merge`" not in skill, "stale reviewed-row text removed"
+assert "In the review phase the review agent and director never push or open PRs" in skill, "review-phase scope added"
+assert "human merge gate" not in open("claude/skills/herdr-orchestration/references/dispatch-mechanism.md").read(), "dispatch-mechanism stale text removed"
+assert "pr_number" in ship and "gh pr list" in ship, "ship step is re-entrant"
+assert "--repo <owner/repo>" in ship, "gh lines name the repo"
 PY
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
