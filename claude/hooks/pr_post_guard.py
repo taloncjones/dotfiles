@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Gate agent-posted GitHub PR/issue writes behind a typed owner go.
 
-The gate applies to work repositories. A personal repository (a checkout or
-canonical owner under ~/Git/personal, per workflow_context.account_scope)
-posts without a go: the owner is the only contributor there (2026-09-28).
+The gate applies to work repositories. A post whose target is a personal
+repository (the -R/--repo, GH_REPO or api-path repository, else the cwd's
+checkout under ~/Git/personal per workflow_context.account_scope) needs no
+go: the owner is the only contributor there (2026-09-28).
 
 Incident 2026-09-23: on rw-bess #2444 a co-review/herdr flow posted one
 marker comment per round and replied to a human reviewer; on this repo's
@@ -16,8 +17,9 @@ Gate: decides only when HERDR_ENV=1; every other session exits 0 untouched
 (no file I/O). Two events, one script, dispatched on hook_event_name:
 
 - UserPromptSubmit mints a one-turn, one-session go from a typed prompt
-  that says "post it", "post all" or "edit the pr body" anywhere as a
-  phrase (word-bounded, any case, not negated) -- never from an
+  that has a sentence saying "post it", "post all" or "edit the pr body"
+  as a phrase (word-bounded, any case, no not/n't/never/no before it, not
+  a question) -- never from an
   AskUserQuestion answer (a tool result, not a typed prompt) and never
   from a multiple-choice option string. The go expires in 600s.
 - PreToolUse Bash is the early second layer. The primary gate is the gh
@@ -60,14 +62,17 @@ import rm_guard
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
 GO = {"post it": "post", "post all": "post", "edit the pr body": "body"}
-# A go phrase anywhere in the prompt; "do not post it", "don't post it" and
-# a backticked mention (a pasted brief) are not a go, nor is an echoed
-# option string such as "(Recommended)".
-GO_RE = re.compile(r"(?<!\bnot )(?<!n't )(?<!`)\b(post it|post all|edit the pr body)\b(?!`)", re.IGNORECASE)
+GO_PHRASE_RE = re.compile(r"(?<!`)\b(post it|post all|edit the pr body)\b(?!`)", re.IGNORECASE)
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+NEGATION_RE = re.compile(r"\b(not|never|no)\b|n't", re.IGNORECASE)
 TTL = 600
 PRUNE_AGE = 86400
 SID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 SHIM_MARK = b"gh_post_shim.py"
+ORIGIN_RE = re.compile(r"[:/]([^/:]+)/[^/]+?(?:\.git)?/?$")
+# `pr close -c`, `-cbye`, `-dc`, `--comment`, `--comment=bye`.
+CLOSE_COMMENT_RE = re.compile(r"^(--comment(=|$)|-[a-z]*c)")
+GH_VALUE_OPTIONS = ("-R", "--repo", "--hostname")
 # Commands that run their argument as a program, and the runner options
 # that take a value (`timeout -s KILL`, `sudo -u me`, `xargs -n 1`).
 COMMAND_RUNNERS = {"timeout", "stdbuf", "nice", "nohup", "time", "xargs", "env", "sudo", "command", "exec", "watch"}
@@ -107,9 +112,8 @@ READ_SUBCOMMANDS = {
 # One-word `gh` commands that only read.
 READ_COMMANDS = {"status", "version", "help", "--version"}
 
-# Non-comment `gh` writes this repo's own skills already invoke (grepped
-# from claude/, codex/, bin/, install/); anything else classifies unknown
-# and is denied outright, go or no go.
+# Non-comment `gh` writes this repo's own skills invoke. Like any other
+# non-post call they classify "write" and pass; listed for reference.
 KNOWN_WRITES = {
     ("pr", "create"),  # claude/commands/pr.md, claude/skills/voice
     ("pr", "merge"),   # claude/skills/ship/SKILL.md
@@ -117,29 +121,80 @@ KNOWN_WRITES = {
 }
 
 
+def _context():
+    spec = importlib.util.spec_from_file_location("dotfiles_workflow_context", CONTEXT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def personal_repository(cwd: str) -> bool:
     """True when `cwd` is in a personal repository; any lookup error is False
     so the gate stays on."""
     try:
-        spec = importlib.util.spec_from_file_location("dotfiles_workflow_context", CONTEXT_PATH)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return bool(module.account_scope(cwd, "claude")["personal_repository"])
+        return bool(_context().account_scope(cwd, "claude")["personal_repository"])
     except Exception:  # noqa: BLE001
         return False
 
 
-def normalize(prompt: str) -> str:
-    text = prompt.strip().lower()
-    return text[:-1].rstrip() if text[-1:] in (".", "!") else text
+def personal_owner(owner: str, cwd: str) -> bool:
+    """True when `owner` is the personal GitHub login. workflow_context keeps
+    no login, so it is the origin owner of the personal checkout at `cwd`."""
+    try:
+        if not personal_repository(cwd):
+            return False
+        url = _context().git(cwd, "remote", "get-url", "origin")
+    except Exception:  # noqa: BLE001
+        return False
+    hit = ORIGIN_RE.search(url)
+    return bool(hit) and hit.group(1).lower() == owner.lower()
+
+
+def target_repo(args: list[str]) -> str | None:
+    """`owner` of the repository a gh call writes to: the api path's
+    repos/<owner>/<name> segment, else -R/--repo, else GH_REPO. None means the
+    cwd's repository."""
+    slug = None
+    i, _verb = subcommand_index(args)
+    if i < len(args) and args[i] == "api":
+        path = parse_api(normalize_api_args(args[i + 1:]) or args[i + 1:])[1]
+        hit = re.match(r"repos/([^/{]+)/([^/{]+)", path or "")
+        slug = f"{hit.group(1)}/{hit.group(2)}" if hit else None
+    for j, tok in enumerate(args):
+        if slug:
+            break
+        if tok in ("-R", "--repo") and j + 1 < len(args):
+            slug = args[j + 1]
+        elif tok.startswith("--repo="):
+            slug = tok.split("=", 1)[1]
+        elif tok.startswith("-R") and len(tok) > 2 and not tok.startswith("--"):
+            slug = tok[2:]
+    slug = slug or os.environ.get("GH_REPO")
+    if not slug:
+        return None
+    parts = slug.split("/")
+    return parts[-2] if len(parts) >= 2 else slug
+
+
+def exempt_from_go(args: list[str], cwd: str) -> bool:
+    """A post to a personal repository needs no go: the explicit target's
+    owner when there is one, else the cwd's repository."""
+    owner = target_repo(args)
+    return personal_repository(cwd) if owner is None else personal_owner(owner, cwd)
 
 
 def go_kind(prompt: str) -> str | None:
-    """The go kind a typed prompt carries, or None."""
+    """The go kind a typed prompt carries, or None. A sentence is a go when it
+    holds the phrase with no negation before it and does not end in `?`."""
     if "(recommended)" in prompt.lower():
         return None
-    hit = GO_RE.search(prompt)
-    return GO[hit.group(1).lower()] if hit else None
+    for sentence in SENTENCE_SPLIT_RE.split(prompt):
+        if sentence.rstrip().endswith("?"):
+            continue
+        for hit in GO_PHRASE_RE.finditer(sentence):
+            if not NEGATION_RE.search(sentence[:hit.start()]):
+                return GO[hit.group(1).lower()]
+    return None
 
 
 def drop_heredoc_bodies(command: str) -> str:
@@ -315,6 +370,8 @@ def classify_api(args: list[str]) -> str:
     if normalized is None:
         return "write"
     method, path, _host, has_field = parse_api(normalized)
+    if path is not None:
+        path = re.split(r"[?#]", path, maxsplit=1)[0]
     if path == "graphql":
         if graphql_query_from_file(normalized) or any("mutation" in a for a in normalized):
             return "post"
@@ -333,6 +390,20 @@ def classify_api(args: list[str]) -> str:
     return "write"
 
 
+def subcommand_index(args: list[str]) -> tuple[int, int]:
+    """Indexes of the first two non-option words (len(args) when absent).
+    Options may sit before either word; -R/--repo/--hostname take a value."""
+    found, i = [], 0
+    while i < len(args) and len(found) < 2:
+        if not args[i].startswith("-"):
+            found.append(i)
+        elif args[i] in GH_VALUE_OPTIONS:
+            i += 1
+        i += 1
+    found += [len(args)] * (2 - len(found))
+    return found[0], found[1]
+
+
 def classify_gh(args: list[str]) -> str:
     """Classify one `gh` invocation's own argv (after the `gh` token) as
     "read", "write" (any non-comment write; allowed without a go), or
@@ -343,11 +414,9 @@ def classify_gh(args: list[str]) -> str:
         return "read"
     if args[:1] and args[0] in READ_COMMANDS:
         return "read"
-    i = 0
-    while i < len(args) and args[i].startswith("-"):
-        i += 2 if args[i] in ("-R", "--repo", "--hostname") else 1
-    sub = tuple(args[i:i + 2])
-    rest = args[i + 2:]
+    i, j = subcommand_index(args)
+    sub = tuple(args[k] for k in (i, j) if k < len(args))
+    rest = args[j + 1:]
     if sub[:1] == ("api",):
         return classify_api(args[i + 1:])
     if sub[:1] == ("search",):
@@ -357,7 +426,7 @@ def classify_gh(args: list[str]) -> str:
     if sub in KNOWN_WRITES:
         return "write"
     if sub in (("pr", "close"), ("issue", "close")):
-        if any(t in ("-c", "--comment") or t.startswith("--comment=") for t in rest):
+        if any(CLOSE_COMMENT_RE.match(t) for t in rest):
             return "post"
         return "write"
     if sub in (("pr", "comment"), ("pr", "review"), ("issue", "comment")):
@@ -365,17 +434,6 @@ def classify_gh(args: list[str]) -> str:
     if sub == ("pr", "edit"):
         return "body"
     return "write"
-
-
-def resolved_kind(sub: str) -> tuple[str | None, str | None]:
-    """Map a classify_gh()/classify_api() verdict to (gated_kind, denial):
-    a read or known write passes through with neither; post/body/delete
-    need a go; an unrecognized call denies outright -- no go covers it."""
-    if sub in ("read", "write"):
-        return None, None
-    if sub == "unknown":
-        return None, "this `gh` call does not match a known read, write, or gated action"
-    return sub, None
 
 
 def effective_command(stripped: list[str]) -> list[str]:
@@ -454,10 +512,11 @@ def herdr_pane_text_mentions_gh(seg: list[str]) -> bool:
     return PANE_GH_RE.search(unquoted(" ".join(seg[3:]))) is not None
 
 
-def classify(command: str, depth: int = 0) -> tuple[list[str], list[str]]:
+def classify(command: str, depth: int = 0, cwd: str = "") -> tuple[list[str], list[str]]:
     """Return (gated_kinds, denials) for `command`. The gh shim is the
     primary gate and sees the final argv; this is the early second layer.
-    `gated_kinds` need a typed go. `denials` are the routes that skip the
+    `gated_kinds` need a typed go (a post to a personal repository, judged
+    against `cwd`, is left out). `denials` are the routes that skip the
     shim (a path-qualified gh, a login shell the anchor misses, gh sent to
     another pane) and no go covers them. Anything this cannot parse or classify passes: the shim
     decides it at exec."""
@@ -485,7 +544,7 @@ def classify(command: str, depth: int = 0) -> tuple[list[str], list[str]]:
         head = rm_guard.basename(run[0]) if run else None
         if head == "gh":
             kind = classify_gh(run[1:])
-            if kind in ("post", "body", "delete"):
+            if kind in ("post", "body", "delete") and not exempt_from_go(run[1:], cwd):
                 kinds.append(kind)
         elif (head in rm_guard.SHELL_WRAPPERS or head == "eval") and depth == 0:
             script = (
@@ -493,7 +552,7 @@ def classify(command: str, depth: int = 0) -> tuple[list[str], list[str]]:
                 else rm_guard.extract_shell_c_arg(run)
             )
             if script:
-                sub_kinds, sub_denials = classify(script, depth + 1)
+                sub_kinds, sub_denials = classify(script, depth + 1, cwd)
                 kinds.extend(sub_kinds)
                 denials.extend(sub_denials)
     return kinds, denials
@@ -547,7 +606,7 @@ def claim(path: Path) -> bool:
 def check_go(kinds: list[str], sid: str, directory: Path, now: float) -> str | None:
     """Denial text for the first kind in `kinds` its typed go does not cover,
     or None. Reads only: the gh shim spends the go (spend_go) at exec."""
-    if not kinds or personal_repository(os.getcwd()):
+    if not kinds:
         return None
     counts = Counter(kinds)
     # One go covers exactly one post and one body write.
@@ -568,8 +627,6 @@ def check_go(kinds: list[str], sid: str, directory: Path, now: float) -> str | N
 
 def spend_go(kinds: list[str], sid: str, directory: Path) -> str | None:
     """Claim each post/body go in `kinds`; denial text if one is spent."""
-    if personal_repository(os.getcwd()):
-        return None
     for kind in kinds:
         if kind != "delete" and not claim(directory / f"{sid}.{kind}-used"):
             return _denial(kind)
@@ -699,16 +756,22 @@ def handle_pretooluse(payload: dict, directory: Path, now: float) -> str | None:
     if not isinstance(sid, str):
         return None
     cwd = payload.get("cwd")
-    if personal_repository(cwd if isinstance(cwd, str) and cwd else os.getcwd()):
-        return None
+    cwd = cwd if isinstance(cwd, str) and cwd else os.getcwd()
     if not shim_armed():
         # No shim behind this session: any `gh` could reach the real one.
-        # Heredoc bodies count here: `bash <<EOF` runs them.
-        if mentions_gh(unquoted(join_continuations(command))):
-            return _unarmed_denial()
-        return None
+        # Heredoc bodies count here: `bash <<EOF` runs them. A personal
+        # checkout is exempt only while every gated call targets a personal repo.
+        if not mentions_gh(unquoted(join_continuations(command))):
+            return None
+        if personal_repository(cwd):
+            try:
+                if not classify(command, cwd=cwd)[0]:
+                    return None
+            except Exception:
+                return None
+        return _unarmed_denial()
     try:
-        kinds, denials = classify(command)
+        kinds, denials = classify(command, cwd=cwd)
     except Exception:
         return None  # fail open: the gh shim still gates at exec
     if denials:

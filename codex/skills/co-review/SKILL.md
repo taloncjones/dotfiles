@@ -344,9 +344,10 @@ Before asking for the go, read the PR's comments once (the `gh api
 
 The go: ask in prose, "Type `post it` to post the marker." End the turn.
 Posting is never an `AskUserQuestion` option, recommended or not. The go is
-a user message whose whole text is `post it`, ignoring case, surrounding
-space, and one trailing `.` or `!`. Anything else, including any
-`AskUserQuestion` answer, is no.
+a typed user message with a sentence that says `post it` or `post all` as a
+phrase (any case), with no `not`, `n't`, `never` or `no` before the phrase
+and no closing `?`. Anything else, including any `AskUserQuestion` answer,
+is no. A personal repository needs no go.
 
 In a herdr pane (`HERDR_ENV=1`) the gh shim refuses this post: only a
 Claude hook mints the typed go, so it never reaches Codex. Leave the marker
@@ -371,6 +372,5 @@ supersede step reruns.
 Never reply to, resolve, or react to a reviewer thread. Draft any reply in
 chat for the owner to post themselves.
 
-Never edit the PR title or body unless the owner types the whole message
-`edit the pr body` (same normalization as the posting go); that go covers
-one edit.
+Never edit the PR title or body unless the owner types `edit the pr body`
+(same phrase rule as the posting go); that go covers one edit.

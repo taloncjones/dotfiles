@@ -22,6 +22,7 @@ export HERDR_ENV=1
 # not depend on the machine, with payload cwd outside ~/Git/personal.
 mkdir -p "$FIX/home/work" "$FIX/home/Git/personal/repo"
 git init -q "$FIX/home/Git/personal/repo"
+git -C "$FIX/home/Git/personal/repo" remote add origin https://github.com/me/repo.git
 HOME="$FIX/home"
 export HOME
 unset CLAUDE_PERSONAL_ONLY
@@ -332,16 +333,16 @@ expect_rc "V5 ANSI-C \$'...' quoting is denied outright, no go" 2 "$(payload_b s
 expect_rc "V5 mint post" 0 "$(payload_u s1 'post it')"
 expect_rc "V5 ANSI-C quoted post passes after a typed go" 0 "$(payload_b s1 "gh pr comment 5 --body \$'hi'")"
 
-# --- U: a gh call outside the read and gated tables is a plain write ------
+# --- U: a gh call outside the read and gated tables passes as a write ------
 
 case_gate u1
-expect_rc "U1 unknown gh subcommand passes the hook (the shim denies it)" 0 "$(payload_b s1 'gh foo bar')"
+expect_rc "U1 unknown gh subcommand passes the hook as a plain write" 0 "$(payload_b s1 'gh foo bar')"
 case_gate u1b
 expect_rc "U1b mint post" 0 "$(payload_u s1 'post it')"
 expect_rc "U1b unknown gh subcommand passes the hook after a typed go" 0 "$(payload_b s1 'gh foo bar')"
 
 case_gate u2
-expect_rc "U2 api POST to an ungated path passes the hook (the shim denies it)" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
+expect_rc "U2 api POST to an ungated path passes the hook as a plain write" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
 case_gate u2b
 expect_rc "U2b mint post" 0 "$(payload_u s1 'post it')"
 expect_rc "U2b api POST to an ungated path passes the hook after a typed go" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
@@ -378,7 +379,7 @@ g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 
 
-def boom(command, depth=0):
+def boom(command, depth=0, cwd=""):
     raise RuntimeError("forced")
 
 
@@ -410,7 +411,7 @@ g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 
 
-def boom(command, depth=0):
+def boom(command, depth=0, cwd=""):
     raise RuntimeError("forced")
 
 
@@ -632,6 +633,51 @@ expect_rc "P2 personal armed pr comment no go" 0 "$(PB_CWD="$PERSONAL_CWD" paylo
 expect_rc "P3 personal armed pr edit body no go" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr edit 1 --body x')"
 expect_rc "P4 work armed pr comment no go" 2 "$(payload_b s1 'gh pr comment 1 --body x')"
 expect_rc "P5 work armed pr edit body no go" 2 "$(payload_b s1 'gh pr edit 1 --body x')"
+
+# --- V1x: options before the subcommand pair and other spellings stay gated --
+
+case_gate v1x
+expect_class "V1x-1 -R between the subcommand words is a post" post pr -R o/r comment 5 --body x
+expect_class "V1x-2 an unknown flag before the pair is skipped" post --paginate pr comment 5 --body x
+expect_class "V1x-3 attached close comment -cbye is a post" post pr close 5 -cbye
+expect_class "V1x-4 --comment=bye on issue close is a post" post issue close 5 --comment=bye
+expect_class "V1x-5 a close without a comment is a plain write" write pr close 5 --delete-branch
+expect_class "V1x-6 a query string on a body path is still a body edit" body api -X PATCH "repos/o/r/pulls/5?x=1" -f body=x
+expect_class "V1x-7 a fragment on a comment path is still a post" post api "repos/o/r/issues/5/comments#top" -f body=x
+expect_class "V1x-8 a query string on a comment delete is still a delete" delete api -X DELETE "repos/o/r/issues/comments/9?x=1"
+expect_rc "V1x-9 hook denies -R between the words with no go" 2 "$(payload_b s1 'gh pr -R o/r comment 5 --body x')"
+expect_rc "V1x-10 hook denies attached close comment with no go" 2 "$(payload_b s1 'gh pr close 5 -cbye')"
+expect_rc "V1x-11 hook denies a query-string body edit with no go" 2 "$(payload_b s1 'gh api -X PATCH repos/o/r/pulls/5?x=1 -f body=x')"
+
+# --- V2x: a negation or question is not a go -------------------------------
+
+for text in 'never post it' 'Do not ever post it.' "you don't need to post it" 'did you post it?' 'no post it' 'not now, post all later? never post all'; do
+    case_gate v2x
+    rm -rf "$GATE"
+    expect_rc "V2x [$text] mints nothing" 0 "$(payload_u s1 "$text")"
+    expect_file "V2x [$text] no marker" "$GATE/s1.json" absent
+done
+case_gate v2y
+expect_rc "V2y a later plain sentence still mints" 0 "$(payload_u s1 'Did you post it? Post it now.')"
+expect_file "V2y marker written" "$GATE/s1.json" present
+case_gate v2z
+expect_rc "V2z negation in an earlier sentence does not block a later go" 0 "$(payload_u s1 "I don't like it. Ok, post all")"
+expect_file "V2z marker written" "$GATE/s1.json" present
+
+# --- T: the personal exemption follows the post target, not the cwd --------
+
+case_gate t1
+expect_rc "T1 personal cwd, -R to a work repo needs a go" 2 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 5 -R work-org/repo --body x')"
+expect_rc "T1 personal cwd, --repo= to a work repo needs a go" 2 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 5 --repo=work-org/repo --body x')"
+expect_rc "T1 personal cwd, api path to a work repo needs a go" 2 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh api repos/work-org/repo/issues/5/comments -f body=x')"
+GH_REPO=work-org/repo
+export GH_REPO
+expect_rc "T1 personal cwd, GH_REPO on a work repo needs a go" 2 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 5 --body x')"
+unset GH_REPO
+expect_rc "T1 personal cwd, -R to its own origin needs none" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 5 -R me/repo --body x')"
+expect_rc "T1 personal cwd, api path to its own origin needs none" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh api repos/me/repo/issues/5/comments -f body=x')"
+expect_rc "T1 personal cwd, no target needs none" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr comment 5 --body x')"
+expect_rc "T1 work cwd, -R to the personal login still needs a go" 2 "$(payload_b s1 'gh pr comment 5 -R me/repo --body x')"
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
