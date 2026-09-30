@@ -268,3 +268,65 @@ def markdown(rows):
     lines = ["| " + " | ".join(HEADER) + " |", "|" + " --- |" * len(HEADER)]
     lines += ["| " + " | ".join(row[key] for key in CELL_KEYS) + " |" for row in rows]
     return "\n".join(lines)
+
+
+def load_core():
+    """herdr_orch_core, or None when it cannot be imported."""
+    try:
+        return _load("pr_status_core", CLAUDE_DIR / "hooks" / "herdr_orch_core.py")
+    except (Exception, SystemExit):
+        return None
+
+
+def cwd_slug(core, cwd):
+    try:
+        return core._context_slug(core.repository_context(cwd))
+    except (Exception, SystemExit):
+        return None
+
+
+def herdr_tasks_dir(core, cwd, slug):
+    """The cwd repo's herdr tasks dir, or None when the repo is not herdr-managed."""
+    try:
+        core.select_payload(types.SimpleNamespace(repo_path=cwd, runtime="claude", personal=False,
+                                                  repo_slug=slug))
+        tasks = core.repo_dir(slug) / "tasks"
+        return tasks if tasks.is_dir() else None
+    except (Exception, SystemExit):
+        return None
+
+
+def submodule_ref(value):
+    if (isinstance(value, dict) and isinstance(value.get("repo"), str)
+            and REPO_RE.fullmatch(value["repo"]) and is_count(value.get("number"))):
+        return {"repo": value["repo"], "number": value["number"]}
+    return None
+
+
+def herdr_prs(core, tasks_dir):
+    """[(pr number, submodule ref or None)] for task records still in flight."""
+    found = []
+    for path in core.task_record_files(tasks_dir):
+        try:
+            rec = json.loads(core.read_payload_text(path))
+        except (OSError, ValueError) as exc:
+            print(f"[WARNING] pr-status: skipped {path.name}: {exc}", file=sys.stderr)
+            continue
+        if not isinstance(rec, dict):
+            print(f"[WARNING] pr-status: skipped {path.name}: not an object", file=sys.stderr)
+            continue
+        if rec.get("status") in DONE_STATUSES:
+            continue
+        number = rec.get("pr_number") if rec.get("pr_number") is not None else rec.get("pr")
+        if is_count(number):
+            found.append((number, submodule_ref(rec.get("submodule_pr"))))
+    return found
+
+
+def merge_authority(core, cwd, slug):
+    if core is None or slug is None:
+        return "human"
+    try:
+        return "director" if core.merge_authority(slug, cwd)["authority"] == "director" else "human"
+    except (Exception, SystemExit):
+        return "human"
