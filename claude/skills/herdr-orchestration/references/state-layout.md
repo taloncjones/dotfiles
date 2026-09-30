@@ -145,16 +145,17 @@ STATE_ROOT/
   = `task_id` lowercased, `[^a-z0-9-]` -> `-`, whole name truncated to 32.
   Verify uniqueness via `agent list`; each launch also gets a collision-resistant
   launch ID. Names are transport handles, not task identity.
-- Display label: short task title, current role/runtime/model/status in separate
-  metadata fields; director `director:<repo>`. Retain stable task and launch IDs
-  behind the label. Refresh pane and workspace metadata on every phase/retry so
-  a reused plan pane no longer displays a plan role during review.
+- Display label: the workspace label is `<state>: <title>` (at most 25
+  characters, no ids), derived from the task record by `core.task_label`
+  (SKILL.md section 8); director `director:<repo>`. Pane metadata carries
+  role/runtime/model/status separately. Stable task and launch IDs stay
+  behind the label.
 - **One workspace/worktree per task.** git allows only one worktree per branch,
   so a task's plan -> implement -> review phases all run in the SAME
   worktree-backed workspace (a fresh agent per phase, sequentially). The
-  workspace label and its index `role` are updated to the current phase as it
-  advances (`<task_id>` for impl, `review:<task_id>` + `role: review` for
-  review); there is never a second workspace on the same branch.
+  workspace label follows the task state (`plan`, `impl`, `review`, ...)
+  and its index `role` the current phase; there is never a second
+  workspace on the same branch.
 
 ## Schemas
 
@@ -431,6 +432,8 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "worktree": "/abs/path/to/worktree",
   "base_ref": "origin/main",
   "base_sha": "<40hex>",
+  "title": "Teardown lifecycle",
+  "workspace_id": "w1",
   "workers": [
     {
       "role": "impl",
@@ -471,6 +474,10 @@ rows are introduced only by `reserve-dispatch` and mutated only by
   "updated": "..."
 }
 ```
+
+`title` (Jira summary or todo title) is the label's title source;
+`workspace_id` is the task's own Herdr workspace, the label target. Both
+are set at kickoff.
 
 `ship_launch_id` is the ship launch the director pinned at dispatch (only
 its handoff counts). `teardown_blocked` is the reason a director teardown
