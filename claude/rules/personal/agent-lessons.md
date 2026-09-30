@@ -55,3 +55,5 @@ is the staging tier, not an archive.
   prior "unreachable" can hide a real gap at the same site.
 - (2026-09) A reviewer of a new runner-local cache or marker dir checks that
   the target's .gitignore covers it instead of calling it "untracked".
+- (2026-09) Never brief a Claude substitute on a recorded Codex quota premise:
+  run one live Codex probe first; a stale exhaustion note cost two real seats.
