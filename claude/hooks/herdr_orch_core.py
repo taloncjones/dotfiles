@@ -2280,7 +2280,8 @@ def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) 
 
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
                 context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
-                control_tier="launcher", workspace_root=None, binding_id=None, require_pid=None):
+                control_tier="launcher", workspace_root=None, binding_id=None, require_pid=None,
+                handover=None):
     sock, sock_pid, reason = validate_messaging_socket(messaging_socket)
     if reason == "ok" and int(pid) != sock_pid:
         print(f"[WARNING] --pid {pid} differs from messaging socket pid {sock_pid}; using {sock_pid}", file=sys.stderr)
@@ -2420,9 +2421,28 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
             tx.current, require_pid, adopt_pid, tx.account_id, adopt_start
         ):
             raise NotLeaseHolder("no lease held by this process")
+        handover_from = None
+        marker = read_rollover_pending(rd) if handover is not None else None
+        if (marker is not None
+                and marker["pane"] == handover["pane"]
+                and ROLLOVER_TOKEN_RE.fullmatch(handover["token"])
+                and secrets.compare_digest(marker["token"], handover["token"])
+                and time.time() < marker["expires_ts"]
+                and tx.handover_adoptable(tx.current, (marker["from_session"], marker["from_fence"]),
+                                          session_id, runtime, thread_id)):
+            handover_from = (marker["from_session"], marker["from_fence"])
+            # Ack first, lease last: a kill before the owner write leaves an
+            # adopted line with the lease unchanged, which the old verb reads
+            # as "kept".
+            append_rollover_event(rd, event="adopted", handover=handover_id(marker["token"]),
+                                  from_session=handover_from[0], from_fence=handover_from[1],
+                                  session=session_id, fence=handover_from[1] + 1,
+                                  pane=marker["pane"])
+            clear_rollover_pending(rd, marker["token"])
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
                          runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid,
-                         pid_start=pid_start, adopt_start=adopt_start)
+                         pid_start=pid_start, adopt_start=adopt_start,
+                         handover_from=handover_from)
         if fence is not None:
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
@@ -2481,6 +2501,12 @@ _PROMPT_LINE_RE = re.compile(r"❯(?: (.*))?")
 # separator the remaining segments always join on.
 _FOOTER_LINE_RE = re.compile(r"(?: *[█░]{10} \d{1,3}%.*)|(?:.*│.*)")
 ROLLOVER_READ_SETTLE_SECS = 0.5
+ROLLOVER_PENDING_FILE = "rollover-pending.json"
+ROLLOVER_ACK_SECS = 120
+ROLLOVER_POLL_SECS = 1.0
+ROLLOVER_LAUNCH = "director 'resume director'"
+ROLLOVER_TOKEN_RE = re.compile(r"[0-9a-f]{32}\Z")
+ROLLOVER_CARRY_MAX = 4000
 
 
 def current_input(text):
@@ -2504,6 +2530,74 @@ def current_input(text):
     if not m:
         return None
     return "\n".join([m.group(1) or ""] + lines[upper + 2:lower]).strip()
+
+
+def handover_id(token):
+    """The loggable id of a handover token; the token itself is never logged."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def read_rollover_pending(rd):
+    """The pending rollover marker, or None when absent or malformed."""
+    try:
+        rec = json.loads(read_payload_text(Path(rd) / ROLLOVER_PENDING_FILE))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    ok = (rec.get("v") == 1
+          and isinstance(rec.get("token"), str) and ROLLOVER_TOKEN_RE.fullmatch(rec["token"])
+          and all(isinstance(rec.get(k), str) and SHELL_SAFE_RE.fullmatch(rec[k])
+                  for k in ("pane", "from_pane"))
+          and isinstance(rec.get("from_session"), str) and rec["from_session"] != ""
+          and type(rec.get("from_fence")) is int
+          and isinstance(rec.get("carry"), str) and len(rec["carry"]) <= ROLLOVER_CARRY_MAX
+          and all(type(rec.get(k)) in (int, float) for k in ("created_ts", "expires_ts")))
+    return rec if ok else None
+
+
+def clear_rollover_pending(rd, token):
+    """Delete the marker only when it still carries token. Call under the owner lock."""
+    rec = read_rollover_pending(rd)
+    if rec is None or rec["token"] != token:
+        return False
+    try:
+        with coordination.payload_parent(Path(rd) / ROLLOVER_PENDING_FILE) as (parent, name):
+            os.unlink(name, dir_fd=parent)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def append_rollover_event(rd, **fields):
+    rec = {"v": 2, "ts": now_iso(), **fields}
+    append_payload(Path(rd) / "rollover.jsonl",
+                   (json.dumps(rec, separators=(",", ":")) + "\n").encode())
+
+
+def rollover_adopted(rd, **match):
+    """The last v2 `adopted` line in rollover.jsonl whose fields equal match, or None."""
+    try:
+        text = read_payload_text(Path(rd) / "rollover.jsonl")
+    except (OSError, ValueError):
+        return None
+    found = None
+    for line in text.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(rec, dict) and rec.get("v") == 2 and rec.get("event") == "adopted"
+                and all(rec.get(k) == v for k, v in match.items())):
+            found = rec
+    return found
+
+
+def env_handover():
+    """This pane's handover ({"pane", "token"}) from the environment, or None."""
+    pane = os.environ.get("HERDR_PANE_ID", "")
+    token = os.environ.get("HERDR_ROLLOVER_TOKEN", "")
+    return {"pane": pane, "token": token} if pane and token else None
 
 
 def rollover_warning(reason) -> str:
@@ -4325,7 +4419,8 @@ def _main(argv=None) -> int:
                 _PAYLOAD_SELECTION.set({"context": context, "scope": scope})
         fence = claim_owner(repo_dir(ns.repo_slug), ns.session, ns.host, ns.pid,
                             messaging_socket=ns.messaging_socket, context=context, expected_slug=expected_slug, runtime=ns.runtime or "claude", thread_id=ns.thread_id, scope=(_PAYLOAD_SELECTION.get() or {}).get("scope"),
-                            control_tier=control_tier, workspace_root=workspace_root, binding_id=ns.binding, **kw)
+                            control_tier=control_tier, workspace_root=workspace_root, binding_id=ns.binding,
+                            handover=env_handover() if control_tier == "launcher" else None, **kw)
         if fence is None:
             print("BUSY")
             return 1

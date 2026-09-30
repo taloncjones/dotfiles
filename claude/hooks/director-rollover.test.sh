@@ -432,6 +432,265 @@ $CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
 SH
 
+# Fixture: write a rollover-pending marker.
+# Args: path token pane from_session from_fence ttl_secs.
+WRITE_MARKER="$TMPDIR/rollover-write-marker.$$.py"
+cat > "$WRITE_MARKER" <<'PY'
+import json, sys, time
+path, token, pane, sess, fence, ttl = sys.argv[1:7]
+now = time.time()
+json.dump({"v": 1, "token": token, "pane": pane, "from_session": sess,
+           "from_fence": int(fence), "from_pane": "w9:p1", "carry": "",
+           "created_ts": now, "expires_ts": now + float(ttl)}, open(path, "w"))
+PY
+export WRITE_MARKER
+T=0123456789abcdef0123456789abcdef; export T
+
+check "handover: new pane adopts through the marker" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+test -d "$RD"
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" 60
+F2=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock)
+kill $OLD
+test "$F2" -eq $((F1 + 1))
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --fence "$F2"
+test ! -e "$RD/rollover-pending.json"
+python3 - "$RD" "$$" "$T" "$F1" <<'PY'
+import hashlib, json, sys
+rd, pid, token, f1 = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+owner = json.load(open(rd + "/owner.json"))
+assert owner["pid"] == pid and owner["messaging_socket"] == f"/tmp/cc-socks/{pid}.sock", owner
+assert owner["session_id"] == "22222222-2222-4222-8222-222222222222", owner
+raw = open(rd + "/rollover.jsonl").read()
+assert token not in raw
+lines = [json.loads(l) for l in raw.splitlines()]
+assert len(lines) == 1, lines
+a = lines[0]
+assert a["v"] == 2 and a["event"] == "adopted", a
+assert a["handover"] == hashlib.sha256(token.encode()).hexdigest()[:16], a
+assert (a["from_session"], a["from_fence"]) == ("11111111-1111-4111-8111-111111111111", f1), a
+assert (a["session"], a["fence"], a["pane"]) == ("22222222-2222-4222-8222-222222222222", f1 + 1, "w9:p2"), a
+PY
+SH
+
+check "handover declines: wrong token (other hex, then non-hex) -> BUSY" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" 60
+for BAD in ffffffffffffffffffffffffffffffff 'é-not-hex'; do
+    out=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN="$BAD" $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+        --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+        --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+    test "$rc" = 1; test "$out" = BUSY
+    ! grep -q Traceback "$FX/err"
+done
+kill $OLD
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test -e "$RD/rollover-pending.json"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "handover declines: wrong pane -> BUSY" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" 60
+out=$(HERDR_PANE_ID=w9:p3 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 1; test "$out" = BUSY
+! grep -q Traceback "$FX/err"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test -e "$RD/rollover-pending.json"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "handover declines: expired marker -> BUSY" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" -1
+out=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 1; test "$out" = BUSY
+! grep -q Traceback "$FX/err"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test -e "$RD/rollover-pending.json"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "handover declines: marker from_fence differs from the lease -> BUSY" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$((F1 + 1))" 60
+out=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 1; test "$out" = BUSY
+! grep -q Traceback "$FX/err"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test -e "$RD/rollover-pending.json"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "handover declines: marker from_session differs from the lease -> BUSY" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 33333333-3333-4333-8333-333333333333 "$F1" 60
+out=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 1; test "$out" = BUSY
+! grep -q Traceback "$FX/err"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test -e "$RD/rollover-pending.json"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "handover declines: no marker -> BUSY" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+out=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 1; test "$out" = BUSY
+! grep -q Traceback "$FX/err"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "handover declines: malformed marker (not JSON, bad token, bool fence) -> BUSY" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+for BODY in 'not json' \
+    '{"v":1,"token":"XYZ","pane":"w9:p2","from_session":"11111111-1111-4111-8111-111111111111","from_fence":1,"from_pane":"w9:p1","carry":"","created_ts":1,"expires_ts":9999999999}' \
+    "{\"v\":1,\"token\":\"$T\",\"pane\":\"w9:p2\",\"from_session\":\"11111111-1111-4111-8111-111111111111\",\"from_fence\":true,\"from_pane\":\"w9:p1\",\"carry\":\"\",\"created_ts\":1,\"expires_ts\":9999999999}"; do
+    printf '%s' "$BODY" > "$RD/rollover-pending.json"
+    out=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+        --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+        --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+    test "$rc" = 1; test "$out" = BUSY
+    ! grep -q Traceback "$FX/err"
+done
+kill $OLD
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test -e "$RD/rollover-pending.json"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "handover declines: consumed marker cannot adopt twice" <<'SH'
+sleep 60 & OLD=$!
+sleep 60 & NEW=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" 60
+F2=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $NEW \
+    --messaging-socket /tmp/cc-socks/$NEW.sock)
+test "$F2" -eq $((F1 + 1))
+out=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 33333333-3333-4333-8333-333333333333 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD $NEW
+test "$rc" = 1; test "$out" = BUSY
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --fence "$F2"
+test "$(grep -c '"event":"adopted"' "$RD/rollover.jsonl")" = 1
+SH
+
+check "claim-owner without the variables is unchanged (BUSY)" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" 60
+out=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 1; test "$out" = BUSY
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+test -e "$RD/rollover-pending.json"
+test ! -e "$RD/rollover.jsonl"
+SH
+
+check "token set, no marker: same-process adoption still adopts" <<'SH'
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+F2=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock)
+test "$F2" -eq $((F1 + 1))
+test -z "$(find "$FX" -name rollover.jsonl)"
+SH
+
+check "token set, no marker: stale lease is taken over" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+F2=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock --stale-secs 0)
+kill $OLD
+test "$F2" -eq $((F1 + 1))
+SH
+
+check "handover_adoptable matrix: session/fence, new session, runtime, thread, account, tier" <<'SH'
+python3 - <<'PY'
+import os, sys, time
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_coordination as co
+old = {"session_id": "a", "pid": 42, "runtime": "claude", "thread_id": None,
+       "account_id": "acct", "control_tier": "launcher", "heartbeat_ts": time.time(), "fence": 3}
+tx = object.__new__(co.OwnerTransaction)
+tx.account_id = "acct"
+assert tx.handover_adoptable(old, ("a", 3), "b", "claude", None)
+assert not tx.handover_adoptable(old, None, "b", "claude", None)
+assert not tx.handover_adoptable(None, ("a", 3), "b", "claude", None)
+assert not tx.handover_adoptable(old, ("a", 4), "b", "claude", None)
+assert not tx.handover_adoptable(old, ("z", 3), "b", "claude", None)
+assert not tx.handover_adoptable(old, ("a", 3), "a", "claude", None)
+assert not tx.handover_adoptable(old, ("a", 3), "b", "codex", "t")
+assert not tx.handover_adoptable(dict(old, runtime="codex", thread_id="t"), ("a", 3), "b", "claude", None)
+assert not tx.handover_adoptable(old, ("a", 3), "b", "claude", "t")
+assert not tx.handover_adoptable(dict(old, account_id="other"), ("a", 3), "b", "claude", None)
+assert not tx.handover_adoptable(dict(old, control_tier="lead"), ("a", 3), "b", "claude", None)
+PY
+SH
+
 # Scripted herdr for the rollover delivery checks: sends log to $FX/herdr.log,
 # fail N times per verb ($FX/fail.<verb>, optional $FX/garbage.<verb> for a
 # malformed-JSON reply), and `pane read` shows $FX/screen.before until a
@@ -1146,7 +1405,7 @@ assert len(hits) == 1 and hits[0]["matcher"] == "startup|resume|clear|compact", 
 PY
 SH
 
-rm -f "$ROLLOVER_STUB"; rm -rf "$SCREENS"
+rm -f "$ROLLOVER_STUB" "$WRITE_MARKER"; rm -rf "$SCREENS"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
