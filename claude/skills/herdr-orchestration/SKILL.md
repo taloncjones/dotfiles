@@ -780,9 +780,32 @@ user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
 
 A gated post (a review, a thread reply, a comment on another author's PR, a
-body that mentions someone, a Jira comment) is never an `AskUserQuestion`
-option, recommended or not: register the draft, show it in prose with its
-hash, and end the turn.
+body that mentions someone, a Jira comment) is asked the same way.
+
+1. Register it first with `python3 ~/.claude/hooks/pr_post_guard.py draft --
+   gh <args>`. A Jira comment has no draft.
+2. Ask one single-select question per draft, at most four per prompt. Put the
+   draft text in the question or in the preview of its post option.
+3. The options are `Post draft <hash>` and `Skip draft <hash>`. The
+   recommended one comes first, with ` (Recommended)`.
+
+The answer is the go. A PostToolUse hook approves exactly the draft the
+chosen option names, and only when its text was in that question or preview.
+It prints a `post gate:` line for each decision. A typed message never
+approves a post, so never ask the owner to type one. Without the tool, a
+gated post cannot be approved; leave the draft in the report.
+
+Answers are not stored. An answer authorizes the action it names in the same
+turn. After any interruption (a crash, `/clear`, compaction, a resume),
+re-derive the state from live sources and ask again: the PR's state and head,
+the worktree and branch, the Jira issue, and a draft's state file. Only an
+approved draft outlives the turn. It stays approved until it is posted,
+withdrawn with `Skip draft <hash>`, or pruned 24 hours later.
+
+When a `Post draft <hash>` answer prints no `post gate:` line, the answer hook
+is not active in this session. Do not ask again. Try the post once. If the
+shim refuses it, tell the owner to run `update --ai` and restart Claude, and
+leave the draft in the report.
 
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
@@ -1305,8 +1328,8 @@ git -C <worktree> diff --name-only <reviewed_head> HEAD -- $(git -C <worktree> d
 ```
 
 `merge-ready` still pins the gated head and reports `head-moved` for it, so
-the director merges that head only after one prose ask, as in a work
-repository.
+the director merges that head only after one `AskUserQuestion` merge
+prompt, as in a work repository.
 
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
@@ -1365,8 +1388,9 @@ A personal repository is a checkout whose path or canonical owner is under
 `~/Git/personal`. Where `merge-authority` prints `director`, the user's
 standing authorization (2026-09-22, reaffirmed 2026-09-29) is the merge go
 and the steps below run without asking. In a work repository the director
-asks once in prose ("merge #<n> at <head>?") and runs the same steps on a
-yes; the yes covers that head only, and a moved head asks again.
+asks once with `AskUserQuestion`, with the options `Merge #<n> at <head>
+(Recommended)` and `Hold`. It runs the same steps when the answer is merge.
+That answer covers that head only, and a moved head asks again.
 
 **Recovery first, before the stale-verdict rule, in every repository.** List
 tasks with the section 4 check-in call plus `--all`:
@@ -1829,7 +1853,7 @@ the new `status`; that write is the authoritative record.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` human: one `AskUserQuestion` merge prompt, then section 6a; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
 | reviewed                                     | `merge-authority` director: section 6a gates pass, PR confirmed `MERGED`                                                                                                                               | `merged` (`merged_by: director`)               | merged                  | yes       |
 | reviewed                                     | PR `MERGED` at `review_head_sha`, director repo (section 6a recovery, before the stale-verdict rule)                                                                                                   | `merged` (`merged_by: observed`)               | merged                  | yes       |
 
@@ -1894,8 +1918,8 @@ Rules (these are outward-facing writes, so treat them carefully):
 - The director pushes the task branch and opens its PR in the section 6
   ship step, runs every `gh` read and non-post write itself, and never
   hands a `gh` command to the owner. It merges through section 6a: without
-  asking where `merge-authority` prints `director`, after one prose ask
-  elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
+  asking where `merge-authority` prints `director`, after one
+  `AskUserQuestion` merge prompt elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
   actions. Workers never carry merge authority.
 - The director posts by audience. In a personal repository it posts without
   asking. In a work repository, maintenance of a PR this account authored
@@ -1907,9 +1931,10 @@ Rules (these are outward-facing writes, so treat them carefully):
   bench, blocked notes) is not posted; it stays in the ship report. Text
   aimed at a person (any `gh pr review`, a thread reply, a comment on a PR
   this account did not author, a body with an `@login`) needs the owner's
-  go: register it with `python3 ~/.claude/hooks/pr_post_guard.py draft --
-  gh <args>`, show the draft and hash, and wait for `post it`, `post all`
-  or `post <hash>`; after posting, print `[INFO] posted reply on #n`. If an
+  go, asked as section 4 says: register it with
+  `python3 ~/.claude/hooks/pr_post_guard.py draft -- gh <args>`, then ask
+  `Post draft <hash>` / `Skip draft <hash>` with the text in the question
+  or preview; after posting, print `[INFO] posted reply on #n`. If an
   approved post fails, let the Bash call return, read the PR, and
   re-register only when the text is absent, telling the owner that a
   duplicate is possible. It never replies to a human reviewer's thread on

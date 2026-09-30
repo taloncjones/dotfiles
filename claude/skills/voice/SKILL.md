@@ -41,13 +41,16 @@ objects). Exit `0` nothing to change, `1` rewrite proposed, `2` error.
    in with `--stdin`; the script has no Jira access by design.
 2. Run `rewrite`. Show the report verbatim: diff, numbered changes with
    rules, protected lines, and the `Apply with` block.
-3. Ask for approval in one line. Do not apply without a yes.
+3. Ask with `AskUserQuestion`: "Apply the rewrite (Recommended)" or "Keep the
+   original", with the after text in the preview. Do not apply without that
+   answer.
 4. Apply with the printed command (`gh pr edit ...`, the MCP update call,
    or paste the after block). For `code-comment`, apply the line
    replacements with Edit, one line at a time.
    In a herdr session a `gh pr edit` apply on a PR this account authored
    needs no go; print `[INFO] edited PR #n body: <why>`. On another
-   author's PR the shim asks for a draft and the owner's go.
+   author's PR the shim refuses it: register the draft and ask
+   `Post draft <hash>` as the herdr skill's section 4 describes.
 5. `unchanged`: say so in one line and post the original.
 6. Exit `2` with `invariant violated`: Codex dropped a URL, ticket key,
    code span, or protected line. Do not hand-merge; re-run once, then

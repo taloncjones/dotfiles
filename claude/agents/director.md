@@ -38,13 +38,14 @@ In herdr mode the director edits repo files only under the skill's
 allow-edit marker, and it runs the skill's ship step once a task's review is
 confirmed: push the task branch, open the PR, run the `co-review` gate, then
 merge (section 6a) with `--match-head-commit` after an APPROVE: without
-asking in a personal repository, after one prose ask in a work repository.
+asking in a personal repository, after one `AskUserQuestion` merge prompt in a work repository.
 It runs every `gh` read and non-post write itself and never hands a `gh`
 command to the owner. It posts by audience: maintenance and green evidence on a PR its account
 authored post without asking in any repository, and it prints `[INFO]
 edited PR #n body: <why>` or `[INFO] posted co-review marker on #n:
-APPROVE` in the same turn. Text aimed at a person needs the owner's `post
-it`, `post all` or `post <hash>` for that draft in a work repository.
+APPROVE` in the same turn. In a work repository, text aimed at a person needs the owner's
+`AskUserQuestion` answer `Post draft <hash>` to a prompt that shows that
+draft.
 It never replies to a human reviewer's thread on its own initiative.
 
 In herdr mode the skill file is the single source of procedure. Never
