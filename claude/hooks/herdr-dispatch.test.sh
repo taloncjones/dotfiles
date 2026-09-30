@@ -399,6 +399,12 @@ elif args[:2] == ["pane", "report-metadata"]:
     if mode == "metadata-fail":
         print(json.dumps({"error": "presentation_unsupported"}), file=sys.stderr)
         raise SystemExit(1)
+    # herdr 0.9.1's own rule and reply, recorded by a live probe 2026-09-29.
+    if "--ttl-ms" in args and int(args[args.index("--ttl-ms") + 1]) > 86400000:
+        print('{"error":{"code":"invalid_metadata_ttl",'
+              '"message":"metadata ttl_ms must be 86400000 or less"},"id":"cli:request"}',
+              file=sys.stderr)
+        raise SystemExit(1)
     # Mutation success is established by the exit status; no result body is required.
 elif args[:2] == ["agent", "list"]:
     agents = json.loads(Path(os.environ["FAKE_AGENTS"]).read_text())
@@ -442,6 +448,36 @@ elif args[:2] == ["agent", "send-keys"]:
         raise SystemExit(1)
     if mode in ("exit-menu", "exit-timeout-menu") and args[3:] == ["1", "enter"]:
         apath.write_text(json.dumps([a for a in agents if a["name"] != target]))
+elif args[:1] == ["workspace"] and args[1:2] in (["get"], ["list"], ["rename"]):
+    wpath = Path(os.environ["FAKE_WORKSPACES"])
+    spaces = (json.loads(wpath.read_text()) if wpath.exists() else
+              [{"workspace_id": workspace, "label": "td-a",
+                "worktree": {"checkout_path": cwd}}])
+    verb = args[1]
+    if verb == "list":
+        if mode == "list-fail":
+            print(json.dumps({"id": "cli:workspace:list",
+                              "error": {"code": "server_unavailable", "message": "fake"}}),
+                  file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps({"id": "cli:workspace:list",
+                          "result": {"type": "workspace_list", "workspaces": spaces}}))
+        raise SystemExit(0)
+    match = [w for w in spaces if w["workspace_id"] == args[2]]
+    if verb == "rename" and mode == "rename-hang":
+        import time
+        time.sleep(float(os.environ.get("FAKE_HANG_SECS", "3")))
+    if not match or (verb == "rename" and mode == "rename-fail"):
+        code = "rename_refused" if match else "workspace_not_found"
+        print(json.dumps({"id": f"cli:workspace:{verb}",
+                          "error": {"code": code, "message": "fake"}}), file=sys.stderr)
+        raise SystemExit(1)
+    if verb == "rename":
+        # Live herdr joins every trailing word into the label.
+        match[0]["label"] = " ".join(args[3:])
+        wpath.write_text(json.dumps(spaces))
+    print(json.dumps({"id": f"cli:workspace:{verb}",
+                      "result": {"type": "workspace_info", "workspace": match[0]}}))
 else:
     print(json.dumps({"error": "unexpected", "args": args}), file=sys.stderr)
     raise SystemExit(2)
@@ -532,6 +568,7 @@ class Fixture:
             "FAKE_PANES": str(self.root / "panes.json"),
             "FAKE_REMOVED_AGENT": str(self.root / "removed-agent.json"),
             "FAKE_AGENT_LIST_COUNT": str(self.root / "agent-list-count"),
+            "FAKE_WORKSPACES": str(self.root / "workspaces.json"),
         }
 
     def close(self):
@@ -3483,6 +3520,54 @@ def test_inspect_binding_reads_lead_subtree():
         fixture.close()
 
 
+RECORDED_TTL_ERROR = (
+    '{"error":{"code":"invalid_metadata_ttl",'
+    '"message":"metadata ttl_ms must be 86400000 or less"},"id":"cli:request"}'
+)
+
+
+def ws_entry(workspace_id, label, checkout):
+    return {"workspace_id": workspace_id, "label": label,
+            "worktree": {"checkout_path": str(checkout)}}
+
+
+def write_workspaces(fx, entries):
+    Path(fx.env["FAKE_WORKSPACES"]).write_text(json.dumps(entries))
+
+
+def workspace_labels(fx):
+    return {w["workspace_id"]: w["label"]
+            for w in json.loads(Path(fx.env["FAKE_WORKSPACES"]).read_text())}
+
+
+def test_fake_herdr_enforces_recorded_ttl_rule():
+    fx = Fixture()
+    try:
+        attempt = {"launch_id": "launch-123", "phase": "review", "role": "reviewer",
+                   "agent": "review-td-a", "pane_id": "w1:p1", "task_id": "td-a"}
+        argv = herdr_dispatch.metadata_argv(attempt, "working", 1234)
+        ok = subprocess.run([str(fx.bin), *argv[1:]], env=fx.env,
+                            capture_output=True, text=True, check=False)
+        assert ok.returncode == 0, ok.stderr
+        over = list(argv[1:])
+        over[over.index("--ttl-ms") + 1] = "86400001"
+        bad = subprocess.run([str(fx.bin), *over], env=fx.env,
+                             capture_output=True, text=True, check=False)
+        assert bad.returncode == 1, bad
+        assert bad.stderr.strip() == RECORDED_TTL_ERROR, bad.stderr
+    finally:
+        fx.close()
+
+
+def test_launch_presentation_passes_recorded_ttl_rule():
+    fx = Fixture()
+    try:
+        result = fx.launch()
+        assert result["presentation"] == {"status": "applied", "reason": None}, result
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -3605,6 +3690,8 @@ for name, test in (
     ("bound start failure keeps the pane outstanding until re-dispatch", test_bound_start_failure_keeps_pane_outstanding_until_redispatch),
     ("bound prechecks refuse before any herdr call", test_bound_prechecks_refuse_before_any_herdr_call),
     ("inspect --binding reads the lead subtree", test_inspect_binding_reads_lead_subtree),
+    ("fake herdr enforces the recorded ttl rule", test_fake_herdr_enforces_recorded_ttl_rule),
+    ("launch presentation passes the recorded ttl rule", test_launch_presentation_passes_recorded_ttl_rule),
 ):
     check(name, test)
 
