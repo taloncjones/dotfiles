@@ -57,3 +57,5 @@ is the staging tier, not an archive.
   the target's .gitignore covers it instead of calling it "untracked".
 - (2026-09) Never brief a Claude substitute on a recorded Codex quota premise:
   run one live Codex probe first; a stale exhaustion note cost two real seats.
+- (2026-09) Run a test you expect to fail with retries off (`--reruns 0` or the
+  equivalent): a rerun plugin in ini addopts turns a red mutation check green.
