@@ -2606,10 +2606,11 @@ def rollover_warning(reason) -> str:
             "and ask the human (takeover is a human decision).")
 
 
-def rollover_info(slug, session, fence, watch) -> str:
+def rollover_info(slug, session, fence, watch, header="lease re-established in place.", carry="") -> str:
     pids, wstate = watch
-    lines = ["[INFO] herdr director rollover: lease re-established in place.",
+    lines = [f"[INFO] herdr director rollover: {header}",
              f"repo_slug={slug} session={session} fence={fence}"]
+    lines += [f"carried: {line}" for line in carry.splitlines() if line.strip()]
     if wstate == "live":
         lines += [f"watch: live (pids {','.join(map(str, pids))}); do not arm another. Its Monitor task id",
                   "did not survive /clear; on yielding ownership, stop it from a fresh scan:",
@@ -4008,6 +4009,46 @@ def _resume_owner(ns) -> int:
     return 0
 
 
+def _adopt_rollover(ns) -> int:
+    """adopt-rollover: take the lease a rollover handed to this pane.
+    Exit 0 INFO, 1 WARNING, 3 silent (no handover names this pane)."""
+    handover = env_handover()
+    sock, sock_pid, reason = validate_messaging_socket(ns.messaging_socket)
+    if handover is None or reason != "ok":
+        return 3
+    try:
+        context = repository_context(ns.repo_path)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 3
+    ns.repo_slug = _context_slug(context)
+    ns.runtime = "claude"
+    if not valid_repo_slug(ns.repo_slug):
+        return 3
+    select_payload(ns)
+    rd = repo_dir(ns.repo_slug)
+    marker = read_rollover_pending(rd)
+    if (marker is None or marker["pane"] != handover["pane"]
+            or time.time() >= marker["expires_ts"]):
+        return 3
+    selected = _PAYLOAD_SELECTION.get()
+    try:
+        fence = claim_owner(rd, ns.session, socket.gethostname(), sock_pid,
+                            messaging_socket=sock, context=selected["context"],
+                            expected_slug=ns.repo_slug, runtime="claude",
+                            scope=selected["scope"], handover=handover)
+    except (OSError, ValueError) as exc:
+        print(rollover_warning(f"error: {exc}"))
+        return 1
+    if fence is None:
+        print(rollover_warning("BUSY"))
+        return 1
+    header = (f"lease handed over from session {marker['from_session']} "
+              f"(pane {marker['from_pane']}).")
+    print(rollover_info(ns.repo_slug, ns.session, fence, watch_state(sock_pid, ns.repo_slug),
+                        header=header, carry=marker["carry"]))
+    return 0
+
+
 def merge_authority(repo_slug, repo_path, runtime="claude", personal=False):
     """Who may merge in this repository: "director" or "human"; fails closed."""
     if not repo_path:
@@ -4207,6 +4248,11 @@ def _main(argv=None) -> int:
     ro.add_argument("--session", required=True)
     ro.add_argument("--messaging-socket", required=True)
     ro.add_argument("--personal", action="store_true")
+    ar = sub.add_parser("adopt-rollover")
+    ar.add_argument("--repo-path", required=True)
+    ar.add_argument("--session", required=True)
+    ar.add_argument("--messaging-socket", required=True)
+    ar.add_argument("--personal", action="store_true")
     wp = add("watch-pids")
     wp.add_argument("--messaging-socket", required=True)
     ib = add("issue-binding", "--task-id", fenced=True)
@@ -4362,6 +4408,8 @@ def _main(argv=None) -> int:
 
     if ns.cmd == "resume-owner":
         return _resume_owner(ns)
+    if ns.cmd == "adopt-rollover":
+        return _adopt_rollover(ns)
 
     # Before select_payload: this verb answers "human" for a bad path or
     # slug instead of exiting 2, so the director never mistakes an error.
