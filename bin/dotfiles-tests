@@ -106,6 +106,7 @@ bash claude/skills/todos/scripts/tests/todos_test.sh
 bash claude/skills/todos/scripts/tests/todos_dashboard_test.sh
 bash claude/skills/repo-recall/scripts/tests/recall_test.sh
 bash claude/skills/voice/scripts/tests/voice_test.sh
+sh claude/skills/pr-status/scripts/tests/pr_status_test.sh
 sh install/claude-links.test.sh
 sh install/codex-surfaces.test.sh
 sh install/codex-roles.test.sh

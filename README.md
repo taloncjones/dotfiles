@@ -418,6 +418,7 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) final/spec/plan review gates
 - `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection; `handoff retire` archives a finished task
 - `voice` - shared prose lint and independent rewrite with protected facts
+- `pr-status` - one read-only table of open PRs: head, CI, co-review at head, bench, body currency, draft, and what each waits on
 - `herdr-orchestration` - Claude-led shared lifecycle; Codex supplies bounded UI/prose/review work
 - `lib/workflow_context.py` - canonical repository identity and account scope
 - `ship`, `post-merge`, `reconcile`, `wrap` - delivery, teardown, Jira drift repair, session exit
