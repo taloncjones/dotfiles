@@ -931,15 +931,22 @@ def register_draft(directory: Path, sid: str, digest: str, args: list[str], text
 
 
 SHOWN_LIMIT = 2000  # Claude Code withholds a longer preview from the prompt
+# The preview pane clips to rows - 26 lines with no scroll; a 40-row terminal
+# shows 14, so 12 leaves room for the question and option rows.
+SHOWN_LINE_LIMIT = 12
+
+
+def _within_display(source: str) -> bool:
+    return len(source) <= SHOWN_LIMIT and len(source.splitlines()) <= SHOWN_LINE_LIMIT
 
 
 def shown(text, question: str, preview: str) -> bool:
     """The draft's text is in the question or the post option's preview,
-    whitespace-normalized, counting only a source within SHOWN_LIMIT; a draft
+    whitespace-normalized, counting only a source within the display limits; a draft
     with no text shows only its hash."""
     if not isinstance(text, str) or not text.strip():
         return True
-    bounded = [source for source in (question, preview) if len(source) <= SHOWN_LIMIT]
+    bounded = [source for source in (question, preview) if _within_display(source)]
     return " ".join(text.split()) in " ".join("\n".join(bounded).split())
 
 
@@ -964,12 +971,22 @@ def approve_draft(directory: Path, sid: str, digest: str, question: str, preview
             f"draft {digest} not approved: its text is over {SHOWN_LIMIT} characters; "
             "shorten the draft or split it"
         )
+    if isinstance(record["text"], str) and len(record["text"].splitlines()) > SHOWN_LINE_LIMIT:
+        return (
+            f"draft {digest} not approved: its text exceeds the display line limit "
+            f"({SHOWN_LINE_LIMIT} lines); shorten the draft or split it"
+        )
     if not shown(record["text"], question, preview):
         for name, source in (("question", question), ("preview", preview)):
             if len(source) > SHOWN_LIMIT:
                 return (
                     f"draft {digest} not approved: the {name} is over {SHOWN_LIMIT} characters, "
                     "more than a prompt displays; shorten it"
+                )
+            if len(source.splitlines()) > SHOWN_LINE_LIMIT:
+                return (
+                    f"draft {digest} not approved: the {name} exceeds the display line limit "
+                    f"({SHOWN_LINE_LIMIT} lines), more than a prompt displays; shorten it"
                 )
         return f"draft {digest} not approved: its text was not in the question or the option's preview"
     if not _move_fresh(pending, draft_path(directory, sid, digest, "approved")):

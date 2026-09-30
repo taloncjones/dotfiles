@@ -233,6 +233,18 @@ expect_out "A17b a draft over 2000 characters is refused" "over 2000 characters;
 expect_file "A17b an over-length draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 expect_file "A17b an over-length draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
 
+case_gate a17f
+TALL=$(python3 -c 'print("\n".join("line %d" % i for i in range(13)))')
+pending aaaaaaaa 1 "$TALL"
+expect_out "A17f a draft over 12 lines is refused though under 2000 characters" "exceeds the display line limit" "$(PA_EXTRA="$(PREV="$TALL" python3 -c 'import json, os; print(json.dumps({"annotations": {"Post this draft?": {"preview": os.environ["PREV"]}}}))')" payload_a s1 'Post draft aaaaaaaa' "$TALL")"
+expect_file "A17f a tall draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a17g
+SHORT=$(python3 -c 'print("\n".join("line %d" % i for i in range(12)))')
+pending aaaaaaaa 1 "$SHORT"
+expect_rc "A17g a draft of exactly 12 lines is approved" 0 "$(PA_EXTRA="$(PREV="$SHORT" python3 -c 'import json, os; print(json.dumps({"annotations": {"Post this draft?": {"preview": os.environ["PREV"]}}}))')" payload_a s1 'Post draft aaaaaaaa' "$SHORT")"
+expect_file "A17g a 12-line draft is approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+
 case_gate a17c
 pending aaaaaaaa 1 'reply one'
 expect_out "A17c a returned preview that lacks the text is refused" "its text was not in the question or the option's preview" "$(PA_EXTRA='{"annotations": {"Post this draft?": {"preview": "withheld"}}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
