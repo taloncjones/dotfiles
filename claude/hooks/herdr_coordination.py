@@ -749,6 +749,7 @@ class OwnerTransaction:
         adopt_pid=None,
         pid_start=None,
         adopt_start=None,
+        handover_from=None,
     ):
         if (
             not isinstance(session, str)
@@ -788,6 +789,7 @@ class OwnerTransaction:
                 or old.get("account_id") != self.account_id
             )
             and not self._adoptable(old, adopt_pid, runtime, thread_id, adopt_start)
+            and not self.handover_adoptable(old, handover_from, session, runtime, thread_id)
         ):
             return None
         fence = (
@@ -835,6 +837,22 @@ class OwnerTransaction:
             and runtime == "claude"
             and old.get("runtime", "claude") == "claude"
             and old.get("thread_id") == thread_id
+            and old.get("account_id") == self.account_id
+            and old.get("control_tier", "launcher") == "launcher"
+        )
+
+    def handover_adoptable(self, old, handover_from, session, runtime, thread_id):
+        # A fresh lease whose holder named a successor in a rollover-pending
+        # marker; the caller validated the marker in this transaction.
+        return (
+            old is not None
+            and handover_from is not None
+            and (old["session_id"], old["fence"]) == tuple(handover_from)
+            and session != old["session_id"]
+            and runtime == "claude"
+            and old.get("runtime", "claude") == "claude"
+            and thread_id is None
+            and old.get("thread_id") is None
             and old.get("account_id") == self.account_id
             and old.get("control_tier", "launcher") == "launcher"
         )

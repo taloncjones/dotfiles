@@ -60,7 +60,8 @@ STATE_ROOT/
     task-lead-gate.json               # task-lead activation gate record; absence,
                                       # damage, or an identity mismatch reads as disabled
     probe-samples.jsonl                # diagnostic probe captures ({ts, cls, probe|raw}); best-effort append after every section-1 probe; safe to delete
-    rollover.jsonl                    # resume-helper outcomes ({ts, session, pane, outcome, reason, waited_secs}); diagnostic only
+    rollover-pending.json             # section-1a handover marker {v, token, pane, from_session, from_fence, from_pane, carry, created_ts, expires_ts}; single-use, owner-lock only, 0600
+    rollover.jsonl                    # rollover events: v2 {ts, event: adopted|handed-over|handover-failed, handover, ...}; the adopted line is the handover ack; v1 lines are retired resume-helper outcomes
     tasks/
       <task_id>.json                  # durable task record
       <task_id>.done.json             # impl worker completion record
@@ -203,6 +204,21 @@ STATE_ROOT/
   > 15 min); the owner refreshes `heartbeat_ts` each turn. A second
   > director whose claim fails **yields** to read-only reporting and
   > offers an explicit takeover.
+
+### `rollover-pending.json`
+
+Written by the `rollover` verb under the owner lock, only while the writer's
+fence is current and no unexpired marker from the same session exists. It is
+deleted only by compare-and-delete on `token`. `claim-owner` and
+`adopt-rollover` adopt a fresh lease through it when the claimant's
+`HERDR_PANE_ID` equals `pane`, its `HERDR_ROLLOVER_TOKEN` equals `token`
+(constant-time compare), `time < expires_ts`, and the lease's session and
+fence equal `from_session`/`from_fence`. In one owner transaction adoption
+appends `{"v":2,"event":"adopted","handover":<sha256(token)[:16]>,...}` to
+`rollover.jsonl`, deletes the marker, then writes the lease and the mirror;
+the token itself is never logged. A malformed or expired marker reads as
+absent. `carry` (at most 4000 characters) is printed as `carried:` lines in
+the new director's startup block.
 
 ### `config.json`
 
