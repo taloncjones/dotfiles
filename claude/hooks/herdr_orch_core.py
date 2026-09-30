@@ -3657,6 +3657,155 @@ def ship_handoff_launches(rd, task_id, task):
     return frozenset(found)
 
 
+LABEL_MAX = 25
+LABEL_HERDR_TIMEOUT_SECS = 10
+LABEL_PHASE_TOKENS = {"plan": "plan", "implement": "impl", "mechanical": "impl",
+                      "review": "review", "ship": "co-review"}
+LABEL_STATUS_TOKENS = {
+    "blocked": "blocked", "completed": "review-due", "review-dispatched": "review",
+    "changes-requested": "repair", "pr-open-pending-merge": "merge?",
+    "merged": "merged", "abandoned": "abandoned", "failed": "failed", "paused": "paused",
+}
+LABEL_TERMINAL_STATUSES = frozenset({"merged", "abandoned", "failed"})
+_LABEL_IDS = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b|#\d+")
+_LABEL_TRIM = " -:|,;."
+
+
+def _launched_rows(task, phases):
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    return [w for w in workers if isinstance(w, dict) and w.get("status") == "launched"
+            and w.get("phase") in phases]
+
+
+def _label_phase(task):
+    rows = _launched_rows(task, LABEL_PHASE_TOKENS)
+    if rows:
+        return rows[-1]["phase"]
+    phase = task.get("phase")
+    return phase if phase in LABEL_PHASE_TOKENS else "plan"
+
+
+def _label_pr_number(task):
+    for key in ("pr_number", "pr"):
+        value = task.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
+def task_state_token(task, ship_handoff=None):
+    """Short human state for a task's Herdr workspace label; display only."""
+    status = task.get("status")
+    if status == "in-progress":
+        return LABEL_PHASE_TOKENS[_label_phase(task)]
+    if status == "reviewed":
+        if _label_pr_number(task) is None:
+            return "open-pr?"
+        if not isinstance(ship_handoff, dict):
+            return "co-review"
+        head = task.get("review_head_sha")
+        if (ship_handoff.get("verdict") == "APPROVE" and head
+                and ship_handoff.get("head_sha") == head):
+            return "merge?"
+        return "gate?"
+    return LABEL_STATUS_TOKENS.get(status, str(status)[:12])
+
+
+def _label_title(task):
+    title = task.get("title")
+    fallback = not isinstance(title, str) or not title.strip()
+    if fallback:
+        title = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", str(task.get("task_id") or ""))
+    # Ids go before the fallback's hyphens become spaces, or a Jira id survives.
+    title = _LABEL_IDS.sub(" ", title)
+    if fallback:
+        title = re.sub(r"[-_]+", " ", title)
+    title = "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in title)
+    return " ".join(title.split()).strip(_LABEL_TRIM)
+
+
+def task_label(task, ship_handoff=None):
+    """`<token>: <title>`, at most LABEL_MAX chars, with no ticket key or PR ref."""
+    token = task_state_token(task, ship_handoff)
+    title = _label_title(task)
+    budget = LABEL_MAX - len(token) - 2
+    if budget <= 0 or not title:
+        return token[:LABEL_MAX]
+    if len(title) > budget:
+        cut = title.rfind(" ", 0, budget + 1)
+        title = title[:cut] if 2 * cut >= budget else title[:budget]
+        title = title.rstrip(_LABEL_TRIM)
+    return f"{token}: {title}" if title else token
+
+
+def label_target(task):
+    """The task's own workspace: the record's, else its last launched plan/implement row's."""
+    ws = task.get("workspace_id")
+    if isinstance(ws, str) and valid_workspace_id(ws):
+        return ws
+    for row in reversed(_launched_rows(task, ("plan", "implement", "mechanical"))):
+        ws = row.get("workspace_id")
+        if isinstance(ws, str) and valid_workspace_id(ws):
+            return ws
+    return None
+
+
+def task_ship_handoff(rd, task_id, task):
+    """The ship.json the record's ship_launch_id pins, or None."""
+    launch = task.get("ship_launch_id")
+    launch_dir = ship_launch_dir(rd, task_id, launch)
+    return read_ship_handoff(launch_dir, launch) if launch_dir is not None else None
+
+
+def apply_workspace_label(task, label, *, herdr_cli=None, env=None, workspace=None,
+                          timeout_secs=None):
+    """Set the task's Herdr workspace label; never raises. Display only.
+
+    `workspace` is a `workspace list` entry the caller already fetched.
+    Renames only a workspace whose checkout is the task's worktree."""
+    ws = label_target(task)
+    out = {"status": "unsupported", "label": label, "workspace_id": ws, "reason": None}
+    try:
+        worktree = task.get("worktree")
+        if ws is None:
+            out["reason"] = "no-workspace"
+            return out
+        if not isinstance(worktree, str) or not worktree:
+            out["reason"] = "no-worktree"
+            return out
+        # Lazy: herdr_dispatch imports this module (see _checkin_poll).
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = herdr_cli or shutil.which("herdr")
+        if not exe:
+            out["reason"] = "herdr-unavailable"
+            return out
+        run_env = dict(os.environ) if env is None else env
+        timeout = LABEL_HERDR_TIMEOUT_SECS if timeout_secs is None else timeout_secs
+        if workspace is None:
+            workspace = run_herdr(exe, ["workspace", "get", ws], env=run_env,
+                                  timeout_secs=timeout)["workspace"]
+        tree = workspace.get("worktree")
+        checkout = tree.get("checkout_path") if isinstance(tree, dict) else None
+        if (not isinstance(checkout, str)
+                or os.path.realpath(checkout) != os.path.realpath(worktree)):
+            out["reason"] = "workspace-mismatch"
+            return out
+        if workspace.get("label") == label:
+            out["status"] = "unchanged"
+            return out
+        run_herdr(exe, ["workspace", "rename", ws, label], env=run_env,
+                  timeout_secs=timeout, json_result=True)
+        out["status"] = "applied"
+        return out
+    except Exception as exc:  # noqa: BLE001 -- display only; DispatchError is lazily imported
+        cause = exc.__cause__
+        out["reason"] = ("herdr-unavailable"
+                         if isinstance(cause, (subprocess.TimeoutExpired, OSError))
+                         else (str(exc) or type(exc).__name__)[:200])
+        return out
+
+
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
                    ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
