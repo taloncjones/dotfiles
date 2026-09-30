@@ -128,8 +128,14 @@ for the provider's `launch_env` mapping.
      the workspace label already equals it (`herdr workspace get
 "$HERDR_WORKSPACE_ID"` -> `.result.workspace.label`). This is display-only
      Herdr state, never repo/worktree state; a worker's own workspace is
-     labelled `<task_id>` at `worktree create` (section 2), so no worker is
-     ever left as a generic "Worker N".
+     labelled `<task_id>` at `worktree create` (section 2) and then
+     `<state>: <title>` from its task record (section 8, Compact
+     presentation), so no worker is ever left as a generic "Worker N".
+   - After every claim or resume, relabel every task workspace from its
+     record:
+     `python3 "$CORE" present-task --repo-slug <slug> --session <id> --fence <fence> --all --apply`.
+     A nonzero exit is reported and the preflight continues; labels are
+     display-only.
    - On every subsequent turn this session acts in the repo, call
      `python3 "$CORE" refresh-owner --repo-slug <slug> --session <id> --fence <fence> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
      to keep the heartbeat alive.
@@ -532,8 +538,11 @@ phase-appropriate brief (references/brief-template.md) and model.
    means the pre-existing branch/worktree is not what step 4 expected; leave it
    untouched (no `worktree remove`, no `branch -D`) and just surface the
    mismatch. Either way, stop after surfacing the mismatch. Only a
-   verified-correct anchor proceeds. Label the workspace `<task_id>`.
-6. **Publish the task before launch under the owner fence.** Preserve the
+   verified-correct anchor proceeds. Label the workspace `<task_id>`; step 6 replaces it with the state label.
+6. **Publish the task before launch under the owner fence.** The record
+   carries `title` (the Jira summary or the todo title) and `workspace_id`
+   (the new `HERDR_WORKSPACE_ID`); publish it with `write-task --present`,
+   which relabels the workspace `plan: <title>`. Preserve the
    pinned contract, branch, base, worktree, and account binding. New records
    start with `workers: []` and `status: in-progress`; a failed launch remains
    visibly retryable. Write the workspace index through `write-index`.
@@ -725,6 +734,12 @@ workspace list`, correlates each task's records, reads HEAD and ancestry, and
 prints one line per non-terminal task plus a final `changed:` line. It mutates
 nothing but the heartbeat; every status transition below is still the
 director's own `write-task`.
+
+Then, whatever the `changed:` line says, run
+`python3 "$CORE" present-task --repo-slug <slug> --session <id> --fence <fence> --all --apply`
+once. It relabels any workspace a missed trigger left stale (a crash, a
+rollover, a sweep, a settle that lost its fence). A nonzero exit is
+reported in the check-in and does not make the check-in incomplete.
 
 - `changed: no` -- end the turn. Do not read panes, do not re-poll.
 - `changed: yes`, any `action=unknown`, or `poll: failed (...)` -- fall through
@@ -1594,10 +1609,39 @@ worker dispatch (binding-scoped)").
 - Route fallback never switches authentication. After an unavailable model,
   choose only an explicitly configured same-account fallback and record it.
 
-Compact presentation uses a stable task ID behind a short title. Show current
-role, runtime/model, and status separately; update them for plan -> implement
--> review and every retry. Presentation failure is visible but never changes
-completion state. Launch IDs, not labels, are the provenance keys.
+Compact presentation. The Herdr sidebar label of a task workspace is
+`<state>: <title>`, at most 25 characters, with the state first so any
+truncation keeps it. `<title>` is the record's `title` (the Jira summary
+or todo title) with ticket keys and `#<n>` PR references removed; the
+task record keeps the ids. `core.task_label` derives it:
+
+| Record                                                     | Token                  |
+| ---------------------------------------------------------- | ---------------------- |
+| `in-progress`, last launched phase plan (or none)          | `plan`                 |
+| `in-progress`, last launched phase implement or mechanical | `impl`                 |
+| `in-progress`, last launched phase review / ship           | `review` / `co-review` |
+| `blocked`                                                  | `blocked`              |
+| `completed`                                                | `review-due`           |
+| `review-dispatched`                                        | `review`               |
+| `changes-requested`                                        | `repair`               |
+| `reviewed`, no `pr_number`                                 | `open-pr?`             |
+| `reviewed`, PR, no ship handoff for `ship_launch_id`       | `co-review`            |
+| `reviewed`, PR, handoff APPROVE at `review_head_sha`       | `merge?`               |
+| `reviewed`, PR, any other handoff                          | `gate?`                |
+| `pr-open-pending-merge`                                    | `merge?`               |
+| `merged`, `abandoned`, `failed`, `paused`                  | verbatim               |
+
+A `?` marks a state that waits on the owner. Triggers:
+`write-task --present` (section 9), the adapter's `launch` and `settle`,
+and `present-task --all --apply` at preflight and every check-in. A
+rename happens only when the workspace's `worktree.checkout_path` is the
+task's `worktree`, so a reused workspace id or the director's own
+workspace is never relabelled. The label is display-only Herdr state: no
+gate reads it, the next trigger overwrites a manual rename, and launch
+IDs, not labels, are the provenance keys. Pane metadata still shows
+role, runtime/model and status separately; presentation failure is
+visible but never changes completion state. Lead-scoped records are not
+labelled.
 
 **Deep-think escalation.** Native Claude/Codex advisors resolve the `think`
 role through the selected-runtime resolver and bounded runner, with only its
@@ -1814,6 +1858,9 @@ The "Event" column below names the conceptual transition, not an emitted
 (`stopped`/`blocked`/`review-stopped`, see references/event-schema.md). Each
 row's transition is committed solely by a `python3 "$CORE" write-task` call that sets
 the new `status`; that write is the authoritative record.
+Every launcher-scope `write-task` passes `--present`, whether or not it
+changes `status`: a `pr_number` or `ship_launch_id` write changes the label
+too.
 
 | From                                         | Evidence / trigger                                                                                                                                                                                     | Event                                          | To                      | Terminal? |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- | ----------------------- | --------- |

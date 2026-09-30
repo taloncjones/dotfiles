@@ -3657,6 +3657,238 @@ def ship_handoff_launches(rd, task_id, task):
     return frozenset(found)
 
 
+LABEL_MAX = 25
+LABEL_HERDR_TIMEOUT_SECS = 10
+LABEL_PHASE_TOKENS = {"plan": "plan", "implement": "impl", "mechanical": "impl",
+                      "review": "review", "ship": "co-review"}
+LABEL_STATUS_TOKENS = {
+    "blocked": "blocked", "completed": "review-due", "review-dispatched": "review",
+    "changes-requested": "repair", "pr-open-pending-merge": "merge?",
+    "merged": "merged", "abandoned": "abandoned", "failed": "failed", "paused": "paused",
+}
+LABEL_TERMINAL_STATUSES = frozenset({"merged", "abandoned", "failed"})
+_LABEL_IDS = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b|#\d+")
+_LABEL_TRIM = " -:|,;."
+
+
+def _launched_rows(task, phases):
+    workers = task.get("workers") if isinstance(task.get("workers"), list) else []
+    return [w for w in workers if isinstance(w, dict) and w.get("status") == "launched"
+            and w.get("phase") in phases]
+
+
+def _label_phase(task):
+    rows = _launched_rows(task, LABEL_PHASE_TOKENS)
+    if rows:
+        return rows[-1]["phase"]
+    phase = task.get("phase")
+    return phase if phase in LABEL_PHASE_TOKENS else "plan"
+
+
+def _label_pr_number(task):
+    for key in ("pr_number", "pr"):
+        value = task.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
+def task_state_token(task, ship_handoff=None):
+    """Short human state for a task's Herdr workspace label; display only."""
+    status = task.get("status")
+    if status == "in-progress":
+        return LABEL_PHASE_TOKENS[_label_phase(task)]
+    if status == "reviewed":
+        if _label_pr_number(task) is None:
+            return "open-pr?"
+        if not isinstance(ship_handoff, dict):
+            return "co-review"
+        head = task.get("review_head_sha")
+        if (ship_handoff.get("verdict") == "APPROVE" and head
+                and ship_handoff.get("head_sha") == head):
+            return "merge?"
+        return "gate?"
+    return LABEL_STATUS_TOKENS.get(status, str(status)[:12])
+
+
+def _label_title(task):
+    title = task.get("title")
+    fallback = not isinstance(title, str) or not title.strip()
+    if fallback:
+        title = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", str(task.get("task_id") or ""))
+    # Ids go before the fallback's hyphens become spaces, or a Jira id survives.
+    title = _LABEL_IDS.sub(" ", title)
+    if fallback:
+        title = re.sub(r"[-_]+", " ", title)
+    title = "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in title)
+    return " ".join(title.split()).strip(_LABEL_TRIM)
+
+
+def task_label(task, ship_handoff=None):
+    """`<token>: <title>`, at most LABEL_MAX chars, with no ticket key or PR ref."""
+    token = task_state_token(task, ship_handoff)
+    title = _label_title(task)
+    budget = LABEL_MAX - len(token) - 2
+    if budget <= 0 or not title:
+        return token[:LABEL_MAX]
+    if len(title) > budget:
+        cut = title.rfind(" ", 0, budget + 1)
+        title = title[:cut] if 2 * cut >= budget else title[:budget]
+        title = title.rstrip(_LABEL_TRIM)
+    return f"{token}: {title}" if title else token
+
+
+def label_target(task):
+    """The task's own workspace: the record's, else its last launched plan/implement row's."""
+    ws = task.get("workspace_id")
+    if isinstance(ws, str) and valid_workspace_id(ws):
+        return ws
+    for row in reversed(_launched_rows(task, ("plan", "implement", "mechanical"))):
+        ws = row.get("workspace_id")
+        if isinstance(ws, str) and valid_workspace_id(ws):
+            return ws
+    return None
+
+
+def task_ship_handoff(rd, task_id, task):
+    """The ship.json the record's ship_launch_id pins, or None."""
+    launch = task.get("ship_launch_id")
+    launch_dir = ship_launch_dir(rd, task_id, launch)
+    return read_ship_handoff(launch_dir, launch) if launch_dir is not None else None
+
+
+def apply_workspace_label(task, label, *, herdr_cli=None, env=None, workspace=None,
+                          timeout_secs=None):
+    """Set the task's Herdr workspace label; never raises. Display only.
+
+    `workspace` is a `workspace list` entry the caller already fetched.
+    Renames only a workspace whose checkout is the task's worktree."""
+    ws = label_target(task)
+    out = {"status": "unsupported", "label": label, "workspace_id": ws, "reason": None}
+    try:
+        worktree = task.get("worktree")
+        if ws is None:
+            out["reason"] = "no-workspace"
+            return out
+        if not isinstance(worktree, str) or not worktree:
+            out["reason"] = "no-worktree"
+            return out
+        # Lazy: herdr_dispatch imports this module (see _checkin_poll).
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = herdr_cli or shutil.which("herdr")
+        if not exe:
+            out["reason"] = "herdr-unavailable"
+            return out
+        run_env = dict(os.environ) if env is None else env
+        timeout = LABEL_HERDR_TIMEOUT_SECS if timeout_secs is None else timeout_secs
+        if workspace is None:
+            workspace = run_herdr(exe, ["workspace", "get", ws], env=run_env,
+                                  timeout_secs=timeout)["workspace"]
+        tree = workspace.get("worktree")
+        checkout = tree.get("checkout_path") if isinstance(tree, dict) else None
+        if (not isinstance(checkout, str)
+                or os.path.realpath(checkout) != os.path.realpath(worktree)):
+            out["reason"] = "workspace-mismatch"
+            return out
+        if workspace.get("label") == label:
+            out["status"] = "unchanged"
+            return out
+        run_herdr(exe, ["workspace", "rename", ws, label], env=run_env,
+                  timeout_secs=timeout, json_result=True)
+        out["status"] = "applied"
+        return out
+    except Exception as exc:  # noqa: BLE001 -- display only; DispatchError is lazily imported
+        cause = exc.__cause__
+        out["reason"] = ("herdr-unavailable"
+                         if isinstance(cause, (subprocess.TimeoutExpired, OSError))
+                         else (str(exc) or type(exc).__name__)[:200])
+        return out
+
+
+def launcher_task_ids(rd):
+    """Launcher-scope task ids: terminal statuses first, each group by id."""
+    tasks = Path(rd) / "tasks"
+    ids = sorted(p.name[:-len(".json")] for p in tasks.glob("*.json")
+                 if p.name.count(".") == 1 and valid_task_id(p.name[:-len(".json")]))
+
+    terminal = set()
+    for tid in ids:
+        try:
+            record = json.loads(read_payload_text(tasks / f"{tid}.json"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("status") in LABEL_TERMINAL_STATUSES:
+            terminal.add(tid)
+    # A live record sharing a workspace with a finished one must label it last.
+    return [t for t in ids if t in terminal] + [t for t in ids if t not in terminal]
+
+
+def _present_row(rd, task_id):
+    task = json.loads(read_payload_text(Path(rd) / "tasks" / f"{task_id}.json"))
+    if not isinstance(task, dict) or task.get("task_id") != task_id:
+        raise ValueError("task record does not match its file")
+    return task, task_label(task, task_ship_handoff(rd, task_id, task))
+
+
+def present_all(rd, *, apply, herdr_cli=None, env=None, timeout_secs=None):
+    """One label row per launcher task; with apply, stop at herdr-unavailable.
+
+    When several records target one workspace, only the last in
+    launcher_task_ids order (a live record after a finished one) is applied;
+    the others report `superseded`. Raises the herdr error when
+    `workspace list` itself fails."""
+    spaces = {}
+    if apply:
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = herdr_cli or shutil.which("herdr")
+        if not exe:
+            raise OSError("herdr is not on PATH")
+        timeout = LABEL_HERDR_TIMEOUT_SECS if timeout_secs is None else timeout_secs
+        listed = run_herdr(exe, ["workspace", "list"],
+                           env=dict(os.environ) if env is None else env, timeout_secs=timeout)
+        spaces = {w.get("workspace_id"): w for w in listed.get("workspaces", [])
+                  if isinstance(w, dict)}
+    rows, rendered = [], {}
+    for tid in launcher_task_ids(rd):
+        row = {"task_id": tid, "label": None, "status": "unsupported",
+               "workspace_id": None, "reason": None}
+        rows.append(row)
+        try:
+            task, label = _present_row(rd, tid)
+        except (OSError, ValueError) as exc:
+            row["reason"] = f"unreadable: {exc}"[:200]
+            continue
+        row.update(label=label, workspace_id=label_target(task))
+        rendered[tid] = task
+    # Last claimant wins, so two records never fight over one workspace.
+    claimant = {row["workspace_id"]: row["task_id"] for row in rows
+                if row["task_id"] in rendered and row["workspace_id"]}
+    stopped = False
+    for row in rows:
+        if row["task_id"] not in rendered:
+            continue
+        ws = row["workspace_id"]
+        if not apply:
+            row["status"] = "rendered"
+        elif stopped:
+            row["reason"] = "herdr-unavailable"
+        elif ws is None:
+            row["reason"] = "no-workspace"
+        elif claimant[ws] != row["task_id"]:
+            row.update(status="skipped", reason="superseded")
+        elif ws not in spaces:
+            row["reason"] = "workspace-gone"
+        else:
+            result = apply_workspace_label(rendered[row["task_id"]], row["label"],
+                                           herdr_cli=herdr_cli, env=env,
+                                           workspace=spaces[ws], timeout_secs=timeout_secs)
+            row.update(status=result["status"], reason=result["reason"])
+            stopped = result["reason"] == "herdr-unavailable"
+    return rows, stopped
+
+
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
                    ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
@@ -4129,6 +4361,7 @@ def _main(argv=None) -> int:
     add("rollover", fenced=True)
     wt = add("write-task", "--task-id", "--json", fenced=True)
     wt.add_argument("--binding", default=None)
+    wt.add_argument("--present", action="store_true")
     # Launcher-scope only: no --binding, so _fenced_scoped never resolves a
     # lead subtree. A lead that needs a fresh start hands back to the director.
     add("reset-task", "--task-id", "--new-task-id", "--json", fenced=True)
@@ -4264,6 +4497,12 @@ def _main(argv=None) -> int:
     vc.add_argument("--validate-only", action="store_true")
     add("merge-authority")
     add("merge-ready", "--task-id", "--pr-json", "--repo-json")
+    pt = add("present-task")
+    pt.add_argument("--task-id", default=None)
+    pt.add_argument("--all", action="store_true")
+    pt.add_argument("--apply", action="store_true")
+    pt.add_argument("--session", default=None)
+    pt.add_argument("--fence", type=int, default=None)
     ns = ap.parse_args(argv)
 
     if ns.cmd == "resume-owner":
@@ -4399,6 +4638,8 @@ def _main(argv=None) -> int:
         print(f"rollover: queued /clear for pane {pane}; end this turn now")
         return 0
     if ns.cmd == "write-task":
+        _require(not (ns.present and ns.binding is not None),
+                 "--present is launcher scope only; drop it with --binding")
         with _fenced_scoped(ns) as (rd, base):
             if ns.binding is not None:
                 require_not_consumed(rd, ns.binding)
@@ -4428,6 +4669,13 @@ def _main(argv=None) -> int:
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
+            if ns.present:
+                # Same transaction, from the bytes on disk, so labels never regress.
+                written = json.loads(read_payload_text(dest))
+                result = apply_workspace_label(
+                    written, task_label(written, task_ship_handoff(rd, ns.task_id, written)))
+                if result["status"] == "unsupported":
+                    sys.stderr.write(f"present: {result['reason']}\n")
             return 0
     if ns.cmd == "reset-task":
         _require(valid_task_id(ns.task_id), "invalid task-id")
@@ -6397,6 +6645,39 @@ def _main(argv=None) -> int:
         except (OSError, ValueError):
             return 1
         return 0 if should_dispatch_review(task, ns.head_sha) else 1
+    if ns.cmd == "present-task":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require((ns.task_id is None) == ns.all, "pass exactly one of --task-id or --all")
+        _require(ns.task_id is None or valid_task_id(ns.task_id), "invalid task-id")
+        _require(not ns.apply or (ns.session and ns.fence is not None),
+                 "--apply needs --session and --fence")
+        if not ns.apply:
+            rd = repo_dir(ns.repo_slug)
+            if ns.all:
+                for row in present_all(rd, apply=False)[0]:
+                    print(json.dumps(row, sort_keys=True))
+                return 0
+            print(_present_row(rd, ns.task_id)[1])
+            return 0
+        # Renames run under the owner transaction so no writer interleaves.
+        with _fenced(ns) as rd:
+            if ns.all:
+                try:
+                    rows, stopped = present_all(rd, apply=True)
+                except Exception as exc:  # noqa: BLE001 -- DispatchError is lazily imported
+                    _require(False, f"present-task: workspace list failed: {exc}")
+                for row in rows:
+                    print(json.dumps(row, sort_keys=True))
+                if stopped:
+                    sys.stderr.write("[X] present-task: herdr-unavailable\n")
+                return 1 if stopped else 0
+            task, label = _present_row(rd, ns.task_id)
+            result = apply_workspace_label(task, label)
+            print(label)
+            if result["status"] == "unsupported":
+                sys.stderr.write(f"[X] present-task: {result['reason']}\n")
+                return 1
+            return 0
     if ns.cmd == "merge-ready":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
