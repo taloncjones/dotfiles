@@ -3861,6 +3861,70 @@ def test_present_all_orders_terminal_first():
         fx.close()
 
 
+def write_task_argv(fx, record, *extra):
+    return ("write-task", "--repo-slug", fx.slug, "--repo-path", str(fx.repo),
+            "--session", "S", "--fence", "1", "--task-id", record["task_id"],
+            "--json", json.dumps(record), *extra)
+
+
+def fixture_record(fx, **fields):
+    return {**json.loads(fx.task_file.read_text()), **fields}
+
+
+def test_write_task_present_relabels():
+    fx = Fixture()
+    try:
+        record = fixture_record(fx, status="reviewed", title="Fix bus", workspace_id="w1")
+        out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert workspace_labels(fx) == {"w1": "open-pr?: Fix bus"}, workspace_labels(fx)
+        record["pr_number"] = 5
+        out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert workspace_labels(fx) == {"w1": "co-review: Fix bus"}, workspace_labels(fx)
+    finally:
+        fx.close()
+
+
+def test_write_task_without_present_no_herdr():
+    fx = Fixture()
+    try:
+        record = fixture_record(fx, status="reviewed", workspace_id="w1")
+        out = core_cli(fx, *write_task_argv(fx, record), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert fx.calls() == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_write_task_present_failure_keeps_write():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        record = fixture_record(fx, status="blocked", workspace_id="w1")
+        out = core_cli(fx, *write_task_argv(fx, record, "--present"), herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert "present: " in out.stderr, out.stderr
+        assert json.loads(fx.task_file.read_text())["status"] == "blocked"
+    finally:
+        fx.close()
+
+
+def test_write_task_present_refuses_binding():
+    fx = Fixture()
+    try:
+        before = fx.task_file.read_text()
+        record = fixture_record(fx, status="blocked")
+        out = core_cli(fx, *write_task_argv(fx, record, "--present", "--binding", "b1"),
+                       herdr_on_path=True)
+        assert out.returncode == 2, out
+        assert "--present" in out.stderr, out.stderr
+        assert fx.task_file.read_text() == before
+        assert fx.calls() == [], fx.calls()
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -3996,6 +4060,10 @@ for name, test in (
     ("present-task --apply refuses a stale fence before herdr", test_present_task_apply_refuses_stale_fence),
     ("present-task --all exit and stop rules", test_present_all_exit_and_stop_rules),
     ("present-task --all labels live tasks after terminal ones", test_present_all_orders_terminal_first),
+    ("write-task --present relabels from the written record", test_write_task_present_relabels),
+    ("write-task without --present makes no herdr call", test_write_task_without_present_no_herdr),
+    ("write-task --present failure keeps exit 0 and the record", test_write_task_present_failure_keeps_write),
+    ("write-task --present refuses --binding", test_write_task_present_refuses_binding),
 ):
     check(name, test)
 

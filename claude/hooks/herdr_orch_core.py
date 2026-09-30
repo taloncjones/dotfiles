@@ -4361,6 +4361,7 @@ def _main(argv=None) -> int:
     add("rollover", fenced=True)
     wt = add("write-task", "--task-id", "--json", fenced=True)
     wt.add_argument("--binding", default=None)
+    wt.add_argument("--present", action="store_true")
     # Launcher-scope only: no --binding, so _fenced_scoped never resolves a
     # lead subtree. A lead that needs a fresh start hands back to the director.
     add("reset-task", "--task-id", "--new-task-id", "--json", fenced=True)
@@ -4637,6 +4638,8 @@ def _main(argv=None) -> int:
         print(f"rollover: queued /clear for pane {pane}; end this turn now")
         return 0
     if ns.cmd == "write-task":
+        _require(not (ns.present and ns.binding is not None),
+                 "--present is launcher scope only; drop it with --binding")
         with _fenced_scoped(ns) as (rd, base):
             if ns.binding is not None:
                 require_not_consumed(rd, ns.binding)
@@ -4666,6 +4669,13 @@ def _main(argv=None) -> int:
             _require_record_within_reader_limit(rec)
             create_payload_dir(base / "tasks")
             write_json_atomic(dest, rec)
+            if ns.present:
+                # Same transaction, from the bytes on disk, so labels never regress.
+                written = json.loads(read_payload_text(dest))
+                result = apply_workspace_label(
+                    written, task_label(written, task_ship_handoff(rd, ns.task_id, written)))
+                if result["status"] == "unsupported":
+                    sys.stderr.write(f"present: {result['reason']}\n")
             return 0
     if ns.cmd == "reset-task":
         _require(valid_task_id(ns.task_id), "invalid task-id")
