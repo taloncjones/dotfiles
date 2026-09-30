@@ -319,18 +319,25 @@ blockers to development. `INCOMPLETE` reports missing evidence. Human approval
 and explicit merge permission remain separate; cleanup refusal preserves the
 snapshot.
 
-## Publish (optional)
+## Publish
 
-Default is post nothing: the report stays in `RUN_DIR`. The only publishable
-item is one marker comment on the reviewed PR, and only for a PR gate whose
-evaluator verdict is `APPROVE` or `CHANGES` -- never for `INCOMPLETE` or a
-local no-PR review. A `--fix` coordinator publishes at most once, after its
-final gate.
+The only publishable item is one marker comment on the reviewed PR, for a PR
+gate only -- never for a local no-PR review. A `--fix` coordinator publishes
+at most once, after its final gate.
 
-The herdr post gate enforcing this is a momentum guardrail, not a security boundary:
-it stops a well-meaning agent posting through `gh` as found on PATH. Run
-the marker post and each supersede delete as a plain `gh` command. The
-shim runs a delete only on this account's own co-review marker.
+- `APPROVE`: post the marker without asking, run the supersede step, and
+  print `[INFO] posted co-review marker on #<PR>: APPROVE` in the same turn.
+- `CHANGES`: do not post. The marker stays in `RUN_DIR` and the report. If
+  the owner asks for it on the PR, register it as a draft (below) and wait
+  for the go.
+- `INCOMPLETE`: never posted; the marker grammar has no such verdict.
+
+The herdr post gate enforcing this is a momentum guardrail, not a security
+boundary: it stops a well-meaning agent posting through `gh` as found on
+PATH. In a work repository the gh shim lets an `APPROVE` marker through on a
+PR this account authored and refuses it on anyone else's PR; supersede
+deletes never need a go, and the shim runs a delete only on this account's
+own co-review marker. A personal repository needs no go at all.
 
 Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
@@ -338,22 +345,8 @@ expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
 own valid markers already on the PR (1 when none). No `target_tip`.
 
-Before asking for the go, read the PR's comments once (the `gh api
---paginate --slurp` call below, run before `gh pr comment`) and compute
-`round` from it.
-
-The go: ask in prose, "Say `post it` to post the marker." End the turn.
-Posting is never an `AskUserQuestion` option, recommended or not. The go is
-a typed user message with a sentence that says `post it` or `post all` as a
-phrase (any case), with no `not`, `n't`, `never` or `no` before the phrase
-and no closing `?`. Anything else, including any `AskUserQuestion` answer,
-is no. A personal repository needs no go.
-
-In a herdr pane (`HERDR_ENV=1`) the gh shim refuses this post: only a
-Claude hook mints the typed go, so it never reaches Codex. Leave the marker
-in `RUN_DIR` and tell the owner it is ready to post.
-
-On the go:
+Before posting, read the PR's comments once (the `gh api --paginate --slurp`
+call below, run before `gh pr comment`) and compute `round` from it.
 
 ```bash
 gh pr comment "$PR" --body-file "$RUN_DIR/marker.md" || exit 2
@@ -365,12 +358,35 @@ uv run --no-project python "$REVIEW_ROOT/claude/skills/co-review/scripts/pr_read
 # gh api -X DELETE "repos/$OWNER/$REPO_NAME/issues/comments/<id>"
 ```
 
-Only on the comment's exit 0 does the supersede step run. If a post landed
-but supersede did not finish, the owner types `post it` again and only the
-supersede step reruns.
+Only on the comment's exit 0 does the supersede step run. If supersede did
+not finish, re-read the comments and rerun only the supersede step. If `gh
+pr comment` did not exit 0, let that Bash call return first, then read the
+comments: post again only when the marker is absent.
 
-Never reply to, resolve, or react to a reviewer thread. Draft any reply in
-chat for the owner to post themselves.
+A draft is the owner's view of one gated post. When the shim refuses a post
+(a `CHANGES` marker the owner asked for, or a marker on a PR this account did
+not author), register it with the exact argv it names:
 
-Never edit the PR title or body unless the owner types `edit the pr body`
-(same phrase rule as the posting go); that go covers one edit.
+```bash
+python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-file "$RUN_DIR/marker.md"
+```
+
+Show the printed `draft <hash>` line and the body in chat and end the turn.
+The go is a typed message with a sentence saying `post it` (the last draft
+shown), `post all` (every draft in that message) or `post <hash>`, with no
+`not`, `n't`, `never` or `no` before the phrase and no closing `?`. Posting is never an `AskUserQuestion` option, recommended or not;
+an `AskUserQuestion` answer is never a go. An approved draft stays approved
+across later messages until it is posted. If an approved post fails, let
+the Bash call return, read the PR, and post again only when the text is
+absent; re-register it and tell the owner the earlier attempt failed and a
+duplicate is possible.
+
+In a herdr pane (`HERDR_ENV=1`) only a Claude hook turns a typed go into an
+approved draft, so a gated post never reaches Codex. Leave the draft in
+`RUN_DIR` and tell the owner it is ready to post.
+
+Never reply to, resolve, or react to a reviewer thread on your own. Draft
+any reply as above and wait for the go.
+
+Edit the title or body of a PR this account authored without asking, and
+print `[INFO] edited PR #<PR> body: <why>` in the same turn.
