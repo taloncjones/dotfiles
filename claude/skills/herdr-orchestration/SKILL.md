@@ -1310,13 +1310,16 @@ repository.
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
 `--repo-json` files); its `handoff_state` is `none`, `stale` (the handoff's head
-is not the live head) or `current`. The ship agent is named exactly its
-launch id. It is live only when `herdr agent get <ship_launch_id>` finds it
-in state `working`; `idle`, `done` or not found (including a launch that
-never started) is not live, because agents stay present after their work
-ends. Before any dispatch, and whenever `handoff_state` is not `none`, close
-a pinned ship agent that is present but not live, as for review panes: send
-`esc`, then `/exit` to the named agent, then close that exact pane if it
+is not the live head) or `current`. The ship agent's herdr name is the
+`agent` field of the `workers[]` row whose `launch_id` equals
+`ship_launch_id` (32 characters, `ship_agent_name` in `herdr_dispatch.py`;
+the launch id itself is longer and does not resolve). It is live only when
+`herdr agent get <that agent>` finds it in state `working`; `idle`, `done`
+or not found (including a launch that never started) is not live, because
+agents stay present after their work ends. Before any dispatch, and
+whenever `handoff_state` is not `none`, close a pinned ship agent that is
+present but not live, as for review panes: send `esc`, then `/exit` to
+that agent name, then close that exact pane if it
 remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
@@ -1828,7 +1831,7 @@ the new `status`; that write is the authoritative record.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                 | `merged`                                       | merged                  | yes       |
 | reviewed                                     | `merge-authority` director: section 6a gates pass, PR confirmed `MERGED`                                                                                                                               | `merged` (`merged_by: director`)               | merged                  | yes       |
 | reviewed                                     | PR `MERGED` at `review_head_sha`, director repo (section 6a recovery, before the stale-verdict rule)                                                                                                   | `merged` (`merged_by: observed`)               | merged                  | yes       |
 
@@ -1905,7 +1908,7 @@ Rules (these are outward-facing writes, so treat them carefully):
   in herdr agent sessions by the gh shim (`bin/herdr-shims/gh`,
   `claude/hooks/gh_post_shim.py`), which gates only posted text at exec
   time -- every other `gh` write (`workflow run`, `run download`, `pr
-  merge`, ...) passes -- with `claude/hooks/pr_post_guard.py` as the
+merge`, ...) passes -- with `claude/hooks/pr_post_guard.py` as the
   typed-go source and second layer. Never send `gh` to another pane with
   `herdr pane run`: that shell has no shim, and the hook refuses it.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
