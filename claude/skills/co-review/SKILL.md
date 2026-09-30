@@ -497,7 +497,7 @@ uv run --no-project python "$GATE_REPORT" carry-forward --repo "$REPO" \
 ```
 
 Exit 0 means every proof holds: no branch-authored commit since the gated
-head, every branch-touched file changed only by the target's own hunks, and
+head, every branch-touched file changed only by the target's own hunks and modes, and
 no file outside the branch's own set. Exit 1 means the head needs a gate;
 the record's `reasons` say why. The record grants nothing beyond naming the
 prior run it extends.

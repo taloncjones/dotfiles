@@ -121,6 +121,40 @@ class CarryForwardTests(unittest.TestCase):
         self.assertTrue(any("other.txt" in reason for reason in record["reasons"]),
                         record["reasons"])
 
+    def test_merge_that_flips_a_branch_file_mode_fails(self):
+        self.advance_main("main_only.txt", "a\nb\n")
+        git(self.repo, "checkout", "-q", "topic")
+        git(self.repo, "merge", "-q", "--no-commit", "main")
+        git(self.repo, "update-index", "--chmod=+x", "feature.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("feature.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
+    def test_merge_that_turns_a_branch_file_into_a_symlink_fails(self):
+        self.advance_main("main_only.txt", "a\nb\n")
+        git(self.repo, "checkout", "-q", "topic")
+        git(self.repo, "merge", "-q", "--no-commit", "main")
+        (self.repo / "feature.txt").unlink()
+        (self.repo / "feature.txt").symlink_to("shared.txt")
+        git(self.repo, "add", "feature.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("feature.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
+    def test_upstream_mode_flip_merged_in_passes(self):
+        git(self.repo, "checkout", "-q", "main")
+        (self.repo / "shared.txt").chmod(0o755)
+        git(self.repo, "commit", "-q", "-a", "-m", "main makes shared executable")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "main")
+        git(self.repo, "checkout", "-q", "topic")
+        git(self.repo, "merge", "-q", "--no-edit", "main")
+        record = self.proof()
+        self.assertTrue(record["pass"], record["reasons"])
+
     def test_rebased_branch_is_not_an_ancestor(self):
         self.advance_main("main_only.txt", "a\nb\n")
         git(self.repo, "checkout", "-q", "topic")

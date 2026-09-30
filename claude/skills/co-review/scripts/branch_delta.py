@@ -53,6 +53,15 @@ def _body(repo: Path, old: str, new: str, path: str) -> list[str] | None:
     return lines
 
 
+def _modes(repo: Path, old: str, new: str, path: str) -> tuple[str, str]:
+    """Old and new mode of one file's diff (type included); empty when the mode is unchanged."""
+    raw = _review.git(repo, *_DIFF, "--raw", "-z", old, new, "--", path)
+    fields = raw.decode("utf-8", "surrogateescape").split(" ", 2)
+    if len(fields) < 3 or fields[0].lstrip(":") == fields[1]:
+        return ("", "")
+    return (fields[0].lstrip(":"), fields[1])
+
+
 def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict:
     """Prove head differs from gated_head only by merges of upstream (spec R3-R5)."""
     record = {
@@ -91,17 +100,23 @@ def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict
             upstream_ref = _body(repo, old_base, new_base, path)
             own_then = _body(repo, old_base, gated, path)
             own_now = _body(repo, new_base, current, path)
-            same_upstream = upstream_now is not None and upstream_now == upstream_ref
-            same_own = own_then is not None and own_then == own_now
+            same_upstream = (
+                upstream_now is not None and upstream_now == upstream_ref
+                and _modes(repo, gated, current, path) == _modes(repo, old_base, new_base, path)
+            )
+            same_own = (
+                own_then is not None and own_then == own_now
+                and _modes(repo, old_base, gated, path) == _modes(repo, new_base, current, path)
+            )
             proof(f"hunks {path}", ["diff", gated, current, "--", path],
                   [f"upstream-equal: {str(same_upstream).lower()}",
                    f"branch-equal: {str(same_own).lower()}"])
             if None in (upstream_now, upstream_ref, own_then, own_now):
                 reasons.append(f"{path}: binary change")
             elif not same_upstream:
-                reasons.append(f"{path}: change since the gated head is not upstream's")
+                reasons.append(f"{path}: hunk or mode change since the gated head is not upstream's")
             elif not same_own:
-                reasons.append(f"{path}: branch hunks changed")
+                reasons.append(f"{path}: branch hunks or mode changed")
         scope = proof("scope", ["diff", "--name-only", new_base, current],
                       _names(repo, new_base, current))
         extra = sorted(set(scope) - set(own))
