@@ -18,6 +18,15 @@ FAIL=0
 REPO_ROOT=$(pwd)
 export REPO_ROOT
 
+# An armed-pane `gh`: any check that is not itself testing the unarmed gate
+# prepends this to PATH so the new director_rollover armed check passes
+# through to the behavior under test.
+ARMED_GH_BIN="$TMPDIR/rollover-armed-gh.$$"
+mkdir -p "$ARMED_GH_BIN"
+printf '#!/bin/sh\n# gh_post_shim.py\nexit 0\n' > "$ARMED_GH_BIN/gh"
+chmod +x "$ARMED_GH_BIN/gh"
+export ARMED_GH_BIN
+
 # check LABEL -- runs a sh snippet on stdin in a fresh fixture: a git repo
 # with a fake origin (FX_REPO, FX_SLUG), temp config/coordination roots, and
 # CORE pointing at the core CLI. Exit 0 pass, non-zero fail.
@@ -600,6 +609,7 @@ test "$(grep -c 'send-text' "$FX/herdr.log")" = 1
 SH
 
 check "hook: silent on every gate failure" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
 H="python3 $REPO_ROOT/claude/hooks/director_rollover.py"
 SID=22222222-2222-4222-8222-222222222222
 SOCK=/tmp/cc-socks/$$.sock
@@ -621,6 +631,7 @@ $CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" --session 111111
 SH
 
 check "hook: clear in the owning director wraps the INFO block and re-claims" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
 SOCK=/tmp/cc-socks/$$.sock
 F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
@@ -638,6 +649,7 @@ assert re.search(r"fence=%d$" % (int(sys.argv[2]) + 1), d["additionalContext"], 
 SH
 
 check "hook: silent when the lease pid is not an ancestor" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
 sleep 60 & SIB=$!
 SOCK=/tmp/cc-socks/$SIB.sock
 $CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
@@ -650,6 +662,7 @@ test ! -s "$FX/h"
 SH
 
 check "hook: a failing claim wraps the WARNING block and still exits 0" <<'SH'
+export PATH="$ARMED_GH_BIN:$PATH"
 SOCK=/tmp/cc-socks/$$.sock
 $CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
@@ -663,6 +676,46 @@ import json, sys
 d = json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"]
 assert d.startswith("[WARNING] herdr director rollover: lease NOT re-established ("), d
 ' "$FX/h"
+SH
+
+check "hook: unarmed pane (plain gh on PATH) warns before any lease gate -- case unarmed" <<'SH'
+mkdir -p "$FX/plaingh"
+printf '#!/bin/sh\nexit 0\n' > "$FX/plaingh/gh"
+chmod +x "$FX/plaingh/gh"
+SOCK=/tmp/cc-socks/$$.sock
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
+printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | PATH="$FX/plaingh:$PATH" HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" \
+    python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h" && rc=0 || rc=$?
+test "$rc" = 0
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"]
+assert d.startswith("[WARNING]"), d
+assert "unarmed" in d, d
+' "$FX/h"
+# no lease gate ran: the fixture claim is untouched
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+SH
+
+check "hook: armed pane (gh shim on PATH) skips the unarmed warning -- case unarmed" <<'SH'
+SOCK=/tmp/cc-socks/$$.sock
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+out=$(printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | PATH="$ARMED_GH_BIN:$PATH" HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" \
+    python3 "$REPO_ROOT/claude/hooks/director_rollover.py")
+test -z "$out"
+SH
+
+check "hook: pr_post_guard import failure exits 0 silently -- case unarmed" <<'SH'
+mkdir -p "$FX/noguard"
+cp "$REPO_ROOT/claude/hooks/director_rollover.py" "$FX/noguard/"
+out=$(printf '{"hook_event_name":"SessionStart","source":"startup","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
+  | HERDR_ENV=1 python3 "$FX/noguard/director_rollover.py")
+test -z "$out"
 SH
 
 check "resume-helper: idle pane at the INFO block with an empty input -> one resume line" <<'SH'
@@ -1015,7 +1068,7 @@ SOCK=/tmp/cc-socks/$$.sock
 $CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
 printf '{"hook_event_name":"SessionStart","source":"clear","agent_type":"director","session_id":"22222222-2222-4222-8222-222222222222","cwd":"%s"}' "$FX_REPO" \
-  | PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" \
+  | PATH="$FX/bin:$ARMED_GH_BIN:$PATH" HERDR_PANE_ID=w9:p1 HERDR_ENV=1 CLAUDE_CODE_MESSAGING_SOCKET="$SOCK" \
     python3 "$REPO_ROOT/claude/hooks/director_rollover.py" > "$FX/h"
 python3 -c '
 import json, sys
@@ -1081,7 +1134,7 @@ assert c.current_input(screen(num_footer)) == "", num_footer
 ' "$REPO_ROOT" "$FX/footers.json"
 SH
 
-check "hook: executable, python3 shebang, registered on clear|compact" <<'SH'
+check "hook: executable, python3 shebang, registered on startup|resume|clear|compact" <<'SH'
 test -x "$REPO_ROOT/claude/hooks/director_rollover.py"
 head -n 1 "$REPO_ROOT/claude/hooks/director_rollover.py" | grep -qxF '#!/usr/bin/env python3'
 python3 - <<'PY'
@@ -1089,7 +1142,7 @@ import json, os
 t = json.load(open(os.environ["REPO_ROOT"] + "/claude/settings.json.tmpl"))
 hits = [e for e in t["hooks"]["SessionStart"]
         if any(h.get("command") == "~/.claude/hooks/director_rollover.py" for h in e["hooks"])]
-assert len(hits) == 1 and hits[0]["matcher"] == "clear|compact", hits
+assert len(hits) == 1 and hits[0]["matcher"] == "startup|resume|clear|compact", hits
 PY
 SH
 

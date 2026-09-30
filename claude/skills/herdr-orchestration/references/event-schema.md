@@ -32,7 +32,7 @@ watch uses the same predicate -- `WATCH_DIRS` does not include
 `workspaces/*.events.jsonl` -- so both wake paths agree on what "something
 happened" means. The hint remains authoritative for `fold_status`.
 
-The `$CORE watch` subcommand (director wake, SKILL.md section 1 step 6)
+The `$CORE watch` subcommand (director wake, SKILL.md section 1 step 7)
 emits only the closed stdout vocabulary `signal` / `heartbeat` and never
 appends events.
 

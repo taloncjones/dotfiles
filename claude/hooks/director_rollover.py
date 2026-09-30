@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""SessionStart hook: re-establish a herdr director's lease after /clear or
-compaction, in place, and orient the fresh context.
+"""SessionStart hook: warn an unarmed director pane, and re-establish a herdr
+director's lease after /clear or compaction, in place.
 
 /clear gives the director a new session id but keeps its process, pid, and
 messaging socket (probed live 2026-09-22), so the core's resume-owner verb
@@ -13,6 +13,12 @@ After a /clear it also starts a detached `resume-helper` that types one
 `resume director` line into the pane once the fresh context is idle, so a
 rollover needs no keystroke. The helper holds no authority of its own: it
 sends only while the canonical lease is the one this hook claimed.
+
+An unarmed pane (first `gh` on PATH is not the herdr shim) gets the
+UNARMED_WARNING on any source (startup|resume|clear|compact) and returns before
+the lease gate on purpose: the lease work is moot until the pane is relaunched.
+The warning is scoped to agent_type director; other unarmed sessions get
+pr_post_guard's own denial. Only `gh` is probed, matching pr_post_guard.
 
 Always exits 0. A failure after the gates prints the WARNING block so the
 director re-runs its preflight instead of acting unfenced.
@@ -38,6 +44,14 @@ WARNING = (
     "Run the herdr-orchestration section-1 preflight; if it reports BUSY, stop\n"
     "and ask the human (takeover is a human decision)."
 )
+UNARMED_WARNING = (
+    "[WARNING] herdr director unarmed: `gh` on this pane's PATH is not the\n"
+    "herdr gh shim, so pr_post_guard.py will fail closed on every gh-mentioning\n"
+    "Bash call, including read-only queries. This pane's claude()/director()\n"
+    "shell predates the arming logic, or a plain `reload` left it stale.\n"
+    "Run /exit, then `exec zsh -l` to drop this shell, then relaunch with\n"
+    "`director`."
+)
 AUTO_RESUME = 'auto-resume: a "resume director" line will arrive in this pane when it is idle.'
 RESUME_LINE = "resume director"
 RESUME_POLL_SECS = 1
@@ -54,6 +68,14 @@ def load_core():
     sys.path.insert(0, str(HOOKS))
     import herdr_orch_core as core
     return core
+
+
+def pane_unarmed() -> bool:
+    """True when the first `gh` on this hook's PATH is not the herdr shim
+    (pr_post_guard.shim_armed, which wraps is_shim)."""
+    sys.path.insert(0, str(HOOKS))
+    import pr_post_guard
+    return not pr_post_guard.shim_armed()
 
 
 def spawn_resume_helper(info, session, cwd) -> bool:
@@ -87,9 +109,18 @@ def main() -> int:
         return 0
     if payload.get("hook_event_name") != "SessionStart":
         return 0
+    is_director = os.environ.get("HERDR_ENV") == "1" and payload.get("agent_type") == "director"
+    if is_director:
+        try:
+            unarmed = pane_unarmed()
+        except Exception:  # noqa: BLE001 -- the hook must exit 0 on any import failure
+            unarmed = False
+        if unarmed:
+            emit(UNARMED_WARNING)
+            return 0
     if payload.get("source") not in ("clear", "compact"):
         return 0
-    if os.environ.get("HERDR_ENV") != "1" or payload.get("agent_type") != "director":
+    if not is_director:
         return 0
     session = payload.get("session_id")
     cwd = payload.get("cwd")

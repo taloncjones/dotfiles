@@ -849,9 +849,9 @@ class GateReportTests(unittest.TestCase):
         self.assertEqual(body.count(f"<!-- co-review-audit head={SHA_A} run=run-1 -->"), 1)
         self.assertTrue(body.startswith("<!-- co-review-audit"))
         for text in ("Co-review gate: APPROVE", "- Run: run-1", f"- Head: {SHA_A}",
-                     "- Tier: full (4 seats)", "- CI: 1/1 checks passed",
-                     "- Report: ~/report.json"):
+                     "- Tier: full (4 seats)", "- CI: 1/1 checks passed"):
             self.assertIn(text, body)
+        self.assertNotIn("Report:", body)
         self.assertNotIn("Substitute", body)
 
     def test_audit_comment_refuses_non_approval(self):

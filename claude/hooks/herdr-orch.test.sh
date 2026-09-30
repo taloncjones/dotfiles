@@ -11411,6 +11411,87 @@ assert c.row_settlement({"status": "merged", "workers": [row]}, 0, done=None, re
                         head=h, payload_root=tempfile.mkdtemp()) == "task-terminal"
 PY
 
+check "ship handoff helpers: ship_launch_dir refuses odd ids and merge_ready reads through them" <<'PY'
+import importlib.util, inspect, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+rd = Path(tempfile.mkdtemp())
+for bad in (None, "", 5, "../x", "a/b", "a..b"):
+    assert c.ship_launch_dir(rd, "PROJ-1", bad) is None, bad
+assert c.ship_launch_dir(rd, "PROJ-1", "ship-x-1") == rd / "artifacts" / "PROJ-1" / "ship-ship-x-1"
+source = inspect.getsource(c.merge_ready)
+assert "ship_launch_dir(" in source and "read_ship_handoff(" in source, "merge_ready uses the helpers"
+assert '"ship.json"' not in source, "merge_ready no longer reads ship.json itself"
+PY
+
+check "row_settlement: a ship row settles only on its own ship.json" <<'PY'
+import importlib.util, json, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "claude/hooks")
+spec = importlib.util.spec_from_file_location("core", "claude/hooks/herdr_orch_core.py")
+c = importlib.util.module_from_spec(spec); spec.loader.exec_module(c)
+h = "a" * 40
+rd = Path(tempfile.mkdtemp())
+def row(phase, lid, pane, **kw):
+    return {"phase": phase, "workspace_id": "w1", "runtime": "claude", "launch_id": lid,
+            "pane_id": pane, "source_head_sha": h, "agent": lid, **kw}
+impl, ship = row("implement", "I", "w1:p1"), row("ship", "S1", "w1:p3")
+task = {"task_id": "PROJ-1", "status": "reviewed", "workers": [impl, ship]}
+def rs(i):
+    return c.row_settlement(task, i, done=None, review=None, head=h,
+                            payload_root=tempfile.mkdtemp(),
+                            ship_handoffs=c.ship_handoff_launches(rd, "PROJ-1", task))
+assert rs(1) is None, "no handoff yet"
+launch_dir = rd / "artifacts" / "PROJ-1" / "ship-S1"
+launch_dir.mkdir(parents=True)
+handoff = launch_dir / "ship.json"
+handoff.write_text(json.dumps({"launch_id": "S2", "verdict": "APPROVE"}))
+assert rs(1) is None, "a handoff naming another launch"
+handoff.write_text("[]")
+assert rs(1) is None, "a non-object handoff"
+handoff.write_text("{")
+assert rs(1) is None, "an unparsable handoff"
+real = rd / "real-ship.json"
+real.write_text(json.dumps({"launch_id": "S1", "verdict": "APPROVE"}))
+handoff.unlink()
+handoff.symlink_to(real)
+assert rs(1) is None, "a symlinked handoff is never read"
+handoff.unlink()
+handoff.write_text(json.dumps({"launch_id": "S1", "verdict": "APPROVE"}))
+assert rs(1) == "handoff-recorded", rs(1)
+assert rs(0) is None, "a ship handoff never settles the implement row"
+handoff.unlink()
+task["workers"][1] = dict(ship, exit_requested="handoff-recorded")
+assert rs(1) == "exit-requested", "a marked row keeps settling after its handoff is gone"
+task["workers"][1] = ship
+task["workers"].append(row("ship", "S2", "w1:p4"))
+assert rs(1) == "superseded", rs(1)
+PY
+
+check "checkin_facts: an idle ship agent settles on its recorded handoff" <<PY
+$LOAD
+rd = tempfile.mkdtemp(); os.makedirs(os.path.join(rd, "tasks"))
+h = "a" * 40
+impl = {"phase": "implement", "workspace_id": "w1", "runtime": "claude", "launch_id": "I",
+        "pane_id": "w1:p1", "source_head_sha": h, "agent": "impl-x"}
+ship = dict(impl, phase="ship", launch_id="ship-x-000000000001", pane_id="w1:p3",
+            agent="ship-x-000000000001")
+task = {"v": 1, "task_id": "PROJ-1", "status": "reviewed", "base_sha": h,
+        "review_head_sha": h, "ship_parked_head": h,
+        "worktree": os.path.join(rd, "gone"), "workers": [impl, ship]}
+poll = {"live": {"w1": "idle"}, "known": {"w1"}, "worktrees": {},
+        "agents": {"w1": [{"name": ship["agent"], "pane_id": "w1:p3", "agent_status": "idle"}]}}
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is False and facts["action"] == "none", facts
+launch_dir = os.path.join(rd, "artifacts", "PROJ-1", "ship-" + ship["launch_id"])
+os.makedirs(launch_dir)
+open(os.path.join(launch_dir, "ship.json"), "w").write(json.dumps({"launch_id": ship["launch_id"]}))
+facts = c.checkin_facts(rd, task, poll, c.state_root().parent)
+assert facts["idle_settled"] is True and facts["action"] == "exit-idle-worker", facts
+PY
+
 check "parse_poll keeps per-workspace agent names and panes" <<PY
 $LOAD
 agents = {"result": {"agents": [

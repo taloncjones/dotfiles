@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import importlib.util
 import json
-import os
 import re
 from pathlib import Path
 
@@ -420,10 +419,6 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
     count = len(ci["check_runs"]) + len(ci["status_contexts"])
     ci_line = (f"{count}/{count} checks passed" if count
                else f"no CI: {preconditions['no_ci']['evidence']}")
-    shown = str(report_path.resolve())
-    home = str(Path.home().resolve())
-    if shown == home or shown.startswith(home + os.sep):
-        shown = "~" + shown[len(home):]
     tier = report["class"]
     seats = report["seats"]
     substitute_lines = tuple(
@@ -441,7 +436,6 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
         f"- Tier: {tier} ({len(_TIER_SEATS[tier])} seats)",
         *substitute_lines,
         f"- CI: {ci_line}",
-        f"- Report: {shown}",
     )
     return "\n".join(lines) + "\n"
 

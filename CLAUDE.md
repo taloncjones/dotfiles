@@ -13,7 +13,7 @@ Personal dotfiles for macOS and Linux. Manages shell config, git, SSH, VS Code s
 ./bootstrap-cloud.sh        # Claude-only setup for ephemeral cloud containers
 update                      # Update dotfiles and dependencies (alias)
 update --ai                 # Refresh only the Claude/Codex layer (no sudo/brew/vscode)
-reload                      # Reload ZSH config (alias)
+reload                      # Replace the shell with a fresh login zsh (alias; re-reads .zshenv)
 setup-claude                # Add CLAUDE.md/.claude to .git/info/exclude in any repo
 ```
 

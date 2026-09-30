@@ -148,10 +148,10 @@ fresh_gate
 mint "post it"
 gh pr comment 5 --body x >/dev/null 2>&1; rc1=$?
 gh pr comment 5 --body x >/dev/null 2>&1; rc2=$?
-if [ "$rc1" = 0 ] && [ "$rc2" = 1 ] && [ "$(log_lines)" = 1 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.post-used" ]; then
-    pass "S5 a post go execs exactly one post"
+if [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && [ "$(log_lines)" = 2 ]; then
+    pass "S5 a post go covers every post until it expires"
 else
-    fail "S5 a post go execs exactly one post (rc=$rc1/$rc2 log=$(log_lines))"
+    fail "S5 a post go covers every post until it expires (rc=$rc1/$rc2 log=$(log_lines))"
 fi
 
 fresh_gate
@@ -245,10 +245,10 @@ mint "edit the pr body"
 gh pr edit 5 --body-file b.md >/dev/null 2>&1; rc2=$?
 gh pr edit 5 --body-file b.md >/dev/null 2>&1; rc3=$?
 gh pr comment 5 --body x >/dev/null 2>&1; rc4=$?
-if [ "$rc1$rc2$rc3$rc4" = 1011 ] && [ "$(log_lines)" = 1 ]; then
-    pass "S8 body edit needs its own go and runs once"
+if [ "$rc1$rc2$rc3$rc4" = 0000 ] && [ "$(log_lines)" = 4 ]; then
+    pass "S8 any go covers body edits and posts alike"
 else
-    fail "S8 body edit needs its own go and runs once (rc=$rc1$rc2$rc3$rc4 log=$(log_lines))"
+    fail "S8 any go covers body edits and posts alike (rc=$rc1$rc2$rc3$rc4 log=$(log_lines))"
 fi
 
 fresh_gate
@@ -267,7 +267,7 @@ mint "post it"
 gh pr comment 5 --help >/dev/null 2>&1; rc1=$?
 gh pr comment 5 --body --help >/dev/null 2>&1; rc2=$?
 gh pr comment 5 --body --help >/dev/null 2>&1; rc3=$?
-if [ "$rc1$rc2$rc3" = 001 ] && [ "$(log_lines)" = 2 ]; then
+if [ "$rc1$rc2$rc3" = 000 ] && [ "$(log_lines)" = 3 ]; then
     pass "S11 --help is a read; --body --help is a post"
 else
     fail "S11 help (rc=$rc1$rc2$rc3 log=$(log_lines))"
@@ -291,7 +291,7 @@ mint "post it"
 map=$(ls "$DOTFILES_POST_GATE_DIR" | sed -n 's/^pid-\([0-9]*\)\.sid$/\1/p')
 CLAUDE_PID="$map" CLAUDE_CODE_SESSION_ID=stale gh pr comment 5 --body x >/dev/null 2>&1; rc1=$?
 CLAUDE_PID="$map" CLAUDE_CODE_SESSION_ID=stale gh pr comment 5 --body x >/dev/null 2>&1; rc2=$?
-if [ -n "$map" ] && [ "$rc1$rc2" = 01 ] && [ "$(log_lines)" = 1 ]; then
+if [ -n "$map" ] && [ "$rc1$rc2" = 00 ] && [ "$(log_lines)" = 2 ]; then
     pass "S13 the hook's pid map binds the go past a stale session id"
 else
     fail "S13 pid map binding (map=$map rc=$rc1$rc2 log=$(log_lines))"
@@ -376,8 +376,8 @@ fi
 
 NL='
 '
-# bypass SHELL CMD KIND: denied with no go; after one go, exactly one run
-# (a delete runs again under the same go).
+# bypass SHELL CMD KIND: denied with no go; after one go, every run passes
+# until the go expires.
 bypass() {
     fresh_gate
     $1 -c "$2" >/dev/null 2>"$T/err" </dev/null
@@ -390,8 +390,7 @@ bypass() {
     first=$(log_lines)
     $1 -c "$2" >/dev/null 2>&1 </dev/null
     second=$(log_lines)
-    want=1
-    [ "$3" = delete ] && want=2
+    want=2
     if [ "$first" = 1 ] && [ "$second" = "$want" ]; then
         pass "B [$1] $2"
     else

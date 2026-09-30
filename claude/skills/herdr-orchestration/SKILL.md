@@ -93,10 +93,17 @@ for the provider's `launch_env` mapping.
 
 1. Assert `HERDR_ENV=1` is set in the environment; if not, stop -- this skill
    only runs inside a Herdr-managed session.
-2. Compute `repo_slug` from `git remote get-url origin` (see
+2. Assert the pane is armed: the first `gh` on PATH must be the herdr shim
+   (`bin/herdr-shims/gh`). An unarmed pane predates the `claude()`/`director()`
+   arming logic or survived a stale `reload`; `pr_post_guard.py` fails closed
+   on every `gh`-mentioning Bash call from it, including read-only queries.
+   On an unarmed pane, stop -- run no claim, dispatch, or PR-CLI call -- and
+   relaunch: `/exit`, then `exec zsh -l` to drop the stale shell, then
+   `director` to relaunch armed.
+3. Compute `repo_slug` from `git remote get-url origin` (see
    references/state-layout.md for the normalization rule); ensure
    `STATE_ROOT/<repo_slug>/` exists.
-3. Claim/refresh ownership:
+4. Claim/refresh ownership:
    - `python3 "$CORE" claim-owner --repo-path <repo_root> --runtime <claude|codex> --repo-slug <slug> --session <id> --host <host> --pid <pid> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
      -> prints a `fence` token on success, or `BUSY` (exit 1) if another
      session holds a live claim. On `BUSY`, yield to read-only status/triage
@@ -176,10 +183,10 @@ for the provider's `launch_env` mapping.
      `settings.json.tmpl` (it would apply to every session of the account).
 
    - Regenerate the board with `bash "$TODOS" dashboard --runtime "$ORCH_RUNTIME"`, retaining `--personal` for an intentional personal account in a work repo. Add `--open` on the initial claim only. This is best-effort: note a non-zero exit in the turn summary and continue the action. The canonical setup above supplies `$TODOS`; never borrow another runtime's personal installation path.
-4. Load and validate `config.json` (schema in references/state-layout.md).
+5. Load and validate `config.json` (schema in references/state-layout.md).
    Missing or invalid config refuses mutating actions with a concrete
    message; triage/status still work read-only where possible.
-5. **Selected-runtime readiness (owner only, after config validation).**
+6. **Selected-runtime readiness (owner only, after config validation).**
    New native Claude and Codex dispatches use the selected runtime's resolver:
    `python3 "$RUNTIME" route --runtime <claude|codex> --role <controller|planner|implementation|reviewer|plan_reviewer|development_reviewer|read_only|mechanical|think> --risk <normal|critical>`.
    Step-to-worker defaults and the two effort-raising axes are in
@@ -264,7 +271,7 @@ for the provider's `launch_env` mapping.
      `config.json`'s `effort` block -- never a separate `resolve-model` call
      per role at dispatch time.
 
-6. **Arm the standing wake watch (owner only; a `BUSY` non-owner never
+7. **Arm the standing wake watch (owner only; a `BUSY` non-owner never
    arms).** If `CLAUDE_CODE_MESSAGING_SOCKET` is set (the hook push is the
    wake path), run only the silent backstop: capture `EPOCH=$(date +%s)`
    FIRST, stop any Monitor-based watch this session still has (including one
@@ -369,20 +376,20 @@ so brainstorm/spec/plan judgment is never delegated to the cheap impl model:
   worker directly (only after the contract pinning steps at the end of this
   section; a plan-ready item without a validated on-disk contract is treated as raw),
   using `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  with `--config-json "$ROUTE_CONFIG"` (step 6 snippet) and the native adapter
   (section 8). An unready route blocks this dispatch.
 - **Fast-path item** -- a repo todo, never a Jira key, handoff, or mech
   kickoff, that passes the fast-path maturity check below: dispatch an
   `implement` worker directly with no plan worker, using
   `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), the native adapter
+  with `--config-json "$ROUTE_CONFIG"` (step 6 snippet), the native adapter
   (section 8), the Fast-path implement brief variant
   (references/brief-template.md), and the Contract pinning steps at the end
   of this section.
 - **Raw item** -- the fallback: any other todo or handoff with no spec/plan:
   dispatch a `plan`
   worker using `python3 "$RUNTIME" route --runtime <claude|codex> --role planner --risk normal`
-  with `--config-json "$ROUTE_CONFIG"` (step 5 snippet) and the native adapter
+  with `--config-json "$ROUTE_CONFIG"` (step 6 snippet) and the native adapter
   first. It runs the repo's brainstorm -> spec ->
   independent spec review -> plan -> independent plan review pipeline;
   Claude uses the Codex review skills and Codex uses the Claude review skills.
@@ -595,7 +602,7 @@ phase; it never marks the task `completed` and never dispatches review.
    so the planner exits and the root pane is back at a shell (the implement
    launch requires one); then reuse the task's branch/workspace.
    Resolve `python3 "$RUNTIME" route --runtime <claude|codex> --role implementation --risk normal`
-   again with `--config-json "$ROUTE_CONFIG"` (step 5 snippet), require readiness,
+   again with `--config-json "$ROUTE_CONFIG"` (step 6 snippet), require readiness,
    append a new strict attempt through
    the adapter, update the display role, and give the worker the exact frozen
    plan paths and hashes. Status remains `in-progress`.
@@ -712,7 +719,7 @@ creates a task/worktree/agent/index/record off an escalation's answer.
 `python3 "$CORE" checkin --repo-slug <slug> --session <id> --fence <fence> --messaging-socket "$CLAUDE_CODE_MESSAGING_SOCKET"`
 
 It refreshes the ownership heartbeat itself, so a wake turn runs it IN PLACE
-OF preflight step 3's `refresh-owner` and skips the dashboard regeneration,
+OF preflight step 4's `refresh-owner` and skips the dashboard regeneration,
 which is a kickoff-time concern. It polls `herdr agent list` / `herdr
 workspace list`, correlates each task's records, reads HEAD and ancestry, and
 prints one line per non-terminal task plus a final `changed:` line. It mutates
@@ -735,14 +742,15 @@ and `rollover-due ...` (section 1a).
 
 `exit-idle-worker` means a worker's agent is idle or done and its row is
 settled: plan confirmed, or exit already requested; review verdict
-recorded or retired; implementer approved; superseded; failed launch; or
-terminal task. It names housekeeping, not a status transition, and ranks
+recorded or retired; ship handoff recorded (`handoff-recorded`);
+implementer approved; superseded; failed launch; or terminal task. It names housekeeping, not a status transition, and ranks
 after every other action.
 
 Run the adapter's `settle --launch-id <launch>` for each such row. `busy` or
 `not-settled` means leave it; `occupant-unverified` or `exit-incomplete`
 means report it. `settle` never closes a workspace or a pane any plan,
-implement, repair or ship row used. It also keeps a pane open
+implement or repair row used; a pane that only review and ship rows used
+closes once each of those rows is settled. It also keeps a pane open
 (`pane: kept-occupied`) while a non-shell process still has the foreground
 or process-info fails or comes back empty, even once its own agent is gone.
 After `/exit` is confirmed delivered (`agent_prompted`, `agent_prompt_stalled`
@@ -1019,7 +1027,8 @@ exits 1. Rely on this verb, never re-derive the guard by hand.
 adapter's `sweep` verb
 (`python3 "$DISPATCH" sweep --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree>`)
 for the task workspace first; it exits stale reviewers whose verdict is
-recorded or retired and closes their panes and dead reviewer shells,
+recorded or retired and ship workers whose handoff is recorded, and closes
+their panes and dead reviewer shells,
 subject to the same kept-occupied and confirmed-exit-menu limits as
 `settle` above. Then confirm zero live review agents as before: reconcile live
 `herdr agent` state for this task's workspace and stop any `rev-<...>` agent
@@ -1061,7 +1070,7 @@ helper from publishing.
    it carries the same MANDATORY explicit `--cwd <repo_root>` and post-open
    repo-anchor verification as section 2 step 5 -- the submodule-adjacency guard
    applies to every `worktree create`/`open`, no exceptions.)
-3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional --config-json "$ROUTE_CONFIG"` (step 5 snippet), then reserve and launch a
+3. Resolve the native dispatch with `python3 "$RUNTIME" route --step implementation-review --runtime <claude|codex> --provisional --config-json "$ROUTE_CONFIG"` (step 6 snippet), then reserve and launch a
    fresh review attempt through the adapter. This derives
    `development_reviewer` (Claude Sonnet/high or Codex Sol/high) from the
    selected runtime. `--provisional` is permitted only when availability or
@@ -1316,12 +1325,30 @@ failed with `base-moved` as its only non-`ci` reason. Never on a `current`
 non-APPROVE handoff (section 6a step 0 owns it). Rule (a) with a
 `ship_launch_id` already set means that run stopped before writing
 `ship.json`: relaunch at most once per reviewed head. Relaunch only when
-`ship_relaunch_head` differs from `review_head_sha`, and write
-`ship_relaunch_head: <review_head_sha>` with the new launch. Otherwise
-report the stopped run, park the task, and stop. At dispatch, `write-task`
-the full record with the new `ship_launch_id`, then write the brief. Every
+`ship_relaunch_head` differs from `review_head_sha`,
+and before launching `write-task` `ship_relaunch_head: <review_head_sha>`
+(every other field carried), so the budget is spent before any worker
+can start and an interrupted relaunch parks the task. Otherwise report
+the stopped run, park the task, and stop. To dispatch, write the brief,
+then launch through the adapter:
+`python3 "$DISPATCH" launch --phase ship --sandbox read-only --agent ship-<task prefix> --route-json <route> ...`
+(the same fields as any launch; resolve the route with
+`route --runtime claude --role reviewer`). The adapter refuses any other
+runtime or sandbox, starts the herdr agent under the returned
+`launch_id`, and tells the worker its launch directory. Right after it
+returns, `write-task` the full record with `ship_launch_id: <launch_id>`.
+Decide from the pin alone: a ship row the pin does not name has no
+authority and is never adopted. A ship launch is never reprompted;
+further gate work is a fresh launch. Every
 ship brief carries the exact line `herdr-ship-brief: stop-after-gate` and
 its launch directory, and no merge authority.
+
+Once its `ship.json` is written, the idle ship agent settles as
+`handoff-recorded`: run
+`python3 "$DISPATCH" settle --repo-slug <slug> --session <id> --fence <fence> --task-id <task> --workspace-id <ws> --cwd <worktree> --launch-id <ship_launch_id>`,
+which exits it and closes its pane under the same limits as section 4.
+The manual `esc`, `/exit`, exact-pane-close path above stays for a pinned
+agent with no handoff.
 
 A ship worker's `## Lessons` section in `STATE_ROOT/<slug>/tasks/<task_id>.ship.md`
 is not harvested at check-in; `/post-merge` step 1 reads it.
@@ -1474,7 +1501,7 @@ do not pass its Claude-only aliases to Codex.
 
 One snapshot per dispatch: use `route --runtime <claude|codex> --role
 <planner|implementation|reviewer|plan_reviewer|read_only|mechanical|think> --risk
-<normal|critical> --config-json "$ROUTE_CONFIG"` (step 5 snippet) and optional
+<normal|critical> --config-json "$ROUTE_CONFIG"` (step 6 snippet) and optional
 explicit policy/capability files. Inspect the
 returned readiness, availability reason, model, and effort before launch.
 Catalog presence is not proof that the selected account can run a model.

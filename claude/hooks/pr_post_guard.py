@@ -61,7 +61,8 @@ import rm_guard
 
 CONTEXT_PATH = Path(__file__).resolve().parents[1] / "skills" / "lib" / "workflow_context.py"
 
-GO = {"post it": "post", "post all": "post", "edit the pr body": "body"}
+# Any go phrase covers every gated kind (post, body, delete) until it expires.
+GO = {"post it": "post", "post all": "post", "edit the pr body": "post"}
 GO_PHRASE_RE = re.compile(r"(?<!`)\b(post it|post all|edit the pr body)\b(?!`)", re.IGNORECASE)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 NEGATION_RE = re.compile(r"\b(not|never|no)\b|n't", re.IGNORECASE)
@@ -608,28 +609,17 @@ def check_go(kinds: list[str], sid: str, directory: Path, now: float) -> str | N
     or None. Reads only: the gh shim spends the go (spend_go) at exec."""
     if not kinds:
         return None
-    counts = Counter(kinds)
-    # One go covers exactly one post and one body write.
-    for kind in ("post", "body"):
-        if counts[kind] > 1:
-            return _denial(kind)
     if not SID_RE.match(sid):
         return _denial(kinds[0])
-    marker = marker_kind(directory, sid, now)
-    for kind in counts:
-        needed = "post" if kind == "delete" else kind
-        if marker != needed:
-            return _denial(kind)
-        if kind != "delete" and (directory / f"{sid}.{kind}-used").exists():
-            return _denial(kind)
+    # One unexpired go covers every gated write until TTL; goes typed
+    # mid-turn never reach UserPromptSubmit, so a go is not spent per post.
+    if marker_kind(directory, sid, now) is None:
+        return _denial(kinds[0])
     return None
 
 
 def spend_go(kinds: list[str], sid: str, directory: Path) -> str | None:
     """Claim each post/body go in `kinds`; denial text if one is spent."""
-    for kind in kinds:
-        if kind != "delete" and not claim(directory / f"{sid}.{kind}-used"):
-            return _denial(kind)
     return None
 
 
@@ -725,16 +715,18 @@ def handle_prompt(payload: dict, directory: Path, now: float) -> None:
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SID_RE.match(sid):
         return
-    _unlink(directory / f"{sid}.json")
-    _unlink(directory / f"{sid}.post-used")
-    _unlink(directory / f"{sid}.body-used")
     write_pid_map(directory, sid)
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         return
     kind = go_kind(prompt)
     if kind is None:
+        # A non-go message keeps an unexpired go: the owner may type the go
+        # and then keep talking while the agent works through its posts.
+        if marker_kind(directory, sid, now) is None:
+            _unlink(directory / f"{sid}.json")
         return
+    _unlink(directory / f"{sid}.json")
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     marker_path = directory / f"{sid}.json"
     fd = os.open(marker_path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
