@@ -1963,6 +1963,36 @@ def test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json():
         fixture.close()
 
 
+def test_ship_launch_fits_a_long_task_id_in_the_agent_name_limit():
+    fixture = Fixture()
+    original_uuid4 = herdr_dispatch.uuid.uuid4
+    try:
+        herdr_dispatch.uuid.uuid4 = lambda: herdr_dispatch.uuid.UUID(int=0)
+        long_agent = "ship-2026-09-29-tell-every-sessi"
+        launch_id = f"{long_agent}-000000000000"
+        agent_name = herdr_dispatch.ship_agent_name(launch_id)
+        assert len(agent_name) <= 32 and agent_name.endswith("000000000000"), agent_name
+        fixture.env["FAKE_RUNTIME"] = "claude"
+        fixture.env["FAKE_AGENT"] = agent_name
+        result = herdr_dispatch.launch(
+            repo_slug=fixture.slug, task_id="td-a", session="S", fence=1,
+            workspace_id="w1", pane_id="w1:p1", phase="ship", agent=long_agent,
+            route=ship_route(), cwd=fixture.repo, sandbox="read-only",
+            prompt="run the gate", herdr_cli=str(fixture.bin), env=fixture.env,
+            start_timeout_ms=4000, prompt_timeout_ms=1000,
+        )
+        row = fixture.worker_records()[-1]
+        assert result["launch_id"] == launch_id, result
+        assert row["launch_id"] == launch_id and row["agent"] == agent_name, row
+        start = next(c for c in fixture.calls() if c[:2] == ["agent", "start"])
+        assert start[2] == agent_name and len(start[2]) <= 32, start
+        get = next(c for c in fixture.calls() if c[:2] == ["agent", "get"])
+        assert get[2] == agent_name, get
+    finally:
+        herdr_dispatch.uuid.uuid4 = original_uuid4
+        fixture.close()
+
+
 def test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent():
     fixture = Fixture()
     try:
@@ -3532,6 +3562,7 @@ for name, test in (
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
     ("a ship launch names its agent after its launch id and points at ship.json", test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json),
+    ("a ship launch fits a long task id in the agent name limit", test_ship_launch_fits_a_long_task_id_in_the_agent_name_limit),
     ("a ship launch refuses a writable sandbox, a Codex runtime or an odd agent", test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent),
     ("an unknown phase is refused with the supported list", test_unknown_phase_is_refused_with_the_supported_list),
     ("reprompt refuses a ship launch", test_reprompt_refuses_a_ship_launch),
