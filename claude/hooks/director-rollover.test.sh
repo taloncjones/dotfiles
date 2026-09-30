@@ -694,7 +694,8 @@ SH
 # Scripted herdr for the handover checks; logs every call to $FX/herdr.log.
 # pane split: $FX/fail.split makes it fail; saves the --env token to
 #   $FX/token; runs $FX/on-split if present; replies pane w9:p2.
-# pane run: $FX/fail.run makes it fail; runs $FX/on-run if present.
+# pane run: $FX/fail.run makes it fail; runs $FX/on-run if present, then
+#   $FX/fail.run.after makes it fail.
 # anything else: ok.
 HANDOVER_STUB="$TMPDIR/rollover-handover-stub.$$"
 cat > "$HANDOVER_STUB" <<'STUB'
@@ -709,6 +710,7 @@ case "$1 $2" in
   "pane run")
     [ -e "$FX/fail.run" ] && { echo boom >&2; exit 7; }
     [ -e "$FX/on-run" ] && sh "$FX/on-run" >> "$FX/hook.log" 2>&1
+    [ -e "$FX/fail.run.after" ] && { echo boom >&2; exit 7; }
     printf '{"id":"x","result":{"type":"ok"}}\n' ;;
   *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
 esac
@@ -852,6 +854,28 @@ grep -qxF 'rollover: could not start director in pane w9:p2; this session keeps 
 test "$(tail -n 1 "$FX/herdr.log")" = "pane close w9:p2"
 test -z "$(find "$FX" -name rollover-pending.json)"
 grep -q '"reason":"run-failed"' "$(find "$FX" -name rollover.jsonl)"
+SH
+
+check "rollover: pane run fails after the new pane adopted -> handed over, pane left open" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"; : > "$FX/fail.run.after"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+sleep 60 & NEW=$!
+cat > "$FX/on-run" <<EOF
+HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=\$(cat "$FX/token") $CORE adopt-rollover --repo-path "$FX_REPO" \
+    --session 22222222-2222-4222-8222-222222222222 --messaging-socket /tmp/cc-socks/$NEW.sock
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 20 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+kill $NEW
+test "$rc" = 0
+grep -qxF "rollover: handed over to pane w9:p2 (session 22222222-2222-4222-8222-222222222222, fence $((F + 1)))" "$FX/o"
+! grep -q 'keeps the lease' "$FX/o"
+! grep -q 'pane close' "$FX/herdr.log"
+test -z "$(find "$FX" -name rollover-pending.json)"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --fence $((F + 1))
 SH
 
 check "rollover: fence lost between split and marker closes the new pane, writes no marker" <<'SH'

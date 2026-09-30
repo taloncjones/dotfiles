@@ -4156,8 +4156,16 @@ def _rollover(ns) -> int:
         run_herdr(exe, ["pane", "run", new_pane, rollover_launch(scope_kind)],
                   env=env, json_result=False)
     except Exception:  # noqa: BLE001
-        with owner_transaction(rd):
+        # herdr may have delivered the command before failing; the lease decides.
+        with owner_transaction(rd) as tx:
+            lease = dict(tx.current or {})
             clear_rollover_pending(rd, token)
+        adopted = rollover_adopted(rd, handover=hid)
+        if adopted is not None and handed_to(lease, adopted):
+            return _handed_over(rd, ns, pane, adopted, started)
+        if lease.get("session_id") != ns.session:
+            print("rollover: lease moved without a handover ack; run the section-1 preflight")
+            return failed("lease-moved", hid, new_pane, close_pane=False)
         print(f"rollover: could not start director in pane {new_pane}; this session keeps the lease")
         return failed("run-failed", hid, new_pane, close_pane=True)
     deadline = created + ns.ack_secs
