@@ -595,12 +595,11 @@ def _read_gate(report_path: Path, expected_path: Path, report_sha256: str | None
 
 
 def carry_forward_record(repo: Path, report_path: Path, expected_path: Path,
-                         report_sha256: str, expected_sha256: str,
-                         upstream: str | None, head: str) -> dict:
+                         report_sha256: str, expected_sha256: str, head: str) -> dict:
     """Re-evaluate the prior APPROVE and run the carry-forward proofs (spec R1-R7)."""
     record = {
         "schema": 1, "tier": "carry-forward", "pass": False, "reasons": [],
-        "prior_run": None, "prior_head": None, "head": None, "upstream": upstream,
+        "prior_run": None, "prior_head": None, "head": None, "upstream": None,
         "base": None, "base_ref": None, "old_base": None, "new_base": None,
         "proofs": [], "audit_comment": None,
     }
@@ -609,7 +608,7 @@ def carry_forward_record(repo: Path, report_path: Path, expected_path: Path,
     if gate is None:
         return record
     expected = gate[1]
-    upstream = upstream or f"origin/{expected['base_ref']}"
+    upstream = f"origin/{expected['base_ref']}"
     record.update(prior_run=expected["run_id"], base_ref=expected["base_ref"])
     record.update(_load_sibling("branch_delta").carry_forward(repo, expected["head"], head, upstream))
     if record["pass"]:
@@ -904,9 +903,7 @@ def main(argv: list[str] | None = None) -> int:
         for flag in ("--repo", "--report", "--expected", "--report-sha256", "--expected-sha256"):
             tier_parser.add_argument(flag, required=True)
         tier_parser.add_argument("--head", default="HEAD")
-        if name == "carry-forward":
-            tier_parser.add_argument("--upstream", default=None)
-        else:
+        if name == "delta-class":
             tier_parser.add_argument("--max-files", type=int, default=DELTA_MAX_FILES)
             tier_parser.add_argument("--max-lines", type=int, default=DELTA_MAX_LINES)
             tier_parser.add_argument("--diff-out", required=True)
@@ -917,7 +914,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "carry-forward":
         record = carry_forward_record(
             Path(args.repo), Path(args.report), Path(args.expected),
-            args.report_sha256, args.expected_sha256, args.upstream, args.head)
+            args.report_sha256, args.expected_sha256, args.head)
         print(json.dumps(record, sort_keys=True))
         return 0 if record["pass"] else 1
     if args.command == "delta-class":

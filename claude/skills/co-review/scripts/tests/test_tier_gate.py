@@ -159,6 +159,15 @@ class CarryForwardCliTests(TierFixture):
         self.assertEqual(code, 1)
         self.assertIn("prior gate verdict is CHANGES", record["reasons"])
 
+    def test_upstream_flag_is_not_accepted(self):
+        self.merge_main()
+        result = subprocess.run(
+            [sys.executable, str(GATE), "carry-forward", "--repo", str(self.repo),
+             *self.pins(), "--upstream", "HEAD"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--upstream", result.stderr)
+
     def test_stdout_is_byte_identical_across_reruns(self):
         self.merge_main()
         run = [sys.executable, str(GATE), "carry-forward", "--repo", str(self.repo), *self.pins()]
