@@ -3562,6 +3562,7 @@ for name, test in (
     ("Claude prompt receives its reserved attempt context", test_claude_prompt_receives_reserved_attempt_context_without_approval_wording),
     ("read-only Codex launch does not claim lifecycle writes", test_read_only_codex_launch_does_not_claim_lifecycle_writes),
     ("a ship launch names its agent after its launch id and points at ship.json", test_ship_launch_names_the_agent_its_launch_id_and_points_at_ship_json),
+    ("a ship launch fits a long task id in the agent name limit", test_ship_launch_fits_a_long_task_id_in_the_agent_name_limit),
     ("a ship launch refuses a writable sandbox, a Codex runtime or an odd agent", test_ship_launch_refuses_a_writable_sandbox_a_codex_runtime_or_an_odd_agent),
     ("an unknown phase is refused with the supported list", test_unknown_phase_is_refused_with_the_supported_list),
     ("reprompt refuses a ship launch", test_reprompt_refuses_a_ship_launch),
