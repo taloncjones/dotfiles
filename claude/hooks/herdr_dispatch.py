@@ -682,6 +682,13 @@ def _lifecycle_prompt(
     )
 
 
+def ship_agent_name(launch_id: str) -> str:
+    """Fit a ship launch id in herdr's 32-character agent name, keeping the hex tail."""
+    if len(launch_id) <= 32:
+        return launch_id
+    return f"{launch_id[:-13][:19]}-{launch_id[-12:]}"
+
+
 def launch(
     *,
     repo_slug: str,
@@ -783,8 +790,7 @@ def launch(
     _validate_pane(herdr_cli, pane_id, workspace_id, cwd, child_env)
     launch_id = f"{agent}-{uuid.uuid4().hex[:12]}"
     if phase == "ship":
-        # SKILL.md section 6 checks a ship agent's liveness by its launch id.
-        agent = launch_id
+        agent = ship_agent_name(launch_id)
     started_ns = time.time_ns()
     attempt = {
         "launch_id": launch_id,
