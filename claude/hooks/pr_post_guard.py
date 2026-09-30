@@ -930,6 +930,9 @@ def register_draft(directory: Path, sid: str, digest: str, args: list[str], text
     return True
 
 
+SHOWN_LIMIT = 2000  # Claude Code withholds a longer preview from the prompt
+
+
 def shown(text, question: str, preview: str) -> bool:
     """The draft's text is in the question or the post option's preview,
     whitespace-normalized; a draft with no text shows only its hash."""
@@ -954,6 +957,11 @@ def approve_draft(directory: Path, sid: str, digest: str, question: str, preview
         or not (record["text"] is None or isinstance(record["text"], str))
     ):
         return f"draft {digest} not approved: its record is unreadable or predates prompt approval; register it again"
+    if isinstance(record["text"], str) and len(record["text"]) > SHOWN_LIMIT:
+        return (
+            f"draft {digest} not approved: its text is over {SHOWN_LIMIT} characters; "
+            "shorten the draft or split it"
+        )
     if not shown(record["text"], question, preview):
         return f"draft {digest} not approved: its text was not in the question or the option's preview"
     if not _move_fresh(pending, draft_path(directory, sid, digest, "approved")):
@@ -979,6 +987,7 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str, str | Non
     question names in its option labels (spec R3); why_undecided is None
     when the chosen option decides it."""
     answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
+    annotations = response.get("annotations") if isinstance(response.get("annotations"), dict) else {}
     questions = response.get("questions")
     if not isinstance(questions, list):
         return []
@@ -1010,6 +1019,9 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str, str | Non
         if chosen and not why:
             option, hit = chosen
             preview = option.get("preview")
+            note = annotations.get(text)
+            if isinstance(note, dict) and "preview" in note:
+                preview = note["preview"]  # what the prompt returned as shown
             found.append((hit.group(1), hit.group(2), text, preview if isinstance(preview, str) else "", None))
             continue
         why = why or "no Post or Skip option was chosen"

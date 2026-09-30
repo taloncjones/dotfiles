@@ -226,6 +226,20 @@ case_gate a13
 expect_rc "A13 a draft with no text" 0 "$(payload_a s1 'Post draft aaaaaaaa' '')"
 expect_file "A13 a textless draft needs only its label" "$GATE/s1.draft-aaaaaaaa.approved" present
 
+case_gate a17b
+LONG=$(python3 -c 'print("word " * 500)')
+pending aaaaaaaa 1 "$LONG"
+expect_out "A17b a draft over 2000 characters is refused" "over 2000 characters; shorten the draft or split it" "$(payload_a s1 'Post draft aaaaaaaa' "$LONG")"
+expect_file "A17b an over-length draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+expect_file "A17b an over-length draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
+
+case_gate a17c
+pending aaaaaaaa 1 'reply one'
+expect_out "A17c a returned preview that lacks the text is refused" "its text was not in the question or the option's preview" "$(PA_EXTRA='{"annotations": {"Post this draft?": {"preview": "withheld"}}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A17c not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+expect_rc "A17c a returned preview with the text" 0 "$(PA_EXTRA='{"annotations": {"Post this draft?": {"preview": "reply one"}}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A17c approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+
 for text in 'post it' 'post all' 'post aaaaaaaa' 'Post it.'; do
     case_gate a14
     rm -rf "$GATE"
