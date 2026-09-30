@@ -1334,13 +1334,16 @@ prompt, as in a work repository.
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
 `--repo-json` files); its `handoff_state` is `none`, `stale` (the handoff's head
-is not the live head) or `current`. The ship agent is named exactly its
-launch id. It is live only when `herdr agent get <ship_launch_id>` finds it
-in state `working`; `idle`, `done` or not found (including a launch that
-never started) is not live, because agents stay present after their work
-ends. Before any dispatch, and whenever `handoff_state` is not `none`, close
-a pinned ship agent that is present but not live, as for review panes: send
-`esc`, then `/exit` to the named agent, then close that exact pane if it
+is not the live head) or `current`. The ship agent's herdr name is the
+`agent` field of the `workers[]` row whose `launch_id` equals
+`ship_launch_id` (32 characters, `ship_agent_name` in `herdr_dispatch.py`;
+the launch id itself is longer and does not resolve). It is live only when
+`herdr agent get <that agent>` finds it in state `working`; `idle`, `done`
+or not found (including a launch that never started) is not live, because
+agents stay present after their work ends. Before any dispatch, and
+whenever `handoff_state` is not `none`, close a pinned ship agent that is
+present but not live, as for review panes: send `esc`, then `/exit` to
+that agent name, then close that exact pane if it
 remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)

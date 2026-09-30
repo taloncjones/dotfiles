@@ -418,6 +418,7 @@ The `claude/` directory is symlinked to `~/.claude/` and `~/.claude-work/` and p
 - `co-review`, `codex-spec-review`, `codex-plan-review` - dual-model (Claude + Codex) final/spec/plan review gates
 - `handoff`, `kickoff` - shared Claude/Codex restart records; no global newest-task selection; `handoff retire` archives a finished task
 - `voice` - shared prose lint and independent rewrite with protected facts
+- `pr-status` - one read-only table of open PRs: head, CI, co-review at head, bench, body currency, draft, and what each waits on
 - `herdr-orchestration` - Claude-led shared lifecycle; Codex supplies bounded UI/prose/review work
 - `lib/workflow_context.py` - canonical repository identity and account scope
 - `ship`, `post-merge`, `reconcile`, `wrap` - delivery, teardown, Jira drift repair, session exit
@@ -455,6 +456,7 @@ inheriting an unverified work account.
 
 - `account_guard.py` - Warn at session start when Claude account does not match directory convention
 - `handoff_notice.py` - List saved handoffs for the current repository at session start with a kickoff hint
+- `herdr_pending_notice.py` - Say at session start when herdr tasks await a director that is not running
 - `block_secrets.py` - Block reads/writes of files containing secrets
 - `cache_jira_url.py` - Cache the linked Jira instance URL after MCP calls
 - `commit_guard.py` - Enforce commit message standards (no attribution, no emojis)
