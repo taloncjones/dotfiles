@@ -49,7 +49,9 @@ is the staging tier, not an archive.
   write "substitute seat" or "work config" up front, not after a block.
 - (2026-09) A contract pinned before a long-lived branch ships goes stale when
   main moves: after any main merge re-run the whole gate, never one check.
-- (2026-09) Re-fetch CI and re-read the head right before finalizing a review
-  report; a check still pending at round start can flip mid-round.
+- (2026-09) Re-run CI, lint and format checks and re-read the head before
+  finalizing every review round; a prior round's clean result is not evidence.
+- (2026-09) Re-derive the scope of any finding carried from an earlier round; a
+  prior "unreachable" can hide a real gap at the same site.
 - (2026-09) A reviewer of a new runner-local cache or marker dir checks that
   the target's .gitignore covers it instead of calling it "untracked".
