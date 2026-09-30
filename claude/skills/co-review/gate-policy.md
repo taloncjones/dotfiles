@@ -136,6 +136,29 @@ accepted only digest-pinned, by the pinned herdr `ship.json` or by the same
 uninterrupted workflow; it is re-evaluated before use; and it approves
 nothing new, because the carried head's branch content is proved unchanged.
 
+### Delta tier
+
+A delta round extends one full APPROVE on this branch to a small
+follow-up. `gate_report.py delta-class` recommends it only when the
+digest-pinned prior evaluates APPROVE with class `full` (or is a delta
+whose copied prior does); the anchor is the full head or a main merge the
+carry-forward proof carries from it; the range from the anchor has no
+merge; and the delta diff stays within the caps (default 5 files and 150
+added plus removed lines) with no CI/workflow, auth/permission/hook,
+submodule-pin, gate-skill or binary path. Caps are cumulative from the full head.
+A work repository needs the owner's per-PR approval; a personal repository
+proceeds on its own.
+
+The report carries a `delta` block and three digest-bound artifacts: the
+copied prior full run (`prior/`), `delta.diff`, and, when the anchor is not
+the full head, `carry-forward.json`. The evaluator re-evaluates the copied
+prior, recomputes eligibility from `delta.diff`, and checks the anchor
+proof. The seats review `delta.diff` with the frozen diff as context and
+report `blast_radius`; `unbounded` fails the round. Every delta result
+other than APPROVE carries `escalate: "full"`: the next gate on that head
+is one fresh full gate whose verdict is final. A failed delta is never
+repaired in place.
+
 ### Frozen inputs and report construction
 
 Prepare one immutable snapshot with `review.py prepare`, then run
@@ -178,7 +201,9 @@ The seat set follows the change class (`scripts/change_class.py`; `co-review
 `breaker`, `verifier`. The light tier runs `codex` and `verifier`, one Codex
 and one Claude runtime, unless the `codex` seat is an evidenced substitute
 (below), for a diff whose every path is Markdown or `.todos/`
-outside the gate skills. Every seat is fresh, read-only, independently
+outside the gate skills. The delta tier runs `claude` and `verifier`, both Claude
+runtimes and never substituted, for a follow-up `co-review --delta` recommends
+(see Delta tier). Every seat is fresh, read-only, independently
 completed runtime calls with a 600-second bound. Record requested and
 observed runtime/model/effort; an
 unknown observation remains `unknown`. Each seat artifact is nonempty,

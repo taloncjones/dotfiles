@@ -1318,6 +1318,28 @@ continues to the ship dispatch rules below. `merge-ready` still pins the
 gated head and reports `head-moved` for it, so the director merges that
 head only after one prose ask, as in a work repository.
 
+**Delta tier.** When a dispatch is due under rule (b), the stale handoff's
+verdict is `APPROVE`, and the carry-forward proof above exited 1, run:
+
+```bash
+python3 "$GATE_REPORT" delta-class --repo <worktree> \
+  --report <report_path> --expected <expected_path> \
+  --report-sha256 <report_sha256> --expected-sha256 <expected_sha256> \
+  --max-files <files> --max-lines <lines> --diff-out <scratchpad>/delta.diff
+```
+
+`<files>` and `<lines>` come from `config.json` `ship.delta`
+(`references/state-layout.md`), defaulting to 5 and 150. Exit 1 dispatches
+as usual. On exit 0, a personal repository (`account-scope` reports
+`personal_repository` true) proceeds; a work repository asks the owner once
+with `AskUserQuestion`, options "Delta round (Recommended)" and "Full
+round", naming the PR, head, caps and the recommendation's `stats`; "Full
+round" dispatches as usual. The delta brief carries these lines:
+`herdr-ship-brief: tier=delta`,
+`herdr-ship-prior-handoff: <pinned ship.json path>`,
+`herdr-ship-delta-head: <head>`, and
+`herdr-ship-delta-caps: <files>/<lines>`.
+
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
 `--repo-json` files); its `handoff_state` is `none`, `stale` (the handoff's head
@@ -1332,11 +1354,15 @@ remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
 `handoff_state` is `current` with verdict `APPROVE` and `merge-ready`
-failed with `base-moved` as its only non-`ci` reason. Never on a `current`
-non-APPROVE handoff (section 6a step 0 owns it). Rule (a) with a
+failed with `base-moved` as its only non-`ci` reason, or (d)
+`handoff_state` is `current`, the handoff report has `class` `delta`, and
+its verdict is not `APPROVE`; that brief carries
+`herdr-ship-brief: tier=full`. Never on a `current` non-APPROVE handoff
+(section 6a step 0 owns it), except rule (d). Rule (a) with a
 `ship_launch_id` already set means that run stopped before writing
-`ship.json`: relaunch at most once per reviewed head. Relaunch only when
-`ship_relaunch_head` differs from `review_head_sha`,
+`ship.json`: relaunch at most once per reviewed head, and
+every such relaunch brief carries `herdr-ship-brief: tier=full`. Relaunch
+only when `ship_relaunch_head` differs from `review_head_sha`,
 and before launching `write-task` `ship_relaunch_head: <review_head_sha>`
 (every other field carried), so the budget is spent before any worker
 can start and an interrupted relaunch parks the task. Otherwise report
@@ -1396,9 +1422,10 @@ director-only; surfacing runs everywhere.
 `handoff_state: "current"`.** "Surface" means: report it in every
 check-in report while it holds, with no mutating retry.
 
-0. Current handoff verdict `CHANGES`: `write-task` `changes-requested`
-   (carrying every field; name the gate report in the note) and follow the
-   changes-requested repair path; the repair moves HEAD and the handoff
+0. A handoff whose report `class` is `delta` is not handled here: section 6
+   rule (d) dispatches a full gate. Current handoff verdict `CHANGES`:
+   `write-task` `changes-requested` (carrying every field; name the gate
+   report in the note) and follow the changes-requested repair path; the repair moves HEAD and the handoff
    turns `stale`. `INCOMPLETE`: surface it. Only a human re-gate request
    moves it on: then `write-task` the record with `ship_launch_id: null`
    (every other field carried), and section 6 dispatches afresh.
