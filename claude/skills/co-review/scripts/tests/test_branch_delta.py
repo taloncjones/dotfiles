@@ -109,6 +109,29 @@ class CarryForwardTests(unittest.TestCase):
         self.assertTrue(any(reason.startswith("shared.txt:") for reason in record["reasons"]),
                         record["reasons"])
 
+    def test_ours_merge_that_drops_upstream_hunks_in_a_branch_file_fails(self):
+        self.advance_main("shared.txt", replace_line(SHARED, 18, "main edit"))
+        git(self.repo, "checkout", "-q", "topic")
+        git(self.repo, "merge", "-q", "--no-edit", "-s", "ours", "main")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("shared.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
+    def test_conflict_resolved_with_ours_fails(self):
+        self.advance_main("shared.txt", replace_line(SHARED, 2, "main edit"))
+        git(self.repo, "checkout", "-q", "topic")
+        merged = subprocess.run(["git", "-C", str(self.repo), "merge", "-q", "--no-edit", "main"],
+                                env=GIT_ENV, capture_output=True, text=True)
+        self.assertNotEqual(merged.returncode, 0)
+        git(self.repo, "checkout", "--ours", "shared.txt")
+        git(self.repo, "add", "shared.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("shared.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
     def test_merge_that_edits_an_outside_file_fails_scope(self):
         self.advance_main("main_only.txt", "a\nb\n")
         git(self.repo, "checkout", "-q", "topic")

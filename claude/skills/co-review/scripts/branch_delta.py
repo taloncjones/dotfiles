@@ -93,8 +93,12 @@ def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict
         record.update(old_base=old_base, new_base=new_base)
         own = proof("branch-files", ["diff", "--name-only", old_base, gated],
                     _names(repo, old_base, gated))
-        changed = _names(repo, gated, current, own) if own else []
-        proof("changed-branch-files", ["diff", "--name-only", gated, current, "--", *own], changed)
+        # Also check files upstream touched: a merge keeping the branch side
+        # leaves them equal to the gated version yet drops upstream's hunks.
+        moved = _names(repo, gated, current, own) if own else []
+        upstream_moved = _names(repo, old_base, new_base, own) if own else []
+        changed = sorted(set(moved) | set(upstream_moved))
+        proof("changed-branch-files", ["diff", "--name-only", gated, current, "--", *own], moved)
         for path in changed:
             upstream_now = _body(repo, gated, current, path)
             upstream_ref = _body(repo, old_base, new_base, path)
