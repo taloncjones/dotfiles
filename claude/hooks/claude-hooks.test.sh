@@ -428,6 +428,26 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# Static registration: PostToolUse AskUserQuestion mints post approvals from
+# the owner's answer; UserPromptSubmit keeps its bookkeeping entry.
+if python3 - <<'PY'
+import json
+import sys
+
+hooks = json.load(open("claude/settings.json.tmpl"))["hooks"]
+gate = [{"type": "command", "command": "~/.claude/hooks/pr_post_guard.py"}]
+post = [e for e in hooks["PostToolUse"] if e.get("matcher") == "AskUserQuestion"]
+ok = len(post) == 1 and post[0]["hooks"] == gate and hooks["UserPromptSubmit"] == [{"hooks": gate}]
+sys.exit(0 if ok else 1)
+PY
+then
+    printf 'PASS  ppg: template registers the post gate on AskUserQuestion answers\n'
+    PASS=$((PASS + 1))
+else
+    printf 'FAIL  ppg: template registers the post gate on AskUserQuestion answers\n' >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # Static registration: the Edit|Write PreToolUse group is the warn-only
 # CLAUDE.md guard followed by the orchestrator edit guard, nothing else.
 if python3 - <<'PY'
