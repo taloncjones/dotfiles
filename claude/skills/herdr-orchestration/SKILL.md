@@ -791,7 +791,8 @@ body that mentions someone, a Jira comment) is asked the same way.
 
 The answer is the go. A PostToolUse hook approves exactly the draft the
 chosen option names, and only when its text was in that question or preview
-and is at most 2000 characters, the most a prompt displays.
+and the draft text and that preview are each at most 2000 characters, the
+most a prompt displays.
 It prints a `post gate:` line for each decision. A typed message never
 approves a post, so never ask the owner to type one. Without the tool, a
 gated post cannot be approved; leave the draft in the report.

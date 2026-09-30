@@ -935,10 +935,12 @@ SHOWN_LIMIT = 2000  # Claude Code withholds a longer preview from the prompt
 
 def shown(text, question: str, preview: str) -> bool:
     """The draft's text is in the question or the post option's preview,
-    whitespace-normalized; a draft with no text shows only its hash."""
+    whitespace-normalized, counting only a source within SHOWN_LIMIT; a draft
+    with no text shows only its hash."""
     if not isinstance(text, str) or not text.strip():
         return True
-    return " ".join(text.split()) in " ".join((question + "\n" + preview).split())
+    bounded = [source for source in (question, preview) if len(source) <= SHOWN_LIMIT]
+    return " ".join(text.split()) in " ".join("\n".join(bounded).split())
 
 
 def approve_draft(directory: Path, sid: str, digest: str, question: str, preview: str) -> str:
@@ -963,6 +965,12 @@ def approve_draft(directory: Path, sid: str, digest: str, question: str, preview
             "shorten the draft or split it"
         )
     if not shown(record["text"], question, preview):
+        for name, source in (("question", question), ("preview", preview)):
+            if len(source) > SHOWN_LIMIT:
+                return (
+                    f"draft {digest} not approved: the {name} is over {SHOWN_LIMIT} characters, "
+                    "more than a prompt displays; shorten it"
+                )
         return f"draft {digest} not approved: its text was not in the question or the option's preview"
     if not _move_fresh(pending, draft_path(directory, sid, digest, "approved")):
         return f"draft {digest} not approved: no pending draft in this session; register it and ask again"

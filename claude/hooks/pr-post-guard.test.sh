@@ -240,6 +240,17 @@ expect_file "A17c not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 expect_rc "A17c a returned preview with the text" 0 "$(PA_EXTRA='{"annotations": {"Post this draft?": {"preview": "reply one"}}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
 expect_file "A17c approved" "$GATE/s1.draft-aaaaaaaa.approved" present
 
+case_gate a17d
+BIGPREV=$(python3 -c 'print("reply one " + "pad " * 600)')
+pending aaaaaaaa 1 'reply one'
+expect_out "A17d a returned preview over 2000 characters is refused" "preview is over 2000 characters" "$(PA_EXTRA="{\"annotations\": {\"Post this draft?\": {\"preview\": \"$BIGPREV\"}}}" payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A17d an over-limit returned preview is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a17e
+pending aaaaaaaa 1 'reply one'
+expect_out "A17e a sent preview over 2000 characters is refused" "preview is over 2000 characters" "$(payload_a s1 'Post draft aaaaaaaa' "$BIGPREV")"
+expect_file "A17e an over-limit sent preview is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
 for text in 'post it' 'post all' 'post aaaaaaaa' 'Post it.'; do
     case_gate a14
     rm -rf "$GATE"
