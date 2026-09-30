@@ -1422,9 +1422,9 @@ director-only; surfacing runs everywhere.
 `handoff_state: "current"`.** "Surface" means: report it in every
 check-in report while it holds, with no mutating retry.
 
-0. A handoff whose report `class` is `delta` is not handled here: section 6
-   rule (d) dispatches a full gate. Current handoff verdict `CHANGES`:
-   `write-task` `changes-requested` (carrying every field; name the gate
+0. A handoff whose report `class` is `delta` is not handled here:
+   section 6 rule (d) dispatches a full gate. Current handoff verdict
+   `CHANGES`: `write-task` `changes-requested` (carrying every field; name the gate
    report in the note) and follow the changes-requested repair path; the repair moves HEAD and the handoff
    turns `stale`. `INCOMPLETE`: surface it. Only a human re-gate request
    moves it on: then `write-task` the record with `ship_launch_id: null`
