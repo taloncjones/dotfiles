@@ -330,3 +330,186 @@ def merge_authority(core, cwd, slug):
         return "director" if core.merge_authority(slug, cwd)["authority"] == "director" else "human"
     except (Exception, SystemExit):
         return "human"
+
+
+class GhError(Exception):
+    """One gh read failed; the message is its first stderr line."""
+
+
+class GhMissing(Exception):
+    """gh is not on PATH."""
+
+
+def gh(*args):
+    try:
+        proc = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
+    except FileNotFoundError as exc:
+        raise GhMissing("gh not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GhError(f"gh {' '.join(args[:2])} timed out") from exc
+    if proc.returncode != 0:
+        lines = proc.stderr.strip().splitlines()
+        raise GhError(lines[0] if lines else f"gh {' '.join(args[:2])} exited {proc.returncode}")
+    return proc.stdout
+
+
+def gh_json(*args):
+    text = gh(*args)
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise GhError(f"gh {' '.join(args[:2])}: invalid JSON") from exc
+
+
+def bench_workflows(path):
+    """{owner/name: workflow file} from every block's bench_workflows key."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    found = {}
+    for block in data.values() if isinstance(data, dict) else []:
+        mapping = block.get("bench_workflows") if isinstance(block, dict) else None
+        if isinstance(mapping, dict):
+            found.update({k: v for k, v in mapping.items() if isinstance(v, str) and v})
+    return found
+
+
+def config_path(explicit):
+    if explicit:
+        return Path(explicit)
+    roots = [Path(os.environ["CLAUDE_CONFIG_DIR"])] if os.environ.get("CLAUDE_CONFIG_DIR") else []
+    roots += [Path.home() / ".claude", Path.home() / ".claude-work"]
+    for root in roots:
+        path = root / "reconcile" / "projects.json"
+        if path.is_file():
+            return path
+    return None
+
+
+def current_repo():
+    try:
+        name = gh_json("repo", "view", "--json", "nameWithOwner").get("nameWithOwner")
+    except (GhError, AttributeError):
+        return None
+    return name if isinstance(name, str) and REPO_RE.fullmatch(name) else None
+
+
+def current_branch_pr():
+    try:
+        number = gh_json("pr", "view", "--json", "number").get("number")
+    except (GhError, AttributeError):
+        return None
+    return number if is_count(number) else None
+
+
+def fetch(repo, number, workflow):
+    """(pr, comments, runs) for one PR; raises GhError."""
+    pr = gh_json("pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS)
+    if not isinstance(pr, dict) or not isinstance(pr.get("headRefOid"), str):
+        raise GhError(f"gh pr view {number}: unexpected JSON")
+    pages = gh_json("api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments")
+    comments = [c for page in pages if isinstance(page, list) for c in page] if isinstance(pages, list) else []
+    runs = None
+    if workflow:
+        runs = gh_json("run", "list", "--repo", repo, "--workflow", workflow, "--branch",
+                       str(pr.get("headRefName") or ""), "--limit", "10", "--json", RUN_FIELDS)
+        runs = runs if isinstance(runs, list) else []
+    return pr, comments, runs
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(prog="pr_status.py", description="Table every open PR and what it waits on.")
+    parser.add_argument("numbers", nargs="*", type=int, metavar="PR")
+    parser.add_argument("--repo", help="owner/name for the listed PR numbers")
+    parser.add_argument("--bench-workflow", help="bench workflow file for the primary repo")
+    parser.add_argument("--config", help="reconcile projects.json with bench_workflows")
+    parser.add_argument("--markdown", action="store_true", help="print the Markdown table only")
+    args = parser.parse_args(argv)
+    if args.repo and not args.numbers:
+        parser.error("--repo needs PR numbers")
+    if args.repo and not REPO_RE.fullmatch(args.repo):
+        parser.error("--repo must be owner/name")
+    if any(n <= 0 for n in args.numbers):
+        parser.error("PR numbers must be positive")
+    if args.config:
+        try:
+            data = json.loads(Path(args.config).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            parser.error(f"--config is not a readable JSON object: {args.config}")
+    return args
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        login = gh("api", "user", "--jq", ".login").strip()
+    except (GhError, GhMissing) as exc:
+        print(f"[X] pr-status: {exc}", file=sys.stderr)
+        return 2
+    cwd = os.getcwd()
+    cwd_repo = current_repo()
+    primary = args.repo or cwd_repo
+    if not primary:
+        print("[X] pr-status: no --repo and the current directory has no GitHub repo", file=sys.stderr)
+        return 2
+    core = load_core()
+    slug = cwd_slug(core, cwd) if core else None
+    targets = []  # (repo, number, explicit, submodule ref)
+    if args.numbers:
+        targets = [(primary, n, True, None) for n in args.numbers]
+    else:
+        tasks_dir = herdr_tasks_dir(core, cwd, slug) if slug else None
+        for number, sub in herdr_prs(core, tasks_dir) if tasks_dir else []:
+            targets.append((primary, number, False, sub))
+            if sub:
+                targets.append((sub["repo"], sub["number"], False, None))
+        number = current_branch_pr()
+        if number:
+            targets.append((primary, number, False, None))
+    seen, unique = set(), []
+    for target in targets:
+        if target[:2] not in seen:
+            seen.add(target[:2])
+            unique.append(target)
+    unique.sort(key=lambda t: (t[0] != primary, t[0], t[1]))
+    config = config_path(args.config)
+    workflows = bench_workflows(config) if config else {}
+    authority = merge_authority(core, cwd, slug)
+    fetched = {}
+    for repo, number, _explicit, _sub in unique:
+        workflow = args.bench_workflow if (repo == primary and args.bench_workflow) else workflows.get(repo)
+        try:
+            fetched[(repo, number)] = fetch(repo, number, workflow)
+        except GhError as exc:
+            fetched[(repo, number)] = exc
+    rows, errors = [], []
+    for repo, number, explicit, sub in unique:
+        prefix = None if repo == primary else repo.split("/", 1)[1]
+        result = fetched[(repo, number)]
+        if isinstance(result, GhError):
+            rows.append({"repo": repo, "number": number, **error_row(repo, number, prefix, str(result))})
+            errors.append(f"{repo}#{number}: {result}")
+            continue
+        pr, comments, runs = result
+        if not explicit and pr.get("state") != "OPEN":
+            continue
+        submodule = None
+        if sub:
+            sub_result = fetched.get((sub["repo"], sub["number"]))
+            sub_pr = sub_result[0] if isinstance(sub_result, tuple) else {}
+            submodule = {**sub, "state": sub_pr.get("state"), "url": sub_pr.get("url")}
+        row_authority = authority if repo == cwd_repo else "human"
+        rows.append({"repo": repo, "number": number,
+                     **build_row(pr, comments, runs, login, row_authority, prefix, submodule)})
+    if args.markdown:
+        print(markdown(rows))
+    else:
+        print(json.dumps({"repo": primary, "rows": rows, "errors": errors}, indent=2))
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
