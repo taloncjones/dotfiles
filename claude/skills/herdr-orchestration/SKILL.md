@@ -779,9 +779,10 @@ prose is not a substitute; the prompt is what raises the notification on the
 user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
 
-An outward-posting action (PR comment, review, reply, body edit, Jira
-comment) is never an `AskUserQuestion` option, recommended or not: ask in
-prose for the typed go and end the turn.
+A gated post (a review, a thread reply, a comment on another author's PR, a
+body that mentions someone, a Jira comment) is never an `AskUserQuestion`
+option, recommended or not: register the draft, show it in prose with its
+hash, and end the turn.
 
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
@@ -1896,17 +1897,28 @@ Rules (these are outward-facing writes, so treat them carefully):
   asking where `merge-authority` prints `director`, after one prose ask
   elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
   actions. Workers never carry merge authority.
-- The director posts to a PR (a co-review marker, bench evidence, a status
-  note, a body edit) without asking in a personal repository, and in a
-  work repository only after the owner says `post it` or `post all` in a
-  message, once per post (co-review Publish; `edit the pr body` for a body
-  edit). It never replies to a human reviewer's thread on its own
-  initiative: it drafts the reply and asks. Enforced
-  in herdr agent sessions by the gh shim (`bin/herdr-shims/gh`,
-  `claude/hooks/gh_post_shim.py`), which gates only posted text at exec
-  time -- every other `gh` write (`workflow run`, `run download`, `pr
-  merge`, ...) passes -- with `claude/hooks/pr_post_guard.py` as the
-  typed-go source and second layer. Never send `gh` to another pane with
+- The director posts by audience. In a personal repository it posts without
+  asking. In a work repository, maintenance of a PR this account authored
+  (title, body, labels, draft/ready, reviewer requests, deleting its own
+  co-review marker) and green evidence on it (an `APPROVE` marker, passing
+  bench or CI evidence) post without asking; each prints its line in the
+  same turn: `[INFO] edited PR #n body: <why>`, `[INFO] posted co-review
+  marker on #n: APPROVE`. Non-green evidence (a `CHANGES` marker, failing
+  bench, blocked notes) is not posted; it stays in the ship report. Text
+  aimed at a person (any `gh pr review`, a thread reply, a comment on a PR
+  this account did not author, a body with an `@login`) needs the owner's
+  go: register it with `python3 ~/.claude/hooks/pr_post_guard.py draft --
+  gh <args>`, show the draft and hash, and wait for `post it`, `post all`
+  or `post <hash>`; after posting, print `[INFO] posted reply on #n`. If an
+  approved post fails, let the Bash call return, read the PR, and
+  re-register only when the text is absent, telling the owner that a
+  duplicate is possible. It never replies to a human reviewer's thread on
+  its own initiative. Enforced in herdr agent sessions by the gh shim
+  (`bin/herdr-shims/gh`, `claude/hooks/gh_post_shim.py`), which reads the
+  PR author once per session and spends one approved draft per gated call
+  -- every other `gh` write (`workflow run`, `run download`, `pr merge`,
+  ...) passes -- with `claude/hooks/pr_post_guard.py` as the draft and go
+  source and the second layer. Never send `gh` to another pane with
   `herdr pane run`: that shell has no shim, and the hook refuses it.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
   nothing under it is ever git-tracked, and no marker is written into any
