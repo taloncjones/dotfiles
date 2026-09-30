@@ -3728,6 +3728,139 @@ def test_apply_label_failures_never_raise():
         fx.close()
 
 
+def core_cli(fx, *argv, herdr_on_path=False):
+    env = dict(fx.env)
+    if herdr_on_path:
+        env["PATH"] = str(fx.root) + os.pathsep + env["PATH"]
+    return subprocess.run(
+        [sys.executable, str(Path(core.__file__).resolve()), *argv],
+        capture_output=True, text=True, env=env, check=False)
+
+
+def put_task(fx, task_id, **fields):
+    record = {"v": 1, "task_id": task_id, "repo_slug": fx.slug,
+              "worktree": str(fx.repo.resolve()), "status": "in-progress",
+              "workers": [], **fields}
+    (fx.rd / "tasks" / f"{task_id}.json").write_text(json.dumps(record))
+
+
+def present_argv(fx, *extra):
+    return ("present-task", "--repo-slug", fx.slug, "--repo-path", str(fx.repo), *extra)
+
+
+def test_present_task_prints_label_without_herdr():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", status="completed", title="HIL smoke tiers")
+        out = core_cli(fx, *present_argv(fx, "--task-id", "td-a"))
+        assert out.returncode == 0, out.stderr
+        assert out.stdout == "review-due: HIL smoke\n", out.stdout
+        assert fx.calls() == [], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_present_task_apply_renames_under_fence():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", status="reviewed", title="Fix bus", workspace_id="w1")
+        argv = present_argv(fx, "--task-id", "td-a", "--apply", "--session", "S", "--fence", "1")
+        out = core_cli(fx, *argv, herdr_on_path=True)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout == "open-pr?: Fix bus\n", out.stdout
+        again = core_cli(fx, *argv, herdr_on_path=True)
+        assert again.returncode == 0, again.stderr
+        renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
+        assert renames == [["workspace", "rename", "w1", "open-pr?: Fix bus"]], renames
+        write_workspaces(fx, [ws_entry("w1", "td-a", fx.root / "elsewhere")])
+        refused = core_cli(fx, *argv, herdr_on_path=True)
+        assert refused.returncode == 1, refused
+        assert "workspace-mismatch" in refused.stderr, refused.stderr
+        assert len([c for c in fx.calls() if c[:2] == ["workspace", "rename"]]) == 1
+    finally:
+        fx.close()
+
+
+def test_present_task_apply_refuses_stale_fence():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", workspace_id="w1")
+        out = core_cli(fx, *present_argv(fx, "--task-id", "td-a", "--apply",
+                                         "--session", "S", "--fence", "2"),
+                       herdr_on_path=True)
+        assert out.returncode != 0, out
+        assert fx.calls() == [], fx.calls()
+        no_fence = core_cli(fx, *present_argv(fx, "--task-id", "td-a", "--apply"),
+                            herdr_on_path=True)
+        assert no_fence.returncode != 0 and fx.calls() == [], no_fence
+    finally:
+        fx.close()
+
+
+def test_present_all_exit_and_stop_rules():
+    fx = Fixture()
+    try:
+        put_task(fx, "td-a", title="Alpha", workspace_id="w1")
+        put_task(fx, "td-b", title="Beta", workspace_id="w3", worktree=None)
+        put_task(fx, "td-c", title="Gamma", workspace_id="w2")
+        write_workspaces(fx, [ws_entry("w1", "td-a", fx.repo.resolve()),
+                              ws_entry("w2", "td-c", fx.repo.resolve()),
+                              ws_entry("w3", "td-b", fx.repo.resolve())])
+        argv = present_argv(fx, "--all", "--apply", "--session", "S", "--fence", "1")
+        ok = core_cli(fx, *argv, herdr_on_path=True)
+        assert ok.returncode == 0, ok.stderr
+        rows = {r["task_id"]: r for r in map(json.loads, ok.stdout.splitlines())}
+        assert rows["td-b"]["reason"] == "no-worktree", rows
+        assert rows["td-a"]["status"] == "applied", rows
+        assert rows["td-c"]["status"] == "applied", rows
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        write_workspaces(fx, [ws_entry("w1", "x", fx.repo.resolve()),
+                              ws_entry("w2", "y", fx.repo.resolve()),
+                              ws_entry("w3", "z", fx.repo.resolve())])
+        before = len(fx.calls())
+        refused = core_cli(fx, *argv, herdr_on_path=True)
+        assert refused.returncode == 0, refused.stderr
+        tried = [c for c in fx.calls()[before:] if c[:2] == ["workspace", "rename"]]
+        assert len(tried) == 2, tried
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        fx.env["FAKE_HANG_SECS"] = "3"
+        results, stopped = core.present_all(fx.rd, apply=True, herdr_cli=str(fx.bin),
+                                            env=fx.env, timeout_secs=1)
+        assert stopped is True, results
+        assert [r["reason"] for r in results] == ["herdr-unavailable"] * 3, results
+        fx.env["FAKE_HERDR_MODE"] = "list-fail"
+        listed = core_cli(fx, *argv, herdr_on_path=True)
+        assert listed.returncode != 0, listed
+        fx.env["FAKE_HERDR_MODE"] = "rename-hang"
+        fx.env["FAKE_HANG_SECS"] = "12"
+        hung = core_cli(fx, *argv, herdr_on_path=True)
+        assert hung.returncode != 0, hung
+        assert len(hung.stdout.splitlines()) == 3, hung.stdout
+    finally:
+        fx.close()
+
+
+def test_present_all_orders_terminal_first():
+    fx = Fixture()
+    try:
+        fx.task_file.unlink()
+        put_task(fx, "td-new", title="New work", workspace_id="w1")
+        put_task(fx, "td-old", status="abandoned", title="Old work", workspace_id="w1")
+        argv = present_argv(fx, "--all", "--apply", "--session", "S", "--fence", "1")
+        for _ in range(2):
+            out = core_cli(fx, *argv, herdr_on_path=True)
+            assert out.returncode == 0, out.stderr
+            rows = [json.loads(line) for line in out.stdout.splitlines()]
+            assert [r["task_id"] for r in rows] == ["td-old", "td-new"], rows
+            assert (rows[0]["status"], rows[0]["reason"]) == ("skipped", "superseded"), rows
+            assert workspace_labels(fx) == {"w1": "plan: New work"}, workspace_labels(fx)
+        assert rows[1]["status"] == "unchanged", rows
+        renames = [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
+        assert renames == [["workspace", "rename", "w1", "plan: New work"]], renames
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -3858,6 +3991,11 @@ for name, test in (
     ("workspace label applies once then reports unchanged", test_apply_label_applies_once_then_unchanged),
     ("workspace label refuses a checkout-path mismatch", test_apply_label_refuses_checkout_mismatch),
     ("workspace label failures never raise", test_apply_label_failures_never_raise),
+    ("present-task prints a label without herdr", test_present_task_prints_label_without_herdr),
+    ("present-task --apply renames under the fence", test_present_task_apply_renames_under_fence),
+    ("present-task --apply refuses a stale fence before herdr", test_present_task_apply_refuses_stale_fence),
+    ("present-task --all exit and stop rules", test_present_all_exit_and_stop_rules),
+    ("present-task --all labels live tasks after terminal ones", test_present_all_orders_terminal_first),
 ):
     check(name, test)
 

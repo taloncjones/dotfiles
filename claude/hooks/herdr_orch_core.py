@@ -3806,6 +3806,89 @@ def apply_workspace_label(task, label, *, herdr_cli=None, env=None, workspace=No
         return out
 
 
+def launcher_task_ids(rd):
+    """Launcher-scope task ids: terminal statuses first, each group by id."""
+    tasks = Path(rd) / "tasks"
+    ids = sorted(p.name[:-len(".json")] for p in tasks.glob("*.json")
+                 if p.name.count(".") == 1 and valid_task_id(p.name[:-len(".json")]))
+
+    terminal = set()
+    for tid in ids:
+        try:
+            record = json.loads(read_payload_text(tasks / f"{tid}.json"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("status") in LABEL_TERMINAL_STATUSES:
+            terminal.add(tid)
+    # A live record sharing a workspace with a finished one must label it last.
+    return [t for t in ids if t in terminal] + [t for t in ids if t not in terminal]
+
+
+def _present_row(rd, task_id):
+    task = json.loads(read_payload_text(Path(rd) / "tasks" / f"{task_id}.json"))
+    if not isinstance(task, dict) or task.get("task_id") != task_id:
+        raise ValueError("task record does not match its file")
+    return task, task_label(task, task_ship_handoff(rd, task_id, task))
+
+
+def present_all(rd, *, apply, herdr_cli=None, env=None, timeout_secs=None):
+    """One label row per launcher task; with apply, stop at herdr-unavailable.
+
+    When several records target one workspace, only the last in
+    launcher_task_ids order (a live record after a finished one) is applied;
+    the others report `superseded`. Raises the herdr error when
+    `workspace list` itself fails."""
+    spaces = {}
+    if apply:
+        import shutil
+        from herdr_dispatch_cli import run_herdr
+        exe = herdr_cli or shutil.which("herdr")
+        if not exe:
+            raise OSError("herdr is not on PATH")
+        timeout = LABEL_HERDR_TIMEOUT_SECS if timeout_secs is None else timeout_secs
+        listed = run_herdr(exe, ["workspace", "list"],
+                           env=dict(os.environ) if env is None else env, timeout_secs=timeout)
+        spaces = {w.get("workspace_id"): w for w in listed.get("workspaces", [])
+                  if isinstance(w, dict)}
+    rows, rendered = [], {}
+    for tid in launcher_task_ids(rd):
+        row = {"task_id": tid, "label": None, "status": "unsupported",
+               "workspace_id": None, "reason": None}
+        rows.append(row)
+        try:
+            task, label = _present_row(rd, tid)
+        except (OSError, ValueError) as exc:
+            row["reason"] = f"unreadable: {exc}"[:200]
+            continue
+        row.update(label=label, workspace_id=label_target(task))
+        rendered[tid] = task
+    # Last claimant wins, so two records never fight over one workspace.
+    claimant = {row["workspace_id"]: row["task_id"] for row in rows
+                if row["task_id"] in rendered and row["workspace_id"]}
+    stopped = False
+    for row in rows:
+        if row["task_id"] not in rendered:
+            continue
+        ws = row["workspace_id"]
+        if not apply:
+            row["status"] = "rendered"
+        elif stopped:
+            row["reason"] = "herdr-unavailable"
+        elif ws is None:
+            row["reason"] = "no-workspace"
+        elif claimant[ws] != row["task_id"]:
+            row.update(status="skipped", reason="superseded")
+        elif ws not in spaces:
+            row["reason"] = "workspace-gone"
+        else:
+            result = apply_workspace_label(rendered[row["task_id"]], row["label"],
+                                           herdr_cli=herdr_cli, env=env,
+                                           workspace=spaces[ws], timeout_secs=timeout_secs)
+            row.update(status=result["status"], reason=result["reason"])
+            stopped = result["reason"] == "herdr-unavailable"
+    return rows, stopped
+
+
 def row_settlement(task, index, *, done, review, head, payload_root, ship_report=None,
                    ship_handoffs=frozenset()):
     """Why workers[index]'s agent may exit, or None while it may still have
@@ -4413,6 +4496,12 @@ def _main(argv=None) -> int:
     vc.add_argument("--validate-only", action="store_true")
     add("merge-authority")
     add("merge-ready", "--task-id", "--pr-json", "--repo-json")
+    pt = add("present-task")
+    pt.add_argument("--task-id", default=None)
+    pt.add_argument("--all", action="store_true")
+    pt.add_argument("--apply", action="store_true")
+    pt.add_argument("--session", default=None)
+    pt.add_argument("--fence", type=int, default=None)
     ns = ap.parse_args(argv)
 
     if ns.cmd == "resume-owner":
@@ -6546,6 +6635,39 @@ def _main(argv=None) -> int:
         except (OSError, ValueError):
             return 1
         return 0 if should_dispatch_review(task, ns.head_sha) else 1
+    if ns.cmd == "present-task":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        _require((ns.task_id is None) == ns.all, "pass exactly one of --task-id or --all")
+        _require(ns.task_id is None or valid_task_id(ns.task_id), "invalid task-id")
+        _require(not ns.apply or (ns.session and ns.fence is not None),
+                 "--apply needs --session and --fence")
+        if not ns.apply:
+            rd = repo_dir(ns.repo_slug)
+            if ns.all:
+                for row in present_all(rd, apply=False)[0]:
+                    print(json.dumps(row, sort_keys=True))
+                return 0
+            print(_present_row(rd, ns.task_id)[1])
+            return 0
+        # Renames run under the owner transaction so no writer interleaves.
+        with _fenced(ns) as rd:
+            if ns.all:
+                try:
+                    rows, stopped = present_all(rd, apply=True)
+                except Exception as exc:  # noqa: BLE001 -- DispatchError is lazily imported
+                    _require(False, f"present-task: workspace list failed: {exc}")
+                for row in rows:
+                    print(json.dumps(row, sort_keys=True))
+                if stopped:
+                    sys.stderr.write("[X] present-task: herdr-unavailable\n")
+                return 1 if stopped else 0
+            task, label = _present_row(rd, ns.task_id)
+            result = apply_workspace_label(task, label)
+            print(label)
+            if result["status"] == "unsupported":
+                sys.stderr.write(f"[X] present-task: {result['reason']}\n")
+                return 1
+            return 0
     if ns.cmd == "merge-ready":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
         _require(valid_task_id(ns.task_id), "invalid task-id")
