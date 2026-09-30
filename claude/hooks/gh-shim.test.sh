@@ -88,9 +88,28 @@ fresh_gate() {
     : >"$FAKE_LOG"
 }
 
-# mint PHRASE: the real hook's UserPromptSubmit handler mints the go for s1
-mint() {
-    printf '{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"%s"}' "$1" \
+# approve HASH: the real hook's PostToolUse handler answers "Post draft HASH"
+# for s1, with the draft's registered text in the option preview
+approve() {
+    AP_HASH="$1" python3 - <<'PY' | python3 "$HOOK" >/dev/null 2>&1
+import json, os
+d, h = os.environ["DOTFILES_POST_GATE_DIR"], os.environ["AP_HASH"]
+try:
+    text = json.load(open(os.path.join(d, f"s1.draft-{h}.pending"))).get("text") or ""
+except (OSError, ValueError, AttributeError):
+    text = ""
+q, label = "Post this draft?", f"Post draft {h}"
+qs = [{"question": q, "multiSelect": False,
+       "options": [{"label": label, "description": "posts it", "preview": text},
+                   {"label": f"Skip draft {h}", "description": "skips it"}]}]
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {q: label}}}))
+PY
+}
+
+# typed TEXT: the real hook's UserPromptSubmit handler sees a typed message from s1
+typed() {
+    TY_TEXT="$1" python3 -c 'import json, os; print(json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s1", "prompt": os.environ["TY_TEXT"]}))' \
         | python3 "$HOOK" >/dev/null 2>&1
 }
 
@@ -160,7 +179,7 @@ fi
 
 fresh_gate
 h=$(draft pr comment 5 --body x)
-mint "post it"
+approve "$h"
 gh pr comment 5 --body x >/dev/null 2>&1; rc1=$?
 gh pr comment 5 --body x >/dev/null 2>"$T/err"; rc2=$?
 if [ -n "$h" ] && [ "$rc1" = 0 ] && [ "$rc2" = 1 ] && [ "$(log_lines)" = 1 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$h.spent" ] && grep -q 'duplicate is possible' "$T/err"; then
@@ -248,17 +267,17 @@ else
 fi
 
 fresh_gate
-mint "edit the pr body"
+typed "edit the pr body"
 gh pr edit 5 --body-file b.md >/dev/null 2>&1; rc=$?
 if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
-    pass "S8 edit the pr body mints nothing and another author's PR edit is refused"
+    pass "S8 a typed edit the pr body approves nothing and another author's PR edit is refused"
 else
     fail "S8 edit the pr body (rc=$rc log=$(log_lines))"
 fi
 
 fresh_gate
 h=$(draft pr review 5 -c -b x)
-mint "post it"
+approve "$h"
 CLAUDE_CODE_SESSION_ID=s2 gh pr review 5 -c -b x >/dev/null 2>&1; rc1=$?
 env -u CLAUDE_CODE_SESSION_ID gh pr review 5 -c -b x >/dev/null 2>&1; rc2=$?
 env -u CLAUDE_CODE_SESSION_ID gh pr view 5 >/dev/null 2>&1; rc3=$?
@@ -270,7 +289,7 @@ fi
 
 fresh_gate
 h=$(draft pr comment 5 --body --help)
-mint "post it"
+approve "$h"
 gh pr comment 5 --help >/dev/null 2>&1; rc1=$?
 gh pr comment 5 --body --help >/dev/null 2>&1; rc2=$?
 gh pr comment 5 --body --help >/dev/null 2>&1; rc3=$?
@@ -295,7 +314,7 @@ fi
 
 fresh_gate
 h=$(draft pr review 5 -c -b x)
-mint "post it"
+approve "$h"
 map=$(ls "$DOTFILES_POST_GATE_DIR" | sed -n 's/^pid-\([0-9]*\)\.sid$/\1/p')
 CLAUDE_PID="$map" CLAUDE_CODE_SESSION_ID=stale gh pr review 5 -c -b x >/dev/null 2>&1; rc1=$?
 CLAUDE_PID="$map" CLAUDE_CODE_SESSION_ID=stale gh pr review 5 -c -b x >/dev/null 2>&1; rc2=$?
@@ -307,7 +326,7 @@ fi
 
 fresh_gate
 h=$(draft pr review 5 -c -b x)
-mint "post it"
+approve "$h"
 : >"$T/not-a-dir"
 DOTFILES_POST_GATE_DIR="$T/not-a-dir" gh pr review 5 -c -b x >/dev/null 2>&1; rc=$?
 if [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
@@ -386,18 +405,27 @@ fi
 fresh_gate
 h1=$(draft pr review 5 -c -b one)
 h2=$(draft pr review 5 -c -b two)
-mint "post all"
+N8_H1="$h1" N8_H2="$h2" python3 - <<'PY' | python3 "$HOOK" >/dev/null 2>&1
+import json, os
+qs = [{"question": f"Post reply {n}?", "multiSelect": False,
+       "options": [{"label": f"Post draft {h}", "description": "posts it", "preview": n},
+                   {"label": f"Skip draft {h}", "description": "skips it"}]}
+      for n, h in (("one", os.environ["N8_H1"]), ("two", os.environ["N8_H2"]))]
+answers = {q["question"]: q["options"][0]["label"] for q in qs}
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": answers}}))
+PY
 sh -c 'gh pr review 5 -c -b one && gh pr review 5 -c -b two' >/dev/null 2>&1; rc=$?
 if [ -n "$h1" ] && [ -n "$h2" ] && [ "$rc" = 0 ] && [ "$(log_lines)" = 2 ]; then
-    pass "N8 post all covers two drafts in one call"
+    pass "N8 one two-question answer covers two drafts in one call"
 else
-    fail "N8 post all (h=$h1/$h2 rc=$rc log=$(log_lines))"
+    fail "N8 two-question answer (h=$h1/$h2 rc=$rc log=$(log_lines))"
 fi
 
 fresh_gate
 h=$(draft pr review 5 -c -b x)
-mint "post it"
-mint "thanks, and what about the other PR"
+approve "$h"
+typed "thanks, and what about the other PR"
 gh pr review 5 -c -b x >/dev/null 2>&1; rc=$?
 if [ -n "$h" ] && [ "$rc" = 0 ] && [ "$(log_lines)" = 1 ]; then
     pass "N9 a later non-go message keeps an unspent approval"
@@ -408,13 +436,49 @@ fi
 fresh_gate
 printf 'first text\n' >r.md
 h=$(draft pr review 5 -c -F r.md)
-mint "post it"
+approve "$h"
 printf 'changed text\n' >r.md
 gh pr review 5 -c -F r.md >/dev/null 2>&1; rc=$?
 if [ -n "$h" ] && [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
     pass "N10 a body changed after approval is refused"
 else
     fail "N10 changed body (rc=$rc log=$(log_lines))"
+fi
+
+fresh_gate
+h=$(draft pr review 5 -c -b x)
+typed "post it"
+typed "post $h"
+gh pr review 5 -c -b x >/dev/null 2>&1; rc=$?
+if [ -n "$h" ] && [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ]; then
+    pass "N11 a typed phrase never releases a draft"
+else
+    fail "N11 typed phrase (rc=$rc log=$(log_lines))"
+fi
+
+fresh_gate
+h=$(draft pr review 5 -c -b x)
+approve "$h"
+AP_HASH="$h" python3 - <<'PY' | python3 "$HOOK" >/dev/null 2>&1
+import json, os
+h = os.environ["AP_HASH"]; q = "Skip this draft?"; label = f"Skip draft {h}"
+qs = [{"question": q, "multiSelect": False, "options": [{"label": label, "description": "skips it"}, {"label": "Hold", "description": "waits"}]}]
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion", "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {q: label}}}))
+PY
+gh pr review 5 -c -b x >/dev/null 2>&1; rc=$?
+if [ -n "$h" ] && [ "$rc" = 1 ] && [ "$(log_lines)" = 0 ] && [ -e "$DOTFILES_POST_GATE_DIR/s1.draft-$h.dismissed" ]; then
+    pass "N12 a skip answer withdraws an unspent approval"
+else
+    fail "N12 withdrawn approval (rc=$rc log=$(log_lines))"
+fi
+
+fresh_gate
+gh pr review 5 -c -b x >/dev/null 2>"$T/err"; rc=$?
+if [ "$rc" = 1 ] && grep -q 'AskUserQuestion' "$T/err" && grep -q 'Post draft <hash>' "$T/err" \
+    && grep -q 'update --ai' "$T/err" && ! grep -qi 'post it' "$T/err"; then
+    pass "N13 the refusal names the prompt and the upgrade fix"
+else
+    fail "N13 refusal text (rc=$rc err=$(cat "$T/err"))"
 fi
 
 fresh_gate
@@ -545,7 +609,7 @@ bypass() {
         fail "B [$1] no go: $2 (hash=$h log=$(log_lines))"
         return
     fi
-    mint "post it"
+    approve "$h"
     $1 -c "$2" >/dev/null 2>&1 </dev/null
     first=$(log_lines)
     $1 -c "$2" >/dev/null 2>&1 </dev/null
