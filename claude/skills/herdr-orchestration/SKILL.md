@@ -40,6 +40,7 @@ SKILL_DIR="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.ar
 CORE="$(cd "$SKILL_DIR/../../hooks" && pwd)/herdr_orch_core.py"
 RUNTIME="$(dirname "$CORE")/agent_runtime.py"
 DISPATCH="$(dirname "$CORE")/herdr_dispatch.py"
+GATE_REPORT="$SKILL_DIR/../co-review/scripts/gate_report.py"
 TODOS="$SKILL_DIR/../todos/scripts/todos.sh"
 ORCH_RUNTIME=claude
 ```
@@ -1294,18 +1295,28 @@ When the gh shim, a hook, or the permission classifier refuses one, it says
 which one refused and what it tried, once, and continues with everything
 else.
 
-**Merge-main-only commits keep the verdict.** A head whose only new commits
-since the gated head merge main, where both checks are empty, keeps the
-prior co-review verdict; do not dispatch a new gate round:
+**Merge-main-only commits keep the verdict.** On every check-in whose task
+is `reviewed` with a `stale` handoff of verdict `APPROVE`, before any ship
+dispatch decision, prove the carry-forward against the pinned handoff;
+`ship.json` supplies the paths and digests:
 
 ```bash
-git -C <worktree> rev-list --no-merges <reviewed_head>..HEAD
-git -C <worktree> diff --name-only <reviewed_head> HEAD -- $(git -C <worktree> diff --name-only "$(git -C <worktree> merge-base origin/<default> <reviewed_head>)" <reviewed_head>)
+git -C <worktree> fetch origin <default>
+python3 "$GATE_REPORT" carry-forward --repo <worktree> \
+  --report <report_path> --expected <expected_path> \
+  --report-sha256 <report_sha256> --expected-sha256 <expected_sha256> \
+  ><scratchpad>/carry-forward.json
 ```
 
-`merge-ready` still pins the gated head and reports `head-moved` for it, so
-the director merges that head only after one prose ask, as in a work
-repository.
+Exit 0 keeps the verdict for the new head: post the record's
+`audit_comment` exactly as ship step 5 (dedupe on
+`co-review-audit head=<head>`, standing authorization), then the
+carry-forward marker under the co-review skill's Carry-forward and Publish
+rules (its dedupe; a personal repository needs no go, a work repository the
+owner's typed `post it`), and never dispatch a gate for that head. Exit 1
+continues to the ship dispatch rules below. `merge-ready` still pins the
+gated head and reports `head-moved` for it, so the director merges that
+head only after one prose ask, as in a work repository.
 
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and

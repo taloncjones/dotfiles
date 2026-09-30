@@ -219,6 +219,25 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertNotIn("--timeout-secs 600", MIRROR)
         self.assertNotIn("600-second", MIRROR)
 
+    def test_both_entrypoints_document_carry_forward(self):
+        for text in (CO_REVIEW, MIRROR):
+            for needle in ("## Carry-forward", '"$GATE_REPORT" carry-forward --repo "$REPO"',
+                           '--report-sha256 "$PRIOR_REPORT_SHA256"',
+                           "tier=carry-forward prior_run=<prior_run> prior_sha=<prior_head>",
+                           "for dedupe only, never authority",
+                           "`tier` = expected `class`"):
+                self.assertIn(needle, text)
+
+    def test_policy_names_the_carry_forward_exception(self):
+        policy = subprocess.run(
+            [sys.executable, str(REPO / "claude/skills/co-review/scripts/gate_report.py"),
+             "policy", "--section", "POLICY"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for needle in ("### Carry-forward", "the one named exception", "digest-pinned",
+                       "never the `gated..HEAD` range"):
+            self.assertIn(needle, policy)
+
 
 class CodexReviewGatesSkillText(unittest.TestCase):
     def test_spec_review_documents_the_substitute_round(self):
@@ -251,6 +270,12 @@ class ShipSkillText(unittest.TestCase):
                        "explicit merge confirmation", "step 6 confirmation"):
             self.assertIn(needle, SHIP)
         self.assertNotIn("step-5 confirmation", SHIP)
+
+    def test_ship_carries_a_merge_main_head_with_the_proof(self):
+        for needle in ("`carry-forward` command exits 0",
+                       "carry-forward record's `audit_comment`"):
+            self.assertIn(needle, SHIP)
+        self.assertNotIn('"Merge-main-only commits keep the verdict" in', SHIP)
 
 
 if __name__ == "__main__":

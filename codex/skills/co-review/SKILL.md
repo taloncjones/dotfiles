@@ -319,6 +319,39 @@ blockers to development. `INCOMPLETE` reports missing evidence. Human approval
 and explicit merge permission remain separate; cleanup refusal preserves the
 snapshot.
 
+## Carry-forward
+
+When the only commits since an APPROVE gate merge the target branch, the
+verdict carries to the new head without seats. The prior report and
+expected identity come with their SHA-256 digests from exactly one source:
+the pinned herdr `ship.json`, or this same uninterrupted workflow's own
+retained gate. Fetch the target, then run the proof:
+
+```bash
+git -C "$REPO" fetch origin "$BASE_REF" || exit 2
+uv run --no-project python "$GATE_REPORT" carry-forward --repo "$REPO" \
+  --report "$PRIOR_REPORT" --expected "$PRIOR_EXPECTED" \
+  --report-sha256 "$PRIOR_REPORT_SHA256" --expected-sha256 "$PRIOR_EXPECTED_SHA256" \
+  >"$RUN_DIR/carry-forward.json"
+```
+
+Exit 0 means every proof holds: no branch-authored commit since the gated
+head, every branch-touched file changed only by the target's own hunks, and
+no file outside the branch's own set. Exit 1 means the head needs a gate;
+the record's `reasons` say why. The record grants nothing beyond naming the
+prior run it extends.
+
+On exit 0, post the record's `audit_comment` as ship step 5 does (dedupe on
+`co-review-audit head=<head>`), then the carry-forward marker under the
+Publish rules below. Its first line is
+`<!-- co-review: sha=<head> base=<base> base_ref=<base_ref> verdict=APPROVE round=<n> tier=carry-forward prior_run=<prior_run> prior_sha=<prior_head> -->`,
+its verdict line is
+`Co-review verdict: APPROVE (carry-forward of <prior_run> at <prior_head>)`,
+and the proof block from `audit_comment` follows. Before asking for the go,
+skip the marker when any PR comment already has a line containing both
+`<!-- co-review: sha=<head> ` and ` tier=carry-forward prior_run=<prior_run> `;
+that read is for dedupe only, never authority.
+
 ## Publish (optional)
 
 Default is post nothing: the report stays in `RUN_DIR`. The only publishable
@@ -336,7 +369,9 @@ Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
 expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
-own valid markers already on the PR (1 when none). No `target_tip`.
+own valid markers already on the PR (1 when none), `tier` = expected `class`.
+No `target_tip`. A carry-forward marker also carries its proof block after
+the verdict line (see Carry-forward).
 
 Before asking for the go, read the PR's comments once (the `gh api
 --paginate --slurp` call below, run before `gh pr comment`) and compute

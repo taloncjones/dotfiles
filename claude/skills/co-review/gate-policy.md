@@ -117,6 +117,25 @@ does next. A nonzero gate exit is evidence to inspect, not permission to
 swallow an evaluator, verification, or cleanup error; malformed or missing
 structured output is `INCOMPLETE`.
 
+### Carry-forward
+
+A head whose only commits since an APPROVE gate merge the target branch
+keeps that verdict without seats when `gate_report.py carry-forward` proves
+three things against the digest-pinned prior report. First, no
+branch-authored non-merge commit exists since the gated head: a set
+difference of `rev-list --no-merges` from the target, never the `gated..HEAD` range,
+which lists the target's own commits after a merge. Second, every
+branch-touched file changed since the gated head carries only the target's
+own hunks while the branch's own hunks are unchanged. Third, the branch's
+changed-file set did not grow. A hand-resolved conflict, a rebase, or any
+branch commit fails the proof and needs a gate.
+
+This is the one named exception to "An interrupted workflow cannot
+reconstruct its authority from an old report". The prior report is
+accepted only digest-pinned, by the pinned herdr `ship.json` or by the same
+uninterrupted workflow; it is re-evaluated before use; and it approves
+nothing new, because the carried head's branch content is proved unchanged.
+
 ### Frozen inputs and report construction
 
 Prepare one immutable snapshot with `review.py prepare`, then run
