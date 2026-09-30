@@ -846,7 +846,8 @@ class GateReportTests(unittest.TestCase):
         result = self._cli_audit(self.root)
         self.assertEqual(result.returncode, 0, result.stderr)
         body = result.stdout
-        self.assertEqual(body.count(f"<!-- co-review-audit head={SHA_A} run=run-1 -->"), 1)
+        self.assertEqual(
+            body.count(f"<!-- co-review-audit head={SHA_A} run=run-1 tier=full -->"), 1)
         self.assertTrue(body.startswith("<!-- co-review-audit"))
         for text in ("Co-review gate: APPROVE", "- Run: run-1", f"- Head: {SHA_A}",
                      "- Tier: full (4 seats)", "- CI: 1/1 checks passed"):

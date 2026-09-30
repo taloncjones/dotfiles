@@ -421,6 +421,11 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
                else f"no CI: {preconditions['no_ci']['evidence']}")
     tier = report["class"]
     seats = report["seats"]
+    prior_fields, prior_lines = "", ()
+    if tier == "delta":
+        delta = report["delta"]
+        prior_fields = f" prior_run={delta['prior_run']} prior_head={delta['prior_head']}"
+        prior_lines = (f"- Prior: {delta['prior_run']} at {delta['prior_head']}",)
     substitute_lines = tuple(
         f"- Substitute: {name} seat ran on claude after a codex "
         f"{seats[name]['codex_substitute']['reason']} failure"
@@ -428,16 +433,91 @@ def audit_comment(report: dict, expected: dict, report_path: Path) -> str | None
         if isinstance(seats.get(name), dict) and "codex_substitute" in seats[name]
     )
     lines = (
-        f"<!-- co-review-audit head={report['head']} run={report['run_id']} -->",
+        f"<!-- co-review-audit head={report['head']} run={report['run_id']} "
+        f"tier={tier}{prior_fields} -->",
         "Co-review gate: APPROVE",
         "",
         f"- Run: {report['run_id']}",
         f"- Head: {report['head']}",
         f"- Tier: {tier} ({len(_TIER_SEATS[tier])} seats)",
+        *prior_lines,
         *substitute_lines,
         f"- CI: {ci_line}",
     )
     return "\n".join(lines) + "\n"
+
+
+def carry_forward_comment(record: dict) -> str:
+    """The PR audit comment for a passing carry-forward record (spec R7)."""
+    lines = [
+        f"<!-- co-review-audit head={record['head']} run={record['prior_run']} "
+        f"tier=carry-forward prior_head={record['prior_head']} -->",
+        "Co-review gate: APPROVE (carry-forward)",
+        "",
+        f"- Run: {record['prior_run']} (carried, no seats)",
+        f"- Head: {record['head']}",
+        f"- Prior head: {record['prior_head']}",
+        f"- Base: {record['base_ref']} at {record['base']}",
+        "",
+        "```text",
+    ]
+    for proof in record["proofs"]:
+        lines.append("$ " + " ".join(proof["argv"]))
+        lines.extend(proof["output"] or ["(empty)"])
+    lines.append("```")
+    return "\n".join(lines) + "\n"
+
+
+def _read_gate(report_path: Path, expected_path: Path, report_sha256: str | None,
+               expected_sha256: str | None, reasons: list[str]):
+    """(report, expected) of a digest-pinned gate that still evaluates APPROVE, else None.
+
+    A None digest is only for a file already bound by a pinned report's own digest.
+    """
+    try:
+        report_bytes, expected_bytes = report_path.read_bytes(), expected_path.read_bytes()
+    except OSError as error:
+        reasons.append(f"cannot read the prior gate: {error}")
+        return None
+    for label, content, pinned in (("report", report_bytes, report_sha256),
+                                   ("expected", expected_bytes, expected_sha256)):
+        if pinned is not None and hashlib.sha256(content).hexdigest() != pinned:
+            reasons.append(f"prior {label} digest does not match its pin")
+            return None
+    try:
+        report = json.loads(report_bytes.decode("utf-8"))
+        expected = json.loads(expected_bytes.decode("utf-8"))
+    except ValueError as error:
+        reasons.append(f"cannot read the prior gate: {error}")
+        return None
+    verdict = evaluate(report, expected, report_path.resolve().parent)["verdict"]
+    if verdict != "APPROVE":
+        reasons.append(f"prior gate verdict is {verdict}")
+        return None
+    return report, expected
+
+
+def carry_forward_record(repo: Path, report_path: Path, expected_path: Path,
+                         report_sha256: str, expected_sha256: str,
+                         upstream: str | None, head: str) -> dict:
+    """Re-evaluate the prior APPROVE and run the carry-forward proofs (spec R1-R7)."""
+    record = {
+        "schema": 1, "tier": "carry-forward", "pass": False, "reasons": [],
+        "prior_run": None, "prior_head": None, "head": None, "upstream": upstream,
+        "base": None, "base_ref": None, "old_base": None, "new_base": None,
+        "proofs": [], "audit_comment": None,
+    }
+    gate = _read_gate(report_path, expected_path, report_sha256, expected_sha256,
+                      record["reasons"])
+    if gate is None:
+        return record
+    expected = gate[1]
+    upstream = upstream or f"origin/{expected['base_ref']}"
+    record.update(prior_run=expected["run_id"], base_ref=expected["base_ref"])
+    record.update(_load_sibling("branch_delta").carry_forward(repo, expected["head"], head, upstream))
+    if record["pass"]:
+        record["audit_comment"] = carry_forward_comment(record)
+    return record
 
 
 def schema() -> dict:
@@ -559,7 +639,18 @@ def main(argv: list[str] | None = None) -> int:
     audit_parser = sub.add_parser("audit-comment")
     audit_parser.add_argument("--report", required=True)
     audit_parser.add_argument("--expected", required=True)
+    cf_parser = sub.add_parser("carry-forward")
+    for flag in ("--repo", "--report", "--expected", "--report-sha256", "--expected-sha256"):
+        cf_parser.add_argument(flag, required=True)
+    cf_parser.add_argument("--head", default="HEAD")
+    cf_parser.add_argument("--upstream", default=None)
     args = parser.parse_args(argv)
+    if args.command == "carry-forward":
+        record = carry_forward_record(
+            Path(args.repo), Path(args.report), Path(args.expected),
+            args.report_sha256, args.expected_sha256, args.upstream, args.head)
+        print(json.dumps(record, sort_keys=True))
+        return 0 if record["pass"] else 1
     if args.command == "schema":
         print(json.dumps(schema(), sort_keys=True))
         return 0
