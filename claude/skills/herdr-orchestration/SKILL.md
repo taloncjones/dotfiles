@@ -121,6 +121,14 @@ for the provider's `launch_env` mapping.
      `BUSY`. Never run `claim-owner` in the
      background: a background process started before `/clear` would pass the
      ancestry check under the old session id.
+   - **Handover adoption.** A fresh lease is also adopted, with a fence bump,
+     when `STATE_ROOT/<slug>/rollover-pending.json` (written by section 1a's
+     `rollover` verb) names this pane (`HERDR_PANE_ID`) and the token in
+     `HERDR_ROLLOVER_TOKEN`, has not expired, and names the current lease's
+     session and fence. The marker is single-use: adoption appends an
+     `adopted` line to `<slug>/rollover.jsonl` and deletes it. A missing or
+     mismatched marker changes nothing; the other claim rules still apply.
+     Launcher-tier Claude claims only.
    - **On the initial claim only** (not on refresh), label THIS session's own
      workspace so the Herdr UI shows the standing director, not a bare
      name: `herdr workspace rename "$HERDR_WORKSPACE_ID" "director:<repo>"`
@@ -309,7 +317,7 @@ for the provider's `launch_env` mapping.
      heartbeat).
    - A persistent Monitor survives `/clear` and keeps delivering into the new
      context (verified 2026-09-22), but the new context does not know its
-     task id. After a rollover, the hook's `watch:` line decides: `live`
+     task id. After a `/clear` or compaction, the hook's `watch:` line decides: `live`
      means do not arm; `none` or `unknown` means arm now.
    - **On yielding ownership** (stale fence, or explicit takeover), TaskStop
      this session's watch before going read-only.
@@ -328,43 +336,63 @@ for the provider's `launch_env` mapping.
      mech-ledger writes; the hook pushes on completion-record changes and
      blocks; an ordinary worker turn end produces neither.
 
-## 1a. Rollover in place
+## 1a. Roll over to a new pane
 
 Roll over when the human asks, or when a check-in prints
 `rollover-due used_pct=<n> threshold=<t>`. That line comes from the host's
 own context reading (the statusline records it per session; `config.json`
 `rollover_pct`, default 45, sets the threshold); never estimate the fill
-yourself and never write the record. Check-in also deletes context records older than 10 minutes; they are inert. On `rollover-due`, write that pass's
+yourself and never write the record. Check-in also deletes context records
+older than 10 minutes; they are inert. On `rollover-due`, write that pass's
 transitions, start no kickoff or dispatch in the same turn, then roll over.
 
 1. Finish or park the current action. Never roll over mid-kickoff or
    mid-dispatch.
-2. Say in this turn's message anything `STATE_ROOT` does not hold: pending
-   human questions, standing directives from chat, a decision in progress.
-   Nothing carries them across `/clear`; the human reads the message and can
-   restate them. Task state is already on disk; do not restate it.
-3. Run, as the LAST tool call of the turn:
-   `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence>`
-4. End the turn. The verb typed `/clear` into this pane and read the input line back; it runs when the
-   turn ends. If the verb exits 1, say what it printed; the human presses
-   Enter or clears the input.
-5. In the fresh context, the `director_rollover` SessionStart hook has already
-   re-claimed the lease under the new session id, printed an `[INFO] herdr
-director rollover` block with the fence and the watch state, and started
-   a helper that sends one `resume director` line into this pane once it is
-   idle (the block's `auto-resume:` line says so). That line is your first
-   turn: follow the block's `Next:` line. Follow its `Next:` line: load this
-   skill, use the printed fence, skip the initial-claim-only steps
-   (workspace label, `dashboard --open`), and run a section-4 check-in
-   before any dispatch.
-6. If the block is a `[WARNING]`, or no block appears, run section 1
-   preflight. Its `claim-owner` adopts the lease the same way; on `BUSY`,
-   stop and ask the human. If no `resume director` line arrives within two minutes, the
-   human types it after checking the pane shows no earlier one; the helper's
-   outcome is in `<slug>/rollover.jsonl`.
+2. Collect what `STATE_ROOT` does not hold: pending human questions,
+   standing directives from chat, a decision in progress. Task state is
+   already on disk; do not restate it. This pane closes after the handover,
+   so pass the notes with `--carry` (at most 4000 characters, one note per
+   line); the new director sees them as `carried:` lines.
+3. Run in the foreground, with a Bash timeout of 300000 ms:
+   `python3 "$CORE" rollover --repo-path <repo_root> --repo-slug <slug> --session <id> --fence <fence> --carry '<notes>'`
+   (add `--personal` when this director runs on an intentional personal
+   account in a work repo). The verb splits this pane, writes
+   `STATE_ROOT/<slug>/rollover-pending.json` naming the new pane and a
+   one-time token, starts `director` there, and waits up to 120 s for the
+   new director to adopt the lease.
+4. `rollover: handed over to pane <p> ...` (exit 0): this session is fenced
+   out. The verb stopped this session's watch; on a `watch:` line that says
+   `unknown` or `not scanned`, TaskStop the watch task. Make
+   `herdr pane close "$HERDR_PANE_ID"` your last tool call; it ends this
+   Claude process. The transcript stays on disk.
+5. `rollover: no ack ... this session keeps the lease (fence <n>)`: the new
+   pane is closed and the marker removed. Use fence `<n>` from now on, say
+   so in this turn's message, and retry later or ask the human.
+6. `rollover: rollover in progress for pane <p>`: an earlier rollover is
+   still waiting. Do not retry until it expires (two minutes); a retry then
+   closes that pane and starts over.
+7. `rollover: lease moved without a handover ack` or `owner: stale-fence`:
+   this session no longer holds the lease. Stop its watch per section 1 step
+   7 and run the section-1 preflight, which reports the holder.
 
-No handoff record, second pane, `/exit`, or `--stale-secs` wait is part of
-a director rollover.
+If the Bash call times out or is interrupted, run the same `rollover`
+command again: it reports a handover that completed meanwhile, refuses
+while the first attempt is still pending, and cleans up an expired one.
+
+In the new pane, the `director_rollover` SessionStart hook runs the core's
+`adopt-rollover`, which takes the lease through the marker (fence + 1, the
+wake socket moves to the new process) and appends an `adopted` line to
+`<slug>/rollover.jsonl`. Its `[INFO] herdr director rollover: lease handed
+over from session <old> (pane <p>).` block is the new director's startup
+report: follow its `Next:` line, act on its `carried:` lines, arm the
+backstop (its `watch:` line says none exists), and run a section-4 check-in
+before any dispatch. On a `[WARNING]` block, or no block, run the section-1
+preflight; its `claim-owner` adopts through the same marker while it is
+valid, and on `BUSY` stop and ask the human.
+
+A `/clear` or compaction in place still keeps the lease: the same hook runs
+`resume-owner` and prints the `lease re-established in place` block. Nothing
+types `/clear` or a resume line into any pane.
 
 ## 2. Kickoff (human designates) -- idempotent, ownership-tracked
 
