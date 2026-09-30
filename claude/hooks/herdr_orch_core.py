@@ -1035,6 +1035,18 @@ def wake_line(repo_slug, ws, event, ts=None, nonce=None) -> str:
     return json.dumps(msg, separators=(",", ":")) + "\n"
 
 
+def heartbeat_reason(hb, now) -> str:
+    """"ok" when an owner heartbeat is fresh enough to deliver a wake to,
+    else the wake guard's refusal reason."""
+    if isinstance(hb, bool) or not isinstance(hb, (int, float)) or not math.isfinite(hb):
+        return "bad-heartbeat"
+    if now - hb > WAKE_HEARTBEAT_STALE_SECS:
+        return "stale-heartbeat"
+    if hb - now > WAKE_HEARTBEAT_SKEW_SECS:
+        return "future-heartbeat"
+    return "ok"
+
+
 def post_wake(rd, ws, event, own_socket="", now=None) -> str:
     """Push one wake line to the owning orchestrator's inbox socket named in
     owner.json. Every guard returns a distinct reason and sends nothing; only
@@ -1056,14 +1068,10 @@ def post_wake(rd, ws, event, own_socket="", now=None) -> str:
     sock_path = owner.get("messaging_socket")
     if not isinstance(sock_path, str) or not sock_path:
         return "no-socket"
-    hb = owner.get("heartbeat_ts")
-    if isinstance(hb, bool) or not isinstance(hb, (int, float)) or not math.isfinite(hb):
-        return "bad-heartbeat"
     now = time.time() if now is None else now
-    if now - hb > WAKE_HEARTBEAT_STALE_SECS:
-        return "stale-heartbeat"
-    if hb - now > WAKE_HEARTBEAT_SKEW_SECS:
-        return "future-heartbeat"
+    reason = heartbeat_reason(owner.get("heartbeat_ts"), now)
+    if reason != "ok":
+        return reason
     pid = owner.get("pid")
     if isinstance(pid, str) and pid.isdigit():
         pid = int(pid)   # legacy records written by the pre-flag CLI
@@ -3166,19 +3174,15 @@ CHECKIN_TERMINAL = frozenset({"failed", "abandoned", "merged"})
 _REVIEW_STATES = frozenset({"review-dispatched", "reviewed", "changes-requested"})
 
 
-def checkin_action(f) -> str:
-    """The transition the director still has to write, or "none".
+# Rules that read a live herdr poll. `pending` runs without one, so it skips them.
+POLL_RULES = frozenset({"unknown", "abandoned-candidate", "blocked", "unblocked",
+                        "exit-idle-worker"})
 
-    Every rule is gated on the transition NOT already being recorded. Firing
-    on evidence alone would make `changed: yes` permanent: is_reviewed
-    consults only the review record and review_head_sha, never task.status, so
-    a task parked in `reviewed` awaiting a human merge would ask for
-    confirm-review on every check-in forever.
-    """
+
+def checkin_rules(f):
+    """(name, fires) pairs in precedence order; the first firing rule wins."""
     status = f.get("status")
-    if status in CHECKIN_TERMINAL:
-        return "none"
-    rules = (
+    return (
         ("unknown", not f.get("poll_ok")
                     or (f.get("head") is None and f.get("worktree_exists"))),
         ("abandoned-candidate", f.get("live") == "absent"
@@ -3206,10 +3210,98 @@ def checkin_action(f) -> str:
         ("exit-idle-worker", f.get("idle_settled")),
         ("ship", f.get("ship_pending")),
     )
-    for name, fires in rules:
+
+
+def checkin_action(f) -> str:
+    """The transition the director still has to write, or "none".
+
+    Every rule is gated on the transition NOT already being recorded. Firing
+    on evidence alone would make `changed: yes` permanent: is_reviewed
+    consults only the review record and review_head_sha, never task.status, so
+    a task parked in `reviewed` awaiting a human merge would ask for
+    confirm-review on every check-in forever.
+    """
+    if f.get("status") in CHECKIN_TERMINAL:
+        return "none"
+    for name, fires in checkin_rules(f):
         if fires:
             return name
     return "none"
+
+
+def pending_action(f) -> str:
+    """checkin_action for facts gathered without a herdr poll: the poll rules
+    are skipped instead of reporting `unknown`."""
+    if f.get("status") in CHECKIN_TERMINAL:
+        return "none"
+    for name, fires in checkin_rules(f):
+        if fires and name not in POLL_RULES:
+            return name
+    return "none"
+
+
+def _utc_stamp(value):
+    """value when it is a core UTC timestamp exactly as now_iso writes it,
+    else None. The round trip rejects unpadded forms strptime accepts
+    (2026-9-7T...), which would break the string ordering callers rely on."""
+    try:
+        parsed = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    return value if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") == value else None
+
+
+def pending_since(rd, task):
+    """When the task began waiting: the newest done/review sidecar ts, else
+    the task's updated, else created; None when none parses."""
+    stamps = []
+    for suffix in (".done.json", ".review.json"):
+        try:
+            rec = json.loads(read_payload_text(Path(rd) / "tasks" / f"{task['task_id']}{suffix}"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and _utc_stamp(rec.get("ts")):
+            stamps.append(rec["ts"])
+    if stamps:
+        return max(stamps)   # fixed-width UTC strings sort chronologically
+    return _utc_stamp(task.get("updated")) or _utc_stamp(task.get("created"))
+
+
+def owner_lease(rd, now) -> str:
+    """live, stale, absent or unreadable for the owner.json mirror, by the
+    same heartbeat rule post_wake delivers wakes on."""
+    try:
+        owner = json.loads(read_payload_text(_owner_path(rd)))
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(owner, dict):
+        return "unreadable"
+    return "live" if heartbeat_reason(owner.get("heartbeat_ts"), now) == "ok" else "stale"
+
+
+def pending_report(rd, now) -> dict:
+    """Tasks whose poll-independent check-in action is not none, oldest
+    first, plus the owner lease. Read-only: no heartbeat, lock or herdr."""
+    payload_root = state_root().parent
+    tasks = []
+    for tf in task_record_files(Path(rd) / "tasks"):
+        try:
+            task = json.loads(read_payload_text(tf))
+        except (OSError, ValueError):
+            continue
+        if not (isinstance(task, dict) and isinstance(task.get("task_id"), str)
+                and valid_task_id(task["task_id"])):
+            continue
+        if task.get("status") in CHECKIN_TERMINAL:
+            continue
+        action = pending_action(checkin_facts(rd, task, None, payload_root))
+        if action != "none":
+            tasks.append({"task_id": task["task_id"], "status": task.get("status") or "unknown",
+                          "action": action, "since": pending_since(rd, task)})
+    tasks.sort(key=lambda t: (t["since"] is None, t["since"] or "", t["task_id"]))
+    return {"repo_slug": Path(rd).name, "lease": owner_lease(rd, now), "tasks": tasks}
 
 
 def ship_pending(task) -> bool:
@@ -3301,7 +3393,10 @@ def checkin_facts(rd, task, poll, payload_root) -> dict:
         live = "absent"
 
     head = _git(worktree, "rev-parse", "HEAD") if worktree_exists else None
-    porcelain = _git(worktree, "status", "--porcelain") if worktree_exists else None
+    # --no-optional-locks: never rewrite a live worker's index (context_git
+    # strips GIT_* variables, so GIT_OPTIONAL_LOCKS cannot carry this).
+    porcelain = (_git(worktree, "--no-optional-locks", "status", "--porcelain")
+                 if worktree_exists else None)
     dirty = "unknown" if porcelain is None else ("yes" if porcelain else "no")
     ahead = _git_ancestor(worktree, task.get("base_sha"), head) if worktree_exists else "unknown"
 
@@ -4145,6 +4240,7 @@ def _main(argv=None) -> int:
     ck.add_argument("--workspaces-json", default=None)
     ck.add_argument("--all", action="store_true")
     add("status")
+    add("pending")
     add("review-deadlines")
     add("task-lead-status")
     add("deactivate-task-leads", fenced=True)
@@ -6124,6 +6220,11 @@ def _main(argv=None) -> int:
             changed = True
         print(f"changed: {'yes' if changed else 'no'}")
         write_drop_ack(rd, acked)
+        return 0
+    if ns.cmd == "pending":
+        _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")
+        rd = repo_dir(ns.repo_slug)
+        print(json.dumps(pending_report(rd, time.time()), separators=(",", ":")))
         return 0
     if ns.cmd == "review-deadlines":
         _require(valid_repo_slug(ns.repo_slug), "invalid repo-slug")

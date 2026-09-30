@@ -780,9 +780,10 @@ prose is not a substitute; the prompt is what raises the notification on the
 user's other devices. Without the tool (a `-p` session), ask in prose and end
 the turn anyway -- ending the turn is the half that saves tokens.
 
-An outward-posting action (PR comment, review, reply, body edit, Jira
-comment) is never an `AskUserQuestion` option, recommended or not: ask in
-prose for the typed go and end the turn.
+A gated post (a review, a thread reply, a comment on another author's PR, a
+body that mentions someone, a Jira comment) is never an `AskUserQuestion`
+option, recommended or not: register the draft, show it in prose with its
+hash, and end the turn.
 
 A check-in runs on a human prompt OR on any wake from the section-1 watch (a
 `signal` or `heartbeat` notification). Watch lines are a WAKE TRIGGER ONLY:
@@ -1343,13 +1344,16 @@ round" dispatches as usual. The delta brief carries these lines:
 **Ship dispatch.** Decide from one `merge-ready` run (section 6a step 1
 shows the call; before a PR exists, pass `{}` in both the `--pr-json` and
 `--repo-json` files); its `handoff_state` is `none`, `stale` (the handoff's head
-is not the live head) or `current`. The ship agent is named exactly its
-launch id. It is live only when `herdr agent get <ship_launch_id>` finds it
-in state `working`; `idle`, `done` or not found (including a launch that
-never started) is not live, because agents stay present after their work
-ends. Before any dispatch, and whenever `handoff_state` is not `none`, close
-a pinned ship agent that is present but not live, as for review panes: send
-`esc`, then `/exit` to the named agent, then close that exact pane if it
+is not the live head) or `current`. The ship agent's herdr name is the
+`agent` field of the `workers[]` row whose `launch_id` equals
+`ship_launch_id` (32 characters, `ship_agent_name` in `herdr_dispatch.py`;
+the launch id itself is longer and does not resolve). It is live only when
+`herdr agent get <that agent>` finds it in state `working`; `idle`, `done`
+or not found (including a launch that never started) is not live, because
+agents stay present after their work ends. Before any dispatch, and
+whenever `handoff_state` is not `none`, close a pinned ship agent that is
+present but not live, as for review panes: send `esc`, then `/exit` to
+that agent name, then close that exact pane if it
 remains (never `herdr workspace close`). Dispatch a fresh ship launch, in
 either kind of repository, only when the pinned agent is not live and (a)
 `handoff_state` is `none`, (b) `handoff_state` is `stale`, or (c)
@@ -1866,7 +1870,7 @@ the new `status`; that write is the authoritative record.
 | review-dispatched                            | complete exact review evidence at dispatched/live HEAD: `outcome: approved` and zero blocking findings                                                                                                 | `reviewed`                                     | reviewed                | no        |
 | review-dispatched/reviewed/changes-requested | recorded `review_head_sha` != live HEAD (branch advanced any time)                                                                                                                                     | (stale: clear `review_head_sha`, re-correlate) | completed/in-progress   | no        |
 | changes-requested                            | implementer pushes new HEAD (new `head_sha`)                                                                                                                                                           | (re-kickoff impl or resume)                    | in-progress             | no        |
-| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                                   | `merged`                                       | merged                  | yes       |
+| reviewed                                     | `merge-authority` human: one prose ask, then section 6a; `/post-merge`                                                                                                                                 | `merged`                                       | merged                  | yes       |
 | reviewed                                     | `merge-authority` director: section 6a gates pass, PR confirmed `MERGED`                                                                                                                               | `merged` (`merged_by: director`)               | merged                  | yes       |
 | reviewed                                     | PR `MERGED` at `review_head_sha`, director repo (section 6a recovery, before the stale-verdict rule)                                                                                                   | `merged` (`merged_by: observed`)               | merged                  | yes       |
 
@@ -1934,17 +1938,28 @@ Rules (these are outward-facing writes, so treat them carefully):
   asking where `merge-authority` prints `director`, after one prose ask
   elsewhere. `/ship` step 6 and `/post-merge` outside that flow stay human
   actions. Workers never carry merge authority.
-- The director posts to a PR (a co-review marker, bench evidence, a status
-  note, a body edit) without asking in a personal repository, and in a
-  work repository only after the owner says `post it` or `post all` in a
-  message, once per post (co-review Publish; `edit the pr body` for a body
-  edit). It never replies to a human reviewer's thread on its own
-  initiative: it drafts the reply and asks. Enforced
-  in herdr agent sessions by the gh shim (`bin/herdr-shims/gh`,
-  `claude/hooks/gh_post_shim.py`), which gates only posted text at exec
-  time -- every other `gh` write (`workflow run`, `run download`, `pr
-  merge`, ...) passes -- with `claude/hooks/pr_post_guard.py` as the
-  typed-go source and second layer. Never send `gh` to another pane with
+- The director posts by audience. In a personal repository it posts without
+  asking. In a work repository, maintenance of a PR this account authored
+  (title, body, labels, draft/ready, reviewer requests, deleting its own
+  co-review marker) and green evidence on it (an `APPROVE` marker, passing
+  bench or CI evidence) post without asking; each prints its line in the
+  same turn: `[INFO] edited PR #n body: <why>`, `[INFO] posted co-review
+  marker on #n: APPROVE`. Non-green evidence (a `CHANGES` marker, failing
+  bench, blocked notes) is not posted; it stays in the ship report. Text
+  aimed at a person (any `gh pr review`, a thread reply, a comment on a PR
+  this account did not author, a body with an `@login`) needs the owner's
+  go: register it with `python3 ~/.claude/hooks/pr_post_guard.py draft --
+  gh <args>`, show the draft and hash, and wait for `post it`, `post all`
+  or `post <hash>`; after posting, print `[INFO] posted reply on #n`. If an
+  approved post fails, let the Bash call return, read the PR, and
+  re-register only when the text is absent, telling the owner that a
+  duplicate is possible. It never replies to a human reviewer's thread on
+  its own initiative. Enforced in herdr agent sessions by the gh shim
+  (`bin/herdr-shims/gh`, `claude/hooks/gh_post_shim.py`), which reads the
+  PR author once per session and spends one approved draft per gated call
+  -- every other `gh` write (`workflow run`, `run download`, `pr merge`,
+  ...) passes -- with `claude/hooks/pr_post_guard.py` as the draft and go
+  source and the second layer. Never send `gh` to another pane with
   `herdr pane run`: that shell has no shim, and the hook refuses it.
 - All state is machine-local under `STATE_ROOT` (`references/state-layout.md`);
   nothing under it is ever git-tracked, and no marker is written into any
