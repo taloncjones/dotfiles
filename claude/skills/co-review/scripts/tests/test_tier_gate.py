@@ -164,5 +164,168 @@ class CarryForwardCliTests(TierFixture):
         first = subprocess.run(run, capture_output=True, check=False).stdout
         self.assertEqual(first, subprocess.run(run, capture_output=True, check=False).stdout)
 
+class DeltaClassCliTests(TierFixture):
+    def test_small_follow_up_recommends_delta_and_writes_the_diff(self):
+        head = commit_file(self.repo, "src/app.py", "print(2)\n")
+        out = self.root / "delta.diff"
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(out))
+        self.assertEqual((code, rec["recommend"]), (0, "delta"), rec["reasons"])
+        self.assertEqual((rec["anchor_head"], rec["head"], rec["carry_forward"]),
+                         (self.gated, head, None))
+        self.assertIn(b"+print(2)", out.read_bytes())
+
+    def test_digest_mismatch_recommends_full(self):
+        commit_file(self.repo, "src/app.py", "print(2)\n")
+        args = self.pins()
+        args[args.index("--expected-sha256") + 1] = "0" * 64
+        code, rec = cli("delta-class", "--repo", str(self.repo), *args,
+                        "--diff-out", str(self.root / "d.diff"))
+        self.assertEqual((code, rec["recommend"]), (1, "full"))
+        self.assertIn("prior expected digest does not match its pin", rec["reasons"])
+        self.assertFalse((self.root / "d.diff").exists())
+
+    def test_ci_workflow_change_recommends_full(self):
+        commit_file(self.repo, ".github/workflows/ci.yml", "on: push\n")
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(self.root / "d.diff"))
+        self.assertEqual((code, rec["recommend"]), (1, "full"))
+        self.assertIn("delta touches a ci path", rec["reasons"])
+
+    def test_six_files_recommend_full(self):
+        for n in range(6):
+            commit_file(self.repo, f"src/f{n}.py", "x\n")
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(self.root / "d.diff"))
+        self.assertEqual(code, 1)
+        self.assertIn("6 files exceed max_files 5", rec["reasons"])
+
+    def test_merge_main_then_follow_up_anchors_on_the_merge(self):
+        merge = self.merge_main()
+        commit_file(self.repo, "src/app.py", "print(3)\n")
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(self.root / "d.diff"))
+        self.assertEqual(code, 0, rec["reasons"])
+        self.assertEqual(rec["anchor_head"], merge)
+        self.assertTrue(rec["carry_forward"]["pass"])
+
+    def test_prior_light_round_recommends_full(self):
+        report, expected = write_run(self.root / "light", "light-1", self.gated, "light",
+                                     gate.LIGHT_SEATS)
+        report["seats"]["codex"]["runtime"] = "codex"
+        report["preconditions"]["diff"] = artifact(self.root / "light", "frozen.diff",
+                                                   "diff --git a/README.md b/README.md\n+x\n")
+        self.report_path, self.expected_path = save(self.root / "light", report, expected)
+        commit_file(self.repo, "src/app.py", "print(2)\n")
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(self.root / "d.diff"))
+        self.assertEqual(code, 1)
+        self.assertIn("first round on a branch is always full: no prior full APPROVE",
+                      rec["reasons"])
+
+
+class DeltaEvaluateTests(TierFixture):
+    def build_delta(self) -> tuple[dict, dict, Path]:
+        head = commit_file(self.repo, "src/app.py", "print(2)\n")
+        run = self.root / "delta-run"
+        run.mkdir()
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(run / "delta.diff"))
+        self.assertEqual(code, 0, rec["reasons"])
+        code, copied = cli("copy-prior", "--report", rec["prior_report"],
+                           "--expected", rec["prior_expected"],
+                           "--report-sha256", rec["prior_report_sha256"],
+                           "--expected-sha256", rec["prior_expected_sha256"],
+                           "--out", str(run / "prior"))
+        self.assertEqual(code, 0, copied)
+        report, expected = write_run(run, "delta-1", head, "delta", gate.DELTA_SEATS)
+        ids = {"prior_run": rec["prior_run"], "prior_head": rec["prior_head"],
+               "anchor_head": rec["anchor_head"]}
+        expected["delta"] = {**ids, "max_files": 5, "max_lines": 150}
+        report["delta"] = {**ids, **copied, "carry_forward": None, "blast_radius": "bounded",
+                           "diff": {"artifact": "delta.diff", "sha256": sha256(run / "delta.diff")}}
+        return report, expected, run
+
+    def test_clean_delta_approves_without_escalation(self):
+        report, expected, run = self.build_delta()
+        result = gate.evaluate(report, expected, run)
+        self.assertEqual(result["verdict"], "APPROVE", result["reasons"])
+        self.assertNotIn("escalate", result)
+
+    def test_unbounded_blast_radius_escalates(self):
+        report, expected, run = self.build_delta()
+        report["delta"]["blast_radius"] = "unbounded"
+        result = gate.evaluate(report, expected, run)
+        self.assertEqual((result["verdict"], result.get("escalate")), ("INCOMPLETE", "full"))
+        self.assertIn("delta blast radius is unbounded", result["reasons"])
+
+    def test_confirmed_material_finding_escalates(self):
+        report, expected, run = self.build_delta()
+        report["findings"] = [{"id": "f", "severity": "major", "disposition": "confirmed",
+                               "scenario": "s", "evidence": "e", "impact": "i"}]
+        result = gate.evaluate(report, expected, run)
+        self.assertEqual((result["verdict"], result.get("escalate")), ("CHANGES", "full"))
+
+    def test_missing_prior_artifact_escalates(self):
+        report, expected, run = self.build_delta()
+        (run / "prior" / "claude.txt").unlink()
+        result = gate.evaluate(report, expected, run)
+        self.assertEqual((result["verdict"], result.get("escalate")), ("INCOMPLETE", "full"))
+
+    def test_expected_without_delta_block_is_incomplete(self):
+        report, expected, run = self.build_delta()
+        del expected["delta"]
+        self.assertIn("delta block is missing", gate.evaluate(report, expected, run)["reasons"])
+
+    def test_delta_seat_on_codex_is_incomplete(self):
+        report, expected, run = self.build_delta()
+        report["seats"]["claude"]["runtime"] = "codex"
+        self.assertIn("delta seat claude must run on claude",
+                      gate.evaluate(report, expected, run)["reasons"])
+
+    def test_full_report_with_a_delta_block_is_incomplete(self):
+        report = json.loads(self.report_path.read_text())
+        expected = json.loads(self.expected_path.read_text())
+        report["delta"] = {}
+        self.assertIn("delta block on a non-delta class",
+                      gate.evaluate(report, expected, self.report_path.parent)["reasons"])
+
+    def test_audit_comment_names_the_delta_tier_and_prior(self):
+        report, expected, run = self.build_delta()
+        body = gate.audit_comment(report, expected, run / "report.json")
+        self.assertTrue(body.startswith(
+            f"<!-- co-review-audit head={report['head']} run=delta-1 tier=delta "
+            f"prior_run=full-1 prior_head={self.gated} -->\n"))
+        self.assertIn("- Tier: delta (2 seats)", body)
+
+    def test_delta_after_a_delta_and_a_main_merge_recommends_full(self):
+        report, expected, run = self.build_delta()
+        self.report_path, self.expected_path = save(run, report, expected)
+        self.merge_main()
+        commit_file(self.repo, "src/app.py", "print(4)\n")
+        code, rec = cli("delta-class", "--repo", str(self.repo), *self.pins(),
+                        "--diff-out", str(self.root / "d.diff"))
+        self.assertEqual((code, rec["recommend"]), (1, "full"))
+        self.assertEqual(rec["prior_run"], "full-1")
+        self.assertTrue(rec["reasons"][0].startswith(
+            "anchor is not a carry-forward of the full head"), rec["reasons"])
+
+    def test_copy_prior_refuses_a_symlinked_artifact(self):
+        target = self.report_path.parent / "claude.txt"
+        moved = self.root / "elsewhere.txt"
+        target.rename(moved)
+        target.symlink_to(moved)
+        code, out = cli("copy-prior", *self.pins(), "--out", str(self.root / "copy"))
+        self.assertEqual(code, 1)
+        self.assertIn("not a regular file", out["error"])
+
+    def test_copy_prior_refuses_a_prior_that_is_not_the_pinned_one(self):
+        pins = self.pins()
+        self.report_path.write_text(self.report_path.read_text() + "\n")
+        code, out = cli("copy-prior", *pins, "--out", str(self.root / "copy"))
+        self.assertEqual(code, 1)
+        self.assertIn("prior report digest does not match its pin", out["error"])
+        self.assertFalse((self.root / "copy").exists())
+
 if __name__ == "__main__":
     unittest.main()
