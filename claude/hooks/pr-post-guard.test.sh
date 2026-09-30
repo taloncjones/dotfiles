@@ -41,12 +41,11 @@ case_gate() {
     export DOTFILES_POST_GATE_DIR="$GATE"
 }
 
-# pending HASH CREATED: a shown draft for s1 in the current gate dir, stamped
-# with the batch the next prompt closes
+# pending HASH CREATED [TEXT]: a shown v3 draft for s1 in the current gate
+# dir; TEXT defaults to "x", and PD_NULL=1 (in a subshell) records no text
 pending() {
     mkdir -p "$GATE"
-    b=$(cat "$GATE/s1.batch" 2>/dev/null || printf initial)
-    printf '{"v":2,"batch":"%s","created":%s,"argv":[]}' "$b" "$2" >"$GATE/s1.draft-$1.pending"
+    PD_TEXT="${3-x}" python3 -c 'import json, os, sys; t = None if os.environ.get("PD_NULL") == "1" else os.environ["PD_TEXT"]; print(json.dumps({"v": 3, "created": int(sys.argv[1]), "argv": [], "text": t}))' "$2" >"$GATE/s1.draft-$1.pending"
 }
 
 REVIEW='gh pr review 5 -c -b x'
@@ -75,6 +74,37 @@ print(json.dumps({
     "tool_input": {"command": os.environ["PB_CMD"]},
 }))
 PY
+}
+
+# payload_a SID LABEL PREVIEW -> PostToolUse AskUserQuestion JSON: one
+# question "$PA_QUESTION" (default "Post this draft?") with the options
+# LABEL (preview PREVIEW) and "Hold", answered with $PA_ANSWER (default
+# LABEL). PA_MULTI=1 makes it multi-select, PA_EXTRA is JSON merged into
+# tool_response, PA_TOOL replaces the tool name. Set these only inside
+# $(...): a sh assignment before a function call can outlive the call.
+payload_a() {
+    PA_SID="$1" PA_LABEL="$2" PA_PREVIEW="${3-}" python3 - <<'PY'
+import json, os
+q = os.environ.get("PA_QUESTION", "Post this draft?")
+label = os.environ["PA_LABEL"]
+questions = [{"question": q, "header": "Post", "multiSelect": os.environ.get("PA_MULTI") == "1",
+              "options": [{"label": label, "description": "posts the draft", "preview": os.environ["PA_PREVIEW"]},
+                          {"label": "Hold", "description": "wait"}]}]
+response = {"questions": questions, "answers": {q: os.environ.get("PA_ANSWER", label)}}
+response.update(json.loads(os.environ.get("PA_EXTRA") or "{}"))
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": os.environ["PA_SID"],
+                  "tool_name": os.environ.get("PA_TOOL", "AskUserQuestion"),
+                  "tool_input": {"questions": questions}, "tool_response": response}))
+PY
+}
+
+# expect_out LABEL NEEDLE PAYLOAD -> the hook's stdout contains NEEDLE
+expect_out() {
+    got=$(printf '%s' "$3" | python3 "$HOOK" 2>/dev/null)
+    case "$got" in
+        *"$2"*) printf 'PASS  %s\n' "$1"; PASS=$((PASS + 1)) ;;
+        *) printf 'FAIL  %s (stdout %s)\n' "$1" "$got" >&2; FAIL=$((FAIL + 1)) ;;
+    esac
 }
 
 expect_rc() {
@@ -119,59 +149,209 @@ expect_class() {
     fi
 }
 
-# --- G: the go is a phrase anywhere in a typed prompt ---------------------
+# --- A: the go is the owner's AskUserQuestion answer, one draft at a time --
 
-case_gate g1
-pending aaaaaaaa 1
-expect_rc "G1 prompt post it" 0 "$(payload_u s1 'post it')"
-expect_file "G1 draft approved" "$GATE/s1.draft-aaaaaaaa.approved" present
-expect_rc "G1 post allowed" 0 "$(payload_b s1 "$REVIEW")"
+case_gate a1
+pending aaaaaaaa 1 'reply one'
+pending bbbbbbbb 2 'reply two'
+expect_out "A1 an answer reports the approval" "post gate: approved draft aaaaaaaa" "$(payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A1 draft A approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+expect_file "A1 draft B still pending" "$GATE/s1.draft-bbbbbbbb.pending" present
+expect_rc "A1 one reply passes" 0 "$(payload_b s1 "$REVIEW")"
+expect_rc "A1 a second reply needs its own approval" 2 "$(payload_b s1 "$REVIEW && $REVIEW")"
 
-case_gate g2
-pending aaaaaaaa 1
-expect_rc "G2 recommended-option prompt is not a go" 0 "$(payload_u s1 'Yes, post it (Recommended)')"
-expect_file "G2 no draft approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
-expect_rc "G2 post denied" 2 "$(payload_b s1 "$REVIEW")"
+case_gate a2
+pending aaaaaaaa 1 'reply one'
+expect_rc "A2 a recommended post option" 0 "$(payload_a s1 'Post draft aaaaaaaa (Recommended)' 'reply one')"
+expect_file "A2 approved" "$GATE/s1.draft-aaaaaaaa.approved" present
 
-case_gate g3
-pending aaaaaaaa 1
-expect_rc "G3 negated prompt is not a go" 0 "$(payload_u s1 'do not post it yet')"
-expect_rc "G3 post denied" 2 "$(payload_b s1 "$REVIEW")"
+case_gate a3
+pending aaaaaaaa 1 'reply one'
+expect_out "A3 text not shown is reported" "draft aaaaaaaa not approved: its text was not in the question" "$(payload_a s1 'Post draft aaaaaaaa' 'another text')"
+expect_file "A3 not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+expect_file "A3 still pending" "$GATE/s1.draft-aaaaaaaa.pending" present
 
-case_gate g3b
-pending aaaaaaaa 1
-expect_rc "G3b post all inside a sentence is a go" 0 "$(payload_u s1 'looks fine, ok post all')"
-expect_file "G3b draft approved" "$GATE/s1.draft-aaaaaaaa.approved" present
-expect_rc "G3b post allowed" 0 "$(payload_b s1 "$REVIEW")"
+case_gate a4
+pending aaaaaaaa 1 'line one
+  line two'
+expect_rc "A4 whitespace differences do not matter" 0 "$(payload_a s1 'Post draft aaaaaaaa' 'line one line two')"
+expect_file "A4 approved" "$GATE/s1.draft-aaaaaaaa.approved" present
 
-case_gate g3c
-pending aaaaaaaa 1
-expect_rc "G3c Post it mid-sentence is a go" 0 "$(payload_u s1 'Merge order is fine. Post it and continue.')"
-expect_file "G3c draft approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+case_gate a5
+pending aaaaaaaa 1 'reply one'
+expect_rc "A5 the text in the question counts" 0 "$(PA_QUESTION='Post this reply on PR 5? reply one' payload_a s1 'Post draft aaaaaaaa' '')"
+expect_file "A5 approved" "$GATE/s1.draft-aaaaaaaa.approved" present
 
-case_gate g3d
-pending aaaaaaaa 1
-expect_rc "G3d edit the pr body mid-sentence is not a go" 0 "$(payload_u s1 'then edit the pr body with the new counts')"
-expect_file "G3d edit the pr body approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+case_gate a6
+pending aaaaaaaa 1 'reply one'
+expect_out "A6 a skip is reported" "post gate: draft aaaaaaaa skipped" "$(payload_a s1 'Skip draft aaaaaaaa' '')"
+expect_file "A6 a skipped draft is dismissed" "$GATE/s1.draft-aaaaaaaa.dismissed" present
+expect_rc "A6 a later post answer without re-registering" 0 "$(payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A6 a dismissed draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 
-case_gate g3e
-pending aaaaaaaa 1
-expect_rc "G3e postit without a boundary is not a go" 0 "$(payload_u s1 'compostit')"
-expect_file "G3e no draft approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+for extra in '{"afkTimeoutMs": 60000}' '{"followUp": true}'; do
+    case_gate a7
+    rm -rf "$GATE"
+    pending aaaaaaaa 1 'reply one'
+    expect_out "A7 [$extra] answer is reported as ignored" "post gate: draft aaaaaaaa not decided (" "$(PA_EXTRA="$extra" payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+    expect_file "A7 [$extra] approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+done
 
-case_gate g4
-pending aaaaaaaa 1
-brief='Summary line one.
-Type `post it` to post the marker.
-Thanks.'
-expect_rc "G4 brief mentioning the go is not a go" 0 "$(payload_u s1 "$brief")"
-expect_rc "G4 post denied" 2 "$(payload_b s1 "$REVIEW")"
+case_gate a8
+pending aaaaaaaa 1 'reply one'
+expect_out "A8 a multi-select answer is reported as ignored" "not decided (a multi-select question cannot approve)" "$(PA_MULTI=1 payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A8 a multi-select question approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a9
+pending aaaaaaaa 1 'reply one'
+expect_out "A9 free-form text is reported as undecided" "not decided (no Post or Skip option was chosen)" "$(PA_ANSWER='yes, post draft aaaaaaaa' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A9 free text that is not a label approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a10
+expect_out "A10 an unregistered hash is reported" "draft cccccccc not approved: no pending draft in this session" "$(payload_a s1 'Post draft cccccccc' '')"
+
+case_gate a11
+pending aaaaaaaa 1 'reply one'
+expect_rc "A11 answer in another session" 0 "$(payload_a s2 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A11 another session's answer approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a12
+mkdir -p "$GATE"
+printf '{"v":2,"batch":"initial","created":1,"argv":[]}' >"$GATE/s1.draft-aaaaaaaa.pending"
+expect_out "A12 a v2 draft is reported" "its record is unreadable or predates prompt approval" "$(payload_a s1 'Post draft aaaaaaaa' '')"
+expect_file "A12 a v2 draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a13
+(PD_NULL=1 pending aaaaaaaa 1)
+expect_rc "A13 a draft with no text" 0 "$(payload_a s1 'Post draft aaaaaaaa' '')"
+expect_file "A13 a textless draft needs only its label" "$GATE/s1.draft-aaaaaaaa.approved" present
+
+for text in 'post it' 'post all' 'post aaaaaaaa' 'Post it.'; do
+    case_gate a14
+    rm -rf "$GATE"
+    pending aaaaaaaa 1 'reply one'
+    expect_rc "A14 [$text] typed prompt" 0 "$(payload_u s1 "$text")"
+    expect_file "A14 [$text] a typed phrase approves nothing" "$GATE/s1.draft-aaaaaaaa.pending" present
+done
+
+case_gate a15
+pending aaaaaaaa 1 'reply one'
+expect_rc "A15 another tool's result" 0 "$(PA_TOOL=Read payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A15 only AskUserQuestion answers approve" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a16
+pending aaaaaaaa 1 'reply one'
+expect_rc "A16 a non-object tool_response exits 0" 0 '{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"AskUserQuestion","tool_response":"Post draft aaaaaaaa"}'
+expect_file "A16 approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a17
+pending aaaaaaaa 1 'reply one'
+pending bbbbbbbb 2 'reply two'
+A17=$(python3 - <<'PY'
+import json
+qs = [{"question": f"Post reply {n}?", "multiSelect": False,
+       "options": [{"label": f"Post draft {h}", "description": "posts it", "preview": f"reply {n}"},
+                   {"label": f"Skip draft {h}", "description": "skips it"}]}
+      for n, h in (("one", "aaaaaaaa"), ("two", "bbbbbbbb"))]
+answers = {q["question"]: q["options"][0]["label"] for q in qs}
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": answers}}))
+PY
+)
+expect_rc "A17 a two-question answer" 0 "$A17"
+expect_file "A17 first draft approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+expect_file "A17 second draft approved" "$GATE/s1.draft-bbbbbbbb.approved" present
+expect_rc "A17 two replies pass under two approvals" 0 "$(payload_b s1 'gh pr review 5 -c -b one && gh pr review 5 -c -b two')"
+
+case_gate a18
+pending aaaaaaaa 1 'reply one'
+env -u HERDR_ENV sh -c 'printf "%s" "$1" | python3 "$2"' _ "$(payload_a s1 'Post draft aaaaaaaa' 'reply one')" "$HOOK" >/dev/null 2>&1
+expect_file "A18 an answer outside herdr approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a19
+pending aaaaaaaa 1 'reply one'
+expect_rc "A19 post answer" 0 "$(payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_out "A19 a skip answer withdraws it" "post gate: draft aaaaaaaa approval withdrawn" "$(payload_a s1 'Skip draft aaaaaaaa' '')"
+expect_file "A19 a withdrawn approval is dismissed" "$GATE/s1.draft-aaaaaaaa.dismissed" present
+expect_rc "A19 the reply is denied again" 2 "$(payload_b s1 "$REVIEW")"
+
+case_gate a20
+pending aaaaaaaa 1 'reply one'
+A20=$(python3 - <<'PY'
+import json
+qs = [{"question": "Post reply one?", "multiSelect": False,
+       "options": [{"label": "Post draft aaaaaaaa", "description": "posts it", "preview": "reply one"},
+                   {"label": "Hold", "description": "waits"}]},
+      {"question": "Skip reply one after all?", "multiSelect": False,
+       "options": [{"label": "Skip draft aaaaaaaa", "description": "skips it"},
+                   {"label": "Hold", "description": "waits"}]}]
+answers = {"Post reply one?": "Post draft aaaaaaaa", "Skip reply one after all?": "Skip draft aaaaaaaa"}
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": answers}}))
+PY
+)
+expect_rc "A20 post then skip in one prompt" 0 "$A20"
+expect_file "A20 ends dismissed" "$GATE/s1.draft-aaaaaaaa.dismissed" present
+
+case_gate a21
+mkdir -p "$GATE"
+: >"$GATE/s1.draft-aaaaaaaa.approved"
+expect_out "A21 an approved draft is reported as approved" "post gate: draft aaaaaaaa already approved; post it" "$(payload_a s1 'Post draft aaaaaaaa' '')"
+expect_file "A21 it stays approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+
+case_gate a22
+mkdir -p "$GATE"
+: >"$GATE/s1.draft-aaaaaaaa.spent"
+expect_out "A22 a posted draft is reported as posted" "post gate: draft aaaaaaaa already posted once" "$(payload_a s1 'Post draft aaaaaaaa' '')"
+
+case_gate a23
+payload_b s1 "$REVIEW" | python3 "$HOOK" >/dev/null 2>"$FIX/err"
+if grep -q 'AskUserQuestion' "$FIX/err" && grep -q 'Post draft <hash>' "$FIX/err" \
+    && grep -q 'update --ai' "$FIX/err" && ! grep -qi 'post it' "$FIX/err"; then
+    printf 'PASS  A23 the reply denial names the prompt and the upgrade fix\n'; PASS=$((PASS + 1))
+else
+    printf 'FAIL  A23 reply denial text (%s)\n' "$(cat "$FIX/err")" >&2; FAIL=$((FAIL + 1))
+fi
+
+case_gate a24
+mkdir -p "$GATE"
+: >"$GATE/s1.draft-aaaaaaaa.spent"
+expect_out "A24 skipping a posted draft says it was posted" "post gate: draft aaaaaaaa not skipped: already posted" "$(payload_a s1 'Skip draft aaaaaaaa' '')"
+
+case_gate a25
+expect_out "A25 an answer with a bad session id is reported as ignored" "not decided (no valid session id)" "$(payload_a '../x' 'Post draft aaaaaaaa' '')"
+expect_file "A25 no pid map is written" "$GATE" absent
+
+case_gate a26
+pending aaaaaaaa 1 'reply one'
+expect_out "A26 a notes-only answer is reported as undecided" "not decided (no Post or Skip option was chosen)" "$(PA_ANSWER='(notes only)' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A26 approves nothing" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a27
+pending aaaaaaaa 1 'reply one'
+expect_out "A27 a timed-out prompt with no answers is reported" "not decided (the prompt timed out)" "$(PA_EXTRA='{"afkTimeoutMs": 60000, "answers": {}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+
+case_gate a28
+pending aaaaaaaa 1 'reply one'
+pending bbbbbbbb 2 'reply two'
+A28=$(python3 - <<'PY'
+import json
+q = "Post which reply?"
+qs = [{"question": q, "multiSelect": False,
+       "options": [{"label": "Post draft aaaaaaaa", "description": "posts one", "preview": "reply one"},
+                   {"label": "Post draft bbbbbbbb", "description": "posts two", "preview": "reply two"}]}]
+print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion",
+                  "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {q: "Post draft aaaaaaaa"}}}))
+PY
+)
+expect_out "A28 a question naming two drafts is refused" "post gate: draft bbbbbbbb not decided (the question names more than one draft)" "$A28"
+expect_file "A28 neither draft is approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 
 # --- P: an approval is per draft, per session, and survives other prompts ---
 
 case_gate p1
 pending aaaaaaaa 1
-expect_rc "P1 mint (with trailing period)" 0 "$(payload_u s1 'Post it.')"
+expect_rc "P1 mint" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
 expect_rc "P1 first post allowed" 0 "$(payload_b s1 "$REVIEW")"
 expect_rc "P1 second post passes the hook (the shim spends the approval)" 0 "$(payload_b s1 "$REVIEW")"
 expect_file "P1 the hook spends nothing" "$GATE/s1.draft-aaaaaaaa.approved" present
@@ -180,14 +360,14 @@ expect_rc "P1c post denied once the shim has spent the approval" 2 "$(payload_b 
 
 case_gate p2
 pending aaaaaaaa 1
-expect_rc "P2 mint" 0 "$(payload_u s1 'post it')"
+expect_rc "P2 mint" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
 expect_rc "P2 next prompt keeps the approval" 0 "$(payload_u s1 'thanks')"
 expect_file "P2 a non-go prompt keeps the approval" "$GATE/s1.draft-aaaaaaaa.approved" present
 expect_rc "P2 post allowed" 0 "$(payload_b s1 "$REVIEW")"
 
 case_gate p3
 pending aaaaaaaa 1
-expect_rc "P3 mint under s1" 0 "$(payload_u s1 'post it')"
+expect_rc "P3 mint under s1" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
 expect_rc "P3 post under s2 denied" 2 "$(payload_b s2 "$REVIEW")"
 
 case_gate p4
@@ -197,7 +377,7 @@ expect_rc "P4 a legacy go marker is not honoured" 2 "$(payload_b s1 "$REVIEW")"
 
 case_gate p5
 pending aaaaaaaa 1
-expect_rc "P5 mint" 0 "$(payload_u s1 'post it')"
+expect_rc "P5 mint" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
 expect_rc "P5 one approval does not cover two replies" 2 "$(payload_b s1 "$REVIEW && $REVIEW")"
 
 # --- D: deletes of own markers need no go (the shim checks ownership) ------
@@ -302,8 +482,8 @@ expect_rc "FN12b sudo -u me gh pr comment denied with no go" 2 "$(payload_b s1 '
 expect_rc "FN12c nice -n 5 gh pr review denied with no go" 2 "$(payload_b s1 'nice -n 5 gh pr review 5 -c -b x')"
 expect_rc "FN12d env -i gh api thread reply denied with no go" 2 "$(payload_b s1 'env -i gh api -X POST repos/o/r/pulls/5/comments/9/replies -f body=x')"
 pending aaaaaaaa 1
-expect_rc "FN12e mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "FN12f env -i gh pr comment allowed once after typed go" 0 "$(payload_b s1 'env -i gh pr review 5 -c -b x')"
+expect_rc "FN12e mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
+expect_rc "FN12f env -i gh pr comment allowed once after an approved draft" 0 "$(payload_b s1 'env -i gh pr review 5 -c -b x')"
 
 case_gate fn13
 expect_rc "FN13a if-wrapped gh pr comment denied with no go" 2 "$(payload_b s1 'if gh pr review 5 -c -b x; then echo ok; fi')"
@@ -337,8 +517,8 @@ cont_line=$(printf 'gh api -X POST \\\nrepos/o/r/pulls/5/comments/9/replies -f b
 expect_rc "V1 backslash line continuation is denied with no go" 2 "$(payload_b s1 "$cont_line")"
 case_gate v1b
 pending aaaaaaaa 1
-expect_rc "V1b mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "V1b same continuation allowed after typed go" 0 "$(payload_b s1 "$cont_line")"
+expect_rc "V1b mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
+expect_rc "V1b same continuation allowed after an approved draft" 0 "$(payload_b s1 "$cont_line")"
 
 case_gate v2
 expect_rc "V2 env assignment ahead of a flagged wrapper is still denied with no go" 2 "$(payload_b s1 'FOO=1 sudo -u me gh pr review 5 -c -b x')"
@@ -349,30 +529,32 @@ expect_rc "V3 a mid-word # in an argument does not defeat the post gate" 2 "$(pa
 case_gate v4
 expect_rc "V4a timeout-wrapped gh pr comment is denied with no go" 2 "$(payload_b s1 'timeout 5 gh pr review 5 -c -b x')"
 pending aaaaaaaa 1
-expect_rc "V4a mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "V4a timeout-wrapped gh pr comment passes after a typed go" 0 "$(payload_b s1 'timeout 5 gh pr review 5 -c -b x')"
+expect_rc "V4a mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
+expect_rc "V4a timeout-wrapped gh pr comment passes after an approved draft" 0 "$(payload_b s1 'timeout 5 gh pr review 5 -c -b x')"
 case_gate v4b
 expect_rc "V4b stdbuf-wrapped gh pr comment is denied with no go" 2 "$(payload_b s1 'stdbuf -oL gh pr review 5 -c -b x')"
 
 case_gate v5
 expect_rc "V5 ANSI-C \$'...' quoting is denied outright, no go" 2 "$(payload_b s1 "gh pr review 5 -c -b \$'hi'")"
 pending aaaaaaaa 1
-expect_rc "V5 mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "V5 ANSI-C quoted post passes after a typed go" 0 "$(payload_b s1 "gh pr review 5 -c -b \$'hi'")"
+expect_rc "V5 mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
+expect_rc "V5 ANSI-C quoted post passes after an approved draft" 0 "$(payload_b s1 "gh pr review 5 -c -b \$'hi'")"
 
 # --- U: a gh call outside the read and gated tables passes as a write ------
 
 case_gate u1
 expect_rc "U1 unknown gh subcommand passes the hook as a plain write" 0 "$(payload_b s1 'gh foo bar')"
 case_gate u1b
-expect_rc "U1b mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "U1b unknown gh subcommand passes the hook after a typed go" 0 "$(payload_b s1 'gh foo bar')"
+pending aaaaaaaa 1
+expect_rc "U1b mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
+expect_rc "U1b unknown gh subcommand passes the hook after an approved draft" 0 "$(payload_b s1 'gh foo bar')"
 
 case_gate u2
 expect_rc "U2 api POST to an ungated path passes the hook as a plain write" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
 case_gate u2b
-expect_rc "U2b mint post" 0 "$(payload_u s1 'post it')"
-expect_rc "U2b api POST to an ungated path passes the hook after a typed go" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
+pending aaaaaaaa 1
+expect_rc "U2b mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
+expect_rc "U2b api POST to an ungated path passes the hook after an approved draft" 0 "$(payload_b s1 'gh api -X POST repos/o/r/labels -f name=x')"
 
 # --- W: every allowed read and known write form -----------------------------
 
@@ -466,7 +648,8 @@ mkdir -p "$FIX/py"
 ln -s "$(command -v python3)" "$FIX/py/python3"
 
 case_gate h1
-expect_rc "H1 mint post" 0 "$(payload_u s1 'post it')"
+pending aaaaaaaa 1
+expect_rc "H1 mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
 payload_b s1 'gh pr comment 5 --body x' | PATH="$FIX/py:/bin" python3 "$HOOK" >/dev/null 2>"$FIX/err"
 rc=$?
 if [ "$rc" = 2 ] && grep -q 'Relaunch' "$FIX/err"; then
@@ -507,7 +690,8 @@ else
 fi
 
 case_gate h2
-expect_rc "H2 mint post" 0 "$(payload_u s1 'post it')"
+pending aaaaaaaa 1
+expect_rc "H2 mint post" 0 "$(payload_a s1 'Post draft aaaaaaaa' x)"
 expect_rc "H2 path-qualified gh denied even with a go" 2 "$(payload_b s1 '/opt/homebrew/bin/gh pr view 5')"
 expect_rc "H2 path-qualified gh inside bash -c denied" 2 "$(payload_b s1 "bash -c '/opt/homebrew/bin/gh pr view 5'")"
 expect_rc "H2 path-qualified gh behind timeout denied" 2 "$(payload_b s1 'timeout 5 /opt/homebrew/bin/gh pr comment 5 --body x')"
@@ -666,24 +850,6 @@ expect_rc "V1x-9 hook denies -R between the words with no go" 2 "$(payload_b s1 
 expect_rc "V1x-10 hook denies an attached-flag review with no go" 2 "$(payload_b s1 'gh pr review 5 -cb x')"
 expect_rc "V1x-11 hook denies a query-string reply with no go" 2 "$(payload_b s1 'gh api -X POST '"'"'repos/o/r/pulls/5/comments/9/replies?x=1'"'"' -f body=x')"
 
-# --- V2x: a negation or question is not a go -------------------------------
-
-for text in 'never post it' 'Do not ever post it.' "you don't need to post it" 'did you post it?' 'no post it' 'not now, post all later? never post all'; do
-    case_gate v2x
-    rm -rf "$GATE"
-    pending aaaaaaaa 1
-    expect_rc "V2x [$text] approves nothing" 0 "$(payload_u s1 "$text")"
-    expect_file "V2x [$text] no approval" "$GATE/s1.draft-aaaaaaaa.approved" absent
-done
-case_gate v2y
-pending aaaaaaaa 1
-expect_rc "V2y a later plain sentence still approves" 0 "$(payload_u s1 'Did you post it? Post it now.')"
-expect_file "V2y draft approved" "$GATE/s1.draft-aaaaaaaa.approved" present
-case_gate v2z
-pending aaaaaaaa 1
-expect_rc "V2z negation in an earlier sentence does not block a later go" 0 "$(payload_u s1 "I don't like it. Ok, post all")"
-expect_file "V2z draft approved" "$GATE/s1.draft-aaaaaaaa.approved" present
-
 # --- T: the personal exemption follows the post target, not the cwd --------
 
 case_gate t1
@@ -699,7 +865,7 @@ expect_rc "T1 personal cwd, api path to its own origin needs none" 0 "$(PB_CWD="
 expect_rc "T1 personal cwd, no target needs none" 0 "$(PB_CWD="$PERSONAL_CWD" payload_b s1 'gh pr review 5 -c -b x')"
 expect_rc "T1 work cwd, -R to the personal login still needs a go" 2 "$(payload_b s1 'gh pr review 5 -R me/repo -c -b x')"
 
-# --- AU/MN/GR/PB: pure helpers the gh shim decides with --------------------
+# --- AU/MN/PB: pure helpers the gh shim decides with --------------------
 
 # expect_py LABEL WANT CODE -> stdout of CODE run with pr_post_guard as g
 expect_py() {
@@ -730,11 +896,6 @@ expect_py "MN3 an inline code span does not" False 'print(g.mentions_person("use
 expect_py "MN4 a fenced code block does not" False 'print(g.mentions_person("```\n@x\n```\nok"))'
 expect_py "MN5 a parenthesised mention does" True 'print(g.mentions_person("(@rev)"))'
 
-expect_py "GR1 post it" it 'print(",".join(sorted(g.go_request("post it"))))'
-expect_py "GR2 post all and a hash in one prompt" 1a2b3c4d,all 'print(",".join(sorted(g.go_request("post all and post 1A2B3C4D"))))'
-expect_py "GR3 edit the pr body is not a go" "" 'print(",".join(sorted(g.go_request("then edit the pr body"))))'
-expect_py "GR4 a negated post all is not a go" "" 'print(",".join(sorted(g.go_request("never post all"))))'
-expect_py "GR5 a backticked post it is not a go" "" 'print(",".join(sorted(g.go_request("Type `post it` now."))))'
 
 expect_py "PB1 a stdin body file is unreadable" "unreadable None" 'print(*g.post_body(["pr", "comment", "5", "--body-file", "-"], "."))'
 expect_py "PB2 a --body value is the text" "text hi" 'print(*g.post_body(["pr", "comment", "5", "-b", "hi"], "."))'
@@ -781,7 +942,7 @@ case_gate dr1
 python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>"$FIX/err"; rc=$?
 h=$(sed -n '1s/^draft \([0-9a-f]\{8\}\): gh pr review 5 -c -b hi$/\1/p' "$FIX/out")
 if [ "$rc" = 0 ] && [ -n "$h" ] && [ "$(sed -n 2p "$FIX/out")" = hi ] \
-    && python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(0 if r["batch"] == "initial" and r["v"] == 2 else 1)' "$GATE/s1.draft-$h.pending"; then
+    && python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(0 if r["v"] == 3 and r["text"] == "hi" and "batch" not in r else 1)' "$GATE/s1.draft-$h.pending"; then
     printf 'PASS  DR1 draft prints its hash and body and records a pending draft\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  DR1 draft registration (rc=%s out=%s err=%s)\n' "$rc" "$(cat "$FIX/out")" "$(cat "$FIX/err")" >&2; FAIL=$((FAIL + 1))
@@ -821,17 +982,6 @@ else
     printf 'FAIL  DR5 draft of a stdin body (rc=%s)\n' "$rc" >&2; FAIL=$((FAIL + 1))
 fi
 
-case_gate dr6
-mkdir -p "$GATE"
-printf 'b1' >"$GATE/s1.batch"
-python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>&1
-h=$(sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p' "$FIX/out")
-if python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["batch"] == "b1" else 1)' "$GATE/s1.draft-$h.pending"; then
-    printf 'PASS  DR6 a draft is stamped with the current batch\n'; PASS=$((PASS + 1))
-else
-    printf 'FAIL  DR6 batch stamp\n' >&2; FAIL=$((FAIL + 1))
-fi
-
 case_gate dr7
 python3 "$HOOK" draft -- gh pr review 5 -c -b hi >"$FIX/out" 2>&1
 h=$(sed -n '1s/^draft \([0-9a-f]\{8\}\).*/\1/p' "$FIX/out")
@@ -841,26 +991,6 @@ if grep -q "^\[WARNING\] draft $h already ran once; read the PR first: a duplica
     printf 'PASS  DR7 re-showing a spent draft warns that a duplicate is possible\n'; PASS=$((PASS + 1))
 else
     printf 'FAIL  DR7 duplicate warning (out=%s)\n' "$(cat "$FIX/out")" >&2; FAIL=$((FAIL + 1))
-fi
-
-case_gate ds1
-DS1_OUT=$(HOOK="$HOOK" GATE="$GATE" python3 - <<'PY'
-import json, os, sys
-from pathlib import Path
-sys.path.insert(0, os.path.dirname(os.environ["HOOK"]))
-import pr_post_guard as g
-d = Path(os.environ["GATE"])
-d.mkdir()
-(d / "s1.draft-aaaaaaaa.pending").write_text(json.dumps({"v": 2, "batch": "x", "created": 1, "argv": []}))
-(d / "s1.draft-bbbbbbbb.pending").write_text(json.dumps({"v": 2, "batch": "y", "created": 2, "argv": []}))
-g.approve_drafts(d, "s1", {"all"}, "x")
-print(sorted(p.name for p in d.iterdir()))
-PY
-)
-if [ "$DS1_OUT" = "['s1.draft-aaaaaaaa.approved', 's1.draft-bbbbbbbb.dismissed']" ]; then
-    printf 'PASS  DS1 post all approves only the closing batch and dismisses the rest\n'; PASS=$((PASS + 1))
-else
-    printf 'FAIL  DS1 batch-scoped approval (got %s)\n' "$DS1_OUT" >&2; FAIL=$((FAIL + 1))
 fi
 
 case_gate ds2
@@ -876,46 +1006,20 @@ expect_py "DS3 a late spend survives the next prune" "True True" "import time; f
 
 case_gate ds4
 mkdir -p "$GATE"
-printf '{"v":2,"batch":"initial","created":1,"argv":[]}' >"$GATE/s1.draft-ffffffff.pending"
+printf '{"v":3,"created":1,"argv":[],"text":null}' >"$GATE/s1.draft-ffffffff.pending"
 python3 -c 'import os, sys, time; old = time.time() - 2 * 86400; os.utime(sys.argv[1], (old, old))' "$GATE/s1.draft-ffffffff.pending"
-expect_py "DS4 an old draft approved now survives the next prune" "True" "import time; from pathlib import Path; d = Path('$GATE'); g.approve_drafts(d, 's1', {'ffffffff'}, 'x'); g.prune(d, time.time()); print((d / 's1.draft-ffffffff.approved').exists())"
+expect_py "DS4 an old draft approved now survives the next prune" "True" "import time; from pathlib import Path; d = Path('$GATE'); g.approve_draft(d, 's1', 'ffffffff', 'Post this draft?', ''); g.prune(d, time.time()); print((d / 's1.draft-ffffffff.approved').exists())"
 
-# --- P6-P10: post all, post it, post <hash>, legacy cleanup, stale batches --
-
-case_gate p6
-pending aaaaaaaa 1
-pending bbbbbbbb 2
-expect_rc "P6 post all" 0 "$(payload_u s1 'post all')"
-expect_file "P6 first draft approved" "$GATE/s1.draft-aaaaaaaa.approved" present
-expect_file "P6 second draft approved" "$GATE/s1.draft-bbbbbbbb.approved" present
-expect_rc "P6 two replies pass under two approvals" 0 "$(payload_b s1 'gh pr review 5 -c -b one && gh pr review 5 -c -b two')"
-
-case_gate p7
-pending aaaaaaaa 1
-pending bbbbbbbb 2
-expect_rc "P7 post it" 0 "$(payload_u s1 'post it')"
-expect_file "P7 the later draft is approved" "$GATE/s1.draft-bbbbbbbb.approved" present
-expect_file "P7 the earlier draft is dismissed" "$GATE/s1.draft-aaaaaaaa.dismissed" present
-
-case_gate p8
-mkdir -p "$GATE"
-printf '{"v":2,"batch":"old","created":1,"argv":[]}' >"$GATE/s1.draft-cccccccc.dismissed"
-expect_rc "P8 post <hash>" 0 "$(payload_u s1 'ok, post CCCCCCCC')"
-expect_file "P8 a dismissed draft is approved by its hash" "$GATE/s1.draft-cccccccc.approved" present
+# --- P9: legacy cleanup ---
 
 case_gate p9
 mkdir -p "$GATE"
 : >"$GATE/s1.json"
 : >"$GATE/s1.post-used"
+: >"$GATE/s1.batch"
 expect_rc "P9 prompt" 0 "$(payload_u s1 'thanks')"
 expect_file "P9 legacy go files are removed" "$GATE/s1.json" absent
-
-case_gate p10
-mkdir -p "$GATE"
-printf 'current' >"$GATE/s1.batch"
-printf '{"v":2,"batch":"older","created":1,"argv":[]}' >"$GATE/s1.draft-dddddddd.pending"
-expect_rc "P10 post all" 0 "$(payload_u s1 'post all')"
-expect_file "P10 a draft from an older batch is not approved" "$GATE/s1.draft-dddddddd.approved" absent
+expect_file "P9 the retired batch file is removed" "$GATE/s1.batch" absent
 
 # --- KC: kinds the hook and shim now tell apart ------------------------------
 
