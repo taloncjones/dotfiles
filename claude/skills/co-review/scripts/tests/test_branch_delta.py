@@ -132,6 +132,73 @@ class CarryForwardTests(unittest.TestCase):
         self.assertTrue(any(reason.startswith("shared.txt:") for reason in record["reasons"]),
                         record["reasons"])
 
+    def test_merge_hand_edited_to_move_a_line_fails(self):
+        # Original [A,X,B]; branch [X,A,X,B]; main [A,B]. Git merges to [X,A,B];
+        # the head holds [A,X,B], the same hunk text at a different position.
+        git(self.repo, "checkout", "-q", "-b", "dup", "main")
+        original = commit_file(self.repo, "dup.txt", "A\nX\nB\n", "dup original")
+        git(self.repo, "checkout", "-q", "-b", "dup-branch", original)
+        self.gated = commit_file(self.repo, "dup.txt", "X\nA\nX\nB\n", "dup branch")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--ff-only", original)
+        commit_file(self.repo, "dup.txt", "A\nB\n", "main drops X")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "main")
+        git(self.repo, "checkout", "-q", "dup-branch")
+        git(self.repo, "merge", "-q", "--no-commit", "main")
+        self.assertEqual((self.repo / "dup.txt").read_text(encoding="utf-8"), "X\nA\nB\n")
+        (self.repo / "dup.txt").write_text("A\nX\nB\n", encoding="utf-8")
+        git(self.repo, "add", "dup.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("dup.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
+    def test_hand_resolved_conflict_in_duplicate_lines_fails(self):
+        # Both sides edit a run of identical lines; git conflicts and the
+        # resolution differs from any merge git would produce.
+        git(self.repo, "checkout", "-q", "-b", "dup", "main")
+        original = commit_file(self.repo, "dup.txt", "A\nX\nX\nX\nB\n", "dup original")
+        git(self.repo, "checkout", "-q", "-b", "dup-branch", original)
+        self.gated = commit_file(self.repo, "dup.txt", "A\nX\nbranch\nX\nB\n", "dup branch")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--ff-only", original)
+        commit_file(self.repo, "dup.txt", "A\nX\nmain\nX\nB\n", "main edits the run")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "main")
+        git(self.repo, "checkout", "-q", "dup-branch")
+        merged = subprocess.run(["git", "-C", str(self.repo), "merge", "-q", "--no-edit", "main"],
+                                env=GIT_ENV, capture_output=True, text=True)
+        self.assertNotEqual(merged.returncode, 0)
+        (self.repo / "dup.txt").write_text("A\nX\nX\nX\nB\n", encoding="utf-8")
+        git(self.repo, "add", "dup.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("dup.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
+    def test_hand_placed_duplicate_line_differing_from_the_clean_merge_fails(self):
+        # Original [A,X,B]; branch adds an X after the first; main adds one before A.
+        # Git merges to [X,A,X,X,B]; the head holds [A,X,X,X,B] (same hunk text).
+        git(self.repo, "checkout", "-q", "-b", "dup", "main")
+        original = commit_file(self.repo, "dup.txt", "A\nX\nB\n", "dup original")
+        git(self.repo, "checkout", "-q", "-b", "dup-branch", original)
+        self.gated = commit_file(self.repo, "dup.txt", "A\nX\nX\nB\n", "dup branch")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--ff-only", original)
+        commit_file(self.repo, "dup.txt", "X\nA\nX\nB\n", "main adds X first")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "main")
+        git(self.repo, "checkout", "-q", "dup-branch")
+        git(self.repo, "merge", "-q", "--no-commit", "main")
+        self.assertEqual((self.repo / "dup.txt").read_text(encoding="utf-8"), "X\nA\nX\nX\nB\n")
+        (self.repo / "dup.txt").write_text("A\nX\nX\nX\nB\n", encoding="utf-8")
+        git(self.repo, "add", "dup.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("dup.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
     def test_merge_that_edits_an_outside_file_fails_scope(self):
         self.advance_main("main_only.txt", "a\nb\n")
         git(self.repo, "checkout", "-q", "topic")

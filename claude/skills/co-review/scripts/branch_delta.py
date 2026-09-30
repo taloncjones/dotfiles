@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 
@@ -35,31 +36,17 @@ def _names(repo: Path, old: str, new: str, paths: list[str] | None = None) -> li
     return [name for name in raw.decode("utf-8", "surrogateescape").split("\0") if name]
 
 
-def _body(repo: Path, old: str, new: str, path: str) -> list[str] | None:
-    """Ordered +/- hunk lines of one file's diff; None for a binary diff."""
-    text = _review.git(repo, *_DIFF, old, new, "--", path).decode("utf-8", "surrogateescape")
-    lines: list[str] = []
-    in_hunk = False
-    for line in text.split("\n"):
-        if line.startswith("diff --git "):
-            in_hunk = False
-        elif line.startswith("@@"):
-            in_hunk = True
-        elif not in_hunk:
-            if line.startswith(("Binary files ", "GIT binary patch")):
-                return None
-        elif line[:1] in ("+", "-"):
-            lines.append(line)
-    return lines
-
-
-def _modes(repo: Path, old: str, new: str, path: str) -> tuple[str, str]:
-    """Old and new mode of one file's diff (type included); empty when the mode is unchanged."""
-    raw = _review.git(repo, *_DIFF, "--raw", "-z", old, new, "--", path)
-    fields = raw.decode("utf-8", "surrogateescape").split(" ", 2)
-    if len(fields) < 3 or fields[0].lstrip(":") == fields[1]:
-        return ("", "")
-    return (fields[0].lstrip(":"), fields[1])
+def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
+    """Tree of git's own merge of ours and theirs, plus its conflicted paths."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-tree", "--write-tree", "--name-only", "-z", ours, theirs],
+        capture_output=True, env=_review.git_environment(), check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise ProofError(result.stderr.decode(errors="replace").strip() or "git merge-tree failed")
+    fields = result.stdout.decode("utf-8", "surrogateescape").split("\0")
+    conflicted = [name for name in fields[1:] if name] if result.returncode else []
+    return fields[0], conflicted
 
 
 def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict:
@@ -93,34 +80,21 @@ def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict
         record.update(old_base=old_base, new_base=new_base)
         own = proof("branch-files", ["diff", "--name-only", old_base, gated],
                     _names(repo, old_base, gated))
-        # Also check files upstream touched: a merge keeping the branch side
-        # leaves them equal to the gated version yet drops upstream's hunks.
+        # Byte-exact: head's own paths must equal git's merge of the gated head
+        # with the new base, so a moved or hand-resolved line cannot pass.
         moved = _names(repo, gated, current, own) if own else []
-        upstream_moved = _names(repo, old_base, new_base, own) if own else []
-        changed = sorted(set(moved) | set(upstream_moved))
         proof("changed-branch-files", ["diff", "--name-only", gated, current, "--", *own], moved)
-        for path in changed:
-            upstream_now = _body(repo, gated, current, path)
-            upstream_ref = _body(repo, old_base, new_base, path)
-            own_then = _body(repo, old_base, gated, path)
-            own_now = _body(repo, new_base, current, path)
-            same_upstream = (
-                upstream_now is not None and upstream_now == upstream_ref
-                and _modes(repo, gated, current, path) == _modes(repo, old_base, new_base, path)
-            )
-            same_own = (
-                own_then is not None and own_then == own_now
-                and _modes(repo, old_base, gated, path) == _modes(repo, new_base, current, path)
-            )
-            proof(f"hunks {path}", ["diff", gated, current, "--", path],
-                  [f"upstream-equal: {str(same_upstream).lower()}",
-                   f"branch-equal: {str(same_own).lower()}"])
-            if None in (upstream_now, upstream_ref, own_then, own_now):
-                reasons.append(f"{path}: binary change")
-            elif not same_upstream:
-                reasons.append(f"{path}: hunk or mode change since the gated head is not upstream's")
-            elif not same_own:
-                reasons.append(f"{path}: branch hunks or mode changed")
+        merged, conflicted = _merge_tree(repo, gated, new_base)
+        for path in sorted(set(conflicted) & set(own)):
+            reasons.append(f"{path}: merging upstream conflicts with the branch")
+        differs = set(_names(repo, merged, current, own)) if own else set()
+        for path in sorted(set(moved) | set(_names(repo, old_base, new_base, own) if own else [])
+                           | differs):
+            equal = path not in differs
+            proof(f"hunks {path}", ["diff", merged, current, "--", path],
+                  [f"merge-equal: {str(equal).lower()}"])
+            if not equal and path not in conflicted:
+                reasons.append(f"{path}: differs from git's merge of the gated head and upstream")
         scope = proof("scope", ["diff", "--name-only", new_base, current],
                       _names(repo, new_base, current))
         extra = sorted(set(scope) - set(own))
