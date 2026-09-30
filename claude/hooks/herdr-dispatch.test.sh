@@ -3925,6 +3925,107 @@ def test_write_task_present_refuses_binding():
         fx.close()
 
 
+def test_launch_relabels_task_workspace():
+    fx = Fixture()
+    try:
+        result = fx.launch()
+        assert result["label"]["status"] == "applied", result
+        assert ["workspace", "rename", "w1", "impl: td a"] in fx.calls(), fx.calls()
+        assert workspace_labels(fx) == {"w1": "impl: td a"}
+    finally:
+        fx.close()
+
+
+def test_launch_label_failure_keeps_launch():
+    fx = Fixture()
+    try:
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        result = fx.launch()
+        assert result["status"] == "launched", result
+        assert result["label"]["status"] == "unsupported", result
+        assert fx.worker_records()[-1]["status"] == "launched", fx.worker_records()
+    finally:
+        fx.close()
+
+
+def test_launch_label_stale_fence_keeps_launch():
+    fx = Fixture()
+    original = core.owner_transaction
+
+    def refusing(rd, *args, **kwargs):
+        rows = json.loads(fx.task_file.read_text()).get("workers", [])
+        if rows and rows[-1].get("status") == "launched":
+            raise ValueError("stale owner fence")
+        return original(rd, *args, **kwargs)
+
+    try:
+        core.owner_transaction = refusing
+        result = fx.launch()
+        assert result["status"] == "launched", result
+        assert result["label"]["status"] == "unsupported", result
+        assert "stale owner fence" in result["label"]["reason"], result
+        assert fx.worker_records()[-1]["status"] == "launched", fx.worker_records()
+        assert not [c for c in fx.calls() if c[:2] == ["workspace", "rename"]]
+    finally:
+        core.owner_transaction = original
+        fx.close()
+
+
+def test_bound_launch_skips_label():
+    fx = LeadFixture()
+    try:
+        result = fx.launch()
+        assert result["label"] == {"status": "skipped", "label": None,
+                                   "workspace_id": None, "reason": "lead-scope"}, result
+        assert not [c for c in fx.calls() if c[:1] == ["workspace"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_ship_settle_relabels_merge_ready():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        fx.settle_state([impl, rev, ship], "reviewed",
+                        [{"name": ship["agent"], "pane_id": "w1:p3", "workspace_id": "w1",
+                          "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", None),
+                         pane("w1:p3", "claude", "idle", ship["launch_id"])])
+        task = json.loads(fx.task_file.read_text())
+        task.update(pr_number=9, review_head_sha=head, ship_launch_id=ship["launch_id"],
+                    title="Fix bus")
+        fx.task_file.write_text(json.dumps(task))
+        launch_dir = fx.rd / "artifacts" / "td-a" / f"ship-{ship['launch_id']}"
+        launch_dir.mkdir(parents=True)
+        (launch_dir / "ship.json").write_text(json.dumps(
+            {"launch_id": ship["launch_id"], "verdict": "APPROVE", "head_sha": head}))
+        result = fx.settle(ship["launch_id"])
+        assert result["status"] == "settled", result
+        assert result["label"]["status"] == "applied", result
+        assert workspace_labels(fx) == {"w1": "merge?: Fix bus"}, workspace_labels(fx)
+    finally:
+        fx.close()
+
+
+def test_settle_label_failure_keeps_result():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "rename-fail"
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["reason"] == "verdict-recorded", result
+        assert result["label"]["status"] == "unsupported", result
+    finally:
+        fx.close()
+
+
 for name, test in (
     ("reprompt targets the named launch and records in place", test_reprompt_targets_named_launch_and_records_in_place),
     ("reprompt rejects a wrong task context", test_reprompt_rejects_wrong_task_context),
@@ -4064,6 +4165,12 @@ for name, test in (
     ("write-task without --present makes no herdr call", test_write_task_without_present_no_herdr),
     ("write-task --present failure keeps exit 0 and the record", test_write_task_present_failure_keeps_write),
     ("write-task --present refuses --binding", test_write_task_present_refuses_binding),
+    ("launch relabels the task workspace", test_launch_relabels_task_workspace),
+    ("launch label rename failure keeps the launch", test_launch_label_failure_keeps_launch),
+    ("launch label stale fence keeps the launch", test_launch_label_stale_fence_keeps_launch),
+    ("bound launch skips the label", test_bound_launch_skips_label),
+    ("ship settle relabels merge-ready", test_ship_settle_relabels_merge_ready),
+    ("settle label failure keeps the settle result", test_settle_label_failure_keeps_result),
 ):
     check(name, test)
 
