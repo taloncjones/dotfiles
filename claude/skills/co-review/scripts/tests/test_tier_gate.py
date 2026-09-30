@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -289,6 +290,92 @@ class DeltaEvaluateTests(TierFixture):
         report["delta"] = {}
         self.assertIn("delta block on a non-delta class",
                       gate.evaluate(report, expected, self.report_path.parent)["reasons"])
+
+    def assert_escalates(self, report, expected, run, reason_part):
+        result = gate.evaluate(report, expected, run)
+        self.assertEqual((result["verdict"], result.get("escalate")), ("INCOMPLETE", "full"),
+                         result["reasons"])
+        self.assertTrue(any(reason_part in reason for reason in result["reasons"]),
+                        result["reasons"])
+
+    def test_identity_mismatch_escalates(self):
+        base_report, expected, run = self.build_delta()
+        for key in ("prior_run", "prior_head", "anchor_head"):
+            report = copy.deepcopy(base_report)
+            report["delta"][key] = "other"
+            with self.subTest(key):
+                self.assert_escalates(report, expected, run, f"identity mismatch: delta {key}")
+
+    def test_prior_that_is_not_full_escalates(self):
+        report, expected, run = self.build_delta()
+        prior_path = run / report["delta"]["prior_report"]["artifact"]
+        prior = json.loads(prior_path.read_text())
+        prior["class"] = "light"
+        prior_path.write_text(json.dumps(prior))
+        report["delta"]["prior_report"]["sha256"] = sha256(prior_path)
+        self.assert_escalates(report, expected, run, "delta prior run is not a full round")
+
+    def test_prior_with_changes_verdict_escalates(self):
+        report, expected, run = self.build_delta()
+        prior_path = run / report["delta"]["prior_report"]["artifact"]
+        prior = json.loads(prior_path.read_text())
+        prior["findings"] = [{"id": "f", "severity": "high", "disposition": "confirmed",
+                              "scenario": "s", "evidence": "e", "impact": "i"}]
+        prior_path.write_text(json.dumps(prior))
+        report["delta"]["prior_report"]["sha256"] = sha256(prior_path)
+        self.assert_escalates(report, expected, run, "delta prior run verdict is CHANGES")
+
+    def test_prior_from_another_pr_escalates(self):
+        base_report, expected, run = self.build_delta()
+        prior_path = run / base_report["delta"]["prior_expected"]["artifact"]
+        original = json.loads(prior_path.read_text())
+        for key, value in (("repository", "o/other"), ("pr_number", 99), ("base_ref", "dev")):
+            report = copy.deepcopy(base_report)
+            prior_path.write_text(json.dumps({**original, key: value}))
+            report["delta"]["prior_expected"]["sha256"] = sha256(prior_path)
+            with self.subTest(key):
+                self.assert_escalates(report, expected, run, f"delta prior {key} differs")
+
+    def test_ineligible_delta_diff_escalates(self):
+        cases = {
+            "gate path": "diff --git a/claude/skills/co-review/SKILL.md "
+                         "b/claude/skills/co-review/SKILL.md\n+x\n",
+            "empty": "",
+        }
+        base_report, expected, run = self.build_delta()
+        for name, body in cases.items():
+            report = copy.deepcopy(base_report)
+            report["delta"]["diff"] = artifact(run, "delta.diff", body)
+            with self.subTest(name):
+                self.assert_escalates(report, expected, run, "delta diff")
+
+    def test_delta_diff_over_the_caps_escalates(self):
+        report, expected, run = self.build_delta()
+        expected["delta"]["max_lines"] = 1
+        self.assert_escalates(report, expected, run, "delta diff is not eligible")
+
+    def test_invalid_caps_escalate(self):
+        report, base_expected, run = self.build_delta()
+        for caps in ({"max_files": 0}, {"max_lines": True}, {"max_files": "5"}):
+            expected = copy.deepcopy(base_expected)
+            expected["delta"].update(caps)
+            with self.subTest(caps):
+                self.assert_escalates(report, expected, run, "delta caps are invalid")
+
+    def test_carry_forward_is_required_when_the_anchor_moved(self):
+        report, expected, run = self.build_delta()
+        expected["delta"]["anchor_head"] = report["delta"]["anchor_head"] = "a" * 40
+        self.assert_escalates(report, expected, run, "delta carry_forward")
+
+    def test_carry_forward_is_forbidden_at_the_prior_head(self):
+        report, expected, run = self.build_delta()
+        report["delta"]["carry_forward"] = artifact(run, "cf.json", "{}")
+        self.assert_escalates(report, expected, run, "delta carry_forward must be null")
+
+    def test_invalid_blast_radius_escalates(self):
+        report, expected, run = self.build_delta()
+        report["delta"]["blast_radius"] = "huge"
+        self.assert_escalates(report, expected, run, "delta blast_radius is invalid")
 
     def test_audit_comment_names_the_delta_tier_and_prior(self):
         report, expected, run = self.build_delta()
