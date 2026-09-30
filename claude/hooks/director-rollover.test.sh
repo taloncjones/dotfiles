@@ -691,132 +691,30 @@ assert not tx.handover_adoptable(dict(old, control_tier="lead"), ("a", 3), "b", 
 PY
 SH
 
-# Scripted herdr for the rollover delivery checks: sends log to $FX/herdr.log,
-# fail N times per verb ($FX/fail.<verb>, optional $FX/garbage.<verb> for a
-# malformed-JSON reply), and `pane read` shows $FX/screen.before until a
-# send-keys lands, then $FX/screen.after.
-ROLLOVER_STUB="$TMPDIR/rollover-herdr-stub.$$"
-cat > "$ROLLOVER_STUB" <<'STUB'
+# Scripted herdr for the handover checks; logs every call to $FX/herdr.log.
+# pane split: $FX/fail.split makes it fail; saves the --env token to
+#   $FX/token; runs $FX/on-split if present; replies pane w9:p2.
+# pane run: $FX/fail.run makes it fail; runs $FX/on-run if present.
+# anything else: ok.
+HANDOVER_STUB="$TMPDIR/rollover-handover-stub.$$"
+cat > "$HANDOVER_STUB" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FX/herdr.log"
-if [ "$1 $2" = "pane read" ]; then
-    if [ -e "$FX/entered" ]; then cat "$FX/screen.after"; else cat "$FX/screen.before"; fi
-    exit 0
-fi
-n=$(grep -c "^pane $2 " "$FX/herdr.log")
-fails=$(cat "$FX/fail.$2" 2>/dev/null || echo 0)
-if [ "$n" -le "$fails" ]; then
-    if [ -e "$FX/garbage.$2" ]; then
-        [ "$2" = send-keys ] && : > "$FX/entered"
-        printf 'not json\n'; exit 0
-    fi
-    echo boom >&2; exit 7
-fi
-[ "$2" = send-keys ] && : > "$FX/entered"
-printf '{"id":"x","result":{"type":"ok"}}\n'
+case "$1 $2" in
+  "pane split")
+    [ -e "$FX/fail.split" ] && { echo boom >&2; exit 7; }
+    for a in "$@"; do case "$a" in HERDR_ROLLOVER_TOKEN=*) printf '%s' "${a#HERDR_ROLLOVER_TOKEN=}" > "$FX/token" ;; esac; done
+    [ -e "$FX/on-split" ] && sh "$FX/on-split" >> "$FX/hook.log" 2>&1
+    printf '{"id":"x","result":{"pane":{"pane_id":"w9:p2"}}}\n' ;;
+  "pane run")
+    [ -e "$FX/fail.run" ] && { echo boom >&2; exit 7; }
+    [ -e "$FX/on-run" ] && sh "$FX/on-run" >> "$FX/hook.log" 2>&1
+    printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+  *) printf '{"id":"x","result":{"type":"ok"}}\n' ;;
+esac
 STUB
-chmod +x "$ROLLOVER_STUB"
-SCREENS="$TMPDIR/rollover-screens.$$"; mkdir -p "$SCREENS"
-python3 - "$SCREENS" <<'PY'
-import sys
-d, rule = sys.argv[1], "─" * 40
-meter = "  " + "█" * 4 + "░" * 6 + " 42% │ Opus"
-def w(name, *lines):
-    open(f"{d}/{name}", "w").write("\n".join(lines) + "\n")
-w("typed", "history", rule, "❯ /clear", rule, meter)
-w("empty", "history", rule, "❯", rule, meter)
-w("history-only", "❯ /clear", "done", rule, "❯", rule, meter)
-w("partial", "history", rule, "❯ /cl", rule, meter)
-PY
-export ROLLOVER_STUB SCREENS
-
-check "rollover: sends /clear then enter to HERDR_PANE_ID" <<'SH'
-cat > "$FX/bin/herdr" <<'STUB'
-#!/bin/sh
-printf '%s\n' "$*" >> "$FX/herdr.log"
-printf '{"id":"x","result":{"type":"ok"}}\n'
-STUB
-chmod +x "$FX/bin/herdr"
-F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
-PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
-grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
-test "$(wc -l < "$FX/herdr.log" | tr -d ' ')" = 3
-test "$(sed -n 1p "$FX/herdr.log")" = "pane send-text w9:p1 /clear"
-test "$(sed -n 2p "$FX/herdr.log")" = "pane send-keys w9:p1 enter"
-test "$(sed -n 3p "$FX/herdr.log")" = "pane read w9:p1 --source detection --lines 40"
-SH
-
-check "rollover: send-text replies malformed JSON but /clear is in the input -> no resend" <<'SH'
-cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
-echo 1 > "$FX/fail.send-text"; : > "$FX/garbage.send-text"
-F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
-PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
-grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
-test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 1
-test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 1
-SH
-
-check "rollover: send-text failed and the input is empty (history has /clear) -> one resend" <<'SH'
-cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/history-only" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
-echo 1 > "$FX/fail.send-text"
-F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
-PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
-grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
-test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 2
-SH
-
-check "rollover: send-text failed with partial input -> stop, no resend, no Enter" <<'SH'
-cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/partial" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
-echo 1 > "$FX/fail.send-text"
-F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
-rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
-test "$rc" = 1
-grep -q 'delivery unknown' "$FX/e"
-test "$(grep -c '^pane send-text ' "$FX/herdr.log")" = 1
-test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 0
-SH
-
-check "rollover: Enter failed once with /clear still typed -> one retry" <<'SH'
-cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
-echo 1 > "$FX/fail.send-keys"
-F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
-PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" > "$FX/o"
-grep -qxF 'rollover: queued /clear for pane w9:p1; end this turn now' "$FX/o"
-test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 2
-SH
-
-check "rollover: Enter failing twice with /clear still typed -> stop, delivery unknown" <<'SH'
-cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/empty" "$FX/screen.after"
-echo 2 > "$FX/fail.send-keys"
-F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
-rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
-test "$rc" = 1
-grep -q 'delivery unknown' "$FX/e"
-test "$(grep -c '^pane send-keys ' "$FX/herdr.log")" = 2
-test "$(grep -c '^pane read ' "$FX/herdr.log")" = 1
-SH
-
-check "rollover: /clear still typed after Enter -> exit 1 with the press-Enter message" <<'SH'
-cp "$ROLLOVER_STUB" "$FX/bin/herdr"; cp "$SCREENS/typed" "$FX/screen.before"; cp "$SCREENS/typed" "$FX/screen.after"
-F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
-rc=0; PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" || rc=$?
-test "$rc" = 1
-grep -qF 'rollover: /clear typed but not submitted in pane w9:p1; press Enter there' "$FX/e"
-SH
+chmod +x "$HANDOVER_STUB"
+export HANDOVER_STUB
 
 check "rollover: stale fence sends nothing" <<'SH'
 cat > "$FX/bin/herdr" <<'STUB'
@@ -849,22 +747,250 @@ test "$rc" = 2
 test ! -e "$FX/herdr.log"
 SH
 
-check "rollover: Enter failing after /clear was typed exits 1 with the delivery-unknown message" <<'SH'
-cat > "$FX/bin/herdr" <<'STUB'
-#!/bin/sh
-printf '%s\n' "$*" >> "$FX/herdr.log"
-case "$2" in send-keys) echo boom >&2; exit 7 ;; esac
-printf '{"id":"x","result":{"type":"ok"}}\n'
-STUB
-chmod +x "$FX/bin/herdr"
+check "rollover: hands over to a new pane on ack, kills its watch, never types into a pane" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+sleep 60 & NEW=$!
+python3 -c 'import time; time.sleep(60)' herdr_orch_core.py watch --repo-slug "$FX_SLUG" --since-epoch 1 & W=$!
+cat > "$FX/on-run" <<EOF
+HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=\$(cat "$FX/token") $CORE adopt-rollover --repo-path "$FX_REPO" \
+    --session 22222222-2222-4222-8222-222222222222 --messaging-socket /tmp/cc-socks/$NEW.sock
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --carry "hold merges" \
+    --ack-secs 20 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+wait $W && wrc=0 || wrc=$?
+kill $NEW
+test "$rc" = 0
+test "$wrc" = 143
+grep -qxF "rollover: handed over to pane w9:p2 (session 22222222-2222-4222-8222-222222222222, fence $((F + 1)))" "$FX/o"
+grep -qxF "watch: stopped (pids $W)" "$FX/o"
+grep -qxF 'Close this pane now, as your last tool call: herdr pane close w9:p1' "$FX/o"
+grep -q '^\[INFO\] herdr director rollover: lease handed over' "$FX/hook.log"
+grep -qxF 'carried: hold merges' "$FX/hook.log"
+REAL_REPO=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$FX_REPO")
+grep -q "^pane split w9:p1 --direction right --cwd $REAL_REPO --env HERDR_ROLLOVER_TOKEN=" "$FX/herdr.log"
+grep -qxF "pane run w9:p2 director 'resume director'" "$FX/herdr.log"
+! grep -q 'send-text\|send-keys\|pane close' "$FX/herdr.log"
+TOKEN=$(cat "$FX/token")
+! grep -q "$TOKEN" "$FX/o"
+LOG=$(find "$FX" -name rollover.jsonl)
+! grep -q "$TOKEN" "$LOG"
+grep -q '"event":"adopted"' "$LOG"
+grep -q '"event":"handed-over"' "$LOG"
+test -z "$(find "$FX" -name rollover-pending.json)"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --fence $((F + 1))
+SH
+
+check "rollover: no ack within the bound keeps the lease, removes the marker, closes the new pane" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$$.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 1 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+grep -qxF "rollover: no ack from pane w9:p2 within 1 s; this session keeps the lease (fence $F)" "$FX/o"
+test "$(tail -n 1 "$FX/herdr.log")" = "pane close w9:p2"
+test -z "$(find "$FX" -name rollover-pending.json)"
+grep -q '"event":"handover-failed".*"reason":"no-ack"' "$(find "$FX" -name rollover.jsonl)"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F"
+SH
+
+check "rollover: an ack whose adoption never landed keeps the lease and closes the pane" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+cat > "$FX/on-run" <<EOF
+python3 -c '
+import hashlib, json, sys
+tok = open(sys.argv[1]).read()
+line = {"v": 2, "ts": "x", "event": "adopted", "handover": hashlib.sha256(tok.encode()).hexdigest()[:16],
+        "from_session": "11111111-1111-4111-8111-111111111111", "from_fence": int(sys.argv[3]),
+        "session": "22222222-2222-4222-8222-222222222222", "fence": int(sys.argv[3]) + 1, "pane": "w9:p2"}
+open(sys.argv[2], "a").write(json.dumps(line) + "\n")
+' "$FX/token" "$RD/rollover.jsonl" "$F"
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 5 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+grep -q 'this session keeps the lease' "$FX/o"
+test "$(tail -n 1 "$FX/herdr.log")" = "pane close w9:p2"
+grep -q '"reason":"adoption-incomplete"' "$RD/rollover.jsonl"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F"
+SH
+
+check "rollover: split failure writes no marker and keeps the lease" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"; : > "$FX/fail.split"
 F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
 PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --fence "$F" 2> "$FX/e" && rc=0 || rc=$?
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 1 > "$FX/o" && rc=0 || rc=$?
 test "$rc" = 1
-grep -q 'delivery unknown' "$FX/e"
-grep -q 'do not re-run rollover' "$FX/e"
-test "$(grep -c 'send-text' "$FX/herdr.log")" = 1
+grep -qxF 'rollover: pane split failed; this session keeps the lease' "$FX/o"
+test -z "$(find "$FX" -name rollover-pending.json)"
+! grep -q 'pane close' "$FX/herdr.log"
+grep -q '"reason":"split-failed"' "$(find "$FX" -name rollover.jsonl)"
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F"
+SH
+
+check "rollover: pane run failure removes the marker and closes the new pane" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"; : > "$FX/fail.run"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+grep -qxF 'rollover: could not start director in pane w9:p2; this session keeps the lease' "$FX/o"
+test "$(tail -n 1 "$FX/herdr.log")" = "pane close w9:p2"
+test -z "$(find "$FX" -name rollover-pending.json)"
+grep -q '"reason":"run-failed"' "$(find "$FX" -name rollover.jsonl)"
+SH
+
+check "rollover: fence lost between split and marker closes the new pane, writes no marker" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+cat > "$FX/on-split" <<EOF
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 33333333-3333-4333-8333-333333333333 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+grep -qxF 'owner: stale-fence' "$FX/o"
+test "$(tail -n 1 "$FX/herdr.log")" = "pane close w9:p2"
+! grep -q '^pane run' "$FX/herdr.log"
+test -z "$(find "$FX" -name rollover-pending.json)"
+SH
+
+check "rollover: lease moved without an ack -> lease-moved, pane left open" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+cat > "$FX/on-run" <<EOF
+$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 33333333-3333-4333-8333-333333333333 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock
+EOF
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 1 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+grep -qxF 'rollover: lease moved without a handover ack; run the section-1 preflight' "$FX/o"
+! grep -q 'keeps the lease' "$FX/o"
+! grep -q 'pane close' "$FX/herdr.log"
+test -z "$(find "$FX" -name rollover-pending.json)"
+grep -q '"reason":"lease-moved"' "$(find "$FX" -name rollover.jsonl)"
+SH
+
+check "rollover: an unexpired own marker refuses with no herdr call" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p5 11111111-1111-4111-8111-111111111111 "$F" 60
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+grep -qxF 'rollover: rollover in progress for pane w9:p5' "$FX/o"
+test ! -e "$FX/herdr.log"
+test -e "$RD/rollover-pending.json"
+SH
+
+check "rollover: an expired own marker closes its pane, is removed, and the rollover proceeds" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p5 11111111-1111-4111-8111-111111111111 "$F" -1
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --ack-secs 1 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+test "$(head -n 1 "$FX/herdr.log")" = "pane close w9:p5"
+grep -q '^pane split w9:p1 ' "$FX/herdr.log"
+grep -q '"reason":"expired".*"to_pane":"w9:p5"' "$RD/rollover.jsonl"
+grep -q '"reason":"no-ack"' "$RD/rollover.jsonl"
+SH
+
+check "rollover: a stale fence after a completed handover reports handed over" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket /tmp/cc-socks/$OLD.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" 60
+HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket /tmp/cc-socks/$$.sock >/dev/null
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 CLAUDE_CODE_MESSAGING_SOCKET=/tmp/cc-socks/$OLD.sock \
+    $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1" > "$FX/o" && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 0
+grep -qxF "rollover: handed over to pane w9:p2 (session 22222222-2222-4222-8222-222222222222, fence $((F1 + 1)))" "$FX/o"
+grep -qxF 'watch: none found' "$FX/o"
+grep -qxF 'Close this pane now, as your last tool call: herdr pane close w9:p1' "$FX/o"
+test ! -e "$FX/herdr.log"
+SH
+
+check "rollover: a retry after /clear closes the superseded marker's pane and proceeds" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p5 11111111-1111-4111-8111-111111111111 "$F" 60
+F2=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 33333333-3333-4333-8333-333333333333 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 33333333-3333-4333-8333-333333333333 --fence "$F2" --ack-secs 1 --poll-secs 0.1 > "$FX/o" && rc=0 || rc=$?
+test "$rc" = 1
+test "$(head -n 1 "$FX/herdr.log")" = "pane close w9:p5"
+grep -q '^pane split w9:p1 ' "$FX/herdr.log"
+grep -q '"reason":"superseded".*"to_pane":"w9:p5"' "$RD/rollover.jsonl"
+grep -qxF "rollover: no ack from pane w9:p2 within 1 s; this session keeps the lease (fence $F2)" "$FX/o"
+SH
+
+check "rollover: a stale fence with an ack whose adoption never landed reports stale-fence" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+printf '{"v":2,"ts":"x","event":"adopted","handover":"0000000000000000","from_session":"11111111-1111-4111-8111-111111111111","from_fence":%s,"session":"22222222-2222-4222-8222-222222222222","fence":%s,"pane":"w9:p2"}\n' "$F" "$((F + 1))" >> "$RD/rollover.jsonl"
+F2=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+test "$F2" -gt "$F"
+out=$(PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F") && rc=0 || rc=$?
+test "$rc" = 1
+test "$out" = "owner: stale-fence"
+test ! -e "$FX/herdr.log"
+SH
+
+check "rollover: --carry over the limit exits 2 before any herdr call" <<'SH'
+cp "$HANDOVER_STUB" "$FX/bin/herdr"
+F=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket /tmp/cc-socks/$$.sock)
+BIG=$(python3 -c 'print("x" * 4001)')
+PATH="$FX/bin:$PATH" HERDR_PANE_ID=w9:p1 $CORE rollover --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F" --carry "$BIG" 2>/dev/null && rc=0 || rc=$?
+test "$rc" = 2
+test ! -e "$FX/herdr.log"
+SH
+
+check "rollover_launch: personal scope adds --personal" <<'SH'
+python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+assert c.rollover_launch("personal") == "director --personal 'resume director'"
+assert c.rollover_launch("work") == "director 'resume director'"
+PY
 SH
 
 check "hook: silent on every gate failure" <<'SH'
@@ -1098,34 +1224,6 @@ if (fs.readdirSync(path.join(dir, "herdr-orch/context")).length !== 1) throw new
 JS
 SH
 
-check "current_input: tolerates a real statusline.js footer with remaining_percentage null (no meter)" <<'SH'
-node - <<'JS' > "$FX/footers.json"
-const sl = require(process.env.REPO_ROOT + "/claude/statusline.js");
-const base = { session_id: "11111111-1111-4111-8111-111111111111",
-               workspace: { current_dir: process.env.FX_REPO },
-               model: { display_name: "Opus" } };
-const nullFooter = sl.render({ ...base, context_window: { remaining_percentage: null, total_tokens: 1000000 } });
-const numFooter = sl.render({ ...base, context_window: { remaining_percentage: 83, total_tokens: 1000000 } });
-process.stdout.write(JSON.stringify({ null_footer: nullFooter, num_footer: numFooter }));
-JS
-python3 -c '
-import json, sys
-sys.path.insert(0, sys.argv[1] + "/claude/hooks")
-import herdr_orch_core as c
-raw = json.load(open(sys.argv[2]))
-rule = "─" * 40
-null_footer = c.strip_ansi(raw["null_footer"])
-num_footer = c.strip_ansi(raw["num_footer"])
-assert "█" not in null_footer, null_footer  # remaining_percentage null -> no meter block cells
-assert "│" in null_footer, null_footer      # segments still join on the separator
-assert "█" in num_footer, num_footer        # a number still renders the meter
-def screen(footer):
-    return "\n".join([rule, "❯", rule, footer]) + "\n"
-assert c.current_input(screen(null_footer)) == "", null_footer
-assert c.current_input(screen(num_footer)) == "", num_footer
-' "$REPO_ROOT" "$FX/footers.json"
-SH
-
 check "hook: executable, python3 shebang, registered on startup|resume|clear|compact" <<'SH'
 test -x "$REPO_ROOT/claude/hooks/director_rollover.py"
 head -n 1 "$REPO_ROOT/claude/hooks/director_rollover.py" | grep -qxF '#!/usr/bin/env python3'
@@ -1138,7 +1236,7 @@ assert len(hits) == 1 and hits[0]["matcher"] == "startup|resume|clear|compact", 
 PY
 SH
 
-rm -f "$ROLLOVER_STUB" "$WRITE_MARKER"; rm -rf "$SCREENS"
+rm -f "$WRITE_MARKER" "$HANDOVER_STUB"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
