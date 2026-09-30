@@ -191,3 +191,80 @@ def body_reasons(body, commits, head):
         if token not in stale and any(o != head and o.startswith(token) for o in oids):
             stale.append(token)
     return reasons + [f"stale sha {token}" for token in stale]
+
+
+def waiting_on(facts):
+    """The first matching waiting-on rule (spec R5)."""
+    if facts["state"] in ("MERGED", "CLOSED"):
+        return facts["state"].lower()
+    if facts["ci_failing"]:
+        return "CI: " + ", ".join(facts["ci_failing"])
+    if facts["ci_pending"] or not facts["ci_passing"]:
+        return "CI"
+    if facts["co_review"] in ("none", "stale"):
+        return "co-review at head"
+    if facts["co_review"] == "changes":
+        return "co-review findings"
+    if facts["bench_ok"] is False:
+        return "bench run"
+    if facts["body_reasons"]:
+        return "body edit"
+    if facts["draft"]:
+        return "undraft"
+    if facts["review_decision"] in ("REVIEW_REQUIRED", "CHANGES_REQUESTED"):
+        who = facts["reviewers"]
+        return "approvers" + (f" ({', '.join(who)})" if who else "")
+    return f"merge ({facts['authority']})"
+
+
+def with_submodule(text, submodule):
+    """Prefix the submodule merge step while the paired submodule PR is unmerged."""
+    if submodule is None or submodule.get("state") == "MERGED":
+        return text
+    link = pr_link(submodule["repo"], submodule["number"], submodule.get("url"))
+    return f"submodule PR {link} merge + re-pin; {text}"
+
+
+def reviewers(requests):
+    names = []
+    for req in requests if isinstance(requests, list) else []:
+        if isinstance(req, dict):
+            name = req.get("login") or req.get("slug") or req.get("name")
+            if name:
+                names.append(md(name))
+    return names
+
+
+def build_row(pr, comments, runs, login, authority, prefix, submodule):
+    """Rendered cells for one fetched PR; runs is None without a bench workflow."""
+    head = pr["headRefOid"]
+    body = str(pr.get("body") or "")
+    failing, pending, passing = ci_state(pr.get("statusCheckRollup"))
+    review_state, review_text = co_review(markers(comments, login), head)
+    bench_ok, bench_text = (None, "n/a") if runs is None else bench(runs, head)
+    evidence = evidence_link(plan_section(body))
+    if evidence:
+        bench_text += f"; {evidence}"
+    reasons = body_reasons(body, pr.get("commits") or [], head)
+    facts = {"state": pr.get("state"), "ci_failing": failing, "ci_pending": pending,
+             "ci_passing": passing, "co_review": review_state, "bench_ok": bench_ok,
+             "body_reasons": reasons, "draft": bool(pr.get("isDraft")),
+             "review_decision": pr.get("reviewDecision"),
+             "reviewers": reviewers(pr.get("reviewRequests")), "authority": authority}
+    return {"pr": pr_cell(pr, prefix), "head": head_cell(pr), "ci": ci_cell(failing, pending, passing),
+            "co_review": review_text, "bench": bench_text, "body": md("; ".join(reasons)) or "yes",
+            "draft": "yes" if pr.get("isDraft") else "no",
+            "waiting_on": with_submodule(waiting_on(facts), submodule)}
+
+
+def error_row(repo, number, prefix, message):
+    row = dict.fromkeys(CELL_KEYS, "?")
+    row["pr"] = f"{prefix} {pr_link(repo, number)}" if prefix else pr_link(repo, number)
+    row["waiting_on"] = f"error: {md(message)}"
+    return row
+
+
+def markdown(rows):
+    lines = ["| " + " | ".join(HEADER) + " |", "|" + " --- |" * len(HEADER)]
+    lines += ["| " + " | ".join(row[key] for key in CELL_KEYS) + " |" for row in rows]
+    return "\n".join(lines)
