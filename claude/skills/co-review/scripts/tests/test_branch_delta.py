@@ -329,6 +329,58 @@ class RenameCarryForwardTests(unittest.TestCase):
         self.assertTrue(record["pass"], record["reasons"])
 
 
+class RenamePairingTests(unittest.TestCase):
+    """Main deletes f and s and adds x and y; diff -M and merge-ort pair them differently."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        common = "".join(f"common shared line number {n:02d} with some padding text\n"
+                         for n in range(1, 19))
+        f_body = common + "f only line one alpha\nf only line two beta\n"
+        s_body = common + "s only line one gamma\ns only line two delta\n"
+        git(self.repo, "init", "-q", "-b", "main")
+        commit_file(self.repo, "f.txt", f_body, "base f")
+        commit_file(self.repo, "s.txt", s_body, "base s")
+        git(self.repo, "checkout", "-q", "-b", "topic")
+        edited = f_body.replace(common.splitlines(keepends=True)[2], "BRANCH EDIT OF LINE THREE\n")
+        self.gated = commit_file(self.repo, "f.txt", edited, "branch edit f")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "rm", "-q", "f.txt", "s.txt")
+        x_body = ("".join(common.splitlines(keepends=True)[:12])
+                  + "f only line one alpha\nf only line two beta\n"
+                  + "".join(f"x new line {n}\n" for n in range(1, 7)))
+        y_body = s_body + "y new line 1\n"
+        (self.repo / "x.txt").write_text(x_body, encoding="utf-8")
+        (self.repo / "y.txt").write_text(y_body, encoding="utf-8")
+        git(self.repo, "add", "x.txt", "y.txt")
+        git(self.repo, "commit", "-q", "-m", "main replaces f and s with x and y")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "main")
+        git(self.repo, "checkout", "-q", "topic")
+        git(self.repo, "merge", "-q", "--no-edit", "main")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def proof(self) -> dict:
+        return bd.carry_forward(self.repo, self.gated, "HEAD", "origin/main")
+
+    def test_merge_as_git_produced_it_passes(self):
+        record = self.proof()
+        self.assertTrue(record["pass"], record["reasons"])
+
+    def test_merge_with_branch_hunk_restored_away_fails(self):
+        # Git put the branch edit into y.txt; restoring y.txt to main's copy drops it.
+        self.assertIn("BRANCH EDIT", (self.repo / "y.txt").read_text(encoding="utf-8"))
+        git(self.repo, "checkout", "-q", "origin/main", "--", "y.txt")
+        git(self.repo, "commit", "-q", "--amend", "--no-edit")
+        self.assertNotIn("BRANCH EDIT", (self.repo / "y.txt").read_text(encoding="utf-8"))
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("y.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
+
 class DeltaRangeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
