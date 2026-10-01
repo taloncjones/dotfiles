@@ -237,6 +237,12 @@ class CodexReviewGatesSkillText(unittest.TestCase):
                        "CLOSED or STILL-OPEN"):
             self.assertIn(needle, text)
 
+    def test_spec_review_closure_check_covers_carried_findings(self):
+        text = " ".join(SPEC_REVIEW.split())
+        for needle in ("a critical or high finding is open after the round at the cap",
+                       "The closure check never falls back to the full-document prompt"):
+            self.assertIn(needle, text)
+
     def test_plan_review_documents_the_substitute_round(self):
         self.assertIn("### Substitute a failed Codex round", PLAN_REVIEW)
         for needle in ("quota, auth, or", "availability failure",
