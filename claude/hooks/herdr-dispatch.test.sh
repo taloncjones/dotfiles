@@ -441,6 +441,15 @@ elif args[:2] == ["pane", "list"]:
              if p["workspace_id"] == ws]
     print(json.dumps({"id": "fake", "result": {"type": "pane_list", "panes": panes}}))
 elif args[:2] == ["pane", "close"]:
+    if mode == "pane-close-fail-second":
+        count_path = Path(os.environ["FAKE_HERDR_LOG"] + ".close-count")
+        closes = int(count_path.read_text()) if count_path.exists() else 0
+        count_path.write_text(str(closes + 1))
+        if closes == 1:
+            print(json.dumps({"id": "cli:pane:close",
+                              "error": {"code": "server_unavailable", "message": "fake"}}),
+                  file=sys.stderr)
+            raise SystemExit(1)
     path = Path(os.environ["FAKE_PANES"])
     path.write_text(json.dumps([p for p in json.loads(path.read_text())
                                 if p["pane_id"] != args[2]]))
@@ -1294,8 +1303,9 @@ def test_sweep_settles_review_and_ship_rows():
         (launch_dir / "ship.json").write_text(
             json.dumps({"launch_id": ship["launch_id"], "verdict": "APPROVE"}))
         result = fx.sweep()
-        rows = [(r["launch_id"], r["reason"], r["pane"]) for r in result["rows"]]
-        assert rows == [("R", "verdict-recorded", "closed"),
+        rows = [(r["launch_id"], r["reason"], r.get("pane")) for r in result["rows"]]
+        # Sweep reports every row; the implementer under review is untouched.
+        assert rows == [("I", None, None), ("R", "verdict-recorded", "closed"),
                         (ship["launch_id"], "handoff-recorded", "closed")], result
         assert ["pane", "close", "w1:p1"] not in fx.calls()
     finally:
@@ -1320,6 +1330,76 @@ def test_sweep_keeps_a_ship_pane_a_repair_row_also_used():
         assert by_lid[ship["launch_id"]]["reason"] == "handoff-recorded", result
         assert by_lid[ship["launch_id"]]["pane"] == "kept-shared", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_sweep_settles_every_row_and_keeps_the_root():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p2", head)
+        latest, rev = settle_row("implement", "I3", "w1:p1", head), settle_row("review", "R", "w1:p3", head)
+        fx.settle_state([impl, repair, latest, rev], "changes-requested", [],
+                        [pane("w1:p1", launch_id="I3"), pane("w1:p2", launch_id="I2"),
+                         pane("w1:p3", launch_id="R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.sweep()
+        rows = [(r["launch_id"], r["status"], r.get("pane")) for r in result["rows"]]
+        assert rows == [("I", "settled", "kept-shared"), ("I2", "settled", "closed"),
+                        ("I3", "not-settled", None), ("R", "settled", "closed")], result
+        closes = [c for c in fx.calls() if c[:2] == ["pane", "close"]]
+        assert closes == [["pane", "close", "w1:p2"], ["pane", "close", "w1:p3"]], closes
+    finally:
+        fx.close()
+
+
+def test_sweep_rerun_finishes_after_a_failed_pane_close():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p2", head)
+        latest, rev = settle_row("implement", "I3", "w1:p1", head), settle_row("review", "R", "w1:p3", head)
+        fx.settle_state([impl, repair, latest, rev], "changes-requested", [],
+                        [pane("w1:p1", launch_id="I3"), pane("w1:p2", launch_id="I2"),
+                         pane("w1:p3", launch_id="R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        fx.env["FAKE_HERDR_MODE"] = "pane-close-fail-second"
+        try:
+            fx.sweep()
+        except herdr_dispatch.DispatchError:
+            pass
+        else:
+            raise AssertionError("sweep should raise when a pane close fails")
+        left = [p["pane_id"] for p in json.loads(Path(fx.env["FAKE_PANES"]).read_text())]
+        assert left == ["w1:p1", "w1:p3"], left
+        fx.env["FAKE_HERDR_MODE"] = "ok"
+        result = fx.sweep()
+        by_lid = {r["launch_id"]: r for r in result["rows"]}
+        assert by_lid["I2"]["pane"] == "absent" and by_lid["R"]["pane"] == "closed", result
+        left = [p["pane_id"] for p in json.loads(Path(fx.env["FAKE_PANES"]).read_text())]
+        assert left == ["w1:p1"], left
+    finally:
+        fx.close()
+
+
+def test_sweep_closes_a_terminal_task_last_round_panes():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, repair = settle_row("implement", "I", "w1:p1", head), settle_row("implement", "I2", "w1:p4", head)
+        rev = settle_row("review", "R", "w1:p2", head)
+        ship = settle_row("ship", "ship-td-a-000000000001", "w1:p3", head)
+        # I2 is the latest implement row: only the terminal fact releases its pane.
+        fx.settle_state([impl, rev, ship, repair], "merged", [],
+                        [pane("w1:p1", launch_id="I"), pane("w1:p2", launch_id="R"),
+                         pane("w1:p3", launch_id=ship["launch_id"]), pane("w1:p4", launch_id="I2")])
+        result = fx.sweep()
+        rows = [(r["launch_id"], r["reason"], r.get("pane")) for r in result["rows"]]
+        assert rows == [("I", "task-terminal", "kept-shared"), ("R", "task-terminal", "closed"),
+                        (ship["launch_id"], "task-terminal", "closed"),
+                        ("I2", "task-terminal", "closed")], result
+        assert ["pane", "close", "w1:p1"] not in fx.calls()
     finally:
         fx.close()
 
@@ -4273,6 +4353,9 @@ for name, test in (
     ("settle keeps a handoff it read even if the file is then deleted", test_settle_keeps_a_handoff_it_read_even_if_the_file_is_then_deleted),
     ("sweep settles review and ship rows", test_sweep_settles_review_and_ship_rows),
     ("sweep keeps a ship pane a repair row also used", test_sweep_keeps_a_ship_pane_a_repair_row_also_used),
+    ("sweep settles every row and keeps the root", test_sweep_settles_every_row_and_keeps_the_root),
+    ("sweep rerun finishes after a failed pane close", test_sweep_rerun_finishes_after_a_failed_pane_close),
+    ("sweep closes a terminal task's last-round panes", test_sweep_closes_a_terminal_task_last_round_panes),
     ("settle keeps a pane when process-info reports no foreground processes", test_settle_keeps_a_pane_when_process_info_reports_no_foreground_processes),
     ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
     ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),

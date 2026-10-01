@@ -1734,7 +1734,7 @@ def settle(*, repo_slug, task_id, session, fence, workspace_id, launch_id, cwd,
 
 def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
           runtime="claude", herdr_cli="herdr", env=None, personal=False):
-    """Settle every review and ship row of the task in one workspace, oldest first."""
+    """Settle every worker row of the task in one workspace, oldest first."""
     child_env, repository, scope, rd = _settle_context(
         repo_slug, task_id, workspace_id, cwd, runtime, personal, env, "sweep")
     try:
@@ -1747,8 +1747,7 @@ def sweep(*, repo_slug, task_id, session, fence, workspace_id, cwd,
             rows = [_settle_index(herdr_cli, task_path, task, i, reasons,
                                   workspace_id, child_env)
                     for i, w in enumerate(task.get("workers", []))
-                    if isinstance(w, dict) and w.get("phase") in core.PANE_CLOSING_PHASES
-                    and w.get("workspace_id") == workspace_id]
+                    if isinstance(w, dict) and w.get("workspace_id") == workspace_id]
             return {"status": "swept", "rows": rows}
     except (OSError, ValueError) as exc:
         raise DispatchError(f"sweep could not hold the owner fence: {exc}") from exc
