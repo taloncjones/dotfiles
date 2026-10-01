@@ -264,6 +264,71 @@ class CarryForwardTests(unittest.TestCase):
         self.assertEqual(self.proof(), self.proof())
 
 
+class RenameCarryForwardTests(unittest.TestCase):
+    """Main renames a file the branch edited; the proof must follow the rename."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        git(self.repo, "init", "-q", "-b", "main")
+        commit_file(self.repo, "old.txt", SHARED, "base")
+        git(self.repo, "checkout", "-q", "-b", "topic")
+        self.gated = commit_file(self.repo, "old.txt", replace_line(SHARED, 2, "branch edit"),
+                                 "branch edit")
+        git(self.repo, "checkout", "-q", "main")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def rename_on_main(self, body: str) -> str:
+        git(self.repo, "mv", "old.txt", "new.txt")
+        (self.repo / "new.txt").write_text(body, encoding="utf-8")
+        git(self.repo, "add", "new.txt")
+        git(self.repo, "commit", "-q", "-m", "main renames old to new")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "main")
+        return body
+
+    def merge_main(self, expect_clean: bool) -> None:
+        git(self.repo, "checkout", "-q", "topic")
+        args = ["git", "-C", str(self.repo), "merge", "-q", "--no-edit", "main"]
+        merged = subprocess.run(args, env=GIT_ENV, capture_output=True, text=True)
+        self.assertEqual(merged.returncode == 0, expect_clean, merged.stdout + merged.stderr)
+
+    def proof(self) -> dict:
+        return bd.carry_forward(self.repo, self.gated, "HEAD", "origin/main")
+
+    def test_conflicting_rename_resolved_by_hand_fails(self):
+        self.rename_on_main(replace_line(SHARED, 2, "main edit"))
+        self.merge_main(expect_clean=False)
+        (self.repo / "new.txt").write_text(replace_line(SHARED, 2, "resolved by hand"),
+                                           encoding="utf-8")
+        git(self.repo, "add", "new.txt")
+        git(self.repo, "commit", "-q", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("new.txt:") and "conflicts" in reason
+                            for reason in record["reasons"]), record["reasons"])
+
+    def test_clean_rename_merge_restored_to_main_copy_fails(self):
+        main_copy = self.rename_on_main(replace_line(SHARED, 18, "main edit"))
+        self.merge_main(expect_clean=True)
+        self.assertEqual((self.repo / "new.txt").read_text(encoding="utf-8"),
+                         replace_line(replace_line(SHARED, 2, "branch edit"), 18, "main edit"))
+        (self.repo / "new.txt").write_text(main_copy, encoding="utf-8")
+        git(self.repo, "add", "new.txt")
+        git(self.repo, "commit", "-q", "--amend", "--no-edit")
+        record = self.proof()
+        self.assertFalse(record["pass"])
+        self.assertTrue(any(reason.startswith("new.txt:") for reason in record["reasons"]),
+                        record["reasons"])
+
+    def test_clean_rename_merge_as_git_produced_it_passes(self):
+        self.rename_on_main(replace_line(SHARED, 18, "main edit"))
+        self.merge_main(expect_clean=True)
+        record = self.proof()
+        self.assertTrue(record["pass"], record["reasons"])
+
+
 class DeltaRangeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -21,10 +21,11 @@ ProofError = _review.ReviewError
 commit = _review.full_commit
 # Literal pathspecs and forced flags: a repo's diff driver, textconv filter or
 # rename detection must not change what the proofs compare.
-_DIFF = (
+_DIFF_BASE = (
     "--literal-pathspecs", "-c", "core.quotePath=true", "diff",
-    "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
+    "--no-color", "--no-ext-diff", "--no-textconv",
 )
+_DIFF = (*_DIFF_BASE, "--no-renames")
 
 
 def _rev_list(repo: Path, *args: str) -> list[str]:
@@ -34,6 +35,25 @@ def _rev_list(repo: Path, *args: str) -> list[str]:
 def _names(repo: Path, old: str, new: str, paths: list[str] | None = None) -> list[str]:
     raw = _review.git(repo, *_DIFF, "--name-only", "-z", old, new, "--", *(paths or []))
     return [name for name in raw.decode("utf-8", "surrogateescape").split("\0") if name]
+
+
+def _follow_upstream(
+    repo: Path, old_base: str, new_base: str, own: set[str]
+) -> tuple[set[str], list[str]]:
+    """Own names plus both sides of upstream renames touching them, and upstream-deleted own paths."""
+    raw = _review.git(repo, *_DIFF_BASE, "--find-renames", "--name-status", "-z", old_base, new_base)
+    fields = raw.decode("utf-8", "surrogateescape").split("\0")
+    followed, deleted, index = set(own), [], 0
+    while index < len(fields) and fields[index]:
+        status = fields[index][0]
+        width = 3 if status in "RC" else 2
+        names = fields[index + 1:index + width]
+        index += width
+        if status == "D" and names[0] in own:
+            deleted.append(names[0])
+        if status in "RC" and own & set(names):
+            followed.update(names)
+    return followed, deleted
 
 
 def _merge_tree(repo: Path, ours: str, theirs: str) -> tuple[str, list[str]]:
@@ -78,8 +98,14 @@ def carry_forward(repo: Path, gated_head: str, head: str, upstream: str) -> dict
         old_base = _review.text_git(repo, "merge-base", base, gated)
         new_base = _review.text_git(repo, "merge-base", base, current)
         record.update(old_base=old_base, new_base=new_base)
-        own = proof("branch-files", ["diff", "--name-only", old_base, gated],
-                    _names(repo, old_base, gated))
+        branch_own = proof("branch-files", ["diff", "--name-only", old_base, gated],
+                          _names(repo, old_base, gated))
+        # An upstream rename moves a branch file to a name the branch diff never
+        # shows; follow it so the byte-exact comparison covers the new path.
+        followed, deleted = _follow_upstream(repo, old_base, new_base, set(branch_own))
+        own = sorted(followed)
+        for path in sorted(deleted):
+            reasons.append(f"{path}: deleted upstream while the branch changes it")
         # Byte-exact: head's own paths must equal git's merge of the gated head
         # with the new base, so a moved or hand-resolved line cannot pass.
         moved = _names(repo, gated, current, own) if own else []
