@@ -60,7 +60,7 @@ never carries the spec cap into the plan review.
 
 | Skill             | Default max Codex rounds | Raised by                    |
 | ----------------- | ------------------------ | ---------------------------- |
-| codex-spec-review | 4                        | the kickoff instruction only |
+| codex-spec-review | 2                        | the kickoff instruction only |
 
 A round is one runner call, whatever its outcome; the skeptic verification
 round counts. Record every call, failed or empty ones included, as its own
@@ -72,6 +72,17 @@ the spec's accepted residuals, and proceed, unless a finding rated critical
 or high is still open. That, or an incomplete last call (timeout, empty,
 malformed, no verdict), blocks the caller; a herdr plan worker emits
 `--outcome paused`.
+
+Closure check: when the round at the cap raised a finding rated critical or
+high, fold the fix and run exactly one more call. It uses the round k diff
+prompt, restricted to returning CLOSED or STILL-OPEN for the open critical
+and high findings; it raises a new finding only on a defect in the changed
+text that blocks closing one of them. Record it as its own row in the
+revision history like any call; it is the only call allowed past the cap.
+When the round at the cap raised nothing above medium, there is no closure
+check: fold the accepted fixes, list open findings as accepted residuals, and
+proceed. A critical or high finding still open after the closure check keeps
+the stop rule above.
 
 For `behavior`, probe recovery semantics explicitly: independently enumerate
 the interruption windows the design's durable writes and authority
@@ -98,7 +109,7 @@ the shared runtime runner:
 
 ```bash
 ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"
-SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"
+SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-2}"
 if [ "$ARTIFACT_CLASS" = advisory ]; then
   FOCUS="These are advisory workflow-prose artifacts with no durable write or authority transition of their own. Report defects that would make an implementer do the wrong thing; return style, rigor, and hardening suggestions as severity low."
 else
@@ -129,7 +140,7 @@ DIFF_STATUS=0
 diff -u "$PREVIOUS_FROZEN_SPEC" "$FROZEN_SPEC" >"$ROUND_DIFF" || DIFF_STATUS=$?
 [ "$DIFF_STATUS" -le 1 ] || exit 2
 ARTIFACT_CLASS="${ARTIFACT_CLASS:-behavior}"
-SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-4}"
+SPEC_MAX_ROUNDS="${SPEC_MAX_ROUNDS:-2}"
 if [ "$ARTIFACT_CLASS" = advisory ]; then
   FOCUS="These are advisory workflow-prose artifacts; return style, rigor, and hardening suggestions as severity low."
 else

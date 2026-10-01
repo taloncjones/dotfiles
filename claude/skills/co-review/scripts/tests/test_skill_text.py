@@ -230,6 +230,13 @@ class CodexReviewGatesSkillText(unittest.TestCase):
                        "counts toward `SPEC_MAX_ROUNDS`"):
             self.assertIn(needle, SPEC_REVIEW)
 
+    def test_spec_review_documents_the_closure_check(self):
+        text = " ".join(SPEC_REVIEW.split())
+        for needle in ("Closure check", "critical or high",
+                       "the only call allowed past the cap",
+                       "CLOSED or STILL-OPEN"):
+            self.assertIn(needle, text)
+
     def test_plan_review_documents_the_substitute_round(self):
         self.assertIn("### Substitute a failed Codex round", PLAN_REVIEW)
         for needle in ("quota, auth, or", "availability failure",
