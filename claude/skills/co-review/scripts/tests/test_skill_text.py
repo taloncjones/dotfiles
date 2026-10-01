@@ -219,6 +219,60 @@ class CoReviewSkillText(unittest.TestCase):
         self.assertNotIn("--timeout-secs 600", MIRROR)
         self.assertNotIn("600-second", MIRROR)
 
+    def test_both_entrypoints_document_carry_forward(self):
+        for text in (CO_REVIEW, MIRROR):
+            for needle in ("## Carry-forward", '"$GATE_REPORT" carry-forward --repo "$REPO"',
+                           '--report-sha256 "$PRIOR_REPORT_SHA256"',
+                           "tier=carry-forward prior_run=<prior_run> prior_sha=<prior_head>",
+                           "for dedupe only, never authority",
+                           "`tier` = expected `class`"):
+                self.assertIn(needle, text)
+
+    def test_policy_names_the_carry_forward_exception(self):
+        policy = subprocess.run(
+            [sys.executable, str(REPO / "claude/skills/co-review/scripts/gate_report.py"),
+             "policy", "--section", "POLICY"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for needle in ("### Carry-forward", "the one named exception", "digest-pinned",
+                       "never the `gated..HEAD` range"):
+            self.assertIn(needle, policy)
+
+    def test_both_entrypoints_document_the_delta_tier(self):
+        for text in (CO_REVIEW, MIRROR):
+            for needle in ("## Delta tier", '"$GATE_REPORT" delta-class --repo "$REPO"',
+                           '"$GATE_REPORT" copy-prior', '--diff-out "$RUN_DIR/delta.diff"',
+                           "blast_radius: unbounded", "one fresh full gate",
+                           "Delta round (Recommended)", "herdr-ship-delta-head:",
+                           "`prior_sha` = expected `delta.prior_head`"):
+                self.assertIn(needle, text)
+
+    def test_delta_evidence_is_written_in_data_flow_order(self):
+        for text in (CO_REVIEW, MIRROR):
+            order = [text.index(needle) for needle in (
+                '--diff-out "$RUN_DIR/delta.diff"', '--out "$RUN_DIR/prior"',
+                '(run / "carry-forward.json")',
+                "into the expected identity before any seat runs")]
+            self.assertEqual(order, sorted(order))
+
+    def test_co_review_branches_probes_and_seats_on_delta(self):
+        for needle in ('if [ "$CLASS" != "delta" ]; then', 'if [ "$CLASS" = "full" ]; then',
+                       '[ "$CLASS" = "delta" ] && SEATS="claude verifier"',
+                       "Delta tier: only the claude reviewer seat.",
+                       "The delta tier runs `claude` and `verifier`"):
+            self.assertIn(needle, CO_REVIEW)
+        self.assertIn("Delta tier: the `claude` reviewer seat and the verifier", MIRROR)
+
+    def test_policy_describes_the_delta_tier(self):
+        policy = subprocess.run(
+            [sys.executable, str(REPO / "claude/skills/co-review/scripts/gate_report.py"),
+             "policy", "--section", "POLICY"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        for needle in ("### Delta tier", "The delta tier runs `claude` and `verifier`",
+                       'escalate: "full"', "cumulative from the full head"):
+            self.assertIn(needle, policy)
+
 
 class CodexReviewGatesSkillText(unittest.TestCase):
     def test_spec_review_documents_the_substitute_round(self):
@@ -251,6 +305,18 @@ class ShipSkillText(unittest.TestCase):
                        "explicit merge confirmation", "step 6 confirmation"):
             self.assertIn(needle, SHIP)
         self.assertNotIn("step-5 confirmation", SHIP)
+
+    def test_ship_carries_a_merge_main_head_with_the_proof(self):
+        for needle in ("`carry-forward` command exits 0",
+                       "carry-forward record's `audit_comment`"):
+            self.assertIn(needle, SHIP)
+        self.assertNotIn('"Merge-main-only commits keep the verdict" in', SHIP)
+
+    def test_ship_maps_the_herdr_tier_lines(self):
+        for needle in ("herdr-ship-brief: tier=full", "herdr-ship-brief: tier=delta",
+                       "herdr-ship-prior-handoff:", "herdr-ship-delta-caps:",
+                       "is not a relaunch after a fix"):
+            self.assertIn(needle, SHIP)
 
 
 if __name__ == "__main__":

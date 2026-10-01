@@ -10,8 +10,14 @@ from datetime import datetime, timezone
 MARKER_RE = re.compile(
     r"^<!-- co-review: sha=(?P<sha>[0-9a-f]{40}) base=(?P<base>[0-9a-f]{40}) "
     r"base_ref=(?P<base_ref>\S+) verdict=(?P<verdict>APPROVE|CHANGES) "
-    r"round=(?P<round>\d+)(?: target_tip=(?P<target_tip>[0-9a-f]{40}))? -->$"
+    r"round=(?P<round>\d+)"
+    r"(?: tier=(?P<tier>full|light|delta|carry-forward)"
+    r"(?: prior_run=(?P<prior_run>[A-Za-z0-9._:-]+) prior_sha=(?P<prior_sha>[0-9a-f]{40}))?)?"
+    r"(?: target_tip=(?P<target_tip>[0-9a-f]{40}))? -->$"
 )
+# prior_run/prior_sha name the run a delta or carry-forward builds on; they
+# appear exactly on those two tiers (spec R9).
+_PRIOR_TIERS = ("delta", "carry-forward")
 # target_tip records the target-branch tip the review compared against. It is
 # for the reader: decide() never compares it, so an approval does not expire
 # when the target moves. A target change that breaks the PR is CI's job.
@@ -127,9 +133,14 @@ def _scan_body(
         candidates += 1
         line = raw.rstrip(" \t")  # ASCII trailing space only, for the $-anchored match
         hit = marker_re.match(line)
-        if hit:
+        if hit and _tier_fields_ok(hit.groupdict()):
             found.append(hit.groupdict())
     return candidates, found
+
+
+def _tier_fields_ok(fields: dict) -> bool:
+    """prior_run/prior_sha are present exactly on a delta or carry-forward marker."""
+    return (fields.get("prior_run") is not None) == (fields.get("tier") in _PRIOR_TIERS)
 
 
 def _has_findings_body(body: str) -> bool:
