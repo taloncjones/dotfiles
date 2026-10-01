@@ -785,14 +785,15 @@ body that mentions someone, a Jira comment) is asked the same way.
 1. Register it first with `python3 ~/.claude/hooks/pr_post_guard.py draft --
    gh <args>`. A Jira comment has no draft.
 2. Ask one single-select question per draft, at most four per prompt. Put the
-   draft text in the question or in the preview of its post option.
+   full draft text in the question; an option preview is clipped by the
+   terminal, so it never counts.
 3. The options are `Post draft <hash>` and `Skip draft <hash>`. The
    recommended one comes first, with ` (Recommended)`.
 
 The answer is the go. A PostToolUse hook approves exactly the draft the
-chosen option names, and only when its text was in that question or preview
-and the draft text and that preview are each at most 2000 characters and 12
-lines, the most a prompt displays.
+chosen option names, and only when its text was in that question
+and the draft text and that question are each at most 2000 characters, the
+most a prompt displays.
 It prints a `post gate:` line for each decision. A typed message never
 approves a post, so never ask the owner to type one. Without the tool, a
 gated post cannot be approved; leave the draft in the report.
@@ -1938,8 +1939,7 @@ Rules (these are outward-facing writes, so treat them carefully):
   this account did not author, a body with an `@login`) needs the owner's
   go, asked as section 4 says: register it with
   `python3 ~/.claude/hooks/pr_post_guard.py draft -- gh <args>`, then ask
-  `Post draft <hash>` / `Skip draft <hash>` with the text in the question
-  or preview; after posting, print `[INFO] posted reply on #n`. If an
+  `Post draft <hash>` / `Skip draft <hash>` with the text in the question; after posting, print `[INFO] posted reply on #n`. If an
   approved post fails, let the Bash call return, read the PR, and
   re-register only when the text is absent, telling the owner that a
   duplicate is possible. It never replies to a human reviewer's thread on

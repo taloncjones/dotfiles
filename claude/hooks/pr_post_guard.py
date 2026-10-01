@@ -23,8 +23,8 @@ a `draft` CLI:
   hash of its argv, the bytes it reads and where it lands, with the text
   it prints.
 - PostToolUse AskUserQuestion approves a pending draft when the chosen
-  option is `Post draft <hash>` and the draft's text is in that question or
-  the option's preview; `Skip draft <hash>` dismisses it or withdraws its
+  option is `Post draft <hash>` and the draft's text is in that question;
+  `Skip draft <hash>` dismisses it or withdraws its
   unspent approval. Typed prompts never approve.
 - UserPromptSubmit records which session this Claude process is on for the
   shim, removes legacy files and prunes old state.
@@ -385,8 +385,9 @@ def gated_reason(kind: str, own: bool, body: tuple[str, str | None]) -> str:
 
 ASK_OWNER = (
     "then ask with AskUserQuestion, one single-select question per draft: options "
-    "`Post draft <hash>` and `Skip draft <hash>`, the draft text in the question or "
-    "the post option's preview. Post only after the answer approves it.\n"
+    "`Post draft <hash>` and `Skip draft <hash>`, the full draft text in the question "
+    "(an option preview is clipped by the terminal and never counts). "
+    "Post only after the answer approves it.\n"
     "An answer that printed no `post gate:` line means the answer hook is not active "
     "in this session: ask the owner to run `update --ai` and restart Claude, and "
     "leave the draft in the report instead of asking again."
@@ -930,27 +931,19 @@ def register_draft(directory: Path, sid: str, digest: str, args: list[str], text
     return True
 
 
-SHOWN_LIMIT = 2000  # Claude Code withholds a longer preview from the prompt
-# The preview pane clips to rows - 26 lines with no scroll; a 40-row terminal
-# shows 14, so 12 leaves room for the question and option rows.
-SHOWN_LINE_LIMIT = 12
+SHOWN_LIMIT = 2000  # Claude Code withholds a longer question from the prompt
 
 
-def _within_display(source: str) -> bool:
-    return len(source) <= SHOWN_LIMIT and len(source.splitlines()) <= SHOWN_LINE_LIMIT
-
-
-def shown(text, question: str, preview: str) -> bool:
-    """The draft's text is in the question or the post option's preview,
-    whitespace-normalized, counting only a source within the display limits; a draft
-    with no text shows only its hash."""
+def shown(text, question: str) -> bool:
+    """The draft's text is in the question, whitespace-normalized, within the
+    display limit; a draft with no text shows only its hash. The option preview
+    pane clips by terminal rows, so it never counts."""
     if not isinstance(text, str) or not text.strip():
         return True
-    bounded = [source for source in (question, preview) if _within_display(source)]
-    return " ".join(text.split()) in " ".join("\n".join(bounded).split())
+    return len(question) <= SHOWN_LIMIT and " ".join(text.split()) in " ".join(question.split())
 
 
-def approve_draft(directory: Path, sid: str, digest: str, question: str, preview: str) -> str:
+def approve_draft(directory: Path, sid: str, digest: str, question: str) -> str:
     """Approve a pending draft the owner chose to post (spec R3 step 5);
     returns the context line."""
     pending = draft_path(directory, sid, digest, "pending")
@@ -971,24 +964,13 @@ def approve_draft(directory: Path, sid: str, digest: str, question: str, preview
             f"draft {digest} not approved: its text is over {SHOWN_LIMIT} characters; "
             "shorten the draft or split it"
         )
-    if isinstance(record["text"], str) and len(record["text"].splitlines()) > SHOWN_LINE_LIMIT:
-        return (
-            f"draft {digest} not approved: its text exceeds the display line limit "
-            f"({SHOWN_LINE_LIMIT} lines); shorten the draft or split it"
-        )
-    if not shown(record["text"], question, preview):
-        for name, source in (("question", question), ("preview", preview)):
-            if len(source) > SHOWN_LIMIT:
-                return (
-                    f"draft {digest} not approved: the {name} is over {SHOWN_LIMIT} characters, "
-                    "more than a prompt displays; shorten it"
-                )
-            if len(source.splitlines()) > SHOWN_LINE_LIMIT:
-                return (
-                    f"draft {digest} not approved: the {name} exceeds the display line limit "
-                    f"({SHOWN_LINE_LIMIT} lines), more than a prompt displays; shorten it"
-                )
-        return f"draft {digest} not approved: its text was not in the question or the option's preview"
+    if not shown(record["text"], question):
+        if len(question) > SHOWN_LIMIT:
+            return (
+                f"draft {digest} not approved: the question is over {SHOWN_LIMIT} characters, "
+                "more than a prompt displays; shorten it"
+            )
+        return f"draft {digest} not approved: its text was not in the question"
     if not _move_fresh(pending, draft_path(directory, sid, digest, "approved")):
         return f"draft {digest} not approved: no pending draft in this session; register it and ask again"
     return f"approved draft {digest}"
@@ -1007,12 +989,11 @@ def dismiss_draft(directory: Path, sid: str, digest: str) -> str:
     return f"draft {digest} skipped (nothing to withdraw)"
 
 
-def answer_decisions(response: dict) -> list[tuple[str, str, str, str, str | None]]:
-    """(verb, digest, question, preview, why_undecided) for each draft a
+def answer_decisions(response: dict) -> list[tuple[str, str, str, str | None]]:
+    """(verb, digest, question, why_undecided) for each draft a
     question names in its option labels (spec R3); why_undecided is None
     when the chosen option decides it."""
     answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
-    annotations = response.get("annotations") if isinstance(response.get("annotations"), dict) else {}
     questions = response.get("questions")
     if not isinstance(questions, list):
         return []
@@ -1042,16 +1023,12 @@ def answer_decisions(response: dict) -> list[tuple[str, str, str, str, str | Non
             why = "a multi-select question cannot approve"
         chosen = next((pair for pair in named if pair[0]["label"] == answers.get(text)), None)
         if chosen and not why:
-            option, hit = chosen
-            preview = option.get("preview")
-            note = annotations.get(text)
-            if isinstance(note, dict) and "preview" in note:
-                preview = note["preview"]  # what the prompt returned as shown
-            found.append((hit.group(1), hit.group(2), text, preview if isinstance(preview, str) else "", None))
+            _option, hit = chosen
+            found.append((hit.group(1), hit.group(2), text, None))
             continue
         why = why or "no Post or Skip option was chosen"
         for digest in dict.fromkeys(hit.group(2) for _option, hit in named):
-            found.append(("", digest, text, "", why))
+            found.append(("", digest, text, why))
     return found
 
 
@@ -1160,17 +1137,17 @@ def handle_answer(payload: dict, directory: Path) -> str | None:
     decisions = answer_decisions(response)
     sid = payload.get("session_id")
     if not isinstance(sid, str) or not SID_RE.match(sid):
-        decisions = [(verb, digest, question, preview, why or "no valid session id")
-                     for verb, digest, question, preview, why in decisions]
+        decisions = [(verb, digest, question, why or "no valid session id")
+                     for verb, digest, question, why in decisions]
         sid = None
     lines = []
-    for verb, digest, question, preview, why in decisions:
+    for verb, digest, question, why in decisions:
         if why:
             lines.append(f"draft {digest} not decided ({why})")
         elif verb == "Skip":
             lines.append(dismiss_draft(directory, sid, digest))
         else:
-            lines.append(approve_draft(directory, sid, digest, question, preview))
+            lines.append(approve_draft(directory, sid, digest, question))
     if sid:
         write_pid_map(directory, sid)
     return "\n".join(f"post gate: {line}" for line in lines) or None

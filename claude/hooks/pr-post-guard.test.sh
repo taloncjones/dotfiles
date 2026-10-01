@@ -76,19 +76,22 @@ print(json.dumps({
 PY
 }
 
-# payload_a SID LABEL PREVIEW -> PostToolUse AskUserQuestion JSON: one
-# question "$PA_QUESTION" (default "Post this draft?") with the options
-# LABEL (preview PREVIEW) and "Hold", answered with $PA_ANSWER (default
-# LABEL). PA_MULTI=1 makes it multi-select, PA_EXTRA is JSON merged into
+# payload_a SID LABEL TEXT -> PostToolUse AskUserQuestion JSON: one
+# question "$PA_QUESTION" (default "Post this draft?" plus TEXT) with the
+# options LABEL (preview $PA_OPT_PREVIEW, none by default) and "Hold",
+# answered with $PA_ANSWER (default LABEL). PA_MULTI=1 makes it multi-select, PA_EXTRA is JSON merged into
 # tool_response, PA_TOOL replaces the tool name. Set these only inside
 # $(...): a sh assignment before a function call can outlive the call.
 payload_a() {
-    PA_SID="$1" PA_LABEL="$2" PA_PREVIEW="${3-}" python3 - <<'PY'
+    PA_SID="$1" PA_LABEL="$2" PA_TEXT="${3-}" python3 - <<'PY'
 import json, os
-q = os.environ.get("PA_QUESTION", "Post this draft?")
+q = os.environ.get("PA_QUESTION") or "Post this draft?\n" + os.environ["PA_TEXT"]
 label = os.environ["PA_LABEL"]
+option = {"label": label, "description": "posts the draft"}
+if os.environ.get("PA_OPT_PREVIEW"):
+    option["preview"] = os.environ["PA_OPT_PREVIEW"]
 questions = [{"question": q, "header": "Post", "multiSelect": os.environ.get("PA_MULTI") == "1",
-              "options": [{"label": label, "description": "posts the draft", "preview": os.environ["PA_PREVIEW"]},
+              "options": [option,
                           {"label": "Hold", "description": "wait"}]}]
 response = {"questions": questions, "answers": {q: os.environ.get("PA_ANSWER", label)}}
 response.update(json.loads(os.environ.get("PA_EXTRA") or "{}"))
@@ -233,35 +236,38 @@ expect_out "A17b a draft over 2000 characters is refused" "over 2000 characters;
 expect_file "A17b an over-length draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 expect_file "A17b an over-length draft stays pending" "$GATE/s1.draft-aaaaaaaa.pending" present
 
-case_gate a17f
-TALL=$(python3 -c 'print("\n".join("line %d" % i for i in range(13)))')
-pending aaaaaaaa 1 "$TALL"
-expect_out "A17f a draft over 12 lines is refused though under 2000 characters" "exceeds the display line limit" "$(PA_EXTRA="$(PREV="$TALL" python3 -c 'import json, os; print(json.dumps({"annotations": {"Post this draft?": {"preview": os.environ["PREV"]}}}))')" payload_a s1 'Post draft aaaaaaaa' "$TALL")"
-expect_file "A17f a tall draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
-
-case_gate a17g
-SHORT=$(python3 -c 'print("\n".join("line %d" % i for i in range(12)))')
-pending aaaaaaaa 1 "$SHORT"
-expect_rc "A17g a draft of exactly 12 lines is approved" 0 "$(PA_EXTRA="$(PREV="$SHORT" python3 -c 'import json, os; print(json.dumps({"annotations": {"Post this draft?": {"preview": os.environ["PREV"]}}}))')" payload_a s1 'Post draft aaaaaaaa' "$SHORT")"
-expect_file "A17g a 12-line draft is approved" "$GATE/s1.draft-aaaaaaaa.approved" present
-
 case_gate a17c
 pending aaaaaaaa 1 'reply one'
-expect_out "A17c a returned preview that lacks the text is refused" "its text was not in the question or the option's preview" "$(PA_EXTRA='{"annotations": {"Post this draft?": {"preview": "withheld"}}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
-expect_file "A17c not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
-expect_rc "A17c a returned preview with the text" 0 "$(PA_EXTRA='{"annotations": {"Post this draft?": {"preview": "reply one"}}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
-expect_file "A17c approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+expect_out "A17c a draft only in the option preview is refused" "its text was not in the question" "$(PA_QUESTION='Post this draft?' PA_OPT_PREVIEW='reply one' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A17c a preview-only draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a17c2
+pending aaaaaaaa 1 'reply one'
+expect_out "A17c a returned preview holding the text is refused" "its text was not in the question" "$(PA_QUESTION='Post this draft?' PA_EXTRA='{"annotations": {"Post this draft?": {"preview": "reply one"}}}' payload_a s1 'Post draft aaaaaaaa' 'reply one')"
+expect_file "A17c a returned-preview draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 
 case_gate a17d
-BIGPREV=$(python3 -c 'print("reply one " + "pad " * 600)')
-pending aaaaaaaa 1 'reply one'
-expect_out "A17d a returned preview over 2000 characters is refused" "preview is over 2000 characters" "$(PA_EXTRA="{\"annotations\": {\"Post this draft?\": {\"preview\": \"$BIGPREV\"}}}" payload_a s1 'Post draft aaaaaaaa' 'reply one')"
-expect_file "A17d an over-limit returned preview is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+ONELINE=$(python3 -c 'print("word " * 248)')
+pending aaaaaaaa 1 "$ONELINE"
+expect_out "A17d a 1240-character paragraph only in the preview is refused" "its text was not in the question" "$(PA_QUESTION='Post this draft?' PA_OPT_PREVIEW="$ONELINE" payload_a s1 'Post draft aaaaaaaa' "$ONELINE")"
+expect_file "A17d a preview-only paragraph is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 
 case_gate a17e
+FIVE=$(python3 -c 'print("\n".join("line %d %s" % (i, "x" * 160) for i in range(5)))')
+pending aaaaaaaa 1 "$FIVE"
+expect_out "A17e a 5-line draft only in the preview is refused" "its text was not in the question" "$(PA_QUESTION='Post this draft?' PA_OPT_PREVIEW="$FIVE" payload_a s1 'Post draft aaaaaaaa' "$FIVE")"
+expect_file "A17e a preview-only 5-line draft is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+
+case_gate a17g
+pending aaaaaaaa 1 "$FIVE"
+expect_rc "A17g a draft in the question needs no option preview" 0 "$(payload_a s1 'Post draft aaaaaaaa' "$FIVE")"
+expect_file "A17g a question-shown draft is approved" "$GATE/s1.draft-aaaaaaaa.approved" present
+
+case_gate a17h
+BIGQ=$(python3 -c 'print("reply one " + "pad " * 600)')
 pending aaaaaaaa 1 'reply one'
-expect_out "A17e a sent preview over 2000 characters is refused" "preview is over 2000 characters" "$(payload_a s1 'Post draft aaaaaaaa' "$BIGPREV")"
-expect_file "A17e an over-limit sent preview is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
+expect_out "A17h a question over 2000 characters is refused" "question is over 2000 characters" "$(payload_a s1 'Post draft aaaaaaaa' "$BIGQ")"
+expect_file "A17h an over-limit question is not approved" "$GATE/s1.draft-aaaaaaaa.approved" absent
 
 for text in 'post it' 'post all' 'post aaaaaaaa' 'Post it.'; do
     case_gate a14
@@ -1045,7 +1051,7 @@ case_gate ds4
 mkdir -p "$GATE"
 printf '{"v":3,"created":1,"argv":[],"text":null}' >"$GATE/s1.draft-ffffffff.pending"
 python3 -c 'import os, sys, time; old = time.time() - 2 * 86400; os.utime(sys.argv[1], (old, old))' "$GATE/s1.draft-ffffffff.pending"
-expect_py "DS4 an old draft approved now survives the next prune" "True" "import time; from pathlib import Path; d = Path('$GATE'); g.approve_draft(d, 's1', 'ffffffff', 'Post this draft?', ''); g.prune(d, time.time()); print((d / 's1.draft-ffffffff.approved').exists())"
+expect_py "DS4 an old draft approved now survives the next prune" "True" "import time; from pathlib import Path; d = Path('$GATE'); g.approve_draft(d, 's1', 'ffffffff', 'Post this draft?'); g.prune(d, time.time()); print((d / 's1.draft-ffffffff.approved').exists())"
 
 # --- P9: legacy cleanup ---
 

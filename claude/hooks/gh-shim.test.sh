@@ -89,7 +89,7 @@ fresh_gate() {
 }
 
 # approve HASH: the real hook's PostToolUse handler answers "Post draft HASH"
-# for s1, with the draft's registered text in the option preview
+# for s1, with the draft's registered text in the question
 approve() {
     AP_HASH="$1" python3 - <<'PY' | python3 "$HOOK" >/dev/null 2>&1
 import json, os
@@ -98,9 +98,9 @@ try:
     text = json.load(open(os.path.join(d, f"s1.draft-{h}.pending"))).get("text") or ""
 except (OSError, ValueError, AttributeError):
     text = ""
-q, label = "Post this draft?", f"Post draft {h}"
+q, label = "Post this draft?\n" + text, f"Post draft {h}"
 qs = [{"question": q, "multiSelect": False,
-       "options": [{"label": label, "description": "posts it", "preview": text},
+       "options": [{"label": label, "description": "posts it"},
                    {"label": f"Skip draft {h}", "description": "skips it"}]}]
 print(json.dumps({"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "AskUserQuestion",
                   "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {q: label}}}))
@@ -407,8 +407,8 @@ h1=$(draft pr review 5 -c -b one)
 h2=$(draft pr review 5 -c -b two)
 N8_H1="$h1" N8_H2="$h2" python3 - <<'PY' | python3 "$HOOK" >/dev/null 2>&1
 import json, os
-qs = [{"question": f"Post reply {n}?", "multiSelect": False,
-       "options": [{"label": f"Post draft {h}", "description": "posts it", "preview": n},
+qs = [{"question": f"Post reply {n}?\n{n}", "multiSelect": False,
+       "options": [{"label": f"Post draft {h}", "description": "posts it"},
                    {"label": f"Skip draft {h}", "description": "skips it"}]}
       for n, h in (("one", os.environ["N8_H1"]), ("two", os.environ["N8_H2"]))]
 answers = {q["question"]: q["options"][0]["label"] for q in qs}
