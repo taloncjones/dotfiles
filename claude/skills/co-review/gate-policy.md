@@ -121,13 +121,12 @@ structured output is `INCOMPLETE`.
 
 A head whose only commits since an APPROVE gate merge the target branch
 keeps that verdict without seats when `gate_report.py carry-forward` proves
-three things against the digest-pinned prior report. First, no
+two things against the digest-pinned prior report. First, no
 branch-authored non-merge commit exists since the gated head: a set
 difference of `rev-list --no-merges` from the target, never the `gated..HEAD` range,
-which lists the target's own commits after a merge. Second, every
-branch-touched file changed since the gated head carries only the target's
-own hunks while the branch's own hunks are unchanged. Third, the branch's
-changed-file set did not grow. A hand-resolved conflict, a rebase, or any
+which lists the target's own commits after a merge. Second, git's merge of
+the gated head with the new base has no merge-tree conflict anywhere, and the
+head's whole tree is byte-equal to that merge result. A hand-resolved conflict, a rebase, or any
 branch commit fails the proof and needs a gate.
 
 This is the one named exception to "An interrupted workflow cannot

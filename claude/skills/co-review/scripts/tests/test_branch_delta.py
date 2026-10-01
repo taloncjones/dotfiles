@@ -199,7 +199,7 @@ class CarryForwardTests(unittest.TestCase):
         self.assertTrue(any(reason.startswith("dup.txt:") for reason in record["reasons"]),
                         record["reasons"])
 
-    def test_merge_that_edits_an_outside_file_fails_scope(self):
+    def test_merge_whose_tree_differs_from_the_merge_result_fails(self):
         self.advance_main("main_only.txt", "a\nb\n")
         git(self.repo, "checkout", "-q", "topic")
         git(self.repo, "merge", "-q", "--no-commit", "main")
