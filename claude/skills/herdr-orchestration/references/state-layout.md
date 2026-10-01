@@ -356,7 +356,11 @@ config error.
 
 `ship` is optional and read only by the director's ship step (SKILL.md
 section 6), never by core. Shape: `{"ship": {"push": true, "pr": true,
-"merge": "auto"}}`. `push` and `pr` are booleans defaulting to true; `merge`
+"merge": "auto"}}`. An optional
+`"delta": {"max_files": 5, "max_lines": 150}` (positive ints, those defaults
+when absent) sets the caps the director's delta-tier step (SKILL.md section 6)
+passes to `delta-class` and binds in the ship brief. `push` and `pr` are
+booleans defaulting to true; `merge`
 is `"auto"` (squash-merge on a co-review APPROVE) or `"human"` (report for
 the owner's confirm). When the block or `merge` is absent, `merge` is
 `"auto"` when `claude/skills/lib/workflow_context.py account-scope --cwd

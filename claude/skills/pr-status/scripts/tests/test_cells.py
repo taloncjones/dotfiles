@@ -32,8 +32,8 @@ def round_marker(sha, verdict, rnd):
             f"verdict={verdict} round={rnd} -->\nCHANGES\n")
 
 
-def audit_marker(sha):
-    return f"<!-- co-review-audit head={sha} run=run-1 -->\nCo-review gate: APPROVE\n"
+def audit_marker(sha, extra=""):
+    return f"<!-- co-review-audit head={sha} run=run-1{extra} -->\nCo-review gate: APPROVE\n"
 
 
 class PrAndHeadCells(unittest.TestCase):
@@ -97,6 +97,18 @@ class CoReviewCell(unittest.TestCase):
     def test_marker_at_older_head_is_stale(self):
         found = ps.markers([comment(11, round_marker(OLD, "APPROVE", 3))], ME)
         self.assertEqual(ps.co_review(found, HEAD), ("stale", f"stale (r3 at {OLD[:9]})"))
+
+    def test_audit_line_variants_with_tier_fields(self):
+        variants = {
+            "no fields": "",
+            "full": " tier=full",
+            "delta": f" tier=delta prior_run=run-0 prior_head={OLD}",
+            "carry-forward": f" tier=carry-forward prior_head={OLD}",
+        }
+        for name, extra in variants.items():
+            with self.subTest(name):
+                found = ps.markers([comment(12, audit_marker(HEAD, extra))], ME)
+                self.assertEqual(ps.co_review(found, HEAD), ("approve", f"audit APPROVE ([12]({URL}#issuecomment-12))"))
 
     def test_audit_at_older_head_is_stale(self):
         found = ps.markers([comment(12, audit_marker(OLD))], ME)

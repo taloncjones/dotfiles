@@ -48,6 +48,15 @@ target base. Stop if either identity is unavailable or mismatched.
    `co-review` self-classifies the frozen diff (light for prose-only changes,
    full otherwise); pass `--full` when a prose change alters a machine-read
    contract, such as a SKILL.md block a test greps.
+A herdr brief line `herdr-ship-brief: tier=full` runs `co-review --full`.
+`herdr-ship-brief: tier=delta` runs `co-review --delta` with the prior
+report, expected identity and digests read from the `ship.json` named by
+`herdr-ship-prior-handoff:`, the caps from `herdr-ship-delta-caps:`, and
+the head bound by `herdr-ship-delta-head:`; the co-review Delta tier
+section decides the final tier. A delta gate's `escalate: "full"`
+is not a relaunch after a fix: in a herdr launch it ends the launch, and
+interactively the co-review Delta tier section runs its one fresh full
+gate.
 
 4. **Recheck gate evidence.** Immediately before presenting a merge-ready
    result, fetch live PR head, base branch, target base, and CI. The active
@@ -64,18 +73,19 @@ target base. Stop if either identity is unavailable or mismatched.
    invalidates approval and stops this workflow. A fresh review needs the
    caller authorization described above; historical PR comments never resume
    this step. One exception: a head whose only new commits since the gated
-   head merge the base branch, with an empty diff over the branch's own
-   files (the git check under "Merge-main-only commits keep the verdict" in
-   the herdr-orchestration skill, section 6), keeps the verdict; redo this
-   step's live recheck against the new head and continue without a new
-   round.
+   head merge the base branch keeps the verdict when the co-review skill's
+   `carry-forward` command exits 0 against this workflow's retained report and
+   expected identity and their digests; keep its record, redo this step's live
+   recheck against the new head, and continue without a new round.
 
 5. **Audit comment.** Only in this same uninterrupted workflow, right after
    step 4 passes (an interrupted workflow stops under the existing step 3/4
    rules and never posts from its report):
    1. `uv run --no-project python "$GATE_REPORT" audit-comment --report REPORT
 --expected EXPECTED >"$RUN_DIR/audit-comment.md"`; a nonzero exit means
-      no post.
+      no post. For a head carried by step 4's exception, write the
+      carry-forward record's `audit_comment` to that file instead; its marker
+      line names the new head, so the same dedupe applies.
    2. `gh api --paginate "repos/{owner}/{repo}/issues/<n>/comments" --jq
 '.[].body' >"$RUN_DIR/pr-comments.txt"`. If that fails, do not post and
       report "audit comment not posted". If any body contains

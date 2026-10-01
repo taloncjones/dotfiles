@@ -99,6 +99,7 @@ git -C "$REPO" -c core.quotePath=true diff --no-color --no-ext-diff --no-textcon
 # A failed capture can leave a partial diff that classifies light; never use it.
 CLASS=$(uv run --no-project python "$GATE_REPORT" classify --diff "$RUN_DIR/frozen.diff") || exit 2
 # `co-review --full` sets CLASS=full here regardless of the classifier.
+# `co-review --delta` may set CLASS=delta in "Delta tier" below, never by itself.
 ```
 
 Both artifacts live inside `RUN_DIR`, are hashed after capture, and are
@@ -114,11 +115,97 @@ to restart an unrestricted search. The current report binds the current tree
 and CI; prior evidence cannot supply current approval authority. A full review
 required by scope/coverage changes stops for a new user decision.
 
+## Delta tier
+
+`co-review --delta` asks for the delta round: the `claude` reviewer seat
+and the `verifier`, both on Claude routes, scoped to a small follow-up
+after a full APPROVE on this branch. The first round on a branch is always
+full. The prior report and expected identity come with their SHA-256
+digests from exactly one source: the pinned `ship.json` a herdr ship brief
+names in `herdr-ship-prior-handoff:`, or this same uninterrupted workflow's
+own retained full gate. Caps default to `MAX_FILES=5` and `MAX_LINES=150`;
+a herdr brief's `herdr-ship-delta-caps: <files>/<lines>` replaces them.
+
+After the snapshot verifies and before the expected identity exists, ask
+for the recommendation. `HEAD` is the manifest's `source.head`:
+
+```bash
+DELTA=0
+uv run --no-project python "$GATE_REPORT" delta-class --repo "$REPO" \
+  --report "$PRIOR_REPORT" --expected "$PRIOR_EXPECTED" \
+  --report-sha256 "$PRIOR_REPORT_SHA256" --expected-sha256 "$PRIOR_EXPECTED_SHA256" \
+  --head "$HEAD" --max-files "$MAX_FILES" --max-lines "$MAX_LINES" \
+  --diff-out "$RUN_DIR/delta.diff" >"$RUN_DIR/delta-class.json" && DELTA=1
+```
+
+`DELTA=0` recommends `full`: keep the classifier's `CLASS` and report the
+recommendation's `reasons`. A herdr brief whose `herdr-ship-delta-head:`
+differs from `$HEAD` also keeps it. Otherwise approve the delta once. A
+personal repository (`claude/skills/lib/workflow_context.py account-scope
+--cwd "$REPO" --runtime claude` reports `personal_repository` true)
+proceeds. A work repository, or an unavailable `account-scope`, asks the
+owner with `AskUserQuestion`, options "Delta round (Recommended)" and
+"Full round", naming the PR, head, caps and the recommendation's `stats`.
+A herdr brief line `herdr-ship-brief: tier=delta` is that approval. The
+approval covers this head in this workflow only; "Full round" keeps
+`CLASS`.
+
+On approval set `CLASS=delta`, then write the prior full run and the anchor
+proof into `RUN_DIR`, in this order after `delta.diff`:
+
+```bash
+PRIOR_FULL_REPORT=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_report"])' "$RUN_DIR/delta-class.json") || exit 2
+PRIOR_FULL_EXPECTED=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_expected"])' "$RUN_DIR/delta-class.json") || exit 2
+PRIOR_FULL_REPORT_SHA256=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_report_sha256"])' "$RUN_DIR/delta-class.json") || exit 2
+PRIOR_FULL_EXPECTED_SHA256=$(uv run --no-project python -c 'import json,sys; print(json.load(open(sys.argv[1]))["prior_expected_sha256"])' "$RUN_DIR/delta-class.json") || exit 2
+uv run --no-project python "$GATE_REPORT" copy-prior --report "$PRIOR_FULL_REPORT" \
+  --expected "$PRIOR_FULL_EXPECTED" --report-sha256 "$PRIOR_FULL_REPORT_SHA256" \
+  --expected-sha256 "$PRIOR_FULL_EXPECTED_SHA256" --out "$RUN_DIR/prior" >"$RUN_DIR/prior.json" || exit 2
+uv run --no-project python - "$RUN_DIR" <<'PY' || exit 2
+import json
+import sys
+from pathlib import Path
+
+run = Path(sys.argv[1])
+record = json.loads((run / "delta-class.json").read_text())["carry_forward"]
+if record is not None:
+    (run / "carry-forward.json").write_text(json.dumps(record, sort_keys=True))
+PY
+```
+
+Then write `class: "delta"` and `delta: {prior_run, prior_head,
+anchor_head, max_files, max_lines}`, copied from `delta-class.json`,
+into the expected identity before any seat runs. An interruption anywhere
+in this sequence invalidates the run.
+
+The report's `delta` block takes `prior_run`, `prior_head` and
+`anchor_head` from `delta-class.json`; `prior_report` and `prior_expected`
+from `prior.json`; `diff` = `delta.diff` and `carry_forward` =
+`carry-forward.json` (null when absent), each with its SHA-256; and
+`blast_radius` from the verifier's reconciliation. The `schema`
+subcommand lists every field.
+
+Each delta seat prompt adds `delta.diff` as the review scope with the
+frozen diff as context, the prior report path and digest (its advisories
+are carried by reference, not re-listed), and this instruction: report
+`blast_radius: unbounded` when the change's effect cannot be bounded to
+this delta, such as a constant, default, tolerance, or fixture value read
+elsewhere. Coverage follows the policy's Follow-up evidence rules.
+
+An evaluation carrying `escalate: "full"` ends the delta gate. In an
+interactive workflow, start one fresh full gate (new `run_id`,
+`CLASS=full`) on the same head; its verdict is final and never escalates.
+A herdr ship launch runs exactly one gate: write `ship.json` with the delta
+verdict and stop, and the director dispatches the full gate.
+
 ## Dispatch and collect seats
 
 The full tier runs `claude`, `codex`, and `breaker`, then `verifier`. The
 light tier runs `codex` and `verifier`: the `codex` reviewer command below,
 then the verifier with that one finder artifact; skip `claude` and `breaker`.
+The delta tier runs `claude` and `verifier`: the `claude` reviewer command
+below, then the verifier with that one finder artifact; skip `codex` and
+`breaker`. `SUBSTITUTE` never applies in the delta tier.
 
 Probe every runner route the tier uses before spending seats. Each probe is a
 60-second `Reply ok` run on that seat's route and snapshot root, written under
@@ -131,10 +218,12 @@ that can. A probe is never a seat artifact.
 
 ```bash
 printf 'Reply ok\n' >"$RUN_DIR/probe.prompt"
-uv run --no-project python "$RUNNER" run \
-  --runtime codex --role reviewer --risk normal --provisional \
-  --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
-  --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json" &
+if [ "$CLASS" != "delta" ]; then
+  uv run --no-project python "$RUNNER" run \
+    --runtime codex --role reviewer --risk normal --provisional \
+    --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
+    --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-codex-reviewer.json" &
+fi
 uv run --no-project python "$RUNNER" run \
   --runtime claude --role skeptic --risk normal --provisional \
   --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
@@ -144,6 +233,8 @@ if [ "$CLASS" != "light" ]; then
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 60 \
     --prompt-file "$RUN_DIR/probe.prompt" >"$RUN_DIR/probe-claude-reviewer.json" &
+fi
+if [ "$CLASS" = "full" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime codex --role skeptic --risk normal --provisional \
     --cwd "$CODEX_ROOT" --sandbox read-only --timeout-secs 60 \
@@ -254,6 +345,7 @@ RUBRIC="$REVIEW_ROOT/claude/skills/co-review/references/failure-classes.md"
 grep -q '^## Classes' "$RUBRIC" || exit 2
 SEATS="claude codex breaker verifier"
 [ "$CLASS" = "light" ] && SEATS="codex verifier"
+[ "$CLASS" = "delta" ] && SEATS="claude verifier"
 for seat in $SEATS; do
   sed -n '/^## Classes/,$p' "$RUBRIC" >>"$RUN_DIR/$seat.prompt"
 done
@@ -273,15 +365,20 @@ case " ${SUBSTITUTE:-} " in *" codex "*) CODEX_SEAT_RUNTIME=claude CODEX_SEAT_RO
 BREAKER_SEAT_RUNTIME=codex BREAKER_SEAT_ROOT=$CODEX_ROOT
 case " ${SUBSTITUTE:-} " in *" breaker "*) BREAKER_SEAT_RUNTIME=claude BREAKER_SEAT_ROOT=$CLAUDE_ROOT ;; esac
 # Light tier: only the codex reviewer seat. Full tier: also claude and breaker.
-uv run --no-project python "$RUNNER" run \
-  --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
-  --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
-  --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
+# Delta tier: only the claude reviewer seat.
+if [ "$CLASS" != "delta" ]; then
+  uv run --no-project python "$RUNNER" run \
+    --runtime "$CODEX_SEAT_RUNTIME" --role reviewer --risk normal --provisional \
+    --cwd "$CODEX_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
+    --prompt-file "$RUN_DIR/codex.prompt" >"$RUN_DIR/codex.runtime.json" &
+fi
 if [ "$CLASS" != "light" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime claude --role reviewer --risk normal --provisional \
     --cwd "$CLAUDE_ROOT" --sandbox read-only --timeout-secs 1200 \
     --prompt-file "$RUN_DIR/claude.prompt" >"$RUN_DIR/claude.runtime.json" &
+fi
+if [ "$CLASS" = "full" ]; then
   uv run --no-project python "$RUNNER" run \
     --runtime "$BREAKER_SEAT_RUNTIME" --role skeptic --risk normal --provisional \
     --cwd "$BREAKER_SEAT_ROOT" --sandbox read-only --timeout-secs 1200 \
@@ -300,7 +397,7 @@ reviewers, invoke a partner, post feedback, fix code, or act outside disposable
 fixtures.
 
 After every finder artifact exists (full: `claude`, `codex`, `breaker`; light:
-`codex`) and its digest is recorded, run the verifier with role `skeptic` and
+`codex`; delta: `claude`) and its digest is recorded, run the verifier with role `skeptic` and
 the same frozen snapshot. Its prompt also contains the finder artifact
 paths/digests and all known blockers; it tests their material claims
 independently, accounts for each blocker and reconciles the combined coverage
@@ -383,6 +480,39 @@ development. `INCOMPLETE` reports missing or invalid evidence. Required human
 approvals and explicit merge permission are separate. Cleanup refusal preserves
 the snapshot and is reported; no source checkout is modified during the gate.
 
+## Carry-forward
+
+When the only commits since an APPROVE gate merge the target branch, the
+verdict carries to the new head without seats. The prior report and
+expected identity come with their SHA-256 digests from exactly one source:
+the pinned herdr `ship.json`, or this same uninterrupted workflow's own
+retained gate. Fetch the target, then run the proof:
+
+```bash
+git -C "$REPO" fetch origin "$BASE_REF" || exit 2
+uv run --no-project python "$GATE_REPORT" carry-forward --repo "$REPO" \
+  --report "$PRIOR_REPORT" --expected "$PRIOR_EXPECTED" \
+  --report-sha256 "$PRIOR_REPORT_SHA256" --expected-sha256 "$PRIOR_EXPECTED_SHA256" \
+  >"$RUN_DIR/carry-forward.json"
+```
+
+Exit 0 means every proof holds: no branch-authored commit since the gated
+head, no merge-tree conflict anywhere in git's merge of the gated head with
+the new base, and the head's whole tree byte-equal to that merge result. Exit 1 means the head needs a gate;
+the record's `reasons` say why. The record grants nothing beyond naming the
+prior run it extends.
+
+On exit 0, post the record's `audit_comment` as ship step 5 does (dedupe on
+`co-review-audit head=<head>`), then the carry-forward marker under the
+Publish rules below. Its first line is
+`<!-- co-review: sha=<head> base=<base> base_ref=<base_ref> verdict=APPROVE round=<n> tier=carry-forward prior_run=<prior_run> prior_sha=<prior_head> -->`,
+its verdict line is
+`Co-review verdict: APPROVE (carry-forward of <prior_run> at <prior_head>)`,
+and the proof block from `audit_comment` follows. Before asking for the go,
+skip the marker when any PR comment already has a line containing both
+`<!-- co-review: sha=<head> ` and ` tier=carry-forward prior_run=<prior_run> `;
+that read is for dedupe only, never authority.
+
 ## Publish
 
 The only publishable item is one marker comment on the reviewed PR, for a PR
@@ -407,7 +537,10 @@ Marker comment shape: first line is the marker, then one verdict line, then
 one line per blocker (`<id>: <title>`), nothing else. Marker fields: `sha` =
 expected `head`, `base` = expected `base`, `base_ref` = expected `base_ref`,
 `verdict` = evaluator verdict, `round` = 1 + the highest `round=` among our
-own valid markers already on the PR (1 when none). No `target_tip`.
+own valid markers already on the PR (1 when none), `tier` = expected `class`; a delta marker adds `prior_run` = expected
+`delta.prior_run` and `prior_sha` = expected `delta.prior_head`, in that order.
+No `target_tip`. A carry-forward marker also carries its proof block after
+the verdict line (see Carry-forward).
 
 Before posting, read the PR's comments once (the `gh api --paginate --slurp`
 call below, run before `gh pr comment`) and compute `round` from it.
