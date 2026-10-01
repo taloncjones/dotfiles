@@ -43,8 +43,11 @@ Standing engineering discipline for all sessions, all repos.
   standing merge order for a named personal repo lets the director merge on
   a complete co-review APPROVE plus green CI, re-checked live at the moment
   of merging (herdr-orchestration section 6a); work repos keep the human go.
-- Approvals do not bundle: a reply naming one action approves only that action,
-  and every outward post (PR comment, ticket, message) needs its own explicit go.
+- Approvals do not bundle: an answer naming one action approves only that
+  action, and every outward post (PR comment, ticket, message) needs its own
+  explicit go. Ask every decision and go with the runtime's prompt tool
+  (`AskUserQuestion` in Claude), recommendation first; never ask the owner to
+  type a confirmation phrase.
 - Before accumulating work on a file -- or dispatching a subagent to one -- confirm it is
   tracked and durable, not gitignored or plugin-managed (`git ls-files --error-unmatch`,
   `.git/info/exclude`). Mind the boundary between repo changes and ephemeral machine-state

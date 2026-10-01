@@ -435,18 +435,21 @@ not author), register it with the exact argv it names:
 python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-file "$RUN_DIR/marker.md"
 ```
 
-Show the printed `draft <hash>` line and the body in chat and end the turn.
-The go is a typed message saying `post it` (the last draft shown), `post
-all` (every draft in that message) or `post <hash>`, not negated and not a
-question. Posting is never an `AskUserQuestion` option, recommended or not;
-an `AskUserQuestion` answer is never a go. An approved draft stays approved
+Show the printed `draft <hash>` line and the body. Then ask with
+`AskUserQuestion`: one single-select question for the draft, with the body
+in the question, and the options
+`Post draft <hash>` and `Skip draft <hash>`, recommendation first. The
+chosen `Post draft <hash>` option is the go. A PostToolUse hook approves
+that one draft when its body was in the question, and prints a
+`post gate:` line. A typed message never approves a post, so never ask the
+owner to type one. An approved draft stays approved
 across later messages until it is posted. If an approved post fails, let
 the Bash call return, read the PR, and post again only when the text is
 absent; re-register it and tell the owner the earlier attempt failed and a
 duplicate is possible.
 
 Never reply to, resolve, or react to a reviewer thread on your own. Draft
-any reply as above and wait for the go.
+any reply as above and ask for it the same way.
 
 Edit the title or body of a PR this account authored without asking, and
 print `[INFO] edited PR #<PR> body: <why>` in the same turn.

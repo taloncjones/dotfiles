@@ -371,22 +371,20 @@ not author), register it with the exact argv it names:
 python3 ~/.claude/hooks/pr_post_guard.py draft -- gh pr comment "$PR" --body-file "$RUN_DIR/marker.md"
 ```
 
-Show the printed `draft <hash>` line and the body in chat and end the turn.
-The go is a typed message with a sentence saying `post it` (the last draft
-shown), `post all` (every draft in that message) or `post <hash>`, with no
-`not`, `n't`, `never` or `no` before the phrase and no closing `?`. Posting is never an `AskUserQuestion` option, recommended or not;
-an `AskUserQuestion` answer is never a go. An approved draft stays approved
-across later messages until it is posted. If an approved post fails, let
-the Bash call return, read the PR, and post again only when the text is
-absent; re-register it and tell the owner the earlier attempt failed and a
-duplicate is possible.
+Show the printed `draft <hash>` line and the body. Only a Claude session
+mints the go: its `AskUserQuestion` answer `Post draft <hash>` approves that
+one draft through a PostToolUse hook, and `Skip draft <hash>` dismisses it.
+A typed message never approves a post. A Codex session cannot mint one.
+Leave the draft in `RUN_DIR` and report it as ready, so the Claude director
+can ask the owner. Never ask the owner to type a phrase.
 
-In a herdr pane (`HERDR_ENV=1`) only a Claude hook turns a typed go into an
-approved draft, so a gated post never reaches Codex. Leave the draft in
-`RUN_DIR` and tell the owner it is ready to post.
+An approved draft stays approved across later messages until it is posted.
+If an approved post fails, let the Bash call return, read the PR, and post
+again only when the text is absent. Re-register it and tell the owner the
+earlier attempt failed and a duplicate is possible.
 
 Never reply to, resolve, or react to a reviewer thread on your own. Draft
-any reply as above and wait for the go.
+any reply as above and leave it for the director to ask.
 
 Edit the title or body of a PR this account authored without asking, and
 print `[INFO] edited PR #<PR> body: <why>` in the same turn.

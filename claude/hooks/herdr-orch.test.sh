@@ -11268,6 +11268,48 @@ grep -Fq 'lessons distillation pending (human)' claude/skills/post-merge/SKILL.m
 grep -Fq 'dirty worktree' claude/skills/post-merge/SKILL.md
 SH
 
+check "decisions are prompts: no typed go, no prose ask, answers are turn-scoped" <<'PY'
+import re
+def read(path):
+    return open(path).read()
+def section(text, start, end):
+    i = text.index(start)
+    return text[i:text.index(end, i + len(start))]
+herdr = read("claude/skills/herdr-orchestration/SKILL.md")
+director = read("claude/agents/director.md")
+cc = read("claude/skills/co-review/SKILL.md")
+cx = read("codex/skills/co-review/SKILL.md")
+pm = read("claude/skills/post-merge/SKILL.md")
+voice = read("claude/skills/voice/SKILL.md")
+ops = read("claude/operating-principles.md")
+layout = read(".claude/skills/dotfiles-architecture-contract/references/install-layout.md")
+guard = read("claude/hooks/pr_post_guard.py")
+banned = ("post it", "post all", "post <hash>", "typed go", "the go is a typed",
+          "answer is never a go", "never an `askuserquestion`")
+for name, text in (("herdr", herdr), ("director", director), ("co-review", cc),
+                   ("codex co-review", cx), ("install-layout", layout)):
+    low = text.lower()
+    for phrase in banned:
+        assert phrase not in low, (name, phrase)
+for phrase in ("post all", "post <hash>", "typed go", "the go is a typed"):
+    assert phrase not in guard.lower(), ("guard", phrase)
+for name, text in (("herdr", herdr), ("director", director)):
+    assert "prose ask" not in text and "asks once in prose" not in text, name
+for name, text in (("herdr", herdr), ("co-review", cc), ("codex co-review", cx)):
+    assert "Post draft <hash>" in text and "Skip draft <hash>" in text, name
+assert "AskUserQuestion" in director
+for token in ("Answers are not stored", "post gate:", "update --ai"):
+    assert token in herdr, token
+for start, end in (("## Step 2", "## Step 3"), ("## Step 4", "## Step 5"), ("## Step 5", "## Notes")):
+    assert "AskUserQuestion" in section(pm, start, end), start
+assert "read the issue's comments" in section(pm, "## Step 4", "## Step 5")
+assert "Resolved by <PR URL>" in section(pm, "## Step 4", "## Step 5")
+assert "<owner>/<repo>/pull/<n>" in section(pm, "## Step 4", "## Step 5")
+assert "AskUserQuestion" in section(voice, "3. Ask", "4. Apply")
+assert "AskUserQuestion" in ops
+assert "Post draft <hash>" in layout
+PY
+
 check "brief template keeps the turn alive on long runs" <<'PY'
 import sys
 t = open("claude/skills/herdr-orchestration/references/brief-template.md").read()
