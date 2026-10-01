@@ -2278,6 +2278,54 @@ def _resume_eligible(cur, require_pid, adopt_pid, account_id, adopt_start=None) 
     )
 
 
+def _launcher_holder_gone(rd, cur):
+    """Why the Claude process behind launcher lease cur is provably gone, or
+    None. Only a lease whose private mirror matches cur and names a valid
+    socket for its pid qualifies: without one, pid is whatever --pid was."""
+    if (cur is None or cur.get("control_tier", "launcher") != "launcher"
+            or cur.get("runtime", "claude") != "claude"):
+        return None
+    try:
+        mirror = json.loads(read_payload_text(_owner_path(rd)))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(mirror, dict) or any(
+            mirror.get(k) != cur[k] for k in ("session_id", "fence", "pid")):
+        return None
+    pid = cur["pid"]
+    sock, _sock_pid, reason = validate_messaging_socket(
+        mirror.get("messaging_socket"), expect_pid=pid)
+    if reason != "ok":
+        return None
+    # A live handover marker reserves this lease for its named successor.
+    marker = read_rollover_pending(rd)
+    if marker is not None and marker_live(marker, cur["session_id"], cur["fence"]):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "pid-dead"
+    except PermissionError:
+        pass
+    except (OSError, OverflowError):
+        return None
+    recorded = cur.get("pid_start")
+    current = coordination.process_start_id(pid)
+    if isinstance(recorded, str) and isinstance(current, str):
+        if recorded == current:
+            return None
+        # linux: versus ps: is a probe change, not a different process.
+        if recorded.split(":", 1)[0] == current.split(":", 1)[0]:
+            return "pid-recycled"
+    try:
+        os.lstat(sock)
+    except FileNotFoundError:
+        return "socket-missing"
+    except OSError:
+        pass
+    return None
+
+
 def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None,
                 context=None, expected_slug=None, runtime="claude", thread_id=None, scope=None,
                 control_tier="launcher", workspace_root=None, binding_id=None, require_pid=None,

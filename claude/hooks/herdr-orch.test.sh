@@ -1583,6 +1583,58 @@ rc=0; $CLI claim-owner --repo-slug slug-m --session S --host h --pid abc >/dev/n
 [ "$rc" = 2 ]        # argparse type=int rejects cleanly (exit 2), no traceback
 SH
 
+check "liveness helper: a codex record gets no verdict; the same claude record is pid-dead" <<PY
+$LOAD
+import random, shutil, subprocess
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = os.path.join(root, "herdr-orch", "slug-unit"); os.makedirs(rd)
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+try:
+    p = subprocess.Popen(["true"]); p.wait(); dead = p.pid
+    sock = sockdir + "/%d.sock" % dead
+    open(sock, "w").close()
+    cur = {"session_id": "S", "fence": 1, "pid": dead, "runtime": "claude",
+           "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0}
+    mirror = os.path.join(rd, "owner.json")
+    json.dump(dict(cur, messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, cur) == "pid-dead"
+    codex = dict(cur, runtime="codex", thread_id="t")
+    json.dump(dict(codex, messaging_socket=sock), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, codex) is None
+finally:
+    shutil.rmtree(sockdir, ignore_errors=True)
+PY
+
+check "liveness helper: never raises -- no lease, missing/bad mirror, oversized pid" <<PY
+$LOAD
+import random, shutil, subprocess
+root = tempfile.mkdtemp(); os.environ["CLAUDE_CONFIG_DIR"] = root
+rd = os.path.join(root, "herdr-orch", "slug-unit"); os.makedirs(rd)
+sockdir = "/tmp/cc-socks-9%09d" % random.randrange(10**9); os.mkdir(sockdir, 0o700)
+try:
+    p = subprocess.Popen(["true"]); p.wait(); dead = p.pid
+    cur = {"session_id": "S", "fence": 1, "pid": dead, "runtime": "claude",
+           "thread_id": None, "control_tier": "launcher", "heartbeat_ts": 1.0}
+    mirror = os.path.join(rd, "owner.json")
+    assert c._launcher_holder_gone(rd, None) is None
+    assert c._launcher_holder_gone(rd, cur) is None
+    open(mirror, "w").write("not json")
+    assert c._launcher_holder_gone(rd, cur) is None
+    open(mirror, "w").write("[]")
+    assert c._launcher_holder_gone(rd, cur) is None
+    open(sockdir + "/%d.sock" % dead, "w").close()
+    json.dump(dict(cur, messaging_socket=sockdir + "/%d.sock" % dead), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, cur) == "pid-dead"
+    for key, other in (("session_id", "S-other"), ("fence", 2), ("pid", dead + 1)):
+        json.dump(dict(cur, messaging_socket=sockdir + "/%d.sock" % dead, **{key: other}), open(mirror, "w"))
+        assert c._launcher_holder_gone(rd, cur) is None, key
+    big = dict(cur, pid=2**64)
+    json.dump(dict(big, messaging_socket=sockdir + "/%d.sock" % 2**64), open(mirror, "w"))
+    assert c._launcher_holder_gone(rd, big) is None
+finally:
+    shutil.rmtree(sockdir, ignore_errors=True)
+PY
+
 check "wake_line shape, nonce uniqueness within one second" <<PY
 $LOAD
 import json as J
