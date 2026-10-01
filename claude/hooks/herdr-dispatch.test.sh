@@ -157,7 +157,7 @@ elif args[:2] == ["pane", "read"]:
         raise SystemExit(0)
     if mode in ("exit-menu", "exit-blocked", "exit-transport-fail", "exit-malformed-reply",
                 "exit-occupant-changed", "exit-malformed-success", "exit-coded-reply-no-id",
-                "exit-timeout-menu"):
+                "exit-timeout-menu", "exit-not-running-sticky", "exit-not-found-sticky"):
         if mode == "exit-occupant-changed":
             # The row's agent exits and a replacement occupies the pane
             # during this read -- simulates the race the pre-read snapshot
@@ -358,6 +358,20 @@ elif args[:2] == ["agent", "prompt"]:
                                          if a["name"] != args[2]]))
             print(json.dumps({"id": "cli:agent:prompt",
                               "error": {"code": "agent_prompt_stalled"}}),
+                  file=sys.stderr)
+            raise SystemExit(1)
+        if mode in ("exit-not-running", "exit-not-found",
+                    "exit-not-running-sticky", "exit-not-found-sticky"):
+            # herdr's structured error on stderr at exit 1. not_running: the
+            # agent left the pane during --wait; not_found: it was gone at
+            # call time. The sticky variants leave the agent listed.
+            apath = Path(os.environ["FAKE_AGENTS"])
+            if not mode.endswith("-sticky"):
+                apath.write_text(json.dumps([a for a in json.loads(apath.read_text())
+                                             if a["name"] != args[2]]))
+            code = "agent_not_found" if "not-found" in mode else "agent_not_running"
+            print(json.dumps({"id": "cli:agent:prompt",
+                              "error": {"code": code, "message": code}}),
                   file=sys.stderr)
             raise SystemExit(1)
         if mode not in ("exit-menu", "exit-sticky", "exit-occupant-changed",
@@ -1385,6 +1399,81 @@ def test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited(
         assert result["pane"] == "kept-occupied", result
         assert result["status"] == "exit-incomplete", result
         assert not [c for c in fx.calls() if c[:2] == ["pane", "close"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_closes_a_pane_when_exit_reports_agent_not_running():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-not-running"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "exited", result
+        assert result["pane"] == "closed", result
+        assert [c for c in fx.calls() if c[:2] == ["pane", "close"]] == [["pane", "close", "w1:p2"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_closes_a_pane_when_exit_reports_agent_not_found():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-not-found"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "done"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "done", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        assert result["status"] == "settled" and result["agent"] == "exited", result
+        assert result["pane"] == "closed", result
+        assert [c for c in fx.calls() if c[:2] == ["pane", "close"]] == [["pane", "close", "w1:p2"]], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_keeps_a_pane_when_agent_not_running_but_the_agent_stays_listed():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-not-running-sticky"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # The fresh agent list outranks the error code, and the exit menu on
+        # the pane is never answered after a gone-code.
+        assert result["agent"] == "still-live", result
+        assert result["pane"] == "kept-occupied", result
+        assert result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] in (["pane", "close"], ["agent", "send-keys"])], fx.calls()
+    finally:
+        fx.close()
+
+
+def test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed():
+    fx = Fixture()
+    try:
+        head = core.repository_context(fx.repo)["head"]
+        impl, rev = settle_row("implement", "I", "w1:p1", head), settle_row("review", "R", "w1:p2", head)
+        fx.env["FAKE_HERDR_MODE"] = "exit-not-found-sticky"
+        fx.settle_state([impl, rev], "changes-requested",
+                        [{"name": "R", "pane_id": "w1:p2", "workspace_id": "w1", "agent_status": "idle"}],
+                        [pane("w1:p1", "claude", "idle", "I"), pane("w1:p2", "claude", "idle", "R")],
+                        review={k: rev[k] for k in core.ATTEMPT_FIELDS})
+        result = fx.settle("R")
+        # agent_not_found delivered nothing: no pane read, no keys.
+        assert result["agent"] == "still-live" and result["status"] == "exit-incomplete", result
+        assert not [c for c in fx.calls() if c[:2] in (["pane", "read"], ["agent", "send-keys"], ["pane", "close"])], fx.calls()
     finally:
         fx.close()
 
@@ -4069,6 +4158,10 @@ for name, test in (
     ("settle keeps a pane when a non-shell process is foregrounded", test_settle_keeps_a_pane_when_a_non_shell_process_is_foregrounded),
     ("settle keeps a two-pane workspace when the agent stays live after exit", test_settle_keeps_a_two_pane_workspace_when_the_agent_stays_live_after_exit),
     ("settle keeps a pane when the agent reappears after exit reports exited", test_settle_keeps_a_pane_when_the_agent_reappears_after_exit_reports_exited),
+    ("settle closes a pane when exit reports agent_not_running", test_settle_closes_a_pane_when_exit_reports_agent_not_running),
+    ("settle closes a pane when exit reports agent_not_found", test_settle_closes_a_pane_when_exit_reports_agent_not_found),
+    ("settle keeps a pane when agent_not_running but the agent stays listed", test_settle_keeps_a_pane_when_agent_not_running_but_the_agent_stays_listed),
+    ("settle never sends keys when agent_not_found but the agent stays listed", test_settle_never_sends_keys_when_agent_not_found_but_the_agent_stays_listed),
     ("background exit menu regex rejects prose without the numbered option", test_background_exit_menu_regex_rejects_prose_without_the_numbered_option),
     ("settle refuses a busy agent without any mutation", test_settle_refuses_a_busy_agent_without_mutation),
     ("settle exits a plan agent and keeps its pane", test_settle_exits_a_plan_agent_and_keeps_its_pane),

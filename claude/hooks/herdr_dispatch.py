@@ -1544,6 +1544,11 @@ def _is_live(agents, row):
 _EXIT_DELIVERED_PREFIX = "Herdr agent prompt did not report success: "
 _EXIT_DELIVERED_CODES = frozenset({"agent_prompt_stalled", "timeout"})
 
+# herdr says the agent is gone: agent_not_running (it left the pane during
+# --wait) or agent_not_found (nothing to deliver to). Only a fresh agent
+# list decides; settle never reads the pane or sends keys after these.
+_EXIT_GONE_CODES = frozenset({"agent_not_running", "agent_not_found"})
+
 
 def _exit_agent(herdr_cli, row, workspace_id, env):
     try:
@@ -1557,6 +1562,9 @@ def _exit_agent(herdr_cli, row, workspace_id, env):
         message = str(exc)
         code = (message[len(_EXIT_DELIVERED_PREFIX):]
                 if message.startswith(_EXIT_DELIVERED_PREFIX) else None)
+        if code in _EXIT_GONE_CODES:
+            agents, _panes = _snapshot(herdr_cli, workspace_id, env)
+            return "still-live" if _is_live(agents, row) else "exited"
         if code not in _EXIT_DELIVERED_CODES:
             return "still-live"
     agents, _panes = _snapshot(herdr_cli, workspace_id, env)
