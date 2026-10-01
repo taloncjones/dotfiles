@@ -2487,11 +2487,27 @@ def claim_owner(rd, session_id, host, pid, stale_secs=900, messaging_socket=None
                                   session=session_id, fence=handover_from[1] + 1,
                                   pane=marker["pane"])
             clear_rollover_pending(rd, marker["token"])
+        old = tx.current
+        gone = None
+        # A handover or a same-process adoption already proves who holds it.
+        if (old is not None and handover_from is None
+                and not tx._adoptable(old, adopt_pid, runtime, thread_id, adopt_start)):
+            gone = _launcher_holder_gone(rd, old)
+        takeover = gone is not None and old["session_id"] != session_id
+        if takeover:
+            # Logged before the lease, like adopted: a line with no matching
+            # lease reads as an attempt.
+            append_rollover_event(rd, event="takeover", reason=gone,
+                                  from_session=old["session_id"], from_fence=old["fence"],
+                                  from_pid=old["pid"], session=session_id)
         fence = tx.claim(session_id, host, sock_pid if reason == "ok" else pid, stale_secs,
                          runtime=runtime, thread_id=thread_id, adopt_pid=adopt_pid,
                          pid_start=pid_start, adopt_start=adopt_start,
-                         handover_from=handover_from)
+                         handover_from=handover_from, holder_gone=gone is not None)
         if fence is not None:
+            if takeover:
+                print(f"[INFO] lease holder gone ({gone}): pid {old['pid']} "
+                      f"session {old['session_id']}; claimed fence {fence}", file=sys.stderr)
             # The private mirror supports legacy wake readers. Only metadata
             # without the account-local socket is copied into the registry.
             write_json_atomic(_owner_path(rd), dict(tx.current, messaging_socket=sock))

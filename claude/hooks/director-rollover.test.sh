@@ -34,6 +34,9 @@ check() {
     label="$1"
     body=$(cat)  # read the snippet before any fixture command can touch stdin
     FX=$(mktemp -d); export FX
+    FX_SOCKS="/tmp/cc-socks-9$(python3 -c 'import random; print("%09d" % random.randrange(10**9))')"
+    export FX_SOCKS
+    mkdir -m 700 "$FX_SOCKS"
     HERDR_COORDINATION_ROOT="$FX/coord"; export HERDR_COORDINATION_ROOT
     CLAUDE_CONFIG_DIR="$FX/config"; export CLAUDE_CONFIG_DIR
     HOME="$FX/home"; export HOME
@@ -57,7 +60,7 @@ print(c.repo_slug(c.context_git(ctx["root"], "remote", "get-url", "origin"), ctx
         printf 'FAIL  %s\n' "$label" >&2; sed 's/^/      /' "$FX/out" >&2
         FAIL=$((FAIL + 1))
     fi
-    rm -rf "$FX"
+    rm -rf "$FX" "$FX_SOCKS"
 }
 
 check "adopt: same pid, caller is a descendant, fresh lease -> new session, fence +1" <<'SH'
@@ -104,7 +107,8 @@ test "$out" = BUSY
 SH
 
 check "adopt refused: ps missing or failing fails closed -> BUSY, no traceback" <<'SH'
-SOCK=/tmp/cc-socks/$$.sock
+SOCK=$FX_SOCKS/$$.sock
+: > "$SOCK"
 $CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
 PY=$(command -v python3); GIT=$(command -v git); SHELL_BIN=$(command -v sh)
@@ -203,10 +207,41 @@ assert cur["pid_start"] == co.process_start_id(int(sys.argv[1])), cur
 PY
 SH
 
-check "adopt refused: pid matches but start identity differs -> BUSY; resume-owner silent exit 3" <<'SH'
-SOCK=/tmp/cc-socks/$$.sock
-$CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK" >/dev/null
+check "recycled start identity: resume-owner refuses (exit 3); claim-owner takes over (pid-recycled)" <<'SH'
+SOCK=$FX_SOCKS/$$.sock
+: > "$SOCK"
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
+python3 - "$$" <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+import herdr_coordination as co
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+live = co.process_start_id(int(sys.argv[1]))
+assert isinstance(live, str), live
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    tx.current = dict(tx.current, pid_start=live.split(":", 1)[0] + ":forged-earlier-process")
+    tx._owner_write(tx.current)
+PY
+$CORE resume-owner --repo-path "$FX_REPO" --session 33333333-3333-4333-8333-333333333333 \
+    --messaging-socket "$SOCK" > "$FX/resume" 2>&1 && rc=0 || rc=$?
+test "$rc" = 3
+test ! -s "$FX/resume"
+out=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket "$SOCK" 2>"$FX/err") && rc=0 || rc=$?
+test "$rc" = 0
+test "$out" -eq $((F1 + 1))
+grep -q '^\[INFO\] lease holder gone (pid-recycled)' "$FX/err"
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+grep '"event":"takeover"' "$RD/rollover.jsonl" | grep -q '"reason":"pid-recycled"'
+SH
+
+check "liveness: an unconfirmed holder identity with its socket gone is taken over (socket-missing)" <<'SH'
+sleep 60 & OLD=$!
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket "$FX_SOCKS/$OLD.sock")
 python3 - <<'PY'
 import argparse, os, sys
 sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
@@ -214,17 +249,69 @@ import herdr_orch_core as c
 c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
                                     personal=False, repo_slug=os.environ["FX_SLUG"]))
 with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
-    tx.current = dict(tx.current, pid_start="ps:Thu Jan 1 00:00:00 1970")
+    tx.current = {k: v for k, v in tx.current.items() if k != "pid_start"}
     tx._owner_write(tx.current)
 PY
 out=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
-    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket "$SOCK") && rc=0 || rc=$?
+    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket "$FX_SOCKS/$$.sock" 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
+test "$rc" = 0
+test "$out" -eq $((F1 + 1))
+grep -q '^\[INFO\] lease holder gone (socket-missing)' "$FX/err"
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+grep '"event":"takeover"' "$RD/rollover.jsonl" | grep -q '"reason":"socket-missing"'
+SH
+
+check "liveness: a start identity under the other probe scheme is unconfirmed, not recycled (BUSY)" <<'SH'
+sleep 60 & OLD=$!
+: > "$FX_SOCKS/$OLD.sock"
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $OLD --messaging-socket "$FX_SOCKS/$OLD.sock")
+python3 - "$OLD" <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+import herdr_coordination as co
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+live = co.process_start_id(int(sys.argv[1]))
+assert isinstance(live, str), live
+other = "linux:forged-boot:1" if live.startswith("ps:") else "ps:Thu Jan  1 00:00:00 1970"
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    tx.current = dict(tx.current, pid_start=other)
+    tx._owner_write(tx.current)
+PY
+out=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket "$FX_SOCKS/$$.sock" 2>"$FX/err") && rc=0 || rc=$?
+kill $OLD
 test "$rc" = 1
 test "$out" = BUSY
-$CORE resume-owner --repo-path "$FX_REPO" --session 33333333-3333-4333-8333-333333333333 \
-    --messaging-socket "$SOCK" > "$FX/resume" 2>&1 && rc=0 || rc=$?
-test "$rc" = 3
-test ! -s "$FX/resume"
+if grep -q 'lease holder gone' "$FX/err"; then exit 1; fi
+$CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
+SH
+
+check "liveness: same-process adoption of a legacy record without its socket is not a takeover" <<'SH'
+SOCK=$FX_SOCKS/$$.sock
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid $$ --messaging-socket "$SOCK")
+test ! -e "$SOCK"
+python3 - <<'PY'
+import argparse, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"] + "/claude/hooks")
+import herdr_orch_core as c
+c.select_payload(argparse.Namespace(repo_path=os.environ["FX_REPO"], runtime="claude",
+                                    personal=False, repo_slug=os.environ["FX_SLUG"]))
+with c.owner_transaction(c.repo_dir(os.environ["FX_SLUG"])) as tx:
+    tx.current = {k: v for k, v in tx.current.items() if k != "pid_start"}
+    tx._owner_write(tx.current)
+PY
+F2=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ --messaging-socket "$SOCK" 2>"$FX/err")
+test "$F2" -eq $((F1 + 1))
+if grep -q 'lease holder gone' "$FX/err"; then exit 1; fi
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+test ! -e "$RD/rollover.jsonl"
 SH
 
 check "adopt: a legacy record without pid_start still adopts by pid and gains pid_start" <<'SH'
@@ -645,6 +732,28 @@ $CORE check-fence --repo-path "$FX_REPO" --repo-slug "$FX_SLUG" \
     --session 11111111-1111-4111-8111-111111111111 --fence "$F1"
 test -e "$RD/rollover-pending.json"
 test ! -e "$RD/rollover.jsonl"
+SH
+
+check "liveness: a live handover marker reserves a dead holder's lease for its successor" <<'SH'
+DEAD=$(python3 -c 'import subprocess; p = subprocess.Popen(["true"]); p.wait(); print(p.pid)')
+: > "$FX_SOCKS/$DEAD.sock"
+F1=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 11111111-1111-4111-8111-111111111111 --host h --pid "$DEAD" --messaging-socket "$FX_SOCKS/$DEAD.sock")
+RD=$(dirname "$(find "$FX" -path "$FX/coord" -prune -o -name owner.json -print | head -1)")
+python3 "$WRITE_MARKER" "$RD/rollover-pending.json" "$T" w9:p2 11111111-1111-4111-8111-111111111111 "$F1" 60
+out=$($CORE claim-owner --repo-path "$FX_REPO" --runtime claude --repo-slug "$FX_SLUG" \
+    --session 33333333-3333-4333-8333-333333333333 --host h --pid $$ \
+    --messaging-socket "$FX_SOCKS/$$.sock" 2>"$FX/err") && rc=0 || rc=$?
+test "$rc" = 1; test "$out" = BUSY
+if grep -q 'lease holder gone' "$FX/err"; then exit 1; fi
+test ! -e "$RD/rollover.jsonl"
+F2=$(HERDR_PANE_ID=w9:p2 HERDR_ROLLOVER_TOKEN=$T $CORE claim-owner --repo-path "$FX_REPO" --runtime claude \
+    --repo-slug "$FX_SLUG" --session 22222222-2222-4222-8222-222222222222 --host h --pid $$ \
+    --messaging-socket "$FX_SOCKS/$$.sock" 2>"$FX/err")
+test "$F2" -eq $((F1 + 1))
+if grep -q 'lease holder gone' "$FX/err"; then exit 1; fi
+test "$(grep -c '"event":"adopted"' "$RD/rollover.jsonl")" = 1
+test "$(grep -c '"event":"takeover"' "$RD/rollover.jsonl")" = 0
 SH
 
 check "token set, no marker: same-process adoption still adopts" <<'SH'
