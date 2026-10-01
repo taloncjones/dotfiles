@@ -11668,6 +11668,26 @@ sec5 = skill.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
 assert " sweep " in sec5 or f"sweep{tick}" in sec5, "section 5 preflight runs sweep"
 PY
 
+check "docs: settle releases superseded repair panes, re-reads after agent_not_running, and terminal tasks are swept" <<'PY'
+import re
+flat = re.sub(r"\s+", " ", open("claude/skills/herdr-orchestration/SKILL.md").read())
+sec4 = flat.split("## 4. Status", 1)[1].split("## 5. Review dispatch", 1)[0]
+sec5 = flat.split("## 5. Review dispatch", 1)[1].split("## 6.", 1)[0]
+sec6a = flat.split("## 6a. Director merge", 1)[1].split("## 7.", 1)[0]
+assert "a pane any plan, implement or repair row used" not in flat, "old never-close sentence removed"
+assert "Close the task's live panes" not in flat, "unguarded pane close removed"
+for phrase in ("its root pane", "superseded, failed at launch", "`agent_not_running`",
+               "`agent_not_found`", "rerun it before any launch",
+               "After `write-task` records `failed`, run one `sweep`"):
+    assert phrase in sec4, phrase
+assert "superseded implement and repair workers" in sec5
+for phrase in ("6. Run the adapter's `sweep` for the task workspace, then close the task's todo",
+               "run the adapter's `sweep` for the task workspace, and run teardown",
+               "run the adapter's `sweep` for the task workspace, then rerun teardown",
+               "Only the writes, the sweeps and teardown below are director-only"):
+    assert phrase in sec6a, phrase
+PY
+
 check "docs: the director ship step is config-driven and the old never-push sentence is gone" <<'PY'
 import re
 skill = open("claude/skills/herdr-orchestration/SKILL.md").read()
